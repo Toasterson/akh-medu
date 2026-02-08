@@ -10,6 +10,8 @@ use crate::error::{AkhResult, EngineError};
 use crate::graph::index::KnowledgeGraph;
 use crate::graph::sparql::SparqlStore;
 use crate::graph::Triple;
+use crate::infer::engine::InferEngine;
+use crate::infer::{InferenceQuery, InferenceResult};
 use crate::simd;
 use crate::store::TieredStore;
 use crate::symbol::{AtomicSymbolAllocator, SymbolId, SymbolKind, SymbolMeta};
@@ -215,6 +217,47 @@ impl Engine {
             sparql.sync_from(&self.knowledge_graph)?;
         }
         Ok(())
+    }
+
+    /// Run spreading-activation inference from the given query.
+    pub fn infer(&self, query: &InferenceQuery) -> AkhResult<InferenceResult> {
+        let infer_engine = InferEngine::new(
+            Arc::clone(&self.ops),
+            Arc::clone(&self.item_memory),
+            Arc::clone(&self.knowledge_graph),
+        );
+        Ok(infer_engine.infer(query)?)
+    }
+
+    /// Analogy inference: "A is to B as C is to ?".
+    pub fn infer_analogy(
+        &self,
+        a: SymbolId,
+        b: SymbolId,
+        c: SymbolId,
+        top_k: usize,
+    ) -> AkhResult<Vec<(SymbolId, f32)>> {
+        let infer_engine = InferEngine::new(
+            Arc::clone(&self.ops),
+            Arc::clone(&self.item_memory),
+            Arc::clone(&self.knowledge_graph),
+        );
+        Ok(infer_engine.infer_analogy(a, b, c, top_k)?)
+    }
+
+    /// Recover the role-filler for a (subject, predicate) pair.
+    pub fn recover_filler(
+        &self,
+        subject: SymbolId,
+        predicate: SymbolId,
+        top_k: usize,
+    ) -> AkhResult<Vec<(SymbolId, f32)>> {
+        let infer_engine = InferEngine::new(
+            Arc::clone(&self.ops),
+            Arc::clone(&self.item_memory),
+            Arc::clone(&self.knowledge_graph),
+        );
+        Ok(infer_engine.recover_filler(subject, predicate, top_k)?)
     }
 }
 

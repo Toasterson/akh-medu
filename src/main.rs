@@ -7,6 +7,7 @@ use miette::{IntoDiagnostic, Result};
 
 use akh_medu::engine::{Engine, EngineConfig};
 use akh_medu::graph::Triple;
+use akh_medu::infer::InferenceQuery;
 use akh_medu::symbol::SymbolId;
 use akh_medu::vsa::Dimension;
 
@@ -37,7 +38,7 @@ enum Commands {
         file: PathBuf,
     },
 
-    /// Query the knowledge base.
+    /// Query the knowledge base using spreading-activation inference.
     Query {
         /// Seed symbol IDs (comma-separated).
         #[arg(long)]
@@ -46,6 +47,10 @@ enum Commands {
         /// Number of results to return.
         #[arg(long, default_value = "10")]
         top_k: usize,
+
+        /// Maximum inference depth.
+        #[arg(long, default_value = "1")]
+        max_depth: usize,
     },
 
     /// Show engine info and statistics.
@@ -117,7 +122,11 @@ fn main() -> Result<()> {
             println!("{}", engine.info());
         }
 
-        Commands::Query { seeds, top_k } => {
+        Commands::Query {
+            seeds,
+            top_k,
+            max_depth,
+        } => {
             let engine = Engine::new(config).into_diagnostic()?;
 
             let seed_ids: Vec<SymbolId> = seeds
@@ -132,25 +141,53 @@ fn main() -> Result<()> {
                 miette::bail!("no valid seed symbol IDs provided");
             }
 
-            // Ensure seeds exist in item memory
-            for &seed in &seed_ids {
-                engine.item_memory().get_or_create(engine.ops(), seed);
+            let query = InferenceQuery {
+                seeds: seed_ids,
+                top_k,
+                max_depth,
+                ..Default::default()
+            };
+
+            let result = engine.infer(&query).into_diagnostic()?;
+
+            println!("Inference results (top {top_k}, depth {max_depth}):");
+            for (i, (sym, confidence)) in result.activations.iter().enumerate() {
+                println!("  {}. {} (confidence: {:.4})", i + 1, sym, confidence);
             }
 
-            // Bundle seed vectors and search
-            let ops = engine.ops();
-            let vecs: Vec<_> = seed_ids
-                .iter()
-                .map(|&id| engine.item_memory().get_or_create(ops, id))
-                .collect();
-            let refs: Vec<&_> = vecs.iter().collect();
-            let bundled = ops.bundle(&refs).into_diagnostic()?;
-
-            let results = engine.search_similar(&bundled, top_k).into_diagnostic()?;
-
-            println!("Query results (top {top_k}):");
-            for (i, r) in results.iter().enumerate() {
-                println!("  {}. {} (similarity: {:.4})", i + 1, r.symbol_id, r.similarity);
+            if !result.provenance.is_empty() {
+                println!("\nProvenance:");
+                for record in &result.provenance {
+                    let kind_desc = match &record.kind {
+                        akh_medu::infer::DerivationKind::Seed => "seed".to_string(),
+                        akh_medu::infer::DerivationKind::GraphEdge { from, predicate } => {
+                            format!("graph edge from {} via {}", from, predicate)
+                        }
+                        akh_medu::infer::DerivationKind::VsaRecovery {
+                            from,
+                            predicate,
+                            similarity,
+                        } => {
+                            format!(
+                                "VSA recovery from {} via {} (sim: {:.4})",
+                                from, predicate, similarity
+                            )
+                        }
+                        akh_medu::infer::DerivationKind::Analogy { a, b, c } => {
+                            format!("analogy {}:{} :: {}:?", a, b, c)
+                        }
+                        akh_medu::infer::DerivationKind::FillerRecovery {
+                            subject,
+                            predicate,
+                        } => {
+                            format!("filler recovery ({}, {})", subject, predicate)
+                        }
+                    };
+                    println!(
+                        "  {} depth={} confidence={:.4} [{}]",
+                        record.symbol, record.depth, record.confidence, kind_desc
+                    );
+                }
             }
         }
 

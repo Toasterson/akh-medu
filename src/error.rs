@@ -256,6 +256,42 @@ pub enum InferError {
     )]
     DepthExceeded { max_depth: usize },
 
+    #[error("no activations produced from {seed_count} seed(s) at depth {depth}")]
+    #[diagnostic(
+        code(akh::infer::no_activations),
+        help(
+            "The seed symbols had no outgoing edges in the knowledge graph. \
+             Add triples connecting these symbols, or increase `max_depth` to \
+             explore further."
+        )
+    )]
+    NoActivations { seed_count: usize, depth: usize },
+
+    #[error("analogy requires exactly 3 distinct symbols, got {count}")]
+    #[diagnostic(
+        code(akh::infer::invalid_analogy),
+        help(
+            "Analogy inference computes A:B :: C:? — provide exactly three \
+             distinct SymbolIds (a, b, c) to find the fourth."
+        )
+    )]
+    InvalidAnalogy { count: usize },
+
+    #[error("activation for {symbol_id} below threshold: {confidence:.4} < {threshold:.4}")]
+    #[diagnostic(
+        code(akh::infer::below_threshold),
+        help(
+            "The recovered symbol's confidence is too low to be considered a \
+             valid inference. Lower `min_confidence` or `min_similarity` in the \
+             query, or add more supporting triples to the knowledge graph."
+        )
+    )]
+    BelowThreshold {
+        symbol_id: u64,
+        confidence: f32,
+        threshold: f32,
+    },
+
     #[error(transparent)]
     #[diagnostic(transparent)]
     Vsa(#[from] VsaError),
@@ -263,6 +299,10 @@ pub enum InferError {
     #[error(transparent)]
     #[diagnostic(transparent)]
     Graph(#[from] GraphError),
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Reason(#[from] ReasonError),
 }
 
 // ---------------------------------------------------------------------------
