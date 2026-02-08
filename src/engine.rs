@@ -6,12 +6,13 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use egg::Rewrite;
+use egg::{AstSize, Extractor, Rewrite, Runner};
 
-use crate::error::{AkhResult, EngineError, ProvenanceError, SymbolError};
+use crate::error::{AkhResult, EngineError, ProvenanceError, ReasonError, SymbolError};
 use crate::export::{ProvenanceExport, SymbolExport, TripleExport};
 use crate::graph::index::KnowledgeGraph;
 use crate::graph::sparql::SparqlStore;
+use crate::graph::traverse::{TraversalConfig, TraversalResult};
 use crate::graph::Triple;
 use crate::infer::engine::InferEngine;
 use crate::infer::{InferenceQuery, InferenceResult};
@@ -385,6 +386,7 @@ impl Engine {
     // -----------------------------------------------------------------------
 
     /// Load a skill: discover → warm → activate.
+    /// Automatically detects label-based triples and resolves them.
     pub fn load_skill(&self, name: &str) -> AkhResult<crate::skills::SkillActivation> {
         let mgr = self
             .skill_manager
@@ -393,7 +395,23 @@ impl Engine {
                 name: name.into(),
             })?;
 
-        // Ensure discovered.
+        // Check if the skill has label-based triples.
+        let skill_dir = mgr.skills_dir().join(name);
+        let triples_path = skill_dir.join("triples.json");
+        let has_label_triples = if triples_path.exists() {
+            std::fs::read_to_string(&triples_path)
+                .ok()
+                .and_then(|c| serde_json::from_str::<Vec<serde_json::Value>>(&c).ok())
+                .is_some_and(|v| v.first().is_some_and(|e| e.get("subject").is_some()))
+        } else {
+            false
+        };
+
+        if has_label_triples {
+            return self.load_skill_with_labels(name);
+        }
+
+        // Standard numeric path.
         let _ = mgr.discover();
         mgr.warm(name)?;
         Ok(mgr.activate(name, &self.knowledge_graph)?)
@@ -556,6 +574,177 @@ impl Engine {
                 }
             })
             .collect())
+    }
+
+    // -----------------------------------------------------------------------
+    // Label-based ingest
+    // -----------------------------------------------------------------------
+
+    /// Resolve a symbol by label, or create it as Entity if it doesn't exist.
+    pub fn resolve_or_create_entity(&self, label: &str) -> AkhResult<SymbolId> {
+        match self.registry.lookup(label) {
+            Some(id) => Ok(id),
+            None => Ok(self.create_symbol(SymbolKind::Entity, label)?.id),
+        }
+    }
+
+    /// Resolve a symbol by label, or create it as Relation if it doesn't exist.
+    pub fn resolve_or_create_relation(&self, label: &str) -> AkhResult<SymbolId> {
+        match self.registry.lookup(label) {
+            Some(id) => Ok(id),
+            None => Ok(self.create_symbol(SymbolKind::Relation, label)?.id),
+        }
+    }
+
+    /// Batch ingest triples from label-based format.
+    /// Auto-creates symbols that don't exist. Predicates become Relations, rest become Entities.
+    /// Returns (created_symbols_count, ingested_triples_count).
+    pub fn ingest_label_triples(
+        &self,
+        triples: &[(String, String, String, f32)],
+    ) -> AkhResult<(usize, usize)> {
+        let symbols_before = self.registry.all().len();
+        let mut ingested = 0usize;
+
+        for (subject, predicate, object, confidence) in triples {
+            let s = self.resolve_or_create_entity(subject)?;
+            let p = self.resolve_or_create_relation(predicate)?;
+            let o = self.resolve_or_create_entity(object)?;
+
+            let triple = Triple::new(s, p, o).with_confidence(*confidence);
+            self.add_triple(&triple)?;
+            ingested += 1;
+        }
+
+        let symbols_after = self.registry.all().len();
+        let created = symbols_after - symbols_before;
+        Ok((created, ingested))
+    }
+
+    // -----------------------------------------------------------------------
+    // Graph traversal
+    // -----------------------------------------------------------------------
+
+    /// Traverse the knowledge graph from seed symbols using BFS.
+    pub fn traverse(
+        &self,
+        seeds: &[SymbolId],
+        config: TraversalConfig,
+    ) -> AkhResult<TraversalResult> {
+        Ok(crate::graph::traverse::traverse_bfs(
+            &self.knowledge_graph,
+            seeds,
+            &config,
+        )?)
+    }
+
+    /// Convenience: extract subgraph from seeds with default config.
+    pub fn extract_subgraph(
+        &self,
+        seeds: &[SymbolId],
+        max_depth: usize,
+    ) -> AkhResult<TraversalResult> {
+        Ok(crate::graph::traverse::extract_subgraph(
+            &self.knowledge_graph,
+            seeds,
+            max_depth,
+        )?)
+    }
+
+    // -----------------------------------------------------------------------
+    // Reasoning
+    // -----------------------------------------------------------------------
+
+    /// Simplify a symbolic expression using e-graph rewriting.
+    /// Parses the expression as AkhLang, runs equality saturation with all active rules,
+    /// extracts the lowest-cost equivalent expression.
+    pub fn simplify_expression(&self, expr: &str) -> AkhResult<String> {
+        let parsed: egg::RecExpr<AkhLang> = expr.parse().map_err(|e| {
+            ReasonError::ParseError {
+                message: format!("{e}"),
+            }
+        })?;
+
+        let rules = self.all_rules();
+        let runner = Runner::default().with_expr(&parsed).run(&rules);
+        let extractor = Extractor::new(&runner.egraph, AstSize);
+        let (_cost, best) = extractor.find_best(runner.roots[0]);
+        Ok(best.to_string())
+    }
+
+    // -----------------------------------------------------------------------
+    // Skill loading with labels
+    // -----------------------------------------------------------------------
+
+    /// Load a skill with label-based triple resolution.
+    /// Pre-resolves labels to symbol IDs, then delegates to standard SkillManager.
+    pub fn load_skill_with_labels(&self, name: &str) -> AkhResult<crate::skills::SkillActivation> {
+        let mgr = self
+            .skill_manager
+            .as_ref()
+            .ok_or(crate::error::SkillError::NotFound {
+                name: name.into(),
+            })?;
+
+        // Ensure discovered and warmed.
+        let _ = mgr.discover();
+        mgr.warm(name)?;
+
+        // Read the skill's triples file before activation.
+        let skill_dir = mgr.skills_dir().join(name);
+        let triples_path = skill_dir.join("triples.json");
+        let mut label_triples_count = 0usize;
+
+        if triples_path.exists() {
+            let content = std::fs::read_to_string(&triples_path).map_err(|e| {
+                crate::error::SkillError::Io {
+                    skill_id: name.into(),
+                    source: e,
+                }
+            })?;
+
+            let raw: Vec<serde_json::Value> =
+                serde_json::from_str(&content).map_err(|e| {
+                    crate::error::SkillError::InvalidManifest {
+                        path: triples_path.display().to_string(),
+                        message: format!("triples parse error: {e}"),
+                    }
+                })?;
+
+            // Detect label-based format by checking first element.
+            let is_label_format = raw
+                .first()
+                .is_some_and(|v| v.get("subject").is_some());
+
+            if is_label_format {
+                for val in &raw {
+                    let subject = val["subject"].as_str().unwrap_or("");
+                    let predicate = val["predicate"].as_str().unwrap_or("");
+                    let object = val["object"].as_str().unwrap_or("");
+                    let confidence = val["confidence"].as_f64().unwrap_or(1.0) as f32;
+
+                    if !subject.is_empty() && !predicate.is_empty() && !object.is_empty() {
+                        let s = self.resolve_or_create_entity(subject)?;
+                        let p = self.resolve_or_create_relation(predicate)?;
+                        let o = self.resolve_or_create_entity(object)?;
+
+                        let triple = Triple::new(s, p, o).with_confidence(confidence);
+                        let _ = self.add_triple(&triple); // ignore duplicates
+                        label_triples_count += 1;
+                    }
+                }
+            }
+        }
+
+        // Now activate via the standard path (which handles numeric triples and rules).
+        let mut activation = mgr.activate(name, &self.knowledge_graph)?;
+
+        // If we loaded label triples, add them to the activation count.
+        if label_triples_count > 0 {
+            activation.triples_loaded += label_triples_count;
+        }
+
+        Ok(activation)
     }
 
     // -----------------------------------------------------------------------

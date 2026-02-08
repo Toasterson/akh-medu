@@ -4,7 +4,10 @@
 //! inference and export, validating that the registry, knowledge graph,
 //! and introspection APIs all work together.
 
+use std::collections::HashSet;
+
 use akh_medu::engine::{Engine, EngineConfig};
+use akh_medu::graph::traverse::TraversalConfig;
 use akh_medu::graph::Triple;
 use akh_medu::infer::InferenceQuery;
 use akh_medu::symbol::{SymbolId, SymbolKind};
@@ -185,4 +188,279 @@ fn get_symbol_meta_returns_correct_data() {
     // Non-existent ID should error.
     let bad_id = SymbolId::new(9999).unwrap();
     assert!(engine.get_symbol_meta(bad_id).is_err());
+}
+
+// ---------------------------------------------------------------------------
+// Part A: Label-based ingest tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn ingest_label_based_triples() {
+    let engine = test_engine();
+
+    let triples = vec![
+        ("Sun".into(), "is-a".into(), "Star".into(), 1.0),
+        ("Earth".into(), "is-a".into(), "Planet".into(), 1.0),
+        ("Earth".into(), "orbits".into(), "Sun".into(), 0.95),
+    ];
+
+    let (created, ingested) = engine.ingest_label_triples(&triples).unwrap();
+
+    // All labels are new, so created should be non-zero.
+    assert!(created > 0, "expected new symbols to be created");
+    assert_eq!(ingested, 3);
+
+    // Verify symbols were auto-created.
+    let sun_id = engine.lookup_symbol("Sun").unwrap();
+    let star_id = engine.lookup_symbol("Star").unwrap();
+    let is_a_id = engine.lookup_symbol("is-a").unwrap();
+
+    // Verify triples exist.
+    assert!(engine.has_triple(sun_id, is_a_id, star_id));
+
+    // Verify symbol kinds: predicates should be Relations.
+    let is_a_meta = engine.get_symbol_meta(is_a_id).unwrap();
+    assert_eq!(is_a_meta.kind, SymbolKind::Relation);
+
+    // Verify entities.
+    let sun_meta = engine.get_symbol_meta(sun_id).unwrap();
+    assert_eq!(sun_meta.kind, SymbolKind::Entity);
+}
+
+#[test]
+fn resolve_or_create_entity_idempotent() {
+    let engine = test_engine();
+
+    let id1 = engine.resolve_or_create_entity("Sun").unwrap();
+    let id2 = engine.resolve_or_create_entity("Sun").unwrap();
+
+    assert_eq!(id1, id2, "calling resolve_or_create twice should return same ID");
+}
+
+#[test]
+fn resolve_or_create_relation_idempotent() {
+    let engine = test_engine();
+
+    let id1 = engine.resolve_or_create_relation("is-a").unwrap();
+    let id2 = engine.resolve_or_create_relation("is-a").unwrap();
+
+    assert_eq!(id1, id2, "calling resolve_or_create twice should return same ID");
+}
+
+// ---------------------------------------------------------------------------
+// Part B: Graph traversal tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn traverse_from_seeds() {
+    let engine = test_engine();
+
+    let triples = vec![
+        ("Sun".into(), "is-a".into(), "Star".into(), 1.0),
+        ("Earth".into(), "orbits".into(), "Sun".into(), 1.0),
+        ("Moon".into(), "orbits".into(), "Earth".into(), 1.0),
+    ];
+    engine.ingest_label_triples(&triples).unwrap();
+
+    let earth_id = engine.lookup_symbol("Earth").unwrap();
+    let result = engine
+        .traverse(
+            &[earth_id],
+            TraversalConfig {
+                max_depth: 3,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    // Earth -> orbits -> Sun, and then Sun -> is-a -> Star.
+    assert!(!result.triples.is_empty(), "traversal should find triples");
+    assert!(result.visited.contains(&earth_id));
+}
+
+#[test]
+fn traverse_with_predicate_filter() {
+    let engine = test_engine();
+
+    let triples = vec![
+        ("Sun".into(), "is-a".into(), "Star".into(), 1.0),
+        ("Earth".into(), "orbits".into(), "Sun".into(), 1.0),
+        ("Earth".into(), "is-a".into(), "Planet".into(), 1.0),
+    ];
+    engine.ingest_label_triples(&triples).unwrap();
+
+    let earth_id = engine.lookup_symbol("Earth").unwrap();
+    let orbits_id = engine.lookup_symbol("orbits").unwrap();
+
+    let mut pred_filter = HashSet::new();
+    pred_filter.insert(orbits_id);
+
+    let result = engine
+        .traverse(
+            &[earth_id],
+            TraversalConfig {
+                max_depth: 2,
+                predicate_filter: pred_filter,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    // Only orbits edges should appear.
+    for t in &result.triples {
+        assert_eq!(t.predicate, orbits_id, "only 'orbits' predicates should appear");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Part C: SPARQL test
+// ---------------------------------------------------------------------------
+
+#[test]
+fn sparql_select_query() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let engine = persistent_engine(dir.path());
+
+    let triples = vec![
+        ("Sun".into(), "is-a".into(), "Star".into(), 1.0),
+    ];
+    engine.ingest_label_triples(&triples).unwrap();
+
+    // Sync to SPARQL.
+    engine.persist().unwrap();
+
+    let results = engine
+        .sparql_query("SELECT ?s ?p ?o WHERE { ?s ?p ?o }")
+        .unwrap();
+
+    assert!(!results.is_empty(), "SPARQL should return at least one result");
+}
+
+// ---------------------------------------------------------------------------
+// Part D: Reasoning tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn simplify_double_negation() {
+    let engine = test_engine();
+
+    let result = engine.simplify_expression("(not (not x))").unwrap();
+    assert_eq!(result, "x");
+}
+
+#[test]
+fn simplify_bind_self_inverse() {
+    let engine = test_engine();
+
+    let result = engine.simplify_expression("(bind a (bind a b))").unwrap();
+    assert_eq!(result, "b");
+}
+
+// ---------------------------------------------------------------------------
+// Part E: Skill scaffold + label loading tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn skill_scaffold_creates_template() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let skill_dir = dir.path().join("skills").join("my-test");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+
+    // Write the three template files (mirroring what the CLI does).
+    let manifest = serde_json::json!({
+        "id": "my-test",
+        "name": "my-test",
+        "version": "0.1.0",
+        "description": "my-test knowledge domain",
+        "domains": ["my-test"],
+        "weight_size_bytes": 0,
+        "triples_file": "triples.json",
+        "rules_file": "rules.txt"
+    });
+    std::fs::write(
+        skill_dir.join("skill.json"),
+        serde_json::to_string_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+
+    let triples = serde_json::json!([
+        {"subject": "ExampleEntity", "predicate": "is-a", "object": "Category", "confidence": 1.0}
+    ]);
+    std::fs::write(
+        skill_dir.join("triples.json"),
+        serde_json::to_string_pretty(&triples).unwrap(),
+    )
+    .unwrap();
+
+    std::fs::write(
+        skill_dir.join("rules.txt"),
+        "# Rewrite rules\n",
+    )
+    .unwrap();
+
+    // Verify files exist.
+    assert!(skill_dir.join("skill.json").exists());
+    assert!(skill_dir.join("triples.json").exists());
+    assert!(skill_dir.join("rules.txt").exists());
+
+    // Verify manifest parses correctly.
+    let content = std::fs::read_to_string(skill_dir.join("skill.json")).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+    assert_eq!(parsed["id"], "my-test");
+    assert_eq!(parsed["version"], "0.1.0");
+}
+
+#[test]
+fn load_skill_with_label_triples() {
+    let dir = tempfile::TempDir::new().unwrap();
+
+    // Create skill directory structure.
+    let skills_dir = dir.path().join("skills");
+    let skill_dir = skills_dir.join("test-labels");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+
+    let manifest = serde_json::json!({
+        "id": "test-labels",
+        "name": "Test Labels",
+        "version": "0.1.0",
+        "description": "Skill with label-based triples",
+        "domains": ["test"],
+        "weight_size_bytes": 0,
+        "triples_file": "triples.json",
+        "rules_file": "rules.txt"
+    });
+    std::fs::write(
+        skill_dir.join("skill.json"),
+        serde_json::to_string_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+
+    let triples = serde_json::json!([
+        {"subject": "Alpha", "predicate": "related-to", "object": "Beta", "confidence": 0.9},
+        {"subject": "Beta", "predicate": "related-to", "object": "Gamma", "confidence": 0.8}
+    ]);
+    std::fs::write(
+        skill_dir.join("triples.json"),
+        serde_json::to_string_pretty(&triples).unwrap(),
+    )
+    .unwrap();
+
+    std::fs::write(skill_dir.join("rules.txt"), "# no rules\n").unwrap();
+
+    // Create engine with persistence pointing to the temp dir.
+    let engine = Engine::new(EngineConfig {
+        dimension: Dimension::TEST,
+        data_dir: Some(dir.path().to_path_buf()),
+        ..Default::default()
+    })
+    .unwrap();
+
+    let activation = engine.load_skill("test-labels").unwrap();
+    assert!(activation.triples_loaded >= 2, "should load at least 2 label-based triples");
+
+    // Verify symbols were created.
+    assert!(engine.lookup_symbol("Alpha").is_ok());
+    assert!(engine.lookup_symbol("Beta").is_ok());
+    assert!(engine.lookup_symbol("Gamma").is_ok());
+    assert!(engine.lookup_symbol("related-to").is_ok());
 }

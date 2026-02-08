@@ -52,6 +52,11 @@ impl SkillManager {
         }
     }
 
+    /// Get the skills directory path.
+    pub fn skills_dir(&self) -> &std::path::Path {
+        &self.skills_dir
+    }
+
     /// Scan the skills directory for subdirectories containing `skill.json`.
     ///
     /// Registers each found skill as Cold. Returns the number of skills discovered.

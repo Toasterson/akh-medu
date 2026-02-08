@@ -1,0 +1,10 @@
+{
+  "id": "astronomy",
+  "name": "Astronomy Pack",
+  "version": "1.0.0",
+  "description": "Basic astronomical knowledge: planets, stars, and orbital relations",
+  "domains": ["astronomy", "science"],
+  "weight_size_bytes": 0,
+  "triples_file": "triples.json",
+  "rules_file": "rules.txt"
+}

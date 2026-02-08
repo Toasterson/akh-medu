@@ -1,11 +1,14 @@
 //! akh-medu CLI: neuro-symbolic AI engine.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 use miette::{IntoDiagnostic, Result};
 
 use akh_medu::engine::{Engine, EngineConfig};
+use akh_medu::error::EngineError;
+use akh_medu::graph::traverse::TraversalConfig;
 use akh_medu::graph::Triple;
 use akh_medu::infer::InferenceQuery;
 use akh_medu::provenance::DerivationKind;
@@ -32,7 +35,7 @@ enum Commands {
     /// Initialize a new akh-medu data directory.
     Init,
 
-    /// Ingest triples from a JSON file.
+    /// Ingest triples from a JSON file (label-based or numeric format).
     Ingest {
         /// Path to JSON file with triples.
         #[arg(long)]
@@ -52,6 +55,55 @@ enum Commands {
         /// Maximum inference depth.
         #[arg(long, default_value = "1")]
         max_depth: usize,
+    },
+
+    /// Traverse the knowledge graph from seed nodes using BFS.
+    Traverse {
+        /// Seed symbols (comma-separated names or IDs).
+        #[arg(long)]
+        seeds: String,
+
+        /// Maximum traversal depth.
+        #[arg(long, default_value = "3")]
+        max_depth: usize,
+
+        /// Only follow these predicates (comma-separated, optional).
+        #[arg(long)]
+        predicates: Option<String>,
+
+        /// Minimum confidence threshold.
+        #[arg(long, default_value = "0.0")]
+        min_confidence: f32,
+
+        /// Maximum number of triples to collect.
+        #[arg(long, default_value = "1000")]
+        max_results: usize,
+
+        /// Output format: "summary" or "json".
+        #[arg(long, default_value = "summary")]
+        format: String,
+    },
+
+    /// Run a SPARQL query against the knowledge graph.
+    Sparql {
+        /// Inline SPARQL query string.
+        #[arg(long)]
+        query: Option<String>,
+
+        /// Path to a SPARQL query file (.rq).
+        #[arg(long)]
+        file: Option<PathBuf>,
+    },
+
+    /// Simplify a symbolic expression using e-graph rewriting.
+    Reason {
+        /// Expression to simplify (e.g. "(not (not x))").
+        #[arg(long)]
+        expr: String,
+
+        /// Show rule count and extra details.
+        #[arg(long)]
+        verbose: bool,
     },
 
     /// Show engine info and statistics.
@@ -119,6 +171,11 @@ enum SkillAction {
         /// Skill name.
         name: String,
     },
+    /// Scaffold a new skillpack with template files.
+    Scaffold {
+        /// Name for the new skillpack.
+        name: String,
+    },
 }
 
 fn main() -> Result<()> {
@@ -165,24 +222,85 @@ fn main() -> Result<()> {
             let engine = Engine::new(config).into_diagnostic()?;
             let content = std::fs::read_to_string(&file).into_diagnostic()?;
 
-            // Simple JSON format: [{"s": 1, "p": 2, "o": 3}, ...]
             let triples: Vec<serde_json::Value> =
                 serde_json::from_str(&content).into_diagnostic()?;
 
-            let mut count = 0;
-            for val in &triples {
-                let s = val["s"].as_u64().unwrap_or(0);
-                let p = val["p"].as_u64().unwrap_or(0);
-                let o = val["o"].as_u64().unwrap_or(0);
-
-                if let (Some(s), Some(p), Some(o)) =
-                    (SymbolId::new(s), SymbolId::new(p), SymbolId::new(o))
-                {
-                    engine.add_triple(&Triple::new(s, p, o)).into_diagnostic()?;
-                    count += 1;
-                }
+            if triples.is_empty() {
+                println!("No triples found in {}", file.display());
+                return Ok(());
             }
-            println!("Ingested {count} triples from {}", file.display());
+
+            // Auto-detect format from first element.
+            let first = &triples[0];
+            let is_label_format = first.get("subject").is_some();
+            let is_numeric_format = first.get("s").is_some();
+
+            if is_label_format {
+                // Label-based format: {"subject": "Sun", "predicate": "is-a", "object": "Star"}
+                let mut label_triples = Vec::new();
+                for (i, val) in triples.iter().enumerate() {
+                    let subject = val["subject"].as_str().ok_or_else(|| {
+                        EngineError::IngestFormat {
+                            message: format!("triple {i}: missing or non-string 'subject' field"),
+                        }
+                    }).into_diagnostic()?;
+                    let predicate = val["predicate"].as_str().ok_or_else(|| {
+                        EngineError::IngestFormat {
+                            message: format!("triple {i}: missing or non-string 'predicate' field"),
+                        }
+                    }).into_diagnostic()?;
+                    let object = val["object"].as_str().ok_or_else(|| {
+                        EngineError::IngestFormat {
+                            message: format!("triple {i}: missing or non-string 'object' field"),
+                        }
+                    }).into_diagnostic()?;
+                    let confidence = val["confidence"].as_f64().unwrap_or(1.0) as f32;
+
+                    label_triples.push((
+                        subject.to_string(),
+                        predicate.to_string(),
+                        object.to_string(),
+                        confidence,
+                    ));
+                }
+
+                let (created, ingested) = engine
+                    .ingest_label_triples(&label_triples)
+                    .into_diagnostic()?;
+
+                // Persist after ingest.
+                let _ = engine.persist();
+
+                println!(
+                    "Ingested {ingested} triples ({created} new symbols) from {}",
+                    file.display()
+                );
+            } else if is_numeric_format {
+                // Numeric format: {"s": 1, "p": 2, "o": 3}
+                let mut count = 0;
+                for val in &triples {
+                    let s = val["s"].as_u64().unwrap_or(0);
+                    let p = val["p"].as_u64().unwrap_or(0);
+                    let o = val["o"].as_u64().unwrap_or(0);
+                    let confidence = val["confidence"].as_f64().unwrap_or(1.0) as f32;
+
+                    if let (Some(s), Some(p), Some(o)) =
+                        (SymbolId::new(s), SymbolId::new(p), SymbolId::new(o))
+                    {
+                        engine
+                            .add_triple(&Triple::new(s, p, o).with_confidence(confidence))
+                            .into_diagnostic()?;
+                        count += 1;
+                    }
+                }
+                println!("Ingested {count} triples from {}", file.display());
+            } else {
+                return Err(EngineError::IngestFormat {
+                    message: "unrecognized triple format in first element".into(),
+                })
+                .into_diagnostic();
+            }
+
             println!("{}", engine.info());
         }
 
@@ -193,7 +311,6 @@ fn main() -> Result<()> {
         } => {
             let engine = Engine::new(config).into_diagnostic()?;
 
-            // Resolve seeds by name or ID.
             let seed_ids: std::result::Result<Vec<SymbolId>, _> = seeds
                 .split(',')
                 .map(|s| engine.resolve_symbol(s.trim()))
@@ -240,6 +357,116 @@ fn main() -> Result<()> {
                     );
                 }
             }
+        }
+
+        Commands::Traverse {
+            seeds,
+            max_depth,
+            predicates,
+            min_confidence,
+            max_results,
+            format,
+        } => {
+            let engine = Engine::new(config).into_diagnostic()?;
+
+            let seed_ids: std::result::Result<Vec<SymbolId>, _> = seeds
+                .split(',')
+                .map(|s| engine.resolve_symbol(s.trim()))
+                .collect();
+            let seed_ids = seed_ids.into_diagnostic()?;
+
+            let predicate_filter: HashSet<SymbolId> = if let Some(ref preds) = predicates {
+                let ids: std::result::Result<Vec<SymbolId>, _> = preds
+                    .split(',')
+                    .map(|s| engine.resolve_symbol(s.trim()))
+                    .collect();
+                ids.into_diagnostic()?.into_iter().collect()
+            } else {
+                HashSet::new()
+            };
+
+            let traverse_config = TraversalConfig {
+                max_depth,
+                predicate_filter,
+                min_confidence,
+                max_results,
+            };
+
+            let result = engine.traverse(&seed_ids, traverse_config).into_diagnostic()?;
+
+            if format == "json" {
+                let json_triples: Vec<serde_json::Value> = result
+                    .triples
+                    .iter()
+                    .map(|t| {
+                        serde_json::json!({
+                            "subject": engine.resolve_label(t.subject),
+                            "predicate": engine.resolve_label(t.predicate),
+                            "object": engine.resolve_label(t.object),
+                            "confidence": t.confidence,
+                        })
+                    })
+                    .collect();
+                let json = serde_json::to_string_pretty(&json_triples).into_diagnostic()?;
+                println!("{json}");
+            } else {
+                println!(
+                    "Traversal: {} triples, {} nodes, depth {}",
+                    result.triples.len(),
+                    result.visited.len(),
+                    result.depth_reached
+                );
+                for t in &result.triples {
+                    println!(
+                        "  \"{}\" -> {} -> \"{}\"  [{:.2}]",
+                        engine.resolve_label(t.subject),
+                        engine.resolve_label(t.predicate),
+                        engine.resolve_label(t.object),
+                        t.confidence,
+                    );
+                }
+            }
+        }
+
+        Commands::Sparql { query, file } => {
+            let engine = Engine::new(config).into_diagnostic()?;
+
+            let sparql_str = if let Some(q) = query {
+                q
+            } else if let Some(path) = file {
+                std::fs::read_to_string(&path).into_diagnostic()?
+            } else {
+                miette::bail!("provide either --query or --file for SPARQL");
+            };
+
+            let results = engine.sparql_query(&sparql_str).into_diagnostic()?;
+
+            if results.is_empty() {
+                println!("No results.");
+            } else {
+                // Print header from first row's variable names.
+                if let Some(first_row) = results.first() {
+                    let header: Vec<&str> = first_row.iter().map(|(k, _)| k.as_str()).collect();
+                    println!("{}", header.join("\t"));
+                }
+                for row in &results {
+                    let vals: Vec<&str> = row.iter().map(|(_, v)| v.as_str()).collect();
+                    println!("{}", vals.join("\t"));
+                }
+            }
+        }
+
+        Commands::Reason { expr, verbose } => {
+            let engine = Engine::new(config).into_diagnostic()?;
+
+            if verbose {
+                let rules = engine.all_rules();
+                println!("Active rules: {}", rules.len());
+            }
+
+            println!("Input:      {expr}");
+            let simplified = engine.simplify_expression(&expr).into_diagnostic()?;
+            println!("Simplified: {simplified}");
         }
 
         Commands::Info => {
@@ -362,6 +589,61 @@ fn main() -> Result<()> {
                     println!("  domains:     {}", info.domains.join(", "));
                     println!("  triples:     {}", info.triple_count);
                     println!("  rules:       {}", info.rule_count);
+                }
+                SkillAction::Scaffold { name } => {
+                    let data_dir = cli
+                        .data_dir
+                        .as_deref()
+                        .unwrap_or_else(|| std::path::Path::new(".akh-medu"));
+                    let skill_dir = data_dir.join("skills").join(&name);
+                    std::fs::create_dir_all(&skill_dir).into_diagnostic()?;
+
+                    // Write skill.json template.
+                    let manifest = serde_json::json!({
+                        "id": name,
+                        "name": name,
+                        "version": "0.1.0",
+                        "description": format!("{name} knowledge domain"),
+                        "domains": [&name],
+                        "weight_size_bytes": 0,
+                        "triples_file": "triples.json",
+                        "rules_file": "rules.txt"
+                    });
+                    std::fs::write(
+                        skill_dir.join("skill.json"),
+                        serde_json::to_string_pretty(&manifest).into_diagnostic()?,
+                    )
+                    .into_diagnostic()?;
+
+                    // Write example triples.json in label-based format.
+                    let triples = serde_json::json!([
+                        {
+                            "subject": "ExampleEntity",
+                            "predicate": "is-a",
+                            "object": "Category",
+                            "confidence": 1.0
+                        }
+                    ]);
+                    std::fs::write(
+                        skill_dir.join("triples.json"),
+                        serde_json::to_string_pretty(&triples).into_diagnostic()?,
+                    )
+                    .into_diagnostic()?;
+
+                    // Write rules.txt template.
+                    std::fs::write(
+                        skill_dir.join("rules.txt"),
+                        "# Rewrite rules for this skillpack.\n\
+                         # Format: <lhs-pattern> => <rhs-pattern>\n\
+                         # Example:\n\
+                         # (similar ?x ?y) => (similar ?y ?x)\n",
+                    )
+                    .into_diagnostic()?;
+
+                    println!("Scaffolded skill '{}' at {}", name, skill_dir.display());
+                    println!("  skill.json   - manifest (edit name, domains, description)");
+                    println!("  triples.json - knowledge triples (label-based format)");
+                    println!("  rules.txt    - rewrite rules");
                 }
             }
         }

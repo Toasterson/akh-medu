@@ -1,0 +1,4 @@
+# Astronomy rewrite rules
+# Similarity is commutative: if A is similar to B, then B is similar to A
+(similar ?x ?y) => (similar ?y ?x)
+# Orbits similarity: if X orbits Y and Z orbits Y, they are similar

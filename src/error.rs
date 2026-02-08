@@ -588,6 +588,17 @@ pub enum EngineError {
         )
     )]
     DataDir { path: String },
+
+    #[error("ingest format error: {message}")]
+    #[diagnostic(
+        code(akh::engine::ingest_format),
+        help(
+            "Triple data must be in one of these formats:\n  \
+             Label-based: {{\"subject\": \"Sun\", \"predicate\": \"is-a\", \"object\": \"Star\"}}\n  \
+             Numeric: {{\"s\": 1, \"p\": 2, \"o\": 3}}"
+        )
+    )]
+    IngestFormat { message: String },
 }
 
 /// Convenience alias for functions returning akh-medu results.

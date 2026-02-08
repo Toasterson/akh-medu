@@ -1,0 +1,12 @@
+[
+  {"subject": "Sun", "predicate": "is-a", "object": "Star", "confidence": 1.0},
+  {"subject": "Earth", "predicate": "is-a", "object": "Planet", "confidence": 1.0},
+  {"subject": "Moon", "predicate": "is-a", "object": "Satellite", "confidence": 1.0},
+  {"subject": "Mars", "predicate": "is-a", "object": "Planet", "confidence": 1.0},
+  {"subject": "Jupiter", "predicate": "is-a", "object": "Planet", "confidence": 1.0},
+  {"subject": "Earth", "predicate": "orbits", "object": "Sun", "confidence": 1.0},
+  {"subject": "Mars", "predicate": "orbits", "object": "Sun", "confidence": 1.0},
+  {"subject": "Jupiter", "predicate": "orbits", "object": "Sun", "confidence": 1.0},
+  {"subject": "Moon", "predicate": "orbits", "object": "Earth", "confidence": 1.0},
+  {"subject": "Sun", "predicate": "has-mass", "object": "SolarMass", "confidence": 0.99}
+]
