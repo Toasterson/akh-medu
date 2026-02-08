@@ -1,0 +1,55 @@
+[package]
+name = "akh-medu"
+version = "0.1.0"
+edition = "2024"
+description = "Neuro-symbolic AI engine: VSA + knowledge graphs + symbolic reasoning"
+license = "MIT"
+
+[dependencies]
+# Error handling
+miette = { version = "7", features = ["fancy"] }
+thiserror = "2"
+
+# Note: We implement our own VSA operations with SIMD kernels
+# rather than depending on `hypervector` and `bitvector_simd` which
+# have compatibility issues with stable Rust toolchains.
+
+# Symbolic reasoning
+egg = "0.11"
+
+# Storage
+memmap2 = "0.9"
+rkyv = "0.8"
+redb = "2"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+bincode = "1"
+
+# Concurrency
+dashmap = "6"
+rayon = "1"
+
+# Search & Graphs
+hnsw_rs = "0.3"
+anndists = "0.1"
+petgraph = "0.7"
+oxigraph = "0.4"
+
+# Numeric
+half = { version = "2", features = ["serde"] }
+rand = "0.8"
+
+# Infrastructure
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4.5", features = ["derive"] }
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+tempfile = "3"
+
+[[bench]]
+name = "vsa_ops"
+harness = false
