@@ -7,6 +7,7 @@
 //!
 //! Both layers share the same [`Triple`] data model and can be synchronized.
 
+pub mod analytics;
 pub mod index;
 pub mod sparql;
 pub mod traverse;

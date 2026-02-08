@@ -85,6 +85,27 @@ impl DurableStore {
         Ok(existed)
     }
 
+    /// Store multiple key-value pairs in a single transaction.
+    pub fn put_batch(&self, entries: &[(&[u8], &[u8])]) -> StoreResult<()> {
+        let txn = self.db.begin_write().map_err(|e| StoreError::Redb {
+            message: format!("begin_write failed: {e}"),
+        })?;
+        {
+            let mut table = txn.open_table(META_TABLE).map_err(|e| StoreError::Redb {
+                message: format!("open_table failed: {e}"),
+            })?;
+            for (key, value) in entries {
+                table.insert(*key, *value).map_err(|e| StoreError::Redb {
+                    message: format!("insert failed: {e}"),
+                })?;
+            }
+        }
+        txn.commit().map_err(|e| StoreError::Redb {
+            message: format!("commit failed: {e}"),
+        })?;
+        Ok(())
+    }
+
     /// Check if a key exists.
     pub fn contains(&self, key: &[u8]) -> StoreResult<bool> {
         self.get(key).map(|v| v.is_some())

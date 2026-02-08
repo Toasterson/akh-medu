@@ -91,8 +91,11 @@ impl SymbolRegistry {
     /// Persist all registry entries to the durable store.
     ///
     /// Each entry is written as `b"sym_meta:<id>"` → bincode-encoded `SymbolMeta`.
+    /// Uses a single batch transaction instead of N individual writes.
     pub fn persist(&self, store: &TieredStore) -> AkhResult<()> {
         if let Some(ref durable) = store.durable {
+            let mut keys = Vec::with_capacity(self.id_to_meta.len());
+            let mut values = Vec::with_capacity(self.id_to_meta.len());
             for entry in self.id_to_meta.iter() {
                 let meta = entry.value();
                 let key = format!("sym_meta:{}", meta.id.get());
@@ -101,8 +104,15 @@ impl SymbolRegistry {
                         message: format!("failed to serialize symbol meta: {e}"),
                     }
                 })?;
-                durable.put(key.as_bytes(), &encoded)?;
+                keys.push(key);
+                values.push(encoded);
             }
+            let entries: Vec<(&[u8], &[u8])> = keys
+                .iter()
+                .zip(values.iter())
+                .map(|(k, v)| (k.as_bytes(), v.as_slice()))
+                .collect();
+            durable.put_batch(&entries)?;
         }
         Ok(())
     }

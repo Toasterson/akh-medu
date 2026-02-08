@@ -9,6 +9,7 @@ use std::sync::Arc;
 use egg::{AstSize, Extractor, Rewrite, Runner};
 
 use crate::error::{AkhResult, EngineError, ProvenanceError, ReasonError, SymbolError};
+use crate::graph::analytics;
 use crate::export::{ProvenanceExport, SymbolExport, TripleExport};
 use crate::graph::index::KnowledgeGraph;
 use crate::graph::sparql::SparqlStore;
@@ -757,6 +758,40 @@ impl Engine {
         }
 
         Ok(activation)
+    }
+
+    // -----------------------------------------------------------------------
+    // Graph analytics
+    // -----------------------------------------------------------------------
+
+    /// Compute degree centrality for all nodes.
+    pub fn degree_centrality(&self) -> Vec<analytics::DegreeCentrality> {
+        analytics::degree_centrality(&self.knowledge_graph)
+    }
+
+    /// Compute PageRank scores.
+    pub fn pagerank(
+        &self,
+        damping: f64,
+        iterations: usize,
+    ) -> AkhResult<Vec<analytics::PageRankScore>> {
+        Ok(analytics::pagerank(&self.knowledge_graph, damping, iterations)?)
+    }
+
+    /// Find strongly connected components.
+    pub fn strongly_connected_components(
+        &self,
+    ) -> AkhResult<Vec<analytics::ConnectedComponent>> {
+        Ok(analytics::strongly_connected_components(&self.knowledge_graph)?)
+    }
+
+    /// Find shortest path (by hop count) between two symbols.
+    pub fn shortest_path(
+        &self,
+        from: SymbolId,
+        to: SymbolId,
+    ) -> AkhResult<Option<Vec<SymbolId>>> {
+        Ok(analytics::shortest_path(&self.knowledge_graph, from, to)?)
     }
 
     // -----------------------------------------------------------------------

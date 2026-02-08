@@ -10,6 +10,7 @@ use akh_medu::engine::{Engine, EngineConfig};
 use akh_medu::graph::traverse::TraversalConfig;
 use akh_medu::graph::Triple;
 use akh_medu::infer::InferenceQuery;
+use akh_medu::pipeline::{Pipeline, PipelineData, PipelineStage, StageConfig, StageKind};
 use akh_medu::symbol::{SymbolId, SymbolKind};
 use akh_medu::vsa::Dimension;
 
@@ -531,4 +532,192 @@ fn filler_recovery_basic() {
         !results.is_empty(),
         "filler recovery should return results"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Part G: Graph analytics tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn degree_centrality_basic() {
+    let engine = test_engine();
+
+    let triples = vec![
+        ("Sun".into(), "is-a".into(), "Star".into(), 1.0),
+        ("Earth".into(), "orbits".into(), "Sun".into(), 1.0),
+        ("Moon".into(), "orbits".into(), "Earth".into(), 1.0),
+        ("Mars".into(), "orbits".into(), "Sun".into(), 1.0),
+    ];
+    engine.ingest_label_triples(&triples).unwrap();
+
+    let results = engine.degree_centrality();
+    assert!(!results.is_empty());
+
+    // Sun has the highest total degree: 1 outgoing (is-a -> Star) + 2 incoming (Earth orbits, Mars orbits)
+    let sun_id = engine.lookup_symbol("Sun").unwrap();
+    let sun_dc = results.iter().find(|dc| dc.symbol == sun_id).unwrap();
+    assert!(sun_dc.total >= 3, "Sun should have at least 3 total degree");
+    assert_eq!(results[0].symbol, sun_id, "Sun should be first (highest degree)");
+}
+
+#[test]
+fn pagerank_hub_scores_highest() {
+    let engine = test_engine();
+
+    let triples = vec![
+        ("A".into(), "links".into(), "Hub".into(), 1.0),
+        ("B".into(), "links".into(), "Hub".into(), 1.0),
+        ("C".into(), "links".into(), "Hub".into(), 1.0),
+        ("D".into(), "links".into(), "Hub".into(), 1.0),
+    ];
+    engine.ingest_label_triples(&triples).unwrap();
+
+    let results = engine.pagerank(0.85, 20).unwrap();
+    assert!(!results.is_empty());
+
+    // Hub has 4 incoming links, should have a high score.
+    let hub_id = engine.lookup_symbol("Hub").unwrap();
+    let hub_pr = results.iter().find(|pr| pr.symbol == hub_id).unwrap();
+    assert!(hub_pr.score > 0.0);
+}
+
+#[test]
+fn scc_finds_cycle() {
+    let engine = test_engine();
+
+    let triples = vec![
+        ("A".into(), "points-to".into(), "B".into(), 1.0),
+        ("B".into(), "points-to".into(), "C".into(), 1.0),
+        ("C".into(), "points-to".into(), "A".into(), 1.0),
+    ];
+    engine.ingest_label_triples(&triples).unwrap();
+
+    let components = engine.strongly_connected_components().unwrap();
+    // A, B, C form one SCC.
+    let cycle_scc = components.iter().find(|c| c.size >= 3);
+    assert!(cycle_scc.is_some(), "should find a component with 3+ members");
+
+    let a_id = engine.lookup_symbol("A").unwrap();
+    let b_id = engine.lookup_symbol("B").unwrap();
+    let c_id = engine.lookup_symbol("C").unwrap();
+    let members = &cycle_scc.unwrap().members;
+    assert!(members.contains(&a_id));
+    assert!(members.contains(&b_id));
+    assert!(members.contains(&c_id));
+}
+
+#[test]
+fn shortest_path_finds_route() {
+    let engine = test_engine();
+
+    let triples = vec![
+        ("A".into(), "links".into(), "B".into(), 1.0),
+        ("B".into(), "links".into(), "C".into(), 1.0),
+        ("C".into(), "links".into(), "D".into(), 1.0),
+    ];
+    engine.ingest_label_triples(&triples).unwrap();
+
+    let a_id = engine.lookup_symbol("A").unwrap();
+    let c_id = engine.lookup_symbol("C").unwrap();
+
+    let path = engine.shortest_path(a_id, c_id).unwrap();
+    assert!(path.is_some());
+    let path = path.unwrap();
+    assert_eq!(path.len(), 3); // A -> B -> C
+    assert_eq!(path[0], a_id);
+    assert_eq!(path[2], c_id);
+}
+
+// ---------------------------------------------------------------------------
+// Part H: Pipeline CLI tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn pipeline_query_via_engine() {
+    let engine = test_engine();
+
+    let triples = vec![
+        ("Sun".into(), "is-a".into(), "Star".into(), 1.0),
+        ("Earth".into(), "orbits".into(), "Sun".into(), 1.0),
+    ];
+    engine.ingest_label_triples(&triples).unwrap();
+
+    let sun_id = engine.lookup_symbol("Sun").unwrap();
+    let output = engine.query_pipeline(vec![sun_id]).unwrap();
+
+    assert_eq!(output.stages_executed, 3);
+    assert_eq!(output.stage_results.len(), 3);
+
+    // First stage is "retrieve", should produce Traversal data.
+    assert_eq!(output.stage_results[0].0, "retrieve");
+}
+
+#[test]
+fn pipeline_custom_stages() {
+    let engine = test_engine();
+
+    let triples = vec![
+        ("Sun".into(), "is-a".into(), "Star".into(), 1.0),
+    ];
+    engine.ingest_label_triples(&triples).unwrap();
+
+    let sun_id = engine.lookup_symbol("Sun").unwrap();
+
+    // Build a custom 2-stage pipeline: retrieve + infer.
+    let pipeline = Pipeline {
+        name: "custom".into(),
+        stages: vec![
+            PipelineStage {
+                name: "retrieve".into(),
+                kind: StageKind::Retrieve,
+                config: StageConfig::Default,
+            },
+            PipelineStage {
+                name: "infer".into(),
+                kind: StageKind::Infer,
+                config: StageConfig::Default,
+            },
+        ],
+    };
+
+    let output = engine
+        .run_pipeline(&pipeline, PipelineData::Seeds(vec![sun_id]))
+        .unwrap();
+
+    assert_eq!(output.stages_executed, 2);
+}
+
+// ---------------------------------------------------------------------------
+// Part I: Batch persist test
+// ---------------------------------------------------------------------------
+
+#[test]
+fn batch_persist_consistent() {
+    let dir = tempfile::TempDir::new().unwrap();
+
+    // Phase 1: create symbols and persist.
+    {
+        let engine = persistent_engine(dir.path());
+        for i in 0..20 {
+            engine
+                .create_symbol(SymbolKind::Entity, format!("Symbol{i}"))
+                .unwrap();
+        }
+        engine.persist().unwrap();
+    }
+
+    // Phase 2: reopen and verify all symbols present.
+    {
+        let engine = persistent_engine(dir.path());
+        let all = engine.all_symbols();
+        assert_eq!(all.len(), 20, "all 20 symbols should survive restart");
+
+        for i in 0..20 {
+            let label = format!("Symbol{i}");
+            assert!(
+                engine.lookup_symbol(&label).is_ok(),
+                "symbol '{label}' should be found after restart"
+            );
+        }
+    }
 }

@@ -3,6 +3,7 @@
 //! Uses `petgraph` for the graph structure and `DashMap` for fast lookups
 //! by subject, predicate, or object.
 
+use std::collections::HashMap;
 use std::sync::RwLock;
 
 use dashmap::DashMap;
@@ -207,14 +208,45 @@ impl KnowledgeGraph {
         self.predicate_index.iter().map(|e| *e.key()).collect()
     }
 
+    /// Acquire a read lock on the inner graph for analytics.
+    pub fn graph(&self) -> std::sync::RwLockReadGuard<'_, DiGraph<SymbolId, EdgeData>> {
+        self.graph.read().expect("graph lock poisoned")
+    }
+
+    /// Build a reverse lookup: NodeIndex -> SymbolId.
+    pub fn node_index_to_symbol(&self) -> HashMap<NodeIndex, SymbolId> {
+        self.node_index.iter().map(|e| (*e.value(), *e.key())).collect()
+    }
+
     /// Bulk-load triples into the graph. Used for restoring from persistent storage.
     /// Returns the number of triples successfully loaded.
+    ///
+    /// Holds the write lock for the entire batch to avoid per-triple lock overhead.
     pub fn bulk_load(&self, triples: &[Triple]) -> GraphResult<usize> {
+        let mut graph = self.graph.write().expect("graph lock poisoned");
         let mut count = 0;
         for triple in triples {
-            self.insert_triple(triple)?;
+            let subj_idx = *self
+                .node_index
+                .entry(triple.subject)
+                .or_insert_with(|| graph.add_node(triple.subject));
+            let obj_idx = *self
+                .node_index
+                .entry(triple.object)
+                .or_insert_with(|| graph.add_node(triple.object));
+            self.node_index
+                .entry(triple.predicate)
+                .or_insert_with(|| graph.add_node(triple.predicate));
+
+            graph.add_edge(subj_idx, obj_idx, EdgeData::from(triple));
+            self.predicate_index
+                .entry(triple.predicate)
+                .or_default()
+                .push((triple.subject, triple.object));
             count += 1;
         }
+        self.triple_count
+            .fetch_add(count, std::sync::atomic::Ordering::Relaxed);
         Ok(count)
     }
 

@@ -11,6 +11,7 @@ use akh_medu::error::EngineError;
 use akh_medu::graph::traverse::TraversalConfig;
 use akh_medu::graph::Triple;
 use akh_medu::infer::InferenceQuery;
+use akh_medu::pipeline::{Pipeline, PipelineData, PipelineStage, StageConfig, StageKind};
 use akh_medu::provenance::DerivationKind;
 use akh_medu::symbol::SymbolId;
 use akh_medu::vsa::Dimension;
@@ -171,6 +172,18 @@ enum Commands {
         #[command(subcommand)]
         action: SkillAction,
     },
+
+    /// Run processing pipelines.
+    Pipeline {
+        #[command(subcommand)]
+        action: PipelineAction,
+    },
+
+    /// Graph analytics: centrality, components, paths.
+    Analytics {
+        #[command(subcommand)]
+        action: AnalyticsAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -220,6 +233,72 @@ enum SkillAction {
     Scaffold {
         /// Name for the new skillpack.
         name: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum PipelineAction {
+    /// List available built-in pipelines.
+    List,
+    /// Run the query pipeline (Retrieve -> Infer -> Reason).
+    Query {
+        /// Seed symbols (comma-separated names or IDs).
+        #[arg(long)]
+        seeds: String,
+        /// Maximum traversal depth for retrieve stage.
+        #[arg(long, default_value = "3")]
+        max_depth: usize,
+        /// Maximum inference depth.
+        #[arg(long, default_value = "1")]
+        infer_depth: usize,
+        /// Output format: "summary" or "json".
+        #[arg(long, default_value = "summary")]
+        format: String,
+    },
+    /// Run a custom pipeline from named stages.
+    Run {
+        /// Comma-separated stage names: retrieve,infer,reason,extract.
+        #[arg(long)]
+        stages: String,
+        /// Seed symbols (comma-separated names or IDs).
+        #[arg(long)]
+        seeds: String,
+        /// Output format: "summary" or "json".
+        #[arg(long, default_value = "summary")]
+        format: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum AnalyticsAction {
+    /// Compute degree centrality for all nodes.
+    Degree {
+        /// Number of top results.
+        #[arg(long, default_value = "10")]
+        top_k: usize,
+    },
+    /// Compute PageRank scores.
+    Pagerank {
+        /// Damping factor (default 0.85).
+        #[arg(long, default_value = "0.85")]
+        damping: f64,
+        /// Number of iterations.
+        #[arg(long, default_value = "20")]
+        iterations: usize,
+        /// Number of top results.
+        #[arg(long, default_value = "10")]
+        top_k: usize,
+    },
+    /// Find strongly connected components.
+    Components,
+    /// Find shortest path between two symbols.
+    Path {
+        /// Start symbol name or ID.
+        #[arg(long)]
+        from: String,
+        /// End symbol name or ID.
+        #[arg(long)]
+        to: String,
     },
 }
 
@@ -766,9 +845,304 @@ fn main() -> Result<()> {
                 }
             }
         }
+
+        Commands::Pipeline { action } => {
+            let engine = Engine::new(config).into_diagnostic()?;
+
+            match action {
+                PipelineAction::List => {
+                    println!("Built-in pipelines:");
+                    println!();
+                    let query = Pipeline::query_pipeline();
+                    println!("  \"{}\" - {} stages:", query.name, query.stages.len());
+                    for (i, stage) in query.stages.iter().enumerate() {
+                        println!("    [{}] {} ({:?})", i + 1, stage.name, stage.kind);
+                    }
+                    println!();
+                    let ingest = Pipeline::ingest_pipeline();
+                    println!("  \"{}\" - {} stage(s):", ingest.name, ingest.stages.len());
+                    for (i, stage) in ingest.stages.iter().enumerate() {
+                        println!("    [{}] {} ({:?})", i + 1, stage.name, stage.kind);
+                    }
+                }
+                PipelineAction::Query {
+                    seeds,
+                    max_depth,
+                    infer_depth,
+                    format,
+                } => {
+                    let seed_ids: std::result::Result<Vec<SymbolId>, _> = seeds
+                        .split(',')
+                        .map(|s| engine.resolve_symbol(s.trim()))
+                        .collect();
+                    let seed_ids = seed_ids.into_diagnostic()?;
+
+                    let mut pipeline = Pipeline::query_pipeline();
+                    // Apply custom config to retrieve stage.
+                    if let Some(stage) = pipeline.stages.first_mut() {
+                        stage.config = StageConfig::Retrieve {
+                            traversal: TraversalConfig {
+                                max_depth,
+                                ..Default::default()
+                            },
+                        };
+                    }
+                    // Apply custom config to infer stage.
+                    if let Some(stage) = pipeline.stages.get_mut(1) {
+                        stage.config = StageConfig::Infer {
+                            query_template: InferenceQuery {
+                                max_depth: infer_depth,
+                                ..Default::default()
+                            },
+                        };
+                    }
+
+                    let output = engine
+                        .run_pipeline(&pipeline, PipelineData::Seeds(seed_ids))
+                        .into_diagnostic()?;
+
+                    if format == "json" {
+                        print_pipeline_output_json(&output, &engine);
+                    } else {
+                        print_pipeline_output_summary(&output, &engine);
+                    }
+                }
+                PipelineAction::Run {
+                    stages,
+                    seeds,
+                    format,
+                } => {
+                    let seed_ids: std::result::Result<Vec<SymbolId>, _> = seeds
+                        .split(',')
+                        .map(|s| engine.resolve_symbol(s.trim()))
+                        .collect();
+                    let seed_ids = seed_ids.into_diagnostic()?;
+
+                    let stage_list: Vec<PipelineStage> = stages
+                        .split(',')
+                        .map(|s| {
+                            let name = s.trim().to_lowercase();
+                            let kind = match name.as_str() {
+                                "retrieve" => StageKind::Retrieve,
+                                "infer" => StageKind::Infer,
+                                "reason" => StageKind::Reason,
+                                "extract" => StageKind::ExtractTriples,
+                                other => {
+                                    eprintln!("Unknown stage: {other}, defaulting to Retrieve");
+                                    StageKind::Retrieve
+                                }
+                            };
+                            PipelineStage {
+                                name: name.clone(),
+                                kind,
+                                config: StageConfig::Default,
+                            }
+                        })
+                        .collect();
+
+                    let pipeline = Pipeline {
+                        name: "custom".into(),
+                        stages: stage_list,
+                    };
+
+                    let output = engine
+                        .run_pipeline(&pipeline, PipelineData::Seeds(seed_ids))
+                        .into_diagnostic()?;
+
+                    if format == "json" {
+                        print_pipeline_output_json(&output, &engine);
+                    } else {
+                        print_pipeline_output_summary(&output, &engine);
+                    }
+                }
+            }
+        }
+
+        Commands::Analytics { action } => {
+            let engine = Engine::new(config).into_diagnostic()?;
+
+            match action {
+                AnalyticsAction::Degree { top_k } => {
+                    let results = engine.degree_centrality();
+                    if results.is_empty() {
+                        println!("No nodes in graph.");
+                    } else {
+                        println!("Degree centrality (top {top_k}):");
+                        for (i, dc) in results.iter().take(top_k).enumerate() {
+                            let label = engine.resolve_label(dc.symbol);
+                            println!(
+                                "  {}. \"{}\" / {} — in: {}, out: {}, total: {}",
+                                i + 1,
+                                label,
+                                dc.symbol,
+                                dc.in_degree,
+                                dc.out_degree,
+                                dc.total
+                            );
+                        }
+                    }
+                }
+                AnalyticsAction::Pagerank {
+                    damping,
+                    iterations,
+                    top_k,
+                } => {
+                    let results = engine.pagerank(damping, iterations).into_diagnostic()?;
+                    if results.is_empty() {
+                        println!("No nodes in graph.");
+                    } else {
+                        println!("PageRank (damping={damping}, iterations={iterations}, top {top_k}):");
+                        for (i, pr) in results.iter().take(top_k).enumerate() {
+                            let label = engine.resolve_label(pr.symbol);
+                            println!(
+                                "  {}. \"{}\" / {} — score: {:.6}",
+                                i + 1,
+                                label,
+                                pr.symbol,
+                                pr.score
+                            );
+                        }
+                    }
+                }
+                AnalyticsAction::Components => {
+                    let components = engine.strongly_connected_components().into_diagnostic()?;
+                    if components.is_empty() {
+                        println!("No components found.");
+                    } else {
+                        println!("Strongly connected components ({}):", components.len());
+                        for comp in &components {
+                            let labels: Vec<String> = comp
+                                .members
+                                .iter()
+                                .take(10)
+                                .map(|s| engine.resolve_label(*s))
+                                .collect();
+                            let suffix = if comp.size > 10 {
+                                format!(" ... and {} more", comp.size - 10)
+                            } else {
+                                String::new()
+                            };
+                            println!(
+                                "  Component {} (size {}): [{}]{}",
+                                comp.id,
+                                comp.size,
+                                labels.join(", "),
+                                suffix
+                            );
+                        }
+                    }
+                }
+                AnalyticsAction::Path { from, to } => {
+                    let from_id = engine.resolve_symbol(&from).into_diagnostic()?;
+                    let to_id = engine.resolve_symbol(&to).into_diagnostic()?;
+
+                    let from_label = engine.resolve_label(from_id);
+                    let to_label = engine.resolve_label(to_id);
+
+                    match engine.shortest_path(from_id, to_id).into_diagnostic()? {
+                        Some(path) => {
+                            let labels: Vec<String> =
+                                path.iter().map(|s| engine.resolve_label(*s)).collect();
+                            println!(
+                                "Shortest path from \"{}\" to \"{}\" ({} hops):",
+                                from_label,
+                                to_label,
+                                path.len() - 1
+                            );
+                            println!("  {}", labels.join(" -> "));
+                        }
+                        None => {
+                            println!(
+                                "No path found from \"{}\" to \"{}\".",
+                                from_label, to_label
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     Ok(())
+}
+
+/// Print pipeline output in summary format.
+fn print_pipeline_output_summary(
+    output: &akh_medu::pipeline::PipelineOutput,
+    engine: &Engine,
+) {
+    println!(
+        "Pipeline — {} stages executed",
+        output.stages_executed
+    );
+    for (i, (name, data)) in output.stage_results.iter().enumerate() {
+        let summary = format_pipeline_data_summary(data, engine);
+        println!("  [{}/{}] {}: {}", i + 1, output.stages_executed, name, summary);
+    }
+}
+
+/// Print pipeline output in JSON format.
+fn print_pipeline_output_json(
+    output: &akh_medu::pipeline::PipelineOutput,
+    engine: &Engine,
+) {
+    let stages: Vec<serde_json::Value> = output
+        .stage_results
+        .iter()
+        .map(|(name, data)| {
+            serde_json::json!({
+                "stage": name,
+                "summary": format_pipeline_data_summary(data, engine),
+            })
+        })
+        .collect();
+    let json = serde_json::json!({
+        "stages_executed": output.stages_executed,
+        "stages": stages,
+        "result": format_pipeline_data_summary(&output.result, engine),
+    });
+    println!("{}", serde_json::to_string_pretty(&json).unwrap_or_default());
+}
+
+/// Format a PipelineData variant as a one-line summary.
+fn format_pipeline_data_summary(data: &akh_medu::pipeline::PipelineData, engine: &Engine) -> String {
+    use akh_medu::pipeline::PipelineData;
+    match data {
+        PipelineData::Seeds(seeds) => {
+            let labels: Vec<String> = seeds.iter().take(5).map(|s| engine.resolve_label(*s)).collect();
+            format!("{} seeds [{}]", seeds.len(), labels.join(", "))
+        }
+        PipelineData::Triples(triples) => {
+            format!("{} triples", triples.len())
+        }
+        PipelineData::Traversal(result) => {
+            format!(
+                "{} triples, {} nodes visited, depth {}",
+                result.triples.len(),
+                result.visited.len(),
+                result.depth_reached
+            )
+        }
+        PipelineData::Inference(result) => {
+            if result.activations.is_empty() {
+                "0 activations".to_string()
+            } else {
+                let top = &result.activations[0];
+                format!(
+                    "{} activations (top: \"{}\" {:.4})",
+                    result.activations.len(),
+                    engine.resolve_label(top.0),
+                    top.1
+                )
+            }
+        }
+        PipelineData::Reasoning(result) => {
+            format!(
+                "\"{}\" (cost: {}, saturated: {})",
+                result.simplified_expr, result.cost, result.saturated
+            )
+        }
+    }
 }
 
 /// Format a DerivationKind with human-readable label resolution.

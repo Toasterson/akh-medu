@@ -214,6 +214,13 @@ pub enum GraphError {
         )
     )]
     DepthExceeded { max_depth: usize },
+
+    #[error("analytics error: {message}")]
+    #[diagnostic(
+        code(akh::graph::analytics),
+        help("The graph analytics computation failed. Check that the graph is non-empty.")
+    )]
+    Analytics { message: String },
 }
 
 // ---------------------------------------------------------------------------
