@@ -93,11 +93,13 @@ placeholder. The phases below evolve it into a real autonomous agent.
 - [x] `Agent::has_persisted_session()` static check
 - [x] All agent CLI commands (`cycle`, `run`, `repl`) auto-persist session on exit
 
-### Phase 8e — External tools & world interaction
-- [ ] File I/O tool: read/write files the agent can use as scratch or data sources
-- [ ] HTTP tool: fetch URLs, call APIs
-- [ ] Shell exec tool: run commands with sandboxing
-- [ ] User interaction tool: ask the user a question and incorporate the answer
+### Phase 8e — External tools & world interaction ✓
+- [x] File I/O tool: read/write files with scratch-dir sandboxing, 4KB read truncation
+- [x] HTTP tool: sync GET via ureq with 256KB response limit and configurable timeout
+- [x] Shell exec tool: poll-based timeout (default 30s), 64KB output limit, process kill on timeout
+- [x] User interaction tool: stdout prompt + stdin readline with EOF/empty handling
+- [x] All 9 tools (5 core + 4 external) registered in Agent, wired into OODA utility scoring
+- [x] Keyword-based tool selection for file_io, http_fetch, shell_exec, user_interact
 
 ### Phase 8f — Planning & reflection
 - [ ] Multi-step planning: decompose goals into ordered tool-call sequences before executing

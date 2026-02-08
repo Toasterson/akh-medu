@@ -884,16 +884,22 @@ fn goal_status_transitions() {
 fn tool_registry_crud() {
     let mut agent = test_agent();
 
-    // Should have 5 built-in tools.
+    // Should have 9 built-in tools (5 core + 4 external).
     let tools = agent.list_tools();
-    assert_eq!(tools.len(), 5);
+    assert_eq!(tools.len(), 9);
 
     let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+    // Core tools.
     assert!(names.contains(&"kg_query"));
     assert!(names.contains(&"kg_mutate"));
     assert!(names.contains(&"memory_recall"));
     assert!(names.contains(&"reason"));
     assert!(names.contains(&"similarity_search"));
+    // External tools.
+    assert!(names.contains(&"file_io"));
+    assert!(names.contains(&"http_fetch"));
+    assert!(names.contains(&"shell_exec"));
+    assert!(names.contains(&"user_interact"));
 
     // Register a custom tool.
     struct CustomTool;
@@ -915,7 +921,7 @@ fn tool_registry_crud() {
     }
 
     agent.register_tool(Box::new(CustomTool));
-    assert_eq!(agent.list_tools().len(), 6);
+    assert_eq!(agent.list_tools().len(), 10);
 }
 
 #[test]
@@ -1936,4 +1942,109 @@ fn wm_serialize_deserialize_roundtrip() {
     let e2 = restored.get(id2).unwrap();
     assert_eq!(e2.content, "decision to query");
     assert_eq!(e2.kind, WorkingMemoryKind::Decision);
+}
+
+// ── Phase 8e: External tools ──────────────────────────────────────────
+
+#[test]
+fn file_io_tool_read_write() {
+    use akh_medu::agent::tool::ToolInput;
+    use std::collections::HashMap;
+
+    let dir = tempfile::tempdir().unwrap();
+    let scratch = dir.path().to_path_buf();
+
+    let engine = test_engine();
+    let tool = akh_medu::agent::tools::FileIoTool::new(Some(scratch.clone()));
+
+    // Write a file.
+    let mut params = HashMap::new();
+    params.insert("action".into(), "write".into());
+    params.insert("path".into(), "hello.txt".into());
+    params.insert("content".into(), "Hello from agent!".into());
+    let input = ToolInput { params };
+    let out = tool.execute(&engine, input).unwrap();
+    assert!(out.success, "write should succeed: {}", out.result);
+    assert!(out.result.contains("17 bytes"));
+
+    // Read it back.
+    let read_path = scratch.join("hello.txt");
+    let mut params = HashMap::new();
+    params.insert("action".into(), "read".into());
+    params.insert("path".into(), read_path.to_string_lossy().into());
+    let input = ToolInput { params };
+    let out = tool.execute(&engine, input).unwrap();
+    assert!(out.success, "read should succeed: {}", out.result);
+    assert!(out.result.contains("Hello from agent!"));
+}
+
+#[test]
+fn file_io_tool_denies_outside_scratch() {
+    use akh_medu::agent::tool::ToolInput;
+    use std::collections::HashMap;
+
+    let dir = tempfile::tempdir().unwrap();
+    let scratch = dir.path().to_path_buf();
+
+    let engine = test_engine();
+    let tool = akh_medu::agent::tools::FileIoTool::new(Some(scratch));
+
+    // Try writing to an absolute path outside scratch.
+    let mut params = HashMap::new();
+    params.insert("action".into(), "write".into());
+    params.insert("path".into(), "/tmp/evil.txt".into());
+    params.insert("content".into(), "should not work".into());
+    let input = ToolInput { params };
+    let out = tool.execute(&engine, input).unwrap();
+    assert!(!out.success, "write outside scratch should be denied");
+    assert!(out.result.contains("denied") || out.result.contains("outside"));
+}
+
+#[test]
+fn shell_exec_tool_runs_command() {
+    use akh_medu::agent::tool::ToolInput;
+    use std::collections::HashMap;
+
+    let engine = test_engine();
+    let tool = akh_medu::agent::tools::ShellExecTool;
+
+    let mut params = HashMap::new();
+    params.insert("command".into(), "echo hello_world".into());
+    let input = ToolInput { params };
+    let out = tool.execute(&engine, input).unwrap();
+    assert!(out.success, "echo should succeed: {}", out.result);
+    assert!(out.result.contains("hello_world"));
+}
+
+#[test]
+fn shell_exec_tool_timeout() {
+    use akh_medu::agent::tool::ToolInput;
+    use std::collections::HashMap;
+
+    let engine = test_engine();
+    let tool = akh_medu::agent::tools::ShellExecTool;
+
+    let mut params = HashMap::new();
+    params.insert("command".into(), "sleep 60".into());
+    params.insert("timeout".into(), "1".into());
+    let input = ToolInput { params };
+    let out = tool.execute(&engine, input).unwrap();
+    assert!(!out.success, "should have timed out");
+    assert!(out.result.contains("timed out"));
+}
+
+#[test]
+fn shell_exec_tool_exit_code() {
+    use akh_medu::agent::tool::ToolInput;
+    use std::collections::HashMap;
+
+    let engine = test_engine();
+    let tool = akh_medu::agent::tools::ShellExecTool;
+
+    let mut params = HashMap::new();
+    params.insert("command".into(), "false".into());
+    let input = ToolInput { params };
+    let out = tool.execute(&engine, input).unwrap();
+    assert!(!out.success, "false should report failure");
+    assert!(out.result.contains("Exit code: 1"));
 }

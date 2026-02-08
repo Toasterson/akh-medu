@@ -645,6 +645,109 @@ fn select_tool(
         ));
     }
 
+    // ── file_io: useful when goal mentions file/data/export/save ──
+    {
+        let goal_lower = goal.description.to_lowercase();
+        let criteria_lower = goal.success_criteria.to_lowercase();
+        let file_keywords = ["file", "read", "write", "save", "export", "data", "log"];
+        let mentions_file = file_keywords
+            .iter()
+            .any(|kw| goal_lower.contains(kw) || criteria_lower.contains(kw));
+
+        if mentions_file {
+            candidates.push(apply_modifiers(
+                ToolCandidate::new(
+                    "file_io",
+                    ToolInput::new()
+                        .with_param("action", "read")
+                        .with_param("path", &format!("{}.txt", goal_label.replace(' ', "_"))),
+                    0.45,
+                    "Goal mentions files/data — attempting file I/O.".into(),
+                ),
+                &history,
+                &episodic_tools,
+                pressure,
+            ));
+        }
+    }
+
+    // ── http_fetch: useful when goal mentions url/http/fetch/api/web ──
+    {
+        let goal_lower = goal.description.to_lowercase();
+        let criteria_lower = goal.success_criteria.to_lowercase();
+        let http_keywords = ["url", "http", "fetch", "api", "web", "download"];
+        let mentions_http = http_keywords
+            .iter()
+            .any(|kw| goal_lower.contains(kw) || criteria_lower.contains(kw));
+
+        if mentions_http {
+            candidates.push(apply_modifiers(
+                ToolCandidate::new(
+                    "http_fetch",
+                    ToolInput::new().with_param("url", "https://example.com"),
+                    0.45,
+                    "Goal mentions HTTP/URL/API — attempting fetch.".into(),
+                ),
+                &history,
+                &episodic_tools,
+                pressure,
+            ));
+        }
+    }
+
+    // ── shell_exec: useful when goal mentions command/shell/run/execute ──
+    {
+        let goal_lower = goal.description.to_lowercase();
+        let criteria_lower = goal.success_criteria.to_lowercase();
+        let shell_keywords = ["command", "shell", "run", "execute", "process", "script"];
+        let mentions_shell = shell_keywords
+            .iter()
+            .any(|kw| goal_lower.contains(kw) || criteria_lower.contains(kw));
+
+        if mentions_shell {
+            candidates.push(apply_modifiers(
+                ToolCandidate::new(
+                    "shell_exec",
+                    ToolInput::new()
+                        .with_param("command", "echo 'agent shell exec'")
+                        .with_param("timeout", "10"),
+                    0.45,
+                    "Goal mentions command/shell execution.".into(),
+                ),
+                &history,
+                &episodic_tools,
+                pressure,
+            ));
+        }
+    }
+
+    // ── user_interact: useful when goal mentions ask/user/input/question ──
+    {
+        let goal_lower = goal.description.to_lowercase();
+        let criteria_lower = goal.success_criteria.to_lowercase();
+        let user_keywords = ["ask", "user", "input", "question", "interact", "human"];
+        let mentions_user = user_keywords
+            .iter()
+            .any(|kw| goal_lower.contains(kw) || criteria_lower.contains(kw));
+
+        if mentions_user {
+            candidates.push(apply_modifiers(
+                ToolCandidate::new(
+                    "user_interact",
+                    ToolInput::new().with_param(
+                        "question",
+                        &format!("What should I know about: {}?", goal.description),
+                    ),
+                    0.5,
+                    "Goal mentions user/input — asking the user.".into(),
+                ),
+                &history,
+                &episodic_tools,
+                pressure,
+            ));
+        }
+    }
+
     // Pick the highest-scored candidate.
     candidates.sort_by(|a, b| {
         b.total_score()

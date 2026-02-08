@@ -36,6 +36,9 @@ anndists = "0.1"
 petgraph = "0.7"
 oxigraph = "0.4"
 
+# HTTP (sync)
+ureq = "2"
+
 # Numeric
 rand = "0.8"
 

@@ -109,6 +109,31 @@ pub struct Agent {
 }
 
 impl Agent {
+    /// Register all built-in tools (core + external).
+    fn register_builtin_tools(
+        registry: &mut ToolRegistry,
+        predicates: &AgentPredicates,
+        engine: &Engine,
+    ) {
+        // Core KG tools.
+        registry.register(Box::new(tools::KgQueryTool));
+        registry.register(Box::new(tools::KgMutateTool));
+        registry.register(Box::new(tools::MemoryRecallTool::new(predicates.clone())));
+        registry.register(Box::new(tools::ReasonTool));
+        registry.register(Box::new(tools::SimilaritySearchTool));
+
+        // External world-interaction tools.
+        let scratch_dir = engine
+            .config()
+            .data_dir
+            .as_ref()
+            .map(|d| d.join("scratch"));
+        registry.register(Box::new(tools::FileIoTool::new(scratch_dir)));
+        registry.register(Box::new(tools::HttpFetchTool));
+        registry.register(Box::new(tools::ShellExecTool));
+        registry.register(Box::new(tools::UserInteractTool));
+    }
+
     /// Create a new agent wrapping the given engine.
     ///
     /// Initializes well-known predicates, registers built-in tools, and
@@ -117,12 +142,7 @@ impl Agent {
         let predicates = AgentPredicates::init(&engine)?;
 
         let mut tool_registry = ToolRegistry::new();
-        // Register built-in tools.
-        tool_registry.register(Box::new(tools::KgQueryTool));
-        tool_registry.register(Box::new(tools::KgMutateTool));
-        tool_registry.register(Box::new(tools::MemoryRecallTool::new(predicates.clone())));
-        tool_registry.register(Box::new(tools::ReasonTool));
-        tool_registry.register(Box::new(tools::SimilaritySearchTool));
+        Self::register_builtin_tools(&mut tool_registry, &predicates, &engine);
 
         let working_memory = WorkingMemory::new(config.working_memory_capacity);
 
@@ -429,11 +449,7 @@ impl Agent {
         let predicates = AgentPredicates::init(&engine)?;
 
         let mut tool_registry = ToolRegistry::new();
-        tool_registry.register(Box::new(tools::KgQueryTool));
-        tool_registry.register(Box::new(tools::KgMutateTool));
-        tool_registry.register(Box::new(tools::MemoryRecallTool::new(predicates.clone())));
-        tool_registry.register(Box::new(tools::ReasonTool));
-        tool_registry.register(Box::new(tools::SimilaritySearchTool));
+        Self::register_builtin_tools(&mut tool_registry, &predicates, &engine);
 
         let store = engine.store();
 
