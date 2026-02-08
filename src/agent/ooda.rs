@@ -9,8 +9,8 @@ use crate::symbol::SymbolId;
 
 use super::agent::Agent;
 use super::error::{AgentError, AgentResult};
-use super::goal::{self, GoalStatus};
-use super::memory::{WorkingMemoryEntry, WorkingMemoryKind};
+use super::goal::{self, Goal, GoalStatus};
+use super::memory::{EpisodicEntry, WorkingMemory, WorkingMemoryEntry, WorkingMemoryKind};
 use super::tool::{ToolInput, ToolOutput};
 
 // ---------------------------------------------------------------------------
@@ -41,8 +41,8 @@ pub struct Observation {
     pub working_memory_size: usize,
     /// WM entry IDs from the most recent cycle.
     pub recent_entries: Vec<u64>,
-    /// Recalled episodic memory symbol IDs.
-    pub recalled_episodes: Vec<SymbolId>,
+    /// Recalled episodic memories (full entries, not just IDs).
+    pub recalled_episodes: Vec<EpisodicEntry>,
 }
 
 /// Context built during the Orient phase.
@@ -141,7 +141,7 @@ fn observe(agent: &mut Agent, cycle: u64) -> AgentResult<Observation> {
             &agent.predicates,
             3,
         ) {
-            recalled = episodes.iter().map(|e| e.symbol_id).collect();
+            recalled = episodes;
         }
     }
 
@@ -196,14 +196,25 @@ fn orient(agent: &mut Agent, observation: &Observation) -> AgentResult<Orientati
         }
     }
 
+    // Incorporate knowledge from recalled episodic memories.
+    // Episodes carry `learnings` — symbols the agent previously found relevant.
+    // Gather triples around those learned symbols for richer context.
+    for episode in &observation.recalled_episodes {
+        for learned_sym in &episode.learnings {
+            let from = agent.engine.triples_from(*learned_sym);
+            relevant_knowledge.extend(from);
+        }
+    }
+
     let memory_pressure = agent.working_memory.pressure();
 
     // Push orientation summary to WM if we found knowledge.
     if !relevant_knowledge.is_empty() || !inferences.is_empty() {
         let orient_content = format!(
-            "Orient: {} relevant triples, {} inferences, pressure {:.2}",
+            "Orient: {} relevant triples, {} inferences, {} episodes, pressure {:.2}",
             relevant_knowledge.len(),
             inferences.len(),
+            observation.recalled_episodes.len(),
             memory_pressure,
         );
         let syms: Vec<SymbolId> = inferences.iter().map(|(s, _)| *s).collect();
@@ -229,7 +240,7 @@ fn orient(agent: &mut Agent, observation: &Observation) -> AgentResult<Orientati
 /// Decide: choose a tool and construct input based on the top-priority goal.
 fn decide(
     agent: &mut Agent,
-    _observation: &Observation,
+    observation: &Observation,
     orientation: &Orientation,
     cycle: u64,
 ) -> AgentResult<Decision> {
@@ -239,11 +250,18 @@ fn decide(
     let goal_id = top_goal.symbol_id;
     let goal_desc = &top_goal.description;
 
+    // Increment reference counts on WM entries we're consulting for this decision.
+    for entry_id in &observation.recent_entries {
+        agent.working_memory.increment_reference(*entry_id);
+    }
+
     // Rule-based strategy to select tool + build input.
     let (tool_name, tool_input, reasoning) = select_tool(
         top_goal,
+        observation,
         orientation,
         &agent.engine,
+        &agent.working_memory,
     );
 
     // Record decision in WM.
@@ -277,16 +295,76 @@ fn decide(
     })
 }
 
-/// Rule-based tool selection strategy.
+/// Tool selection strategy.
+///
+/// Considers all 5 tools, observation context (recalled episodes), orientation
+/// (knowledge, inferences, memory pressure), and recent WM history to avoid
+/// repeating the same action.
 fn select_tool(
-    goal: &super::goal::Goal,
+    goal: &Goal,
+    observation: &Observation,
     orientation: &Orientation,
     engine: &crate::engine::Engine,
+    working_memory: &WorkingMemory,
 ) -> (String, ToolInput, String) {
     let goal_label = engine.resolve_label(goal.symbol_id);
+    let has_knowledge = !orientation.relevant_knowledge.is_empty();
+    let has_inferences = !orientation.inferences.is_empty();
+    let has_episodes = !observation.recalled_episodes.is_empty();
 
-    // If there's very little relevant knowledge, do a KG query first.
-    if orientation.relevant_knowledge.is_empty() {
+    // Check what tool was used most recently to avoid immediate repetition.
+    let last_tool = last_tool_used(working_memory);
+
+    // ── Priority 1: If memory pressure is high and episodes exist, recall ──
+    // Recalling past experience can inform better decisions under pressure.
+    if orientation.memory_pressure > 0.7 && has_episodes && last_tool.as_deref() != Some("memory_recall") {
+        let query_syms: Vec<String> = observation
+            .recalled_episodes
+            .iter()
+            .flat_map(|ep| ep.learnings.iter())
+            .take(3)
+            .map(|s| engine.resolve_label(*s))
+            .collect();
+        let query_str = if query_syms.is_empty() {
+            goal_label.clone()
+        } else {
+            query_syms.join(",")
+        };
+        return (
+            "memory_recall".into(),
+            ToolInput::new()
+                .with_param("query_symbols", &query_str)
+                .with_param("top_k", "3"),
+            format!(
+                "Memory pressure high ({:.0}%) with past episodes — recalling relevant experience.",
+                orientation.memory_pressure * 100.0
+            ),
+        );
+    }
+
+    // ── Priority 2: No knowledge at all — explore via KG query ──
+    if !has_knowledge {
+        // If episodes exist but no KG knowledge, recall first.
+        if has_episodes && last_tool.as_deref() != Some("memory_recall") {
+            let query_str = observation
+                .recalled_episodes
+                .iter()
+                .flat_map(|ep| ep.learnings.iter())
+                .take(3)
+                .map(|s| engine.resolve_label(*s))
+                .collect::<Vec<_>>()
+                .join(",");
+            if !query_str.is_empty() {
+                return (
+                    "memory_recall".into(),
+                    ToolInput::new()
+                        .with_param("query_symbols", &query_str)
+                        .with_param("top_k", "3"),
+                    "No KG knowledge but have past episodes — recalling experience first.".into(),
+                );
+            }
+        }
+
         return (
             "kg_query".into(),
             ToolInput::new()
@@ -296,8 +374,29 @@ fn select_tool(
         );
     }
 
-    // If there are inferences, maybe do similarity search to explore further.
-    if !orientation.inferences.is_empty() {
+    // ── Priority 3: Knowledge + inferences → synthesize new knowledge ──
+    // When we have both knowledge and inferences, we can create new triples.
+    if has_knowledge && has_inferences && last_tool.as_deref() != Some("kg_mutate") {
+        // Find a potential new connection: link the top inference to the goal
+        // via a relation found in existing knowledge.
+        if let Some(new_triple) = synthesize_triple(goal, orientation, engine) {
+            return (
+                "kg_mutate".into(),
+                ToolInput::new()
+                    .with_param("subject", &new_triple.0)
+                    .with_param("predicate", &new_triple.1)
+                    .with_param("object", &new_triple.2)
+                    .with_param("confidence", "0.7"),
+                format!(
+                    "Have knowledge and inferences — synthesizing new triple: {} -> {} -> {}.",
+                    new_triple.0, new_triple.1, new_triple.2
+                ),
+            );
+        }
+    }
+
+    // ── Priority 4: Inferences available → explore similar symbols ──
+    if has_inferences && last_tool.as_deref() != Some("similarity_search") {
         let top_sym = orientation.inferences[0].0;
         let top_label = engine.resolve_label(top_sym);
         return (
@@ -312,9 +411,8 @@ fn select_tool(
         );
     }
 
-    // If we have knowledge but no inferences, try reasoning.
-    if !orientation.relevant_knowledge.is_empty() && orientation.inferences.is_empty() {
-        // Build a simple expression from the first triple.
+    // ── Priority 5: Knowledge but no inferences → symbolic reasoning ──
+    if has_knowledge && !has_inferences && last_tool.as_deref() != Some("reason") {
         let t = &orientation.relevant_knowledge[0];
         let expr = format!(
             "(triple {} {} {})",
@@ -329,14 +427,63 @@ fn select_tool(
         );
     }
 
-    // Default: query the goal symbol.
+    // ── Fallback: KG query (always safe) ──
     (
         "kg_query".into(),
         ToolInput::new()
             .with_param("symbol", &goal_label)
             .with_param("direction", "both"),
-        "Default action — querying KG for goal symbol.".into(),
+        "Cycling tools — querying KG for fresh context.".into(),
     )
+}
+
+/// Check what tool was used in the most recent ToolResult WM entry.
+fn last_tool_used(working_memory: &WorkingMemory) -> Option<String> {
+    working_memory
+        .by_kind(WorkingMemoryKind::ToolResult)
+        .into_iter()
+        .max_by_key(|e| e.id)
+        .and_then(|e| {
+            // Content format: "Tool result (tool_name):\n..."
+            e.content
+                .strip_prefix("Tool result (")
+                .and_then(|s| s.find(')').map(|i| s[..i].to_string()))
+        })
+}
+
+/// Try to synthesize a new triple from orientation context.
+///
+/// Looks for an inference symbol that isn't already connected to the goal,
+/// and proposes connecting it via a relation found in existing knowledge.
+fn synthesize_triple(
+    goal: &Goal,
+    orientation: &Orientation,
+    engine: &crate::engine::Engine,
+) -> Option<(String, String, String)> {
+    // Get the set of symbols already connected to the goal.
+    let connected: std::collections::HashSet<SymbolId> = orientation
+        .relevant_knowledge
+        .iter()
+        .flat_map(|t| [t.subject, t.object])
+        .collect();
+
+    // Find the first inference symbol NOT already connected to the goal.
+    let novel_inference = orientation
+        .inferences
+        .iter()
+        .find(|(sym, _)| !connected.contains(sym) && *sym != goal.symbol_id)?;
+
+    // Pick a predicate from existing knowledge.
+    let predicate = orientation
+        .relevant_knowledge
+        .first()
+        .map(|t| t.predicate)?;
+
+    let subject = engine.resolve_label(goal.symbol_id);
+    let pred_label = engine.resolve_label(predicate);
+    let object = engine.resolve_label(novel_inference.0);
+
+    Some((subject, pred_label, object))
 }
 
 /// Act: execute the selected tool and update goal status.
@@ -367,19 +514,13 @@ fn act(agent: &mut Agent, decision: &Decision, cycle: u64) -> AgentResult<Action
         })
         .ok();
 
-    // Determine goal progress.
-    let goal_progress = if tool_output.success && !tool_output.symbols_involved.is_empty() {
-        GoalProgress::Advanced {
-            detail: format!(
-                "Tool {} produced {} symbols",
-                decision.chosen_tool,
-                tool_output.symbols_involved.len()
-            ),
-        }
-    } else if !tool_output.success {
-        GoalProgress::Failed {
-            reason: tool_output.result.clone(),
-        }
+    // Determine goal progress by evaluating success criteria.
+    let goal_progress = if let Some(goal) = agent
+        .goals
+        .iter()
+        .find(|g| g.symbol_id == decision.goal_id)
+    {
+        evaluate_goal_progress(goal, &tool_output, &agent.engine)
     } else {
         GoalProgress::NoChange
     };
@@ -418,4 +559,106 @@ fn act(agent: &mut Agent, decision: &Decision, cycle: u64) -> AgentResult<Action
         goal_progress,
         new_wm_entries: wm_id.into_iter().collect(),
     })
+}
+
+/// Evaluate whether a tool output satisfies a goal's success criteria.
+///
+/// Compares the symbols returned by the tool against keywords in the goal's
+/// success criteria. If enough criteria keywords match symbol labels in the
+/// tool output, the goal is considered complete.
+fn evaluate_goal_progress(
+    goal: &Goal,
+    tool_output: &ToolOutput,
+    engine: &crate::engine::Engine,
+) -> GoalProgress {
+    if !tool_output.success {
+        return GoalProgress::Failed {
+            reason: tool_output.result.clone(),
+        };
+    }
+
+    if tool_output.symbols_involved.is_empty() {
+        return GoalProgress::NoChange;
+    }
+
+    // Extract meaningful keywords from success criteria (words > 3 chars).
+    let criteria_keywords: Vec<String> = goal
+        .success_criteria
+        .split_whitespace()
+        .filter(|w| w.len() > 3)
+        .map(|w| w.to_lowercase().trim_matches(|c: char| !c.is_alphanumeric()).to_string())
+        .filter(|w| !w.is_empty())
+        .collect();
+
+    if criteria_keywords.is_empty() {
+        // No parseable criteria — treat any result with symbols as progress.
+        return GoalProgress::Advanced {
+            detail: format!(
+                "Tool produced {} symbols (no evaluable criteria).",
+                tool_output.symbols_involved.len()
+            ),
+        };
+    }
+
+    // Collect symbol labels from the tool output (lowercased), excluding the
+    // goal's own symbol and agent-metadata labels (desc:, status:, priority:,
+    // criteria:, goal:) to prevent self-referential matching.
+    let output_labels: Vec<String> = tool_output
+        .symbols_involved
+        .iter()
+        .filter(|s| **s != goal.symbol_id)
+        .map(|s| engine.resolve_label(*s).to_lowercase())
+        .filter(|label| {
+            !label.starts_with("desc:")
+                && !label.starts_with("status:")
+                && !label.starts_with("priority:")
+                && !label.starts_with("criteria:")
+                && !label.starts_with("goal:")
+                && !label.starts_with("agent:")
+        })
+        .collect();
+
+    // Also search the result text, but strip out agent-metadata lines.
+    let result_lower: String = tool_output
+        .result
+        .lines()
+        .filter(|line| {
+            let l = line.trim().to_lowercase();
+            !l.contains("desc:") && !l.contains("criteria:") && !l.contains("status:")
+                && !l.contains("priority:") && !l.starts_with("agent:")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        .to_lowercase();
+
+    // Count how many criteria keywords are satisfied.
+    let matched: usize = criteria_keywords
+        .iter()
+        .filter(|kw| {
+            output_labels.iter().any(|label| label.contains(kw.as_str()))
+                || result_lower.contains(kw.as_str())
+        })
+        .count();
+
+    let match_ratio = matched as f32 / criteria_keywords.len() as f32;
+
+    if match_ratio >= 0.5 {
+        GoalProgress::Completed
+    } else if matched > 0 {
+        GoalProgress::Advanced {
+            detail: format!(
+                "Matched {}/{} criteria keywords ({:.0}%).",
+                matched,
+                criteria_keywords.len(),
+                match_ratio * 100.0
+            ),
+        }
+    } else {
+        GoalProgress::Advanced {
+            detail: format!(
+                "Tool produced {} symbols, no criteria keywords matched yet.",
+                tool_output.symbols_involved.len()
+            ),
+        }
+    }
 }

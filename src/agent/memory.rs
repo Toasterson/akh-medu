@@ -119,6 +119,13 @@ impl WorkingMemory {
             .collect()
     }
 
+    /// Increment the reference count for an entry (called when Decide consults it).
+    pub fn increment_reference(&mut self, id: u64) {
+        if let Some(entry) = self.get_mut(id) {
+            entry.reference_count += 1;
+        }
+    }
+
     /// Update the relevance score for an entry.
     pub fn update_relevance(&mut self, id: u64, score: f32) {
         if let Some(entry) = self.get_mut(id) {

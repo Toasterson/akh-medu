@@ -207,6 +207,9 @@ pub fn restore_goals(engine: &Engine, predicates: &AgentPredicates) -> AgentResu
         let triples = engine.triples_from(meta.id);
         let mut description = meta.label.trim_start_matches("goal:").to_string();
         let mut status = GoalStatus::Pending;
+        // Track the SymbolId of the status object so we pick the most recent one
+        // (highest SymbolId = most recently created, since IDs are monotonic).
+        let mut status_sym_id: Option<SymbolId> = None;
         let mut priority = 128u8;
         let mut criteria = String::new();
         let mut parent = None;
@@ -217,8 +220,14 @@ pub fn restore_goals(engine: &Engine, predicates: &AgentPredicates) -> AgentResu
             if triple.predicate == predicates.has_description {
                 description = obj_label.trim_start_matches("desc:").to_string();
             } else if triple.predicate == predicates.has_status {
-                let status_str = obj_label.trim_start_matches("status:");
-                status = GoalStatus::from_label(status_str);
+                // Only accept this status if it's more recent (higher SymbolId)
+                // than any previously seen status triple for this goal.
+                let dominated = status_sym_id.is_some_and(|prev| triple.object > prev);
+                if status_sym_id.is_none() || dominated {
+                    let status_str = obj_label.trim_start_matches("status:");
+                    status = GoalStatus::from_label(status_str);
+                    status_sym_id = Some(triple.object);
+                }
             } else if triple.predicate == predicates.has_priority {
                 if let Some(p) = obj_label.trim_start_matches("priority:").parse::<u8>().ok() {
                     priority = p;
