@@ -67,11 +67,14 @@ placeholder. The phases below evolve it into a real autonomous agent.
 - [x] Fix Act phase: evaluate_goal_progress() checks criteria keywords against non-metadata tool output
 - [x] Fix self-referential criteria match: agent-metadata labels (desc:, status:, criteria:, goal:) filtered out
 
-### Phase 8b — Success criteria & goal autonomy
-- [ ] Parse and evaluate success criteria against KG state (pattern matching on triples)
-- [ ] Let Act produce Completed/Failed based on criteria evaluation
-- [ ] Integrate goal decomposition into the OODA loop (agent decomposes goals when stuck)
-- [ ] Add `suspend_goal()`, `fail_goal()` to Agent public API
+### Phase 8b — Success criteria & goal autonomy ✓
+- [x] Parse and evaluate success criteria against KG state (pattern matching on triples)
+- [x] Let Act produce Completed/Failed based on criteria evaluation (two-signal: tool output + KG state)
+- [x] Stall detection: track `cycles_worked` and `last_progress_cycle` per goal, `is_stalled()` method
+- [x] Integrate goal decomposition into OODA loop (`decompose_stalled_goals()` auto-fires after each cycle)
+- [x] Goal decomposition splits on commas/"and", suspends parent, creates active children
+- [x] Add `suspend_goal()`, `fail_goal()`, `decompose_stalled_goal()` to Agent public API
+- [x] Metadata label filtering: agent-metadata (desc:, status:, criteria:, goal:, episode:, summary:, tag:) excluded from criteria matching
 
 ### Phase 8c — Intelligent decision-making
 - [ ] Replace if/else `select_tool()` with utility-based scoring

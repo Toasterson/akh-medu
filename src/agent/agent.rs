@@ -9,7 +9,7 @@ use crate::engine::Engine;
 use crate::symbol::SymbolId;
 
 use super::error::{AgentError, AgentResult};
-use super::goal::{self, Goal, GoalStatus};
+use super::goal::{self, Goal, GoalStatus, DEFAULT_STALL_THRESHOLD};
 use super::memory::{
     consolidate, recall_episodes, ConsolidationConfig, ConsolidationResult, EpisodicEntry,
     WorkingMemory,
@@ -158,6 +158,9 @@ impl Agent {
 
         let result = ooda::run_ooda_cycle(self)?;
 
+        // Auto-decompose stalled goals.
+        self.decompose_stalled_goals();
+
         // Auto-consolidate if enabled and WM pressure is high.
         if self.config.auto_consolidate
             && self.working_memory.len() >= self.config.consolidation.auto_consolidate_at
@@ -181,6 +184,9 @@ impl Agent {
 
             let result = ooda::run_ooda_cycle(self)?;
             results.push(result);
+
+            // Auto-decompose stalled goals.
+            self.decompose_stalled_goals();
 
             // Auto-consolidate.
             if self.config.auto_consolidate
@@ -263,6 +269,101 @@ impl Agent {
                 goal_id: goal_id.get(),
             })?;
         goal::update_goal_status(&self.engine, goal, GoalStatus::Completed, &self.predicates)
+    }
+
+    /// Suspend a goal (e.g., while sub-goals are being worked on).
+    pub fn suspend_goal(&mut self, goal_id: SymbolId) -> AgentResult<()> {
+        let goal = self
+            .goals
+            .iter_mut()
+            .find(|g| g.symbol_id == goal_id)
+            .ok_or(AgentError::GoalNotFound {
+                goal_id: goal_id.get(),
+            })?;
+        goal::update_goal_status(&self.engine, goal, GoalStatus::Suspended, &self.predicates)
+    }
+
+    /// Mark a goal as failed with a reason.
+    pub fn fail_goal(&mut self, goal_id: SymbolId, reason: &str) -> AgentResult<()> {
+        let goal = self
+            .goals
+            .iter_mut()
+            .find(|g| g.symbol_id == goal_id)
+            .ok_or(AgentError::GoalNotFound {
+                goal_id: goal_id.get(),
+            })?;
+        goal::update_goal_status(
+            &self.engine,
+            goal,
+            GoalStatus::Failed {
+                reason: reason.into(),
+            },
+            &self.predicates,
+        )
+    }
+
+    /// Auto-decompose any active goals that have stalled.
+    ///
+    /// A goal is stalled if it has been worked on for `DEFAULT_STALL_THRESHOLD`
+    /// cycles without making progress. Stalled leaf goals (no existing children)
+    /// are decomposed into sub-goals.
+    fn decompose_stalled_goals(&mut self) {
+        let stalled_ids: Vec<SymbolId> = self
+            .goals
+            .iter()
+            .filter(|g| {
+                matches!(g.status, GoalStatus::Active)
+                    && g.children.is_empty()
+                    && g.is_stalled(self.cycle_count, DEFAULT_STALL_THRESHOLD)
+            })
+            .map(|g| g.symbol_id)
+            .collect();
+
+        for goal_id in stalled_ids {
+            let _ = self.decompose_stalled_goal(goal_id);
+        }
+    }
+
+    /// Decompose a stalled goal into sub-goals.
+    ///
+    /// Suspends the parent goal and creates active child goals derived from
+    /// the parent's description. Returns the new sub-goal symbol IDs.
+    pub fn decompose_stalled_goal(&mut self, goal_id: SymbolId) -> AgentResult<Vec<SymbolId>> {
+        let (description, parent_idx) = {
+            let (idx, goal) = self
+                .goals
+                .iter()
+                .enumerate()
+                .find(|(_, g)| g.symbol_id == goal_id)
+                .ok_or(AgentError::GoalNotFound {
+                    goal_id: goal_id.get(),
+                })?;
+            (goal.description.clone(), idx)
+        };
+
+        let sub_descs = goal::generate_sub_goal_descriptions(&description);
+        let sub_tuples: Vec<(&str, u8, &str)> = sub_descs
+            .iter()
+            .map(|(d, p, c)| (d.as_str(), *p, c.as_str()))
+            .collect();
+
+        let parent = &mut self.goals[parent_idx];
+        let children = goal::decompose_goal(&self.engine, parent, &sub_tuples, &self.predicates)?;
+
+        let child_ids: Vec<SymbolId> = children.iter().map(|c| c.symbol_id).collect();
+
+        // Suspend the parent.
+        goal::update_goal_status(
+            &self.engine,
+            &mut self.goals[parent_idx],
+            GoalStatus::Suspended,
+            &self.predicates,
+        )?;
+
+        // Add children to the goals list.
+        self.goals.extend(children);
+
+        Ok(child_ids)
     }
 }
 

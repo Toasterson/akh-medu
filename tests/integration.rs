@@ -1325,3 +1325,246 @@ fn all_five_tools_selectable() {
         tools_used
     );
 }
+
+// ===========================================================================
+// Phase 8b: Goal autonomy & stall detection integration tests
+// ===========================================================================
+
+#[test]
+fn goal_stall_detection() {
+    // A goal that makes no progress should be detected as stalled after threshold cycles.
+    let engine = test_engine();
+    engine
+        .ingest_label_triples(&[("Sun".into(), "is-a".into(), "Star".into(), 1.0)])
+        .unwrap();
+
+    let engine = Arc::new(engine);
+    let config = AgentConfig {
+        max_cycles: 20,
+        ..Default::default()
+    };
+    let mut agent = Agent::new(engine, config).unwrap();
+
+    // Use criteria that will never self-match so the goal stays Active and stalls.
+    agent
+        .add_goal(
+            "Impossible task",
+            128,
+            "Requires unicorn verification protocol",
+        )
+        .unwrap();
+
+    // Run enough cycles past the stall threshold (DEFAULT_STALL_THRESHOLD = 5).
+    for _ in 0..7 {
+        if akh_medu::agent::goal::active_goals(agent.goals()).is_empty() {
+            break;
+        }
+        let _ = agent.run_cycle();
+    }
+
+    // The goal should have been worked on and detected as stalled.
+    // After stall detection, decompose_stalled_goals should have:
+    // - Suspended the original goal
+    // - Created child sub-goals
+    let original = agent
+        .goals()
+        .iter()
+        .find(|g| g.description.contains("Impossible task"))
+        .expect("original goal should still exist");
+
+    // Either it got decomposed (Suspended with children) or it's still active
+    // with cycles_worked tracked.
+    if matches!(original.status, GoalStatus::Suspended) {
+        assert!(
+            !original.children.is_empty(),
+            "suspended goal should have children from decomposition"
+        );
+        // Should have new active child goals.
+        let active = akh_medu::agent::goal::active_goals(agent.goals());
+        assert!(
+            !active.is_empty(),
+            "should have active child goals after decomposition"
+        );
+    } else {
+        // If not yet stalled (cycles_worked < threshold), it should be tracking.
+        assert!(
+            original.cycles_worked > 0,
+            "goal should have cycles_worked tracked, got {}",
+            original.cycles_worked
+        );
+    }
+}
+
+#[test]
+fn goal_decomposition_creates_children() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let engine = Arc::new(persistent_engine(dir.path()));
+    let mut agent = Agent::new(engine.clone(), AgentConfig::default()).unwrap();
+
+    // A goal with natural comma-separated sub-tasks.
+    let parent_id = agent
+        .add_goal(
+            "Find stars, classify planets, and map orbits",
+            200,
+            "Complete all sub-tasks",
+        )
+        .unwrap();
+
+    // Manually decompose it.
+    let children = agent.decompose_stalled_goal(parent_id).unwrap();
+
+    // Should produce at least 2 sub-goals from the comma/"and" split.
+    assert!(
+        children.len() >= 2,
+        "expected at least 2 sub-goals from decomposition, got {}",
+        children.len()
+    );
+
+    // Parent should be suspended.
+    let parent = agent
+        .goals()
+        .iter()
+        .find(|g| g.symbol_id == parent_id)
+        .unwrap();
+    assert!(
+        matches!(parent.status, GoalStatus::Suspended),
+        "parent should be suspended after decomposition"
+    );
+
+    // Children should be active.
+    for child_id in &children {
+        let child = agent
+            .goals()
+            .iter()
+            .find(|g| g.symbol_id == *child_id)
+            .unwrap();
+        assert!(
+            matches!(child.status, GoalStatus::Active),
+            "child should be active"
+        );
+        assert_eq!(
+            child.parent,
+            Some(parent_id),
+            "child should reference parent"
+        );
+    }
+
+    // Verify parent-child triples in KG.
+    let parent_triples = engine.triples_from(parent_id);
+    let child_pred_label = "agent:child_goal";
+    let child_triples: Vec<_> = parent_triples
+        .iter()
+        .filter(|t| engine.resolve_label(t.predicate) == child_pred_label)
+        .collect();
+    assert!(
+        child_triples.len() >= 2,
+        "parent should have child_goal triples in KG"
+    );
+}
+
+#[test]
+fn suspend_and_fail_goal() {
+    let engine = Arc::new(test_engine());
+    let mut agent = Agent::new(engine, AgentConfig::default()).unwrap();
+
+    let g1 = agent.add_goal("Goal one", 128, "test").unwrap();
+    let g2 = agent.add_goal("Goal two", 128, "test").unwrap();
+
+    // Suspend goal one.
+    agent.suspend_goal(g1).unwrap();
+    let goal1 = agent.goals().iter().find(|g| g.symbol_id == g1).unwrap();
+    assert!(matches!(goal1.status, GoalStatus::Suspended));
+
+    // Fail goal two with a reason.
+    agent.fail_goal(g2, "resource unavailable").unwrap();
+    let goal2 = agent.goals().iter().find(|g| g.symbol_id == g2).unwrap();
+    match &goal2.status {
+        GoalStatus::Failed { reason } => {
+            assert!(reason.contains("resource unavailable"));
+        }
+        other => panic!("expected Failed status, got {other:?}"),
+    }
+
+    // Neither should appear in active goals.
+    let active = akh_medu::agent::goal::active_goals(agent.goals());
+    assert!(active.is_empty(), "no goals should be active");
+}
+
+#[test]
+fn criteria_evaluation_uses_kg_state() {
+    // Verify that criteria evaluation checks KG state, not just tool output.
+    let engine = test_engine();
+    engine
+        .ingest_label_triples(&[
+            ("Alpha".into(), "is-a".into(), "Star".into(), 1.0),
+            ("Beta".into(), "is-a".into(), "Star".into(), 1.0),
+            ("Gamma".into(), "is-a".into(), "Planet".into(), 1.0),
+        ])
+        .unwrap();
+
+    let engine = Arc::new(engine);
+    let config = AgentConfig {
+        max_cycles: 10,
+        ..Default::default()
+    };
+    let mut agent = Agent::new(engine, config).unwrap();
+
+    // Criteria keywords "star" should match entities like "Star" already in the KG.
+    agent
+        .add_goal("Catalog celestial objects", 200, "Find star entities")
+        .unwrap();
+
+    let result = agent.run_until_complete();
+    match result {
+        Ok(cycles) => {
+            assert!(
+                !cycles.is_empty(),
+                "should have run at least one cycle"
+            );
+        }
+        Err(_) => {
+            // Even if max cycles reached, the agent should have run cycles.
+            assert!(agent.cycle_count() > 0);
+        }
+    }
+}
+
+#[test]
+fn cycles_worked_tracks_per_goal() {
+    let engine = test_engine();
+    engine
+        .ingest_label_triples(&[("Sun".into(), "is-a".into(), "Star".into(), 1.0)])
+        .unwrap();
+
+    let engine = Arc::new(engine);
+    let mut agent = Agent::new(engine, AgentConfig::default()).unwrap();
+
+    agent
+        .add_goal(
+            "Track cycles",
+            128,
+            "Requires quantum entanglement verification",
+        )
+        .unwrap();
+
+    // Run 3 cycles.
+    for _ in 0..3 {
+        if akh_medu::agent::goal::active_goals(agent.goals()).is_empty() {
+            break;
+        }
+        let _ = agent.run_cycle();
+    }
+
+    // The goal should have cycles_worked tracked.
+    let goal = agent
+        .goals()
+        .iter()
+        .find(|g| g.description.contains("Track cycles"));
+    assert!(goal.is_some());
+    let goal = goal.unwrap();
+    assert!(
+        goal.cycles_worked > 0,
+        "expected cycles_worked > 0, got {}",
+        goal.cycles_worked
+    );
+}

@@ -525,20 +525,27 @@ fn act(agent: &mut Agent, decision: &Decision, cycle: u64) -> AgentResult<Action
         GoalProgress::NoChange
     };
 
-    // Update goal status if completed or failed.
+    // Update goal tracking and status.
     if let Some(goal) = agent
         .goals
         .iter_mut()
         .find(|g| g.symbol_id == decision.goal_id)
     {
+        // Track cycles worked on this goal.
+        goal.cycles_worked += 1;
+
         match &goal_progress {
             GoalProgress::Completed => {
+                goal.last_progress_cycle = cycle;
                 let _ = goal::update_goal_status(
                     &agent.engine,
                     goal,
                     GoalStatus::Completed,
                     &agent.predicates,
                 );
+            }
+            GoalProgress::Advanced { .. } => {
+                goal.last_progress_cycle = cycle;
             }
             GoalProgress::Failed { reason } => {
                 let _ = goal::update_goal_status(
@@ -550,7 +557,7 @@ fn act(agent: &mut Agent, decision: &Decision, cycle: u64) -> AgentResult<Action
                     &agent.predicates,
                 );
             }
-            _ => {}
+            GoalProgress::NoChange => {}
         }
     }
 
@@ -561,11 +568,68 @@ fn act(agent: &mut Agent, decision: &Decision, cycle: u64) -> AgentResult<Action
     })
 }
 
+/// Extract meaningful keywords from a criteria string (words > 3 chars, lowercased,
+/// stripped of punctuation).
+fn parse_criteria_keywords(criteria: &str) -> Vec<String> {
+    criteria
+        .split_whitespace()
+        .filter(|w| w.len() > 3)
+        .map(|w| {
+            w.to_lowercase()
+                .trim_matches(|c: char| !c.is_alphanumeric())
+                .to_string()
+        })
+        .filter(|w| !w.is_empty())
+        .collect()
+}
+
+/// Whether a label is agent-internal metadata (should be excluded from criteria matching).
+fn is_metadata_label(label: &str) -> bool {
+    label.starts_with("desc:")
+        || label.starts_with("status:")
+        || label.starts_with("priority:")
+        || label.starts_with("criteria:")
+        || label.starts_with("goal:")
+        || label.starts_with("agent:")
+        || label.starts_with("episode:")
+        || label.starts_with("summary:")
+        || label.starts_with("tag:")
+}
+
+/// Evaluate whether a goal's success criteria are satisfied by the current KG state.
+///
+/// Searches the entire KG for data symbols (not agent metadata) matching
+/// criteria keywords. Returns the match ratio in [0.0, 1.0].
+fn evaluate_criteria_against_kg(
+    goal: &Goal,
+    engine: &crate::engine::Engine,
+) -> f32 {
+    let keywords = parse_criteria_keywords(&goal.success_criteria);
+    if keywords.is_empty() {
+        return 0.0;
+    }
+
+    let matched: usize = keywords
+        .iter()
+        .filter(|kw| {
+            engine.all_symbols().iter().any(|meta| {
+                let label = meta.label.to_lowercase();
+                !is_metadata_label(&label) && label.contains(kw.as_str())
+            })
+        })
+        .count();
+
+    matched as f32 / keywords.len() as f32
+}
+
 /// Evaluate whether a tool output satisfies a goal's success criteria.
 ///
-/// Compares the symbols returned by the tool against keywords in the goal's
-/// success criteria. If enough criteria keywords match symbol labels in the
-/// tool output, the goal is considered complete.
+/// Uses two signals:
+/// 1. **Tool output**: symbols and text from the current tool execution.
+/// 2. **KG state**: whether the entire knowledge graph now contains data
+///    matching the criteria keywords.
+///
+/// Completion requires >=50% keyword match from either signal.
 fn evaluate_goal_progress(
     goal: &Goal,
     tool_output: &ToolOutput,
@@ -577,21 +641,12 @@ fn evaluate_goal_progress(
         };
     }
 
-    if tool_output.symbols_involved.is_empty() {
-        return GoalProgress::NoChange;
-    }
-
-    // Extract meaningful keywords from success criteria (words > 3 chars).
-    let criteria_keywords: Vec<String> = goal
-        .success_criteria
-        .split_whitespace()
-        .filter(|w| w.len() > 3)
-        .map(|w| w.to_lowercase().trim_matches(|c: char| !c.is_alphanumeric()).to_string())
-        .filter(|w| !w.is_empty())
-        .collect();
+    let criteria_keywords = parse_criteria_keywords(&goal.success_criteria);
 
     if criteria_keywords.is_empty() {
-        // No parseable criteria — treat any result with symbols as progress.
+        if tool_output.symbols_involved.is_empty() {
+            return GoalProgress::NoChange;
+        }
         return GoalProgress::Advanced {
             detail: format!(
                 "Tool produced {} symbols (no evaluable criteria).",
@@ -600,65 +655,67 @@ fn evaluate_goal_progress(
         };
     }
 
-    // Collect symbol labels from the tool output (lowercased), excluding the
-    // goal's own symbol and agent-metadata labels (desc:, status:, priority:,
-    // criteria:, goal:) to prevent self-referential matching.
+    // ── Signal 1: Check tool output ──
+
     let output_labels: Vec<String> = tool_output
         .symbols_involved
         .iter()
         .filter(|s| **s != goal.symbol_id)
         .map(|s| engine.resolve_label(*s).to_lowercase())
-        .filter(|label| {
-            !label.starts_with("desc:")
-                && !label.starts_with("status:")
-                && !label.starts_with("priority:")
-                && !label.starts_with("criteria:")
-                && !label.starts_with("goal:")
-                && !label.starts_with("agent:")
-        })
+        .filter(|label| !is_metadata_label(label))
         .collect();
 
-    // Also search the result text, but strip out agent-metadata lines.
     let result_lower: String = tool_output
         .result
         .lines()
         .filter(|line| {
             let l = line.trim().to_lowercase();
-            !l.contains("desc:") && !l.contains("criteria:") && !l.contains("status:")
-                && !l.contains("priority:") && !l.starts_with("agent:")
+            !is_metadata_label(&l) && !l.contains("desc:") && !l.contains("criteria:")
         })
         .collect::<Vec<_>>()
         .join("\n")
         .to_lowercase();
 
-    // Count how many criteria keywords are satisfied.
-    let matched: usize = criteria_keywords
+    let tool_matched: usize = criteria_keywords
         .iter()
         .filter(|kw| {
-            output_labels.iter().any(|label| label.contains(kw.as_str()))
+            output_labels
+                .iter()
+                .any(|label| label.contains(kw.as_str()))
                 || result_lower.contains(kw.as_str())
         })
         .count();
 
-    let match_ratio = matched as f32 / criteria_keywords.len() as f32;
+    let tool_ratio = tool_matched as f32 / criteria_keywords.len() as f32;
 
-    if match_ratio >= 0.5 {
+    // ── Signal 2: Check KG state ──
+
+    let kg_ratio = evaluate_criteria_against_kg(goal, engine);
+
+    // Complete if either signal exceeds 50%.
+    let best_ratio = tool_ratio.max(kg_ratio);
+    let best_matched = (best_ratio * criteria_keywords.len() as f32).round() as usize;
+
+    if best_ratio >= 0.5 {
         GoalProgress::Completed
-    } else if matched > 0 {
+    } else if best_matched > 0 {
         GoalProgress::Advanced {
             detail: format!(
-                "Matched {}/{} criteria keywords ({:.0}%).",
-                matched,
+                "Matched {}/{} criteria keywords (tool: {:.0}%, KG: {:.0}%).",
+                best_matched,
                 criteria_keywords.len(),
-                match_ratio * 100.0
+                tool_ratio * 100.0,
+                kg_ratio * 100.0,
             ),
         }
-    } else {
+    } else if !tool_output.symbols_involved.is_empty() {
         GoalProgress::Advanced {
             detail: format!(
                 "Tool produced {} symbols, no criteria keywords matched yet.",
                 tool_output.symbols_involved.len()
             ),
         }
+    } else {
+        GoalProgress::NoChange
     }
 }

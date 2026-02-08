@@ -62,6 +62,9 @@ impl std::fmt::Display for GoalStatus {
     }
 }
 
+/// Default number of cycles without progress before a goal is considered stalled.
+pub const DEFAULT_STALL_THRESHOLD: u32 = 5;
+
 /// A goal the agent is working toward.
 #[derive(Debug, Clone)]
 pub struct Goal {
@@ -81,6 +84,19 @@ pub struct Goal {
     pub children: Vec<SymbolId>,
     /// When this goal was created (seconds since UNIX epoch).
     pub created_at: u64,
+    /// How many OODA cycles have targeted this goal.
+    pub cycles_worked: u32,
+    /// Last cycle where the goal made meaningful progress (Advanced or Completed).
+    pub last_progress_cycle: u64,
+}
+
+impl Goal {
+    /// Whether this goal is stalled: has been worked on for `threshold` cycles
+    /// since it last made progress.
+    pub fn is_stalled(&self, current_cycle: u64, threshold: u32) -> bool {
+        self.cycles_worked >= threshold
+            && current_cycle.saturating_sub(self.last_progress_cycle) >= threshold as u64
+    }
 }
 
 /// Create a goal and persist it in the knowledge graph.
@@ -132,6 +148,8 @@ pub fn create_goal(
         parent: None,
         children: Vec::new(),
         created_at: goal_sym.created_at,
+        cycles_worked: 0,
+        last_progress_cycle: 0,
     })
 }
 
@@ -250,10 +268,52 @@ pub fn restore_goals(engine: &Engine, predicates: &AgentPredicates) -> AgentResu
             parent,
             children,
             created_at: meta.created_at,
+            cycles_worked: 0,
+            last_progress_cycle: 0,
         });
     }
 
     Ok(goals)
+}
+
+/// Generate sub-goal descriptions from a parent goal's description.
+///
+/// Splits on commas and "and" to find natural sub-tasks. If no natural split
+/// is found, generates generic exploration sub-goals.
+pub fn generate_sub_goal_descriptions(description: &str) -> Vec<(String, u8, String)> {
+    // Try splitting on commas first.
+    let parts: Vec<&str> = description
+        .split(',')
+        .flat_map(|p| p.split(" and "))
+        .map(|p| p.trim())
+        .filter(|p| p.len() > 3)
+        .collect();
+
+    if parts.len() >= 2 {
+        return parts
+            .into_iter()
+            .enumerate()
+            .map(|(i, part)| {
+                let priority = 200u8.saturating_sub((i as u8) * 10);
+                let criteria = format!("Complete: {part}");
+                (part.to_string(), priority, criteria)
+            })
+            .collect();
+    }
+
+    // No natural split — generate generic exploration sub-goals.
+    vec![
+        (
+            format!("Query knowledge about: {}", &description.chars().take(30).collect::<String>()),
+            200,
+            format!("Find relevant triples for: {description}"),
+        ),
+        (
+            format!("Reason about: {}", &description.chars().take(30).collect::<String>()),
+            180,
+            format!("Apply reasoning to: {description}"),
+        ),
+    ]
 }
 
 #[cfg(test)]
@@ -290,6 +350,8 @@ mod tests {
                 parent: None,
                 children: Vec::new(),
                 created_at: 0,
+                cycles_worked: 0,
+                last_progress_cycle: 0,
             },
             Goal {
                 symbol_id: SymbolId::new(2).unwrap(),
@@ -300,6 +362,8 @@ mod tests {
                 parent: None,
                 children: Vec::new(),
                 created_at: 0,
+                cycles_worked: 0,
+                last_progress_cycle: 0,
             },
             Goal {
                 symbol_id: SymbolId::new(3).unwrap(),
@@ -310,6 +374,8 @@ mod tests {
                 parent: None,
                 children: Vec::new(),
                 created_at: 0,
+                cycles_worked: 0,
+                last_progress_cycle: 0,
             },
         ];
 
