@@ -101,8 +101,10 @@ placeholder. The phases below evolve it into a real autonomous agent.
 - [x] All 9 tools (5 core + 4 external) registered in Agent, wired into OODA utility scoring
 - [x] Keyword-based tool selection for file_io, http_fetch, shell_exec, user_interact
 
-### Phase 8f — Planning & reflection
-- [ ] Multi-step planning: decompose goals into ordered tool-call sequences before executing
-- [ ] Reflection: after N cycles, agent reviews its own WM and strategy effectiveness
-- [ ] Meta-reasoning: agent can modify its own goal priorities and create new goals
-- [ ] Backtracking: if a plan fails, revert to last good state and try alternative
+### Phase 8f — Planning & reflection ✓
+- [x] Multi-step planning: Plan type with ordered PlanSteps, auto-generated per goal before OODA cycle
+- [x] Two alternating strategies (explore-first vs reason-first) based on attempt number
+- [x] Reflection: after every N cycles (configurable), reviews tool effectiveness and goal progress
+- [x] Meta-reasoning: auto-adjusts goal priorities (boost progressing, demote stagnant), suggests decomposition
+- [x] Backtracking: on plan step failure, marks plan as failed, generates alternative with incremented attempt
+- [x] CLI commands: `agent plan`, `agent reflect`; REPL commands: `p`/`plan`, `r`/`reflect`

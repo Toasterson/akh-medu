@@ -2048,3 +2048,148 @@ fn shell_exec_tool_exit_code() {
     assert!(!out.success, "false should report failure");
     assert!(out.result.contains("Exit code: 1"));
 }
+
+// ── Phase 8f: Planning & reflection ───────────────────────────────────
+
+#[test]
+fn plan_generation_produces_steps() {
+    let mut agent = test_agent_with_data();
+    let goal_id = agent
+        .add_goal("Find all stars in the knowledge graph", 128, "stars found")
+        .unwrap();
+
+    let plan = agent.plan_goal(goal_id).unwrap();
+
+    assert!(plan.total_steps() >= 1, "plan should have at least one step");
+    assert_eq!(plan.status, akh_medu::agent::PlanStatus::Active);
+    assert!(plan.has_remaining_steps());
+    assert_eq!(plan.completed_count(), 0);
+
+    // Verify the strategy string is populated.
+    assert!(!plan.strategy.is_empty());
+}
+
+#[test]
+fn plan_step_completion_advances() {
+    use akh_medu::agent::plan::{Plan, PlanStep, PlanStatus, StepStatus};
+
+    let mut plan = Plan {
+        goal_id: SymbolId::new(1).unwrap(),
+        steps: vec![
+            PlanStep {
+                tool_name: "kg_query".into(),
+                tool_input: ToolInput::new(),
+                rationale: "gather data".into(),
+                status: StepStatus::Pending,
+                index: 0,
+            },
+            PlanStep {
+                tool_name: "reason".into(),
+                tool_input: ToolInput::new(),
+                rationale: "analyze".into(),
+                status: StepStatus::Pending,
+                index: 1,
+            },
+        ],
+        status: PlanStatus::Active,
+        attempt: 0,
+        strategy: "test".into(),
+    };
+
+    // Complete step 0.
+    plan.complete_step(0);
+    assert_eq!(plan.completed_count(), 1);
+    assert_eq!(plan.next_step_index(), Some(1));
+
+    // Complete step 1.
+    plan.complete_step(1);
+    assert_eq!(plan.status, PlanStatus::Completed);
+    assert!(!plan.has_remaining_steps());
+}
+
+#[test]
+fn backtrack_generates_alternative_plan() {
+    let mut agent = test_agent_with_data();
+    let goal_id = agent
+        .add_goal("Find all stars in the knowledge graph", 128, "stars found")
+        .unwrap();
+
+    // Generate first plan.
+    let first_strategy = agent.plan_goal(goal_id).unwrap().strategy.clone();
+
+    // Backtrack.
+    let alt = agent.backtrack_goal(goal_id).unwrap();
+    assert!(alt.is_some(), "should get an alternative plan");
+
+    let alt_plan = alt.unwrap();
+    assert_eq!(alt_plan.attempt, 1);
+    // Strategy should differ (attempt 0 = explore-first, attempt 1 = reason-first).
+    assert_ne!(alt_plan.strategy, first_strategy);
+}
+
+#[test]
+fn reflection_produces_insights() {
+    let mut agent = test_agent_with_data();
+    agent
+        .add_goal("Find stars", 128, "stars found")
+        .unwrap();
+
+    // Run a few cycles to populate WM with tool results.
+    for _ in 0..3 {
+        let _ = agent.run_cycle();
+    }
+
+    let result = agent.reflect().unwrap();
+
+    // Should have analyzed something.
+    assert!(result.at_cycle > 0);
+    assert!(result.memory_pressure >= 0.0);
+    assert!(!result.summary.is_empty());
+}
+
+#[test]
+fn meta_reasoning_adjusts_priorities() {
+    use akh_medu::agent::Adjustment;
+
+    let mut agent = test_agent_with_data();
+    let goal_id = agent
+        .add_goal("Find stars", 128, "stars found")
+        .unwrap();
+
+    let original_priority = agent.goals().iter()
+        .find(|g| g.symbol_id == goal_id)
+        .unwrap()
+        .priority;
+
+    // Apply a priority increase adjustment.
+    let adjustments = vec![Adjustment::IncreasePriority {
+        goal_id,
+        from: 128,
+        to: 200,
+        reason: "test boost".into(),
+    }];
+
+    let applied = agent.apply_adjustments(&adjustments).unwrap();
+    assert_eq!(applied, 1);
+
+    let new_priority = agent.goals().iter()
+        .find(|g| g.symbol_id == goal_id)
+        .unwrap()
+        .priority;
+    assert_eq!(new_priority, 200);
+    assert_ne!(new_priority, original_priority);
+}
+
+#[test]
+fn run_cycle_generates_plan_automatically() {
+    let mut agent = test_agent_with_data();
+    let goal_id = agent
+        .add_goal("Find stars in the knowledge graph", 128, "stars found")
+        .unwrap();
+
+    // Running a cycle should auto-generate a plan.
+    let _ = agent.run_cycle().unwrap();
+
+    let plan = agent.plan_for_goal(goal_id);
+    assert!(plan.is_some(), "plan should exist after run_cycle");
+}

@@ -355,6 +355,17 @@ enum AgentAction {
         #[arg(long)]
         goals: Option<String>,
     },
+    /// Generate and display a plan for a goal.
+    Plan {
+        /// Goal description.
+        #[arg(long)]
+        goal: String,
+        /// Goal priority (0-255).
+        #[arg(long, default_value = "128")]
+        priority: u8,
+    },
+    /// Run reflection on the current agent state.
+    Reflect,
 }
 
 fn main() -> Result<()> {
@@ -1363,7 +1374,7 @@ fn main() -> Result<()> {
                         }
                     }
 
-                    println!("Agent REPL — type 'q' to quit, 'c' to consolidate, Enter to run a cycle.");
+                    println!("Agent REPL — q:quit, c:consolidate, p:plan, r:reflect, s:status, t:tools, Enter:cycle");
                     print_repl_status(&agent, &engine);
 
                     let stdin = std::io::stdin();
@@ -1400,6 +1411,54 @@ fn main() -> Result<()> {
                             "t" | "tools" => {
                                 for sig in agent.list_tools() {
                                     println!("  {} — {}", sig.name, sig.description);
+                                }
+                            }
+                            "p" | "plan" => {
+                                let active = agent.goals().iter()
+                                    .find(|g| matches!(g.status, akh_medu::agent::GoalStatus::Active));
+                                if let Some(goal) = active {
+                                    let gid = goal.symbol_id;
+                                    match agent.plan_goal(gid) {
+                                        Ok(plan) => {
+                                            println!("Plan: {}", plan.strategy);
+                                            for step in &plan.steps {
+                                                let status = match &step.status {
+                                                    akh_medu::agent::StepStatus::Pending => ".",
+                                                    akh_medu::agent::StepStatus::Active => ">",
+                                                    akh_medu::agent::StepStatus::Completed => "✓",
+                                                    akh_medu::agent::StepStatus::Failed { .. } => "✗",
+                                                    akh_medu::agent::StepStatus::Skipped => "-",
+                                                };
+                                                println!(
+                                                    "  [{}] {}: {}",
+                                                    status, step.tool_name, step.rationale,
+                                                );
+                                            }
+                                        }
+                                        Err(e) => println!("Plan error: {e}"),
+                                    }
+                                } else {
+                                    println!("No active goals to plan for.");
+                                }
+                            }
+                            "r" | "reflect" => {
+                                match agent.reflect() {
+                                    Ok(result) => {
+                                        println!("{}", result.summary);
+                                        for adj in &result.adjustments {
+                                            match adj {
+                                                akh_medu::agent::Adjustment::IncreasePriority { from, to, reason, .. } =>
+                                                    println!("  [+] {} → {}: {}", from, to, reason),
+                                                akh_medu::agent::Adjustment::DecreasePriority { from, to, reason, .. } =>
+                                                    println!("  [-] {} → {}: {}", from, to, reason),
+                                                akh_medu::agent::Adjustment::SuggestNewGoal { description, reason, .. } =>
+                                                    println!("  [new] {}: {}", description, reason),
+                                                akh_medu::agent::Adjustment::SuggestAbandon { reason, .. } =>
+                                                    println!("  [abandon] {}", reason),
+                                            }
+                                        }
+                                    }
+                                    Err(e) => println!("Reflect error: {e}"),
                                 }
                             }
                             cmd if cmd.starts_with("goal ") => {
@@ -1445,6 +1504,92 @@ fn main() -> Result<()> {
                     // Persist session on exit.
                     agent.persist_session().into_diagnostic()?;
                     println!("Session persisted. Use `agent resume` to continue.");
+                }
+
+                AgentAction::Plan { goal, priority } => {
+                    let agent_config = AgentConfig::default();
+                    let mut agent =
+                        Agent::new(Arc::clone(&engine), agent_config).into_diagnostic()?;
+
+                    let goal_id = agent
+                        .add_goal(&goal, priority, "Agent-determined completion")
+                        .into_diagnostic()?;
+
+                    let plan = agent.plan_goal(goal_id).into_diagnostic()?;
+
+                    println!("Plan for \"{}\" (attempt {}):", goal, plan.attempt + 1);
+                    println!("  Strategy: {}", plan.strategy);
+                    for step in &plan.steps {
+                        let status = match &step.status {
+                            akh_medu::agent::StepStatus::Pending => "pending",
+                            akh_medu::agent::StepStatus::Active => "active",
+                            akh_medu::agent::StepStatus::Completed => "done",
+                            akh_medu::agent::StepStatus::Failed { .. } => "FAILED",
+                            akh_medu::agent::StepStatus::Skipped => "skipped",
+                        };
+                        println!(
+                            "  [{}] Step {}: {} — {}",
+                            status, step.index, step.tool_name, step.rationale,
+                        );
+                    }
+                }
+
+                AgentAction::Reflect => {
+                    let agent_config = AgentConfig::default();
+                    let mut agent = if Agent::has_persisted_session(&engine) {
+                        Agent::resume(Arc::clone(&engine), agent_config).into_diagnostic()?
+                    } else {
+                        Agent::new(Arc::clone(&engine), agent_config).into_diagnostic()?
+                    };
+
+                    let result = agent.reflect().into_diagnostic()?;
+
+                    println!("{}", result.summary);
+                    if !result.tool_insights.is_empty() {
+                        println!("\nTool effectiveness:");
+                        for ti in &result.tool_insights {
+                            let flag = if ti.flagged_ineffective { " [!]" } else { "" };
+                            println!(
+                                "  {} — {}/{} success ({:.0}%){}",
+                                ti.tool_name,
+                                ti.successes,
+                                ti.invocations,
+                                ti.success_rate * 100.0,
+                                flag,
+                            );
+                        }
+                    }
+                    if !result.goal_insights.is_empty() {
+                        println!("\nGoal progress:");
+                        for gi in &result.goal_insights {
+                            let stag = if gi.is_stagnant { " [stagnant]" } else { "" };
+                            println!(
+                                "  {} — {} cycles worked{}",
+                                gi.description, gi.cycles_worked, stag,
+                            );
+                        }
+                    }
+                    if !result.adjustments.is_empty() {
+                        println!("\nRecommended adjustments:");
+                        for adj in &result.adjustments {
+                            match adj {
+                                akh_medu::agent::Adjustment::IncreasePriority {
+                                    from, to, reason, ..
+                                } => println!("  [+] Priority {} → {}: {}", from, to, reason),
+                                akh_medu::agent::Adjustment::DecreasePriority {
+                                    from, to, reason, ..
+                                } => println!("  [-] Priority {} → {}: {}", from, to, reason),
+                                akh_medu::agent::Adjustment::SuggestNewGoal {
+                                    description,
+                                    reason,
+                                    ..
+                                } => println!("  [new] \"{}\": {}", description, reason),
+                                akh_medu::agent::Adjustment::SuggestAbandon {
+                                    reason, ..
+                                } => println!("  [abandon] {}", reason),
+                            }
+                        }
+                    }
                 }
             }
         }

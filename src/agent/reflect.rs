@@ -1,0 +1,434 @@
+//! Reflection: the agent reviews its own working memory and strategy effectiveness.
+//!
+//! After every N cycles, the agent introspects on:
+//! - Tool effectiveness (success rates per tool)
+//! - Strategy diversity (how many unique tools used)
+//! - Goal progress rate (cycles per advancement)
+//! - Memory utilization (WM pressure over time)
+//!
+//! Reflection produces insights and actionable adjustments:
+//! meta-reasoning (priority changes, new goal creation).
+
+use std::collections::HashMap;
+
+use super::error::AgentResult;
+use super::goal::{Goal, GoalStatus};
+use super::memory::{WorkingMemory, WorkingMemoryKind};
+use crate::symbol::SymbolId;
+
+// ---------------------------------------------------------------------------
+// Configuration
+// ---------------------------------------------------------------------------
+
+/// Configuration for when and how reflection occurs.
+#[derive(Debug, Clone)]
+pub struct ReflectionConfig {
+    /// Run reflection every N cycles (default: 5).
+    pub reflect_every_n_cycles: u64,
+    /// Minimum tool success rate before flagging it as ineffective (default: 0.3).
+    pub min_tool_success_rate: f32,
+    /// Maximum cycles without progress before suggesting priority change (default: 8).
+    pub stagnation_threshold: u32,
+}
+
+impl Default for ReflectionConfig {
+    fn default() -> Self {
+        Self {
+            reflect_every_n_cycles: 5,
+            min_tool_success_rate: 0.3,
+            stagnation_threshold: 8,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Reflection result
+// ---------------------------------------------------------------------------
+
+/// Insight produced by reflection about a specific tool.
+#[derive(Debug, Clone)]
+pub struct ToolInsight {
+    /// Tool name.
+    pub tool_name: String,
+    /// How many times the tool was invoked.
+    pub invocations: usize,
+    /// How many invocations produced successful output.
+    pub successes: usize,
+    /// Success rate [0.0, 1.0].
+    pub success_rate: f32,
+    /// Whether this tool is flagged as ineffective.
+    pub flagged_ineffective: bool,
+}
+
+/// Insight about a specific goal's progress.
+#[derive(Debug, Clone)]
+pub struct GoalInsight {
+    /// Goal symbol ID.
+    pub goal_id: SymbolId,
+    /// Goal description (truncated).
+    pub description: String,
+    /// How many cycles worked on this goal.
+    pub cycles_worked: u32,
+    /// Whether the goal appears stagnant.
+    pub is_stagnant: bool,
+}
+
+/// A recommended adjustment from meta-reasoning.
+#[derive(Debug, Clone)]
+pub enum Adjustment {
+    /// Increase a goal's priority.
+    IncreasePriority {
+        goal_id: SymbolId,
+        from: u8,
+        to: u8,
+        reason: String,
+    },
+    /// Decrease a goal's priority.
+    DecreasePriority {
+        goal_id: SymbolId,
+        from: u8,
+        to: u8,
+        reason: String,
+    },
+    /// Suggest creating a new sub-goal.
+    SuggestNewGoal {
+        description: String,
+        priority: u8,
+        reason: String,
+    },
+    /// Suggest abandoning a stagnant goal.
+    SuggestAbandon {
+        goal_id: SymbolId,
+        reason: String,
+    },
+}
+
+/// The full output of a reflection cycle.
+#[derive(Debug, Clone)]
+pub struct ReflectionResult {
+    /// At which cycle this reflection occurred.
+    pub at_cycle: u64,
+    /// Insights about tool usage.
+    pub tool_insights: Vec<ToolInsight>,
+    /// Number of unique tools used in the review window.
+    pub strategy_diversity: usize,
+    /// Insights about goal progress.
+    pub goal_insights: Vec<GoalInsight>,
+    /// Current working memory pressure.
+    pub memory_pressure: f32,
+    /// Recommended adjustments (meta-reasoning output).
+    pub adjustments: Vec<Adjustment>,
+    /// Human-readable summary of the reflection.
+    pub summary: String,
+}
+
+// ---------------------------------------------------------------------------
+// Reflection logic
+// ---------------------------------------------------------------------------
+
+/// Run a reflection over the agent's current state.
+///
+/// Analyzes working memory entries (tool results, decisions) and goal status
+/// to produce insights and recommended adjustments.
+pub fn reflect(
+    working_memory: &WorkingMemory,
+    goals: &[Goal],
+    current_cycle: u64,
+    config: &ReflectionConfig,
+) -> AgentResult<ReflectionResult> {
+    // ── Tool effectiveness ────────────────────────────────────────────
+
+    let tool_insights = analyze_tool_effectiveness(working_memory, config);
+    let strategy_diversity = tool_insights.len();
+
+    // ── Goal progress ────────────────────────────────────────────────
+
+    let goal_insights = analyze_goal_progress(goals, current_cycle, config);
+
+    // ── Memory state ─────────────────────────────────────────────────
+
+    let memory_pressure = working_memory.pressure();
+
+    // ── Meta-reasoning: compute adjustments ──────────────────────────
+
+    let adjustments = compute_adjustments(goals, &tool_insights, &goal_insights, config);
+
+    // ── Summary ──────────────────────────────────────────────────────
+
+    let ineffective_tools: Vec<&str> = tool_insights
+        .iter()
+        .filter(|t| t.flagged_ineffective)
+        .map(|t| t.tool_name.as_str())
+        .collect();
+
+    let stagnant_goals: Vec<&str> = goal_insights
+        .iter()
+        .filter(|g| g.is_stagnant)
+        .map(|g| g.description.as_str())
+        .collect();
+
+    let summary = format!(
+        "Reflection at cycle {}: {} tools used ({} ineffective), {} goals ({} stagnant), \
+         memory pressure {:.0}%, {} adjustments recommended.",
+        current_cycle,
+        strategy_diversity,
+        ineffective_tools.len(),
+        goal_insights.len(),
+        stagnant_goals.len(),
+        memory_pressure * 100.0,
+        adjustments.len(),
+    );
+
+    Ok(ReflectionResult {
+        at_cycle: current_cycle,
+        tool_insights,
+        strategy_diversity,
+        goal_insights,
+        memory_pressure,
+        adjustments,
+        summary,
+    })
+}
+
+/// Analyze tool effectiveness from working memory entries.
+fn analyze_tool_effectiveness(
+    working_memory: &WorkingMemory,
+    config: &ReflectionConfig,
+) -> Vec<ToolInsight> {
+    let mut tool_stats: HashMap<String, (usize, usize)> = HashMap::new(); // (invocations, successes)
+
+    // Parse tool results from WM.
+    for entry in working_memory.by_kind(WorkingMemoryKind::ToolResult) {
+        if let Some(tool_name) = entry
+            .content
+            .strip_prefix("Tool result (")
+            .and_then(|s| s.find(')').map(|i| s[..i].to_string()))
+        {
+            let stats = tool_stats.entry(tool_name).or_insert((0, 0));
+            stats.0 += 1;
+            // Heuristic: if the tool result doesn't contain "error" or "failed",
+            // consider it successful.
+            let result_text = entry.content.to_lowercase();
+            if !result_text.contains("error") && !result_text.contains("failed") {
+                stats.1 += 1;
+            }
+        }
+    }
+
+    tool_stats
+        .into_iter()
+        .map(|(name, (invocations, successes))| {
+            let success_rate = if invocations > 0 {
+                successes as f32 / invocations as f32
+            } else {
+                0.0
+            };
+            ToolInsight {
+                tool_name: name,
+                invocations,
+                successes,
+                success_rate,
+                flagged_ineffective: invocations >= 2
+                    && success_rate < config.min_tool_success_rate,
+            }
+        })
+        .collect()
+}
+
+/// Analyze goal progress.
+fn analyze_goal_progress(
+    goals: &[Goal],
+    current_cycle: u64,
+    config: &ReflectionConfig,
+) -> Vec<GoalInsight> {
+    goals
+        .iter()
+        .filter(|g| matches!(g.status, GoalStatus::Active))
+        .map(|g| {
+            let is_stagnant = g.cycles_worked >= config.stagnation_threshold
+                && current_cycle.saturating_sub(g.last_progress_cycle)
+                    >= config.stagnation_threshold as u64;
+
+            GoalInsight {
+                goal_id: g.symbol_id,
+                description: g.description.chars().take(50).collect(),
+                cycles_worked: g.cycles_worked,
+                is_stagnant,
+            }
+        })
+        .collect()
+}
+
+/// Compute meta-reasoning adjustments based on insights.
+fn compute_adjustments(
+    goals: &[Goal],
+    _tool_insights: &[ToolInsight],
+    goal_insights: &[GoalInsight],
+    config: &ReflectionConfig,
+) -> Vec<Adjustment> {
+    let mut adjustments = Vec::new();
+
+    for insight in goal_insights {
+        if !insight.is_stagnant {
+            continue;
+        }
+
+        // Find the actual goal to get its priority.
+        let goal = match goals.iter().find(|g| g.symbol_id == insight.goal_id) {
+            Some(g) => g,
+            None => continue,
+        };
+
+        if goal.cycles_worked >= config.stagnation_threshold * 2 {
+            // Severely stagnant — suggest abandoning.
+            adjustments.push(Adjustment::SuggestAbandon {
+                goal_id: insight.goal_id,
+                reason: format!(
+                    "Goal \"{}\" has been worked on for {} cycles without progress.",
+                    insight.description, insight.cycles_worked,
+                ),
+            });
+        } else if goal.priority > 20 {
+            // Moderately stagnant — decrease priority to let other goals proceed.
+            let new_priority = goal.priority.saturating_sub(30);
+            adjustments.push(Adjustment::DecreasePriority {
+                goal_id: insight.goal_id,
+                from: goal.priority,
+                to: new_priority,
+                reason: format!(
+                    "Goal \"{}\" is stagnant after {} cycles — reducing priority.",
+                    insight.description, insight.cycles_worked,
+                ),
+            });
+        }
+
+        // Suggest decomposition as a new sub-goal if not already decomposed.
+        if goal.children.is_empty() {
+            adjustments.push(Adjustment::SuggestNewGoal {
+                description: format!("Decompose: {}", insight.description),
+                priority: goal.priority.saturating_add(10).min(255),
+                reason: format!(
+                    "Goal \"{}\" may benefit from decomposition into smaller tasks.",
+                    insight.description,
+                ),
+            });
+        }
+    }
+
+    // Boost priority of goals that are close to completion (high cycles_worked
+    // but not stagnant — meaning they're making progress).
+    for insight in goal_insights {
+        if insight.is_stagnant || insight.cycles_worked < 3 {
+            continue;
+        }
+        let goal = match goals.iter().find(|g| g.symbol_id == insight.goal_id) {
+            Some(g) => g,
+            None => continue,
+        };
+        if goal.priority < 230 {
+            adjustments.push(Adjustment::IncreasePriority {
+                goal_id: insight.goal_id,
+                from: goal.priority,
+                to: goal.priority.saturating_add(20).min(255),
+                reason: format!(
+                    "Goal \"{}\" is making progress after {} cycles — boosting priority.",
+                    insight.description, insight.cycles_worked,
+                ),
+            });
+        }
+    }
+
+    adjustments
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::memory::WorkingMemoryEntry;
+    use crate::symbol::SymbolId;
+
+    fn make_tool_result(tool: &str, content: &str, cycle: u64) -> WorkingMemoryEntry {
+        WorkingMemoryEntry {
+            id: 0,
+            content: format!("Tool result ({tool}):\n{content}"),
+            symbols: vec![],
+            kind: WorkingMemoryKind::ToolResult,
+            timestamp: 0,
+            relevance: 0.6,
+            source_cycle: cycle,
+            reference_count: 0,
+        }
+    }
+
+    #[test]
+    fn tool_effectiveness_analysis() {
+        let mut wm = WorkingMemory::new(20);
+        wm.push(make_tool_result("kg_query", "Found 3 triples", 1))
+            .unwrap();
+        wm.push(make_tool_result("kg_query", "Found 1 triple", 2))
+            .unwrap();
+        wm.push(make_tool_result("reason", "error: parse failed", 3))
+            .unwrap();
+        wm.push(make_tool_result("reason", "error: no rules match", 4))
+            .unwrap();
+
+        let config = ReflectionConfig::default();
+        let insights = analyze_tool_effectiveness(&wm, &config);
+
+        let kg = insights.iter().find(|t| t.tool_name == "kg_query").unwrap();
+        assert_eq!(kg.invocations, 2);
+        assert_eq!(kg.successes, 2);
+        assert!(!kg.flagged_ineffective);
+
+        let reason = insights.iter().find(|t| t.tool_name == "reason").unwrap();
+        assert_eq!(reason.invocations, 2);
+        assert_eq!(reason.successes, 0);
+        assert!(reason.flagged_ineffective);
+    }
+
+    #[test]
+    fn stagnant_goal_detected() {
+        let goals = vec![Goal {
+            symbol_id: SymbolId::new(1).unwrap(),
+            description: "Find all stars".into(),
+            status: GoalStatus::Active,
+            priority: 128,
+            success_criteria: "stars found".into(),
+            parent: None,
+            children: Vec::new(),
+            created_at: 0,
+            cycles_worked: 10,
+            last_progress_cycle: 0,
+        }];
+
+        let config = ReflectionConfig::default();
+        let insights = analyze_goal_progress(&goals, 15, &config);
+
+        assert_eq!(insights.len(), 1);
+        assert!(insights[0].is_stagnant);
+    }
+
+    #[test]
+    fn adjustments_for_stagnant_goals() {
+        let goals = vec![Goal {
+            symbol_id: SymbolId::new(1).unwrap(),
+            description: "Find all stars".into(),
+            status: GoalStatus::Active,
+            priority: 128,
+            success_criteria: "stars found".into(),
+            parent: None,
+            children: Vec::new(),
+            created_at: 0,
+            cycles_worked: 10,
+            last_progress_cycle: 0,
+        }];
+
+        let config = ReflectionConfig::default();
+        let goal_insights = analyze_goal_progress(&goals, 15, &config);
+        let adjustments = compute_adjustments(&goals, &[], &goal_insights, &config);
+
+        // Should have at least a DecreasePriority and SuggestNewGoal.
+        assert!(adjustments.iter().any(|a| matches!(a, Adjustment::DecreasePriority { .. })));
+        assert!(adjustments.iter().any(|a| matches!(a, Adjustment::SuggestNewGoal { .. })));
+    }
+}

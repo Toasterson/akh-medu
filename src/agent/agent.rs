@@ -15,9 +15,11 @@ use super::error::{AgentError, AgentResult};
 use super::goal::{self, Goal, GoalStatus, DEFAULT_STALL_THRESHOLD};
 use super::memory::{
     consolidate, recall_episodes, ConsolidationConfig, ConsolidationResult, EpisodicEntry,
-    WorkingMemory,
+    WorkingMemory, WorkingMemoryEntry, WorkingMemoryKind,
 };
 use super::ooda::{self, OodaCycleResult};
+use super::plan::{self, Plan, PlanStatus};
+use super::reflect::{self, Adjustment, ReflectionConfig, ReflectionResult};
 use super::tool::{ToolRegistry, ToolSignature};
 use super::tools;
 
@@ -36,6 +38,10 @@ pub struct AgentConfig {
     pub max_cycles: usize,
     /// Whether to auto-consolidate when WM nears capacity (default: true).
     pub auto_consolidate: bool,
+    /// Reflection settings.
+    pub reflection: ReflectionConfig,
+    /// Maximum backtrack attempts per goal before giving up (default: 3).
+    pub max_backtrack_attempts: u32,
 }
 
 impl Default for AgentConfig {
@@ -45,6 +51,8 @@ impl Default for AgentConfig {
             consolidation: ConsolidationConfig::default(),
             max_cycles: 1000,
             auto_consolidate: true,
+            reflection: ReflectionConfig::default(),
+            max_backtrack_attempts: 3,
         }
     }
 }
@@ -106,6 +114,10 @@ pub struct Agent {
     pub(crate) goals: Vec<Goal>,
     pub(crate) predicates: AgentPredicates,
     pub(crate) cycle_count: u64,
+    /// Active plans per goal (keyed by goal SymbolId).
+    pub(crate) plans: std::collections::HashMap<u64, Plan>,
+    /// Most recent reflection result.
+    pub(crate) last_reflection: Option<ReflectionResult>,
 }
 
 impl Agent {
@@ -157,6 +169,8 @@ impl Agent {
             goals,
             predicates,
             cycle_count: 0,
+            plans: std::collections::HashMap::new(),
+            last_reflection: None,
         })
     }
 
@@ -174,12 +188,64 @@ impl Agent {
     }
 
     /// Run a single OODA cycle.
+    ///
+    /// Also triggers plan-aware execution (advances plan steps), periodic
+    /// reflection, auto-decomposition of stalled goals, and auto-consolidation.
     pub fn run_cycle(&mut self) -> AgentResult<OodaCycleResult> {
         if goal::active_goals(&self.goals).is_empty() {
             return Err(AgentError::NoGoals);
         }
 
+        // Before the OODA cycle, ensure the top-priority goal has a plan.
+        let active = goal::active_goals(&self.goals);
+        if let Some(top_goal) = active.first() {
+            let gid = top_goal.symbol_id;
+            let _ = self.plan_goal(gid);
+        }
+
         let result = ooda::run_ooda_cycle(self)?;
+
+        // Advance plan tracking based on the cycle result.
+        let goal_id = result.decision.goal_id;
+        let key = goal_id.get();
+        let mut should_backtrack = false;
+        if let Some(plan) = self.plans.get_mut(&key) {
+            if let Some(idx) = plan.next_step_index() {
+                match &result.action_result.goal_progress {
+                    ooda::GoalProgress::Failed { reason } => {
+                        plan.fail_step(idx, reason);
+                        should_backtrack = true;
+                    }
+                    _ => {
+                        plan.complete_step(idx);
+                    }
+                }
+            }
+        }
+        if should_backtrack {
+            let _ = self.backtrack_goal(goal_id);
+        }
+
+        // Periodic reflection.
+        let reflect_interval = self.config.reflection.reflect_every_n_cycles;
+        if reflect_interval > 0 && self.cycle_count % reflect_interval == 0 {
+            if let Ok(reflection) = self.reflect() {
+                // Auto-apply non-destructive adjustments (priority changes only).
+                let safe_adjustments: Vec<Adjustment> = reflection
+                    .adjustments
+                    .iter()
+                    .filter(|a| {
+                        matches!(
+                            a,
+                            Adjustment::IncreasePriority { .. }
+                                | Adjustment::DecreasePriority { .. }
+                        )
+                    })
+                    .cloned()
+                    .collect();
+                let _ = self.apply_adjustments(&safe_adjustments);
+            }
+        }
 
         // Auto-decompose stalled goals.
         self.decompose_stalled_goals();
@@ -390,6 +456,189 @@ impl Agent {
     }
 
     // -----------------------------------------------------------------------
+    // Planning
+    // -----------------------------------------------------------------------
+
+    /// Get the active plan for a goal, if one exists.
+    pub fn plan_for_goal(&self, goal_id: SymbolId) -> Option<&Plan> {
+        self.plans.get(&goal_id.get())
+    }
+
+    /// Generate a plan for a goal. If a plan already exists and is active,
+    /// returns it unchanged.
+    pub fn plan_goal(&mut self, goal_id: SymbolId) -> AgentResult<&Plan> {
+        let key = goal_id.get();
+
+        // Return existing active plan.
+        if self.plans.get(&key).is_some_and(|p| p.status == PlanStatus::Active) {
+            return Ok(&self.plans[&key]);
+        }
+
+        let goal = self
+            .goals
+            .iter()
+            .find(|g| g.symbol_id == goal_id)
+            .ok_or(AgentError::GoalNotFound { goal_id: key })?
+            .clone();
+
+        let attempt = self
+            .plans
+            .get(&key)
+            .map(|p| p.attempt + 1)
+            .unwrap_or(0);
+
+        let new_plan = plan::generate_plan(
+            &goal,
+            &self.engine,
+            &self.working_memory,
+            attempt,
+        )?;
+
+        // Record plan creation in WM.
+        let _ = self.working_memory.push(WorkingMemoryEntry {
+            id: 0,
+            content: format!(
+                "Plan generated for \"{}\": {} steps, strategy: {}",
+                goal.description,
+                new_plan.total_steps(),
+                new_plan.strategy,
+            ),
+            symbols: vec![goal_id],
+            kind: WorkingMemoryKind::Decision,
+            timestamp: 0,
+            relevance: 0.7,
+            source_cycle: self.cycle_count,
+            reference_count: 0,
+        });
+
+        self.plans.insert(key, new_plan);
+        Ok(&self.plans[&key])
+    }
+
+    /// Backtrack: discard the current plan for a goal and generate an alternative.
+    ///
+    /// Returns `None` if max backtrack attempts have been exhausted.
+    pub fn backtrack_goal(&mut self, goal_id: SymbolId) -> AgentResult<Option<&Plan>> {
+        let key = goal_id.get();
+        let current = self.plans.get(&key);
+
+        let attempt = current.map(|p| p.attempt + 1).unwrap_or(0);
+        if attempt >= self.config.max_backtrack_attempts {
+            return Ok(None);
+        }
+
+        // Mark old plan as superseded.
+        if let Some(old) = self.plans.get_mut(&key) {
+            old.status = PlanStatus::Superseded;
+        }
+
+        let goal = self
+            .goals
+            .iter()
+            .find(|g| g.symbol_id == goal_id)
+            .ok_or(AgentError::GoalNotFound { goal_id: key })?
+            .clone();
+
+        let new_plan = plan::generate_plan(
+            &goal,
+            &self.engine,
+            &self.working_memory,
+            attempt,
+        )?;
+
+        let _ = self.working_memory.push(WorkingMemoryEntry {
+            id: 0,
+            content: format!(
+                "Backtrack: new plan (attempt {}) for \"{}\": {}",
+                attempt + 1,
+                goal.description,
+                new_plan.strategy,
+            ),
+            symbols: vec![goal_id],
+            kind: WorkingMemoryKind::Decision,
+            timestamp: 0,
+            relevance: 0.7,
+            source_cycle: self.cycle_count,
+            reference_count: 0,
+        });
+
+        self.plans.insert(key, new_plan);
+        Ok(Some(&self.plans[&key]))
+    }
+
+    // -----------------------------------------------------------------------
+    // Reflection & meta-reasoning
+    // -----------------------------------------------------------------------
+
+    /// Run reflection: review working memory and strategy effectiveness.
+    pub fn reflect(&mut self) -> AgentResult<ReflectionResult> {
+        let result = reflect::reflect(
+            &self.working_memory,
+            &self.goals,
+            self.cycle_count,
+            &self.config.reflection,
+        )?;
+
+        // Record reflection in WM.
+        let _ = self.working_memory.push(WorkingMemoryEntry {
+            id: 0,
+            content: result.summary.clone(),
+            symbols: vec![],
+            kind: WorkingMemoryKind::Inference,
+            timestamp: 0,
+            relevance: 0.8,
+            source_cycle: self.cycle_count,
+            reference_count: 0,
+        });
+
+        self.last_reflection = Some(result.clone());
+        Ok(result)
+    }
+
+    /// Apply meta-reasoning adjustments from a reflection result.
+    ///
+    /// Modifies goal priorities and creates suggested sub-goals. Returns
+    /// the number of adjustments applied.
+    pub fn apply_adjustments(&mut self, adjustments: &[Adjustment]) -> AgentResult<usize> {
+        let mut applied = 0;
+
+        for adj in adjustments {
+            match adj {
+                Adjustment::IncreasePriority {
+                    goal_id, to, ..
+                }
+                | Adjustment::DecreasePriority {
+                    goal_id, to, ..
+                } => {
+                    if let Some(g) = self.goals.iter_mut().find(|g| g.symbol_id == *goal_id) {
+                        g.priority = *to;
+                        applied += 1;
+                    }
+                }
+                Adjustment::SuggestNewGoal {
+                    description,
+                    priority,
+                    ..
+                } => {
+                    let _ = self.add_goal(description, *priority, description)?;
+                    applied += 1;
+                }
+                Adjustment::SuggestAbandon { goal_id, reason } => {
+                    let _ = self.fail_goal(*goal_id, reason);
+                    applied += 1;
+                }
+            }
+        }
+
+        Ok(applied)
+    }
+
+    /// Get the most recent reflection result.
+    pub fn last_reflection(&self) -> Option<&ReflectionResult> {
+        self.last_reflection.as_ref()
+    }
+
+    // -----------------------------------------------------------------------
     // Session persistence
     // -----------------------------------------------------------------------
 
@@ -484,6 +733,8 @@ impl Agent {
             goals,
             predicates,
             cycle_count,
+            plans: std::collections::HashMap::new(),
+            last_reflection: None,
         })
     }
 
@@ -505,6 +756,8 @@ impl std::fmt::Debug for Agent {
             .field("working_memory", &self.working_memory)
             .field("tools", &self.tool_registry)
             .field("cycle_count", &self.cycle_count)
+            .field("active_plans", &self.plans.len())
+            .field("has_reflection", &self.last_reflection.is_some())
             .finish()
     }
 }

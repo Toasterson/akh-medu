@@ -13,6 +13,8 @@ pub mod error;
 pub mod goal;
 pub mod memory;
 pub mod ooda;
+pub mod plan;
+pub mod reflect;
 pub mod tool;
 pub mod tools;
 
@@ -26,4 +28,6 @@ pub use memory::{
 pub use ooda::{
     ActionResult, Decision, GoalProgress, Observation, OodaCycleResult, Orientation,
 };
+pub use plan::{Plan, PlanStatus, PlanStep, StepStatus};
+pub use reflect::{Adjustment, ReflectionConfig, ReflectionResult};
 pub use tool::{Tool, ToolInput, ToolOutput, ToolRegistry, ToolSignature};
