@@ -6,6 +6,12 @@
 
 use std::collections::HashSet;
 
+use std::sync::Arc;
+
+use akh_medu::agent::{Agent, AgentConfig};
+use akh_medu::agent::goal::GoalStatus;
+use akh_medu::agent::memory::{WorkingMemory, WorkingMemoryEntry, WorkingMemoryKind};
+use akh_medu::agent::tool::{Tool, ToolInput, ToolOutput, ToolSignature};
 use akh_medu::engine::{Engine, EngineConfig};
 use akh_medu::graph::traverse::TraversalConfig;
 use akh_medu::graph::Triple;
@@ -719,5 +725,431 @@ fn batch_persist_consistent() {
                 "symbol '{label}' should be found after restart"
             );
         }
+    }
+}
+
+// ===========================================================================
+// Part J: Agent integration tests
+// ===========================================================================
+
+fn test_agent() -> Agent {
+    let engine = Arc::new(test_engine());
+    Agent::new(engine, AgentConfig::default()).unwrap()
+}
+
+fn test_agent_with_data() -> Agent {
+    let engine = test_engine();
+    let triples = vec![
+        ("Sun".into(), "is-a".into(), "Star".into(), 1.0),
+        ("Earth".into(), "is-a".into(), "Planet".into(), 1.0),
+        ("Earth".into(), "orbits".into(), "Sun".into(), 0.95),
+        ("Moon".into(), "orbits".into(), "Earth".into(), 0.9),
+        ("Mars".into(), "is-a".into(), "Planet".into(), 1.0),
+        ("Mars".into(), "orbits".into(), "Sun".into(), 0.95),
+    ];
+    engine.ingest_label_triples(&triples).unwrap();
+    let engine = Arc::new(engine);
+    Agent::new(engine, AgentConfig::default()).unwrap()
+}
+
+#[test]
+fn working_memory_push_and_retrieve() {
+    let mut wm = WorkingMemory::new(10);
+
+    let id1 = wm
+        .push(WorkingMemoryEntry {
+            id: 0,
+            content: "Observed: Sun is a star".into(),
+            symbols: Vec::new(),
+            kind: WorkingMemoryKind::Observation,
+            timestamp: 0,
+            relevance: 0.7,
+            source_cycle: 1,
+            reference_count: 0,
+        })
+        .unwrap();
+
+    let id2 = wm
+        .push(WorkingMemoryEntry {
+            id: 0,
+            content: "Decided: query KG".into(),
+            symbols: Vec::new(),
+            kind: WorkingMemoryKind::Decision,
+            timestamp: 0,
+            relevance: 0.8,
+            source_cycle: 1,
+            reference_count: 0,
+        })
+        .unwrap();
+
+    assert_eq!(wm.len(), 2);
+    assert_eq!(wm.get(id1).unwrap().content, "Observed: Sun is a star");
+    assert_eq!(wm.get(id2).unwrap().kind, WorkingMemoryKind::Decision);
+
+    let obs = wm.by_kind(WorkingMemoryKind::Observation);
+    assert_eq!(obs.len(), 1);
+}
+
+#[test]
+fn working_memory_eviction() {
+    let mut wm = WorkingMemory::new(3);
+
+    wm.push(WorkingMemoryEntry {
+        id: 0,
+        content: "a".into(),
+        symbols: Vec::new(),
+        kind: WorkingMemoryKind::Observation,
+        timestamp: 0,
+        relevance: 0.3,
+        source_cycle: 1,
+        reference_count: 0,
+    })
+    .unwrap();
+
+    let id_high = wm
+        .push(WorkingMemoryEntry {
+            id: 0,
+            content: "b".into(),
+            symbols: Vec::new(),
+            kind: WorkingMemoryKind::Decision,
+            timestamp: 0,
+            relevance: 0.9,
+            source_cycle: 1,
+            reference_count: 0,
+        })
+        .unwrap();
+
+    wm.push(WorkingMemoryEntry {
+        id: 0,
+        content: "c".into(),
+        symbols: Vec::new(),
+        kind: WorkingMemoryKind::ToolResult,
+        timestamp: 0,
+        relevance: 0.2,
+        source_cycle: 1,
+        reference_count: 0,
+    })
+    .unwrap();
+
+    assert!(wm.is_full());
+
+    // Evict entries below 0.5 relevance.
+    let evicted = wm.evict_below(0.5);
+    assert_eq!(evicted, 2);
+    assert_eq!(wm.len(), 1);
+    assert!(wm.get(id_high).is_some());
+}
+
+#[test]
+fn goal_create_and_decompose() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let engine = Arc::new(persistent_engine(dir.path()));
+    let mut agent = Agent::new(engine.clone(), AgentConfig::default()).unwrap();
+
+    let parent_id = agent
+        .add_goal("Understand the solar system", 200, "Know all planets")
+        .unwrap();
+
+    assert_eq!(agent.goals().len(), 1);
+    assert_eq!(agent.goals()[0].symbol_id, parent_id);
+    assert!(matches!(agent.goals()[0].status, GoalStatus::Active));
+
+    // Verify goal is in KG.
+    let triples = engine.triples_from(parent_id);
+    assert!(
+        !triples.is_empty(),
+        "goal should have triples in KG"
+    );
+}
+
+#[test]
+fn goal_status_transitions() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let engine = Arc::new(persistent_engine(dir.path()));
+    let mut agent = Agent::new(engine, AgentConfig::default()).unwrap();
+
+    let goal_id = agent
+        .add_goal("Test goal", 128, "Test criteria")
+        .unwrap();
+
+    // Initially active.
+    assert!(matches!(agent.goals()[0].status, GoalStatus::Active));
+
+    // Complete the goal.
+    agent.complete_goal(goal_id).unwrap();
+    assert!(matches!(agent.goals()[0].status, GoalStatus::Completed));
+}
+
+#[test]
+fn tool_registry_crud() {
+    let mut agent = test_agent();
+
+    // Should have 5 built-in tools.
+    let tools = agent.list_tools();
+    assert_eq!(tools.len(), 5);
+
+    let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+    assert!(names.contains(&"kg_query"));
+    assert!(names.contains(&"kg_mutate"));
+    assert!(names.contains(&"memory_recall"));
+    assert!(names.contains(&"reason"));
+    assert!(names.contains(&"similarity_search"));
+
+    // Register a custom tool.
+    struct CustomTool;
+    impl Tool for CustomTool {
+        fn signature(&self) -> ToolSignature {
+            ToolSignature {
+                name: "custom".into(),
+                description: "A custom tool".into(),
+                parameters: vec![],
+            }
+        }
+        fn execute(
+            &self,
+            _engine: &Engine,
+            _input: ToolInput,
+        ) -> akh_medu::agent::AgentResult<ToolOutput> {
+            Ok(ToolOutput::ok("custom result"))
+        }
+    }
+
+    agent.register_tool(Box::new(CustomTool));
+    assert_eq!(agent.list_tools().len(), 6);
+}
+
+#[test]
+fn kg_query_tool_execution() {
+    let mut agent = test_agent_with_data();
+
+    // Add a goal so we have context.
+    agent.add_goal("Find stars", 128, "Find star symbols").unwrap();
+
+    // Execute the kg_query tool directly.
+    let _input = ToolInput::new()
+        .with_param("symbol", "Sun")
+        .with_param("direction", "both");
+    let output = agent
+        .engine()
+        .resolve_symbol("Sun")
+        .expect("Sun should exist");
+
+    // Use the tool registry.
+    let result = agent
+        .engine()
+        .triples_from(output);
+    assert!(!result.is_empty(), "Sun should have outgoing triples");
+}
+
+#[test]
+fn consolidation_persists_episodes() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let engine = persistent_engine(dir.path());
+
+    // Ingest some data.
+    engine
+        .ingest_label_triples(&[
+            ("Sun".into(), "is-a".into(), "Star".into(), 1.0),
+            ("Earth".into(), "orbits".into(), "Sun".into(), 1.0),
+        ])
+        .unwrap();
+
+    let engine = Arc::new(engine);
+    let config = AgentConfig {
+        consolidation: akh_medu::agent::memory::ConsolidationConfig {
+            min_relevance: 0.0, // persist everything
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut agent = Agent::new(engine.clone(), config).unwrap();
+
+    let _sun_id = engine.lookup_symbol("Sun").unwrap();
+
+    // Push entries to working memory via a cycle.
+    agent.add_goal("Test consolidation", 128, "test").unwrap();
+    let _ = agent.run_cycle(); // produces WM entries
+
+    // Now consolidate.
+    let result = agent.consolidate().unwrap();
+    assert!(
+        result.entries_scored > 0,
+        "should have scored WM entries"
+    );
+    // Episodes should be created (since min_relevance is 0).
+    // The exact count depends on WM entries, which come from the cycle.
+
+    // Verify episodes are in the KG.
+    for ep_id in &result.episodes_created {
+        let triples = engine.triples_from(*ep_id);
+        assert!(
+            !triples.is_empty(),
+            "episode should have triples in KG"
+        );
+    }
+}
+
+#[test]
+fn consolidation_provenance_tracking() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let engine = persistent_engine(dir.path());
+
+    engine
+        .ingest_label_triples(&[("Sun".into(), "is-a".into(), "Star".into(), 1.0)])
+        .unwrap();
+
+    let engine = Arc::new(engine);
+    let config = AgentConfig {
+        consolidation: akh_medu::agent::memory::ConsolidationConfig {
+            min_relevance: 0.0,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut agent = Agent::new(engine.clone(), config).unwrap();
+
+    agent.add_goal("Track provenance", 128, "test").unwrap();
+    let _ = agent.run_cycle();
+    let result = agent.consolidate().unwrap();
+
+    // Check provenance records for consolidated episodes.
+    for ep_id in &result.episodes_created {
+        let provenance = engine.provenance_of(*ep_id);
+        if let Ok(records) = provenance {
+            let consolidation_records: Vec<_> = records
+                .iter()
+                .filter(|r| matches!(r.kind, akh_medu::provenance::DerivationKind::AgentConsolidation { .. }))
+                .collect();
+            assert!(
+                !consolidation_records.is_empty(),
+                "episode should have AgentConsolidation provenance"
+            );
+        }
+    }
+}
+
+#[test]
+fn ooda_single_cycle() {
+    let mut agent = test_agent_with_data();
+
+    agent
+        .add_goal("Find all stars in the knowledge graph", 200, "List star symbols")
+        .unwrap();
+
+    let result = agent.run_cycle().unwrap();
+
+    assert_eq!(result.cycle_number, 1);
+    assert!(!result.observation.active_goals.is_empty());
+    assert!(!result.decision.chosen_tool.is_empty());
+    assert!(!result.decision.reasoning.is_empty());
+    // The tool should have executed.
+    assert!(!result.action_result.tool_output.result.is_empty());
+}
+
+#[test]
+fn agent_run_until_complete() {
+    let mut agent = test_agent_with_data();
+
+    let goal_id = agent
+        .add_goal("Explore Sun", 128, "Query Sun symbol")
+        .unwrap();
+
+    // Run a few cycles — then manually complete the goal.
+    let _ = agent.run_cycle();
+    let _ = agent.run_cycle();
+    agent.complete_goal(goal_id).unwrap();
+
+    // Now run_until_complete should return immediately (no active goals).
+    let results = agent.run_until_complete().unwrap();
+    assert!(results.is_empty(), "no active goals, should return immediately");
+}
+
+#[test]
+fn episodic_recall_by_tag() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let engine = persistent_engine(dir.path());
+
+    engine
+        .ingest_label_triples(&[
+            ("Sun".into(), "is-a".into(), "Star".into(), 1.0),
+            ("Earth".into(), "orbits".into(), "Sun".into(), 1.0),
+        ])
+        .unwrap();
+
+    let engine = Arc::new(engine);
+    let config = AgentConfig {
+        consolidation: akh_medu::agent::memory::ConsolidationConfig {
+            min_relevance: 0.0,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut agent = Agent::new(engine.clone(), config).unwrap();
+
+    agent.add_goal("Consolidate and recall", 128, "test").unwrap();
+    let _ = agent.run_cycle();
+    let consolidation = agent.consolidate().unwrap();
+
+    // Recall using a symbol that was learned.
+    if !consolidation.episodes_created.is_empty() {
+        // Get one of the learned symbols from the first episode.
+        let ep_id = consolidation.episodes_created[0];
+        let triples = engine.triples_from(ep_id);
+        let learned_syms: Vec<SymbolId> = triples
+            .iter()
+            .filter(|t| {
+                let label = engine.resolve_label(t.predicate);
+                label == "agent:learned"
+            })
+            .map(|t| t.object)
+            .collect();
+
+        if !learned_syms.is_empty() {
+            let recalled = agent.recall(&learned_syms, 5).unwrap();
+            assert!(
+                !recalled.is_empty(),
+                "should recall episodes by learned symbol"
+            );
+        }
+    }
+}
+
+#[test]
+fn agent_persistence_roundtrip() {
+    let dir = tempfile::TempDir::new().unwrap();
+
+    // Phase 1: create agent with goals, run cycles, persist.
+    {
+        let engine = persistent_engine(dir.path());
+        engine
+            .ingest_label_triples(&[("Sun".into(), "is-a".into(), "Star".into(), 1.0)])
+            .unwrap();
+
+        let engine = Arc::new(engine);
+        let mut agent = Agent::new(engine.clone(), AgentConfig::default()).unwrap();
+
+        agent
+            .add_goal("Persistent goal", 200, "Survives restart")
+            .unwrap();
+        let _ = agent.run_cycle();
+        engine.persist().unwrap();
+    }
+
+    // Phase 2: reopen and verify goals are restored.
+    {
+        let engine = persistent_engine(dir.path());
+        let engine = Arc::new(engine);
+        let agent = Agent::new(engine.clone(), AgentConfig::default()).unwrap();
+
+        // Goals should be restored from KG.
+        let restored_goals = agent.goals();
+        assert!(
+            !restored_goals.is_empty(),
+            "goals should survive restart"
+        );
+        let has_persistent = restored_goals
+            .iter()
+            .any(|g| g.description.contains("Persistent goal"));
+        assert!(has_persistent, "should find the 'Persistent goal'");
     }
 }

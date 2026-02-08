@@ -52,6 +52,10 @@ pub enum AkhError {
     #[error(transparent)]
     #[diagnostic(transparent)]
     Engine(#[from] EngineError),
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Agent(#[from] crate::agent::error::AgentError),
 }
 
 // ---------------------------------------------------------------------------

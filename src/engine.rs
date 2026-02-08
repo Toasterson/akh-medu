@@ -818,6 +818,16 @@ impl Engine {
         self.sparql.as_ref()
     }
 
+    /// Get the tiered store handle.
+    pub fn store(&self) -> &TieredStore {
+        &self.store
+    }
+
+    /// Get the symbol registry handle.
+    pub fn registry(&self) -> &SymbolRegistry {
+        &self.registry
+    }
+
     /// Get the engine configuration.
     pub fn config(&self) -> &EngineConfig {
         &self.config

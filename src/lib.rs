@@ -29,6 +29,7 @@
 //! engine.add_triple(&Triple::new(sun.id, is_a.id, star.id)).unwrap();
 //! ```
 
+pub mod agent;
 pub mod engine;
 pub mod error;
 pub mod export;

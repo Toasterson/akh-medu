@@ -2,10 +2,12 @@
 
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
 use miette::{IntoDiagnostic, Result};
 
+use akh_medu::agent::{Agent, AgentConfig};
 use akh_medu::engine::{Engine, EngineConfig};
 use akh_medu::error::EngineError;
 use akh_medu::graph::traverse::TraversalConfig;
@@ -184,6 +186,12 @@ enum Commands {
         #[command(subcommand)]
         action: AnalyticsAction,
     },
+
+    /// Run the autonomous agent.
+    Agent {
+        #[command(subcommand)]
+        action: AgentAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -300,6 +308,41 @@ enum AnalyticsAction {
         #[arg(long)]
         to: String,
     },
+}
+
+#[derive(Subcommand)]
+enum AgentAction {
+    /// Run one OODA cycle.
+    Cycle {
+        /// Goal description.
+        #[arg(long)]
+        goal: String,
+        /// Goal priority (0-255).
+        #[arg(long, default_value = "128")]
+        priority: u8,
+    },
+    /// Run agent until goals complete or max cycles reached.
+    Run {
+        /// Goal descriptions (comma-separated).
+        #[arg(long)]
+        goals: String,
+        /// Maximum OODA cycles.
+        #[arg(long, default_value = "10")]
+        max_cycles: usize,
+    },
+    /// Trigger memory consolidation.
+    Consolidate,
+    /// Recall episodic memories.
+    Recall {
+        /// Query symbols (comma-separated names or IDs).
+        #[arg(long)]
+        query: String,
+        /// Maximum results.
+        #[arg(long, default_value = "5")]
+        top_k: usize,
+    },
+    /// List registered tools.
+    Tools,
 }
 
 fn main() -> Result<()> {
@@ -1061,6 +1104,169 @@ fn main() -> Result<()> {
                 }
             }
         }
+
+        Commands::Agent { action } => {
+            let engine = Arc::new(Engine::new(config).into_diagnostic()?);
+
+            match action {
+                AgentAction::Cycle { goal, priority } => {
+                    let agent_config = AgentConfig::default();
+                    let mut agent =
+                        Agent::new(Arc::clone(&engine), agent_config).into_diagnostic()?;
+
+                    agent
+                        .add_goal(&goal, priority, "Agent-determined completion")
+                        .into_diagnostic()?;
+
+                    let result = agent.run_cycle().into_diagnostic()?;
+
+                    println!("OODA Cycle {}", result.cycle_number);
+                    println!(
+                        "  Observe: {} active goals, {} WM entries",
+                        result.observation.active_goals.len(),
+                        result.observation.working_memory_size,
+                    );
+                    println!(
+                        "  Orient:  {} relevant triples, {} inferences, pressure {:.2}",
+                        result.orientation.relevant_knowledge.len(),
+                        result.orientation.inferences.len(),
+                        result.orientation.memory_pressure,
+                    );
+                    println!(
+                        "  Decide:  tool={}, goal=\"{}\"",
+                        result.decision.chosen_tool,
+                        engine.resolve_label(result.decision.goal_id),
+                    );
+                    println!("  Reason:  {}", result.decision.reasoning);
+                    println!(
+                        "  Act:     success={}, symbols={}",
+                        result.action_result.tool_output.success,
+                        result.action_result.tool_output.symbols_involved.len(),
+                    );
+                    println!(
+                        "  Result:  {}",
+                        if result.action_result.tool_output.result.len() > 120 {
+                            format!("{}...", &result.action_result.tool_output.result[..120])
+                        } else {
+                            result.action_result.tool_output.result.clone()
+                        }
+                    );
+
+                    let _ = engine.persist();
+                }
+
+                AgentAction::Run {
+                    goals,
+                    max_cycles,
+                } => {
+                    let agent_config = AgentConfig {
+                        max_cycles,
+                        ..Default::default()
+                    };
+                    let mut agent =
+                        Agent::new(Arc::clone(&engine), agent_config).into_diagnostic()?;
+
+                    for goal_str in goals.split(',') {
+                        let goal = goal_str.trim();
+                        if !goal.is_empty() {
+                            agent
+                                .add_goal(goal, 128, "Agent-determined completion")
+                                .into_diagnostic()?;
+                        }
+                    }
+
+                    match agent.run_until_complete() {
+                        Ok(results) => {
+                            println!(
+                                "Agent completed: {} cycles, {} goals",
+                                results.len(),
+                                agent.goals().len(),
+                            );
+                            for g in agent.goals() {
+                                println!(
+                                    "  {} [{}]: {}",
+                                    engine.resolve_label(g.symbol_id),
+                                    g.status,
+                                    g.description,
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            println!("Agent stopped: {e}");
+                            println!(
+                                "  Completed {} cycles, WM has {} entries",
+                                agent.cycle_count(),
+                                agent.working_memory().len(),
+                            );
+                        }
+                    }
+
+                    let _ = engine.persist();
+                }
+
+                AgentAction::Consolidate => {
+                    let agent_config = AgentConfig::default();
+                    let mut agent =
+                        Agent::new(Arc::clone(&engine), agent_config).into_diagnostic()?;
+
+                    let result = agent.consolidate().into_diagnostic()?;
+                    println!("Consolidation complete:");
+                    println!("  entries scored:    {}", result.entries_scored);
+                    println!("  entries persisted: {}", result.entries_persisted);
+                    println!("  entries evicted:   {}", result.entries_evicted);
+                    println!("  episodes created:  {}", result.episodes_created.len());
+                    for ep in &result.episodes_created {
+                        println!("    {}", engine.resolve_label(*ep));
+                    }
+
+                    let _ = engine.persist();
+                }
+
+                AgentAction::Recall { query, top_k } => {
+                    let agent_config = AgentConfig::default();
+                    let agent =
+                        Agent::new(Arc::clone(&engine), agent_config).into_diagnostic()?;
+
+                    let query_ids: std::result::Result<Vec<SymbolId>, _> = query
+                        .split(',')
+                        .map(|s| engine.resolve_symbol(s.trim()))
+                        .collect();
+                    let query_ids = query_ids.into_diagnostic()?;
+
+                    let episodes = agent.recall(&query_ids, top_k).into_diagnostic()?;
+                    if episodes.is_empty() {
+                        println!("No episodic memories found.");
+                    } else {
+                        println!("Recalled {} episode(s):", episodes.len());
+                        for ep in &episodes {
+                            println!(
+                                "  {} — \"{}\" (learnings: {}, tags: {})",
+                                engine.resolve_label(ep.symbol_id),
+                                ep.summary,
+                                ep.learnings.len(),
+                                ep.tags.len(),
+                            );
+                        }
+                    }
+                }
+
+                AgentAction::Tools => {
+                    let agent_config = AgentConfig::default();
+                    let agent =
+                        Agent::new(Arc::clone(&engine), agent_config).into_diagnostic()?;
+
+                    let tools = agent.list_tools();
+                    println!("Registered tools ({}):", tools.len());
+                    for sig in &tools {
+                        println!("  {} — {}", sig.name, sig.description);
+                        for param in &sig.parameters {
+                            let req = if param.required { " (required)" } else { "" };
+                            println!("    --{}{}: {}", param.name, req, param.description);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     Ok(())
@@ -1189,5 +1395,21 @@ fn format_derivation_kind(kind: &DerivationKind, engine: &Engine) -> String {
         }
         DerivationKind::Reasoned => "reasoned".to_string(),
         DerivationKind::Aggregated => "aggregated".to_string(),
+        DerivationKind::AgentDecision { goal, cycle } => {
+            format!(
+                "agent decision for \"{}\" at cycle {}",
+                engine.resolve_label(*goal),
+                cycle
+            )
+        }
+        DerivationKind::AgentConsolidation {
+            reason,
+            relevance_score,
+        } => {
+            format!(
+                "agent consolidation (relevance: {:.2}): {}",
+                relevance_score, reason
+            )
+        }
     }
 }

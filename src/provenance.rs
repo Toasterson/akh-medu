@@ -72,6 +72,16 @@ pub enum DerivationKind {
     Reasoned,
     /// Aggregated from multiple sources.
     Aggregated,
+    /// The agent made a decision during an OODA cycle.
+    AgentDecision {
+        goal: SymbolId,
+        cycle: u64,
+    },
+    /// The agent consolidated a working memory entry to episodic memory.
+    AgentConsolidation {
+        reason: String,
+        relevance_score: f32,
+    },
 }
 
 impl DerivationKind {
@@ -86,6 +96,8 @@ impl DerivationKind {
             Self::FillerRecovery { .. } => 5,
             Self::Reasoned => 6,
             Self::Aggregated => 7,
+            Self::AgentDecision { .. } => 8,
+            Self::AgentConsolidation { .. } => 9,
         }
     }
 }
