@@ -145,6 +145,18 @@ impl Engine {
 
         let store = Arc::new(store);
 
+        // Restore knowledge graph from persistent SPARQL store.
+        if let Some(ref sparql) = sparql {
+            let restored = sparql.all_triples().unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "KG restore from SPARQL skipped");
+                vec![]
+            });
+            if !restored.is_empty() {
+                let count = knowledge_graph.bulk_load(&restored).unwrap_or(0);
+                tracing::info!(triples = count, "knowledge graph restored from SPARQL");
+            }
+        }
+
         // Restore registry and allocator from persistent storage if available.
         let registry = SymbolRegistry::restore(&store).unwrap_or_else(|e| {
             tracing::debug!(error = %e, "registry restore skipped, starting fresh");

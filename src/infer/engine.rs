@@ -176,7 +176,10 @@ impl InferEngine {
                                 continue;
                             }
                             if sr.similarity >= query.min_similarity {
-                                let vsa_confidence = parent_confidence * sr.similarity;
+                                // Cap VSA recovery confidence by the graph path:
+                                // similarity is a ceiling, not the sole confidence.
+                                let vsa_confidence =
+                                    parent_confidence * edge_confidence.min(sr.similarity);
                                 let combined =
                                     graph_confidence.max(vsa_confidence);
                                 if combined >= query.min_confidence {

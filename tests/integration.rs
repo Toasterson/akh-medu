@@ -464,3 +464,71 @@ fn load_skill_with_label_triples() {
     assert!(engine.lookup_symbol("Gamma").is_ok());
     assert!(engine.lookup_symbol("related-to").is_ok());
 }
+
+// ---------------------------------------------------------------------------
+// Part F: VSA search, analogy, filler tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn search_similar_finds_related() {
+    let engine = test_engine();
+
+    let triples = vec![
+        ("Sun".into(), "is-a".into(), "Star".into(), 1.0),
+        ("Earth".into(), "is-a".into(), "Planet".into(), 1.0),
+        ("Earth".into(), "orbits".into(), "Sun".into(), 1.0),
+    ];
+    engine.ingest_label_triples(&triples).unwrap();
+
+    let sun_id = engine.lookup_symbol("Sun").unwrap();
+
+    // Search for symbols similar to Sun.
+    let results = engine.search_similar_to(sun_id, 5).unwrap();
+    assert!(
+        !results.is_empty(),
+        "search_similar_to should return results"
+    );
+    // Sun's own vector should be the top match.
+    assert_eq!(results[0].symbol_id, sun_id);
+}
+
+#[test]
+fn analogy_basic() {
+    let engine = test_engine();
+
+    let _sun = engine.create_symbol(SymbolKind::Entity, "Sun").unwrap();
+    let _star = engine.create_symbol(SymbolKind::Entity, "Star").unwrap();
+    let _earth = engine.create_symbol(SymbolKind::Entity, "Earth").unwrap();
+    let _planet = engine.create_symbol(SymbolKind::Entity, "Planet").unwrap();
+
+    let sun_id = engine.lookup_symbol("Sun").unwrap();
+    let star_id = engine.lookup_symbol("Star").unwrap();
+    let earth_id = engine.lookup_symbol("Earth").unwrap();
+
+    // Analogy: Sun:Star :: Earth:?
+    let results = engine.infer_analogy(sun_id, star_id, earth_id, 5).unwrap();
+    assert!(
+        !results.is_empty(),
+        "analogy should return results"
+    );
+}
+
+#[test]
+fn filler_recovery_basic() {
+    let engine = test_engine();
+
+    let triples = vec![
+        ("Sun".into(), "is-a".into(), "Star".into(), 1.0),
+    ];
+    engine.ingest_label_triples(&triples).unwrap();
+
+    let sun_id = engine.lookup_symbol("Sun").unwrap();
+    let is_a_id = engine.lookup_symbol("is-a").unwrap();
+
+    // Recover filler for (Sun, is-a).
+    let results = engine.recover_filler(sun_id, is_a_id, 5).unwrap();
+    assert!(
+        !results.is_empty(),
+        "filler recovery should return results"
+    );
+}

@@ -565,13 +565,6 @@ pub enum PipelineError {
 
 #[derive(Debug, Error, Diagnostic)]
 pub enum EngineError {
-    #[error("engine not initialized: call Engine::new() first")]
-    #[diagnostic(
-        code(akh::engine::not_initialized),
-        help("The engine must be initialized before use. Call `Engine::new(config)` first.")
-    )]
-    NotInitialized,
-
     #[error("invalid configuration: {message}")]
     #[diagnostic(
         code(akh::engine::invalid_config),

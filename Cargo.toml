@@ -19,7 +19,6 @@ egg = "0.11"
 
 # Storage
 memmap2 = "0.9"
-rkyv = "0.8"
 redb = "2"
 
 # Serialization
@@ -38,7 +37,6 @@ petgraph = "0.7"
 oxigraph = "0.4"
 
 # Numeric
-half = { version = "2", features = ["serde"] }
 rand = "0.8"
 
 # Infrastructure

@@ -207,6 +207,17 @@ impl KnowledgeGraph {
         self.predicate_index.iter().map(|e| *e.key()).collect()
     }
 
+    /// Bulk-load triples into the graph. Used for restoring from persistent storage.
+    /// Returns the number of triples successfully loaded.
+    pub fn bulk_load(&self, triples: &[Triple]) -> GraphResult<usize> {
+        let mut count = 0;
+        for triple in triples {
+            self.insert_triple(triple)?;
+            count += 1;
+        }
+        Ok(count)
+    }
+
     /// Get all triples in the graph.
     pub fn all_triples(&self) -> Vec<Triple> {
         let graph = self.graph.read().expect("graph lock poisoned");

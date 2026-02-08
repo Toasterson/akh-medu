@@ -122,3 +122,108 @@ fn provenance_survives_restart() {
         );
     }
 }
+
+#[test]
+fn triples_survive_restart() {
+    let dir = tempfile::TempDir::new().unwrap();
+
+    // Session 1: create symbols, add triples, persist.
+    {
+        let engine = persistent_engine(dir.path());
+        let sun = engine.create_symbol(SymbolKind::Entity, "Sun").unwrap();
+        let is_a = engine.create_symbol(SymbolKind::Relation, "is-a").unwrap();
+        let star = engine.create_symbol(SymbolKind::Entity, "Star").unwrap();
+        let earth = engine.create_symbol(SymbolKind::Entity, "Earth").unwrap();
+        let orbits = engine.create_symbol(SymbolKind::Relation, "orbits").unwrap();
+
+        engine
+            .add_triple(&Triple::new(sun.id, is_a.id, star.id))
+            .unwrap();
+        engine
+            .add_triple(&Triple::new(earth.id, orbits.id, sun.id))
+            .unwrap();
+
+        // Verify triples exist before persist.
+        assert_eq!(engine.all_triples().len(), 2);
+        assert!(engine.has_triple(sun.id, is_a.id, star.id));
+
+        engine.persist().unwrap();
+    }
+
+    // Session 2: reopen and verify triples survived.
+    {
+        let engine = persistent_engine(dir.path());
+
+        let all = engine.all_triples();
+        assert_eq!(
+            all.len(),
+            2,
+            "triples should survive restart; got {}",
+            all.len()
+        );
+
+        let sun_id = engine.lookup_symbol("Sun").unwrap();
+        let is_a_id = engine.lookup_symbol("is-a").unwrap();
+        let star_id = engine.lookup_symbol("Star").unwrap();
+        let earth_id = engine.lookup_symbol("Earth").unwrap();
+        let orbits_id = engine.lookup_symbol("orbits").unwrap();
+
+        assert!(
+            engine.has_triple(sun_id, is_a_id, star_id),
+            "Sun is-a Star should survive restart"
+        );
+        assert!(
+            engine.has_triple(earth_id, orbits_id, sun_id),
+            "Earth orbits Sun should survive restart"
+        );
+
+        // triples_from should work.
+        let from_sun = engine.triples_from(sun_id);
+        assert_eq!(from_sun.len(), 1);
+
+        // triples_to should work.
+        let to_sun = engine.triples_to(sun_id);
+        assert_eq!(to_sun.len(), 1);
+    }
+}
+
+#[test]
+fn traversal_works_after_restart() {
+    use akh_medu::graph::traverse::TraversalConfig;
+
+    let dir = tempfile::TempDir::new().unwrap();
+
+    // Session 1: ingest label triples, persist.
+    {
+        let engine = persistent_engine(dir.path());
+        let triples = vec![
+            ("Sun".into(), "is-a".into(), "Star".into(), 1.0f32),
+            ("Earth".into(), "orbits".into(), "Sun".into(), 1.0),
+            ("Moon".into(), "orbits".into(), "Earth".into(), 1.0),
+        ];
+        engine.ingest_label_triples(&triples).unwrap();
+        engine.persist().unwrap();
+    }
+
+    // Session 2: reopen, traverse from Earth.
+    {
+        let engine = persistent_engine(dir.path());
+        let earth_id = engine.lookup_symbol("Earth").unwrap();
+
+        let result = engine
+            .traverse(
+                &[earth_id],
+                TraversalConfig {
+                    max_depth: 3,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        assert!(
+            !result.triples.is_empty(),
+            "traversal after restart should find triples"
+        );
+        assert!(result.visited.contains(&earth_id));
+    }
+}

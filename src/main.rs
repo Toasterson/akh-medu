@@ -106,6 +106,51 @@ enum Commands {
         verbose: bool,
     },
 
+    /// Search for symbols similar to a given symbol via VSA.
+    Search {
+        /// Symbol name or numeric ID to search around.
+        #[arg(long)]
+        symbol: String,
+
+        /// Number of results to return.
+        #[arg(long, default_value = "5")]
+        top_k: usize,
+    },
+
+    /// Compute an analogy: A:B :: C:? via VSA bind/unbind.
+    Analogy {
+        /// First symbol (A).
+        #[arg(long)]
+        a: String,
+
+        /// Second symbol (B).
+        #[arg(long)]
+        b: String,
+
+        /// Third symbol (C).
+        #[arg(long)]
+        c: String,
+
+        /// Number of results to return.
+        #[arg(long, default_value = "5")]
+        top_k: usize,
+    },
+
+    /// Recover the filler for a (subject, predicate) pair via VSA unbind.
+    Filler {
+        /// Subject symbol name or ID.
+        #[arg(long)]
+        subject: String,
+
+        /// Predicate symbol name or ID.
+        #[arg(long)]
+        predicate: String,
+
+        /// Number of results to return.
+        #[arg(long, default_value = "5")]
+        top_k: usize,
+    },
+
     /// Show engine info and statistics.
     Info,
 
@@ -467,6 +512,80 @@ fn main() -> Result<()> {
             println!("Input:      {expr}");
             let simplified = engine.simplify_expression(&expr).into_diagnostic()?;
             println!("Simplified: {simplified}");
+        }
+
+        Commands::Search { symbol, top_k } => {
+            let engine = Engine::new(config).into_diagnostic()?;
+            let sym_id = engine.resolve_symbol(&symbol).into_diagnostic()?;
+            let label = engine.resolve_label(sym_id);
+
+            let results = engine.search_similar_to(sym_id, top_k).into_diagnostic()?;
+
+            println!("Similar to \"{label}\" (top {top_k}):");
+            for (i, sr) in results.iter().enumerate() {
+                let sr_label = engine.resolve_label(sr.symbol_id);
+                println!(
+                    "  {}. \"{}\" / {} (similarity: {:.4})",
+                    i + 1,
+                    sr_label,
+                    sr.symbol_id,
+                    sr.similarity
+                );
+            }
+        }
+
+        Commands::Analogy { a, b, c, top_k } => {
+            let engine = Engine::new(config).into_diagnostic()?;
+            let a_id = engine.resolve_symbol(&a).into_diagnostic()?;
+            let b_id = engine.resolve_symbol(&b).into_diagnostic()?;
+            let c_id = engine.resolve_symbol(&c).into_diagnostic()?;
+
+            let a_label = engine.resolve_label(a_id);
+            let b_label = engine.resolve_label(b_id);
+            let c_label = engine.resolve_label(c_id);
+
+            let results = engine.infer_analogy(a_id, b_id, c_id, top_k).into_diagnostic()?;
+
+            println!("Analogy: \"{a_label}\" : \"{b_label}\" :: \"{c_label}\" : ?");
+            for (i, (sym_id, confidence)) in results.iter().enumerate() {
+                let label = engine.resolve_label(*sym_id);
+                println!(
+                    "  {}. \"{}\" / {} (confidence: {:.4})",
+                    i + 1,
+                    label,
+                    sym_id,
+                    confidence
+                );
+            }
+        }
+
+        Commands::Filler {
+            subject,
+            predicate,
+            top_k,
+        } => {
+            let engine = Engine::new(config).into_diagnostic()?;
+            let subj_id = engine.resolve_symbol(&subject).into_diagnostic()?;
+            let pred_id = engine.resolve_symbol(&predicate).into_diagnostic()?;
+
+            let subj_label = engine.resolve_label(subj_id);
+            let pred_label = engine.resolve_label(pred_id);
+
+            let results = engine
+                .recover_filler(subj_id, pred_id, top_k)
+                .into_diagnostic()?;
+
+            println!("Filler for (\"{subj_label}\", \"{pred_label}\"):");
+            for (i, (sym_id, similarity)) in results.iter().enumerate() {
+                let label = engine.resolve_label(*sym_id);
+                println!(
+                    "  {}. \"{}\" / {} (similarity: {:.4})",
+                    i + 1,
+                    label,
+                    sym_id,
+                    similarity
+                );
+            }
         }
 
         Commands::Info => {

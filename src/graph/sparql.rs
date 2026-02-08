@@ -47,7 +47,7 @@ impl SparqlStore {
     }
 
     /// Try to parse a SymbolId from an IRI string.
-    fn iri_to_symbol(iri: &str) -> Option<SymbolId> {
+    pub(crate) fn iri_to_symbol(iri: &str) -> Option<SymbolId> {
         let id_str = iri.strip_prefix(AKH_NS)?;
         let raw: u64 = id_str.parse().ok()?;
         SymbolId::new(raw)
@@ -71,6 +71,55 @@ impl SparqlStore {
         })?;
 
         Ok(())
+    }
+
+    /// Retrieve all triples from the SPARQL store as in-memory Triple objects.
+    /// Used to restore the KnowledgeGraph on engine restart.
+    ///
+    /// Note: confidence values are not currently stored in SPARQL, so restored
+    /// triples will have default confidence of 1.0.
+    // TODO: Store confidence via reification or named graphs to preserve across restarts.
+    pub fn all_triples(&self) -> GraphResult<Vec<Triple>> {
+        let results = self.store.query("SELECT ?s ?p ?o WHERE { ?s ?p ?o }").map_err(|e| {
+            GraphError::Sparql {
+                message: format!("SPARQL all_triples query failed: {e}"),
+            }
+        })?;
+
+        let mut triples = Vec::new();
+        match results {
+            QueryResults::Solutions(solutions) => {
+                for solution in solutions {
+                    let solution = solution.map_err(|e| GraphError::Sparql {
+                        message: format!("solution error: {e}"),
+                    })?;
+                    let s_term = solution.get("s");
+                    let p_term = solution.get("p");
+                    let o_term = solution.get("o");
+
+                    if let (Some(s), Some(p), Some(o)) = (s_term, p_term, o_term) {
+                        let s_iri = s.to_string().trim_matches('<').trim_matches('>').to_string();
+                        let p_iri = p.to_string().trim_matches('<').trim_matches('>').to_string();
+                        let o_iri = o.to_string().trim_matches('<').trim_matches('>').to_string();
+
+                        if let (Some(subject), Some(predicate), Some(object)) = (
+                            Self::iri_to_symbol(&s_iri),
+                            Self::iri_to_symbol(&p_iri),
+                            Self::iri_to_symbol(&o_iri),
+                        ) {
+                            triples.push(Triple::new(subject, predicate, object));
+                        }
+                    }
+                }
+            }
+            _ => {
+                return Err(GraphError::Sparql {
+                    message: "unexpected result type from all_triples query".into(),
+                });
+            }
+        }
+
+        Ok(triples)
     }
 
     /// Sync all triples from an in-memory KnowledgeGraph to the SPARQL store.
