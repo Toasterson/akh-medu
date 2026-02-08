@@ -144,6 +144,10 @@ impl Agent {
         registry.register(Box::new(tools::HttpFetchTool));
         registry.register(Box::new(tools::ShellExecTool));
         registry.register(Box::new(tools::UserInteractTool));
+
+        // Autonomous reasoning tools.
+        registry.register(Box::new(tools::InferRulesTool));
+        registry.register(Box::new(tools::GapAnalysisTool));
     }
 
     /// Create a new agent wrapping the given engine.

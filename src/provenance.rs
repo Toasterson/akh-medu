@@ -82,6 +82,25 @@ pub enum DerivationKind {
         reason: String,
         relevance_score: f32,
     },
+    /// Derived by a forward-chaining inference rule.
+    RuleInference {
+        rule_name: String,
+        antecedents: Vec<SymbolId>,
+    },
+    /// Derived via multi-path confidence fusion.
+    FusedInference {
+        path_count: usize,
+        interference_signal: f32,
+    },
+    /// Identified by gap analysis as missing knowledge.
+    GapIdentified {
+        gap_kind: String,
+        severity: f32,
+    },
+    /// Discovered via schema pattern analysis.
+    SchemaDiscovered {
+        pattern_type: String,
+    },
 }
 
 impl DerivationKind {
@@ -98,6 +117,10 @@ impl DerivationKind {
             Self::Aggregated => 7,
             Self::AgentDecision { .. } => 8,
             Self::AgentConsolidation { .. } => 9,
+            Self::RuleInference { .. } => 10,
+            Self::FusedInference { .. } => 11,
+            Self::GapIdentified { .. } => 12,
+            Self::SchemaDiscovered { .. } => 13,
         }
     }
 }

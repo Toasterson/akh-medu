@@ -1,8 +1,11 @@
 //! Built-in tools for the agent: KG query, KG mutate, memory recall, reason,
-//! similarity search, file I/O, HTTP fetch, shell exec, user interaction.
+//! similarity search, file I/O, HTTP fetch, shell exec, user interaction,
+//! infer rules, gap analysis.
 
 pub mod file_io;
+pub mod gap_analysis;
 pub mod http_fetch;
+pub mod infer_rules;
 pub mod kg_mutate;
 pub mod kg_query;
 pub mod memory_recall;
@@ -12,7 +15,9 @@ pub mod similarity_search;
 pub mod user_interact;
 
 pub use file_io::FileIoTool;
+pub use gap_analysis::GapAnalysisTool;
 pub use http_fetch::HttpFetchTool;
+pub use infer_rules::InferRulesTool;
 pub use kg_mutate::KgMutateTool;
 pub use kg_query::KgQueryTool;
 pub use memory_recall::MemoryRecallTool;

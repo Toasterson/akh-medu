@@ -8,6 +8,7 @@ use clap::{Parser, Subcommand};
 use miette::{IntoDiagnostic, Result};
 
 use akh_medu::agent::{Agent, AgentConfig};
+use akh_medu::autonomous::{GapAnalysisConfig, RuleEngineConfig, SchemaDiscoveryConfig};
 use akh_medu::engine::{Engine, EngineConfig};
 use akh_medu::error::EngineError;
 use akh_medu::graph::traverse::TraversalConfig;
@@ -366,6 +367,26 @@ enum AgentAction {
     },
     /// Run reflection on the current agent state.
     Reflect,
+    /// Run forward-chaining inference rules.
+    Infer {
+        /// Maximum forward-chaining iterations.
+        #[arg(long, default_value = "5")]
+        max_iterations: usize,
+        /// Minimum confidence for derived triples.
+        #[arg(long, default_value = "0.1")]
+        min_confidence: f32,
+    },
+    /// Analyze knowledge gaps around a goal.
+    Gaps {
+        /// Goal symbol name or ID.
+        #[arg(long)]
+        goal: String,
+        /// Maximum gaps to report.
+        #[arg(long, default_value = "10")]
+        max_gaps: usize,
+    },
+    /// Discover schema patterns from the knowledge graph.
+    Schema,
 }
 
 fn main() -> Result<()> {
@@ -1374,7 +1395,7 @@ fn main() -> Result<()> {
                         }
                     }
 
-                    println!("Agent REPL — q:quit, c:consolidate, p:plan, r:reflect, s:status, t:tools, Enter:cycle");
+                    println!("Agent REPL — q:quit, c:consolidate, p:plan, r:reflect, s:status, t:tools, i:infer, g:gaps, d:schema, Enter:cycle");
                     print_repl_status(&agent, &engine);
 
                     let stdin = std::io::stdin();
@@ -1459,6 +1480,97 @@ fn main() -> Result<()> {
                                         }
                                     }
                                     Err(e) => println!("Reflect error: {e}"),
+                                }
+                            }
+                            "i" | "infer" => {
+                                let rule_config = RuleEngineConfig {
+                                    max_iterations: 5,
+                                    min_confidence: 0.1,
+                                    ..Default::default()
+                                };
+                                match engine.run_rules(rule_config) {
+                                    Ok(result) => {
+                                        println!(
+                                            "Derived {} triple(s) in {} iteration(s){}",
+                                            result.derived.len(),
+                                            result.iterations,
+                                            if result.reached_fixpoint { " (fixpoint)" } else { "" },
+                                        );
+                                        for dt in &result.derived {
+                                            println!(
+                                                "  [{}] \"{}\" -> {} -> \"{}\"",
+                                                dt.rule_name,
+                                                engine.resolve_label(dt.triple.subject),
+                                                engine.resolve_label(dt.triple.predicate),
+                                                engine.resolve_label(dt.triple.object),
+                                            );
+                                        }
+                                    }
+                                    Err(e) => println!("Infer error: {e}"),
+                                }
+                            }
+                            cmd if cmd.starts_with("g ") || cmd.starts_with("gaps ") => {
+                                let goal_name = cmd
+                                    .strip_prefix("gaps ")
+                                    .or_else(|| cmd.strip_prefix("g "))
+                                    .unwrap_or("")
+                                    .trim();
+                                if goal_name.is_empty() {
+                                    println!("Usage: g <goal-symbol>");
+                                } else {
+                                    match engine.resolve_symbol(goal_name) {
+                                        Ok(goal_id) => {
+                                            let gap_config = GapAnalysisConfig {
+                                                max_gaps: 10,
+                                                ..Default::default()
+                                            };
+                                            match engine.analyze_gaps(&[goal_id], gap_config) {
+                                                Ok(result) => {
+                                                    println!(
+                                                        "Gaps: {} analyzed, {} dead ends, {:.0}% coverage",
+                                                        result.entities_analyzed,
+                                                        result.dead_ends,
+                                                        result.coverage_score * 100.0,
+                                                    );
+                                                    for gap in &result.gaps {
+                                                        println!(
+                                                            "  [{:.2}] \"{}\" — {}",
+                                                            gap.severity,
+                                                            engine.resolve_label(gap.entity),
+                                                            gap.description,
+                                                        );
+                                                    }
+                                                }
+                                                Err(e) => println!("Gap analysis error: {e}"),
+                                            }
+                                        }
+                                        Err(e) => println!("Symbol resolve error: {e}"),
+                                    }
+                                }
+                            }
+                            "d" | "schema" => {
+                                let schema_config = SchemaDiscoveryConfig::default();
+                                match engine.discover_schema(schema_config) {
+                                    Ok(result) => {
+                                        if result.types.is_empty() {
+                                            println!("No schema patterns discovered.");
+                                        } else {
+                                            println!("Discovered {} type(s):", result.types.len());
+                                            for dt in &result.types {
+                                                let name = dt
+                                                    .type_symbol
+                                                    .map(|s| engine.resolve_label(s))
+                                                    .unwrap_or_else(|| {
+                                                        format!("cluster({})", engine.resolve_label(dt.exemplar))
+                                                    });
+                                                println!(
+                                                    "  {} — {} members",
+                                                    name, dt.members.len(),
+                                                );
+                                            }
+                                        }
+                                    }
+                                    Err(e) => println!("Schema error: {e}"),
                                 }
                             }
                             cmd if cmd.starts_with("goal ") => {
@@ -1587,6 +1699,155 @@ fn main() -> Result<()> {
                                 akh_medu::agent::Adjustment::SuggestAbandon {
                                     reason, ..
                                 } => println!("  [abandon] {}", reason),
+                            }
+                        }
+                    }
+                }
+
+                AgentAction::Infer {
+                    max_iterations,
+                    min_confidence,
+                } => {
+                    let rule_config = RuleEngineConfig {
+                        max_iterations,
+                        min_confidence,
+                        ..Default::default()
+                    };
+
+                    let result = engine.run_rules(rule_config).into_diagnostic()?;
+
+                    println!(
+                        "Derived {} new triple(s) in {} iteration(s){}",
+                        result.derived.len(),
+                        result.iterations,
+                        if result.reached_fixpoint {
+                            " (fixpoint reached)"
+                        } else {
+                            ""
+                        },
+                    );
+
+                    for (rule, count) in &result.rule_stats {
+                        if *count > 0 {
+                            println!("  {rule}: {count} derivation(s)");
+                        }
+                    }
+
+                    for dt in &result.derived {
+                        println!(
+                            "  [{}] \"{}\" -> {} -> \"{}\" (conf: {:.2})",
+                            dt.rule_name,
+                            engine.resolve_label(dt.triple.subject),
+                            engine.resolve_label(dt.triple.predicate),
+                            engine.resolve_label(dt.triple.object),
+                            dt.confidence,
+                        );
+                    }
+                }
+
+                AgentAction::Gaps { goal, max_gaps } => {
+                    let goal_id = engine.resolve_symbol(&goal).into_diagnostic()?;
+
+                    let gap_config = GapAnalysisConfig {
+                        max_gaps,
+                        ..Default::default()
+                    };
+
+                    let result = engine
+                        .analyze_gaps(&[goal_id], gap_config)
+                        .into_diagnostic()?;
+
+                    println!(
+                        "Gap analysis for \"{}\": {} entities analyzed, {} dead ends, coverage {:.0}%",
+                        engine.resolve_label(goal_id),
+                        result.entities_analyzed,
+                        result.dead_ends,
+                        result.coverage_score * 100.0,
+                    );
+
+                    for gap in &result.gaps {
+                        println!(
+                            "  [{:.2}] \"{}\" — {}",
+                            gap.severity,
+                            engine.resolve_label(gap.entity),
+                            gap.description,
+                        );
+                        if !gap.suggested_predicates.is_empty() {
+                            let preds: Vec<String> = gap
+                                .suggested_predicates
+                                .iter()
+                                .map(|p| engine.resolve_label(*p))
+                                .collect();
+                            println!("    suggested predicates: {}", preds.join(", "));
+                        }
+                    }
+                }
+
+                AgentAction::Schema => {
+                    let schema_config = SchemaDiscoveryConfig::default();
+
+                    let result = engine
+                        .discover_schema(schema_config)
+                        .into_diagnostic()?;
+
+                    if result.types.is_empty()
+                        && result.co_occurring_predicates.is_empty()
+                        && result.relation_hierarchies.is_empty()
+                    {
+                        println!("No schema patterns discovered (insufficient data).");
+                    } else {
+                        if !result.types.is_empty() {
+                            println!("Discovered types ({}):", result.types.len());
+                            for dt in &result.types {
+                                let name = dt
+                                    .type_symbol
+                                    .map(|s| engine.resolve_label(s))
+                                    .unwrap_or_else(|| {
+                                        format!("cluster({})", engine.resolve_label(dt.exemplar))
+                                    });
+                                println!(
+                                    "  {} — {} members, {} typical predicates",
+                                    name,
+                                    dt.members.len(),
+                                    dt.typical_predicates.len(),
+                                );
+                                for pp in &dt.typical_predicates {
+                                    println!(
+                                        "    {} ({:.0}% coverage)",
+                                        engine.resolve_label(pp.predicate),
+                                        pp.coverage * 100.0,
+                                    );
+                                }
+                            }
+                        }
+
+                        if !result.co_occurring_predicates.is_empty() {
+                            println!(
+                                "\nCo-occurring predicates ({}):",
+                                result.co_occurring_predicates.len()
+                            );
+                            for (p1, p2, strength) in &result.co_occurring_predicates {
+                                println!(
+                                    "  {} <-> {} ({:.0}%)",
+                                    engine.resolve_label(*p1),
+                                    engine.resolve_label(*p2),
+                                    strength * 100.0,
+                                );
+                            }
+                        }
+
+                        if !result.relation_hierarchies.is_empty() {
+                            println!(
+                                "\nRelation hierarchies ({}):",
+                                result.relation_hierarchies.len()
+                            );
+                            for rh in &result.relation_hierarchies {
+                                println!(
+                                    "  {} => {} ({:.0}%)",
+                                    engine.resolve_label(rh.specific),
+                                    engine.resolve_label(rh.general),
+                                    rh.implication_strength * 100.0,
+                                );
                             }
                         }
                     }
@@ -1755,6 +2016,41 @@ fn format_derivation_kind(kind: &DerivationKind, engine: &Engine) -> String {
                 "agent consolidation (relevance: {:.2}): {}",
                 relevance_score, reason
             )
+        }
+        DerivationKind::RuleInference {
+            rule_name,
+            antecedents,
+        } => {
+            let ant_labels: Vec<String> = antecedents
+                .iter()
+                .map(|s| engine.resolve_label(*s))
+                .collect();
+            format!(
+                "rule inference [{}] from [{}]",
+                rule_name,
+                ant_labels.join(", ")
+            )
+        }
+        DerivationKind::FusedInference {
+            path_count,
+            interference_signal,
+        } => {
+            format!(
+                "fused inference ({} paths, interference: {:.2})",
+                path_count, interference_signal
+            )
+        }
+        DerivationKind::GapIdentified {
+            gap_kind,
+            severity,
+        } => {
+            format!(
+                "gap identified [{}] (severity: {:.2})",
+                gap_kind, severity
+            )
+        }
+        DerivationKind::SchemaDiscovered { pattern_type } => {
+            format!("schema discovered [{}]", pattern_type)
         }
     }
 }

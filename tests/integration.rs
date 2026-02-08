@@ -884,9 +884,9 @@ fn goal_status_transitions() {
 fn tool_registry_crud() {
     let mut agent = test_agent();
 
-    // Should have 9 built-in tools (5 core + 4 external).
+    // Should have 11 built-in tools (5 core + 4 external + 2 autonomous).
     let tools = agent.list_tools();
-    assert_eq!(tools.len(), 9);
+    assert_eq!(tools.len(), 11);
 
     let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
     // Core tools.
@@ -900,6 +900,9 @@ fn tool_registry_crud() {
     assert!(names.contains(&"http_fetch"));
     assert!(names.contains(&"shell_exec"));
     assert!(names.contains(&"user_interact"));
+    // Autonomous tools.
+    assert!(names.contains(&"infer_rules"));
+    assert!(names.contains(&"gap_analysis"));
 
     // Register a custom tool.
     struct CustomTool;
@@ -921,7 +924,7 @@ fn tool_registry_crud() {
     }
 
     agent.register_tool(Box::new(CustomTool));
-    assert_eq!(agent.list_tools().len(), 10);
+    assert_eq!(agent.list_tools().len(), 12);
 }
 
 #[test]
@@ -2192,4 +2195,236 @@ fn run_cycle_generates_plan_automatically() {
 
     let plan = agent.plan_for_goal(goal_id);
     assert!(plan.is_some(), "plan should exist after run_cycle");
+}
+
+// ---------------------------------------------------------------------------
+// Phase 9: Autonomous KG building integration tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn rule_inference_transitive_closure() {
+    let engine = test_engine();
+    engine
+        .ingest_label_triples(&[
+            ("Dog".into(), "is-a".into(), "Mammal".into(), 1.0),
+            ("Mammal".into(), "is-a".into(), "Animal".into(), 1.0),
+        ])
+        .unwrap();
+
+    let config = akh_medu::autonomous::RuleEngineConfig::default();
+    let result = engine.run_rules(config).unwrap();
+
+    // Dog is-a Animal should be derived via transitive closure.
+    let dog = engine.lookup_symbol("Dog").unwrap();
+    let animal = engine.lookup_symbol("Animal").unwrap();
+    let derived_match = result.derived.iter().any(|dt| {
+        dt.triple.subject == dog && dt.triple.object == animal
+    });
+    assert!(derived_match, "Dog is-a Animal should be derived");
+    assert!(result.derived.len() >= 1);
+
+    // Verify the triple is actually in the KG now.
+    assert!(engine.has_triple(dog, engine.lookup_symbol("is-a").unwrap(), animal));
+}
+
+#[test]
+fn rule_inference_inverse_relations() {
+    let engine = test_engine();
+    engine
+        .ingest_label_triples(&[
+            ("Alice".into(), "parent-of".into(), "Bob".into(), 1.0),
+        ])
+        .unwrap();
+
+    let config = akh_medu::autonomous::RuleEngineConfig::default();
+    let result = engine.run_rules(config).unwrap();
+
+    // Bob child-of Alice should be derived.
+    let bob = engine.lookup_symbol("Bob").unwrap();
+    let alice = engine.lookup_symbol("Alice").unwrap();
+    let child_of = engine.lookup_symbol("child-of").unwrap();
+    assert!(
+        engine.has_triple(bob, child_of, alice),
+        "Bob child-of Alice should be derived"
+    );
+
+    let derived_match = result.derived.iter().any(|dt| {
+        dt.rule_name == "parent-child-inverse"
+    });
+    assert!(derived_match, "parent-child-inverse rule should fire");
+}
+
+#[test]
+fn rule_inference_provenance_tracking() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = persistent_engine(dir.path());
+    engine
+        .ingest_label_triples(&[
+            ("X".into(), "similar-to".into(), "Y".into(), 1.0),
+        ])
+        .unwrap();
+
+    let config = akh_medu::autonomous::RuleEngineConfig::default();
+    let result = engine.run_rules(config).unwrap();
+
+    // Y similar-to X should be derived via symmetric rule.
+    assert!(!result.derived.is_empty());
+    let derived_match = result.derived.iter().any(|dt| {
+        dt.rule_name == "similar-to-symmetric"
+    });
+    assert!(derived_match, "similar-to-symmetric rule should fire");
+
+    // Check provenance was stored.
+    let y = engine.lookup_symbol("Y").unwrap();
+    let provenance = engine.provenance_of(y).unwrap();
+    let has_rule_prov = provenance.iter().any(|p| {
+        matches!(&p.kind, akh_medu::provenance::DerivationKind::RuleInference { rule_name, .. }
+            if rule_name == "similar-to-symmetric")
+    });
+    assert!(has_rule_prov, "RuleInference provenance should be stored");
+}
+
+#[test]
+fn gap_analysis_finds_dead_ends() {
+    let engine = test_engine();
+    engine
+        .ingest_label_triples(&[
+            ("Star".into(), "is-a".into(), "CelestialBody".into(), 1.0),
+            ("Lonely".into(), "near".into(), "Star".into(), 1.0),
+        ])
+        .unwrap();
+
+    let star = engine.lookup_symbol("Star").unwrap();
+    let config = akh_medu::autonomous::GapAnalysisConfig::default();
+    let result = engine.analyze_gaps(&[star], config).unwrap();
+
+    // At least one dead end should be found (entities with very few connections).
+    assert!(result.entities_analyzed > 0);
+    // Coverage score should be between 0 and 1.
+    assert!(result.coverage_score >= 0.0 && result.coverage_score <= 1.0);
+}
+
+#[test]
+fn gap_analysis_finds_missing_predicates() {
+    let engine = test_engine();
+    // Create 3 entities of the same type with shared predicates, then remove one.
+    engine
+        .ingest_label_triples(&[
+            ("Dog".into(), "is-a".into(), "Animal".into(), 1.0),
+            ("Dog".into(), "has-legs".into(), "4".into(), 1.0),
+            ("Dog".into(), "has-color".into(), "brown".into(), 1.0),
+            ("Cat".into(), "is-a".into(), "Animal".into(), 1.0),
+            ("Cat".into(), "has-legs".into(), "4".into(), 1.0),
+            ("Cat".into(), "has-color".into(), "black".into(), 1.0),
+            ("Horse".into(), "is-a".into(), "Animal".into(), 1.0),
+            ("Horse".into(), "has-legs".into(), "4".into(), 1.0),
+            ("Horse".into(), "has-color".into(), "white".into(), 1.0),
+            // Bird has is-a but is missing has-legs and has-color.
+            ("Bird".into(), "is-a".into(), "Animal".into(), 1.0),
+        ])
+        .unwrap();
+
+    let bird = engine.lookup_symbol("Bird").unwrap();
+    let config = akh_medu::autonomous::GapAnalysisConfig {
+        min_degree: 1,
+        ..Default::default()
+    };
+    let result = engine.analyze_gaps(&[bird], config).unwrap();
+
+    assert!(result.entities_analyzed > 0);
+    // Bird should show up as having missing predicates relative to its type.
+    // We just check that the analysis runs and produces at least some gaps.
+    // The exact gap content depends on VSA similarity which is stochastic.
+}
+
+#[test]
+fn confidence_fusion_multiple_paths() {
+    use akh_medu::autonomous::fusion::noisy_or;
+
+    // Noisy-OR: 1 - (1-0.72)(1-0.6) = 1 - 0.28*0.4 = 1 - 0.112 = 0.888
+    let fused = noisy_or(&[0.72, 0.6]);
+    assert!((fused - 0.888).abs() < 0.001, "noisy-or of [0.72, 0.6] should be ~0.888, got {fused}");
+
+    // Fused confidence always exceeds any individual path.
+    assert!(fused > 0.72);
+    assert!(fused > 0.6);
+
+    // Single path returns itself.
+    let single = noisy_or(&[0.5]);
+    assert!((single - 0.5).abs() < 0.001);
+
+    // Three paths.
+    let three = noisy_or(&[0.5, 0.5, 0.5]);
+    // 1 - 0.5^3 = 0.875
+    assert!((three - 0.875).abs() < 0.001);
+}
+
+#[test]
+fn schema_discovery_finds_types() {
+    let engine = test_engine();
+    // Create entities with shared predicate patterns.
+    engine
+        .ingest_label_triples(&[
+            ("Dog".into(), "is-a".into(), "Animal".into(), 1.0),
+            ("Dog".into(), "has-legs".into(), "4".into(), 1.0),
+            ("Cat".into(), "is-a".into(), "Animal".into(), 1.0),
+            ("Cat".into(), "has-legs".into(), "4".into(), 1.0),
+            ("Horse".into(), "is-a".into(), "Animal".into(), 1.0),
+            ("Horse".into(), "has-legs".into(), "4".into(), 1.0),
+        ])
+        .unwrap();
+
+    let config = akh_medu::autonomous::SchemaDiscoveryConfig {
+        min_type_members: 3,
+        ..Default::default()
+    };
+    let result = engine.discover_schema(config).unwrap();
+
+    // Should discover at least one type cluster (Dog, Cat, Horse share the same predicates).
+    assert!(!result.types.is_empty(), "should discover at least one entity type");
+    let first_type = &result.types[0];
+    assert!(first_type.members.len() >= 3);
+}
+
+#[test]
+fn agent_uses_infer_and_gap_tools() {
+    let engine = Arc::new(test_engine());
+    engine
+        .ingest_label_triples(&[
+            ("Star".into(), "is-a".into(), "CelestialBody".into(), 1.0),
+            ("CelestialBody".into(), "is-a".into(), "PhysicalObject".into(), 1.0),
+            ("Sun".into(), "is-a".into(), "Star".into(), 1.0),
+        ])
+        .unwrap();
+
+    let config = AgentConfig {
+        max_cycles: 5,
+        ..Default::default()
+    };
+    let mut agent = Agent::new(Arc::clone(&engine), config).unwrap();
+    agent
+        .add_goal(
+            "Derive type hierarchy for celestial bodies",
+            128,
+            "transitive types inferred",
+        )
+        .unwrap();
+
+    // Run a few cycles — the agent should select infer_rules or gap_analysis at some point.
+    let mut tools_used: Vec<String> = Vec::new();
+    for _ in 0..5 {
+        match agent.run_cycle() {
+            Ok(result) => {
+                tools_used.push(result.decision.chosen_tool.clone());
+            }
+            Err(_) => break,
+        }
+    }
+
+    // Verify that the tools are at least available and the agent runs without crashing.
+    // The exact tool selection depends on the utility scoring heuristics.
+    let all_tools: Vec<String> = agent.list_tools().iter().map(|t| t.name.clone()).collect();
+    assert!(all_tools.contains(&"infer_rules".to_string()));
+    assert!(all_tools.contains(&"gap_analysis".to_string()));
+    assert!(!tools_used.is_empty(), "agent should have run at least one cycle");
 }

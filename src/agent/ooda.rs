@@ -721,6 +721,78 @@ fn select_tool(
         }
     }
 
+    // ── infer_rules: when knowledge exists but inference hasn't been run recently ──
+    if has_knowledge {
+        let goal_lower = goal.description.to_lowercase();
+        let criteria_lower = goal.success_criteria.to_lowercase();
+        let infer_keywords = [
+            "infer", "deduce", "derive", "transitive", "type", "hierarchy", "classify",
+        ];
+        let mentions_infer = infer_keywords
+            .iter()
+            .any(|kw| goal_lower.contains(kw) || criteria_lower.contains(kw));
+
+        let recent_infer_count = history.count("infer_rules");
+        // Use if keywords match or if we haven't inferred in the last 3 cycles.
+        let base = if mentions_infer {
+            0.65
+        } else if recent_infer_count == 0 {
+            0.55
+        } else {
+            0.35
+        };
+
+        candidates.push(apply_modifiers(
+            ToolCandidate::new(
+                "infer_rules",
+                ToolInput::new()
+                    .with_param("max_iterations", "5")
+                    .with_param("min_confidence", "0.1"),
+                base,
+                "Running forward-chaining inference to derive new knowledge.".into(),
+            ),
+            &history,
+            &episodic_tools,
+            pressure,
+        ));
+    }
+
+    // ── gap_analysis: when querying the same area without progress ──
+    {
+        let goal_lower = goal.description.to_lowercase();
+        let criteria_lower = goal.success_criteria.to_lowercase();
+        let gap_keywords = ["gap", "missing", "incomplete", "discover", "explore", "what"];
+        let mentions_gap = gap_keywords
+            .iter()
+            .any(|kw| goal_lower.contains(kw) || criteria_lower.contains(kw));
+
+        let query_count = history.count("kg_query");
+        // Use if keywords match or if we've queried 2+ times without progress.
+        let base = if mentions_gap {
+            0.6
+        } else if query_count >= 2 {
+            0.5
+        } else {
+            0.3
+        };
+
+        if base > 0.3 {
+            candidates.push(apply_modifiers(
+                ToolCandidate::new(
+                    "gap_analysis",
+                    ToolInput::new()
+                        .with_param("goal", &goal_label)
+                        .with_param("max_gaps", "10"),
+                    base,
+                    "Identifying knowledge gaps around the goal.".into(),
+                ),
+                &history,
+                &episodic_tools,
+                pressure,
+            ));
+        }
+    }
+
     // ── user_interact: useful when goal mentions ask/user/input/question ──
     {
         let goal_lower = goal.description.to_lowercase();

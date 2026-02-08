@@ -30,6 +30,7 @@
 //! ```
 
 pub mod agent;
+pub mod autonomous;
 pub mod engine;
 pub mod error;
 pub mod export;

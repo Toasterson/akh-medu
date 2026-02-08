@@ -56,6 +56,10 @@ pub enum AkhError {
     #[error(transparent)]
     #[diagnostic(transparent)]
     Agent(#[from] crate::agent::error::AgentError),
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Autonomous(#[from] crate::autonomous::error::AutonomousError),
 }
 
 // ---------------------------------------------------------------------------

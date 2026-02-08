@@ -795,6 +795,37 @@ impl Engine {
     }
 
     // -----------------------------------------------------------------------
+    // Autonomous reasoning
+    // -----------------------------------------------------------------------
+
+    /// Run forward-chaining inference rules on the knowledge graph.
+    pub fn run_rules(
+        &self,
+        config: crate::autonomous::rule_engine::RuleEngineConfig,
+    ) -> AkhResult<crate::autonomous::rule_engine::RuleEngineResult> {
+        let engine = crate::autonomous::rule_engine::RuleEngine::new(config)
+            .with_rules(crate::autonomous::rules::RuleSet::builtin());
+        Ok(engine.run(self)?)
+    }
+
+    /// Analyze knowledge gaps around the given goal symbols.
+    pub fn analyze_gaps(
+        &self,
+        goals: &[SymbolId],
+        config: crate::autonomous::gap::GapAnalysisConfig,
+    ) -> AkhResult<crate::autonomous::gap::GapAnalysisResult> {
+        Ok(crate::autonomous::gap::analyze_gaps(self, goals, &config)?)
+    }
+
+    /// Discover schema patterns from the knowledge graph.
+    pub fn discover_schema(
+        &self,
+        config: crate::autonomous::schema::SchemaDiscoveryConfig,
+    ) -> AkhResult<crate::autonomous::schema::SchemaDiscoveryResult> {
+        Ok(crate::autonomous::schema::discover_schema(self, &config)?)
+    }
+
+    // -----------------------------------------------------------------------
     // Accessors
     // -----------------------------------------------------------------------
 
