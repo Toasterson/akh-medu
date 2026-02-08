@@ -8,6 +8,9 @@ use std::sync::Arc;
 use crate::engine::Engine;
 use crate::symbol::SymbolId;
 
+// Re-used for session persistence serialization.
+use bincode;
+
 use super::error::{AgentError, AgentResult};
 use super::goal::{self, Goal, GoalStatus, DEFAULT_STALL_THRESHOLD};
 use super::memory::{
@@ -364,6 +367,118 @@ impl Agent {
         self.goals.extend(children);
 
         Ok(child_ids)
+    }
+
+    // -----------------------------------------------------------------------
+    // Session persistence
+    // -----------------------------------------------------------------------
+
+    /// Persist session state (working memory + cycle count) to the engine's durable store.
+    ///
+    /// Call this before shutting down to enable `resume()` later.
+    pub fn persist_session(&self) -> AgentResult<()> {
+        let store = self.engine.store();
+
+        // Serialize working memory entries.
+        let (wm_next_id, wm_bytes) = self.working_memory.serialize()?;
+
+        store
+            .put_meta(b"agent:wm_entries", &wm_bytes)
+            .map_err(|e| AgentError::ConsolidationFailed {
+                message: format!("failed to persist WM entries: {e}"),
+            })?;
+
+        // Persist WM next_id counter.
+        let next_id_bytes =
+            bincode::serialize(&wm_next_id).map_err(|e| AgentError::ConsolidationFailed {
+                message: format!("failed to serialize WM next_id: {e}"),
+            })?;
+        store
+            .put_meta(b"agent:wm_next_id", &next_id_bytes)
+            .map_err(|e| AgentError::ConsolidationFailed {
+                message: format!("failed to persist WM next_id: {e}"),
+            })?;
+
+        // Persist cycle count.
+        let cycle_bytes = bincode::serialize(&self.cycle_count).map_err(|e| {
+            AgentError::ConsolidationFailed {
+                message: format!("failed to serialize cycle count: {e}"),
+            }
+        })?;
+        store
+            .put_meta(b"agent:cycle_count", &cycle_bytes)
+            .map_err(|e| AgentError::ConsolidationFailed {
+                message: format!("failed to persist cycle count: {e}"),
+            })?;
+
+        // Flush the engine's durable store.
+        self.engine
+            .persist()
+            .map_err(|e| AgentError::ConsolidationFailed {
+                message: format!("engine persist failed: {e}"),
+            })?;
+
+        Ok(())
+    }
+
+    /// Resume an agent from a previously persisted session.
+    ///
+    /// Restores working memory and cycle count from the durable store, and
+    /// rebuilds goals from the knowledge graph.
+    pub fn resume(engine: Arc<Engine>, config: AgentConfig) -> AgentResult<Self> {
+        let predicates = AgentPredicates::init(&engine)?;
+
+        let mut tool_registry = ToolRegistry::new();
+        tool_registry.register(Box::new(tools::KgQueryTool));
+        tool_registry.register(Box::new(tools::KgMutateTool));
+        tool_registry.register(Box::new(tools::MemoryRecallTool::new(predicates.clone())));
+        tool_registry.register(Box::new(tools::ReasonTool));
+        tool_registry.register(Box::new(tools::SimilaritySearchTool));
+
+        let store = engine.store();
+
+        // Restore working memory.
+        let working_memory = match (
+            store.get_meta(b"agent:wm_entries").ok().flatten(),
+            store.get_meta(b"agent:wm_next_id").ok().flatten(),
+        ) {
+            (Some(wm_bytes), Some(next_id_bytes)) => {
+                let next_id: u64 = bincode::deserialize(&next_id_bytes).unwrap_or(1);
+                WorkingMemory::restore(config.working_memory_capacity, next_id, &wm_bytes)?
+            }
+            _ => WorkingMemory::new(config.working_memory_capacity),
+        };
+
+        // Restore cycle count.
+        let cycle_count = store
+            .get_meta(b"agent:cycle_count")
+            .ok()
+            .flatten()
+            .and_then(|bytes| bincode::deserialize::<u64>(&bytes).ok())
+            .unwrap_or(0);
+
+        // Restore goals from KG.
+        let goals = goal::restore_goals(&engine, &predicates).unwrap_or_default();
+
+        Ok(Self {
+            engine,
+            config,
+            working_memory,
+            tool_registry,
+            goals,
+            predicates,
+            cycle_count,
+        })
+    }
+
+    /// Check whether a persisted session exists in the durable store.
+    pub fn has_persisted_session(engine: &Engine) -> bool {
+        engine
+            .store()
+            .get_meta(b"agent:cycle_count")
+            .ok()
+            .flatten()
+            .is_some()
     }
 }
 

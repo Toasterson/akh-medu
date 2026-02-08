@@ -343,6 +343,18 @@ enum AgentAction {
     },
     /// List registered tools.
     Tools,
+    /// Resume a previously persisted session.
+    Resume {
+        /// Maximum OODA cycles.
+        #[arg(long, default_value = "10")]
+        max_cycles: usize,
+    },
+    /// Interactive REPL: run cycles one at a time with user input between each.
+    Repl {
+        /// Goal descriptions (comma-separated). Omit to resume existing goals.
+        #[arg(long)]
+        goals: Option<String>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -1152,7 +1164,7 @@ fn main() -> Result<()> {
                         }
                     );
 
-                    let _ = engine.persist();
+                    agent.persist_session().into_diagnostic()?;
                 }
 
                 AgentAction::Run {
@@ -1201,7 +1213,7 @@ fn main() -> Result<()> {
                         }
                     }
 
-                    let _ = engine.persist();
+                    agent.persist_session().into_diagnostic()?;
                 }
 
                 AgentAction::Consolidate => {
@@ -1265,11 +1277,199 @@ fn main() -> Result<()> {
                         }
                     }
                 }
+
+                AgentAction::Resume { max_cycles } => {
+                    if !Agent::has_persisted_session(&engine) {
+                        miette::bail!(
+                            "No persisted session found. Run `agent run` or `agent repl` first."
+                        );
+                    }
+
+                    let agent_config = AgentConfig {
+                        max_cycles,
+                        ..Default::default()
+                    };
+                    let mut agent =
+                        Agent::resume(Arc::clone(&engine), agent_config).into_diagnostic()?;
+
+                    println!(
+                        "Resumed session: cycle {}, {} WM entries, {} goals",
+                        agent.cycle_count(),
+                        agent.working_memory().len(),
+                        agent.goals().len(),
+                    );
+
+                    for g in agent.goals() {
+                        println!(
+                            "  [{}] {} — {}",
+                            g.status,
+                            engine.resolve_label(g.symbol_id),
+                            g.description,
+                        );
+                    }
+
+                    match agent.run_until_complete() {
+                        Ok(results) => {
+                            println!(
+                                "Agent completed: {} cycles, {} goals",
+                                results.len(),
+                                agent.goals().len(),
+                            );
+                            for g in agent.goals() {
+                                println!(
+                                    "  {} [{}]: {}",
+                                    engine.resolve_label(g.symbol_id),
+                                    g.status,
+                                    g.description,
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            println!("Agent stopped: {e}");
+                        }
+                    }
+
+                    agent.persist_session().into_diagnostic()?;
+                }
+
+                AgentAction::Repl { goals } => {
+                    // Resume or create a fresh agent.
+                    let agent_config = AgentConfig::default();
+                    let mut agent = if goals.is_none()
+                        && Agent::has_persisted_session(&engine)
+                    {
+                        let a =
+                            Agent::resume(Arc::clone(&engine), agent_config).into_diagnostic()?;
+                        println!(
+                            "Resumed session: cycle {}, {} WM entries, {} goals",
+                            a.cycle_count(),
+                            a.working_memory().len(),
+                            a.goals().len(),
+                        );
+                        a
+                    } else {
+                        Agent::new(Arc::clone(&engine), agent_config).into_diagnostic()?
+                    };
+
+                    // Add goals if provided.
+                    if let Some(ref goals_str) = goals {
+                        for goal_str in goals_str.split(',') {
+                            let goal = goal_str.trim();
+                            if !goal.is_empty() {
+                                agent
+                                    .add_goal(goal, 128, "Agent-determined completion")
+                                    .into_diagnostic()?;
+                            }
+                        }
+                    }
+
+                    println!("Agent REPL — type 'q' to quit, 'c' to consolidate, Enter to run a cycle.");
+                    print_repl_status(&agent, &engine);
+
+                    let stdin = std::io::stdin();
+                    let mut input = String::new();
+
+                    loop {
+                        input.clear();
+                        print!("> ");
+                        // Flush stdout so the prompt appears before blocking on read.
+                        use std::io::Write;
+                        std::io::stdout().flush().ok();
+
+                        if stdin.read_line(&mut input).into_diagnostic()? == 0 {
+                            // EOF
+                            break;
+                        }
+
+                        let cmd = input.trim();
+
+                        match cmd {
+                            "q" | "quit" | "exit" => break,
+                            "c" | "consolidate" => {
+                                match agent.consolidate() {
+                                    Ok(r) => println!(
+                                        "Consolidated: {} persisted, {} evicted",
+                                        r.entries_persisted, r.entries_evicted,
+                                    ),
+                                    Err(e) => println!("Consolidation error: {e}"),
+                                }
+                            }
+                            "s" | "status" => {
+                                print_repl_status(&agent, &engine);
+                            }
+                            "t" | "tools" => {
+                                for sig in agent.list_tools() {
+                                    println!("  {} — {}", sig.name, sig.description);
+                                }
+                            }
+                            cmd if cmd.starts_with("goal ") => {
+                                let desc = cmd.strip_prefix("goal ").unwrap_or("").trim();
+                                if desc.is_empty() {
+                                    println!("Usage: goal <description>");
+                                } else {
+                                    match agent.add_goal(desc, 128, "Agent-determined completion") {
+                                        Ok(id) => println!("Added goal: {}", engine.resolve_label(id)),
+                                        Err(e) => println!("Error adding goal: {e}"),
+                                    }
+                                }
+                            }
+                            _ => {
+                                // Default: run one OODA cycle.
+                                match agent.run_cycle() {
+                                    Ok(result) => {
+                                        println!(
+                                            "Cycle {} — tool={}, goal=\"{}\", progress={:?}",
+                                            result.cycle_number,
+                                            result.decision.chosen_tool,
+                                            engine.resolve_label(result.decision.goal_id),
+                                            result.action_result.goal_progress,
+                                        );
+                                        println!(
+                                            "  Result: {}",
+                                            if result.action_result.tool_output.result.len() > 100 {
+                                                format!(
+                                                    "{}...",
+                                                    &result.action_result.tool_output.result[..100]
+                                                )
+                                            } else {
+                                                result.action_result.tool_output.result.clone()
+                                            }
+                                        );
+                                    }
+                                    Err(e) => println!("Cycle error: {e}"),
+                                }
+                            }
+                        }
+                    }
+
+                    // Persist session on exit.
+                    agent.persist_session().into_diagnostic()?;
+                    println!("Session persisted. Use `agent resume` to continue.");
+                }
             }
         }
     }
 
     Ok(())
+}
+
+/// Print agent REPL status line.
+fn print_repl_status(agent: &Agent, engine: &Engine) {
+    println!(
+        "  cycle: {}, WM: {}/{}, goals: {} active / {} total",
+        agent.cycle_count(),
+        agent.working_memory().len(),
+        agent.working_memory().capacity(),
+        agent.goals().iter().filter(|g| matches!(g.status, akh_medu::agent::GoalStatus::Active)).count(),
+        agent.goals().len(),
+    );
+    for g in agent.goals() {
+        println!(
+            "    [{}] {}",
+            g.status,
+            engine.resolve_label(g.symbol_id),
+        );
+    }
 }
 
 /// Print pipeline output in summary format.

@@ -84,11 +84,14 @@ placeholder. The phases below evolve it into a real autonomous agent.
 - [x] Use recalled episodic memories: `extract_episodic_tool_hints()` parses tool names from episode summaries, applies episodic_bonus (+0.2)
 - [x] Score breakdown in reasoning string for full transparency
 
-### Phase 8d — Session persistence & REPL
-- [ ] Serialize/deserialize WorkingMemory to engine's durable store
-- [ ] Add agent REPL mode (interactive loop with user input between cycles)
-- [ ] Persist cycle_count and restore on agent restart
-- [ ] CLI session continuity: `agent resume` picks up where it left off
+### Phase 8d — Session persistence & REPL ✓
+- [x] Serialize/deserialize WorkingMemory to engine's durable store (bincode via `put_meta`/`get_meta`)
+- [x] Add agent REPL mode (interactive loop with user input between cycles): `agent repl`
+- [x] Persist cycle_count and restore on agent restart
+- [x] CLI session continuity: `agent resume` picks up where it left off
+- [x] `Agent::persist_session()` and `Agent::resume()` constructors
+- [x] `Agent::has_persisted_session()` static check
+- [x] All agent CLI commands (`cycle`, `run`, `repl`) auto-persist session on exit
 
 ### Phase 8e — External tools & world interaction
 - [ ] File I/O tool: read/write files the agent can use as scratch or data sources

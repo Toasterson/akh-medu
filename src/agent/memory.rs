@@ -5,6 +5,8 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use serde::{Deserialize, Serialize};
+
 use crate::engine::Engine;
 use crate::graph::Triple;
 use crate::provenance::{DerivationKind, ProvenanceRecord};
@@ -19,7 +21,7 @@ use super::goal::Goal;
 // ---------------------------------------------------------------------------
 
 /// Classification of a working memory entry.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WorkingMemoryKind {
     /// Produced during the Observe phase.
     Observation,
@@ -34,7 +36,7 @@ pub enum WorkingMemoryKind {
 }
 
 /// A single entry in working memory.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkingMemoryEntry {
     /// Auto-incremented ID within the session.
     pub id: u64,
@@ -177,6 +179,30 @@ impl WorkingMemory {
     /// All entries (for iteration during consolidation).
     pub fn entries(&self) -> &[WorkingMemoryEntry] {
         &self.entries
+    }
+
+    /// Serialize working memory state for persistence.
+    ///
+    /// Returns `(next_id, entries_bytes)` — the next ID counter and bincode-encoded entries.
+    pub fn serialize(&self) -> AgentResult<(u64, Vec<u8>)> {
+        let next_id = self.next_id.load(Ordering::Relaxed);
+        let bytes = bincode::serialize(&self.entries).map_err(|e| AgentError::ConsolidationFailed {
+            message: format!("failed to serialize working memory: {e}"),
+        })?;
+        Ok((next_id, bytes))
+    }
+
+    /// Restore working memory from serialized state.
+    pub fn restore(capacity: usize, next_id: u64, bytes: &[u8]) -> AgentResult<Self> {
+        let entries: Vec<WorkingMemoryEntry> =
+            bincode::deserialize(bytes).map_err(|e| AgentError::ConsolidationFailed {
+                message: format!("failed to deserialize working memory: {e}"),
+            })?;
+        Ok(Self {
+            entries,
+            capacity,
+            next_id: AtomicU64::new(next_id),
+        })
     }
 }
 

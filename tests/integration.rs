@@ -1759,3 +1759,181 @@ fn recency_penalty_prevents_immediate_repeat() {
         consecutive_repeats
     );
 }
+
+// ===========================================================================
+// Phase 8d: Session persistence & resume integration tests
+// ===========================================================================
+
+#[test]
+fn session_persist_and_resume() {
+    let dir = tempfile::TempDir::new().unwrap();
+
+    // Phase 1: create agent, add goals, run cycles, persist session.
+    let cycle_count_phase1;
+    let wm_len_phase1;
+    {
+        let engine = Arc::new(persistent_engine(dir.path()));
+        engine
+            .ingest_label_triples(&[
+                ("Sun".into(), "is-a".into(), "Star".into(), 1.0),
+                ("Earth".into(), "orbits".into(), "Sun".into(), 1.0),
+            ])
+            .unwrap();
+
+        let mut agent = Agent::new(engine, AgentConfig::default()).unwrap();
+        agent
+            .add_goal("Explore the solar system", 128, "Map celestial bodies")
+            .unwrap();
+
+        // Run 3 cycles to populate WM and advance cycle_count.
+        for _ in 0..3 {
+            let _ = agent.run_cycle();
+        }
+
+        cycle_count_phase1 = agent.cycle_count();
+        wm_len_phase1 = agent.working_memory().len();
+
+        assert!(cycle_count_phase1 >= 3, "should have run at least 3 cycles");
+        assert!(wm_len_phase1 > 0, "WM should have entries after 3 cycles");
+
+        agent.persist_session().unwrap();
+    }
+
+    // Phase 2: resume and verify state was restored.
+    {
+        let engine = Arc::new(persistent_engine(dir.path()));
+
+        assert!(
+            Agent::has_persisted_session(&engine),
+            "should detect persisted session"
+        );
+
+        let agent = Agent::resume(engine, AgentConfig::default()).unwrap();
+
+        assert_eq!(
+            agent.cycle_count(),
+            cycle_count_phase1,
+            "cycle count should be restored"
+        );
+        assert_eq!(
+            agent.working_memory().len(),
+            wm_len_phase1,
+            "WM entries should be restored"
+        );
+        assert!(
+            !agent.goals().is_empty(),
+            "goals should be restored from KG"
+        );
+    }
+}
+
+#[test]
+fn session_resume_continues_execution() {
+    let dir = tempfile::TempDir::new().unwrap();
+
+    // Phase 1: create, run 2 cycles, persist.
+    {
+        let engine = Arc::new(persistent_engine(dir.path()));
+        engine
+            .ingest_label_triples(&[("Sun".into(), "is-a".into(), "Star".into(), 1.0)])
+            .unwrap();
+
+        let mut agent = Agent::new(engine, AgentConfig::default()).unwrap();
+        agent
+            .add_goal(
+                "Analyze stellar data",
+                128,
+                "Requires comprehensive stellar classification",
+            )
+            .unwrap();
+
+        let _ = agent.run_cycle();
+        let _ = agent.run_cycle();
+        agent.persist_session().unwrap();
+    }
+
+    // Phase 2: resume and run more cycles — cycle count should continue from where it left off.
+    {
+        let engine = Arc::new(persistent_engine(dir.path()));
+        let mut agent = Agent::resume(engine, AgentConfig::default()).unwrap();
+
+        let initial_cycle = agent.cycle_count();
+        assert!(initial_cycle >= 2, "should resume from at least cycle 2");
+
+        // Run 2 more cycles.
+        let _ = agent.run_cycle();
+        let _ = agent.run_cycle();
+
+        assert!(
+            agent.cycle_count() > initial_cycle,
+            "cycle count should advance after resumed cycles"
+        );
+    }
+}
+
+#[test]
+fn no_persisted_session_returns_fresh_agent() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let engine = Arc::new(persistent_engine(dir.path()));
+
+    // No prior session — has_persisted_session should be false.
+    assert!(
+        !Agent::has_persisted_session(&engine),
+        "fresh engine should have no persisted session"
+    );
+
+    // Resume should still work, returning a fresh agent.
+    let agent = Agent::resume(engine, AgentConfig::default()).unwrap();
+    assert_eq!(agent.cycle_count(), 0, "fresh resume should start at cycle 0");
+    assert!(agent.working_memory().is_empty(), "fresh resume should have empty WM");
+}
+
+#[test]
+fn wm_serialize_deserialize_roundtrip() {
+    // Test that WorkingMemory serialization is lossless.
+    let mut wm = WorkingMemory::new(50);
+
+    let id1 = wm
+        .push(WorkingMemoryEntry {
+            id: 0,
+            content: "observation about stars".into(),
+            symbols: vec![],
+            kind: WorkingMemoryKind::Observation,
+            timestamp: 0,
+            relevance: 0.8,
+            source_cycle: 1,
+            reference_count: 3,
+        })
+        .unwrap();
+
+    let id2 = wm
+        .push(WorkingMemoryEntry {
+            id: 0,
+            content: "decision to query".into(),
+            symbols: vec![],
+            kind: WorkingMemoryKind::Decision,
+            timestamp: 0,
+            relevance: 0.6,
+            source_cycle: 2,
+            reference_count: 1,
+        })
+        .unwrap();
+
+    // Serialize.
+    let (next_id, bytes) = wm.serialize().unwrap();
+    assert!(!bytes.is_empty());
+
+    // Restore.
+    let restored = WorkingMemory::restore(50, next_id, &bytes).unwrap();
+    assert_eq!(restored.len(), 2, "should have 2 entries after restore");
+
+    let e1 = restored.get(id1).unwrap();
+    assert_eq!(e1.content, "observation about stars");
+    assert_eq!(e1.kind, WorkingMemoryKind::Observation);
+    assert_eq!(e1.relevance, 0.8);
+    assert_eq!(e1.reference_count, 3);
+
+    let e2 = restored.get(id2).unwrap();
+    assert_eq!(e2.content, "decision to query");
+    assert_eq!(e2.kind, WorkingMemoryKind::Decision);
+}
