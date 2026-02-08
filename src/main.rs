@@ -41,7 +41,7 @@ enum Commands {
 
     /// Query the knowledge base using spreading-activation inference.
     Query {
-        /// Seed symbol IDs (comma-separated).
+        /// Seed symbols (comma-separated names or IDs, e.g. "Sun,Moon" or "1,2").
         #[arg(long)]
         seeds: String,
 
@@ -57,10 +57,46 @@ enum Commands {
     /// Show engine info and statistics.
     Info,
 
+    /// List and inspect symbols.
+    Symbols {
+        #[command(subcommand)]
+        action: SymbolAction,
+    },
+
+    /// Export engine data as JSON.
+    Export {
+        #[command(subcommand)]
+        action: ExportAction,
+    },
+
     /// Manage skillpacks.
     Skill {
         #[command(subcommand)]
         action: SkillAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum SymbolAction {
+    /// List all registered symbols.
+    List,
+    /// Show details of a specific symbol (by name or ID).
+    Show {
+        /// Symbol name or numeric ID.
+        name_or_id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum ExportAction {
+    /// Export the symbol table as JSON.
+    Symbols,
+    /// Export all triples as JSON.
+    Triples,
+    /// Export provenance chain for a symbol as JSON.
+    Provenance {
+        /// Symbol name or numeric ID.
+        name_or_id: String,
     },
 }
 
@@ -157,16 +193,15 @@ fn main() -> Result<()> {
         } => {
             let engine = Engine::new(config).into_diagnostic()?;
 
-            let seed_ids: Vec<SymbolId> = seeds
+            // Resolve seeds by name or ID.
+            let seed_ids: std::result::Result<Vec<SymbolId>, _> = seeds
                 .split(',')
-                .filter_map(|s| {
-                    let raw: u64 = s.trim().parse().ok()?;
-                    SymbolId::new(raw)
-                })
+                .map(|s| engine.resolve_symbol(s.trim()))
                 .collect();
+            let seed_ids = seed_ids.into_diagnostic()?;
 
             if seed_ids.is_empty() {
-                miette::bail!("no valid seed symbol IDs provided");
+                miette::bail!("no valid seed symbols provided");
             }
 
             let query = InferenceQuery {
@@ -179,44 +214,29 @@ fn main() -> Result<()> {
             let result = engine.infer(&query).into_diagnostic()?;
 
             println!("Inference results (top {top_k}, depth {max_depth}):");
-            for (i, (sym, confidence)) in result.activations.iter().enumerate() {
-                println!("  {}. {} (confidence: {:.4})", i + 1, sym, confidence);
+            for (i, (sym_id, confidence)) in result.activations.iter().enumerate() {
+                let label = engine.resolve_label(*sym_id);
+                println!(
+                    "  {}. \"{}\" / {} (confidence: {:.4})",
+                    i + 1,
+                    label,
+                    sym_id,
+                    confidence
+                );
             }
 
             if !result.provenance.is_empty() {
                 println!("\nProvenance:");
                 for record in &result.provenance {
-                    let kind_desc = match &record.kind {
-                        DerivationKind::Extracted => "extracted".to_string(),
-                        DerivationKind::Seed => "seed".to_string(),
-                        DerivationKind::GraphEdge { from, predicate } => {
-                            format!("graph edge from {} via {}", from, predicate)
-                        }
-                        DerivationKind::VsaRecovery {
-                            from,
-                            predicate,
-                            similarity,
-                        } => {
-                            format!(
-                                "VSA recovery from {} via {} (sim: {:.4})",
-                                from, predicate, similarity
-                            )
-                        }
-                        DerivationKind::Analogy { a, b, c } => {
-                            format!("analogy {}:{} :: {}:?", a, b, c)
-                        }
-                        DerivationKind::FillerRecovery {
-                            subject,
-                            predicate,
-                        } => {
-                            format!("filler recovery ({}, {})", subject, predicate)
-                        }
-                        DerivationKind::Reasoned => "reasoned".to_string(),
-                        DerivationKind::Aggregated => "aggregated".to_string(),
-                    };
+                    let derived_label = engine.resolve_label(record.derived_id);
+                    let kind_desc = format_derivation_kind(&record.kind, &engine);
                     println!(
-                        "  {} depth={} confidence={:.4} [{}]",
-                        record.derived_id, record.depth, record.confidence, kind_desc
+                        "  \"{}\" / {} depth={} confidence={:.4} [{}]",
+                        derived_label,
+                        record.derived_id,
+                        record.depth,
+                        record.confidence,
+                        kind_desc
                     );
                 }
             }
@@ -225,6 +245,82 @@ fn main() -> Result<()> {
         Commands::Info => {
             let engine = Engine::new(config).into_diagnostic()?;
             println!("{}", engine.info());
+        }
+
+        Commands::Symbols { action } => {
+            let engine = Engine::new(config).into_diagnostic()?;
+
+            match action {
+                SymbolAction::List => {
+                    let symbols = engine.all_symbols();
+                    if symbols.is_empty() {
+                        println!("No symbols registered.");
+                    } else {
+                        println!("Symbols ({}):", symbols.len());
+                        for meta in &symbols {
+                            println!(
+                                "  {} / {} [{}]",
+                                meta.label, meta.id, meta.kind
+                            );
+                        }
+                    }
+                }
+                SymbolAction::Show { name_or_id } => {
+                    let id = engine.resolve_symbol(&name_or_id).into_diagnostic()?;
+                    let meta = engine.get_symbol_meta(id).into_diagnostic()?;
+                    println!("Symbol: \"{}\"", meta.label);
+                    println!("  id:         {}", meta.id);
+                    println!("  kind:       {}", meta.kind);
+                    println!("  created_at: {}", meta.created_at);
+
+                    let from = engine.triples_from(id);
+                    if !from.is_empty() {
+                        println!("  outgoing triples ({}):", from.len());
+                        for t in &from {
+                            println!(
+                                "    -> {} -> \"{}\"",
+                                engine.resolve_label(t.predicate),
+                                engine.resolve_label(t.object)
+                            );
+                        }
+                    }
+
+                    let to = engine.triples_to(id);
+                    if !to.is_empty() {
+                        println!("  incoming triples ({}):", to.len());
+                        for t in &to {
+                            println!(
+                                "    \"{}\" -> {} ->",
+                                engine.resolve_label(t.subject),
+                                engine.resolve_label(t.predicate)
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        Commands::Export { action } => {
+            let engine = Engine::new(config).into_diagnostic()?;
+
+            match action {
+                ExportAction::Symbols => {
+                    let exports = engine.export_symbol_table();
+                    let json = serde_json::to_string_pretty(&exports).into_diagnostic()?;
+                    println!("{json}");
+                }
+                ExportAction::Triples => {
+                    let exports = engine.export_triples();
+                    let json = serde_json::to_string_pretty(&exports).into_diagnostic()?;
+                    println!("{json}");
+                }
+                ExportAction::Provenance { name_or_id } => {
+                    let id = engine.resolve_symbol(&name_or_id).into_diagnostic()?;
+                    let exports = engine.export_provenance_chain(id).into_diagnostic()?;
+                    let json = serde_json::to_string_pretty(&exports).into_diagnostic()?;
+                    println!("{json}");
+                }
+            }
         }
 
         Commands::Skill { action } => {
@@ -272,4 +368,51 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Format a DerivationKind with human-readable label resolution.
+fn format_derivation_kind(kind: &DerivationKind, engine: &Engine) -> String {
+    match kind {
+        DerivationKind::Extracted => "extracted".to_string(),
+        DerivationKind::Seed => "seed".to_string(),
+        DerivationKind::GraphEdge { from, predicate } => {
+            format!(
+                "graph edge from \"{}\" via \"{}\"",
+                engine.resolve_label(*from),
+                engine.resolve_label(*predicate)
+            )
+        }
+        DerivationKind::VsaRecovery {
+            from,
+            predicate,
+            similarity,
+        } => {
+            format!(
+                "VSA recovery from \"{}\" via \"{}\" (sim: {:.4})",
+                engine.resolve_label(*from),
+                engine.resolve_label(*predicate),
+                similarity
+            )
+        }
+        DerivationKind::Analogy { a, b, c } => {
+            format!(
+                "analogy \"{}\":\"{}\" :: \"{}\":?",
+                engine.resolve_label(*a),
+                engine.resolve_label(*b),
+                engine.resolve_label(*c)
+            )
+        }
+        DerivationKind::FillerRecovery {
+            subject,
+            predicate,
+        } => {
+            format!(
+                "filler recovery (\"{}\", \"{}\")",
+                engine.resolve_label(*subject),
+                engine.resolve_label(*predicate)
+            )
+        }
+        DerivationKind::Reasoned => "reasoned".to_string(),
+        DerivationKind::Aggregated => "aggregated".to_string(),
+    }
 }

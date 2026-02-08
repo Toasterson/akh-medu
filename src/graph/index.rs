@@ -156,6 +156,31 @@ impl KnowledgeGraph {
             .collect()
     }
 
+    /// Get all triples where the given symbol appears as object (incoming edges).
+    pub fn triples_to(&self, object: SymbolId) -> Vec<Triple> {
+        let graph = self.graph.read().expect("graph lock poisoned");
+        let obj_idx = match self.node_index.get(&object) {
+            Some(idx) => *idx.value(),
+            None => return vec![],
+        };
+
+        graph
+            .edges_directed(obj_idx, Direction::Incoming)
+            .filter_map(|e| {
+                let subject = *graph.node_weight(e.source())?;
+                let edge = e.weight();
+                Some(Triple {
+                    subject,
+                    predicate: edge.predicate,
+                    object,
+                    confidence: edge.confidence,
+                    timestamp: edge.timestamp,
+                    provenance_id: edge.provenance_id,
+                })
+            })
+            .collect()
+    }
+
     /// Check if a node exists.
     pub fn has_node(&self, symbol: SymbolId) -> bool {
         self.node_index.contains_key(&symbol)
@@ -304,6 +329,23 @@ mod tests {
         let triples = kg.triples_from(sym(1));
         assert_eq!(triples.len(), 1);
         assert!((triples[0].confidence - 0.8).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn triples_to() {
+        let kg = KnowledgeGraph::new();
+        let a = sym(1);
+        let b = sym(2);
+        let c = sym(3);
+        let r1 = sym(10);
+        let r2 = sym(11);
+
+        kg.insert_triple(&Triple::new(a, r1, c)).unwrap();
+        kg.insert_triple(&Triple::new(b, r2, c)).unwrap();
+
+        let triples = kg.triples_to(c);
+        assert_eq!(triples.len(), 2);
+        assert!(triples.iter().all(|t| t.object == c));
     }
 
     #[test]

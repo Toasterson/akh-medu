@@ -90,6 +90,57 @@ impl DurableStore {
         self.get(key).map(|v| v.is_some())
     }
 
+    /// Scan all keys with the given prefix, returning `(key, value)` pairs.
+    ///
+    /// Uses redb range queries with prefix bounds to efficiently iterate
+    /// only the matching key space.
+    pub fn scan_prefix(&self, prefix: &[u8]) -> StoreResult<Vec<(Vec<u8>, Vec<u8>)>> {
+        let txn = self.db.begin_read().map_err(|e| StoreError::Redb {
+            message: format!("begin_read failed: {e}"),
+        })?;
+        let table = txn.open_table(META_TABLE).map_err(|e| StoreError::Redb {
+            message: format!("open_table failed: {e}"),
+        })?;
+
+        // Compute the exclusive upper bound by incrementing the last byte.
+        // If the last byte is 0xFF, try the second-to-last, etc.
+        // If all bytes are 0xFF, we use an unbounded range (scan to end).
+        let end_bound = increment_prefix(prefix);
+
+        let mut results = Vec::new();
+
+        let iter = match &end_bound {
+            Some(end) => {
+                table
+                    .range::<&[u8]>(prefix..end.as_slice())
+                    .map_err(|e| StoreError::Redb {
+                        message: format!("range scan failed: {e}"),
+                    })?
+            }
+            None => {
+                table
+                    .range::<&[u8]>(prefix..)
+                    .map_err(|e| StoreError::Redb {
+                        message: format!("range scan failed: {e}"),
+                    })?
+            }
+        };
+
+        for entry in iter {
+            let (k, v) = entry.map_err(|e| StoreError::Redb {
+                message: format!("range iteration failed: {e}"),
+            })?;
+            let key_bytes = k.value().to_vec();
+            // Double-check prefix match (for the unbounded case).
+            if !key_bytes.starts_with(prefix) {
+                break;
+            }
+            results.push((key_bytes, v.value().to_vec()));
+        }
+
+        Ok(results)
+    }
+
     /// Get a reference to the underlying database (for custom table operations).
     pub fn database(&self) -> &Database {
         &self.db
@@ -101,6 +152,22 @@ impl DurableStore {
     pub fn database_arc(&self) -> Arc<Database> {
         Arc::clone(&self.db)
     }
+}
+
+/// Compute the exclusive upper bound for a prefix scan.
+///
+/// Increments the last byte of the prefix. If it overflows (0xFF),
+/// truncates and carries. Returns `None` if all bytes are 0xFF (scan to end).
+fn increment_prefix(prefix: &[u8]) -> Option<Vec<u8>> {
+    let mut end = prefix.to_vec();
+    while let Some(last) = end.last_mut() {
+        if *last < 0xFF {
+            *last += 1;
+            return Some(end);
+        }
+        end.pop();
+    }
+    None
 }
 
 impl std::fmt::Debug for DurableStore {
@@ -159,5 +226,30 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let store = DurableStore::open(dir.path()).unwrap();
         assert!(!store.remove(b"nonexistent").unwrap());
+    }
+
+    #[test]
+    fn scan_prefix_returns_matching_keys() {
+        let dir = TempDir::new().unwrap();
+        let store = DurableStore::open(dir.path()).unwrap();
+
+        store.put(b"sym_meta:1", b"data1").unwrap();
+        store.put(b"sym_meta:2", b"data2").unwrap();
+        store.put(b"sym_meta:10", b"data10").unwrap();
+        store.put(b"other_key", b"other").unwrap();
+
+        let results = store.scan_prefix(b"sym_meta:").unwrap();
+        assert_eq!(results.len(), 3);
+        assert!(results.iter().all(|(k, _)| k.starts_with(b"sym_meta:")));
+    }
+
+    #[test]
+    fn scan_prefix_empty_result() {
+        let dir = TempDir::new().unwrap();
+        let store = DurableStore::open(dir.path()).unwrap();
+
+        store.put(b"other_key", b"data").unwrap();
+        let results = store.scan_prefix(b"sym_meta:").unwrap();
+        assert!(results.is_empty());
     }
 }

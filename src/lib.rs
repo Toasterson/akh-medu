@@ -31,11 +31,13 @@
 
 pub mod engine;
 pub mod error;
+pub mod export;
 pub mod graph;
 pub mod infer;
 pub mod pipeline;
 pub mod provenance;
 pub mod reason;
+pub mod registry;
 pub mod simd;
 pub mod skills;
 pub mod store;

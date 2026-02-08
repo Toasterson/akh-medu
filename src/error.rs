@@ -239,6 +239,33 @@ pub enum SymbolError {
         help("Valid symbol kinds are: Entity, Relation, Composite, Glyph.")
     )]
     InvalidKind { kind: String },
+
+    #[error("symbol not found: id {symbol_id}")]
+    #[diagnostic(
+        code(akh::symbol::not_found),
+        help("No symbol exists with this ID. Use `all_symbols()` to list available symbols.")
+    )]
+    NotFound { symbol_id: u64 },
+
+    #[error("duplicate label: \"{label}\" already registered as sym:{existing_id}")]
+    #[diagnostic(
+        code(akh::symbol::duplicate_label),
+        help(
+            "A symbol with this label already exists. Use `lookup_symbol(\"{label}\")` to retrieve it, \
+             or choose a different label."
+        )
+    )]
+    DuplicateLabel { label: String, existing_id: u64 },
+
+    #[error("symbol not found by label: \"{label}\"")]
+    #[diagnostic(
+        code(akh::symbol::label_not_found),
+        help(
+            "No symbol with this label exists. Lookup is case-insensitive. \
+             Create the symbol first with `create_symbol()`."
+        )
+    )]
+    LabelNotFound { label: String },
 }
 
 // ---------------------------------------------------------------------------

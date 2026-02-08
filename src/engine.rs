@@ -8,7 +8,8 @@ use std::sync::Arc;
 
 use egg::Rewrite;
 
-use crate::error::{AkhResult, EngineError, ProvenanceError};
+use crate::error::{AkhResult, EngineError, ProvenanceError, SymbolError};
+use crate::export::{ProvenanceExport, SymbolExport, TripleExport};
 use crate::graph::index::KnowledgeGraph;
 use crate::graph::sparql::SparqlStore;
 use crate::graph::Triple;
@@ -17,6 +18,7 @@ use crate::infer::{InferenceQuery, InferenceResult};
 use crate::pipeline::{Pipeline, PipelineContext, PipelineData, PipelineOutput};
 use crate::provenance::{DerivationKind, ProvenanceId, ProvenanceLedger, ProvenanceRecord};
 use crate::reason::AkhLang;
+use crate::registry::SymbolRegistry;
 use crate::simd;
 use crate::skills::manager::SkillManager;
 use crate::skills::SkillInfo;
@@ -65,6 +67,7 @@ pub struct Engine {
     sparql: Option<SparqlStore>,
     store: Arc<TieredStore>,
     symbol_allocator: Arc<AtomicSymbolAllocator>,
+    registry: SymbolRegistry,
     provenance_ledger: Option<ProvenanceLedger>,
     skill_manager: Option<SkillManager>,
 }
@@ -139,14 +142,35 @@ impl Engine {
             (TieredStore::memory_only(), None, None, None)
         };
 
+        let store = Arc::new(store);
+
+        // Restore registry and allocator from persistent storage if available.
+        let registry = SymbolRegistry::restore(&store).unwrap_or_else(|e| {
+            tracing::debug!(error = %e, "registry restore skipped, starting fresh");
+            SymbolRegistry::new()
+        });
+
+        let symbol_allocator = {
+            let restored_next = store
+                .get_meta(b"sym_allocator_next")
+                .ok()
+                .flatten()
+                .and_then(|bytes| bincode::deserialize::<u64>(&bytes).ok());
+            match restored_next {
+                Some(next) => Arc::new(AtomicSymbolAllocator::starting_from(next)),
+                None => Arc::new(AtomicSymbolAllocator::new()),
+            }
+        };
+
         Ok(Self {
             config,
             ops,
             item_memory,
             knowledge_graph,
             sparql,
-            store: Arc::new(store),
-            symbol_allocator: Arc::new(AtomicSymbolAllocator::new()),
+            store,
+            symbol_allocator,
+            registry,
             provenance_ledger,
             skill_manager,
         })
@@ -157,7 +181,10 @@ impl Engine {
         let id = self.symbol_allocator.next_id()?;
         let meta = SymbolMeta::new(id, kind, label);
 
-        // Store metadata
+        // Register in the bidirectional registry.
+        self.registry.register(meta.clone())?;
+
+        // Store metadata in tiered store.
         let encoded = bincode::serialize(&meta).map_err(|e| {
             crate::error::StoreError::Serialization {
                 message: format!("failed to serialize symbol meta: {e}"),
@@ -165,7 +192,7 @@ impl Engine {
         })?;
         self.store.put(id, encoded);
 
-        // Create hypervector in item memory
+        // Create hypervector in item memory.
         self.item_memory.get_or_create(&self.ops, id);
 
         Ok(meta)
@@ -403,6 +430,135 @@ impl Engine {
     }
 
     // -----------------------------------------------------------------------
+    // Introspection: symbol lookups
+    // -----------------------------------------------------------------------
+
+    /// Look up a symbol by label (case-insensitive).
+    pub fn lookup_symbol(&self, label: &str) -> AkhResult<SymbolId> {
+        self.registry
+            .lookup(label)
+            .ok_or_else(|| SymbolError::LabelNotFound { label: label.into() }.into())
+    }
+
+    /// Get metadata for a symbol by ID.
+    pub fn get_symbol_meta(&self, id: SymbolId) -> AkhResult<SymbolMeta> {
+        self.registry
+            .get(id)
+            .ok_or_else(|| SymbolError::NotFound { symbol_id: id.get() }.into())
+    }
+
+    /// List all registered symbols with metadata.
+    pub fn all_symbols(&self) -> Vec<SymbolMeta> {
+        self.registry.all()
+    }
+
+    /// Resolve a name-or-id string: try parsing as u64 first, then label lookup.
+    pub fn resolve_symbol(&self, name_or_id: &str) -> AkhResult<SymbolId> {
+        // Try numeric ID first.
+        if let Ok(raw) = name_or_id.trim().parse::<u64>() {
+            if let Some(id) = SymbolId::new(raw) {
+                return Ok(id);
+            }
+        }
+        // Fall back to label lookup.
+        self.lookup_symbol(name_or_id)
+    }
+
+    /// Resolve a label for display, falling back to `sym:{id}`.
+    pub fn resolve_label(&self, id: SymbolId) -> String {
+        self.registry.resolve_label(id)
+    }
+
+    // -----------------------------------------------------------------------
+    // Introspection: triples
+    // -----------------------------------------------------------------------
+
+    /// Check if a specific triple exists.
+    pub fn has_triple(&self, s: SymbolId, p: SymbolId, o: SymbolId) -> bool {
+        self.knowledge_graph
+            .objects_of(s, p)
+            .contains(&o)
+    }
+
+    /// Get all triples where symbol is subject.
+    pub fn triples_from(&self, symbol: SymbolId) -> Vec<Triple> {
+        self.knowledge_graph.triples_from(symbol)
+    }
+
+    /// Get all triples where symbol is object.
+    pub fn triples_to(&self, symbol: SymbolId) -> Vec<Triple> {
+        self.knowledge_graph.triples_to(symbol)
+    }
+
+    /// Get all triples in the knowledge graph.
+    pub fn all_triples(&self) -> Vec<Triple> {
+        self.knowledge_graph.all_triples()
+    }
+
+    /// Execute a SPARQL SELECT query.
+    pub fn sparql_query(&self, sparql: &str) -> AkhResult<Vec<Vec<(String, String)>>> {
+        let store = self.sparql.as_ref().ok_or(EngineError::InvalidConfig {
+            message: "SPARQL queries require persistence (--data-dir)".into(),
+        })?;
+        Ok(store.query_select(sparql)?)
+    }
+
+    // -----------------------------------------------------------------------
+    // Export
+    // -----------------------------------------------------------------------
+
+    /// Export the symbol table with resolved labels.
+    pub fn export_symbol_table(&self) -> Vec<SymbolExport> {
+        self.registry
+            .all()
+            .into_iter()
+            .map(|m| SymbolExport {
+                id: m.id.get(),
+                label: m.label.clone(),
+                kind: m.kind.to_string(),
+                created_at: m.created_at,
+            })
+            .collect()
+    }
+
+    /// Export all triples with resolved labels.
+    pub fn export_triples(&self) -> Vec<TripleExport> {
+        self.knowledge_graph
+            .all_triples()
+            .into_iter()
+            .map(|t| TripleExport {
+                subject_id: t.subject.get(),
+                subject_label: self.registry.resolve_label(t.subject),
+                predicate_id: t.predicate.get(),
+                predicate_label: self.registry.resolve_label(t.predicate),
+                object_id: t.object.get(),
+                object_label: self.registry.resolve_label(t.object),
+                confidence: t.confidence,
+            })
+            .collect()
+    }
+
+    /// Export the provenance chain for a symbol.
+    pub fn export_provenance_chain(&self, symbol: SymbolId) -> AkhResult<Vec<ProvenanceExport>> {
+        let records = self.provenance_of(symbol)?;
+        Ok(records
+            .into_iter()
+            .map(|r| {
+                let kind_desc = format!("{:?}", r.kind);
+                ProvenanceExport {
+                    id: r.id.map(|p| p.get()).unwrap_or(0),
+                    derived_id: r.derived_id.get(),
+                    derived_label: self.registry.resolve_label(r.derived_id),
+                    kind: kind_desc,
+                    confidence: r.confidence,
+                    depth: r.depth,
+                    sources: r.sources.iter().map(|s| s.get()).collect(),
+                }
+            })
+            .collect())
+    }
+
+    // -----------------------------------------------------------------------
     // Accessors
     // -----------------------------------------------------------------------
 
@@ -443,7 +599,7 @@ impl Engine {
         EngineInfo {
             dimension: self.config.dimension.0,
             encoding: self.config.encoding.to_string(),
-            isa_level: self.ops.dim().0.to_string(), // placeholder
+            isa_level: format!("{}", self.ops.isa_level()),
             symbol_count: self.item_memory.len(),
             node_count: self.knowledge_graph.node_count(),
             triple_count: self.knowledge_graph.triple_count(),
@@ -454,8 +610,21 @@ impl Engine {
         }
     }
 
-    /// Persist current state (sync knowledge graph to SPARQL store).
+    /// Persist current state (registry, allocator, knowledge graph → SPARQL).
     pub fn persist(&self) -> AkhResult<()> {
+        // Persist symbol registry.
+        self.registry.persist(&self.store)?;
+
+        // Persist allocator next-ID so new symbols resume correctly after restart.
+        let next = self.symbol_allocator.peek_next();
+        let encoded = bincode::serialize(&next).map_err(|e| {
+            crate::error::StoreError::Serialization {
+                message: format!("failed to serialize allocator state: {e}"),
+            }
+        })?;
+        self.store.put_meta(b"sym_allocator_next", &encoded)?;
+
+        // Sync knowledge graph to SPARQL store.
         if let Some(ref sparql) = self.sparql {
             sparql.sync_from(&self.knowledge_graph)?;
         }
@@ -500,6 +669,7 @@ impl std::fmt::Debug for Engine {
             .field("config", &self.config)
             .field("item_memory", &self.item_memory)
             .field("knowledge_graph", &self.knowledge_graph)
+            .field("registry", &self.registry)
             .finish()
     }
 }

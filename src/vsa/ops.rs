@@ -58,6 +58,11 @@ impl VsaOps {
         self.encoding
     }
 
+    /// The SIMD instruction set level this kernel uses.
+    pub fn isa_level(&self) -> crate::simd::IsaLevel {
+        self.kernel.isa_level()
+    }
+
     /// Generate a random hypervector using the given RNG.
     pub fn random(&self, rng: &mut impl rand::Rng) -> HyperVec {
         let byte_len = self.dim.binary_byte_len();
