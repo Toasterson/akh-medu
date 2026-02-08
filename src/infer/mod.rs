@@ -10,47 +10,9 @@ pub mod engine;
 use crate::symbol::SymbolId;
 use crate::vsa::HyperVec;
 
-/// How a particular activation was derived.
-#[derive(Debug, Clone, PartialEq)]
-pub enum DerivationKind {
-    /// Seed symbol provided by the user.
-    Seed,
-    /// Inferred by following a graph edge.
-    GraphEdge {
-        from: SymbolId,
-        predicate: SymbolId,
-    },
-    /// Inferred via VSA unbind + cleanup recovery.
-    VsaRecovery {
-        from: SymbolId,
-        predicate: SymbolId,
-        similarity: f32,
-    },
-    /// Inferred via analogy (A:B :: C:?).
-    Analogy {
-        a: SymbolId,
-        b: SymbolId,
-        c: SymbolId,
-    },
-    /// Recovered as a role-filler via unbind.
-    FillerRecovery {
-        subject: SymbolId,
-        predicate: SymbolId,
-    },
-}
-
-/// A record of how a symbol was activated during inference.
-#[derive(Debug, Clone)]
-pub struct ProvenanceRecord {
-    /// The symbol that was activated.
-    pub symbol: SymbolId,
-    /// The confidence at which it was activated.
-    pub confidence: f32,
-    /// The depth at which it was activated.
-    pub depth: usize,
-    /// How this activation was derived.
-    pub kind: DerivationKind,
-}
+// Re-export unified provenance types so downstream code can use them
+// through `crate::infer::DerivationKind` / `crate::infer::ProvenanceRecord`.
+pub use crate::provenance::{DerivationKind, ProvenanceRecord};
 
 /// Query for the inference engine.
 #[derive(Debug, Clone)]

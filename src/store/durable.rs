@@ -94,6 +94,13 @@ impl DurableStore {
     pub fn database(&self) -> &Database {
         &self.db
     }
+
+    /// Get a shared handle to the underlying database.
+    ///
+    /// Used by the provenance ledger to open its own tables on the same DB.
+    pub fn database_arc(&self) -> Arc<Database> {
+        Arc::clone(&self.db)
+    }
 }
 
 impl std::fmt::Debug for DurableStore {

@@ -6,8 +6,11 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use egg::Rewrite;
+
 use crate::error::InferError;
 use crate::graph::index::KnowledgeGraph;
+use crate::reason::AkhLang;
 use crate::symbol::SymbolId;
 use crate::vsa::item_memory::ItemMemory;
 use crate::vsa::ops::VsaOps;
@@ -69,8 +72,18 @@ impl InferEngine {
         }
     }
 
-    /// Run spreading-activation inference from the given query.
+    /// Run spreading-activation inference using the built-in rules.
     pub fn infer(&self, query: &InferenceQuery) -> InferResult<InferenceResult> {
+        let rules = crate::reason::builtin_rules();
+        self.infer_with_rules(query, &rules)
+    }
+
+    /// Run spreading-activation inference with custom rewrite rules.
+    pub fn infer_with_rules(
+        &self,
+        query: &InferenceQuery,
+        rules: &[Rewrite<AkhLang, ()>],
+    ) -> InferResult<InferenceResult> {
         if query.seeds.is_empty() {
             return Err(InferError::NoSeeds);
         }
@@ -83,12 +96,11 @@ impl InferEngine {
             let vec = self.item_memory.get_or_create(&self.ops, seed);
             seed_vecs.push(vec);
             ctx.activate(seed, 1.0);
-            ctx.provenance.push(ProvenanceRecord {
-                symbol: seed,
-                confidence: 1.0,
-                depth: 0,
-                kind: DerivationKind::Seed,
-            });
+            ctx.provenance.push(
+                ProvenanceRecord::new(seed, DerivationKind::Seed)
+                    .with_confidence(1.0)
+                    .with_depth(0),
+            );
         }
 
         // Bundle seeds into initial pattern
@@ -134,15 +146,18 @@ impl InferEngine {
                     let graph_confidence = parent_confidence * edge_confidence;
                     if graph_confidence >= query.min_confidence {
                         if ctx.activate(triple.object, graph_confidence) {
-                            ctx.provenance.push(ProvenanceRecord {
-                                symbol: triple.object,
-                                confidence: graph_confidence,
-                                depth: depth + 1,
-                                kind: DerivationKind::GraphEdge {
-                                    from: sym,
-                                    predicate: triple.predicate,
-                                },
-                            });
+                            ctx.provenance.push(
+                                ProvenanceRecord::new(
+                                    triple.object,
+                                    DerivationKind::GraphEdge {
+                                        from: sym,
+                                        predicate: triple.predicate,
+                                    },
+                                )
+                                .with_sources(vec![sym])
+                                .with_confidence(graph_confidence)
+                                .with_depth(depth + 1),
+                            );
                             let obj_vec =
                                 self.item_memory.get_or_create(&self.ops, triple.object);
                             new_vecs.push(obj_vec);
@@ -166,16 +181,19 @@ impl InferEngine {
                                     graph_confidence.max(vsa_confidence);
                                 if combined >= query.min_confidence {
                                     if ctx.activate(sr.symbol_id, combined) {
-                                        ctx.provenance.push(ProvenanceRecord {
-                                            symbol: sr.symbol_id,
-                                            confidence: combined,
-                                            depth: depth + 1,
-                                            kind: DerivationKind::VsaRecovery {
-                                                from: sym,
-                                                predicate: triple.predicate,
-                                                similarity: sr.similarity,
-                                            },
-                                        });
+                                        ctx.provenance.push(
+                                            ProvenanceRecord::new(
+                                                sr.symbol_id,
+                                                DerivationKind::VsaRecovery {
+                                                    from: sym,
+                                                    predicate: triple.predicate,
+                                                    similarity: sr.similarity,
+                                                },
+                                            )
+                                            .with_sources(vec![sym, triple.predicate])
+                                            .with_confidence(combined)
+                                            .with_depth(depth + 1),
+                                        );
                                         let sr_vec = self
                                             .item_memory
                                             .get_or_create(&self.ops, sr.symbol_id);
@@ -200,7 +218,7 @@ impl InferEngine {
 
         // --- Optional e-graph verification ---
         if query.verify_with_egraph {
-            self.verify_with_egraph(&mut ctx);
+            self.verify_with_egraph(&mut ctx, rules);
         }
 
         // --- Collect results: filter out seeds, sort by confidence ---
@@ -277,10 +295,8 @@ impl InferEngine {
 
     /// Apply e-graph verification: build expressions from provenance chains
     /// and penalize non-simplifiable inferences.
-    fn verify_with_egraph(&self, ctx: &mut InferContext) {
+    fn verify_with_egraph(&self, ctx: &mut InferContext, rules: &[Rewrite<AkhLang, ()>]) {
         use egg::{AstSize, Extractor, Runner};
-
-        let rules = crate::reason::builtin_rules();
 
         for record in &ctx.provenance {
             if let DerivationKind::VsaRecovery {
@@ -297,13 +313,13 @@ impl InferEngine {
                     predicate.get()
                 );
                 if let Ok(expr) = expr_str.parse::<egg::RecExpr<crate::reason::AkhLang>>() {
-                    let runner = Runner::default().with_expr(&expr).run(&rules);
+                    let runner = Runner::default().with_expr(&expr).run(rules);
                     let extractor = Extractor::new(&runner.egraph, AstSize);
                     let (original_cost, _) = extractor.find_best(runner.roots[0]);
                     // If the expression didn't simplify at all, it's suspicious
                     // but we only slightly penalize rather than rejecting
                     if original_cost >= 5 {
-                        if let Some(conf) = ctx.activations.get_mut(&record.symbol) {
+                        if let Some(conf) = ctx.activations.get_mut(&record.derived_id) {
                             *conf *= 0.9;
                         }
                     }

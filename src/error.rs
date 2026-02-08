@@ -43,6 +43,14 @@ pub enum AkhError {
 
     #[error(transparent)]
     #[diagnostic(transparent)]
+    Provenance(#[from] ProvenanceError),
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Pipeline(#[from] PipelineError),
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
     Engine(#[from] EngineError),
 }
 
@@ -348,7 +356,7 @@ pub enum SkillError {
         code(akh::skill::not_found),
         help(
             "No skillpack with this name is registered. \
-             Check available skillpacks with `akh-medu info`."
+             Check available skillpacks with `akh-medu skill list`."
         )
     )]
     NotFound { name: String },
@@ -376,6 +384,152 @@ pub enum SkillError {
         required_mb: usize,
         available_mb: usize,
     },
+
+    #[error("invalid manifest at {path}: {message}")]
+    #[diagnostic(
+        code(akh::skill::invalid_manifest),
+        help(
+            "The skill.json file is malformed or missing required fields. \
+             Ensure it contains id, name, version, and domains."
+        )
+    )]
+    InvalidManifest { path: String, message: String },
+
+    #[error("invalid rule in skillpack {skill_id}: {message}")]
+    #[diagnostic(
+        code(akh::skill::invalid_rule),
+        help(
+            "A rewrite rule could not be parsed. Rules must use the format: \
+             <lhs-pattern> => <rhs-pattern>, e.g. '(bind ?a (bind ?a ?b)) => ?b'."
+        )
+    )]
+    InvalidRule { skill_id: String, message: String },
+
+    #[error("invalid state transition for skill {skill_id}: {from} -> {to}")]
+    #[diagnostic(
+        code(akh::skill::invalid_transition),
+        help(
+            "Skillpacks follow the lifecycle Cold → Warm → Hot. \
+             You cannot skip states or go backwards except via deactivate."
+        )
+    )]
+    InvalidTransition {
+        skill_id: String,
+        from: String,
+        to: String,
+    },
+
+    #[error("skills directory not found: {path}")]
+    #[diagnostic(
+        code(akh::skill::no_skills_dir),
+        help(
+            "The skills directory does not exist. \
+             Create it at the expected path or configure a different data directory."
+        )
+    )]
+    NoSkillsDir { path: String },
+
+    #[error("I/O error for skillpack {skill_id}: {source}")]
+    #[diagnostic(
+        code(akh::skill::io),
+        help("A filesystem operation failed while accessing the skillpack directory.")
+    )]
+    Io {
+        skill_id: String,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+// ---------------------------------------------------------------------------
+// Provenance errors
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Error, Diagnostic)]
+pub enum ProvenanceError {
+    #[error("provenance record not found: id {id}")]
+    #[diagnostic(
+        code(akh::provenance::not_found),
+        help(
+            "No provenance record exists with this ID. \
+             Check that the ID is correct, or query by derived symbol instead."
+        )
+    )]
+    NotFound { id: u64 },
+
+    #[error("provenance ledger requires persistence — no durable store configured")]
+    #[diagnostic(
+        code(akh::provenance::no_persistence),
+        help(
+            "The provenance ledger needs a data directory for storage. \
+             Pass --data-dir to enable persistence, or use Engine::new() \
+             with a configured data_dir."
+        )
+    )]
+    NoPersistence,
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Store(#[from] StoreError),
+}
+
+// ---------------------------------------------------------------------------
+// Pipeline errors
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Error, Diagnostic)]
+pub enum PipelineError {
+    #[error("pipeline {name} has no stages")]
+    #[diagnostic(
+        code(akh::pipeline::empty),
+        help("A pipeline must contain at least one stage. Add stages before running.")
+    )]
+    EmptyPipeline { name: String },
+
+    #[error("stage {stage_name} execution failed: {message}")]
+    #[diagnostic(
+        code(akh::pipeline::stage_execution),
+        help("An individual pipeline stage encountered an error during execution.")
+    )]
+    StageExecution { stage_name: String, message: String },
+
+    #[error("pipeline {pipeline_name} failed at stage {stage_index} ({stage_name})")]
+    #[diagnostic(
+        code(akh::pipeline::stage_failure),
+        help(
+            "A pipeline stage failed. Check the inner error for details. \
+             The pipeline was aborted at this stage."
+        )
+    )]
+    StageFailure {
+        pipeline_name: String,
+        stage_name: String,
+        stage_index: usize,
+        #[source]
+        source: Box<PipelineError>,
+    },
+
+    #[error("stage {stage_name} expected {expected} data, got {actual}")]
+    #[diagnostic(
+        code(akh::pipeline::incompatible_data),
+        help(
+            "The output of the previous stage is not compatible with this stage's input. \
+             Check pipeline stage ordering — e.g. Retrieve produces Traversal data, \
+             not Seeds."
+        )
+    )]
+    IncompatibleData {
+        stage_name: String,
+        expected: String,
+        actual: String,
+    },
+
+    #[error("no seed symbols available for pipeline execution")]
+    #[diagnostic(
+        code(akh::pipeline::no_seeds),
+        help("The pipeline needs seed symbols to start. Provide initial Seeds data.")
+    )]
+    NoSeeds,
 }
 
 // ---------------------------------------------------------------------------
@@ -411,6 +565,15 @@ pub enum EngineError {
 
 /// Convenience alias for functions returning akh-medu results.
 pub type AkhResult<T> = std::result::Result<T, AkhError>;
+
+/// Result type for provenance operations.
+pub type ProvenanceResult<T> = std::result::Result<T, ProvenanceError>;
+
+/// Result type for pipeline operations.
+pub type PipelineResult<T> = std::result::Result<T, PipelineError>;
+
+/// Result type for skill operations.
+pub type SkillResult<T> = std::result::Result<T, SkillError>;
 
 #[cfg(test)]
 mod tests {

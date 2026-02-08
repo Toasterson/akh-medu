@@ -8,6 +8,7 @@ use miette::{IntoDiagnostic, Result};
 use akh_medu::engine::{Engine, EngineConfig};
 use akh_medu::graph::Triple;
 use akh_medu::infer::InferenceQuery;
+use akh_medu::provenance::DerivationKind;
 use akh_medu::symbol::SymbolId;
 use akh_medu::vsa::Dimension;
 
@@ -55,6 +56,33 @@ enum Commands {
 
     /// Show engine info and statistics.
     Info,
+
+    /// Manage skillpacks.
+    Skill {
+        #[command(subcommand)]
+        action: SkillAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum SkillAction {
+    /// List all discovered skillpacks.
+    List,
+    /// Load (discover + warm + activate) a skillpack.
+    Load {
+        /// Skill name (directory name under skills/).
+        name: String,
+    },
+    /// Unload (deactivate) a skillpack.
+    Unload {
+        /// Skill name.
+        name: String,
+    },
+    /// Show details about a skillpack.
+    Info {
+        /// Skill name.
+        name: String,
+    },
 }
 
 fn main() -> Result<()> {
@@ -159,11 +187,12 @@ fn main() -> Result<()> {
                 println!("\nProvenance:");
                 for record in &result.provenance {
                     let kind_desc = match &record.kind {
-                        akh_medu::infer::DerivationKind::Seed => "seed".to_string(),
-                        akh_medu::infer::DerivationKind::GraphEdge { from, predicate } => {
+                        DerivationKind::Extracted => "extracted".to_string(),
+                        DerivationKind::Seed => "seed".to_string(),
+                        DerivationKind::GraphEdge { from, predicate } => {
                             format!("graph edge from {} via {}", from, predicate)
                         }
-                        akh_medu::infer::DerivationKind::VsaRecovery {
+                        DerivationKind::VsaRecovery {
                             from,
                             predicate,
                             similarity,
@@ -173,19 +202,21 @@ fn main() -> Result<()> {
                                 from, predicate, similarity
                             )
                         }
-                        akh_medu::infer::DerivationKind::Analogy { a, b, c } => {
+                        DerivationKind::Analogy { a, b, c } => {
                             format!("analogy {}:{} :: {}:?", a, b, c)
                         }
-                        akh_medu::infer::DerivationKind::FillerRecovery {
+                        DerivationKind::FillerRecovery {
                             subject,
                             predicate,
                         } => {
                             format!("filler recovery ({}, {})", subject, predicate)
                         }
+                        DerivationKind::Reasoned => "reasoned".to_string(),
+                        DerivationKind::Aggregated => "aggregated".to_string(),
                     };
                     println!(
                         "  {} depth={} confidence={:.4} [{}]",
-                        record.symbol, record.depth, record.confidence, kind_desc
+                        record.derived_id, record.depth, record.confidence, kind_desc
                     );
                 }
             }
@@ -194,6 +225,49 @@ fn main() -> Result<()> {
         Commands::Info => {
             let engine = Engine::new(config).into_diagnostic()?;
             println!("{}", engine.info());
+        }
+
+        Commands::Skill { action } => {
+            let engine = Engine::new(config).into_diagnostic()?;
+
+            match action {
+                SkillAction::List => {
+                    let skills = engine.list_skills();
+                    if skills.is_empty() {
+                        println!("No skillpacks discovered.");
+                    } else {
+                        println!("Skillpacks ({}):", skills.len());
+                        for skill in &skills {
+                            println!(
+                                "  {} ({}) [{}] - {}",
+                                skill.id, skill.version, skill.state, skill.description
+                            );
+                        }
+                    }
+                }
+                SkillAction::Load { name } => {
+                    let activation = engine.load_skill(&name).into_diagnostic()?;
+                    println!("Loaded skill: {}", activation.skill_id);
+                    println!("  triples: {}", activation.triples_loaded);
+                    println!("  rules:   {}", activation.rules_loaded);
+                    println!("  memory:  {} bytes", activation.memory_bytes);
+                }
+                SkillAction::Unload { name } => {
+                    engine.unload_skill(&name).into_diagnostic()?;
+                    println!("Unloaded skill: {name}");
+                }
+                SkillAction::Info { name } => {
+                    let info = engine.skill_info(&name).into_diagnostic()?;
+                    println!("Skill: {}", info.id);
+                    println!("  name:        {}", info.name);
+                    println!("  version:     {}", info.version);
+                    println!("  description: {}", info.description);
+                    println!("  state:       {}", info.state);
+                    println!("  domains:     {}", info.domains.join(", "));
+                    println!("  triples:     {}", info.triple_count);
+                    println!("  rules:       {}", info.rule_count);
+                }
+            }
         }
     }
 

@@ -6,13 +6,20 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::error::{AkhResult, EngineError};
+use egg::Rewrite;
+
+use crate::error::{AkhResult, EngineError, ProvenanceError};
 use crate::graph::index::KnowledgeGraph;
 use crate::graph::sparql::SparqlStore;
 use crate::graph::Triple;
 use crate::infer::engine::InferEngine;
 use crate::infer::{InferenceQuery, InferenceResult};
+use crate::pipeline::{Pipeline, PipelineContext, PipelineData, PipelineOutput};
+use crate::provenance::{DerivationKind, ProvenanceId, ProvenanceLedger, ProvenanceRecord};
+use crate::reason::AkhLang;
 use crate::simd;
+use crate::skills::manager::SkillManager;
+use crate::skills::SkillInfo;
 use crate::store::TieredStore;
 use crate::symbol::{AtomicSymbolAllocator, SymbolId, SymbolKind, SymbolMeta};
 use crate::vsa::item_memory::{ItemMemory, SearchResult};
@@ -49,7 +56,7 @@ impl Default for EngineConfig {
 /// The akh-medu neuro-symbolic AI engine.
 ///
 /// Owns all subsystems: VSA operations, item memory, knowledge graph,
-/// storage tiers, and symbol allocator.
+/// storage tiers, symbol allocator, provenance ledger, and skill manager.
 pub struct Engine {
     config: EngineConfig,
     ops: Arc<VsaOps>,
@@ -58,6 +65,8 @@ pub struct Engine {
     sparql: Option<SparqlStore>,
     store: Arc<TieredStore>,
     symbol_allocator: Arc<AtomicSymbolAllocator>,
+    provenance_ledger: Option<ProvenanceLedger>,
+    skill_manager: Option<SkillManager>,
 }
 
 impl Engine {
@@ -86,7 +95,9 @@ impl Engine {
         ));
         let knowledge_graph = Arc::new(KnowledgeGraph::new());
 
-        let (store, sparql) = if let Some(ref dir) = config.data_dir {
+        let (store, sparql, provenance_ledger, skill_manager) = if let Some(ref dir) =
+            config.data_dir
+        {
             std::fs::create_dir_all(dir).map_err(|_| EngineError::DataDir {
                 path: dir.display().to_string(),
             })?;
@@ -100,9 +111,32 @@ impl Engine {
                     message: format!("failed to create SPARQL store: {e}"),
                 }
             })?;
-            (store, Some(sparql))
+
+            // Initialize provenance ledger from the durable store's database.
+            let ledger = if let Some(ref durable) = store.durable {
+                let db = durable.database_arc();
+                match ProvenanceLedger::open(db) {
+                    Ok(l) => Some(l),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "failed to open provenance ledger, running without");
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
+            // Initialize skill manager.
+            let skills_dir = dir.join("skills");
+            let skill_mgr = SkillManager::new(skills_dir, config.max_memory_mb);
+            // Auto-discover, but don't fail if directory doesn't exist yet.
+            if let Err(e) = skill_mgr.discover() {
+                tracing::debug!(error = %e, "skill discovery skipped");
+            }
+
+            (store, Some(sparql), ledger, Some(skill_mgr))
         } else {
-            (TieredStore::memory_only(), None)
+            (TieredStore::memory_only(), None, None, None)
         };
 
         Ok(Self {
@@ -113,6 +147,8 @@ impl Engine {
             sparql,
             store: Arc::new(store),
             symbol_allocator: Arc::new(AtomicSymbolAllocator::new()),
+            provenance_ledger,
+            skill_manager,
         })
     }
 
@@ -172,61 +208,44 @@ impl Engine {
         self.search_similar(&vec, top_k)
     }
 
-    /// Get the VSA operations handle.
-    pub fn ops(&self) -> &VsaOps {
-        &self.ops
-    }
+    // -----------------------------------------------------------------------
+    // Rule management
+    // -----------------------------------------------------------------------
 
-    /// Get the item memory handle.
-    pub fn item_memory(&self) -> &ItemMemory {
-        &self.item_memory
-    }
-
-    /// Get the knowledge graph handle.
-    pub fn knowledge_graph(&self) -> &KnowledgeGraph {
-        &self.knowledge_graph
-    }
-
-    /// Get the SPARQL store handle.
-    pub fn sparql(&self) -> Option<&SparqlStore> {
-        self.sparql.as_ref()
-    }
-
-    /// Get the engine configuration.
-    pub fn config(&self) -> &EngineConfig {
-        &self.config
-    }
-
-    /// Get system info (node count, triple count, symbol count, etc.)
-    pub fn info(&self) -> EngineInfo {
-        EngineInfo {
-            dimension: self.config.dimension.0,
-            encoding: self.config.encoding.to_string(),
-            isa_level: self.ops.dim().0.to_string(), // placeholder
-            symbol_count: self.item_memory.len(),
-            node_count: self.knowledge_graph.node_count(),
-            triple_count: self.knowledge_graph.triple_count(),
-            store_hot_entries: self.store.hot_len(),
-            persistent: self.config.data_dir.is_some(),
+    /// Collect all rewrite rules: built-in + skill-provided.
+    pub fn all_rules(&self) -> Vec<Rewrite<AkhLang, ()>> {
+        let mut rules = crate::reason::builtin_rules();
+        if let Some(ref mgr) = self.skill_manager {
+            rules.extend(mgr.active_rules());
         }
+        rules
     }
 
-    /// Persist current state (sync knowledge graph to SPARQL store).
-    pub fn persist(&self) -> AkhResult<()> {
-        if let Some(ref sparql) = self.sparql {
-            sparql.sync_from(&self.knowledge_graph)?;
-        }
-        Ok(())
-    }
+    // -----------------------------------------------------------------------
+    // Inference
+    // -----------------------------------------------------------------------
 
     /// Run spreading-activation inference from the given query.
+    ///
+    /// Uses all active rules (built-in + skills) and optionally persists
+    /// provenance records to the ledger.
     pub fn infer(&self, query: &InferenceQuery) -> AkhResult<InferenceResult> {
+        let rules = self.all_rules();
         let infer_engine = InferEngine::new(
             Arc::clone(&self.ops),
             Arc::clone(&self.item_memory),
             Arc::clone(&self.knowledge_graph),
         );
-        Ok(infer_engine.infer(query)?)
+        let mut result = infer_engine.infer_with_rules(query, &rules)?;
+
+        // Persist provenance records if ledger is available.
+        if let Some(ref ledger) = self.provenance_ledger {
+            if let Err(e) = ledger.store_batch(&mut result.provenance) {
+                tracing::warn!(error = %e, "failed to persist provenance records");
+            }
+        }
+
+        Ok(result)
     }
 
     /// Analogy inference: "A is to B as C is to ?".
@@ -259,6 +278,189 @@ impl Engine {
         );
         Ok(infer_engine.recover_filler(subject, predicate, top_k)?)
     }
+
+    // -----------------------------------------------------------------------
+    // Provenance
+    // -----------------------------------------------------------------------
+
+    /// Store a provenance record in the ledger.
+    pub fn store_provenance(&self, record: &mut ProvenanceRecord) -> AkhResult<ProvenanceId> {
+        let ledger = self
+            .provenance_ledger
+            .as_ref()
+            .ok_or(ProvenanceError::NoPersistence)?;
+        Ok(ledger.store(record)?)
+    }
+
+    /// Get a provenance record by ID.
+    pub fn get_provenance(&self, id: ProvenanceId) -> AkhResult<ProvenanceRecord> {
+        let ledger = self
+            .provenance_ledger
+            .as_ref()
+            .ok_or(ProvenanceError::NoPersistence)?;
+        Ok(ledger.get(id)?)
+    }
+
+    /// Get all provenance records for a derived symbol.
+    pub fn provenance_of(&self, symbol: SymbolId) -> AkhResult<Vec<ProvenanceRecord>> {
+        let ledger = self
+            .provenance_ledger
+            .as_ref()
+            .ok_or(ProvenanceError::NoPersistence)?;
+        Ok(ledger.by_derived(symbol)?)
+    }
+
+    /// Get all provenance records that depend on a given source symbol.
+    pub fn dependents_of(&self, symbol: SymbolId) -> AkhResult<Vec<ProvenanceRecord>> {
+        let ledger = self
+            .provenance_ledger
+            .as_ref()
+            .ok_or(ProvenanceError::NoPersistence)?;
+        Ok(ledger.by_source(symbol)?)
+    }
+
+    /// Get all provenance records of a given derivation kind.
+    pub fn provenance_by_kind(&self, kind: &DerivationKind) -> AkhResult<Vec<ProvenanceRecord>> {
+        let ledger = self
+            .provenance_ledger
+            .as_ref()
+            .ok_or(ProvenanceError::NoPersistence)?;
+        Ok(ledger.by_kind(kind)?)
+    }
+
+    // -----------------------------------------------------------------------
+    // Pipeline
+    // -----------------------------------------------------------------------
+
+    /// Run a pipeline with the given initial data.
+    pub fn run_pipeline(
+        &self,
+        pipeline: &Pipeline,
+        initial: PipelineData,
+    ) -> AkhResult<PipelineOutput> {
+        let ctx = PipelineContext {
+            ops: Arc::clone(&self.ops),
+            item_memory: Arc::clone(&self.item_memory),
+            knowledge_graph: Arc::clone(&self.knowledge_graph),
+            rules: self.all_rules(),
+        };
+        Ok(pipeline.run(&ctx, initial)?)
+    }
+
+    /// Run the built-in query pipeline with the given seeds.
+    pub fn query_pipeline(&self, seeds: Vec<SymbolId>) -> AkhResult<PipelineOutput> {
+        let pipeline = Pipeline::query_pipeline();
+        self.run_pipeline(&pipeline, PipelineData::Seeds(seeds))
+    }
+
+    // -----------------------------------------------------------------------
+    // Skills
+    // -----------------------------------------------------------------------
+
+    /// Load a skill: discover → warm → activate.
+    pub fn load_skill(&self, name: &str) -> AkhResult<crate::skills::SkillActivation> {
+        let mgr = self
+            .skill_manager
+            .as_ref()
+            .ok_or(crate::error::SkillError::NotFound {
+                name: name.into(),
+            })?;
+
+        // Ensure discovered.
+        let _ = mgr.discover();
+        mgr.warm(name)?;
+        Ok(mgr.activate(name, &self.knowledge_graph)?)
+    }
+
+    /// Unload (deactivate) a skill.
+    pub fn unload_skill(&self, name: &str) -> AkhResult<()> {
+        let mgr = self
+            .skill_manager
+            .as_ref()
+            .ok_or(crate::error::SkillError::NotFound {
+                name: name.into(),
+            })?;
+        Ok(mgr.deactivate(name)?)
+    }
+
+    /// List all known skills.
+    pub fn list_skills(&self) -> Vec<SkillInfo> {
+        self.skill_manager
+            .as_ref()
+            .map(|mgr| mgr.list())
+            .unwrap_or_default()
+    }
+
+    /// Get info about a specific skill.
+    pub fn skill_info(&self, name: &str) -> AkhResult<SkillInfo> {
+        let mgr = self
+            .skill_manager
+            .as_ref()
+            .ok_or(crate::error::SkillError::NotFound {
+                name: name.into(),
+            })?;
+        Ok(mgr.get_info(name)?)
+    }
+
+    // -----------------------------------------------------------------------
+    // Accessors
+    // -----------------------------------------------------------------------
+
+    /// Get the VSA operations handle.
+    pub fn ops(&self) -> &VsaOps {
+        &self.ops
+    }
+
+    /// Get the item memory handle.
+    pub fn item_memory(&self) -> &ItemMemory {
+        &self.item_memory
+    }
+
+    /// Get the knowledge graph handle.
+    pub fn knowledge_graph(&self) -> &KnowledgeGraph {
+        &self.knowledge_graph
+    }
+
+    /// Get the SPARQL store handle.
+    pub fn sparql(&self) -> Option<&SparqlStore> {
+        self.sparql.as_ref()
+    }
+
+    /// Get the engine configuration.
+    pub fn config(&self) -> &EngineConfig {
+        &self.config
+    }
+
+    /// Get system info (node count, triple count, symbol count, etc.)
+    pub fn info(&self) -> EngineInfo {
+        let provenance_count = self
+            .provenance_ledger
+            .as_ref()
+            .and_then(|l| l.len().ok())
+            .unwrap_or(0);
+        let skill_count = self.list_skills().len();
+
+        EngineInfo {
+            dimension: self.config.dimension.0,
+            encoding: self.config.encoding.to_string(),
+            isa_level: self.ops.dim().0.to_string(), // placeholder
+            symbol_count: self.item_memory.len(),
+            node_count: self.knowledge_graph.node_count(),
+            triple_count: self.knowledge_graph.triple_count(),
+            store_hot_entries: self.store.hot_len(),
+            persistent: self.config.data_dir.is_some(),
+            provenance_count,
+            skill_count,
+        }
+    }
+
+    /// Persist current state (sync knowledge graph to SPARQL store).
+    pub fn persist(&self) -> AkhResult<()> {
+        if let Some(ref sparql) = self.sparql {
+            sparql.sync_from(&self.knowledge_graph)?;
+        }
+        Ok(())
+    }
 }
 
 /// Summary information about the engine state.
@@ -272,6 +474,8 @@ pub struct EngineInfo {
     pub triple_count: usize,
     pub store_hot_entries: usize,
     pub persistent: bool,
+    pub provenance_count: usize,
+    pub skill_count: usize,
 }
 
 impl std::fmt::Display for EngineInfo {
@@ -283,6 +487,8 @@ impl std::fmt::Display for EngineInfo {
         writeln!(f, "  nodes:        {}", self.node_count)?;
         writeln!(f, "  triples:      {}", self.triple_count)?;
         writeln!(f, "  hot entries:  {}", self.store_hot_entries)?;
+        writeln!(f, "  provenance:   {}", self.provenance_count)?;
+        writeln!(f, "  skills:       {}", self.skill_count)?;
         writeln!(f, "  persistent:   {}", self.persistent)?;
         Ok(())
     }
@@ -373,6 +579,19 @@ mod tests {
             dimension: Dimension(0),
             ..Default::default()
         });
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn provenance_requires_persistence() {
+        let engine = Engine::new(EngineConfig {
+            dimension: Dimension::TEST,
+            ..Default::default()
+        })
+        .unwrap();
+
+        let sym = SymbolId::new(1).unwrap();
+        let result = engine.provenance_of(sym);
         assert!(result.is_err());
     }
 }
