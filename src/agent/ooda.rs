@@ -3,6 +3,8 @@
 //! Each cycle gathers state, builds context, chooses an action, and executes it.
 //! The agent's working memory is updated throughout the cycle.
 
+use std::collections::{HashMap, HashSet};
+
 use crate::graph::Triple;
 use crate::provenance::{DerivationKind, ProvenanceRecord};
 use crate::symbol::SymbolId;
@@ -295,11 +297,206 @@ fn decide(
     })
 }
 
-/// Tool selection strategy.
+// ---------------------------------------------------------------------------
+// Utility-based tool selection
+// ---------------------------------------------------------------------------
+
+/// Tool usage history for a specific goal, extracted from working memory.
+struct GoalToolHistory {
+    /// How many times each tool was used for this goal.
+    usage_counts: HashMap<String, usize>,
+    /// Ordered list of tools used (most recent last), for recency tracking.
+    recent_tools: Vec<String>,
+}
+
+impl GoalToolHistory {
+    /// Extract tool history for a goal from working memory Decision entries.
+    fn from_working_memory(wm: &WorkingMemory, goal_id: SymbolId) -> Self {
+        let mut usage_counts: HashMap<String, usize> = HashMap::new();
+        let mut recent_tools = Vec::new();
+
+        let mut decisions: Vec<&WorkingMemoryEntry> = wm
+            .by_kind(WorkingMemoryKind::Decision)
+            .into_iter()
+            .filter(|e| e.symbols.contains(&goal_id))
+            .collect();
+        decisions.sort_by_key(|e| e.id);
+
+        for entry in decisions {
+            if let Some(tool_name) = parse_tool_from_decision(&entry.content) {
+                *usage_counts.entry(tool_name.clone()).or_insert(0) += 1;
+                recent_tools.push(tool_name);
+            }
+        }
+
+        Self {
+            usage_counts,
+            recent_tools,
+        }
+    }
+
+    /// How many times a tool has been used for this goal.
+    fn count(&self, tool: &str) -> usize {
+        self.usage_counts.get(tool).copied().unwrap_or(0)
+    }
+
+    /// Whether a tool has ever been used for this goal.
+    fn ever_used(&self, tool: &str) -> bool {
+        self.count(tool) > 0
+    }
+
+    /// How recently a tool was used (0 = most recent, 1 = one before, etc).
+    /// Returns None if never used for this goal.
+    fn recency(&self, tool: &str) -> Option<usize> {
+        self.recent_tools
+            .iter()
+            .rev()
+            .position(|t| t == tool)
+    }
+
+}
+
+/// Parse tool name from a Decision WM entry content string.
+fn parse_tool_from_decision(content: &str) -> Option<String> {
+    content
+        .strip_prefix("Decide: tool=")
+        .and_then(|s| s.find(',').map(|i| s[..i].to_string()))
+}
+
+/// A scored tool candidate with utility breakdown.
+struct ToolCandidate {
+    name: String,
+    input: ToolInput,
+    /// How appropriate this tool is given the current state [0.0, 1.0].
+    base_score: f32,
+    /// Penalty for recent use on the same goal [0.0, 0.5].
+    recency_penalty: f32,
+    /// Bonus for being an unexplored tool for this goal [0.0, 0.2].
+    novelty_bonus: f32,
+    /// Bonus from episodic memory suggesting this tool worked before [0.0, 0.2].
+    episodic_bonus: f32,
+    /// Bonus for being appropriate given memory pressure [0.0, 0.2].
+    pressure_bonus: f32,
+    /// Why this tool was considered.
+    reasoning: String,
+}
+
+impl ToolCandidate {
+    fn total_score(&self) -> f32 {
+        (self.base_score - self.recency_penalty + self.novelty_bonus
+            + self.episodic_bonus + self.pressure_bonus)
+            .max(0.0)
+    }
+
+    fn new(name: &str, input: ToolInput, base_score: f32, reasoning: String) -> Self {
+        Self {
+            name: name.into(),
+            input,
+            base_score,
+            recency_penalty: 0.0,
+            novelty_bonus: 0.0,
+            episodic_bonus: 0.0,
+            pressure_bonus: 0.0,
+            reasoning,
+        }
+    }
+}
+
+/// Extract tool names mentioned in recalled episodic memory summaries.
+fn extract_episodic_tool_hints(episodes: &[EpisodicEntry]) -> HashSet<String> {
+    let mut tools = HashSet::new();
+    for ep in episodes {
+        // Summaries contain WM content like "summary:Tool result (kg_query):..."
+        // or "summary:Decide: tool=kg_query, ..."
+        let text = ep.summary.strip_prefix("summary:").unwrap_or(&ep.summary);
+        if let Some(name) = text
+            .strip_prefix("Tool result (")
+            .and_then(|s| s.find(')').map(|i| s[..i].to_string()))
+        {
+            tools.insert(name);
+        }
+        if let Some(name) = parse_tool_from_decision(text) {
+            tools.insert(name);
+        }
+    }
+    tools
+}
+
+/// Compute recency penalty for a tool given its per-goal history.
 ///
-/// Considers all 5 tools, observation context (recalled episodes), orientation
-/// (knowledge, inferences, memory pressure), and recent WM history to avoid
-/// repeating the same action.
+/// Most recently used: 0.4, second-most-recent: 0.2, third: 0.1, beyond: 0.0.
+fn compute_recency_penalty(tool: &str, history: &GoalToolHistory) -> f32 {
+    match history.recency(tool) {
+        Some(0) => 0.4,
+        Some(1) => 0.2,
+        Some(2) => 0.1,
+        _ => 0.0,
+    }
+}
+
+/// Apply modifiers (recency, novelty, episodic, pressure) to a base candidate.
+fn apply_modifiers(
+    mut c: ToolCandidate,
+    history: &GoalToolHistory,
+    episodic_tools: &HashSet<String>,
+    memory_pressure: f32,
+) -> ToolCandidate {
+    c.recency_penalty = compute_recency_penalty(&c.name, history);
+
+    if !history.ever_used(&c.name) {
+        c.novelty_bonus = 0.15;
+    }
+
+    if episodic_tools.contains(&c.name) {
+        c.episodic_bonus = 0.2;
+    }
+
+    // memory_recall benefits from high pressure; others don't.
+    if c.name == "memory_recall" && memory_pressure > 0.7 {
+        c.pressure_bonus = 0.15;
+    }
+
+    c
+}
+
+/// Try to synthesize a new triple from orientation context.
+///
+/// Looks for an inference symbol that isn't already connected to the goal,
+/// and proposes connecting it via a relation found in existing knowledge.
+fn synthesize_triple(
+    goal: &Goal,
+    orientation: &Orientation,
+    engine: &crate::engine::Engine,
+) -> Option<(String, String, String)> {
+    let connected: HashSet<SymbolId> = orientation
+        .relevant_knowledge
+        .iter()
+        .flat_map(|t| [t.subject, t.object])
+        .collect();
+
+    let novel_inference = orientation
+        .inferences
+        .iter()
+        .find(|(sym, _)| !connected.contains(sym) && *sym != goal.symbol_id)?;
+
+    let predicate = orientation
+        .relevant_knowledge
+        .first()
+        .map(|t| t.predicate)?;
+
+    let subject = engine.resolve_label(goal.symbol_id);
+    let pred_label = engine.resolve_label(predicate);
+    let object = engine.resolve_label(novel_inference.0);
+
+    Some((subject, pred_label, object))
+}
+
+/// Utility-based tool selection.
+///
+/// Scores all 5 tools based on: state-dependent base score, recency penalty
+/// (avoids repeating tools on the same goal), novelty bonus (explores
+/// untried tools), episodic bonus (replicates past successful strategies),
+/// and memory pressure bonus. Picks the highest-scored candidate.
 fn select_tool(
     goal: &Goal,
     observation: &Observation,
@@ -307,17 +504,75 @@ fn select_tool(
     engine: &crate::engine::Engine,
     working_memory: &WorkingMemory,
 ) -> (String, ToolInput, String) {
+    let history = GoalToolHistory::from_working_memory(working_memory, goal.symbol_id);
+    let episodic_tools = extract_episodic_tool_hints(&observation.recalled_episodes);
+    let pressure = orientation.memory_pressure;
+
     let goal_label = engine.resolve_label(goal.symbol_id);
     let has_knowledge = !orientation.relevant_knowledge.is_empty();
     let has_inferences = !orientation.inferences.is_empty();
     let has_episodes = !observation.recalled_episodes.is_empty();
 
-    // Check what tool was used most recently to avoid immediate repetition.
-    let last_tool = last_tool_used(working_memory);
+    let mut candidates: Vec<ToolCandidate> = Vec::new();
 
-    // ── Priority 1: If memory pressure is high and episodes exist, recall ──
-    // Recalling past experience can inform better decisions under pressure.
-    if orientation.memory_pressure > 0.7 && has_episodes && last_tool.as_deref() != Some("memory_recall") {
+    // ── kg_query: always applicable, most valuable when knowledge is scarce ──
+    {
+        // Pick a query target: prefer an unexplored inference symbol, else goal.
+        let query_symbol = orientation
+            .inferences
+            .iter()
+            .find(|(sym, _)| {
+                let triples = engine.triples_from(*sym);
+                triples.len() < 3 && *sym != goal.symbol_id
+            })
+            .map(|(sym, _)| engine.resolve_label(*sym))
+            .unwrap_or_else(|| goal_label.clone());
+
+        let base = if has_knowledge { 0.4 } else { 0.8 };
+        let reason = if has_knowledge {
+            format!("Deeper KG exploration of \"{query_symbol}\".")
+        } else {
+            format!("No knowledge yet — querying KG for \"{query_symbol}\".")
+        };
+
+        candidates.push(apply_modifiers(
+            ToolCandidate::new(
+                "kg_query",
+                ToolInput::new()
+                    .with_param("symbol", &query_symbol)
+                    .with_param("direction", "both"),
+                base,
+                reason,
+            ),
+            &history,
+            &episodic_tools,
+            pressure,
+        ));
+    }
+
+    // ── kg_mutate: only when we can synthesize a new triple ──
+    if has_knowledge && has_inferences {
+        if let Some((subj, pred, obj)) = synthesize_triple(goal, orientation, engine) {
+            candidates.push(apply_modifiers(
+                ToolCandidate::new(
+                    "kg_mutate",
+                    ToolInput::new()
+                        .with_param("subject", &subj)
+                        .with_param("predicate", &pred)
+                        .with_param("object", &obj)
+                        .with_param("confidence", "0.7"),
+                    0.7,
+                    format!("Synthesizing new triple: {subj} -> {pred} -> {obj}."),
+                ),
+                &history,
+                &episodic_tools,
+                pressure,
+            ));
+        }
+    }
+
+    // ── memory_recall: only when episodes exist ──
+    if has_episodes {
         let query_syms: Vec<String> = observation
             .recalled_episodes
             .iter()
@@ -330,89 +585,25 @@ fn select_tool(
         } else {
             query_syms.join(",")
         };
-        return (
-            "memory_recall".into(),
-            ToolInput::new()
-                .with_param("query_symbols", &query_str)
-                .with_param("top_k", "3"),
-            format!(
-                "Memory pressure high ({:.0}%) with past episodes — recalling relevant experience.",
-                orientation.memory_pressure * 100.0
-            ),
-        );
-    }
 
-    // ── Priority 2: No knowledge at all — explore via KG query ──
-    if !has_knowledge {
-        // If episodes exist but no KG knowledge, recall first.
-        if has_episodes && last_tool.as_deref() != Some("memory_recall") {
-            let query_str = observation
-                .recalled_episodes
-                .iter()
-                .flat_map(|ep| ep.learnings.iter())
-                .take(3)
-                .map(|s| engine.resolve_label(*s))
-                .collect::<Vec<_>>()
-                .join(",");
-            if !query_str.is_empty() {
-                return (
-                    "memory_recall".into(),
-                    ToolInput::new()
-                        .with_param("query_symbols", &query_str)
-                        .with_param("top_k", "3"),
-                    "No KG knowledge but have past episodes — recalling experience first.".into(),
-                );
-            }
-        }
-
-        return (
-            "kg_query".into(),
-            ToolInput::new()
-                .with_param("symbol", &goal_label)
-                .with_param("direction", "both"),
-            "No relevant knowledge found — querying KG for goal context.".into(),
-        );
-    }
-
-    // ── Priority 3: Knowledge + inferences → synthesize new knowledge ──
-    // When we have both knowledge and inferences, we can create new triples.
-    if has_knowledge && has_inferences && last_tool.as_deref() != Some("kg_mutate") {
-        // Find a potential new connection: link the top inference to the goal
-        // via a relation found in existing knowledge.
-        if let Some(new_triple) = synthesize_triple(goal, orientation, engine) {
-            return (
-                "kg_mutate".into(),
+        let base = 0.55;
+        candidates.push(apply_modifiers(
+            ToolCandidate::new(
+                "memory_recall",
                 ToolInput::new()
-                    .with_param("subject", &new_triple.0)
-                    .with_param("predicate", &new_triple.1)
-                    .with_param("object", &new_triple.2)
-                    .with_param("confidence", "0.7"),
-                format!(
-                    "Have knowledge and inferences — synthesizing new triple: {} -> {} -> {}.",
-                    new_triple.0, new_triple.1, new_triple.2
-                ),
-            );
-        }
-    }
-
-    // ── Priority 4: Inferences available → explore similar symbols ──
-    if has_inferences && last_tool.as_deref() != Some("similarity_search") {
-        let top_sym = orientation.inferences[0].0;
-        let top_label = engine.resolve_label(top_sym);
-        return (
-            "similarity_search".into(),
-            ToolInput::new()
-                .with_param("symbol", &top_label)
-                .with_param("top_k", "5"),
-            format!(
-                "Found inferences — exploring similar symbols around \"{}\".",
-                top_label
+                    .with_param("query_symbols", &query_str)
+                    .with_param("top_k", "3"),
+                base,
+                "Recalling past experience for this goal.".into(),
             ),
-        );
+            &history,
+            &episodic_tools,
+            pressure,
+        ));
     }
 
-    // ── Priority 5: Knowledge but no inferences → symbolic reasoning ──
-    if has_knowledge && !has_inferences && last_tool.as_deref() != Some("reason") {
+    // ── reason: only when knowledge triples exist to reason about ──
+    if has_knowledge {
         let t = &orientation.relevant_knowledge[0];
         let expr = format!(
             "(triple {} {} {})",
@@ -420,70 +611,70 @@ fn select_tool(
             engine.resolve_label(t.predicate),
             engine.resolve_label(t.object),
         );
-        return (
-            "reason".into(),
-            ToolInput::new().with_param("expression", &expr),
-            "Have knowledge but no inferences — attempting symbolic reasoning.".into(),
-        );
+
+        candidates.push(apply_modifiers(
+            ToolCandidate::new(
+                "reason",
+                ToolInput::new().with_param("expression", &expr),
+                0.5,
+                "Applying symbolic reasoning to known triples.".into(),
+            ),
+            &history,
+            &episodic_tools,
+            pressure,
+        ));
     }
 
-    // ── Fallback: KG query (always safe) ──
-    (
-        "kg_query".into(),
-        ToolInput::new()
-            .with_param("symbol", &goal_label)
-            .with_param("direction", "both"),
-        "Cycling tools — querying KG for fresh context.".into(),
-    )
-}
+    // ── similarity_search: only when inferences give us symbols to explore ──
+    if has_inferences {
+        let top_sym = orientation.inferences[0].0;
+        let top_label = engine.resolve_label(top_sym);
 
-/// Check what tool was used in the most recent ToolResult WM entry.
-fn last_tool_used(working_memory: &WorkingMemory) -> Option<String> {
-    working_memory
-        .by_kind(WorkingMemoryKind::ToolResult)
-        .into_iter()
-        .max_by_key(|e| e.id)
-        .and_then(|e| {
-            // Content format: "Tool result (tool_name):\n..."
-            e.content
-                .strip_prefix("Tool result (")
-                .and_then(|s| s.find(')').map(|i| s[..i].to_string()))
-        })
-}
+        candidates.push(apply_modifiers(
+            ToolCandidate::new(
+                "similarity_search",
+                ToolInput::new()
+                    .with_param("symbol", &top_label)
+                    .with_param("top_k", "5"),
+                0.55,
+                format!("Exploring similar symbols around \"{top_label}\"."),
+            ),
+            &history,
+            &episodic_tools,
+            pressure,
+        ));
+    }
 
-/// Try to synthesize a new triple from orientation context.
-///
-/// Looks for an inference symbol that isn't already connected to the goal,
-/// and proposes connecting it via a relation found in existing knowledge.
-fn synthesize_triple(
-    goal: &Goal,
-    orientation: &Orientation,
-    engine: &crate::engine::Engine,
-) -> Option<(String, String, String)> {
-    // Get the set of symbols already connected to the goal.
-    let connected: std::collections::HashSet<SymbolId> = orientation
-        .relevant_knowledge
-        .iter()
-        .flat_map(|t| [t.subject, t.object])
-        .collect();
+    // Pick the highest-scored candidate.
+    candidates.sort_by(|a, b| {
+        b.total_score()
+            .partial_cmp(&a.total_score())
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
-    // Find the first inference symbol NOT already connected to the goal.
-    let novel_inference = orientation
-        .inferences
-        .iter()
-        .find(|(sym, _)| !connected.contains(sym) && *sym != goal.symbol_id)?;
-
-    // Pick a predicate from existing knowledge.
-    let predicate = orientation
-        .relevant_knowledge
-        .first()
-        .map(|t| t.predicate)?;
-
-    let subject = engine.resolve_label(goal.symbol_id);
-    let pred_label = engine.resolve_label(predicate);
-    let object = engine.resolve_label(novel_inference.0);
-
-    Some((subject, pred_label, object))
+    if let Some(best) = candidates.into_iter().next() {
+        let score = best.total_score();
+        let reasoning = format!(
+            "{} [score={:.2}: base={:.2} recency=-{:.2} novelty=+{:.2} episodic=+{:.2} pressure=+{:.2}]",
+            best.reasoning,
+            score,
+            best.base_score,
+            best.recency_penalty,
+            best.novelty_bonus,
+            best.episodic_bonus,
+            best.pressure_bonus,
+        );
+        (best.name, best.input, reasoning)
+    } else {
+        // Absolute fallback (no candidates at all — shouldn't happen).
+        (
+            "kg_query".into(),
+            ToolInput::new()
+                .with_param("symbol", &goal_label)
+                .with_param("direction", "both"),
+            "No candidates scored — falling back to KG query.".into(),
+        )
+    }
 }
 
 /// Act: execute the selected tool and update goal status.

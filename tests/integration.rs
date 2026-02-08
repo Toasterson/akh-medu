@@ -1568,3 +1568,194 @@ fn cycles_worked_tracks_per_goal() {
         goal.cycles_worked
     );
 }
+
+// ===========================================================================
+// Phase 8c: Utility-based tool selection integration tests
+// ===========================================================================
+
+#[test]
+fn utility_scoring_diversifies_tools() {
+    // With utility scoring, the recency penalty should force even more tool
+    // diversification than the old if/else approach.
+    let engine = test_engine();
+    engine
+        .ingest_label_triples(&[
+            ("Sun".into(), "is-a".into(), "Star".into(), 1.0),
+            ("Earth".into(), "orbits".into(), "Sun".into(), 0.95),
+            ("Mars".into(), "is-a".into(), "Planet".into(), 1.0),
+            ("Mars".into(), "orbits".into(), "Sun".into(), 0.95),
+            ("Jupiter".into(), "is-a".into(), "Planet".into(), 1.0),
+            ("Saturn".into(), "is-a".into(), "Planet".into(), 1.0),
+            ("Venus".into(), "is-a".into(), "Planet".into(), 1.0),
+        ])
+        .unwrap();
+
+    let engine = Arc::new(engine);
+    let config = AgentConfig {
+        max_cycles: 20,
+        ..Default::default()
+    };
+    let mut agent = Agent::new(engine, config).unwrap();
+    agent
+        .add_goal(
+            "Map the entire solar system topology",
+            200,
+            "Comprehensive verification of planetary classification",
+        )
+        .unwrap();
+
+    let mut tools_used = std::collections::HashSet::new();
+    let mut tool_sequence = Vec::new();
+    for _ in 0..12 {
+        if akh_medu::agent::goal::active_goals(agent.goals()).is_empty() {
+            break;
+        }
+        if let Ok(result) = agent.run_cycle() {
+            tools_used.insert(result.decision.chosen_tool.clone());
+            tool_sequence.push(result.decision.chosen_tool.clone());
+        }
+    }
+
+    // Should see at least 3 different tools (better than before).
+    assert!(
+        tools_used.len() >= 3,
+        "expected at least 3 tools with utility scoring, got {}: {:?}",
+        tools_used.len(),
+        tools_used
+    );
+
+    // Verify no tool is used more than 3 times consecutively (recency penalty works).
+    let max_consecutive = tool_sequence
+        .windows(4)
+        .filter(|w| w.iter().all(|t| t == &w[0]))
+        .count();
+    assert_eq!(
+        max_consecutive, 0,
+        "no tool should be used 4+ times consecutively, sequence: {:?}",
+        tool_sequence
+    );
+}
+
+#[test]
+fn utility_scoring_includes_score_breakdown() {
+    // The reasoning string should include the score breakdown for transparency.
+    let engine = test_engine();
+    engine
+        .ingest_label_triples(&[("Sun".into(), "is-a".into(), "Star".into(), 1.0)])
+        .unwrap();
+
+    let engine = Arc::new(engine);
+    let mut agent = Agent::new(engine, AgentConfig::default()).unwrap();
+    agent
+        .add_goal("Explore stars", 128, "Find star data")
+        .unwrap();
+
+    let result = agent.run_cycle().unwrap();
+    let reasoning = &result.decision.reasoning;
+
+    // Reasoning should contain the score breakdown.
+    assert!(
+        reasoning.contains("score=") && reasoning.contains("base="),
+        "reasoning should include score breakdown, got: {}",
+        reasoning
+    );
+}
+
+#[test]
+fn novelty_bonus_encourages_new_tools() {
+    // When running multiple cycles, tools not yet tried for a goal should
+    // get selected due to novelty bonus, even if their base score is lower.
+    let engine = test_engine();
+    engine
+        .ingest_label_triples(&[
+            ("Sun".into(), "is-a".into(), "Star".into(), 1.0),
+            ("Earth".into(), "is-a".into(), "Planet".into(), 1.0),
+            ("Earth".into(), "orbits".into(), "Sun".into(), 0.9),
+        ])
+        .unwrap();
+
+    let engine = Arc::new(engine);
+    let config = AgentConfig {
+        max_cycles: 10,
+        ..Default::default()
+    };
+    let mut agent = Agent::new(engine, config).unwrap();
+    agent
+        .add_goal(
+            "Classify celestial bodies",
+            200,
+            "Requires galactic classification protocol",
+        )
+        .unwrap();
+
+    let mut tools_seen_by_cycle_5 = std::collections::HashSet::new();
+    for i in 0..8 {
+        if akh_medu::agent::goal::active_goals(agent.goals()).is_empty() {
+            break;
+        }
+        if let Ok(result) = agent.run_cycle() {
+            if i < 5 {
+                tools_seen_by_cycle_5.insert(result.decision.chosen_tool.clone());
+            }
+        }
+    }
+
+    // By cycle 5, novelty bonus should have pushed at least 2 different tools.
+    assert!(
+        tools_seen_by_cycle_5.len() >= 2,
+        "novelty bonus should diversify tools early, got {} by cycle 5: {:?}",
+        tools_seen_by_cycle_5.len(),
+        tools_seen_by_cycle_5
+    );
+}
+
+#[test]
+fn recency_penalty_prevents_immediate_repeat() {
+    // The most recently used tool should get a recency penalty, so consecutive
+    // cycles rarely pick the same tool twice in a row.
+    let engine = test_engine();
+    engine
+        .ingest_label_triples(&[
+            ("Alpha".into(), "is-a".into(), "Star".into(), 1.0),
+            ("Beta".into(), "is-a".into(), "Star".into(), 1.0),
+            ("Gamma".into(), "is-a".into(), "Planet".into(), 1.0),
+            ("Delta".into(), "orbits".into(), "Alpha".into(), 0.9),
+        ])
+        .unwrap();
+
+    let engine = Arc::new(engine);
+    let config = AgentConfig {
+        max_cycles: 15,
+        ..Default::default()
+    };
+    let mut agent = Agent::new(engine, config).unwrap();
+    agent
+        .add_goal(
+            "Analyze stellar neighborhood",
+            200,
+            "Requires interstellar mapping protocol",
+        )
+        .unwrap();
+
+    let mut consecutive_repeats = 0;
+    let mut prev_tool = String::new();
+    for _ in 0..10 {
+        if akh_medu::agent::goal::active_goals(agent.goals()).is_empty() {
+            break;
+        }
+        if let Ok(result) = agent.run_cycle() {
+            if result.decision.chosen_tool == prev_tool {
+                consecutive_repeats += 1;
+            }
+            prev_tool = result.decision.chosen_tool;
+        }
+    }
+
+    // With recency penalty, consecutive repeats should be rare.
+    // Allow at most 3 out of 9 transitions to be repeats.
+    assert!(
+        consecutive_repeats <= 3,
+        "recency penalty should limit consecutive repeats, got {} in 10 cycles",
+        consecutive_repeats
+    );
+}

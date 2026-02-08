@@ -76,12 +76,13 @@ placeholder. The phases below evolve it into a real autonomous agent.
 - [x] Add `suspend_goal()`, `fail_goal()`, `decompose_stalled_goal()` to Agent public API
 - [x] Metadata label filtering: agent-metadata (desc:, status:, criteria:, goal:, episode:, summary:, tag:) excluded from criteria matching
 
-### Phase 8c — Intelligent decision-making
-- [ ] Replace if/else `select_tool()` with utility-based scoring
-- [ ] Score each tool by expected value given: current goal, orientation context, WM history
-- [ ] Add loop detection: track recent (tool, goal) pairs, penalize repetition
-- [ ] Strategy rotation: when stuck, try tools the agent hasn't used for this goal
-- [ ] Use recalled episodic memories to inform tool selection (past strategies for similar goals)
+### Phase 8c — Intelligent decision-making ✓
+- [x] Replace if/else `select_tool()` with utility-based scoring (`ToolCandidate` with `total_score()`)
+- [x] Score each tool by: base_score (state-dependent), recency_penalty, novelty_bonus, episodic_bonus, pressure_bonus
+- [x] Add loop detection: `GoalToolHistory` tracks per-goal (tool, count, recency) from WM Decision entries
+- [x] Strategy rotation: novelty_bonus (+0.15) for tools never used on this goal; recency_penalty (-0.4/-0.2/-0.1) prevents repetition
+- [x] Use recalled episodic memories: `extract_episodic_tool_hints()` parses tool names from episode summaries, applies episodic_bonus (+0.2)
+- [x] Score breakdown in reasoning string for full transparency
 
 ### Phase 8d — Session persistence & REPL
 - [ ] Serialize/deserialize WorkingMemory to engine's durable store
