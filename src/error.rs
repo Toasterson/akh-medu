@@ -60,6 +60,10 @@ pub enum AkhError {
     #[error(transparent)]
     #[diagnostic(transparent)]
     Autonomous(#[from] crate::autonomous::error::AutonomousError),
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Glyph(#[from] crate::glyph::GlyphError),
 }
 
 // ---------------------------------------------------------------------------

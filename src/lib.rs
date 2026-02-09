@@ -34,6 +34,7 @@ pub mod autonomous;
 pub mod engine;
 pub mod error;
 pub mod export;
+pub mod glyph;
 pub mod graph;
 pub mod infer;
 pub mod pipeline;

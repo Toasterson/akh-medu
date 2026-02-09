@@ -2428,3 +2428,114 @@ fn agent_uses_infer_and_gap_tools() {
     assert!(all_tools.contains(&"gap_analysis".to_string()));
     assert!(!tools_used.is_empty(), "agent should have run at least one cycle");
 }
+
+// ===========================================================================
+// Phase 10: Hieroglyphic Notation System
+// ===========================================================================
+
+#[test]
+fn hieroglyphic_render_triple() {
+    let engine = test_engine();
+    let dog = engine.create_symbol(SymbolKind::Entity, "Dog").unwrap();
+    let is_a = engine.create_symbol(SymbolKind::Relation, "is-a").unwrap();
+    let animal = engine.create_symbol(SymbolKind::Entity, "Animal").unwrap();
+    engine
+        .add_triple(&Triple::new(dog.id, is_a.id, animal.id))
+        .unwrap();
+
+    let config = akh_medu::glyph::NotationConfig {
+        use_pua: false,
+        show_confidence: true,
+        show_provenance: false,
+        show_sigils: false,
+        compact: true,
+    };
+    let rendered = akh_medu::glyph::notation::render_triple(&engine, &Triple::new(dog.id, is_a.id, animal.id), &config);
+
+    // Should contain the is-a glyph fallback (△) and entity labels.
+    assert!(rendered.contains("Dog"), "should contain subject label");
+    assert!(rendered.contains("Animal"), "should contain object label");
+    assert!(
+        rendered.contains('\u{25B3}'),
+        "should contain is-a glyph fallback (△)"
+    );
+    // Should contain confidence dots.
+    assert!(rendered.contains('\u{25CF}'), "should contain filled confidence dots");
+}
+
+#[test]
+fn hieroglyphic_sigil_unique() {
+    let engine = test_engine();
+    let dog = engine.create_symbol(SymbolKind::Entity, "Dog").unwrap();
+    let cat = engine.create_symbol(SymbolKind::Entity, "Cat").unwrap();
+
+    let s1 = akh_medu::glyph::sigil::sigil_for_symbol(dog.id, engine.item_memory(), false)
+        .unwrap();
+    let s2 = akh_medu::glyph::sigil::sigil_for_symbol(cat.id, engine.item_memory(), false)
+        .unwrap();
+
+    // Different symbols should (very likely) produce different sigils.
+    // With 32^3 combinations and random VSA vectors, collision probability is negligible.
+    assert_ne!(s1, s2, "different entities should have different sigils");
+}
+
+#[test]
+fn hieroglyphic_subgraph() {
+    let engine = test_engine();
+    let dog = engine.create_symbol(SymbolKind::Entity, "Dog").unwrap();
+    let is_a = engine.create_symbol(SymbolKind::Relation, "is-a").unwrap();
+    let animal = engine.create_symbol(SymbolKind::Entity, "Animal").unwrap();
+    let has_a = engine.create_symbol(SymbolKind::Relation, "has-a").unwrap();
+    let legs = engine.create_symbol(SymbolKind::Entity, "Legs").unwrap();
+
+    engine.add_triple(&Triple::new(dog.id, is_a.id, animal.id)).unwrap();
+    engine.add_triple(&Triple::new(dog.id, has_a.id, legs.id)).unwrap();
+
+    let triples = vec![
+        Triple::new(dog.id, is_a.id, animal.id),
+        Triple::new(dog.id, has_a.id, legs.id),
+    ];
+
+    let config = akh_medu::glyph::NotationConfig {
+        use_pua: false,
+        show_confidence: false,
+        show_provenance: false,
+        show_sigils: false,
+        compact: false,
+    };
+    let rendered = akh_medu::glyph::notation::render_subgraph(&engine, &triples, &config);
+
+    // Block format should have curly braces for grouped triples.
+    assert!(rendered.contains('{'), "block format should have opening brace");
+    assert!(rendered.contains('}'), "block format should have closing brace");
+    assert!(rendered.contains("Animal"));
+    assert!(rendered.contains("Legs"));
+}
+
+#[test]
+fn hieroglyphic_legend() {
+    let config = akh_medu::glyph::RenderConfig {
+        color: false,
+        notation: akh_medu::glyph::NotationConfig {
+            use_pua: false,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let legend = akh_medu::glyph::render::render_legend(&config);
+
+    // Should list all 35 fixed glyphs.
+    assert!(legend.contains("is-a"), "legend should contain is-a");
+    assert!(legend.contains("type:person"), "legend should contain type:person");
+    assert!(legend.contains("prov:asserted"), "legend should contain prov:asserted");
+    assert!(legend.contains("struct:triple"), "legend should contain struct:triple");
+
+    // Should list all 32 radicals.
+    assert!(legend.contains("eye"), "legend should contain eye radical");
+    assert!(legend.contains("ankh"), "legend should contain ankh radical");
+    assert!(legend.contains("star"), "legend should contain star radical");
+
+    // Count lines with radical entries (should have 32).
+    let radical_lines: Vec<&str> = legend.lines().filter(|l| l.contains("[")).collect();
+    assert_eq!(radical_lines.len(), 32, "legend should list 32 radicals");
+}

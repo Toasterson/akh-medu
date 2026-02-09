@@ -11,6 +11,7 @@ use akh_medu::agent::{Agent, AgentConfig};
 use akh_medu::autonomous::{GapAnalysisConfig, RuleEngineConfig, SchemaDiscoveryConfig};
 use akh_medu::engine::{Engine, EngineConfig};
 use akh_medu::error::EngineError;
+use akh_medu::glyph;
 use akh_medu::graph::traverse::TraversalConfig;
 use akh_medu::graph::Triple;
 use akh_medu::infer::InferenceQuery;
@@ -186,6 +187,25 @@ enum Commands {
     Analytics {
         #[command(subcommand)]
         action: AnalyticsAction,
+    },
+
+    /// Render knowledge in hieroglyphic notation.
+    Render {
+        /// Entity or symbol to render (label or ID).
+        #[arg(long)]
+        entity: Option<String>,
+        /// Depth of subgraph to render (default: 1).
+        #[arg(long, default_value = "1")]
+        depth: usize,
+        /// Show all triples (when no entity specified).
+        #[arg(long)]
+        all: bool,
+        /// Show glyph legend.
+        #[arg(long)]
+        legend: bool,
+        /// Disable color output.
+        #[arg(long)]
+        no_color: bool,
     },
 
     /// Run the autonomous agent.
@@ -1149,6 +1169,59 @@ fn main() -> Result<()> {
             }
         }
 
+        Commands::Render {
+            entity,
+            depth,
+            all,
+            legend,
+            no_color,
+        } => {
+            let engine = Engine::new(config).into_diagnostic()?;
+
+            let render_config = glyph::RenderConfig {
+                color: !no_color,
+                notation: glyph::NotationConfig {
+                    use_pua: glyph::catalog::font_available(),
+                    show_confidence: true,
+                    show_provenance: false,
+                    show_sigils: true,
+                    compact: false,
+                },
+                ..Default::default()
+            };
+
+            if legend {
+                println!("{}", glyph::render::render_legend(&render_config));
+            } else if let Some(ref name) = entity {
+                let sym_id = engine.resolve_symbol(name).into_diagnostic()?;
+                let result = engine.extract_subgraph(&[sym_id], depth).into_diagnostic()?;
+                if result.triples.is_empty() {
+                    println!("No triples found around \"{}\".", name);
+                } else {
+                    println!(
+                        "{}",
+                        glyph::render::render_to_terminal(
+                            &engine,
+                            &result.triples,
+                            &render_config,
+                        )
+                    );
+                }
+            } else if all {
+                let triples = engine.all_triples();
+                if triples.is_empty() {
+                    println!("No triples in knowledge graph.");
+                } else {
+                    println!(
+                        "{}",
+                        glyph::render::render_to_terminal(&engine, &triples, &render_config)
+                    );
+                }
+            } else {
+                println!("Usage: render --entity <name> [--depth N] | render --all | render --legend");
+            }
+        }
+
         Commands::Agent { action } => {
             let engine = Arc::new(Engine::new(config).into_diagnostic()?);
 
@@ -1395,7 +1468,7 @@ fn main() -> Result<()> {
                         }
                     }
 
-                    println!("Agent REPL — q:quit, c:consolidate, p:plan, r:reflect, s:status, t:tools, i:infer, g:gaps, d:schema, Enter:cycle");
+                    println!("Agent REPL — q:quit, c:consolidate, p:plan, r:reflect, s:status, t:tools, i:infer, g:gaps, d:schema, h:hiero, hl:legend, Enter:cycle");
                     print_repl_status(&agent, &engine);
 
                     let stdin = std::io::stdin();
@@ -1545,6 +1618,69 @@ fn main() -> Result<()> {
                                             }
                                         }
                                         Err(e) => println!("Symbol resolve error: {e}"),
+                                    }
+                                }
+                            }
+                            "hl" | "legend" => {
+                                let rc = glyph::RenderConfig {
+                                    color: true,
+                                    notation: glyph::NotationConfig {
+                                        use_pua: glyph::catalog::font_available(),
+                                        ..Default::default()
+                                    },
+                                    ..Default::default()
+                                };
+                                println!("{}", glyph::render::render_legend(&rc));
+                            }
+                            cmd if cmd == "h" || cmd == "hiero" || cmd.starts_with("h ") || cmd.starts_with("hiero ") => {
+                                let entity_name = cmd
+                                    .strip_prefix("hiero ")
+                                    .or_else(|| cmd.strip_prefix("h "))
+                                    .unwrap_or("")
+                                    .trim();
+
+                                let rc = glyph::RenderConfig {
+                                    color: true,
+                                    notation: glyph::NotationConfig {
+                                        use_pua: glyph::catalog::font_available(),
+                                        ..Default::default()
+                                    },
+                                    ..Default::default()
+                                };
+
+                                if entity_name.is_empty() {
+                                    // Render all triples.
+                                    let triples = engine.all_triples();
+                                    if triples.is_empty() {
+                                        println!("No triples in knowledge graph.");
+                                    } else {
+                                        println!(
+                                            "{}",
+                                            glyph::render::render_to_terminal(&engine, &triples, &rc)
+                                        );
+                                    }
+                                } else {
+                                    match engine.resolve_symbol(entity_name) {
+                                        Ok(sym_id) => {
+                                            match engine.extract_subgraph(&[sym_id], 1) {
+                                                Ok(result) => {
+                                                    if result.triples.is_empty() {
+                                                        println!("No triples around \"{}\".", entity_name);
+                                                    } else {
+                                                        println!(
+                                                            "{}",
+                                                            glyph::render::render_to_terminal(
+                                                                &engine,
+                                                                &result.triples,
+                                                                &rc,
+                                                            )
+                                                        );
+                                                    }
+                                                }
+                                                Err(e) => println!("Subgraph error: {e}"),
+                                            }
+                                        }
+                                        Err(e) => println!("Symbol error: {e}"),
                                     }
                                 }
                             }
