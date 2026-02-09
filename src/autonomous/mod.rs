@@ -8,6 +8,7 @@
 pub mod error;
 pub mod fusion;
 pub mod gap;
+pub mod integration;
 pub mod rule_engine;
 pub mod rules;
 pub mod schema;

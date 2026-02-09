@@ -9,6 +9,7 @@
 //! - Encoding from symbols to vectors
 
 pub mod encode;
+pub mod grounding;
 pub mod item_memory;
 pub mod ops;
 

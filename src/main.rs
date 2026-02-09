@@ -40,12 +40,27 @@ enum Commands {
     /// Initialize a new akh-medu data directory.
     Init,
 
-    /// Ingest triples from a JSON file (label-based or numeric format).
+    /// Ingest triples from a file (JSON, CSV, or text format).
     Ingest {
-        /// Path to JSON file with triples.
+        /// Path to file with triples.
         #[arg(long)]
         file: PathBuf,
+
+        /// File format: "json" (default), "csv", or "text".
+        #[arg(long, default_value = "json")]
+        format: String,
+
+        /// CSV format: "spo" (subject,predicate,object) or "entity" (headers=predicates).
+        #[arg(long, default_value = "spo")]
+        csv_format: String,
+
+        /// Maximum sentences to process for text format.
+        #[arg(long, default_value = "100")]
+        max_sentences: usize,
     },
+
+    /// Load all bundled skills, run grounding, run inference.
+    Bootstrap,
 
     /// Query the knowledge base using spreading-activation inference.
     Query {
@@ -212,6 +227,19 @@ enum Commands {
     Agent {
         #[command(subcommand)]
         action: AgentAction,
+    },
+
+    /// Interactive chat with the knowledge base.
+    Chat {
+        /// Skill pack to load on start (optional).
+        #[arg(long)]
+        skill: Option<String>,
+        /// Ollama model override (default: llama3.2).
+        #[arg(long)]
+        model: Option<String>,
+        /// Disable Ollama (regex-only mode).
+        #[arg(long)]
+        no_ollama: bool,
     },
 }
 
@@ -449,90 +477,198 @@ fn main() -> Result<()> {
             println!("{}", engine.info());
         }
 
-        Commands::Ingest { file } => {
+        Commands::Ingest { file, format, csv_format, max_sentences } => {
             let engine = Engine::new(config).into_diagnostic()?;
-            let content = std::fs::read_to_string(&file).into_diagnostic()?;
 
-            let triples: Vec<serde_json::Value> =
-                serde_json::from_str(&content).into_diagnostic()?;
+            match format.as_str() {
+                "json" => {
+                    let content = std::fs::read_to_string(&file).into_diagnostic()?;
+                    let triples: Vec<serde_json::Value> =
+                        serde_json::from_str(&content).into_diagnostic()?;
 
-            if triples.is_empty() {
-                println!("No triples found in {}", file.display());
-                return Ok(());
-            }
+                    if triples.is_empty() {
+                        println!("No triples found in {}", file.display());
+                        return Ok(());
+                    }
 
-            // Auto-detect format from first element.
-            let first = &triples[0];
-            let is_label_format = first.get("subject").is_some();
-            let is_numeric_format = first.get("s").is_some();
+                    let first = &triples[0];
+                    let is_label_format = first.get("subject").is_some();
+                    let is_numeric_format = first.get("s").is_some();
 
-            if is_label_format {
-                // Label-based format: {"subject": "Sun", "predicate": "is-a", "object": "Star"}
-                let mut label_triples = Vec::new();
-                for (i, val) in triples.iter().enumerate() {
-                    let subject = val["subject"].as_str().ok_or_else(|| {
-                        EngineError::IngestFormat {
-                            message: format!("triple {i}: missing or non-string 'subject' field"),
+                    if is_label_format {
+                        let mut label_triples = Vec::new();
+                        for (i, val) in triples.iter().enumerate() {
+                            let subject = val["subject"].as_str().ok_or_else(|| {
+                                EngineError::IngestFormat {
+                                    message: format!("triple {i}: missing or non-string 'subject' field"),
+                                }
+                            }).into_diagnostic()?;
+                            let predicate = val["predicate"].as_str().ok_or_else(|| {
+                                EngineError::IngestFormat {
+                                    message: format!("triple {i}: missing or non-string 'predicate' field"),
+                                }
+                            }).into_diagnostic()?;
+                            let object = val["object"].as_str().ok_or_else(|| {
+                                EngineError::IngestFormat {
+                                    message: format!("triple {i}: missing or non-string 'object' field"),
+                                }
+                            }).into_diagnostic()?;
+                            let confidence = val["confidence"].as_f64().unwrap_or(1.0) as f32;
+
+                            label_triples.push((
+                                subject.to_string(),
+                                predicate.to_string(),
+                                object.to_string(),
+                                confidence,
+                            ));
                         }
-                    }).into_diagnostic()?;
-                    let predicate = val["predicate"].as_str().ok_or_else(|| {
-                        EngineError::IngestFormat {
-                            message: format!("triple {i}: missing or non-string 'predicate' field"),
-                        }
-                    }).into_diagnostic()?;
-                    let object = val["object"].as_str().ok_or_else(|| {
-                        EngineError::IngestFormat {
-                            message: format!("triple {i}: missing or non-string 'object' field"),
-                        }
-                    }).into_diagnostic()?;
-                    let confidence = val["confidence"].as_f64().unwrap_or(1.0) as f32;
 
-                    label_triples.push((
-                        subject.to_string(),
-                        predicate.to_string(),
-                        object.to_string(),
-                        confidence,
-                    ));
-                }
-
-                let (created, ingested) = engine
-                    .ingest_label_triples(&label_triples)
-                    .into_diagnostic()?;
-
-                // Persist after ingest.
-                let _ = engine.persist();
-
-                println!(
-                    "Ingested {ingested} triples ({created} new symbols) from {}",
-                    file.display()
-                );
-            } else if is_numeric_format {
-                // Numeric format: {"s": 1, "p": 2, "o": 3}
-                let mut count = 0;
-                for val in &triples {
-                    let s = val["s"].as_u64().unwrap_or(0);
-                    let p = val["p"].as_u64().unwrap_or(0);
-                    let o = val["o"].as_u64().unwrap_or(0);
-                    let confidence = val["confidence"].as_f64().unwrap_or(1.0) as f32;
-
-                    if let (Some(s), Some(p), Some(o)) =
-                        (SymbolId::new(s), SymbolId::new(p), SymbolId::new(o))
-                    {
-                        engine
-                            .add_triple(&Triple::new(s, p, o).with_confidence(confidence))
+                        let (created, ingested) = engine
+                            .ingest_label_triples(&label_triples)
                             .into_diagnostic()?;
-                        count += 1;
+                        let _ = engine.persist();
+                        println!(
+                            "Ingested {ingested} triples ({created} new symbols) from {}",
+                            file.display()
+                        );
+                    } else if is_numeric_format {
+                        let mut count = 0;
+                        for val in &triples {
+                            let s = val["s"].as_u64().unwrap_or(0);
+                            let p = val["p"].as_u64().unwrap_or(0);
+                            let o = val["o"].as_u64().unwrap_or(0);
+                            let confidence = val["confidence"].as_f64().unwrap_or(1.0) as f32;
+
+                            if let (Some(s), Some(p), Some(o)) =
+                                (SymbolId::new(s), SymbolId::new(p), SymbolId::new(o))
+                            {
+                                engine
+                                    .add_triple(&Triple::new(s, p, o).with_confidence(confidence))
+                                    .into_diagnostic()?;
+                                count += 1;
+                            }
+                        }
+                        println!("Ingested {count} triples from {}", file.display());
+                    } else {
+                        return Err(EngineError::IngestFormat {
+                            message: "unrecognized triple format in first element".into(),
+                        })
+                        .into_diagnostic();
                     }
                 }
-                println!("Ingested {count} triples from {}", file.display());
-            } else {
-                return Err(EngineError::IngestFormat {
-                    message: "unrecognized triple format in first element".into(),
-                })
-                .into_diagnostic();
+                "csv" => {
+                    use akh_medu::agent::tools::CsvIngestTool;
+                    use akh_medu::agent::tool::{Tool, ToolInput};
+
+                    let input = ToolInput::new()
+                        .with_param("path", file.to_str().unwrap_or(""))
+                        .with_param("format", &csv_format);
+
+                    let tool = CsvIngestTool;
+                    let output = tool.execute(&engine, input).into_diagnostic()?;
+                    println!("{}", output.result);
+                }
+                "text" => {
+                    use akh_medu::agent::tools::TextIngestTool;
+                    use akh_medu::agent::tool::{Tool, ToolInput};
+
+                    let input = ToolInput::new()
+                        .with_param("text", &format!("file:{}", file.display()))
+                        .with_param("max_sentences", &max_sentences.to_string());
+
+                    let tool = TextIngestTool;
+                    let output = tool.execute(&engine, input).into_diagnostic()?;
+                    println!("{}", output.result);
+                }
+                other => {
+                    miette::bail!("Unknown format: \"{other}\". Use json, csv, or text.");
+                }
             }
 
+            // Auto-ground symbols after ingest.
+            let ops = engine.ops();
+            let im = engine.item_memory();
+            let grounding_config = akh_medu::vsa::grounding::GroundingConfig::default();
+            match akh_medu::vsa::grounding::ground_all(&engine, ops, im, &grounding_config) {
+                Ok(result) => {
+                    if result.symbols_updated > 0 {
+                        println!(
+                            "Grounding: {} symbols updated in {} round(s).",
+                            result.symbols_updated, result.rounds_completed,
+                        );
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Grounding warning: {e}");
+                }
+            }
+
+            let _ = engine.persist();
             println!("{}", engine.info());
+        }
+
+        Commands::Bootstrap => {
+            let engine = Engine::new(config).into_diagnostic()?;
+
+            let skill_names = ["astronomy", "common_sense", "geography", "science", "language"];
+            let mut total_triples = 0usize;
+            let mut total_rules = 0usize;
+            let mut skills_loaded = 0usize;
+
+            for name in &skill_names {
+                match engine.load_skill(name) {
+                    Ok(activation) => {
+                        println!(
+                            "Loading skill: {}... {} triples, {} rules",
+                            name, activation.triples_loaded, activation.rules_loaded,
+                        );
+                        total_triples += activation.triples_loaded;
+                        total_rules += activation.rules_loaded;
+                        skills_loaded += 1;
+                    }
+                    Err(e) => {
+                        eprintln!("  Skipping {name}: {e}");
+                    }
+                }
+            }
+
+            // Run grounding.
+            let ops = engine.ops();
+            let im = engine.item_memory();
+            let grounding_config = akh_medu::vsa::grounding::GroundingConfig::default();
+            match akh_medu::vsa::grounding::ground_all(&engine, ops, im, &grounding_config) {
+                Ok(result) => {
+                    println!(
+                        "Grounding symbols... {} round(s), {} symbols updated",
+                        result.rounds_completed, result.symbols_updated,
+                    );
+                }
+                Err(e) => {
+                    eprintln!("Grounding warning: {e}");
+                }
+            }
+
+            // Run forward-chaining inference.
+            let rule_config = akh_medu::autonomous::RuleEngineConfig::default();
+            match engine.run_rules(rule_config) {
+                Ok(result) => {
+                    let derived_count = result.derived.len();
+                    println!(
+                        "Running inference... derived {} new triples",
+                        derived_count,
+                    );
+                    total_triples += derived_count;
+                }
+                Err(e) => {
+                    eprintln!("Inference warning: {e}");
+                }
+            }
+
+            let _ = engine.persist();
+            println!(
+                "Bootstrap complete: {} base + derived = {} total triples, {} skills, {} rules.",
+                total_triples - total_rules, total_triples, skills_loaded, total_rules,
+            );
         }
 
         Commands::Query {
@@ -1989,6 +2125,350 @@ fn main() -> Result<()> {
                     }
                 }
             }
+        }
+
+        Commands::Chat { skill, model, no_ollama } => {
+            let engine = Arc::new(Engine::new(config).into_diagnostic()?);
+
+            // Load skill if specified.
+            if let Some(ref skill_name) = skill {
+                match engine.load_skill(skill_name) {
+                    Ok(activation) => {
+                        println!(
+                            "Loaded skill: {} ({} triples, {} rules)",
+                            skill_name, activation.triples_loaded, activation.rules_loaded,
+                        );
+                    }
+                    Err(e) => {
+                        eprintln!("Warning: failed to load skill \"{skill_name}\": {e}");
+                    }
+                }
+
+                // Run grounding after skill load.
+                let ops = engine.ops();
+                let im = engine.item_memory();
+                let grounding_config = akh_medu::vsa::grounding::GroundingConfig::default();
+                if let Ok(result) = akh_medu::vsa::grounding::ground_all(&engine, ops, im, &grounding_config) {
+                    if result.symbols_updated > 0 {
+                        println!(
+                            "Grounded {} symbols in {} round(s).",
+                            result.symbols_updated, result.rounds_completed,
+                        );
+                    }
+                }
+            }
+
+            // Set up Ollama client (optional).
+            let mut ollama = if no_ollama {
+                None
+            } else {
+                let mut ollama_config = akh_medu::agent::OllamaConfig::default();
+                if let Some(ref m) = model {
+                    ollama_config.model = m.clone();
+                }
+                let mut client = akh_medu::agent::OllamaClient::new(ollama_config);
+                if client.probe() {
+                    println!("Ollama available (model: {})", client.model());
+                    Some(client)
+                } else {
+                    println!("Ollama not available, using regex-only mode.");
+                    None
+                }
+            };
+
+            // Set up agent for goal-based interactions.
+            let agent_config = AgentConfig {
+                max_cycles: 20,
+                ..Default::default()
+            };
+            let mut agent = Agent::new(Arc::clone(&engine), agent_config).into_diagnostic()?;
+            let mut conversation = akh_medu::agent::Conversation::new(100);
+
+            println!("akh-medu chat (type 'help' for commands, 'quit' to exit)");
+            println!();
+
+            loop {
+                eprint!("> ");
+                let mut input = String::new();
+                match std::io::stdin().read_line(&mut input) {
+                    Ok(0) => break, // EOF
+                    Ok(_) => {}
+                    Err(e) => {
+                        eprintln!("Read error: {e}");
+                        break;
+                    }
+                }
+
+                let trimmed = input.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                if trimmed == "quit" || trimmed == "exit" || trimmed == "q" {
+                    break;
+                }
+
+                let intent = akh_medu::agent::classify_intent(trimmed);
+                let response = match intent {
+                    akh_medu::agent::UserIntent::Help => {
+                        "Commands:\n  \
+                         <question>?    Query the knowledge base\n  \
+                         <fact>         Assert a fact (e.g., \"Dogs are mammals\")\n  \
+                         find <topic>   Set an agent goal\n  \
+                         run [N]        Run N OODA cycles\n  \
+                         status         Show agent status\n  \
+                         show <entity>  Render hieroglyphic notation\n  \
+                         help           Show this help\n  \
+                         quit           Exit"
+                            .to_string()
+                    }
+
+                    akh_medu::agent::UserIntent::ShowStatus => {
+                        let goals = agent.goals();
+                        let active = akh_medu::agent::goal::active_goals(&goals);
+                        format!(
+                            "Cycle: {}, Goals: {} active / {} total, WM: {} entries, Triples: {}",
+                            agent.cycle_count(),
+                            active.len(),
+                            goals.len(),
+                            agent.working_memory().len(),
+                            engine.all_triples().len(),
+                        )
+                    }
+
+                    akh_medu::agent::UserIntent::Query { subject } => {
+                        // KG search via engine.
+                        let mut lines = Vec::new();
+                        match engine.resolve_symbol(&subject) {
+                            Ok(sym_id) => {
+                                let from_triples = engine.triples_from(sym_id);
+                                let to_triples = engine.triples_to(sym_id);
+                                let label = engine.resolve_label(sym_id);
+
+                                for t in &from_triples {
+                                    lines.push(format!(
+                                        "  {} -> {} -> {} [{:.2}]",
+                                        label,
+                                        engine.resolve_label(t.predicate),
+                                        engine.resolve_label(t.object),
+                                        t.confidence,
+                                    ));
+                                }
+                                for t in &to_triples {
+                                    lines.push(format!(
+                                        "  {} -> {} -> {} [{:.2}]",
+                                        engine.resolve_label(t.subject),
+                                        engine.resolve_label(t.predicate),
+                                        label,
+                                        t.confidence,
+                                    ));
+                                }
+
+                                if lines.is_empty() {
+                                    // Try similarity search.
+                                    if let Ok(similar) = engine.search_similar_to(sym_id, 5) {
+                                        if !similar.is_empty() {
+                                            lines.push(format!("No triples for \"{subject}\", but similar symbols:"));
+                                            for sr in &similar {
+                                                lines.push(format!(
+                                                    "  {} (similarity: {:.3})",
+                                                    engine.resolve_label(sr.symbol_id),
+                                                    sr.similarity,
+                                                ));
+                                            }
+                                        }
+                                    }
+                                }
+
+                                if lines.is_empty() {
+                                    format!("No information found for \"{subject}\".")
+                                } else {
+                                    // Optionally synthesize NL answer via Ollama.
+                                    let kg_text = lines.join("\n");
+                                    if let Some(ref mut client) = ollama {
+                                        match client.generate(
+                                            &format!(
+                                                "Based on these facts:\n{}\n\nAnswer: {}",
+                                                kg_text, trimmed,
+                                            ),
+                                            Some("You are a helpful assistant. Answer the question using only the provided facts. Be concise."),
+                                        ) {
+                                            Ok(answer) => format!("{answer}\n\nKG facts:\n{kg_text}"),
+                                            Err(_) => kg_text,
+                                        }
+                                    } else {
+                                        kg_text
+                                    }
+                                }
+                            }
+                            Err(_) => format!("Symbol \"{subject}\" not found in knowledge base."),
+                        }
+                    }
+
+                    akh_medu::agent::UserIntent::Assert { text } => {
+                        // Extract triples using regex (and optionally LLM).
+                        use akh_medu::agent::tools::TextIngestTool;
+                        use akh_medu::agent::tool::Tool;
+
+                        let tool_input = akh_medu::agent::ToolInput::new()
+                            .with_param("text", &text);
+                        match TextIngestTool.execute(&engine, tool_input) {
+                            Ok(output) => {
+                                // Auto-ground after ingest.
+                                let ops = engine.ops();
+                                let im = engine.item_memory();
+                                let gc = akh_medu::vsa::grounding::GroundingConfig::default();
+                                let _ = akh_medu::vsa::grounding::ground_all(&engine, ops, im, &gc);
+                                output.result
+                            }
+                            Err(e) => format!("Extraction error: {e}"),
+                        }
+                    }
+
+                    akh_medu::agent::UserIntent::SetGoal { description } => {
+                        match agent.add_goal(&description, 128, "Agent-determined completion") {
+                            Ok(_) => {
+                                // Run a few OODA cycles.
+                                let mut results = Vec::new();
+                                for _ in 0..5 {
+                                    match agent.run_cycle() {
+                                        Ok(r) => {
+                                            results.push(format!(
+                                                "  [{}] {} -> {}",
+                                                r.cycle_number,
+                                                r.decision.chosen_tool,
+                                                if r.action_result.tool_output.result.len() > 80 {
+                                                    format!("{}...", &r.action_result.tool_output.result[..80])
+                                                } else {
+                                                    r.action_result.tool_output.result.clone()
+                                                },
+                                            ));
+                                        }
+                                        Err(e) => {
+                                            results.push(format!("  Error: {e}"));
+                                            break;
+                                        }
+                                    }
+                                    // Check if goal completed.
+                                    let active = akh_medu::agent::goal::active_goals(agent.goals());
+                                    if active.is_empty() {
+                                        break;
+                                    }
+                                }
+                                format!("Goal set: \"{description}\"\n{}", results.join("\n"))
+                            }
+                            Err(e) => format!("Failed to set goal: {e}"),
+                        }
+                    }
+
+                    akh_medu::agent::UserIntent::RunAgent { cycles } => {
+                        let n = cycles.unwrap_or(1);
+                        let mut results = Vec::new();
+                        for _ in 0..n {
+                            match agent.run_cycle() {
+                                Ok(r) => {
+                                    results.push(format!(
+                                        "  [{}] {} -> {:?}",
+                                        r.cycle_number,
+                                        r.decision.chosen_tool,
+                                        r.action_result.goal_progress,
+                                    ));
+                                }
+                                Err(e) => {
+                                    results.push(format!("  Error: {e}"));
+                                    break;
+                                }
+                            }
+                        }
+                        if results.is_empty() {
+                            "No active goals to run.".to_string()
+                        } else {
+                            results.join("\n")
+                        }
+                    }
+
+                    akh_medu::agent::UserIntent::RenderHiero { entity } => {
+                        let render_config = akh_medu::glyph::RenderConfig {
+                            color: true,
+                            notation: akh_medu::glyph::NotationConfig {
+                                use_pua: akh_medu::glyph::catalog::font_available(),
+                                show_confidence: true,
+                                show_provenance: false,
+                                show_sigils: true,
+                                compact: false,
+                            },
+                            ..Default::default()
+                        };
+
+                        if let Some(ref name) = entity {
+                            match engine.resolve_symbol(name) {
+                                Ok(sym_id) => {
+                                    match engine.extract_subgraph(&[sym_id], 1) {
+                                        Ok(result) if !result.triples.is_empty() => {
+                                            akh_medu::glyph::render::render_to_terminal(
+                                                &engine, &result.triples, &render_config,
+                                            )
+                                        }
+                                        _ => format!("No triples found around \"{name}\"."),
+                                    }
+                                }
+                                Err(_) => format!("Symbol \"{name}\" not found."),
+                            }
+                        } else {
+                            let triples = engine.all_triples();
+                            if triples.is_empty() {
+                                "No triples in knowledge graph.".to_string()
+                            } else {
+                                akh_medu::glyph::render::render_to_terminal(
+                                    &engine, &triples, &render_config,
+                                )
+                            }
+                        }
+                    }
+
+                    akh_medu::agent::UserIntent::Freeform { text } => {
+                        if let Some(ref mut client) = ollama {
+                            // Send to Ollama with KG context.
+                            let symbols = engine.all_symbols();
+                            let context = if symbols.len() <= 20 {
+                                symbols.iter().map(|s| s.label.clone()).collect::<Vec<_>>().join(", ")
+                            } else {
+                                format!("{} symbols in knowledge base", symbols.len())
+                            };
+
+                            match client.generate(
+                                &text,
+                                Some(&format!(
+                                    "You are a helpful assistant. The knowledge base contains: {}. \
+                                     Answer based on this context when relevant.",
+                                    context,
+                                )),
+                            ) {
+                                Ok(answer) => answer,
+                                Err(_) => {
+                                    "I don't understand that input. Type 'help' for commands.".to_string()
+                                }
+                            }
+                        } else {
+                            "I don't understand that input. Type 'help' for commands.".to_string()
+                        }
+                    }
+                };
+
+                println!("{response}");
+                println!();
+
+                conversation.add_turn(trimmed.to_string(), response);
+            }
+
+            // Persist session.
+            agent.persist_session().into_diagnostic()?;
+
+            // Persist conversation.
+            if let Ok(bytes) = conversation.to_bytes() {
+                let _ = engine.store().put_meta(b"chat:conversation", &bytes);
+            }
+
+            println!("Session saved.");
         }
     }
 

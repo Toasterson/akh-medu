@@ -1,0 +1,9 @@
+# Common sense rewrite rules
+# is-a transitivity: if X is-a Y and Y is-a Z, then X is-a Z
+(is-a ?x (is-a ?y ?z)) => (is-a ?x ?z)
+# part-of transitivity: if X has-part Y and Y has-part Z, then X has-part Z
+(has-part ?x (has-part ?y ?z)) => (has-part ?x ?z)
+# Opposite symmetry: if X opposite-of Y, then Y opposite-of X
+(opposite-of ?x ?y) => (opposite-of ?y ?x)
+# Property inheritance: if X is-a Y, properties of Y apply to X
+(has-property (is-a ?x ?y) ?z) => (has-property ?x ?z)

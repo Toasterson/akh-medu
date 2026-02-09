@@ -5,7 +5,9 @@
 //! graph-guided spreading activation with VSA bind/unbind recovery
 //! and similarity-based cleanup to discover implicit knowledge.
 
+pub mod backward;
 pub mod engine;
+pub mod superposition;
 
 use crate::symbol::SymbolId;
 use crate::vsa::HyperVec;

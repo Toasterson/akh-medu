@@ -14,6 +14,7 @@ use super::error::{AgentError, AgentResult};
 use super::goal::{self, Goal, GoalStatus};
 use super::memory::{EpisodicEntry, WorkingMemory, WorkingMemoryEntry, WorkingMemoryKind};
 use super::tool::{ToolInput, ToolOutput};
+use super::tool_semantics::{encode_criteria, encode_goal_semantics};
 
 // ---------------------------------------------------------------------------
 // OODA cycle types
@@ -645,178 +646,114 @@ fn select_tool(
         ));
     }
 
-    // ── file_io: useful when goal mentions file/data/export/save ──
+    // ── VSA-based tool scoring for remaining tools ──
+    // Encode the goal as a hypervector, then score each tool via semantic similarity.
+    // This replaces all keyword-matching blocks with interference-based scoring.
     {
-        let goal_lower = goal.description.to_lowercase();
-        let criteria_lower = goal.success_criteria.to_lowercase();
-        let file_keywords = ["file", "read", "write", "save", "export", "data", "log"];
-        let mentions_file = file_keywords
-            .iter()
-            .any(|kw| goal_lower.contains(kw) || criteria_lower.contains(kw));
+        let ops = engine.ops();
+        let im = engine.item_memory();
 
-        if mentions_file {
-            candidates.push(apply_modifiers(
-                ToolCandidate::new(
-                    "file_io",
-                    ToolInput::new()
-                        .with_param("action", "read")
-                        .with_param("path", &format!("{}.txt", goal_label.replace(' ', "_"))),
-                    0.45,
-                    "Goal mentions files/data — attempting file I/O.".into(),
-                ),
-                &history,
-                &episodic_tools,
-                pressure,
-            ));
-        }
-    }
+        if let Ok(goal_vec) =
+            encode_goal_semantics(&goal.description, &goal.success_criteria, engine, ops, im)
+        {
+            // Score tools by semantic similarity to the goal vector.
+            let vsa_tools: &[(&str, &[&str])] = &[
+                ("file_io", &["file", "read", "write", "save", "export", "data", "disk", "load", "document"]),
+                ("http_fetch", &["http", "url", "fetch", "web", "api", "download", "request", "network"]),
+                ("shell_exec", &["command", "shell", "execute", "run", "process", "script", "system", "terminal"]),
+                ("infer_rules", &["infer", "deduce", "derive", "transitive", "type", "hierarchy", "classify", "forward", "chain"]),
+                ("gap_analysis", &["gap", "missing", "incomplete", "discover", "explore", "what", "unknown", "coverage"]),
+                ("user_interact", &["ask", "user", "input", "question", "interact", "human", "prompt", "dialog"]),
+            ];
 
-    // ── http_fetch: useful when goal mentions url/http/fetch/api/web ──
-    {
-        let goal_lower = goal.description.to_lowercase();
-        let criteria_lower = goal.success_criteria.to_lowercase();
-        let http_keywords = ["url", "http", "fetch", "api", "web", "download"];
-        let mentions_http = http_keywords
-            .iter()
-            .any(|kw| goal_lower.contains(kw) || criteria_lower.contains(kw));
+            for (tool_name, concepts) in vsa_tools {
+                let profile_vec = match crate::vsa::grounding::bundle_symbols(
+                    engine, ops, im, concepts,
+                ) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
 
-        if mentions_http {
-            candidates.push(apply_modifiers(
-                ToolCandidate::new(
-                    "http_fetch",
-                    ToolInput::new().with_param("url", "https://example.com"),
-                    0.45,
-                    "Goal mentions HTTP/URL/API — attempting fetch.".into(),
-                ),
-                &history,
-                &episodic_tools,
-                pressure,
-            ));
-        }
-    }
+                let semantic_score = ops.similarity(&goal_vec, &profile_vec).unwrap_or(0.5);
 
-    // ── shell_exec: useful when goal mentions command/shell/run/execute ──
-    {
-        let goal_lower = goal.description.to_lowercase();
-        let criteria_lower = goal.success_criteria.to_lowercase();
-        let shell_keywords = ["command", "shell", "run", "execute", "process", "script"];
-        let mentions_shell = shell_keywords
-            .iter()
-            .any(|kw| goal_lower.contains(kw) || criteria_lower.contains(kw));
+                // Apply context-aware adjustments on top of raw semantic score.
+                let (adjusted_base, input, reason) = match *tool_name {
+                    "file_io" => {
+                        if semantic_score <= 0.55 { continue; }
+                        (
+                            semantic_score * 0.75,
+                            ToolInput::new()
+                                .with_param("action", "read")
+                                .with_param("path", &format!("{}.txt", goal_label.replace(' ', "_"))),
+                            format!("VSA semantic match for file I/O: {semantic_score:.3}"),
+                        )
+                    }
+                    "http_fetch" => {
+                        if semantic_score <= 0.55 { continue; }
+                        (
+                            semantic_score * 0.75,
+                            ToolInput::new().with_param("url", "https://example.com"),
+                            format!("VSA semantic match for HTTP fetch: {semantic_score:.3}"),
+                        )
+                    }
+                    "shell_exec" => {
+                        if semantic_score <= 0.55 { continue; }
+                        (
+                            semantic_score * 0.75,
+                            ToolInput::new()
+                                .with_param("command", "echo 'agent shell exec'")
+                                .with_param("timeout", "10"),
+                            format!("VSA semantic match for shell exec: {semantic_score:.3}"),
+                        )
+                    }
+                    "infer_rules" => {
+                        if !has_knowledge { continue; }
+                        let recent_infer_count = history.count("infer_rules");
+                        let context_boost = if recent_infer_count == 0 { 0.1 } else { 0.0 };
+                        // Always-available reasoning tool: use VSA score with a floor
+                        let base = (semantic_score * 0.7 + context_boost).max(0.35).min(0.75);
+                        (
+                            base,
+                            ToolInput::new()
+                                .with_param("max_iterations", "5")
+                                .with_param("min_confidence", "0.1"),
+                            format!("VSA inference relevance: {semantic_score:.3}"),
+                        )
+                    }
+                    "gap_analysis" => {
+                        let query_count = history.count("kg_query");
+                        let stall_boost = if query_count >= 2 { 0.1 } else { 0.0 };
+                        // Always-available analysis tool: use VSA score with a floor
+                        let base = (semantic_score * 0.7 + stall_boost).max(0.3).min(0.75);
+                        (
+                            base,
+                            ToolInput::new()
+                                .with_param("goal", &goal_label)
+                                .with_param("max_gaps", "10"),
+                            format!("VSA gap analysis relevance: {semantic_score:.3}"),
+                        )
+                    }
+                    "user_interact" => {
+                        if semantic_score <= 0.55 { continue; }
+                        (
+                            semantic_score * 0.75,
+                            ToolInput::new().with_param(
+                                "question",
+                                &format!("What should I know about: {}?", goal.description),
+                            ),
+                            format!("VSA semantic match for user interaction: {semantic_score:.3}"),
+                        )
+                    }
+                    _ => continue,
+                };
 
-        if mentions_shell {
-            candidates.push(apply_modifiers(
-                ToolCandidate::new(
-                    "shell_exec",
-                    ToolInput::new()
-                        .with_param("command", "echo 'agent shell exec'")
-                        .with_param("timeout", "10"),
-                    0.45,
-                    "Goal mentions command/shell execution.".into(),
-                ),
-                &history,
-                &episodic_tools,
-                pressure,
-            ));
-        }
-    }
-
-    // ── infer_rules: when knowledge exists but inference hasn't been run recently ──
-    if has_knowledge {
-        let goal_lower = goal.description.to_lowercase();
-        let criteria_lower = goal.success_criteria.to_lowercase();
-        let infer_keywords = [
-            "infer", "deduce", "derive", "transitive", "type", "hierarchy", "classify",
-        ];
-        let mentions_infer = infer_keywords
-            .iter()
-            .any(|kw| goal_lower.contains(kw) || criteria_lower.contains(kw));
-
-        let recent_infer_count = history.count("infer_rules");
-        // Use if keywords match or if we haven't inferred in the last 3 cycles.
-        let base = if mentions_infer {
-            0.65
-        } else if recent_infer_count == 0 {
-            0.55
-        } else {
-            0.35
-        };
-
-        candidates.push(apply_modifiers(
-            ToolCandidate::new(
-                "infer_rules",
-                ToolInput::new()
-                    .with_param("max_iterations", "5")
-                    .with_param("min_confidence", "0.1"),
-                base,
-                "Running forward-chaining inference to derive new knowledge.".into(),
-            ),
-            &history,
-            &episodic_tools,
-            pressure,
-        ));
-    }
-
-    // ── gap_analysis: when querying the same area without progress ──
-    {
-        let goal_lower = goal.description.to_lowercase();
-        let criteria_lower = goal.success_criteria.to_lowercase();
-        let gap_keywords = ["gap", "missing", "incomplete", "discover", "explore", "what"];
-        let mentions_gap = gap_keywords
-            .iter()
-            .any(|kw| goal_lower.contains(kw) || criteria_lower.contains(kw));
-
-        let query_count = history.count("kg_query");
-        // Use if keywords match or if we've queried 2+ times without progress.
-        let base = if mentions_gap {
-            0.6
-        } else if query_count >= 2 {
-            0.5
-        } else {
-            0.3
-        };
-
-        if base > 0.3 {
-            candidates.push(apply_modifiers(
-                ToolCandidate::new(
-                    "gap_analysis",
-                    ToolInput::new()
-                        .with_param("goal", &goal_label)
-                        .with_param("max_gaps", "10"),
-                    base,
-                    "Identifying knowledge gaps around the goal.".into(),
-                ),
-                &history,
-                &episodic_tools,
-                pressure,
-            ));
-        }
-    }
-
-    // ── user_interact: useful when goal mentions ask/user/input/question ──
-    {
-        let goal_lower = goal.description.to_lowercase();
-        let criteria_lower = goal.success_criteria.to_lowercase();
-        let user_keywords = ["ask", "user", "input", "question", "interact", "human"];
-        let mentions_user = user_keywords
-            .iter()
-            .any(|kw| goal_lower.contains(kw) || criteria_lower.contains(kw));
-
-        if mentions_user {
-            candidates.push(apply_modifiers(
-                ToolCandidate::new(
-                    "user_interact",
-                    ToolInput::new().with_param(
-                        "question",
-                        &format!("What should I know about: {}?", goal.description),
-                    ),
-                    0.5,
-                    "Goal mentions user/input — asking the user.".into(),
-                ),
-                &history,
-                &episodic_tools,
-                pressure,
-            ));
+                candidates.push(apply_modifiers(
+                    ToolCandidate::new(tool_name, input, adjusted_base, reason),
+                    &history,
+                    &episodic_tools,
+                    pressure,
+                ));
+            }
         }
     }
 
@@ -990,12 +927,16 @@ fn evaluate_criteria_against_kg(
 
 /// Evaluate whether a tool output satisfies a goal's success criteria.
 ///
-/// Uses two signals:
-/// 1. **Tool output**: symbols and text from the current tool execution.
-/// 2. **KG state**: whether the entire knowledge graph now contains data
-///    matching the criteria keywords.
+/// Uses VSA interference pattern matching:
+/// 1. **Tool output signal**: encode output symbols as a hypervector, measure
+///    constructive interference with the criteria vector.
+/// 2. **KG state signal**: encode KG neighborhood as a hypervector, measure
+///    interference with the criteria vector.
 ///
-/// Completion requires >=50% keyword match from either signal.
+/// Constructive interference (similarity > completion_threshold) → Completed.
+/// Partial interference → Advanced. No interference → NoChange.
+///
+/// Falls back to keyword matching if VSA encoding fails.
 fn evaluate_goal_progress(
     goal: &Goal,
     tool_output: &ToolOutput,
@@ -1007,6 +948,111 @@ fn evaluate_goal_progress(
         };
     }
 
+    if goal.success_criteria.trim().is_empty() {
+        if tool_output.symbols_involved.is_empty() {
+            return GoalProgress::NoChange;
+        }
+        return GoalProgress::Advanced {
+            detail: format!(
+                "Tool produced {} symbols (no evaluable criteria).",
+                tool_output.symbols_involved.len()
+            ),
+        };
+    }
+
+    let ops = engine.ops();
+    let im = engine.item_memory();
+
+    // ── Encode criteria as hypervector ──
+    let criteria_vec = match encode_criteria(&goal.success_criteria, engine, ops, im) {
+        Ok(v) => v,
+        Err(_) => return evaluate_goal_progress_keyword_fallback(goal, tool_output, engine),
+    };
+
+    // ── Signal 1: Tool output interference ──
+    // Bundle the output symbols into a state vector and measure similarity.
+    let output_vecs: Vec<crate::vsa::HyperVec> = tool_output
+        .symbols_involved
+        .iter()
+        .filter(|s| **s != goal.symbol_id)
+        .filter_map(|s| im.get(*s))
+        .collect();
+
+    let tool_interference = if !output_vecs.is_empty() {
+        let refs: Vec<&crate::vsa::HyperVec> = output_vecs.iter().collect();
+        match ops.bundle(&refs) {
+            Ok(state_vec) => ops.similarity(&criteria_vec, &state_vec).unwrap_or(0.5),
+            Err(_) => 0.5,
+        }
+    } else {
+        0.5 // neutral — no signal
+    };
+
+    // ── Signal 2: KG state interference ──
+    // Bundle the goal's KG neighborhood into a state vector.
+    let kg_triples = engine.triples_from(goal.symbol_id);
+    let kg_vecs: Vec<crate::vsa::HyperVec> = kg_triples
+        .iter()
+        .flat_map(|t| [t.object, t.predicate])
+        .filter_map(|s| im.get(s))
+        .collect();
+
+    let kg_interference = if !kg_vecs.is_empty() {
+        let refs: Vec<&crate::vsa::HyperVec> = kg_vecs.iter().collect();
+        match ops.bundle(&refs) {
+            Ok(state_vec) => ops.similarity(&criteria_vec, &state_vec).unwrap_or(0.5),
+            Err(_) => 0.5,
+        }
+    } else {
+        0.5
+    };
+
+    // The best interference signal determines progress.
+    let best_interference = tool_interference.max(kg_interference);
+
+    // Thresholds calibrated for VSA similarity:
+    // Random vectors have ~0.50 similarity (bipolar), but the majority-vote
+    // tie-breaker introduces bias when bundling even numbers of vectors.
+    // Require BOTH signals to indicate relevance for completion (constructive
+    // interference in both tool output and KG state), or a very strong single
+    // signal to avoid false positives from tie-breaker artifacts.
+    let strong_threshold = 0.70;
+    let completion_threshold = 0.60;
+    let advancement_threshold = 0.53;
+
+    // Require both signals for completion, or one very strong signal
+    let both_above_threshold = tool_interference >= completion_threshold
+        && kg_interference >= completion_threshold;
+    let one_very_strong = best_interference >= strong_threshold;
+
+    if both_above_threshold || one_very_strong {
+        GoalProgress::Completed
+    } else if best_interference >= advancement_threshold {
+        GoalProgress::Advanced {
+            detail: format!(
+                "VSA interference: tool={tool_interference:.3}, KG={kg_interference:.3} (threshold={completion_threshold:.2})",
+            ),
+        }
+    } else if !tool_output.symbols_involved.is_empty() {
+        GoalProgress::Advanced {
+            detail: format!(
+                "Tool produced {} symbols, weak interference: {best_interference:.3}.",
+                tool_output.symbols_involved.len()
+            ),
+        }
+    } else {
+        GoalProgress::NoChange
+    }
+}
+
+/// Keyword-based fallback for goal progress evaluation.
+///
+/// Used when VSA encoding fails (e.g., empty item memory).
+fn evaluate_goal_progress_keyword_fallback(
+    goal: &Goal,
+    tool_output: &ToolOutput,
+    engine: &crate::engine::Engine,
+) -> GoalProgress {
     let criteria_keywords = parse_criteria_keywords(&goal.success_criteria);
 
     if criteria_keywords.is_empty() {
@@ -1020,8 +1066,6 @@ fn evaluate_goal_progress(
             ),
         };
     }
-
-    // ── Signal 1: Check tool output ──
 
     let output_labels: Vec<String> = tool_output
         .symbols_involved
@@ -1053,12 +1097,7 @@ fn evaluate_goal_progress(
         .count();
 
     let tool_ratio = tool_matched as f32 / criteria_keywords.len() as f32;
-
-    // ── Signal 2: Check KG state ──
-
     let kg_ratio = evaluate_criteria_against_kg(goal, engine);
-
-    // Complete if either signal exceeds 50%.
     let best_ratio = tool_ratio.max(kg_ratio);
     let best_matched = (best_ratio * criteria_keywords.len() as f32).round() as usize;
 

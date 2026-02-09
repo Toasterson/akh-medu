@@ -148,6 +148,10 @@ impl Agent {
         // Autonomous reasoning tools.
         registry.register(Box::new(tools::InferRulesTool));
         registry.register(Box::new(tools::GapAnalysisTool));
+
+        // Ingest tools.
+        registry.register(Box::new(tools::CsvIngestTool));
+        registry.register(Box::new(tools::TextIngestTool));
     }
 
     /// Create a new agent wrapping the given engine.

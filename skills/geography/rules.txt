@@ -1,0 +1,5 @@
+# Geography rewrite rules
+# located-in transitivity: if X located-in Y and Y located-in Z, then X located-in Z
+(located-in ?x (located-in ?y ?z)) => (located-in ?x ?z)
+# Borders symmetry: if X borders Y, then Y borders X
+(borders ?x ?y) => (borders ?y ?x)

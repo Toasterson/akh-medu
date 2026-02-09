@@ -9,6 +9,7 @@ use super::error::AgentResult;
 use super::goal::Goal;
 use super::memory::{WorkingMemory, WorkingMemoryKind};
 use super::tool::ToolInput;
+use super::tool_semantics::encode_goal_semantics;
 use crate::engine::Engine;
 use crate::symbol::SymbolId;
 
@@ -161,27 +162,51 @@ pub fn generate_plan(
     let goal_lower = goal.description.to_lowercase();
     let criteria_lower = goal.success_criteria.to_lowercase();
 
-    // Determine what the goal needs by analyzing keywords.
-    let needs_knowledge = contains_any(
-        &goal_lower,
-        &["find", "query", "search", "discover", "what", "list", "identify"],
-    );
-    let needs_reasoning = contains_any(
-        &goal_lower,
-        &["reason", "infer", "deduce", "classify", "analyze", "why"],
-    );
-    let needs_creation = contains_any(
-        &goal_lower,
-        &["create", "add", "build", "connect", "link", "store", "write"],
-    );
-    let needs_external = contains_any(
-        &goal_lower,
-        &["file", "http", "url", "command", "shell", "fetch", "download"],
-    );
-    let needs_similarity = contains_any(
-        &goal_lower,
-        &["similar", "like", "related", "compare", "cluster"],
-    );
+    // Determine what the goal needs via VSA semantic similarity.
+    // Encode canonical strategy patterns as hypervectors and measure
+    // interference with the goal vector. Falls back to keyword matching
+    // if VSA encoding fails.
+    let (needs_knowledge, needs_reasoning, needs_creation, needs_external, needs_similarity) = {
+        let ops = engine.ops();
+        let im = engine.item_memory();
+
+        match encode_goal_semantics(&goal.description, &goal.success_criteria, engine, ops, im) {
+            Ok(goal_vec) => {
+                let score = |concepts: &[&str]| -> f32 {
+                    crate::vsa::grounding::bundle_symbols(engine, ops, im, concepts)
+                        .ok()
+                        .and_then(|v| ops.similarity(&goal_vec, &v).ok())
+                        .unwrap_or(0.5)
+                };
+
+                let knowledge_score = score(&["find", "query", "search", "discover", "explore", "list", "identify"]);
+                let reasoning_score = score(&["reason", "infer", "deduce", "classify", "analyze", "why"]);
+                let creation_score = score(&["create", "add", "build", "connect", "link", "store", "write"]);
+                let external_score = score(&["file", "http", "command", "shell", "fetch", "download"]);
+                let similarity_score = score(&["similar", "like", "related", "compare", "cluster"]);
+
+                // Threshold: random similarity is ~0.50, so 0.55 indicates real signal.
+                let threshold = 0.55;
+                (
+                    knowledge_score > threshold,
+                    reasoning_score > threshold,
+                    creation_score > threshold,
+                    external_score > threshold,
+                    similarity_score > threshold,
+                )
+            }
+            Err(_) => {
+                // Keyword fallback
+                (
+                    contains_any(&goal_lower, &["find", "query", "search", "discover", "what", "list", "identify"]),
+                    contains_any(&goal_lower, &["reason", "infer", "deduce", "classify", "analyze", "why"]),
+                    contains_any(&goal_lower, &["create", "add", "build", "connect", "link", "store", "write"]),
+                    contains_any(&goal_lower, &["file", "http", "url", "command", "shell", "fetch", "download"]),
+                    contains_any(&goal_lower, &["similar", "like", "related", "compare", "cluster"]),
+                )
+            }
+        }
+    };
 
     // Check if we have existing knowledge about the goal's subject.
     let goal_label = engine.resolve_label(goal.symbol_id);
@@ -339,40 +364,95 @@ pub fn generate_plan(
     }
 
     // External tool steps (appended regardless of strategy).
+    // Use VSA similarity to determine which external tools are relevant.
     if needs_external {
-        if contains_any(&goal_lower, &["file", "read", "write", "save", "export"]) {
-            steps.push(PlanStep {
-                tool_name: "file_io".into(),
-                tool_input: ToolInput::new()
-                    .with_param("action", "read")
-                    .with_param("path", &format!("{}.txt", goal_label.replace(' ', "_"))),
-                rationale: "Access file data relevant to the goal.".into(),
-                status: StepStatus::Pending,
-                index: steps.len(),
-            });
-            strategy_parts.push("file I/O");
-        }
-        if contains_any(&goal_lower, &["http", "url", "fetch", "api", "download"]) {
-            steps.push(PlanStep {
-                tool_name: "http_fetch".into(),
-                tool_input: ToolInput::new().with_param("url", "https://example.com"),
-                rationale: "Fetch external data via HTTP.".into(),
-                status: StepStatus::Pending,
-                index: steps.len(),
-            });
-            strategy_parts.push("HTTP fetch");
-        }
-        if contains_any(&goal_lower, &["command", "shell", "run", "execute"]) {
-            steps.push(PlanStep {
-                tool_name: "shell_exec".into(),
-                tool_input: ToolInput::new()
-                    .with_param("command", "echo 'plan step'")
-                    .with_param("timeout", "10"),
-                rationale: "Execute a shell command for the goal.".into(),
-                status: StepStatus::Pending,
-                index: steps.len(),
-            });
-            strategy_parts.push("shell exec");
+        let ops = engine.ops();
+        let im = engine.item_memory();
+
+        let external_tools: &[(&str, &[&str], &str)] = &[
+            ("file_io", &["file", "read", "write", "save", "export", "data", "disk"], "file I/O"),
+            ("http_fetch", &["http", "url", "fetch", "web", "api", "download", "network"], "HTTP fetch"),
+            ("shell_exec", &["command", "shell", "execute", "run", "process", "script"], "shell exec"),
+        ];
+
+        if let Ok(goal_vec) =
+            encode_goal_semantics(&goal.description, &goal.success_criteria, engine, ops, im)
+        {
+            for (tool_name, concepts, strategy_label) in external_tools {
+                let score = crate::vsa::grounding::bundle_symbols(engine, ops, im, concepts)
+                    .ok()
+                    .and_then(|v| ops.similarity(&goal_vec, &v).ok())
+                    .unwrap_or(0.5);
+
+                if score <= 0.55 {
+                    continue;
+                }
+
+                let (tool_input, rationale) = match *tool_name {
+                    "file_io" => (
+                        ToolInput::new()
+                            .with_param("action", "read")
+                            .with_param("path", &format!("{}.txt", goal_label.replace(' ', "_"))),
+                        format!("VSA-selected file I/O (similarity: {score:.3})."),
+                    ),
+                    "http_fetch" => (
+                        ToolInput::new().with_param("url", "https://example.com"),
+                        format!("VSA-selected HTTP fetch (similarity: {score:.3})."),
+                    ),
+                    "shell_exec" => (
+                        ToolInput::new()
+                            .with_param("command", "echo 'plan step'")
+                            .with_param("timeout", "10"),
+                        format!("VSA-selected shell exec (similarity: {score:.3})."),
+                    ),
+                    _ => continue,
+                };
+
+                steps.push(PlanStep {
+                    tool_name: tool_name.to_string(),
+                    tool_input,
+                    rationale,
+                    status: StepStatus::Pending,
+                    index: steps.len(),
+                });
+                strategy_parts.push(strategy_label);
+            }
+        } else {
+            // Keyword fallback for external tools
+            if contains_any(&goal_lower, &["file", "read", "write", "save", "export"]) {
+                steps.push(PlanStep {
+                    tool_name: "file_io".into(),
+                    tool_input: ToolInput::new()
+                        .with_param("action", "read")
+                        .with_param("path", &format!("{}.txt", goal_label.replace(' ', "_"))),
+                    rationale: "Access file data relevant to the goal.".into(),
+                    status: StepStatus::Pending,
+                    index: steps.len(),
+                });
+                strategy_parts.push("file I/O");
+            }
+            if contains_any(&goal_lower, &["http", "url", "fetch", "api", "download"]) {
+                steps.push(PlanStep {
+                    tool_name: "http_fetch".into(),
+                    tool_input: ToolInput::new().with_param("url", "https://example.com"),
+                    rationale: "Fetch external data via HTTP.".into(),
+                    status: StepStatus::Pending,
+                    index: steps.len(),
+                });
+                strategy_parts.push("HTTP fetch");
+            }
+            if contains_any(&goal_lower, &["command", "shell", "run", "execute"]) {
+                steps.push(PlanStep {
+                    tool_name: "shell_exec".into(),
+                    tool_input: ToolInput::new()
+                        .with_param("command", "echo 'plan step'")
+                        .with_param("timeout", "10"),
+                    rationale: "Execute a shell command for the goal.".into(),
+                    status: StepStatus::Pending,
+                    index: steps.len(),
+                });
+                strategy_parts.push("shell exec");
+            }
         }
     }
 
@@ -460,7 +540,7 @@ mod tests {
     use super::*;
     use crate::symbol::SymbolId;
 
-    fn dummy_goal(desc: &str, criteria: &str) -> Goal {
+    fn _dummy_goal(desc: &str, criteria: &str) -> Goal {
         Goal {
             symbol_id: SymbolId::new(1).unwrap(),
             description: desc.into(),

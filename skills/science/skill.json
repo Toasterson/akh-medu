@@ -1,0 +1,10 @@
+{
+  "id": "science",
+  "name": "Basic Science",
+  "version": "1.0.0",
+  "description": "Elements, forces, scientific classification, and composition",
+  "domains": ["science", "physics", "chemistry"],
+  "weight_size_bytes": 0,
+  "triples_file": "triples.json",
+  "rules_file": "rules.txt"
+}

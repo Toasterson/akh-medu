@@ -1,0 +1,7 @@
+# Language rewrite rules
+# Synonym symmetry: if X synonym-of Y, then Y synonym-of X
+(synonym-of ?x ?y) => (synonym-of ?y ?x)
+# Antonym symmetry: if X antonym-of Y, then Y antonym-of X
+(antonym-of ?x ?y) => (antonym-of ?y ?x)
+# inverse-of symmetry
+(inverse-of ?x ?y) => (inverse-of ?y ?x)

@@ -1,0 +1,7 @@
+# Science rewrite rules
+# composed-of transitivity: if X composed-of Y and Y composed-of Z, then X composed-of Z
+(composed-of ?x (composed-of ?y ?z)) => (composed-of ?x ?z)
+# is-a transitivity
+(is-a ?x (is-a ?y ?z)) => (is-a ?x ?z)
+# has-part transitivity
+(has-part ?x (has-part ?y ?z)) => (has-part ?x ?z)

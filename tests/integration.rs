@@ -884,9 +884,9 @@ fn goal_status_transitions() {
 fn tool_registry_crud() {
     let mut agent = test_agent();
 
-    // Should have 11 built-in tools (5 core + 4 external + 2 autonomous).
+    // Should have 13 built-in tools (5 core + 4 external + 2 autonomous + 2 ingest).
     let tools = agent.list_tools();
-    assert_eq!(tools.len(), 11);
+    assert_eq!(tools.len(), 13);
 
     let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
     // Core tools.
@@ -903,6 +903,9 @@ fn tool_registry_crud() {
     // Autonomous tools.
     assert!(names.contains(&"infer_rules"));
     assert!(names.contains(&"gap_analysis"));
+    // Ingest tools.
+    assert!(names.contains(&"csv_ingest"));
+    assert!(names.contains(&"text_ingest"));
 
     // Register a custom tool.
     struct CustomTool;
@@ -924,7 +927,7 @@ fn tool_registry_crud() {
     }
 
     agent.register_tool(Box::new(CustomTool));
-    assert_eq!(agent.list_tools().len(), 12);
+    assert_eq!(agent.list_tools().len(), 14);
 }
 
 #[test]
@@ -2538,4 +2541,363 @@ fn hieroglyphic_legend() {
     // Count lines with radical entries (should have 32).
     let radical_lines: Vec<&str> = legend.lines().filter(|l| l.contains("[")).collect();
     assert_eq!(radical_lines.len(), 32, "legend should list 32 radicals");
+}
+
+// -----------------------------------------------------------------------
+// Phase 12: Knowledge Population
+// -----------------------------------------------------------------------
+
+/// Create an engine with bundled skill packs available.
+fn engine_with_skills() -> (Engine, tempfile::TempDir) {
+    let dir = tempfile::TempDir::new().unwrap();
+    let skills_target = dir.path().join("skills");
+    std::fs::create_dir_all(&skills_target).unwrap();
+
+    // Copy bundled skill packs from the repo's skills/ directory.
+    let source_skills = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("skills");
+    if source_skills.exists() {
+        for entry in std::fs::read_dir(&source_skills).unwrap() {
+            let entry = entry.unwrap();
+            let skill_name = entry.file_name();
+            let src = entry.path();
+            let dst = skills_target.join(&skill_name);
+            std::fs::create_dir_all(&dst).unwrap();
+            for file in std::fs::read_dir(&src).unwrap() {
+                let file = file.unwrap();
+                std::fs::copy(file.path(), dst.join(file.file_name())).unwrap();
+            }
+        }
+    }
+
+    let engine = Engine::new(EngineConfig {
+        dimension: Dimension::TEST,
+        data_dir: Some(dir.path().to_path_buf()),
+        ..Default::default()
+    })
+    .unwrap();
+
+    (engine, dir)
+}
+
+#[test]
+fn skill_pack_common_sense_loads() {
+    let (engine, _dir) = engine_with_skills();
+    let activation = engine.load_skill("common_sense").unwrap();
+    assert!(activation.triples_loaded > 100, "common_sense should have >100 triples");
+    assert!(activation.rules_loaded > 0, "common_sense should have rules");
+}
+
+#[test]
+fn skill_pack_geography_loads() {
+    let (engine, _dir) = engine_with_skills();
+    let activation = engine.load_skill("geography").unwrap();
+    assert!(activation.triples_loaded > 80, "geography should have >80 triples");
+    assert!(activation.rules_loaded > 0, "geography should have rules");
+}
+
+#[test]
+fn skill_pack_science_loads() {
+    let (engine, _dir) = engine_with_skills();
+    let activation = engine.load_skill("science").unwrap();
+    assert!(activation.triples_loaded > 80, "science should have >80 triples");
+    assert!(activation.rules_loaded > 0, "science should have rules");
+}
+
+#[test]
+fn skill_pack_language_loads() {
+    let (engine, _dir) = engine_with_skills();
+    let activation = engine.load_skill("language").unwrap();
+    assert!(activation.triples_loaded > 60, "language should have >60 triples");
+    assert!(activation.rules_loaded > 0, "language should have rules");
+}
+
+#[test]
+fn csv_ingest_spo_and_entity() {
+    use akh_medu::agent::tools::CsvIngestTool;
+    use akh_medu::agent::tool::{Tool, ToolInput};
+
+    let engine = test_engine();
+    let dir = tempfile::TempDir::new().unwrap();
+
+    // SPO format.
+    let spo_path = dir.path().join("spo.csv");
+    std::fs::write(&spo_path, "Dog,is-a,Animal\nCat,is-a,Animal,0.95\n").unwrap();
+    let input = ToolInput::new()
+        .with_param("path", spo_path.to_str().unwrap())
+        .with_param("format", "spo");
+    let result = CsvIngestTool.execute(&engine, input).unwrap();
+    assert!(result.success);
+    assert!(result.result.contains("2 triples ingested"));
+
+    // Entity format.
+    let entity_path = dir.path().join("entity.csv");
+    std::fs::write(&entity_path, "entity,is-a,lives-in\nFrog,Animal,Pond\n").unwrap();
+    let input = ToolInput::new()
+        .with_param("path", entity_path.to_str().unwrap())
+        .with_param("format", "entity");
+    let result = CsvIngestTool.execute(&engine, input).unwrap();
+    assert!(result.success);
+    assert!(result.result.contains("2 triples ingested"));
+}
+
+#[test]
+fn text_ingest_extracts_triples() {
+    use akh_medu::agent::tools::TextIngestTool;
+    use akh_medu::agent::tool::{Tool, ToolInput};
+
+    let engine = test_engine();
+    let input = ToolInput::new()
+        .with_param("text", "Dogs are mammals. Paris is located in France. The wheel is part of the car.");
+    let result = TextIngestTool.execute(&engine, input).unwrap();
+    assert!(result.success);
+    assert!(result.result.contains("extracted 3 triple(s)"));
+}
+
+#[test]
+fn bootstrap_loads_skills_and_grounds() {
+    let (engine, _dir) = engine_with_skills();
+
+    // Load all skills.
+    let skill_names = ["astronomy", "common_sense", "geography", "science", "language"];
+    let mut total = 0;
+    for name in &skill_names {
+        if let Ok(activation) = engine.load_skill(name) {
+            total += activation.triples_loaded;
+        }
+    }
+    assert!(total > 200, "should load >200 triples across all skills, got {total}");
+
+    // Run grounding.
+    let ops = engine.ops();
+    let im = engine.item_memory();
+    let config = akh_medu::vsa::grounding::GroundingConfig::default();
+    let grounding = akh_medu::vsa::grounding::ground_all(&engine, ops, im, &config).unwrap();
+    assert!(grounding.symbols_updated > 0, "grounding should update symbols");
+}
+
+#[test]
+fn post_ingest_grounding_improves_similarity() {
+    let (engine, _dir) = engine_with_skills();
+    engine.load_skill("common_sense").unwrap();
+
+    let ops = engine.ops();
+    let im = engine.item_memory();
+
+    // Before grounding: Dog and Cat have ~0.5 similarity (random vectors).
+    let dog = engine.lookup_symbol("Dog").unwrap();
+    let cat = engine.lookup_symbol("Cat").unwrap();
+
+    let dog_vec_before = im.get_or_create(ops, dog);
+    let cat_vec_before = im.get_or_create(ops, cat);
+    let sim_before = ops.similarity(&dog_vec_before, &cat_vec_before).unwrap();
+
+    // Run grounding.
+    let config = akh_medu::vsa::grounding::GroundingConfig::default();
+    akh_medu::vsa::grounding::ground_all(&engine, ops, im, &config).unwrap();
+
+    // After grounding: Dog and Cat should be more similar.
+    let dog_vec_after = im.get(dog).unwrap();
+    let cat_vec_after = im.get(cat).unwrap();
+    let sim_after = ops.similarity(&dog_vec_after, &cat_vec_after).unwrap();
+
+    assert!(
+        sim_after > sim_before,
+        "Dog/Cat similarity should increase after grounding: before={sim_before:.3}, after={sim_after:.3}"
+    );
+}
+
+#[test]
+fn new_tools_accessible_in_ooda() {
+    let engine = Engine::new(EngineConfig {
+        dimension: Dimension::TEST,
+        ..Default::default()
+    })
+    .unwrap();
+    let engine = Arc::new(engine);
+    let agent = Agent::new(Arc::clone(&engine), AgentConfig::default()).unwrap();
+
+    // Verify new tools are registered and accessible.
+    let tools = agent.list_tools();
+    let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+    assert!(names.contains(&"csv_ingest"), "csv_ingest should be registered");
+    assert!(names.contains(&"text_ingest"), "text_ingest should be registered");
+}
+
+// ---------------------------------------------------------------------------
+// Phase 13 — Natural Language Interface
+// ---------------------------------------------------------------------------
+
+#[test]
+fn intent_classify_query() {
+    use akh_medu::agent::{classify_intent, UserIntent};
+
+    match classify_intent("What is a dog?") {
+        UserIntent::Query { subject } => {
+            assert!(subject.to_lowercase().contains("dog"), "subject should contain 'dog', got: {subject}");
+        }
+        other => panic!("Expected Query, got {other:?}"),
+    }
+}
+
+#[test]
+fn intent_classify_assert() {
+    use akh_medu::agent::{classify_intent, UserIntent};
+
+    match classify_intent("Dogs are mammals") {
+        UserIntent::Assert { text } => {
+            assert_eq!(text, "Dogs are mammals");
+        }
+        other => panic!("Expected Assert, got {other:?}"),
+    }
+}
+
+#[test]
+fn intent_classify_goal() {
+    use akh_medu::agent::{classify_intent, UserIntent};
+
+    match classify_intent("Find similar animals to Dog") {
+        UserIntent::SetGoal { description } => {
+            assert!(description.contains("similar animals"), "desc: {description}");
+        }
+        other => panic!("Expected SetGoal, got {other:?}"),
+    }
+}
+
+#[test]
+fn intent_classify_status() {
+    use akh_medu::agent::{classify_intent, UserIntent};
+
+    assert!(matches!(classify_intent("status"), UserIntent::ShowStatus));
+    assert!(matches!(classify_intent("goals"), UserIntent::ShowStatus));
+}
+
+#[test]
+fn intent_classify_render() {
+    use akh_medu::agent::{classify_intent, UserIntent};
+
+    match classify_intent("show Dog") {
+        UserIntent::RenderHiero { entity } => {
+            assert_eq!(entity.as_deref(), Some("Dog"));
+        }
+        other => panic!("Expected RenderHiero, got {other:?}"),
+    }
+}
+
+#[test]
+fn intent_classify_freeform() {
+    use akh_medu::agent::{classify_intent, UserIntent};
+
+    assert!(matches!(
+        classify_intent("tell me something interesting"),
+        UserIntent::Freeform { .. }
+    ));
+}
+
+#[test]
+fn ollama_client_probe_unreachable() {
+    use akh_medu::agent::{OllamaClient, OllamaConfig};
+
+    let config = OllamaConfig {
+        base_url: "http://127.0.0.1:1".into(),
+        ..Default::default()
+    };
+    let mut client = OllamaClient::new(config);
+    assert!(!client.probe(), "probe to unreachable port should return false");
+    assert!(!client.is_available());
+
+    // generate/chat should fail gracefully
+    assert!(client.generate("test", None).is_err());
+}
+
+#[test]
+fn conversation_serialize_deserialize() {
+    use akh_medu::agent::Conversation;
+
+    let mut conv = Conversation::new(50);
+    conv.add_turn("What is a cat?".into(), "A cat is a mammal.".into());
+    conv.add_turn("Tell me more.".into(), "Cats are domestic animals.".into());
+
+    let bytes = conv.to_bytes().unwrap();
+    let restored = Conversation::from_bytes(&bytes).unwrap();
+
+    assert_eq!(restored.len(), 2);
+    assert_eq!(restored.turns()[0].user_input, "What is a cat?");
+    assert_eq!(restored.turns()[1].agent_response, "Cats are domestic animals.");
+}
+
+#[test]
+fn chat_roundtrip_without_ollama() {
+    // Integration test: classify intent, execute assertion via TextIngestTool, query result.
+    let engine = Engine::new(EngineConfig {
+        dimension: Dimension::TEST,
+        ..Default::default()
+    })
+    .unwrap();
+    let engine = Arc::new(engine);
+
+    // Step 1: Assert a fact.
+    let intent = akh_medu::agent::classify_intent("Dogs are mammals");
+    assert!(matches!(intent, akh_medu::agent::UserIntent::Assert { .. }));
+
+    if let akh_medu::agent::UserIntent::Assert { text } = intent {
+        use akh_medu::agent::tool::Tool;
+        let tool_input = akh_medu::agent::ToolInput::new().with_param("text", &text);
+        let output = akh_medu::agent::tools::TextIngestTool
+            .execute(&engine, tool_input)
+            .unwrap();
+        assert!(output.success, "TextIngestTool should succeed: {}", output.result);
+        assert!(
+            output.result.contains("is-a") || output.result.contains("triple"),
+            "Should mention extracted triple: {}",
+            output.result,
+        );
+    }
+
+    // Step 2: Verify symbols were created by the ingest.
+    // TextIngestTool capitalizes and preserves the original words: "Dogs" and "Mammals".
+    let resolved = engine.resolve_symbol("Dogs");
+    assert!(
+        resolved.is_ok(),
+        "Symbol 'Dogs' should exist after assertion, got: {resolved:?}",
+    );
+    let resolved_obj = engine.resolve_symbol("Mammals");
+    assert!(
+        resolved_obj.is_ok(),
+        "Symbol 'Mammals' should exist after assertion, got: {resolved_obj:?}",
+    );
+
+    // Verify the triple exists.
+    let dogs_id = resolved.unwrap();
+    let triples = engine.triples_from(dogs_id);
+    assert!(!triples.is_empty(), "Dogs should have outgoing triples");
+}
+
+#[test]
+fn graceful_fallback_without_ollama() {
+    // All features should work without Ollama — no panics, no unwraps on None.
+    let engine = Engine::new(EngineConfig {
+        dimension: Dimension::TEST,
+        ..Default::default()
+    })
+    .unwrap();
+    let engine = Arc::new(engine);
+
+    // Agent creation works without Ollama.
+    let agent = Agent::new(Arc::clone(&engine), AgentConfig::default()).unwrap();
+    assert_eq!(agent.cycle_count(), 0);
+
+    // Conversation works without Ollama.
+    let mut conv = akh_medu::agent::Conversation::new(10);
+    conv.add_turn("test".into(), "response".into());
+    assert_eq!(conv.len(), 1);
+
+    // Intent classification works without Ollama (regex-only).
+    let intent = akh_medu::agent::classify_intent("What is the capital of France?");
+    assert!(matches!(intent, akh_medu::agent::UserIntent::Query { .. }));
+
+    // Text ingest works without Ollama (regex extraction).
+    use akh_medu::agent::tool::Tool;
+    let input = akh_medu::agent::ToolInput::new().with_param("text", "Paris is the capital of France");
+    let output = akh_medu::agent::tools::TextIngestTool.execute(&engine, input).unwrap();
+    assert!(output.success);
 }

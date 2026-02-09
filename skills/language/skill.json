@@ -1,0 +1,10 @@
+{
+  "id": "language",
+  "name": "Language Structure",
+  "version": "1.0.0",
+  "description": "Parts of speech, sentence structure, and linguistic relations",
+  "domains": ["language", "linguistics"],
+  "weight_size_bytes": 0,
+  "triples_file": "triples.json",
+  "rules_file": "rules.txt"
+}

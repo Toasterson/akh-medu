@@ -1,0 +1,10 @@
+{
+  "id": "geography",
+  "name": "World Geography",
+  "version": "1.0.0",
+  "description": "Countries, capitals, continents, rivers, and mountains",
+  "domains": ["geography", "world"],
+  "weight_size_bytes": 0,
+  "triples_file": "triples.json",
+  "rules_file": "rules.txt"
+}
