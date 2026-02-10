@@ -378,6 +378,11 @@ impl Agent {
         )
     }
 
+    /// Clear all restored goals (for fresh-start mode).
+    pub fn clear_goals(&mut self) {
+        self.goals.clear();
+    }
+
     /// Mark a goal as completed by its symbol ID.
     pub fn complete_goal(&mut self, goal_id: SymbolId) -> AgentResult<()> {
         let goal = self

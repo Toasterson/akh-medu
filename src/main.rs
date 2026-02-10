@@ -416,6 +416,9 @@ enum AgentAction {
         /// Disable Ollama LLM polishing.
         #[arg(long)]
         no_ollama: bool,
+        /// Fresh start: ignore persisted goals from previous sessions.
+        #[arg(long)]
+        fresh: bool,
     },
     /// Trigger memory consolidation.
     Consolidate,
@@ -484,6 +487,9 @@ enum AgentAction {
         /// Maximum OODA cycles per question.
         #[arg(long, default_value = "5")]
         max_cycles: usize,
+        /// Fresh start: ignore persisted session and goals.
+        #[arg(long)]
+        fresh: bool,
     },
 }
 
@@ -1466,6 +1472,7 @@ fn main() -> Result<()> {
                     max_cycles,
                     model,
                     no_ollama,
+                    fresh,
                 } => {
                     let agent_config = AgentConfig {
                         max_cycles,
@@ -1473,6 +1480,10 @@ fn main() -> Result<()> {
                     };
                     let mut agent =
                         Agent::new(Arc::clone(&engine), agent_config).into_diagnostic()?;
+
+                    if fresh {
+                        agent.clear_goals();
+                    }
 
                     // Optionally set up Ollama for narrative polishing.
                     if !no_ollama {
@@ -2214,6 +2225,7 @@ fn main() -> Result<()> {
                     model,
                     no_ollama,
                     max_cycles,
+                    fresh,
                 } => {
                     let agent_config = AgentConfig {
                         max_cycles,
@@ -2221,7 +2233,7 @@ fn main() -> Result<()> {
                     };
 
                     // Resume or create fresh agent.
-                    let mut agent = if Agent::has_persisted_session(&engine) {
+                    let mut agent = if !fresh && Agent::has_persisted_session(&engine) {
                         let a = Agent::resume(Arc::clone(&engine), agent_config)
                             .into_diagnostic()?;
                         println!(
@@ -2234,6 +2246,10 @@ fn main() -> Result<()> {
                     } else {
                         Agent::new(Arc::clone(&engine), agent_config).into_diagnostic()?
                     };
+
+                    if fresh {
+                        agent.clear_goals();
+                    }
 
                     // Optionally set up Ollama.
                     if !no_ollama {
