@@ -83,6 +83,9 @@ pub fn is_metadata_label(label: &str) -> bool {
         || label.starts_with("episode:")
         || label.starts_with("summary:")
         || label.starts_with("tag:")
+        || label.starts_with("role:")
+        || label.starts_with("importance:")
+        || label.starts_with("semantic:")
 }
 
 /// Whether a line references agent metadata labels (even embedded in a sentence).
@@ -158,6 +161,11 @@ fn is_code_annotation(pred: &str) -> bool {
 /// Whether a predicate is inferred noise (redundant with structural predicates).
 fn is_inferred_noise(pred: &str) -> bool {
     INFERRED_NOISE_PREDICATES.iter().any(|p| pred == *p)
+}
+
+/// Whether a predicate is a semantic enrichment annotation (handled by Code Architecture section).
+fn is_semantic_predicate(pred: &str) -> bool {
+    pred.starts_with("semantic:")
 }
 
 // ── Pipeline ─────────────────────────────────────────────────────────────
@@ -331,8 +339,10 @@ fn parse_kg_query_facts(body: &str, tool: &str, cycle: u64) -> Vec<ExtractedFact
                 _ => unreachable!(),
             };
 
-            // Skip code annotations (visibility, attributes, etc.) and inferred noise.
-            if is_code_annotation(&p) || is_inferred_noise(&p) {
+            // Skip code annotations, inferred noise, and semantic enrichment predicates.
+            // Semantic predicates are handled by the Code Architecture section via
+            // direct KG queries, not through WM fact extraction.
+            if is_code_annotation(&p) || is_inferred_noise(&p) || is_semantic_predicate(&p) {
                 continue;
             }
 
@@ -729,8 +739,12 @@ fn render_entity_section(entity: &str, facts: &[ExtractedFact]) -> NarrativeSect
             predicate, object, ..
         } = &fact.kind
         {
-            // Skip code predicates here — they belong in the Code Structure section.
-            if is_code_predicate(predicate) || is_code_annotation(predicate) {
+            // Skip code predicates (belong in Code Structure section) and
+            // semantic enrichment predicates (handled by Code Architecture section).
+            if is_code_predicate(predicate)
+                || is_code_annotation(predicate)
+                || is_semantic_predicate(predicate)
+            {
                 continue;
             }
             predicates
@@ -867,8 +881,23 @@ fn render_code_section(facts: &[ExtractedFact], engine: &crate::engine::Engine) 
     let sem_preds = super::semantic_enrichment::SemanticPredicates::init(engine).ok();
 
     // Helper: resolve a label to its SymbolId (best-effort).
+    // Tries exact match first, then falls back to case-insensitive suffix match
+    // (e.g., "encode" → "vsa::encode", "Vsa" → "vsa").
     let resolve_sym = |label: &str| -> Option<crate::symbol::SymbolId> {
-        engine.resolve_symbol(label).ok()
+        if let Ok(sym) = engine.resolve_symbol(label) {
+            return Some(sym);
+        }
+        let lower = label.to_lowercase();
+        engine.all_symbols().iter().find_map(|sym| {
+            let sym_lower = sym.label.to_lowercase();
+            if sym_lower == lower
+                || sym_lower.ends_with(&format!("::{lower}"))
+            {
+                Some(sym.id)
+            } else {
+                None
+            }
+        })
     };
 
     // Helper: get role label for a name.
@@ -1059,7 +1088,9 @@ fn render_code_section(facts: &[ExtractedFact], engine: &crate::engine::Engine) 
     let prose = if prose_parts.is_empty() {
         "No code structure details found.".to_string()
     } else {
-        prose_parts.join(" ")
+        // Use paragraph breaks between structural blocks so bullet lists
+        // aren't smashed onto the same line as "Key types:" etc.
+        prose_parts.join("\n\n")
     };
 
     // Use "Code Architecture" heading when enrichment data is present,
@@ -1180,19 +1211,45 @@ fn render_other_section(facts: &[ExtractedFact]) -> Option<NarrativeSection> {
 // ── Step 4: Optional LLM polish ──────────────────────────────────────────
 
 fn polish_with_llm(summary: NarrativeSummary, client: &OllamaClient) -> NarrativeSummary {
-    let template_text = format_summary_as_text(&summary);
+    // Protect the "Code Architecture" section from LLM rewriting. It already
+    // has well-formatted enrichment annotations (role labels, importance stars,
+    // data flow lines) that LLMs consistently strip when paraphrasing.
+    let protected_idx = summary
+        .sections
+        .iter()
+        .position(|s| s.heading == "Code Architecture");
+    let protected_section = protected_idx.map(|i| summary.sections[i].clone());
+
+    let mut polishable_sections = summary.sections.clone();
+    if let Some(idx) = protected_idx {
+        polishable_sections.remove(idx);
+    }
+
+    let polishable = NarrativeSummary {
+        overview: summary.overview.clone(),
+        sections: polishable_sections,
+        gaps: summary.gaps.clone(),
+        facts_count: summary.facts_count,
+    };
+
+    let template_text = format_summary_as_text(&polishable);
 
     let system = "Rewrite the following agent findings into clear, concise prose. \
         Preserve all facts exactly. Do not add information not present in the input. \
         Do NOT speculate about what modules, functions, or types do — only describe \
         relationships and names that appear in the input. \
-        Preserve computed annotations: role labels like (transformation), (storage) \
-        and importance markers like (\u{2605}). These are derived from graph analysis, \
-        not speculation — keep them exactly as written. \
         Keep ## Markdown headings. Be conversational but factual.";
 
     match client.generate(&template_text, Some(system)) {
-        Ok(polished) => parse_polished_response(&polished, &summary),
+        Ok(polished) => {
+            let mut result = parse_polished_response(&polished, &polishable);
+            // Re-insert the protected Code Architecture section at its original position.
+            if let Some(section) = protected_section {
+                let insert_idx = protected_idx.unwrap_or(0).min(result.sections.len());
+                result.sections.insert(insert_idx, section);
+            }
+            result
+        }
         Err(_) => summary, // Graceful degradation to template
     }
 }
@@ -1773,5 +1830,91 @@ mod tests {
     fn derives_trait_predicates_handled() {
         assert!(is_code_predicate("code:derives-trait"));
         assert!(is_code_predicate("code:implements-trait"));
+    }
+
+    #[test]
+    fn enrichment_annotations_in_code_section() {
+        use crate::graph::Triple;
+
+        let engine = test_engine();
+
+        // Set up code predicates and create module structure.
+        let code_preds =
+            crate::agent::tools::code_predicates::CodePredicates::init(&engine).unwrap();
+        let vsa = engine.resolve_or_create_entity("Vsa").unwrap();
+        let encode = engine.resolve_or_create_entity("encode").unwrap();
+        let item_memory = engine.resolve_or_create_entity("item_memory").unwrap();
+
+        engine
+            .add_triple(&Triple::new(vsa, code_preds.contains_mod, encode))
+            .unwrap();
+        engine
+            .add_triple(&Triple::new(vsa, code_preds.contains_mod, item_memory))
+            .unwrap();
+
+        // Give submodules their own children so they get role-classified.
+        let encode_fn = engine.resolve_or_create_entity("encode_symbol").unwrap();
+        engine
+            .add_triple(&Triple::new(encode, code_preds.defines_fn, encode_fn))
+            .unwrap();
+        let search_fn = engine.resolve_or_create_entity("search").unwrap();
+        engine
+            .add_triple(&Triple::new(item_memory, code_preds.defines_fn, search_fn))
+            .unwrap();
+
+        // Run enrichment to populate semantic triples.
+        let _ = crate::agent::semantic_enrichment::enrich(&engine);
+
+        // Build facts matching what synthesis would see.
+        let facts = vec![
+            ExtractedFact {
+                kind: FactKind::CodeFact {
+                    kind: "code:contains-mod".into(),
+                    name: "Vsa".into(),
+                    detail: "encode".into(),
+                },
+                source_tool: "kg_query".into(),
+                source_cycle: 1,
+            },
+            ExtractedFact {
+                kind: FactKind::CodeFact {
+                    kind: "code:contains-mod".into(),
+                    name: "Vsa".into(),
+                    detail: "item_memory".into(),
+                },
+                source_tool: "kg_query".into(),
+                source_cycle: 1,
+            },
+        ];
+
+        let section = render_code_section(&facts, &engine);
+
+        // With enrichment, heading should be "Code Architecture".
+        assert_eq!(
+            section.heading, "Code Architecture",
+            "should use Code Architecture heading when enrichment data exists, prose: {}",
+            section.prose,
+        );
+
+        // The purpose sentence should mention the primary role.
+        assert!(
+            section.prose.contains("module is a"),
+            "should have purpose sentence with role, prose: {}",
+            section.prose,
+        );
+
+        // Children should have enrichment annotations (role tags or importance stars).
+        let has_annotations = section.prose.contains("(transformation)")
+            || section.prose.contains("(storage)")
+            || section.prose.contains("(computation)")
+            || section.prose.contains("(coordination)")
+            || section.prose.contains("(analysis)")
+            || section.prose.contains("(interface)")
+            || section.prose.contains("\u{2605}"); // star marker
+        assert!(
+            has_annotations,
+            "children should have enrichment annotations (role or star), prose: {}",
+            section.prose,
+        );
     }
 }
