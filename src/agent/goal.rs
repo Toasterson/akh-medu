@@ -229,8 +229,23 @@ pub fn restore_goals(engine: &Engine, predicates: &AgentPredicates) -> AgentResu
             continue;
         }
 
+        // Skip garbage labels: Rust types, single-word noise, very short descriptions.
+        // These leak in when the agent creates goals from type debug output
+        // (e.g., "goal:&Goal", "goal:SymbolId", "goal:&mut Goal").
+        let description_raw = meta.label.trim_start_matches("goal:");
+        if description_raw.len() < 3
+            || description_raw.starts_with('&')
+            || description_raw.starts_with('(')
+            || description_raw.contains("::")
+            || (description_raw.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                && description_raw.len() < 15
+                && description_raw.chars().next().is_some_and(|c| c.is_ascii_uppercase()))
+        {
+            continue;
+        }
+
         let triples = engine.triples_from(meta.id);
-        let mut description = meta.label.trim_start_matches("goal:").to_string();
+        let mut description = description_raw.to_string();
         let mut status = GoalStatus::Pending;
         // Track the SymbolId of the status object so we pick the most recent one
         // (highest SymbolId = most recently created, since IDs are monotonic).
@@ -281,6 +296,15 @@ pub fn restore_goals(engine: &Engine, predicates: &AgentPredicates) -> AgentResu
     }
 
     Ok(goals)
+}
+
+/// Clear all goals from the in-memory goal list.
+///
+/// Note: The KG does not currently support triple removal, so goal symbols
+/// remain in the graph. The validation filter in `restore_goals()` will skip
+/// garbage labels on future restores. Use `--fresh` to start from a clean KG.
+pub fn clear_goals(goals: &mut Vec<Goal>) {
+    goals.clear();
 }
 
 /// Generate sub-goal descriptions from a parent goal's description.
@@ -343,6 +367,67 @@ mod tests {
             let restored = GoalStatus::from_label(&label);
             assert_eq!(restored, status);
         }
+    }
+
+    /// Standalone validation matching `restore_goals` filtering logic.
+    fn is_valid_goal_label(label: &str) -> bool {
+        let desc = label.trim_start_matches("goal:");
+        if desc.len() < 3
+            || desc.starts_with('&')
+            || desc.starts_with('(')
+            || desc.contains("::")
+            || (desc.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                && desc.len() < 15
+                && desc.chars().next().is_some_and(|c| c.is_ascii_uppercase()))
+        {
+            return false;
+        }
+        true
+    }
+
+    #[test]
+    fn goal_validation_filters_garbage_labels() {
+        // Valid goals
+        assert!(is_valid_goal_label("goal:describe the VSA module architecture"));
+        assert!(is_valid_goal_label("goal:find all dependencies"));
+        assert!(is_valid_goal_label("goal:explore code structure"));
+
+        // Garbage: Rust type names
+        assert!(!is_valid_goal_label("goal:&Goal"));
+        assert!(!is_valid_goal_label("goal:&mut Goal"));
+        assert!(!is_valid_goal_label("goal:SymbolId"));
+        assert!(!is_valid_goal_label("goal:GoalStatus"));
+
+        // Garbage: module paths
+        assert!(!is_valid_goal_label("goal:std::collections::HashMap"));
+        assert!(!is_valid_goal_label("goal:agent::goal::Goal"));
+
+        // Garbage: too short
+        assert!(!is_valid_goal_label("goal:ab"));
+        assert!(!is_valid_goal_label("goal:x"));
+
+        // Garbage: tuple-like
+        assert!(!is_valid_goal_label("goal:(String, u8)"));
+    }
+
+    #[test]
+    fn clear_goals_empties_list() {
+        let mut goals = vec![
+            Goal {
+                symbol_id: SymbolId::new(1).unwrap(),
+                description: "test".into(),
+                status: GoalStatus::Active,
+                priority: 128,
+                success_criteria: String::new(),
+                parent: None,
+                children: Vec::new(),
+                created_at: 0,
+                cycles_worked: 0,
+                last_progress_cycle: 0,
+            },
+        ];
+        clear_goals(&mut goals);
+        assert!(goals.is_empty());
     }
 
     #[test]

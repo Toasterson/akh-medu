@@ -6,7 +6,7 @@
 //! 3. `render_template()` — build a `NarrativeSummary` from grouped facts
 //! 4. `polish_with_llm()` — optionally refine prose via Ollama (graceful fallback)
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use super::llm::OllamaClient;
 use super::memory::{WorkingMemoryEntry, WorkingMemoryKind};
@@ -85,15 +85,79 @@ pub fn is_metadata_label(label: &str) -> bool {
         || label.starts_with("tag:")
 }
 
-/// Code-related predicate prefixes that indicate code structure triples.
+/// Whether a line references agent metadata labels (even embedded in a sentence).
+fn contains_metadata_ref(line: &str) -> bool {
+    let lower = line.to_lowercase();
+
+    // Exact metadata tokens
+    let metadata_tokens = [
+        "status:active", "status:completed", "status:failed", "status:pending",
+        "status:suspended",
+        "agent:has_description", "agent:has_status", "agent:has_priority",
+        "agent:has_criteria", "agent:is_goal",
+        "priority:128", "priority:200",
+        "goal:", "episode:", "summary:", "tag:", "desc:",
+    ];
+    if metadata_tokens.iter().any(|tok| lower.contains(tok)) {
+        return true;
+    }
+
+    // "X has only N connection(s)" — always noise in gap output, not useful in narrative.
+    if lower.contains("has only") && lower.contains("connection") {
+        return true;
+    }
+
+    false
+}
+
+/// Strip a leading relevance score like `[0.90] ` from a gap line.
+fn strip_leading_score(s: &str) -> &str {
+    if s.starts_with('[') {
+        if let Some(bracket_end) = s.find("] ") {
+            let inner = &s[1..bracket_end];
+            if inner.parse::<f32>().is_ok() {
+                return s[bracket_end + 2..].trim();
+            }
+        }
+    }
+    s
+}
+
+/// Structural code predicates worth showing in narrative (NOT annotations).
+const CODE_STRUCTURE_PREDICATES: &[&str] = &[
+    "code:contains-mod", "code:defines-fn", "code:defines-struct",
+    "code:defines-enum", "code:defines-type", "code:defines-mod",
+    "code:depends-on", "code:defined-in",
+    "code:has-variant", "code:has-method", "code:has-field",
+    "code:derives-trait", "code:implements-trait",
+    "defines-fn", "defines-type", "defines-mod",
+    "depends-on", "implements", "contains",
+];
+
+/// Code annotation predicates to skip (noise in narrative).
+const CODE_ANNOTATION_PREDICATES: &[&str] = &[
+    "code:has-visibility", "code:has-attribute", "code:has-doc",
+    "code:line-count", "code:has-return-type", "code:returns-type",
+];
+
+/// Inferred predicates that are redundant with structural code predicates.
+const INFERRED_NOISE_PREDICATES: &[&str] = &[
+    "child-of", "part-of", "similar-to", "has-a",
+];
+
+/// Whether a predicate indicates code structure (worth showing).
 fn is_code_predicate(pred: &str) -> bool {
-    pred.starts_with("code:")
-        || pred == "defines-fn"
-        || pred == "defines-type"
-        || pred == "defines-mod"
-        || pred == "depends-on"
-        || pred == "implements"
-        || pred == "contains"
+    CODE_STRUCTURE_PREDICATES.iter().any(|p| pred == *p)
+}
+
+/// Whether a predicate is a code annotation to skip.
+fn is_code_annotation(pred: &str) -> bool {
+    CODE_ANNOTATION_PREDICATES.iter().any(|p| pred == *p)
+}
+
+/// Whether a predicate is inferred noise (redundant with structural predicates).
+fn is_inferred_noise(pred: &str) -> bool {
+    INFERRED_NOISE_PREDICATES.iter().any(|p| pred == *p)
 }
 
 // ── Pipeline ─────────────────────────────────────────────────────────────
@@ -169,6 +233,35 @@ fn extract_facts(entries: &[WorkingMemoryEntry]) -> Vec<ExtractedFact> {
         }
     }
 
+    // Deduplicate: keep first occurrence of each unique fact signature.
+    let mut seen = HashSet::new();
+    facts.retain(|f| {
+        let key = match &f.kind {
+            FactKind::Triple {
+                subject,
+                predicate,
+                object,
+            } => format!("T:{subject}:{predicate}:{object}"),
+            FactKind::CodeFact { kind, name, detail } => format!("C:{kind}:{name}:{detail}"),
+            FactKind::Similarity {
+                entity,
+                similar_to,
+                ..
+            } => format!("S:{entity}:{similar_to}"),
+            FactKind::Gap {
+                entity,
+                description,
+            } => format!("G:{entity}:{description}"),
+            FactKind::Inference {
+                expression,
+                simplified,
+            } => format!("I:{expression}:{simplified}"),
+            FactKind::Derivation { count, iterations } => format!("D:{count}:{iterations}"),
+            FactKind::Raw(s) => format!("R:{s}"),
+        };
+        seen.insert(key)
+    });
+
     facts
 }
 
@@ -195,10 +288,20 @@ fn strip_tool_prefix(content: &str) -> String {
 /// Whether a raw string is metadata noise that should be skipped.
 fn is_metadata_noise(s: &str) -> bool {
     // Lines that are purely metadata labels
-    s.lines().all(|line| {
+    if s.lines().all(|line| {
         let trimmed = line.trim();
         trimmed.is_empty() || is_metadata_label(trimmed)
-    })
+    }) {
+        return true;
+    }
+    // Agent metadata triples from kg_mutate: "goal:..." -> agent:... -> ...
+    if s.starts_with("Added triple:") {
+        let lower = s.to_lowercase();
+        if lower.contains("goal:") || lower.contains("agent:") {
+            return true;
+        }
+    }
+    false
 }
 
 /// Parse kg_query results. Typical format:
@@ -228,6 +331,11 @@ fn parse_kg_query_facts(body: &str, tool: &str, cycle: u64) -> Vec<ExtractedFact
                 _ => unreachable!(),
             };
 
+            // Skip code annotations (visibility, attributes, etc.) and inferred noise.
+            if is_code_annotation(&p) || is_inferred_noise(&p) {
+                continue;
+            }
+
             if is_code_predicate(&p) {
                 facts.push(ExtractedFact {
                     kind: FactKind::CodeFact {
@@ -254,13 +362,41 @@ fn parse_kg_query_facts(body: &str, tool: &str, cycle: u64) -> Vec<ExtractedFact
     facts
 }
 
-/// Try to parse "A -> B -> C" into a Triple fact.
+/// Strip surrounding quotes and trailing confidence like `[0.85]` from a label.
+///
+/// KG query output looks like: `"Vsa" -> code:contains-mod -> "encode"  [1.00]`
+fn clean_label(s: &str) -> String {
+    let mut s = s.trim().to_string();
+    // Strip trailing confidence: `  [0.85]` or ` [1.00]`
+    if let Some(bracket_pos) = s.rfind("  [") {
+        // Verify it ends with `]` and the content looks like a float
+        let rest = &s[bracket_pos + 3..];
+        if rest.ends_with(']') {
+            let inner = &rest[..rest.len() - 1];
+            if inner.parse::<f32>().is_ok() {
+                s.truncate(bracket_pos);
+            }
+        }
+    }
+    // Strip surrounding quotes
+    let trimmed = s.trim();
+    if trimmed.len() >= 2 && trimmed.starts_with('"') && trimmed.ends_with('"') {
+        trimmed[1..trimmed.len() - 1].to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// Try to parse `"A" -> B -> "C"  [0.85]` into a Triple fact.
 fn parse_arrow_triple(line: &str) -> Option<FactKind> {
     let parts: Vec<&str> = line.split(" -> ").collect();
     if parts.len() >= 3 {
-        let subject = parts[0].trim().to_string();
-        let predicate = parts[1].trim().to_string();
-        let object = parts[2..].join(" -> ").trim().to_string();
+        let subject = clean_label(parts[0]);
+        let predicate = clean_label(parts[1]);
+        let object = clean_label(&parts[2..].join(" -> "));
+        if subject.is_empty() || predicate.is_empty() || object.is_empty() {
+            return None;
+        }
         Some(FactKind::Triple {
             subject,
             predicate,
@@ -401,13 +537,33 @@ fn parse_gap_facts(body: &str, tool: &str, cycle: u64) -> Vec<ExtractedFact> {
         if trimmed.is_empty()
             || trimmed.starts_with("Gap analysis")
             || trimmed.starts_with("Found")
+            || trimmed.starts_with("Analyzed")
             || is_metadata_label(trimmed)
         {
             continue;
         }
 
+        // Skip lines that reference agent metadata labels anywhere.
+        if contains_metadata_ref(trimmed) {
+            continue;
+        }
+
+        // Skip generic schema-completeness gaps ("X is missing predicate 'Y'").
+        if trimmed.contains("is missing predicate") {
+            continue;
+        }
+
         // Lines like "- entity: description" or "entity has no X"
         let cleaned = trimmed.strip_prefix("- ").unwrap_or(trimmed);
+        // Strip leading relevance scores like "[0.90] "
+        let cleaned = strip_leading_score(cleaned);
+        // Skip entries where score stripping left an empty or truncated stub.
+        if cleaned.is_empty()
+            || cleaned == "..."
+            || (cleaned.ends_with("...") && cleaned.len() < 10)
+        {
+            continue;
+        }
         if let Some(colon_pos) = cleaned.find(": ") {
             let entity = cleaned[..colon_pos].trim().to_string();
             let description = cleaned[colon_pos + 2..].trim().to_string();
@@ -547,6 +703,16 @@ fn render_template(
         }
     }
 
+    // Drop sections with only placeholder prose (nothing useful to show).
+    // Also drop trivially uninformative entity sections ("X is a Module.").
+    sections.retain(|s| {
+        if s.prose.starts_with("No ") {
+            return false;
+        }
+        // Entity sections that only state "is a Module/Function/Struct" are noise.
+        is_informative_section(s)
+    });
+
     NarrativeSummary {
         overview,
         sections,
@@ -563,6 +729,10 @@ fn render_entity_section(entity: &str, facts: &[ExtractedFact]) -> NarrativeSect
             predicate, object, ..
         } = &fact.kind
         {
+            // Skip code predicates here — they belong in the Code Structure section.
+            if is_code_predicate(predicate) || is_code_annotation(predicate) {
+                continue;
+            }
             predicates
                 .entry(predicate.clone())
                 .or_default()
@@ -581,9 +751,22 @@ fn render_entity_section(entity: &str, facts: &[ExtractedFact]) -> NarrativeSect
             "depends-on" => format!("depends on {obj_list}"),
             "implements" => format!("implements {obj_list}"),
             "contains" => format!("contains {obj_list}"),
-            "defines-fn" | "code:defines-fn" => format!("defines functions {obj_list}"),
-            "defines-type" | "code:defines-type" => format!("defines types {obj_list}"),
-            "defines-mod" | "code:defines-mod" => format!("defines modules {obj_list}"),
+            "defines-fn" | "code:defines-fn" | "code:has-method" => {
+                format!("defines functions {obj_list}")
+            }
+            "defines-type" | "code:defines-type" | "code:defines-struct" => {
+                format!("defines types {obj_list}")
+            }
+            "defines-mod" | "code:defines-mod" | "code:contains-mod" => {
+                format!("contains modules {obj_list}")
+            }
+            "code:defines-enum" => format!("defines enums {obj_list}"),
+            "code:has-variant" => format!("has variants {obj_list}"),
+            "code:has-field" => format!("has fields {obj_list}"),
+            "code:depends-on" => format!("depends on {obj_list}"),
+            "code:defined-in" => format!("is defined in {obj_list}"),
+            "code:derives-trait" => format!("derives {obj_list}"),
+            "code:implements-trait" => format!("implements {obj_list}"),
             _ => format!("{pred} {obj_list}"),
         };
         prose_parts.push(sentence);
@@ -606,23 +789,26 @@ fn render_code_section(facts: &[ExtractedFact]) -> NarrativeSection {
     let mut functions: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut types: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut deps: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut prose_parts = Vec::new();
 
     for fact in facts {
         if let FactKind::CodeFact { kind, name, detail } = &fact.kind {
             match kind.as_str() {
-                "code:defines-mod" | "defines-mod" | "contains" => {
+                "code:contains-mod" | "code:defines-mod" | "defines-mod" | "contains" => {
                     modules
                         .entry(name.clone())
                         .or_default()
                         .push(detail.clone());
                 }
-                "code:defines-fn" | "defines-fn" => {
+                "code:defines-fn" | "defines-fn" | "code:has-method" => {
                     functions
                         .entry(name.clone())
                         .or_default()
                         .push(detail.clone());
                 }
-                "code:defines-type" | "defines-type" | "implements" => {
+                "code:defines-struct" | "code:defines-enum" | "code:defines-type"
+                | "defines-type" | "implements" | "code:has-variant" | "code:has-field"
+                | "code:derives-trait" | "code:implements-trait" => {
                     types
                         .entry(name.clone())
                         .or_default()
@@ -631,45 +817,126 @@ fn render_code_section(facts: &[ExtractedFact]) -> NarrativeSection {
                 "depends-on" | "code:depends-on" => {
                     deps.entry(name.clone()).or_default().push(detail.clone());
                 }
+                "code:defined-in" => {
+                    // "defined-in" is informational — add as module metadata
+                    prose_parts.push(format!("**{name}** is defined in `{detail}`."));
+                }
                 _ => {
-                    // Other code facts go under functions as a catch-all
+                    // Genuinely unknown code predicates — show as-is
                     functions
                         .entry(name.clone())
                         .or_default()
-                        .push(format!("{kind}: {detail}"));
+                        .push(detail.clone());
                 }
             }
         }
     }
 
-    let mut prose_parts = Vec::new();
+    // Identify the primary entity (most code facts) and its children.
+    // Filter out noise from unrelated entities that happen to reference the same symbols.
+    let mut fact_counts: BTreeMap<String, usize> = BTreeMap::new();
+    for map in [&modules, &functions, &types, &deps] {
+        for (name, items) in map {
+            *fact_counts.entry(name.clone()).or_default() += items.len();
+        }
+    }
+    let primary = fact_counts
+        .iter()
+        .max_by_key(|(_, count)| **count)
+        .map(|(name, _)| name.clone());
+    let primary_children: HashSet<String> = primary
+        .as_ref()
+        .and_then(|p| modules.get(p))
+        .map(|children| children.iter().cloned().collect())
+        .unwrap_or_default();
 
-    if !modules.is_empty() {
-        for (parent, children) in &modules {
-            let list = format_code_list(children);
-            prose_parts.push(format!("The **{parent}** module contains {list}."));
+    // Only keep entries from the primary entity, its children, or entities with 2+ facts.
+    let is_relevant = |name: &str| -> bool {
+        primary.as_deref() == Some(name)
+            || primary_children.contains(name)
+            || fact_counts.get(name).copied().unwrap_or(0) >= 2
+    };
+    modules.retain(|name, _| is_relevant(name));
+    functions.retain(|name, _| is_relevant(name));
+    types.retain(|name, _| is_relevant(name));
+    deps.retain(|name, _| is_relevant(name));
+
+    // Build hierarchical output: group child details under the primary entity.
+    let mut rendered_children: HashSet<String> = HashSet::new();
+
+    if let Some(ref primary_name) = primary {
+        if let Some(children) = modules.get(primary_name) {
+            let mut child_lines = Vec::new();
+            for child in children {
+                let mut parts = Vec::new();
+                if let Some(fns) = functions.get(child) {
+                    parts.push(format!("functions: {}", format_code_list(fns)));
+                }
+                if let Some(ts) = types.get(child) {
+                    parts.push(format!("types: {}", format_code_list(ts)));
+                }
+                if let Some(ds) = deps.get(child) {
+                    parts.push(format!("depends on {}", format_list(ds)));
+                }
+                if parts.is_empty() {
+                    child_lines.push(format!("- **{child}**"));
+                } else {
+                    child_lines.push(format!("- **{child}** — {}", parts.join(". ")));
+                }
+                rendered_children.insert(child.clone());
+            }
+
+            if !child_lines.is_empty() {
+                prose_parts.push(format!(
+                    "The **{primary_name}** module contains:\n{}",
+                    child_lines.join("\n"),
+                ));
+            }
+
+            // Render primary entity's own types and deps (not child-level).
+            if let Some(ts) = types.get(primary_name) {
+                let list = format_code_list(ts);
+                prose_parts.push(format!("Key types: {list}."));
+            }
+            if let Some(ds) = deps.get(primary_name) {
+                let list = format_list(ds);
+                prose_parts.push(format!("Depends on {list}."));
+            }
+            rendered_children.insert(primary_name.clone());
         }
     }
 
-    if !functions.is_empty() {
-        for (owner, fns) in &functions {
-            let list = format_code_list(fns);
-            prose_parts.push(format!("**{owner}** defines functions {list}."));
+    // Render any remaining entities not covered by the hierarchical tree.
+    for (parent, children) in &modules {
+        if rendered_children.contains(parent) {
+            continue;
         }
+        let list = format_code_list(children);
+        prose_parts.push(format!("The **{parent}** module contains {list}."));
     }
 
-    if !types.is_empty() {
-        for (owner, ts) in &types {
-            let list = format_code_list(ts);
-            prose_parts.push(format!("**{owner}** defines types {list}."));
+    for (owner, fns) in &functions {
+        if rendered_children.contains(owner) {
+            continue;
         }
+        let list = format_code_list(fns);
+        prose_parts.push(format!("**{owner}** defines functions {list}."));
     }
 
-    if !deps.is_empty() {
-        for (module, dep_list) in &deps {
-            let list = format_list(dep_list);
-            prose_parts.push(format!("**{module}** depends on {list}."));
+    for (owner, ts) in &types {
+        if rendered_children.contains(owner) {
+            continue;
         }
+        let list = format_code_list(ts);
+        prose_parts.push(format!("**{owner}** defines types {list}."));
+    }
+
+    for (module, dep_list) in &deps {
+        if rendered_children.contains(module) {
+            continue;
+        }
+        let list = format_list(dep_list);
+        prose_parts.push(format!("**{module}** depends on {list}."));
     }
 
     let prose = if prose_parts.is_empty() {
@@ -723,18 +990,25 @@ fn render_reasoning_section(facts: &[ExtractedFact]) -> NarrativeSection {
                 expression,
                 simplified,
             } => {
-                if !simplified.is_empty() && simplified != expression {
+                // Skip noise: goal-derived expressions or trivial rewrites
+                let is_noise = simplified.contains("goal_")
+                    || expression.contains("goal_")
+                    || expression.is_empty()
+                    || simplified.is_empty()
+                    || simplified == expression;
+                if !is_noise && !simplified.is_empty() {
                     lines.push(format!("Simplified `{expression}` to `{simplified}`."));
-                } else if !expression.is_empty() {
-                    lines.push(format!("Analyzed expression: `{expression}`."));
                 }
             }
             FactKind::Derivation { count, iterations } => {
-                lines.push(format!(
-                    "Derived {count} new fact{} in {iterations} iteration{}.",
-                    if *count == 1 { "" } else { "s" },
-                    if *iterations == 1 { "" } else { "s" },
-                ));
+                // Skip zero derivations (noise) and counts > 100 (internal e-graph expansion).
+                if *count > 0 && *count <= 100 {
+                    lines.push(format!(
+                        "Derived {count} new fact{} in {iterations} iteration{}.",
+                        if *count == 1 { "" } else { "s" },
+                        if *iterations == 1 { "" } else { "s" },
+                    ));
+                }
             }
             _ => {}
         }
@@ -782,10 +1056,10 @@ fn polish_with_llm(summary: NarrativeSummary, client: &OllamaClient) -> Narrativ
     let template_text = format_summary_as_text(&summary);
 
     let system = "Rewrite the following agent findings into clear, concise prose. \
-        Preserve all facts and structure (headings, sections). \
-        Do not add facts not present in the input. \
-        Keep headings as ## Markdown headings. \
-        Be conversational but accurate.";
+        Preserve all facts exactly. Do not add information not present in the input. \
+        Do NOT speculate about what modules, functions, or types do — only describe \
+        relationships and names that appear in the input. \
+        Keep ## Markdown headings. Be conversational but factual.";
 
     match client.generate(&template_text, Some(system)) {
         Ok(polished) => parse_polished_response(&polished, &summary),
@@ -893,6 +1167,37 @@ fn parse_polished_response(polished: &str, original: &NarrativeSummary) -> Narra
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
+/// Trivial type-only section: entity sections that say only "X is a Module/Function/Struct".
+const TRIVIAL_TYPES: &[&str] = &[
+    "Module", "Function", "Struct", "Enum", "Type", "Trait",
+];
+
+/// Whether a section is informative enough to show (not just "X is a Module.").
+fn is_informative_section(section: &NarrativeSection) -> bool {
+    // Code Structure, Related Concepts, etc. are always informative.
+    if section.heading == "Code Structure"
+        || section.heading == "Related Concepts"
+        || section.heading == "Reasoning Results"
+    {
+        return true;
+    }
+    // Entity sections: check if they say more than just "is a Module".
+    let prose = &section.prose;
+    // Pattern: "**entity** is a X." or "**entity** is a X and Y."
+    if let Some(rest) = prose.strip_prefix(&format!("**{}** is a ", section.heading)) {
+        let rest = rest.trim_end_matches('.');
+        // Split by " and " — if all parts are trivial types, skip.
+        let parts: Vec<&str> = rest.split(" and ").collect();
+        if parts
+            .iter()
+            .all(|p| TRIVIAL_TYPES.iter().any(|t| p.trim() == *t))
+        {
+            return false;
+        }
+    }
+    true
+}
+
 /// Format a list of items as "A, B, and C".
 fn format_list(items: &[String]) -> String {
     match items.len() {
@@ -994,10 +1299,18 @@ mod tests {
     #[test]
     fn code_predicates_detected() {
         assert!(is_code_predicate("code:defines-fn"));
+        assert!(is_code_predicate("code:contains-mod"));
+        assert!(is_code_predicate("code:defines-struct"));
         assert!(is_code_predicate("defines-fn"));
         assert!(is_code_predicate("depends-on"));
         assert!(!is_code_predicate("is-a"));
         assert!(!is_code_predicate("has"));
+        // Annotations should NOT be code predicates
+        assert!(!is_code_predicate("code:has-visibility"));
+        assert!(!is_code_predicate("code:has-attribute"));
+        // But they should be annotations
+        assert!(is_code_annotation("code:has-visibility"));
+        assert!(is_code_annotation("code:has-attribute"));
     }
 
     #[test]
@@ -1023,6 +1336,18 @@ mod tests {
         let facts = extract_facts(&[entry]);
         // Only the Engine fact should remain (status:active is metadata)
         assert_eq!(facts.len(), 1);
+    }
+
+    #[test]
+    fn visibility_annotations_filtered() {
+        let entry = make_tool_entry(
+            "Tool result (kg_query):\n  \"MyMod\" -> code:has-visibility -> \"public\"  [1.00]\n  \"MyMod\" -> code:defines-fn -> \"my_func\"  [1.00]",
+            1,
+        );
+        let facts = extract_facts(&[entry]);
+        // Only the defines-fn fact should survive, has-visibility is annotation noise
+        assert_eq!(facts.len(), 1);
+        assert!(matches!(&facts[0].kind, FactKind::CodeFact { kind, .. } if kind == "code:defines-fn"));
     }
 
     #[test]
@@ -1100,5 +1425,213 @@ mod tests {
         assert!(text.contains("## Engine"));
         assert!(text.contains("**Engine** is a Struct."));
         assert!(text.contains("VSA traits unknown"));
+    }
+
+    #[test]
+    fn clean_label_strips_quotes_and_confidence() {
+        assert_eq!(clean_label("\"Vsa\""), "Vsa");
+        assert_eq!(clean_label("\"encode\"  [1.00]"), "encode");
+        assert_eq!(clean_label("code:contains-mod"), "code:contains-mod");
+        assert_eq!(clean_label("\"HyperVec\"  [0.85]"), "HyperVec");
+        assert_eq!(clean_label("plain"), "plain");
+        assert_eq!(clean_label("\"quoted\""), "quoted");
+    }
+
+    #[test]
+    fn parse_arrow_triple_with_quotes_and_confidence() {
+        let fact = parse_arrow_triple("\"Vsa\" -> code:contains-mod -> \"encode\"  [1.00]");
+        assert!(matches!(
+            fact,
+            Some(FactKind::Triple { subject, predicate, object })
+            if subject == "Vsa" && predicate == "code:contains-mod" && object == "encode"
+        ));
+    }
+
+    #[test]
+    fn metadata_noise_filters_agent_triples() {
+        assert!(is_metadata_noise("Added triple: \"goal:test\" -> agent:has_criteria -> \"data\" [0.70]"));
+        assert!(!is_metadata_noise("Added triple: \"Vsa\" -> is-a -> \"Module\" [1.00]"));
+    }
+
+    #[test]
+    fn contains_metadata_ref_catches_embedded() {
+        assert!(contains_metadata_ref("[0.90] status:completed has only 1 connection"));
+        assert!(contains_metadata_ref("agent:has_description is sparse"));
+        assert!(!contains_metadata_ref("Engine has 5 functions"));
+    }
+
+    #[test]
+    fn strip_leading_score_works() {
+        assert_eq!(strip_leading_score("[0.90] some text"), "some text");
+        assert_eq!(strip_leading_score("no score here"), "no score here");
+        assert_eq!(strip_leading_score("[invalid] text"), "[invalid] text");
+    }
+
+    #[test]
+    fn gap_facts_filter_metadata_refs() {
+        let entry = make_tool_entry(
+            "Tool result (gap_analysis):\nAnalyzed 10 entities: 5 dead ends\n[0.90] status:completed has only 1 connection(s)\n[0.85] Engine: has no documentation",
+            3,
+        );
+        let facts = extract_facts(&[entry]);
+        // Only the Engine gap should survive — status:completed is metadata, Analyzed is skipped
+        assert_eq!(facts.len(), 1);
+        assert!(matches!(&facts[0].kind, FactKind::Gap { entity, .. } if entity == "Engine"));
+    }
+
+    #[test]
+    fn duplicate_facts_deduplicated() {
+        // Same triple from two different cycles should appear only once.
+        let e1 = make_tool_entry(
+            "Tool result (kg_query):\n\"Vsa\" -> code:contains-mod -> \"encode\"  [1.00]",
+            1,
+        );
+        let e2 = make_tool_entry(
+            "Tool result (kg_query):\n\"Vsa\" -> code:contains-mod -> \"encode\"  [1.00]",
+            3,
+        );
+        let facts = extract_facts(&[e1, e2]);
+        assert_eq!(facts.len(), 1, "duplicate triples should be merged");
+    }
+
+    #[test]
+    fn low_connection_gaps_filtered() {
+        let entry = make_tool_entry(
+            "Tool result (gap_analysis):\n[0.80] web has only 1 connection(s) (in=1, out=0)\n[0.75] api has only 2 connection(s) (in=1, out=1)",
+            2,
+        );
+        let facts = extract_facts(&[entry]);
+        assert_eq!(facts.len(), 0, "low-connection gaps should be filtered");
+    }
+
+    #[test]
+    fn zero_derivation_filtered() {
+        let entry = make_tool_entry(
+            "Tool result (infer_rules):\nDerived 0 new triples in 1 iterations",
+            1,
+        );
+        let facts = extract_facts(&[entry]);
+        // Zero derivations should produce no Derivation facts (filtered at extract level).
+        // The Derivation fact IS created but the rendering skips count==0.
+        let section = render_reasoning_section(&facts);
+        assert!(
+            !section.prose.contains("Derived 0"),
+            "zero-derivation should not appear in prose: {}",
+            section.prose,
+        );
+    }
+
+    #[test]
+    fn gap_truncated_scores_filtered() {
+        let entry = make_tool_entry(
+            "Tool result (gap_analysis):\n- [0.90] ...\n- [0.85] ab...\n- [0.80] Engine: valid gap description",
+            3,
+        );
+        let facts = extract_facts(&[entry]);
+        // Only the Engine gap should survive — truncated stubs are skipped.
+        assert_eq!(facts.len(), 1, "truncated gaps should be filtered, got: {facts:?}");
+        assert!(matches!(&facts[0].kind, FactKind::Gap { entity, .. } if entity == "Engine"));
+    }
+
+    #[test]
+    fn hierarchical_code_rendering() {
+        let facts = vec![
+            ExtractedFact {
+                kind: FactKind::CodeFact {
+                    kind: "code:contains-mod".into(),
+                    name: "Vsa".into(),
+                    detail: "encode".into(),
+                },
+                source_tool: "kg_query".into(),
+                source_cycle: 1,
+            },
+            ExtractedFact {
+                kind: FactKind::CodeFact {
+                    kind: "code:contains-mod".into(),
+                    name: "Vsa".into(),
+                    detail: "ops".into(),
+                },
+                source_tool: "kg_query".into(),
+                source_cycle: 1,
+            },
+            ExtractedFact {
+                kind: FactKind::CodeFact {
+                    kind: "code:defines-fn".into(),
+                    name: "encode".into(),
+                    detail: "encode_symbol".into(),
+                },
+                source_tool: "kg_query".into(),
+                source_cycle: 2,
+            },
+            ExtractedFact {
+                kind: FactKind::CodeFact {
+                    kind: "code:defines-type".into(),
+                    name: "ops".into(),
+                    detail: "VsaOps".into(),
+                },
+                source_tool: "kg_query".into(),
+                source_cycle: 2,
+            },
+            ExtractedFact {
+                kind: FactKind::CodeFact {
+                    kind: "code:defines-type".into(),
+                    name: "Vsa".into(),
+                    detail: "HyperVec".into(),
+                },
+                source_tool: "kg_query".into(),
+                source_cycle: 1,
+            },
+            ExtractedFact {
+                kind: FactKind::CodeFact {
+                    kind: "code:depends-on".into(),
+                    name: "Vsa".into(),
+                    detail: "serde".into(),
+                },
+                source_tool: "kg_query".into(),
+                source_cycle: 1,
+            },
+        ];
+
+        let section = render_code_section(&facts);
+
+        // Should contain hierarchical structure
+        assert!(
+            section.prose.contains("- **encode**"),
+            "should have encode as child: {}",
+            section.prose,
+        );
+        assert!(
+            section.prose.contains("- **ops**"),
+            "should have ops as child: {}",
+            section.prose,
+        );
+        // Child details should be inline
+        assert!(
+            section.prose.contains("`encode_symbol`"),
+            "encode child should show functions: {}",
+            section.prose,
+        );
+        assert!(
+            section.prose.contains("`VsaOps`"),
+            "ops child should show types: {}",
+            section.prose,
+        );
+        // Primary entity's own types/deps should be separate
+        assert!(
+            section.prose.contains("Key types:"),
+            "primary should show own types: {}",
+            section.prose,
+        );
+        assert!(
+            section.prose.contains("serde"),
+            "primary should show deps: {}",
+            section.prose,
+        );
+    }
+
+    #[test]
+    fn derives_trait_predicates_handled() {
+        assert!(is_code_predicate("code:derives-trait"));
+        assert!(is_code_predicate("code:implements-trait"));
     }
 }

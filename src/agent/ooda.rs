@@ -517,15 +517,23 @@ fn select_tool(
     // Detect code-related queries for smarter tool selection.
     let is_code_query = is_code_goal(&goal.description);
 
+    // Pre-compute unexplored child once to avoid redundant WM scans.
+    let unexplored_child = if is_code_query {
+        find_unexplored_code_child(working_memory, engine)
+    } else {
+        None
+    };
+
     let mut candidates: Vec<ToolCandidate> = Vec::new();
 
     // ── kg_query: always applicable, most valuable when knowledge is scarce ──
     {
-        // For code queries, try to find a matching code entity as query target.
+        // For code queries, prefer unexplored child entities discovered in
+        // previous kg_query results, then fall back to top-level match.
         let query_symbol = if is_code_query {
-            find_code_entity_for_query(engine, &goal.description)
+            unexplored_child.clone()
+                .or_else(|| find_code_entity_for_query(engine, &goal.description))
                 .unwrap_or_else(|| {
-                    // Fall back to unexplored inference or goal label.
                     orientation
                         .inferences
                         .iter()
@@ -564,7 +572,7 @@ fn select_tool(
             format!("No knowledge yet — querying KG for \"{query_symbol}\".")
         };
 
-        candidates.push(apply_modifiers(
+        let mut kg_candidate = apply_modifiers(
             ToolCandidate::new(
                 "kg_query",
                 ToolInput::new()
@@ -576,7 +584,15 @@ fn select_tool(
             &history,
             &episodic_tools,
             pressure,
-        ));
+        );
+
+        // When exploring code with an unexplored child, override recency penalty.
+        // The agent found a NEW entity to query — querying a different entity isn't repetition.
+        if is_code_query && unexplored_child.is_some() {
+            kg_candidate.recency_penalty = 0.0;
+        }
+
+        candidates.push(kg_candidate);
     }
 
     // ── kg_mutate: only when we can synthesize a new triple ──
@@ -751,8 +767,13 @@ fn select_tool(
                         if !has_knowledge { continue; }
                         let recent_infer_count = history.count("infer_rules");
                         let context_boost = if recent_infer_count == 0 { 0.1 } else { 0.0 };
-                        // Always-available reasoning tool: use VSA score with a floor
-                        let base = (semantic_score * 0.7 + context_boost).max(0.35).min(0.75);
+                        // Suppress when code children still need exploring.
+                        let base = if is_code_query && unexplored_child.is_some() {
+                            0.1
+                        } else {
+                            // Always-available reasoning tool: use VSA score with a floor
+                            (semantic_score * 0.7 + context_boost).max(0.35).min(0.75)
+                        };
                         (
                             base,
                             ToolInput::new()
@@ -764,8 +785,13 @@ fn select_tool(
                     "gap_analysis" => {
                         let query_count = history.count("kg_query");
                         let stall_boost = if query_count >= 2 { 0.1 } else { 0.0 };
-                        // Always-available analysis tool: use VSA score with a floor
-                        let base = (semantic_score * 0.7 + stall_boost).max(0.3).min(0.75);
+                        // Suppress when code children still need exploring.
+                        let base = if is_code_query && unexplored_child.is_some() {
+                            0.1
+                        } else {
+                            // Always-available analysis tool: use VSA score with a floor
+                            (semantic_score * 0.7 + stall_boost).max(0.3).min(0.75)
+                        };
                         (
                             base,
                             ToolInput::new()
@@ -847,9 +873,9 @@ fn act(agent: &mut Agent, decision: &Decision, cycle: u64) -> AgentResult<Action
         },
     };
 
-    // Record tool result in WM.
-    let result_content = if tool_output.result.len() > 120 {
-        format!("{}...", &tool_output.result[..120])
+    // Record tool result in WM (truncate very large results to keep WM manageable).
+    let result_content = if tool_output.result.len() > 4096 {
+        format!("{}...", &tool_output.result[..4096])
     } else {
         tool_output.result.clone()
     };
@@ -955,10 +981,109 @@ fn is_code_goal(description: &str) -> bool {
     CODE_KEYWORDS.iter().any(|kw| lower.contains(kw))
 }
 
+/// Extract code entity labels that appeared in kg_query results (as children)
+/// but haven't been queried themselves yet.
+///
+/// Parses WM ToolResult entries for kg_query output lines like:
+/// `"Vsa" -> code:contains-mod -> "encode"  [1.00]`
+/// and collects the object labels. Then checks which of those haven't been
+/// queried (i.e., don't appear as subjects in other kg_query results).
+fn find_unexplored_code_child(
+    working_memory: &WorkingMemory,
+    engine: &crate::engine::Engine,
+) -> Option<String> {
+    use super::memory::WorkingMemoryKind;
+
+    let code_child_predicates = [
+        "code:contains-mod", "code:defines-fn", "code:defines-struct",
+        "code:defines-enum", "code:defines-type",
+    ];
+
+    let mut discovered_children: Vec<String> = Vec::new();
+    let mut queried_subjects: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for entry in working_memory.entries() {
+        if !matches!(entry.kind, WorkingMemoryKind::ToolResult) {
+            continue;
+        }
+        let content = &entry.content;
+        if !content.contains("Tool result (kg_query):") {
+            continue;
+        }
+
+        for line in content.lines() {
+            let trimmed = line.trim();
+            // Parse `"Subject" -> predicate -> "Object"  [conf]`
+            let parts: Vec<&str> = trimmed.split(" -> ").collect();
+            if parts.len() < 3 {
+                continue;
+            }
+            let subject = parts[0].trim().trim_matches('"').to_string();
+            let predicate = parts[1].trim();
+            let object_raw = parts[2..].join(" -> ");
+            // Strip trailing confidence
+            let object = if let Some(bracket_pos) = object_raw.rfind("  [") {
+                object_raw[..bracket_pos].trim().trim_matches('"').to_string()
+            } else {
+                object_raw.trim().trim_matches('"').to_string()
+            };
+
+            queried_subjects.insert(subject);
+
+            if code_child_predicates.iter().any(|&p| p == predicate) {
+                if !object.is_empty()
+                    && !super::synthesize::is_metadata_label(&object)
+                    && object != "tests"
+                {
+                    discovered_children.push(object);
+                }
+            }
+        }
+    }
+
+    // Return the first child that hasn't been queried yet AND exists in the KG.
+    for child in &discovered_children {
+        if !queried_subjects.contains(child) {
+            // Verify it resolves in the engine.
+            if engine.resolve_symbol(child).is_ok() {
+                return Some(child.clone());
+            }
+            // Try module-qualified form (e.g., "vsa::encode")
+            // The child might be a short name; search symbols for a match.
+            let symbols = engine.all_symbols();
+            for sym in &symbols {
+                let label = &sym.label;
+                if label.ends_with(child.as_str())
+                    && (label.ends_with(&format!("::{child}")) || label == child)
+                    && !queried_subjects.contains(label)
+                {
+                    return Some(label.clone());
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Stop words that should not contribute to entity matching scores.
+const STOP_WORDS: &[&str] = &[
+    "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
+    "have", "has", "had", "do", "does", "did", "will", "would", "could",
+    "should", "may", "might", "shall", "can", "need", "dare", "ought",
+    "describe", "explain", "show", "list", "what", "how", "why", "when",
+    "where", "which", "who", "whom", "that", "this", "these", "those",
+    "it", "its", "of", "in", "on", "at", "to", "for", "with", "by",
+    "from", "about", "into", "through", "during", "before", "after",
+    "and", "or", "but", "not", "no", "all", "each", "every", "any",
+    "me", "my", "we", "our",
+];
+
 /// Find the best matching code entity for a goal description.
 ///
-/// Scores all non-metadata symbols by keyword overlap with the description,
-/// returning the label of the best match (if any scores > 0).
+/// Scores all non-metadata symbols by keyword overlap with the description.
+/// Uses exact word-boundary matching (not substring), filters stop words,
+/// and prefers shorter labels (more specific entities).
 fn find_code_entity_for_query(
     engine: &crate::engine::Engine,
     description: &str,
@@ -966,45 +1091,92 @@ fn find_code_entity_for_query(
     let desc_words: Vec<String> = description
         .split_whitespace()
         .map(|w| w.to_lowercase().trim_matches(|c: char| !c.is_alphanumeric()).to_string())
-        .filter(|w| !w.is_empty() && w.len() > 1)
+        .filter(|w| {
+            !w.is_empty()
+                && w.len() > 1
+                && !STOP_WORDS.contains(&w.as_str())
+        })
         .collect();
+
+    if desc_words.is_empty() {
+        return None;
+    }
 
     let symbols = engine.all_symbols();
     let mut best_label: Option<String> = None;
-    let mut best_score = 0usize;
+    let mut best_score = 0i32;
 
     for sym in &symbols {
         let label = &sym.label;
         if is_metadata_label(label) {
             continue;
         }
+        // Skip long labels (docstrings, descriptions, signatures) — they're not entities.
+        if label.len() > 60 {
+            continue;
+        }
 
-        // Score: count how many description words appear in (or match) the label.
         let label_lower = label.to_lowercase();
-        let score: usize = desc_words
-            .iter()
-            .filter(|w| label_lower.contains(w.as_str()))
-            .count();
 
-        // Also check if the symbol has code-related triples (higher quality).
-        let has_code_triples = engine
+        // Tokenize the label into words for exact boundary matching.
+        let label_words: Vec<&str> = label_lower
+            .split(|c: char| !c.is_alphanumeric() && c != '_')
+            .filter(|w| !w.is_empty())
+            .collect();
+
+        let mut score: i32 = 0;
+
+        for desc_word in &desc_words {
+            // Exact word match in label (e.g., "vsa" matches label word "vsa")
+            if label_words.iter().any(|lw| *lw == desc_word.as_str()) {
+                score += 3; // Strong signal: exact word boundary match
+            }
+            // Whole label equals the word (e.g., label "Vsa" == word "vsa")
+            else if label_lower == *desc_word {
+                score += 5; // Strongest: the entire label IS the keyword
+            }
+        }
+
+        if score == 0 {
+            continue;
+        }
+
+        // Bonus for having code-structure triples (not just visibility annotations).
+        let structural_triples: Vec<_> = engine
             .triples_from(sym.id)
             .iter()
-            .any(|t| {
+            .filter(|t| {
                 let pred = engine.resolve_label(t.predicate);
-                pred.starts_with("code:") || pred == "defines-fn" || pred == "defines-type"
-                    || pred == "defines-mod" || pred == "depends-on" || pred == "contains"
-            });
+                pred == "code:contains-mod" || pred == "code:defines-fn"
+                    || pred == "code:defines-struct" || pred == "code:defines-enum"
+                    || pred == "code:depends-on" || pred == "code:defined-in"
+            })
+            .cloned()
+            .collect();
 
-        let adjusted_score = if has_code_triples { score + 2 } else { score };
+        if !structural_triples.is_empty() {
+            score += 4;
+            // Bonus for richer entities (more children = more to explore).
+            let child_count = structural_triples.len();
+            if child_count >= 3 {
+                score += 2; // Rich module with many children
+            }
+        }
 
-        if adjusted_score > best_score {
-            best_score = adjusted_score;
+        // Prefer shorter, more specific labels (e.g., "Vsa" over "vsa::item_memory").
+        if label.len() <= 10 {
+            score += 2;
+        } else if label.len() > 30 {
+            score -= 1;
+        }
+
+        if score > best_score || (score == best_score && label.len() < best_label.as_ref().map_or(usize::MAX, |l| l.len())) {
+            best_score = score;
             best_label = Some(label.clone());
         }
     }
 
-    if best_score > 0 { best_label } else { None }
+    best_label
 }
 
 /// Evaluate whether a goal's success criteria are satisfied by the current KG state.
