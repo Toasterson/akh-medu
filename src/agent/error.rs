@@ -60,6 +60,16 @@ pub enum AgentError {
     )]
     MaxCyclesReached { max_cycles: usize },
 
+    #[error("code ingestion failed for \"{path}\": {message}")]
+    #[diagnostic(
+        code(akh::agent::code_ingest),
+        help(
+            "Check that the path exists and contains valid Rust source files. \
+             Ensure syn can parse the files (no syntax errors)."
+        )
+    )]
+    CodeIngest { path: String, message: String },
+
     #[error("{0}")]
     #[diagnostic(
         code(akh::agent::engine),

@@ -294,6 +294,132 @@ impl RuleSet {
         }
     }
 
+    /// Code-specific inference rules (6 rules for code structure reasoning).
+    ///
+    /// These compose with the builtin ontological rules since code entities also
+    /// use `is-a` (e.g., `Engine is-a Struct`, `create_symbol is-a Function`).
+    pub fn code_rules() -> Self {
+        let rules = vec![
+            // 1. Transitive dependency: (X depends-on Y) ∧ (Y depends-on Z) ⟹ (X depends-on Z)
+            InferenceRule::new("depends-on-transitive", RuleKind::TransitiveClosure)
+                .with_antecedents(vec![
+                    TriplePattern {
+                        subject: RuleTerm::Variable("X".into()),
+                        predicate: RuleTerm::Label("code:depends-on".into()),
+                        object: RuleTerm::Variable("Y".into()),
+                    },
+                    TriplePattern {
+                        subject: RuleTerm::Variable("Y".into()),
+                        predicate: RuleTerm::Label("code:depends-on".into()),
+                        object: RuleTerm::Variable("Z".into()),
+                    },
+                ])
+                .with_consequents(vec![TriplePattern {
+                    subject: RuleTerm::Variable("X".into()),
+                    predicate: RuleTerm::Label("code:depends-on".into()),
+                    object: RuleTerm::Variable("Z".into()),
+                }])
+                .with_confidence(0.85),
+            // 2. Transitive module containment.
+            InferenceRule::new("module-containment-transitive", RuleKind::TransitiveClosure)
+                .with_antecedents(vec![
+                    TriplePattern {
+                        subject: RuleTerm::Variable("X".into()),
+                        predicate: RuleTerm::Label("code:contains-mod".into()),
+                        object: RuleTerm::Variable("Y".into()),
+                    },
+                    TriplePattern {
+                        subject: RuleTerm::Variable("Y".into()),
+                        predicate: RuleTerm::Label("code:contains-mod".into()),
+                        object: RuleTerm::Variable("Z".into()),
+                    },
+                ])
+                .with_consequents(vec![TriplePattern {
+                    subject: RuleTerm::Variable("X".into()),
+                    predicate: RuleTerm::Label("code:contains-mod".into()),
+                    object: RuleTerm::Variable("Z".into()),
+                }])
+                .with_confidence(0.95),
+            // 3. Trait method inheritance: impl T for X, T has-method M ⟹ X has-method M.
+            InferenceRule::new("trait-method-inheritance", RuleKind::TypeSubsumption)
+                .with_antecedents(vec![
+                    TriplePattern {
+                        subject: RuleTerm::Variable("X".into()),
+                        predicate: RuleTerm::Label("code:implements-trait".into()),
+                        object: RuleTerm::Variable("T".into()),
+                    },
+                    TriplePattern {
+                        subject: RuleTerm::Variable("T".into()),
+                        predicate: RuleTerm::Label("code:has-method".into()),
+                        object: RuleTerm::Variable("M".into()),
+                    },
+                ])
+                .with_consequents(vec![TriplePattern {
+                    subject: RuleTerm::Variable("X".into()),
+                    predicate: RuleTerm::Label("code:has-method".into()),
+                    object: RuleTerm::Variable("M".into()),
+                }])
+                .with_confidence(0.90),
+            // 4. Circular dependency detection.
+            InferenceRule::new(
+                "circular-dependency",
+                RuleKind::Custom {
+                    name: "circular-dep".into(),
+                },
+            )
+            .with_antecedents(vec![
+                TriplePattern {
+                    subject: RuleTerm::Variable("X".into()),
+                    predicate: RuleTerm::Label("code:depends-on".into()),
+                    object: RuleTerm::Variable("Y".into()),
+                },
+                TriplePattern {
+                    subject: RuleTerm::Variable("Y".into()),
+                    predicate: RuleTerm::Label("code:depends-on".into()),
+                    object: RuleTerm::Variable("X".into()),
+                },
+            ])
+            .with_consequents(vec![TriplePattern {
+                subject: RuleTerm::Variable("X".into()),
+                predicate: RuleTerm::Label("code:circular-dep".into()),
+                object: RuleTerm::Variable("Y".into()),
+            }])
+            .with_confidence(1.0),
+            // 5. defines-fn inverse: (X defines-fn Y) ⟹ (Y defined-in X).
+            InferenceRule::new("defines-fn-inverse", RuleKind::InverseRelation)
+                .with_antecedents(vec![TriplePattern {
+                    subject: RuleTerm::Variable("X".into()),
+                    predicate: RuleTerm::Label("code:defines-fn".into()),
+                    object: RuleTerm::Variable("Y".into()),
+                }])
+                .with_consequents(vec![TriplePattern {
+                    subject: RuleTerm::Variable("Y".into()),
+                    predicate: RuleTerm::Label("code:defined-in".into()),
+                    object: RuleTerm::Variable("X".into()),
+                }])
+                .with_confidence(1.0),
+            // 6. defines-struct inverse: (X defines-struct Y) ⟹ (Y defined-in X).
+            InferenceRule::new("defines-struct-inverse", RuleKind::InverseRelation)
+                .with_antecedents(vec![TriplePattern {
+                    subject: RuleTerm::Variable("X".into()),
+                    predicate: RuleTerm::Label("code:defines-struct".into()),
+                    object: RuleTerm::Variable("Y".into()),
+                }])
+                .with_consequents(vec![TriplePattern {
+                    subject: RuleTerm::Variable("Y".into()),
+                    predicate: RuleTerm::Label("code:defined-in".into()),
+                    object: RuleTerm::Variable("X".into()),
+                }])
+                .with_confidence(1.0),
+        ];
+
+        Self {
+            name: "code".into(),
+            rules,
+            source: "builtin-code".into(),
+        }
+    }
+
     /// Parse a rule set from JSON.
     pub fn from_json(json: &str, source: &str) -> AutonomousResult<Self> {
         let rules: Vec<InferenceRule> = serde_json::from_str(json).map_err(|e| {
@@ -522,6 +648,25 @@ mod tests {
         assert_eq!(rs.rules[0].antecedents.len(), 2);
         assert_eq!(rs.rules[0].consequents.len(), 1);
         assert_eq!(rs.rules[0].confidence_factor, 0.9);
+    }
+
+    #[test]
+    fn code_rules_has_six_rules() {
+        let rs = RuleSet::code_rules();
+        assert_eq!(rs.rules.len(), 6);
+        assert_eq!(rs.enabled_count(), 6);
+    }
+
+    #[test]
+    fn code_rule_names() {
+        let rs = RuleSet::code_rules();
+        let names: Vec<&str> = rs.rules.iter().map(|r| r.name.as_str()).collect();
+        assert!(names.contains(&"depends-on-transitive"));
+        assert!(names.contains(&"module-containment-transitive"));
+        assert!(names.contains(&"trait-method-inheritance"));
+        assert!(names.contains(&"circular-dependency"));
+        assert!(names.contains(&"defines-fn-inverse"));
+        assert!(names.contains(&"defines-struct-inverse"));
     }
 
     #[test]

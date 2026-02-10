@@ -115,6 +115,20 @@ const TOOL_CONCEPTS: &[(&str, &[&str])] = &[
             "language", "parse", "read", "document",
         ],
     ),
+    (
+        "code_ingest",
+        &[
+            "code", "rust", "source", "parse", "function", "struct",
+            "module", "trait", "architecture", "analyze",
+        ],
+    ),
+    (
+        "doc_gen",
+        &[
+            "document", "explain", "describe", "architecture",
+            "generate", "write", "summarize", "overview",
+        ],
+    ),
 ];
 
 /// Build semantic profiles for all registered tools.

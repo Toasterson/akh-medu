@@ -36,6 +36,9 @@ anndists = "0.1"
 petgraph = "0.7"
 oxigraph = "0.4"
 
+# Code analysis
+syn = { version = "2", features = ["full", "visit"] }
+
 # HTTP (sync)
 ureq = "2"
 

@@ -241,6 +241,38 @@ enum Commands {
         #[arg(long)]
         no_ollama: bool,
     },
+
+    /// Ingest Rust source code into the knowledge graph.
+    CodeIngest {
+        /// File or directory path to ingest.
+        #[arg(long)]
+        path: PathBuf,
+        /// Scan subdirectories recursively (default: true).
+        #[arg(long, default_value = "true")]
+        recursive: bool,
+        /// Run forward-chaining code rules after ingestion.
+        #[arg(long)]
+        run_rules: bool,
+        /// Maximum number of files to process.
+        #[arg(long, default_value = "200")]
+        max_files: usize,
+    },
+
+    /// Generate documentation from code knowledge in the KG.
+    DocGen {
+        /// Target: "architecture", "module:<name>", "type:<name>", "dependencies".
+        #[arg(long)]
+        target: String,
+        /// Output format: "markdown" (default), "json", or "both".
+        #[arg(long, default_value = "markdown")]
+        format: String,
+        /// Output file path (stdout if omitted).
+        #[arg(long)]
+        output: Option<PathBuf>,
+        /// Use LLM to polish Markdown output.
+        #[arg(long)]
+        polish: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2469,6 +2501,100 @@ fn main() -> Result<()> {
             }
 
             println!("Session saved.");
+        }
+
+        Commands::CodeIngest {
+            path,
+            recursive,
+            run_rules,
+            max_files,
+        } => {
+            let engine = Engine::new(config).into_diagnostic()?;
+
+            use akh_medu::agent::tool::{Tool, ToolInput};
+            use akh_medu::agent::tools::CodeIngestTool;
+
+            let input = ToolInput::new()
+                .with_param("path", path.to_str().unwrap_or(""))
+                .with_param("recursive", &recursive.to_string())
+                .with_param("max_files", &max_files.to_string());
+
+            let tool = CodeIngestTool;
+            let output = tool.execute(&engine, input).into_diagnostic()?;
+            println!("{}", output.result);
+
+            if run_rules {
+                let rule_config = RuleEngineConfig::default();
+                let result = engine.run_code_rules(rule_config).into_diagnostic()?;
+                println!(
+                    "Rules: {} derived triple(s) in {} iteration(s){}.",
+                    result.derived.len(),
+                    result.iterations,
+                    if result.reached_fixpoint {
+                        " (fixpoint)"
+                    } else {
+                        ""
+                    },
+                );
+            }
+
+            // Auto-ground after ingestion.
+            let ops = engine.ops();
+            let im = engine.item_memory();
+            let grounding_config = akh_medu::vsa::grounding::GroundingConfig::default();
+            match akh_medu::vsa::grounding::ground_all(&engine, ops, im, &grounding_config) {
+                Ok(result) => {
+                    if result.symbols_updated > 0 {
+                        println!(
+                            "Grounding: {} symbols updated in {} round(s).",
+                            result.symbols_updated, result.rounds_completed,
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "grounding skipped");
+                }
+            }
+
+            let _ = engine.persist();
+            println!("{}", engine.info());
+        }
+
+        Commands::DocGen {
+            target,
+            format,
+            output,
+            polish,
+        } => {
+            let engine = Engine::new(config).into_diagnostic()?;
+
+            use akh_medu::agent::tool::{Tool, ToolInput};
+            use akh_medu::agent::tools::DocGenTool;
+
+            let input = ToolInput::new()
+                .with_param("target", &target)
+                .with_param("format", &format)
+                .with_param("polish", &polish.to_string());
+
+            let tool = DocGenTool;
+            let tool_output = tool.execute(&engine, input).into_diagnostic()?;
+
+            if let Some(ref out_path) = output {
+                std::fs::write(out_path, &tool_output.result).into_diagnostic()?;
+                println!("Documentation written to {}", out_path.display());
+
+                // Write JSON sidecar if format is "both".
+                if format == "both" {
+                    let json_path = out_path.with_extension("json");
+                    // The result contains both separated by ---
+                    if let Some(json_part) = tool_output.result.split("\n\n---\n\n").nth(1) {
+                        std::fs::write(&json_path, json_part).into_diagnostic()?;
+                        println!("JSON sidecar written to {}", json_path.display());
+                    }
+                }
+            } else {
+                println!("{}", tool_output.result);
+            }
         }
     }
 

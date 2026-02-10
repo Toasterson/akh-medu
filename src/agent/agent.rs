@@ -152,6 +152,10 @@ impl Agent {
         // Ingest tools.
         registry.register(Box::new(tools::CsvIngestTool));
         registry.register(Box::new(tools::TextIngestTool));
+        registry.register(Box::new(tools::CodeIngestTool));
+
+        // Documentation generation.
+        registry.register(Box::new(tools::DocGenTool));
     }
 
     /// Create a new agent wrapping the given engine.

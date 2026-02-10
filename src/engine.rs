@@ -808,6 +808,17 @@ impl Engine {
         Ok(engine.run(self)?)
     }
 
+    /// Run both builtin ontological + code-specific inference rules.
+    pub fn run_code_rules(
+        &self,
+        config: crate::autonomous::rule_engine::RuleEngineConfig,
+    ) -> AkhResult<crate::autonomous::rule_engine::RuleEngineResult> {
+        let engine = crate::autonomous::rule_engine::RuleEngine::new(config)
+            .with_rules(crate::autonomous::rules::RuleSet::builtin())
+            .with_rules(crate::autonomous::rules::RuleSet::code_rules());
+        Ok(engine.run(self)?)
+    }
+
     /// Analyze knowledge gaps around the given goal symbols.
     pub fn analyze_gaps(
         &self,
