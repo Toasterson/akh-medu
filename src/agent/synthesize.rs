@@ -132,15 +132,16 @@ const CODE_STRUCTURE_PREDICATES: &[&str] = &[
     "code:defines-enum", "code:defines-type", "code:defines-mod",
     "code:depends-on", "code:defined-in",
     "code:has-variant", "code:has-method", "code:has-field",
-    "code:derives-trait", "code:implements-trait",
     "defines-fn", "defines-type", "defines-mod",
     "depends-on", "implements", "contains",
 ];
 
-/// Code annotation predicates to skip (noise in narrative).
+/// Code annotation predicates to skip (noise in narrative — queried from KG when needed).
 const CODE_ANNOTATION_PREDICATES: &[&str] = &[
     "code:has-visibility", "code:has-attribute", "code:has-doc",
     "code:line-count", "code:has-return-type", "code:returns-type",
+    "code:derives-trait", "code:implements-trait",
+    "code:has-param",
 ];
 
 /// Inferred predicates that are redundant with structural code predicates.
@@ -821,8 +822,7 @@ fn render_code_section(facts: &[ExtractedFact], engine: &crate::engine::Engine) 
                         .push(detail.clone());
                 }
                 "code:defines-struct" | "code:defines-enum" | "code:defines-type"
-                | "defines-type" | "implements" | "code:has-variant" | "code:has-field"
-                | "code:derives-trait" | "code:implements-trait" => {
+                | "defines-type" | "implements" | "code:has-variant" | "code:has-field" => {
                     types
                         .entry(name.clone())
                         .or_default()
@@ -846,18 +846,33 @@ fn render_code_section(facts: &[ExtractedFact], engine: &crate::engine::Engine) 
         }
     }
 
-    // Identify the primary entity (most code facts) and its children.
-    // Filter out noise from unrelated entities that happen to reference the same symbols.
+    // Identify the primary entity and its children.
+    // Prefer module containers (which have children in the `modules` map) over
+    // structs/types — a module is the natural "root" of a hierarchical rendering.
     let mut fact_counts: BTreeMap<String, usize> = BTreeMap::new();
     for map in [&modules, &functions, &types, &deps] {
         for (name, items) in map {
             *fact_counts.entry(name.clone()).or_default() += items.len();
         }
     }
-    let primary = fact_counts
-        .iter()
-        .max_by_key(|(_, count)| **count)
-        .map(|(name, _)| name.clone());
+    let primary = if modules.is_empty() {
+        // No module hierarchy — pick entity with most facts.
+        fact_counts
+            .iter()
+            .max_by_key(|(_, c)| **c)
+            .map(|(n, _)| n.clone())
+    } else {
+        // Pick the module container with the most total children/facts.
+        modules
+            .iter()
+            .max_by_key(|(name, children)| {
+                children.len()
+                    + functions.get(*name).map_or(0, |v| v.len())
+                    + types.get(*name).map_or(0, |v| v.len())
+                    + deps.get(*name).map_or(0, |v| v.len())
+            })
+            .map(|(name, _)| name.clone())
+    };
     let primary_children: HashSet<String> = primary
         .as_ref()
         .and_then(|p| modules.get(p))
@@ -914,6 +929,79 @@ fn render_code_section(facts: &[ExtractedFact], engine: &crate::engine::Engine) 
         super::semantic_enrichment::lookup_importance(engine, sym, preds)
     };
 
+    // ── Code-predicate KG queries (doc, signatures, fields, derives) ────
+    // These query code:has-doc, code:has-param, code:returns-type, etc. directly
+    // from the KG. They were filtered from WM extraction (too verbose) but are
+    // valuable for rendering key types and function signatures.
+    let code_preds = super::tools::code_predicates::CodePredicates::init(engine).ok();
+
+    // Helper: get first doc comment for a name.
+    let get_doc = |name: &str| -> Option<String> {
+        let preds = code_preds.as_ref()?;
+        let sym = resolve_sym(name)?;
+        let triples = engine.triples_from(sym);
+        triples
+            .iter()
+            .find(|t| t.predicate == preds.has_doc)
+            .map(|t| engine.resolve_label(t.object).to_string())
+    };
+
+    // Helper: get function signature as "(param:Type, ...) → RetType".
+    let get_fn_signature = |name: &str| -> Option<String> {
+        let preds = code_preds.as_ref()?;
+        let sym = resolve_sym(name)?;
+        let triples = engine.triples_from(sym);
+        let params: Vec<String> = triples
+            .iter()
+            .filter(|t| t.predicate == preds.has_param)
+            .map(|t| engine.resolve_label(t.object).to_string())
+            .collect();
+        let ret = triples
+            .iter()
+            .find(|t| t.predicate == preds.returns_type)
+            .map(|t| engine.resolve_label(t.object).to_string());
+        if params.is_empty() && ret.is_none() {
+            return None;
+        }
+        let params_str = params.join(", ");
+        match ret {
+            Some(r) => Some(format!("({params_str}) \u{2192} {r}")),
+            None => Some(format!("({params_str})")),
+        }
+    };
+
+    // Helper: get struct fields as ["name:Type", ...].
+    let get_fields = |name: &str| -> Vec<String> {
+        let Some(preds) = code_preds.as_ref() else {
+            return Vec::new();
+        };
+        let Some(sym) = resolve_sym(name) else {
+            return Vec::new();
+        };
+        engine
+            .triples_from(sym)
+            .iter()
+            .filter(|t| t.predicate == preds.has_field)
+            .map(|t| engine.resolve_label(t.object).to_string())
+            .collect()
+    };
+
+    // Helper: get derive traits as ["Debug", "Clone", ...].
+    let get_derives = |name: &str| -> Vec<String> {
+        let Some(preds) = code_preds.as_ref() else {
+            return Vec::new();
+        };
+        let Some(sym) = resolve_sym(name) else {
+            return Vec::new();
+        };
+        engine
+            .triples_from(sym)
+            .iter()
+            .filter(|t| t.predicate == preds.derives_trait)
+            .map(|t| engine.resolve_label(t.object).to_string())
+            .collect()
+    };
+
     // Build hierarchical output: group child details under the primary entity.
     let mut rendered_children: HashSet<String> = HashSet::new();
 
@@ -948,35 +1036,69 @@ fn render_code_section(facts: &[ExtractedFact], engine: &crate::engine::Engine) 
 
             let mut child_lines = Vec::new();
             for child in &sorted_children {
-                let mut parts = Vec::new();
-                if let Some(fns) = functions.get(*child) {
-                    parts.push(format!("functions: {}", format_code_list(fns)));
-                }
-                if let Some(ts) = types.get(*child) {
-                    parts.push(format!("types: {}", format_code_list(ts)));
-                }
-                if let Some(ds) = deps.get(*child) {
-                    parts.push(format!("depends on {}", format_list(ds)));
-                }
-
                 // Enrichment annotations: role label and importance star.
                 let role_tag = get_role(child)
                     .map(|r| format!(" ({r})"))
                     .unwrap_or_default();
                 let star = if get_importance(child).unwrap_or(0.0) > 0.7 {
-                    ", \u{2605}"
+                    " \u{2605}"
                 } else {
                     ""
                 };
 
-                if parts.is_empty() {
-                    child_lines.push(format!("- **{child}**{role_tag}{star}"));
-                } else {
-                    child_lines.push(format!(
-                        "- **{child}**{role_tag}{star} \u{2014} {}",
-                        parts.join(". "),
-                    ));
+                // Purpose from doc comment first sentence.
+                let purpose = get_doc(child).map(|d| first_sentence_of(&d));
+                let purpose_str = purpose
+                    .as_deref()
+                    .map(|p| format!(" \u{2014} {}", lowercase_first(p)))
+                    .unwrap_or_default();
+
+                // Key functions with signatures.
+                let fn_details: Vec<String> = functions
+                    .get(*child)
+                    .map(|fns| {
+                        fns.iter()
+                            .take(3) // at most 3 key functions
+                            .map(|f| {
+                                if let Some(sig) = get_fn_signature(f) {
+                                    format!("`{f}{sig}`")
+                                } else {
+                                    format!("`{f}`")
+                                }
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                // Key types (clean, no derives).
+                let type_details: Vec<String> = types
+                    .get(*child)
+                    .map(|ts| ts.iter().map(|t| format!("`{t}`")).collect())
+                    .unwrap_or_default();
+
+                // Build detail parts.
+                let mut detail_parts = Vec::new();
+                if !fn_details.is_empty() {
+                    detail_parts.push(format!("Key functions: {}", fn_details.join(", ")));
                 }
+                if !type_details.is_empty() {
+                    detail_parts.push(format!("Key types: {}", type_details.join(", ")));
+                }
+
+                let detail_str = if detail_parts.is_empty() {
+                    String::new()
+                } else {
+                    // Put details on next indented line if we have a purpose sentence.
+                    if purpose_str.is_empty() {
+                        format!(" \u{2014} {}", detail_parts.join(". "))
+                    } else {
+                        format!("\n  {}", detail_parts.join(". "))
+                    }
+                };
+
+                child_lines.push(format!(
+                    "- **{child}**{role_tag}{star}{purpose_str}{detail_str}"
+                ));
                 rendered_children.insert((*child).clone());
             }
 
@@ -988,21 +1110,31 @@ fn render_code_section(facts: &[ExtractedFact], engine: &crate::engine::Engine) 
             }
 
             if !child_lines.is_empty() {
-                let purpose = if !primary_roles.is_empty() {
+                // Three-tier purpose sentence:
+                // 1. Doc comment (best) — explains what the module does
+                // 2. Role label (fallback) — "is a transformation and storage layer"
+                // 3. Plain (bare) — just "contains N submodules"
+                let purpose_sentence = if let Some(doc) = get_doc(primary_name) {
+                    let sentence = first_sentence_of(&doc);
+                    format!("The **{primary_name}** module {}",
+                        lowercase_first(&sentence))
+                } else if !primary_roles.is_empty() {
                     let role_desc = primary_roles.join(" and ");
-                    format!(
-                        "The **{primary_name}** module is a {role_desc} layer.\n\nIt contains {} submodule{}:\n{}",
-                        total_children,
-                        if total_children == 1 { "" } else { "s" },
-                        child_lines.join("\n"),
-                    )
+                    format!("The **{primary_name}** module is a {role_desc} layer.")
                 } else {
-                    format!(
-                        "The **{primary_name}** module contains:\n{}",
-                        child_lines.join("\n"),
-                    )
+                    format!("The **{primary_name}** module contains {} submodule{}.",
+                        total_children,
+                        if total_children == 1 { "" } else { "s" })
                 };
-                prose_parts.push(purpose);
+
+                let children_block = format!(
+                    "It contains {} submodule{}:\n{}",
+                    total_children,
+                    if total_children == 1 { "" } else { "s" },
+                    child_lines.join("\n"),
+                );
+
+                prose_parts.push(format!("{purpose_sentence}\n\n{children_block}"));
             }
 
             // Data flow line from semantic:flows-to triples.
@@ -1030,16 +1162,30 @@ fn render_code_section(facts: &[ExtractedFact], engine: &crate::engine::Engine) 
 
             // Render primary entity's own types and deps (not child-level).
             if let Some(ts) = types.get(primary_name) {
-                // Add star to high-importance types.
+                // Enhanced type rendering: fields, derives, and importance stars.
                 let typed_list: Vec<String> = ts
                     .iter()
                     .map(|t| {
                         let star = if get_importance(t).unwrap_or(0.0) > 0.7 {
-                            " (\u{2605})"
+                            " \u{2605}"
                         } else {
                             ""
                         };
-                        format!("`{t}`{star}")
+                        // Struct fields: (field: Type, field: Type)
+                        let fields = get_fields(t);
+                        let field_str = if fields.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" ({})", fields.join(", "))
+                        };
+                        // Compact derives: [Debug, Clone, Serialize]
+                        let derives = get_derives(t);
+                        let derive_str = if derives.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" [derives: {}]", derives.join(", "))
+                        };
+                        format!("`{t}`{field_str}{derive_str}{star}")
                     })
                     .collect();
                 prose_parts.push(format!("Key types: {}.", format_list(&typed_list)));
@@ -1057,16 +1203,35 @@ fn render_code_section(facts: &[ExtractedFact], engine: &crate::engine::Engine) 
         if rendered_children.contains(parent) {
             continue;
         }
+        let doc_purpose = get_doc(parent)
+            .map(|d| format!(" \u{2014} {}", lowercase_first(&first_sentence_of(&d))))
+            .unwrap_or_default();
         let list = format_code_list(children);
-        prose_parts.push(format!("The **{parent}** module contains {list}."));
+        prose_parts.push(format!("The **{parent}** module{doc_purpose} contains {list}."));
     }
 
     for (owner, fns) in &functions {
         if rendered_children.contains(owner) {
             continue;
         }
-        let list = format_code_list(fns);
-        prose_parts.push(format!("**{owner}** defines functions {list}."));
+        // Show function signatures where available.
+        let fn_list: Vec<String> = fns
+            .iter()
+            .map(|f| {
+                if let Some(sig) = get_fn_signature(f) {
+                    format!("`{f}{sig}`")
+                } else {
+                    format!("`{f}`")
+                }
+            })
+            .collect();
+        let doc_purpose = get_doc(owner)
+            .map(|d| format!(" \u{2014} {}", lowercase_first(&first_sentence_of(&d))))
+            .unwrap_or_default();
+        prose_parts.push(format!(
+            "**{owner}**{doc_purpose} defines functions {}.",
+            format_list(&fn_list),
+        ));
     }
 
     for (owner, ts) in &types {
@@ -1384,6 +1549,35 @@ fn is_informative_section(section: &NarrativeSection) -> bool {
         }
     }
     true
+}
+
+/// Extract the first sentence from a doc comment.
+///
+/// Trims and takes text up to the first `.` followed by whitespace/end.
+fn first_sentence_of(doc: &str) -> String {
+    let trimmed = doc.trim();
+    // Find sentence-ending period: followed by space, newline, or end.
+    if let Some(pos) = trimmed.find(". ") {
+        trimmed[..=pos].to_string()
+    } else if let Some(stripped) = trimmed.strip_suffix('.') {
+        format!("{stripped}.")
+    } else if let Some(pos) = trimmed.find('\n') {
+        trimmed[..pos].trim_end().to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// Lowercase the first character of a string (for embedding doc sentences in prose).
+fn lowercase_first(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        None => String::new(),
+        Some(c) => {
+            let lower: String = c.to_lowercase().collect();
+            format!("{lower}{}", chars.as_str())
+        }
+    }
 }
 
 /// Format a list of items as "A, B, and C".
@@ -1827,9 +2021,12 @@ mod tests {
     }
 
     #[test]
-    fn derives_trait_predicates_handled() {
-        assert!(is_code_predicate("code:derives-trait"));
-        assert!(is_code_predicate("code:implements-trait"));
+    fn derives_trait_predicates_are_annotations() {
+        // Derive traits are queried directly from KG, not extracted as WM facts.
+        assert!(is_code_annotation("code:derives-trait"));
+        assert!(is_code_annotation("code:implements-trait"));
+        assert!(!is_code_predicate("code:derives-trait"));
+        assert!(!is_code_predicate("code:implements-trait"));
     }
 
     #[test]
@@ -1916,5 +2113,328 @@ mod tests {
             "children should have enrichment annotations (role or star), prose: {}",
             section.prose,
         );
+    }
+
+    #[test]
+    fn primary_selection_prefers_module_over_struct() {
+        let engine = test_engine();
+
+        // HyperVec has many more facts (18 derive traits + methods), but Vsa
+        // is a module with children — Vsa should win as primary.
+        let mut facts = Vec::new();
+
+        // Vsa has 2 submodules (module container).
+        for child in &["encode", "ops"] {
+            facts.push(ExtractedFact {
+                kind: FactKind::CodeFact {
+                    kind: "code:contains-mod".into(),
+                    name: "Vsa".into(),
+                    detail: child.to_string(),
+                },
+                source_tool: "kg_query".into(),
+                source_cycle: 1,
+            });
+        }
+
+        // HyperVec has many more facts (struct definitions).
+        for t in &["Clone", "Debug", "Serialize", "Deserialize", "Eq",
+                    "Hash", "PartialEq", "data", "encoding", "dim"] {
+            facts.push(ExtractedFact {
+                kind: FactKind::CodeFact {
+                    kind: "code:defines-type".into(),
+                    name: "HyperVec".into(),
+                    detail: t.to_string(),
+                },
+                source_tool: "kg_query".into(),
+                source_cycle: 1,
+            });
+        }
+
+        let section = render_code_section(&facts, &engine);
+
+        // Vsa should be the primary (hierarchical rendering fires).
+        assert!(
+            section.prose.contains("**Vsa** module"),
+            "Vsa should be primary, not HyperVec. Prose: {}",
+            section.prose,
+        );
+        assert!(
+            section.prose.contains("- **encode**"),
+            "encode should be rendered as child of Vsa. Prose: {}",
+            section.prose,
+        );
+    }
+
+    #[test]
+    fn derive_traits_not_in_types_output() {
+        // derive traits (code:derives-trait) should be filtered out at extraction
+        // level and not show up as "types" in the rendered output.
+        let entry = make_tool_entry(
+            "Tool result (kg_query):\n\
+             \"HyperVec\" -> code:derives-trait -> \"Clone\"  [1.00]\n\
+             \"HyperVec\" -> code:derives-trait -> \"Debug\"  [1.00]\n\
+             \"HyperVec\" -> code:defines-type -> \"Dimension\"  [1.00]",
+            1,
+        );
+        let facts = extract_facts(&[entry]);
+
+        // Only the defines-type fact should survive — derives are now annotations.
+        assert_eq!(
+            facts.len(), 1,
+            "derive traits should be filtered as annotations, got: {facts:?}",
+        );
+        assert!(
+            matches!(&facts[0].kind, FactKind::CodeFact { kind, detail, .. }
+                if kind == "code:defines-type" && detail == "Dimension"),
+        );
+    }
+
+    #[test]
+    fn doc_comments_render_as_purpose() {
+        use crate::graph::Triple;
+
+        let engine = test_engine();
+        let code_preds =
+            crate::agent::tools::code_predicates::CodePredicates::init(&engine).unwrap();
+
+        // Create module with doc comment.
+        let vsa = engine.resolve_or_create_entity("Vsa").unwrap();
+        let encode = engine.resolve_or_create_entity("encode").unwrap();
+        engine
+            .add_triple(&Triple::new(vsa, code_preds.contains_mod, encode))
+            .unwrap();
+
+        // Add doc comment to Vsa.
+        let doc = engine
+            .resolve_or_create_entity("Implements Vector Symbolic Architecture for encoding.")
+            .unwrap();
+        engine
+            .add_triple(&Triple::new(vsa, code_preds.has_doc, doc))
+            .unwrap();
+
+        let facts = vec![ExtractedFact {
+            kind: FactKind::CodeFact {
+                kind: "code:contains-mod".into(),
+                name: "Vsa".into(),
+                detail: "encode".into(),
+            },
+            source_tool: "kg_query".into(),
+            source_cycle: 1,
+        }];
+
+        let section = render_code_section(&facts, &engine);
+
+        // The doc comment should appear as the purpose sentence.
+        assert!(
+            section.prose.contains("implements Vector Symbolic Architecture"),
+            "doc comment should render as purpose. Prose: {}",
+            section.prose,
+        );
+    }
+
+    #[test]
+    fn function_signatures_render_in_children() {
+        use crate::graph::Triple;
+
+        let engine = test_engine();
+        let code_preds =
+            crate::agent::tools::code_predicates::CodePredicates::init(&engine).unwrap();
+
+        let vsa = engine.resolve_or_create_entity("Vsa").unwrap();
+        let encode = engine.resolve_or_create_entity("encode").unwrap();
+        engine
+            .add_triple(&Triple::new(vsa, code_preds.contains_mod, encode))
+            .unwrap();
+
+        // encode module defines encode_symbol with param and return type.
+        let encode_fn = engine.resolve_or_create_entity("encode_symbol").unwrap();
+        engine
+            .add_triple(&Triple::new(encode, code_preds.defines_fn, encode_fn))
+            .unwrap();
+        let param = engine.resolve_or_create_entity("label:&str").unwrap();
+        engine
+            .add_triple(&Triple::new(encode_fn, code_preds.has_param, param))
+            .unwrap();
+        let ret = engine.resolve_or_create_entity("HyperVec").unwrap();
+        engine
+            .add_triple(&Triple::new(encode_fn, code_preds.returns_type, ret))
+            .unwrap();
+
+        let facts = vec![
+            ExtractedFact {
+                kind: FactKind::CodeFact {
+                    kind: "code:contains-mod".into(),
+                    name: "Vsa".into(),
+                    detail: "encode".into(),
+                },
+                source_tool: "kg_query".into(),
+                source_cycle: 1,
+            },
+            ExtractedFact {
+                kind: FactKind::CodeFact {
+                    kind: "code:defines-fn".into(),
+                    name: "encode".into(),
+                    detail: "encode_symbol".into(),
+                },
+                source_tool: "kg_query".into(),
+                source_cycle: 1,
+            },
+        ];
+
+        let section = render_code_section(&facts, &engine);
+
+        // encode_symbol should show its signature.
+        assert!(
+            section.prose.contains("encode_symbol(label:&str)"),
+            "fn signature should include params. Prose: {}",
+            section.prose,
+        );
+        assert!(
+            section.prose.contains("\u{2192} HyperVec"),
+            "fn signature should include return type. Prose: {}",
+            section.prose,
+        );
+    }
+
+    #[test]
+    fn struct_fields_render_in_key_types() {
+        use crate::graph::Triple;
+
+        let engine = test_engine();
+        let code_preds =
+            crate::agent::tools::code_predicates::CodePredicates::init(&engine).unwrap();
+
+        let vsa = engine.resolve_or_create_entity("Vsa").unwrap();
+        let encode = engine.resolve_or_create_entity("encode").unwrap();
+        engine
+            .add_triple(&Triple::new(vsa, code_preds.contains_mod, encode))
+            .unwrap();
+
+        // HyperVec is a type defined by Vsa with fields.
+        let hv = engine.resolve_or_create_entity("HyperVec").unwrap();
+        let field_dim = engine.resolve_or_create_entity("dim:Dimension").unwrap();
+        let field_data = engine.resolve_or_create_entity("data:Vec<u8>").unwrap();
+        engine
+            .add_triple(&Triple::new(hv, code_preds.has_field, field_dim))
+            .unwrap();
+        engine
+            .add_triple(&Triple::new(hv, code_preds.has_field, field_data))
+            .unwrap();
+
+        // HyperVec derives Debug.
+        let debug = engine.resolve_or_create_entity("Debug").unwrap();
+        engine
+            .add_triple(&Triple::new(hv, code_preds.derives_trait, debug))
+            .unwrap();
+
+        let facts = vec![
+            ExtractedFact {
+                kind: FactKind::CodeFact {
+                    kind: "code:contains-mod".into(),
+                    name: "Vsa".into(),
+                    detail: "encode".into(),
+                },
+                source_tool: "kg_query".into(),
+                source_cycle: 1,
+            },
+            ExtractedFact {
+                kind: FactKind::CodeFact {
+                    kind: "code:defines-type".into(),
+                    name: "Vsa".into(),
+                    detail: "HyperVec".into(),
+                },
+                source_tool: "kg_query".into(),
+                source_cycle: 1,
+            },
+        ];
+
+        let section = render_code_section(&facts, &engine);
+
+        // Key types should show fields.
+        assert!(
+            section.prose.contains("dim:Dimension"),
+            "struct fields should render in Key types. Prose: {}",
+            section.prose,
+        );
+        assert!(
+            section.prose.contains("data:Vec<u8>"),
+            "struct fields should render in Key types. Prose: {}",
+            section.prose,
+        );
+        // Compact derives.
+        assert!(
+            section.prose.contains("[derives: Debug]"),
+            "derives should render in compact format. Prose: {}",
+            section.prose,
+        );
+    }
+
+    #[test]
+    fn graceful_fallback_no_doc_or_enrichment() {
+        let engine = test_engine();
+
+        // Minimal facts: just a module with children, no enrichment, no doc comments.
+        let facts = vec![
+            ExtractedFact {
+                kind: FactKind::CodeFact {
+                    kind: "code:contains-mod".into(),
+                    name: "Vsa".into(),
+                    detail: "encode".into(),
+                },
+                source_tool: "kg_query".into(),
+                source_cycle: 1,
+            },
+            ExtractedFact {
+                kind: FactKind::CodeFact {
+                    kind: "code:contains-mod".into(),
+                    name: "Vsa".into(),
+                    detail: "ops".into(),
+                },
+                source_tool: "kg_query".into(),
+                source_cycle: 1,
+            },
+        ];
+
+        let section = render_code_section(&facts, &engine);
+
+        // Should gracefully fall back to plain purpose.
+        assert!(
+            section.prose.contains("**Vsa** module contains 2 submodules"),
+            "should fall back to plain purpose when no doc/enrichment. Prose: {}",
+            section.prose,
+        );
+        // Heading should be Code Structure (no enrichment).
+        assert_eq!(
+            section.heading, "Code Structure",
+            "should use Code Structure heading without enrichment",
+        );
+    }
+
+    #[test]
+    fn first_sentence_of_extracts_correctly() {
+        assert_eq!(
+            first_sentence_of("Implements VSA encoding. Contains submodules."),
+            "Implements VSA encoding.",
+        );
+        assert_eq!(
+            first_sentence_of("Single sentence without trailing space."),
+            "Single sentence without trailing space.",
+        );
+        assert_eq!(
+            first_sentence_of("No period here"),
+            "No period here",
+        );
+        assert_eq!(
+            first_sentence_of("Line one\nLine two"),
+            "Line one",
+        );
+    }
+
+    #[test]
+    fn lowercase_first_works() {
+        assert_eq!(lowercase_first("Implements"), "implements");
+        assert_eq!(lowercase_first("already"), "already");
+        assert_eq!(lowercase_first(""), "");
+        assert_eq!(lowercase_first("A"), "a");
     }
 }
