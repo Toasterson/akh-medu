@@ -256,7 +256,16 @@ enum Commands {
         /// Maximum number of files to process.
         #[arg(long, default_value = "200")]
         max_files: usize,
+        /// Run semantic enrichment (role classification, importance, data flow).
+        #[arg(long)]
+        enrich: bool,
     },
+
+    /// Run semantic enrichment on existing code knowledge.
+    ///
+    /// Classifies module roles, computes importance, and detects data flow.
+    /// Persists results as `semantic:*` triples in the KG.
+    Enrich,
 
     /// Generate documentation from code knowledge in the KG.
     DocGen {
@@ -2749,6 +2758,7 @@ fn main() -> Result<()> {
             recursive,
             run_rules,
             max_files,
+            enrich,
         } => {
             let engine = Engine::new(config).into_diagnostic()?;
 
@@ -2797,8 +2807,46 @@ fn main() -> Result<()> {
                 }
             }
 
+            // Semantic enrichment (optional).
+            if enrich {
+                match akh_medu::agent::semantic_enrichment::enrich(&engine) {
+                    Ok(result) => {
+                        println!(
+                            "Enrichment: {} role(s), {} importance score(s), {} flow edge(s).",
+                            result.roles_enriched,
+                            result.importance_enriched,
+                            result.flows_detected,
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "semantic enrichment skipped");
+                    }
+                }
+            }
+
             let _ = engine.persist();
             println!("{}", engine.info());
+        }
+
+        Commands::Enrich => {
+            let engine = Engine::new(config).into_diagnostic()?;
+
+            match akh_medu::agent::semantic_enrichment::enrich(&engine) {
+                Ok(result) => {
+                    println!(
+                        "Semantic enrichment complete:\n  Roles classified: {}\n  Importance scores: {}\n  Flow edges: {}",
+                        result.roles_enriched,
+                        result.importance_enriched,
+                        result.flows_detected,
+                    );
+                }
+                Err(e) => {
+                    eprintln!("Enrichment failed: {e}");
+                    std::process::exit(1);
+                }
+            }
+
+            let _ = engine.persist();
         }
 
         Commands::DocGen {
@@ -3034,6 +3082,9 @@ fn format_derivation_kind(kind: &DerivationKind, engine: &Engine) -> String {
         }
         DerivationKind::SchemaDiscovered { pattern_type } => {
             format!("schema discovered [{}]", pattern_type)
+        }
+        DerivationKind::SemanticEnrichment { source } => {
+            format!("semantic enrichment [{}]", source)
         }
     }
 }

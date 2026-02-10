@@ -1041,29 +1041,56 @@ fn find_unexplored_code_child(
         }
     }
 
-    // Return the first child that hasn't been queried yet AND exists in the KG.
+    // Collect unexplored children (not yet queried, exists in KG).
+    let mut unexplored: Vec<(String, f32)> = Vec::new();
+
+    // Try to load semantic importance for ranking.
+    let sem_preds = super::semantic_enrichment::SemanticPredicates::init(engine).ok();
+
     for child in &discovered_children {
-        if !queried_subjects.contains(child) {
-            // Verify it resolves in the engine.
-            if engine.resolve_symbol(child).is_ok() {
-                return Some(child.clone());
-            }
+        if queried_subjects.contains(child) {
+            continue;
+        }
+
+        let resolved_label = if engine.resolve_symbol(child).is_ok() {
+            Some(child.clone())
+        } else {
             // Try module-qualified form (e.g., "vsa::encode")
-            // The child might be a short name; search symbols for a match.
             let symbols = engine.all_symbols();
-            for sym in &symbols {
+            symbols.iter().find_map(|sym| {
                 let label = &sym.label;
                 if label.ends_with(child.as_str())
                     && (label.ends_with(&format!("::{child}")) || label == child)
                     && !queried_subjects.contains(label)
                 {
-                    return Some(label.clone());
+                    Some(label.clone())
+                } else {
+                    None
                 }
-            }
+            })
+        };
+
+        if let Some(label) = resolved_label {
+            // Look up importance if semantic enrichment is available.
+            let importance = sem_preds
+                .as_ref()
+                .and_then(|preds| {
+                    engine.resolve_symbol(&label).ok().and_then(|sym| {
+                        super::semantic_enrichment::lookup_importance(engine, sym, preds)
+                    })
+                })
+                .unwrap_or(0.0);
+
+            unexplored.push((label, importance));
         }
     }
 
-    None
+    // Sort by importance descending — prefer high-importance children first.
+    unexplored.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    unexplored.into_iter().next().map(|(label, _)| label)
 }
 
 /// Stop words that should not contribute to entity matching scores.

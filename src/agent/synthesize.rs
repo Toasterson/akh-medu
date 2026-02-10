@@ -639,7 +639,7 @@ fn render_template(
     goal: &str,
     groups: &[FactGroup],
     all_facts: &[ExtractedFact],
-    _engine: &crate::engine::Engine,
+    engine: &crate::engine::Engine,
 ) -> NarrativeSummary {
     let total_facts = all_facts.len();
     let max_cycle = all_facts
@@ -672,7 +672,7 @@ fn render_template(
                 sections.push(render_entity_section(entity, &group.facts));
             }
             GroupKey::CodeStructure => {
-                sections.push(render_code_section(&group.facts));
+                sections.push(render_code_section(&group.facts, engine));
             }
             GroupKey::RelatedConcepts => {
                 sections.push(render_similarity_section(&group.facts));
@@ -784,7 +784,7 @@ fn render_entity_section(entity: &str, facts: &[ExtractedFact]) -> NarrativeSect
     }
 }
 
-fn render_code_section(facts: &[ExtractedFact]) -> NarrativeSection {
+fn render_code_section(facts: &[ExtractedFact], engine: &crate::engine::Engine) -> NarrativeSection {
     let mut modules: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut functions: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut types: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -861,42 +861,159 @@ fn render_code_section(facts: &[ExtractedFact]) -> NarrativeSection {
     types.retain(|name, _| is_relevant(name));
     deps.retain(|name, _| is_relevant(name));
 
+    // ── Semantic enrichment lookups ──────────────────────────────────────
+    // Try to load semantic predicates for enrichment data (roles, importance, flow).
+    // If enrichment hasn't run, these will gracefully return None/empty.
+    let sem_preds = super::semantic_enrichment::SemanticPredicates::init(engine).ok();
+
+    // Helper: resolve a label to its SymbolId (best-effort).
+    let resolve_sym = |label: &str| -> Option<crate::symbol::SymbolId> {
+        engine.resolve_symbol(label).ok()
+    };
+
+    // Helper: get role label for a name.
+    let get_role = |name: &str| -> Option<String> {
+        let preds = sem_preds.as_ref()?;
+        let sym = resolve_sym(name)?;
+        super::semantic_enrichment::lookup_role(engine, sym, preds)
+    };
+
+    // Helper: get importance for a name.
+    let get_importance = |name: &str| -> Option<f32> {
+        let preds = sem_preds.as_ref()?;
+        let sym = resolve_sym(name)?;
+        super::semantic_enrichment::lookup_importance(engine, sym, preds)
+    };
+
     // Build hierarchical output: group child details under the primary entity.
     let mut rendered_children: HashSet<String> = HashSet::new();
 
     if let Some(ref primary_name) = primary {
+        // ── Purpose header from primary roles ──
+        let primary_roles: Vec<String> = sem_preds.as_ref().and_then(|preds| {
+            let sym = resolve_sym(primary_name)?;
+            let triples = engine.triples_from(sym);
+            let roles: Vec<String> = triples
+                .iter()
+                .filter(|t| t.predicate == preds.has_role)
+                .map(|t| {
+                    engine
+                        .resolve_label(t.object)
+                        .trim_start_matches("role:")
+                        .to_string()
+                })
+                .collect();
+            if roles.is_empty() { None } else { Some(roles) }
+        }).unwrap_or_default();
+
         if let Some(children) = modules.get(primary_name) {
+            // Sort children by importance (highest first), falling back to name order.
+            let mut sorted_children: Vec<&String> = children.iter().collect();
+            sorted_children.sort_by(|a, b| {
+                let imp_a = get_importance(a).unwrap_or(0.0);
+                let imp_b = get_importance(b).unwrap_or(0.0);
+                imp_b
+                    .partial_cmp(&imp_a)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+
             let mut child_lines = Vec::new();
-            for child in children {
+            for child in &sorted_children {
                 let mut parts = Vec::new();
-                if let Some(fns) = functions.get(child) {
+                if let Some(fns) = functions.get(*child) {
                     parts.push(format!("functions: {}", format_code_list(fns)));
                 }
-                if let Some(ts) = types.get(child) {
+                if let Some(ts) = types.get(*child) {
                     parts.push(format!("types: {}", format_code_list(ts)));
                 }
-                if let Some(ds) = deps.get(child) {
+                if let Some(ds) = deps.get(*child) {
                     parts.push(format!("depends on {}", format_list(ds)));
                 }
-                if parts.is_empty() {
-                    child_lines.push(format!("- **{child}**"));
+
+                // Enrichment annotations: role label and importance star.
+                let role_tag = get_role(child)
+                    .map(|r| format!(" ({r})"))
+                    .unwrap_or_default();
+                let star = if get_importance(child).unwrap_or(0.0) > 0.7 {
+                    ", \u{2605}"
                 } else {
-                    child_lines.push(format!("- **{child}** — {}", parts.join(". ")));
+                    ""
+                };
+
+                if parts.is_empty() {
+                    child_lines.push(format!("- **{child}**{role_tag}{star}"));
+                } else {
+                    child_lines.push(format!(
+                        "- **{child}**{role_tag}{star} \u{2014} {}",
+                        parts.join(". "),
+                    ));
                 }
-                rendered_children.insert(child.clone());
+                rendered_children.insert((*child).clone());
+            }
+
+            // Truncation: > 8 children → show top 5 + "and N more"
+            let total_children = child_lines.len();
+            if total_children > 8 {
+                child_lines.truncate(5);
+                child_lines.push(format!("- ...and {} more", total_children - 5));
             }
 
             if !child_lines.is_empty() {
-                prose_parts.push(format!(
-                    "The **{primary_name}** module contains:\n{}",
-                    child_lines.join("\n"),
-                ));
+                let purpose = if !primary_roles.is_empty() {
+                    let role_desc = primary_roles.join(" and ");
+                    format!(
+                        "The **{primary_name}** module is a {role_desc} layer.\n\nIt contains {} submodule{}:\n{}",
+                        total_children,
+                        if total_children == 1 { "" } else { "s" },
+                        child_lines.join("\n"),
+                    )
+                } else {
+                    format!(
+                        "The **{primary_name}** module contains:\n{}",
+                        child_lines.join("\n"),
+                    )
+                };
+                prose_parts.push(purpose);
+            }
+
+            // Data flow line from semantic:flows-to triples.
+            if let Some(ref preds) = sem_preds {
+                let child_syms: Vec<crate::symbol::SymbolId> = sorted_children
+                    .iter()
+                    .filter_map(|c| resolve_sym(c))
+                    .collect();
+                let flow_chain =
+                    super::semantic_enrichment::build_flow_chain(engine, preds, &child_syms);
+                if flow_chain.len() >= 2 {
+                    let flow_parts: Vec<String> = flow_chain
+                        .iter()
+                        .map(|(name, via)| {
+                            if let Some(t) = via {
+                                format!("`{name}` \u{2192} {t}")
+                            } else {
+                                format!("`{name}`")
+                            }
+                        })
+                        .collect();
+                    prose_parts.push(format!("Data flow: {}", flow_parts.join(" \u{2192} ")));
+                }
             }
 
             // Render primary entity's own types and deps (not child-level).
             if let Some(ts) = types.get(primary_name) {
-                let list = format_code_list(ts);
-                prose_parts.push(format!("Key types: {list}."));
+                // Add star to high-importance types.
+                let typed_list: Vec<String> = ts
+                    .iter()
+                    .map(|t| {
+                        let star = if get_importance(t).unwrap_or(0.0) > 0.7 {
+                            " (\u{2605})"
+                        } else {
+                            ""
+                        };
+                        format!("`{t}`{star}")
+                    })
+                    .collect();
+                prose_parts.push(format!("Key types: {}.", format_list(&typed_list)));
             }
             if let Some(ds) = deps.get(primary_name) {
                 let list = format_list(ds);
@@ -945,8 +1062,18 @@ fn render_code_section(facts: &[ExtractedFact]) -> NarrativeSection {
         prose_parts.join(" ")
     };
 
+    // Use "Code Architecture" heading when enrichment data is present,
+    // fall back to "Code Structure" when it's purely structural.
+    let has_enrichment = sem_preds.is_some()
+        && primary.as_ref().is_some_and(|p| get_role(p).is_some());
+    let heading = if has_enrichment {
+        "Code Architecture"
+    } else {
+        "Code Structure"
+    };
+
     NarrativeSection {
-        heading: "Code Structure".to_string(),
+        heading: heading.to_string(),
         prose,
     }
 }
@@ -1059,6 +1186,9 @@ fn polish_with_llm(summary: NarrativeSummary, client: &OllamaClient) -> Narrativ
         Preserve all facts exactly. Do not add information not present in the input. \
         Do NOT speculate about what modules, functions, or types do — only describe \
         relationships and names that appear in the input. \
+        Preserve computed annotations: role labels like (transformation), (storage) \
+        and importance markers like (\u{2605}). These are derived from graph analysis, \
+        not speculation — keep them exactly as written. \
         Keep ## Markdown headings. Be conversational but factual.";
 
     match client.generate(&template_text, Some(system)) {
@@ -1174,8 +1304,9 @@ const TRIVIAL_TYPES: &[&str] = &[
 
 /// Whether a section is informative enough to show (not just "X is a Module.").
 fn is_informative_section(section: &NarrativeSection) -> bool {
-    // Code Structure, Related Concepts, etc. are always informative.
+    // Code Structure/Architecture, Related Concepts, etc. are always informative.
     if section.heading == "Code Structure"
+        || section.heading == "Code Architecture"
         || section.heading == "Related Concepts"
         || section.heading == "Reasoning Results"
     {
@@ -1533,8 +1664,17 @@ mod tests {
         assert!(matches!(&facts[0].kind, FactKind::Gap { entity, .. } if entity == "Engine"));
     }
 
+    fn test_engine() -> crate::engine::Engine {
+        crate::engine::Engine::new(crate::engine::EngineConfig {
+            dimension: crate::vsa::Dimension::TEST,
+            ..Default::default()
+        })
+        .unwrap()
+    }
+
     #[test]
     fn hierarchical_code_rendering() {
+        let engine = test_engine();
         let facts = vec![
             ExtractedFact {
                 kind: FactKind::CodeFact {
@@ -1592,7 +1732,7 @@ mod tests {
             },
         ];
 
-        let section = render_code_section(&facts);
+        let section = render_code_section(&facts, &engine);
 
         // Should contain hierarchical structure
         assert!(

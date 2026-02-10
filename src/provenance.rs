@@ -101,6 +101,10 @@ pub enum DerivationKind {
     SchemaDiscovered {
         pattern_type: String,
     },
+    /// Derived by VSA-based semantic enrichment (role classification, importance, data flow).
+    SemanticEnrichment {
+        source: String,
+    },
 }
 
 impl DerivationKind {
@@ -121,6 +125,7 @@ impl DerivationKind {
             Self::FusedInference { .. } => 11,
             Self::GapIdentified { .. } => 12,
             Self::SchemaDiscovered { .. } => 13,
+            Self::SemanticEnrichment { .. } => 14,
         }
     }
 }
