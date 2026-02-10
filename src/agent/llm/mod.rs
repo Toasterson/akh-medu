@@ -41,6 +41,13 @@ pub enum LlmError {
         help("Increase the timeout or use a smaller model.")
     )]
     Timeout { timeout_secs: u64 },
+
+    #[error("failed to pull model \"{model}\": {message}")]
+    #[diagnostic(
+        code(akh::llm::model_pull),
+        help("Check your internet connection or manually run: ollama pull {model}")
+    )]
+    ModelPull { model: String, message: String },
 }
 
 /// Configuration for the Ollama client.
@@ -86,6 +93,8 @@ pub struct ExtractedTriple {
 pub struct OllamaClient {
     config: OllamaConfig,
     available: bool,
+    /// Models available locally after `probe()`.
+    available_models: Vec<String>,
 }
 
 impl OllamaClient {
@@ -94,13 +103,14 @@ impl OllamaClient {
         Self {
             config,
             available: false,
+            available_models: Vec::new(),
         }
     }
 
     /// Probe the Ollama server to check availability.
     ///
-    /// Sends a lightweight request to the health endpoint.
-    /// Sets the internal `available` flag.
+    /// Sends a lightweight request to the `/api/tags` endpoint,
+    /// parses the list of locally available models.
     pub fn probe(&mut self) -> bool {
         let url = format!("{}/api/tags", self.config.base_url);
         let agent = ureq::AgentBuilder::new()
@@ -109,13 +119,97 @@ impl OllamaClient {
 
         match agent.get(&url).call() {
             Ok(resp) => {
-                self.available = resp.status() == 200;
-                self.available
+                if resp.status() != 200 {
+                    self.available = false;
+                    return false;
+                }
+                self.available = true;
+
+                // Parse model list from response.
+                if let Ok(body) = resp.into_string() {
+                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
+                        self.available_models = json["models"]
+                            .as_array()
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(|m| m["name"].as_str().map(|s| s.to_string()))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                    }
+                }
+
+                true
             }
             Err(_) => {
                 self.available = false;
+                self.available_models.clear();
                 false
             }
+        }
+    }
+
+    /// Whether the configured model is locally available.
+    pub fn has_model(&self) -> bool {
+        let target = &self.config.model;
+        self.available_models.iter().any(|m| {
+            m == target || m.split(':').next() == Some(target)
+        })
+    }
+
+    /// Ensure the configured model is available, pulling it if necessary.
+    ///
+    /// Call this after `probe()` returns true, before running the OODA loop.
+    pub fn ensure_model(&mut self) -> Result<(), LlmError> {
+        if !self.available {
+            return Err(LlmError::Unavailable {
+                url: self.config.base_url.clone(),
+            });
+        }
+
+        if self.has_model() {
+            return Ok(());
+        }
+
+        // Model not present locally — pull it.
+        eprintln!(
+            "Pulling model '{}'... this may take a few minutes.",
+            self.config.model
+        );
+
+        let url = format!("{}/api/pull", self.config.base_url);
+        let agent = ureq::AgentBuilder::new()
+            .timeout(std::time::Duration::from_secs(600)) // pulls can be slow
+            .build();
+
+        let body = serde_json::json!({
+            "name": self.config.model,
+            "stream": false,
+        });
+
+        let body_str = serde_json::to_string(&body).map_err(|e| LlmError::ModelPull {
+            model: self.config.model.clone(),
+            message: format!("JSON serialize error: {e}"),
+        })?;
+
+        let resp = agent
+            .post(&url)
+            .set("Content-Type", "application/json")
+            .send_string(&body_str)
+            .map_err(|e: ureq::Error| LlmError::ModelPull {
+                model: self.config.model.clone(),
+                message: e.to_string(),
+            })?;
+
+        if resp.status() == 200 {
+            // Re-probe to refresh model list.
+            self.probe();
+            Ok(())
+        } else {
+            Err(LlmError::ModelPull {
+                model: self.config.model.clone(),
+                message: format!("server returned status {}", resp.status()),
+            })
         }
     }
 

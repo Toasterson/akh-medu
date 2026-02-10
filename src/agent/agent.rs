@@ -118,6 +118,8 @@ pub struct Agent {
     pub(crate) plans: std::collections::HashMap<u64, Plan>,
     /// Most recent reflection result.
     pub(crate) last_reflection: Option<ReflectionResult>,
+    /// Optional LLM client for narrative polishing.
+    pub(crate) llm_client: Option<super::llm::OllamaClient>,
 }
 
 impl Agent {
@@ -183,6 +185,7 @@ impl Agent {
             cycle_count: 0,
             plans: std::collections::HashMap::new(),
             last_reflection: None,
+            llm_client: None,
         })
     }
 
@@ -358,6 +361,21 @@ impl Agent {
     /// Get the agent predicates.
     pub fn predicates(&self) -> &AgentPredicates {
         &self.predicates
+    }
+
+    /// Set the optional LLM client for narrative polishing.
+    pub fn set_llm_client(&mut self, client: super::llm::OllamaClient) {
+        self.llm_client = Some(client);
+    }
+
+    /// Synthesize human-readable narrative from the agent's working memory findings.
+    pub fn synthesize_findings(&self, goal: &str) -> super::synthesize::NarrativeSummary {
+        super::synthesize::synthesize(
+            goal,
+            self.working_memory.entries(),
+            &self.engine,
+            self.llm_client.as_ref(),
+        )
     }
 
     /// Mark a goal as completed by its symbol ID.
@@ -747,6 +765,7 @@ impl Agent {
             cycle_count,
             plans: std::collections::HashMap::new(),
             last_reflection: None,
+            llm_client: None,
         })
     }
 

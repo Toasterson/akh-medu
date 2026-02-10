@@ -410,6 +410,12 @@ enum AgentAction {
         /// Maximum OODA cycles.
         #[arg(long, default_value = "10")]
         max_cycles: usize,
+        /// Ollama model override.
+        #[arg(long)]
+        model: Option<String>,
+        /// Disable Ollama LLM polishing.
+        #[arg(long)]
+        no_ollama: bool,
     },
     /// Trigger memory consolidation.
     Consolidate,
@@ -467,6 +473,18 @@ enum AgentAction {
     },
     /// Discover schema patterns from the knowledge graph.
     Schema,
+    /// Interactive chat: ask questions, agent explores and answers in prose.
+    Chat {
+        /// Ollama model override (default: llama3.2).
+        #[arg(long)]
+        model: Option<String>,
+        /// Disable Ollama LLM polishing.
+        #[arg(long)]
+        no_ollama: bool,
+        /// Maximum OODA cycles per question.
+        #[arg(long, default_value = "5")]
+        max_cycles: usize,
+    },
 }
 
 fn main() -> Result<()> {
@@ -1446,6 +1464,8 @@ fn main() -> Result<()> {
                 AgentAction::Run {
                     goals,
                     max_cycles,
+                    model,
+                    no_ollama,
                 } => {
                     let agent_config = AgentConfig {
                         max_cycles,
@@ -1453,6 +1473,21 @@ fn main() -> Result<()> {
                     };
                     let mut agent =
                         Agent::new(Arc::clone(&engine), agent_config).into_diagnostic()?;
+
+                    // Optionally set up Ollama for narrative polishing.
+                    if !no_ollama {
+                        let mut ollama_config = akh_medu::agent::OllamaConfig::default();
+                        if let Some(ref m) = model {
+                            ollama_config.model = m.clone();
+                        }
+                        let mut client = akh_medu::agent::OllamaClient::new(ollama_config);
+                        if client.probe() {
+                            if let Err(e) = client.ensure_model() {
+                                eprintln!("Warning: {e}");
+                            }
+                            agent.set_llm_client(client);
+                        }
+                    }
 
                     for goal_str in goals.split(',') {
                         let goal = goal_str.trim();
@@ -1466,9 +1501,6 @@ fn main() -> Result<()> {
                     let run_result = agent.run_until_complete();
 
                     // Show summary regardless of how the run ended.
-                    let cycles = agent.cycle_count();
-                    let wm_len = agent.working_memory().len();
-
                     match &run_result {
                         Ok(results) => {
                             println!(
@@ -1493,19 +1525,17 @@ fn main() -> Result<()> {
                         );
                     }
 
-                    // Show what the agent learned — display WM tool results.
-                    use akh_medu::agent::memory::WorkingMemoryKind;
-                    let tool_results: Vec<_> = agent
-                        .working_memory()
-                        .entries()
-                        .iter()
-                        .filter(|e| matches!(e.kind, WorkingMemoryKind::ToolResult))
-                        .collect();
-
-                    if !tool_results.is_empty() {
-                        println!("\nAgent findings ({cycles} cycles, {wm_len} WM entries):");
-                        for entry in &tool_results {
-                            println!("  {}", entry.content);
+                    // Synthesize narrative from findings.
+                    let summary = agent.synthesize_findings(&goals);
+                    println!("\n{}", summary.overview);
+                    for section in &summary.sections {
+                        println!("\n## {}", section.heading);
+                        println!("{}", section.prose);
+                    }
+                    if !summary.gaps.is_empty() {
+                        println!("\nOpen questions:");
+                        for gap in &summary.gaps {
+                            println!("  - {gap}");
                         }
                     }
 
@@ -2178,6 +2208,178 @@ fn main() -> Result<()> {
                             }
                         }
                     }
+                }
+
+                AgentAction::Chat {
+                    model,
+                    no_ollama,
+                    max_cycles,
+                } => {
+                    let agent_config = AgentConfig {
+                        max_cycles,
+                        ..Default::default()
+                    };
+
+                    // Resume or create fresh agent.
+                    let mut agent = if Agent::has_persisted_session(&engine) {
+                        let a = Agent::resume(Arc::clone(&engine), agent_config)
+                            .into_diagnostic()?;
+                        println!(
+                            "Resumed session: cycle {}, {} WM entries, {} goals",
+                            a.cycle_count(),
+                            a.working_memory().len(),
+                            a.goals().len(),
+                        );
+                        a
+                    } else {
+                        Agent::new(Arc::clone(&engine), agent_config).into_diagnostic()?
+                    };
+
+                    // Optionally set up Ollama.
+                    if !no_ollama {
+                        let mut ollama_config = akh_medu::agent::OllamaConfig::default();
+                        if let Some(ref m) = model {
+                            ollama_config.model = m.clone();
+                        }
+                        let mut client = akh_medu::agent::OllamaClient::new(ollama_config);
+                        if client.probe() {
+                            if let Err(e) = client.ensure_model() {
+                                eprintln!("Warning: {e}");
+                            } else {
+                                println!("LLM available (model: {})", client.model());
+                            }
+                            agent.set_llm_client(client);
+                        } else {
+                            println!("No LLM — using template-based responses.");
+                        }
+                    }
+
+                    // Restore or create conversation state.
+                    let mut conversation = {
+                        let store = engine.store();
+                        store
+                            .get_meta(b"agent:chat:conversation")
+                            .ok()
+                            .flatten()
+                            .and_then(|bytes| {
+                                akh_medu::agent::Conversation::from_bytes(&bytes).ok()
+                            })
+                            .unwrap_or_else(|| akh_medu::agent::Conversation::new(100))
+                    };
+
+                    println!("akh-medu agent chat (type 'help' for commands, 'quit' to exit)\n");
+
+                    use std::io::Write as _;
+                    let stdin = std::io::stdin();
+                    let mut input = String::new();
+
+                    loop {
+                        input.clear();
+                        print!("> ");
+                        std::io::stdout().flush().ok();
+
+                        if stdin.read_line(&mut input).into_diagnostic()? == 0 {
+                            break; // EOF
+                        }
+
+                        let cmd = input.trim();
+                        if cmd.is_empty() {
+                            continue;
+                        }
+
+                        match cmd {
+                            "quit" | "exit" | "q" => break,
+                            "help" | "h" => {
+                                println!("Commands:");
+                                println!("  <question>  — ask about the knowledge base");
+                                println!("  status      — show goal status");
+                                println!("  goals       — list active goals");
+                                println!("  help        — this message");
+                                println!("  quit        — exit chat");
+                                continue;
+                            }
+                            "status" | "s" => {
+                                println!("Cycle: {}, WM entries: {}, Goals: {}",
+                                    agent.cycle_count(),
+                                    agent.working_memory().len(),
+                                    agent.goals().len(),
+                                );
+                                for g in agent.goals() {
+                                    println!("  [{}] {}", g.status, g.description);
+                                }
+                                continue;
+                            }
+                            "goals" | "g" => {
+                                if agent.goals().is_empty() {
+                                    println!("No active goals.");
+                                } else {
+                                    for g in agent.goals() {
+                                        println!(
+                                            "  [{}] {}: {}",
+                                            g.status,
+                                            engine.resolve_label(g.symbol_id),
+                                            g.description,
+                                        );
+                                    }
+                                }
+                                continue;
+                            }
+                            _ => {}
+                        }
+
+                        // Treat input as a question — create temporary goal and run cycles.
+                        let question = cmd.to_string();
+                        let goal_desc = format!("chat: {question}");
+                        let goal_id = match agent
+                            .add_goal(&goal_desc, 200, "Agent-determined completion")
+                        {
+                            Ok(id) => id,
+                            Err(e) => {
+                                eprintln!("Error: {e}");
+                                continue;
+                            }
+                        };
+
+                        // Run cycles for this question.
+                        match agent.run_until_complete() {
+                            Ok(_) => {}
+                            Err(e) => {
+                                eprintln!("(agent stopped: {e})");
+                            }
+                        }
+
+                        // Synthesize and display findings.
+                        let summary = agent.synthesize_findings(&question);
+                        println!("\n{}", summary.overview);
+                        for section in &summary.sections {
+                            println!("\n## {}", section.heading);
+                            println!("{}", section.prose);
+                        }
+                        if !summary.gaps.is_empty() {
+                            println!("\nOpen questions:");
+                            for gap in &summary.gaps {
+                                println!("  - {gap}");
+                            }
+                        }
+                        println!();
+
+                        // Mark the chat goal as completed.
+                        let _ = agent.complete_goal(goal_id);
+
+                        // Store exchange in conversation.
+                        let response_text = format!("{summary}");
+                        conversation.add_turn(question, response_text);
+                    }
+
+                    // Persist agent session.
+                    agent.persist_session().into_diagnostic()?;
+
+                    // Persist conversation.
+                    if let Ok(bytes) = conversation.to_bytes() {
+                        let _ = engine.store().put_meta(b"agent:chat:conversation", &bytes);
+                    }
+
+                    println!("Session saved.");
                 }
             }
         }

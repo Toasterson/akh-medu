@@ -18,6 +18,7 @@ pub mod nlp;
 pub mod ooda;
 pub mod plan;
 pub mod reflect;
+pub mod synthesize;
 pub mod tool;
 pub mod tool_semantics;
 pub mod tools;
@@ -37,4 +38,5 @@ pub use ooda::{
 };
 pub use plan::{Plan, PlanStatus, PlanStep, StepStatus};
 pub use reflect::{Adjustment, ReflectionConfig, ReflectionResult};
+pub use synthesize::NarrativeSummary;
 pub use tool::{Tool, ToolInput, ToolOutput, ToolRegistry, ToolSignature};

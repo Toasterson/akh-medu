@@ -514,23 +514,51 @@ fn select_tool(
     let has_inferences = !orientation.inferences.is_empty();
     let has_episodes = !observation.recalled_episodes.is_empty();
 
+    // Detect code-related queries for smarter tool selection.
+    let is_code_query = is_code_goal(&goal.description);
+
     let mut candidates: Vec<ToolCandidate> = Vec::new();
 
     // ── kg_query: always applicable, most valuable when knowledge is scarce ──
     {
-        // Pick a query target: prefer an unexplored inference symbol, else goal.
-        let query_symbol = orientation
-            .inferences
-            .iter()
-            .find(|(sym, _)| {
-                let triples = engine.triples_from(*sym);
-                triples.len() < 3 && *sym != goal.symbol_id
-            })
-            .map(|(sym, _)| engine.resolve_label(*sym))
-            .unwrap_or_else(|| goal_label.clone());
+        // For code queries, try to find a matching code entity as query target.
+        let query_symbol = if is_code_query {
+            find_code_entity_for_query(engine, &goal.description)
+                .unwrap_or_else(|| {
+                    // Fall back to unexplored inference or goal label.
+                    orientation
+                        .inferences
+                        .iter()
+                        .find(|(sym, _)| {
+                            let triples = engine.triples_from(*sym);
+                            triples.len() < 3 && *sym != goal.symbol_id
+                        })
+                        .map(|(sym, _)| engine.resolve_label(*sym))
+                        .unwrap_or_else(|| goal_label.clone())
+                })
+        } else {
+            // Pick a query target: prefer an unexplored inference symbol, else goal.
+            orientation
+                .inferences
+                .iter()
+                .find(|(sym, _)| {
+                    let triples = engine.triples_from(*sym);
+                    triples.len() < 3 && *sym != goal.symbol_id
+                })
+                .map(|(sym, _)| engine.resolve_label(*sym))
+                .unwrap_or_else(|| goal_label.clone())
+        };
 
-        let base = if has_knowledge { 0.4 } else { 0.8 };
-        let reason = if has_knowledge {
+        let base = if is_code_query {
+            if has_knowledge { 0.7 } else { 0.85 }
+        } else if has_knowledge {
+            0.4
+        } else {
+            0.8
+        };
+        let reason = if is_code_query {
+            format!("Code query — querying KG for \"{query_symbol}\".")
+        } else if has_knowledge {
             format!("Deeper KG exploration of \"{query_symbol}\".")
         } else {
             format!("No knowledge yet — querying KG for \"{query_symbol}\".")
@@ -637,9 +665,12 @@ fn select_tool(
     }
 
     // ── similarity_search: only when inferences give us symbols to explore ──
+    // Suppress for code queries (mostly finds metadata like priority:128).
     if has_inferences {
         let top_sym = orientation.inferences[0].0;
         let top_label = engine.resolve_label(top_sym);
+
+        let sim_base = if is_code_query { 0.25 } else { 0.55 };
 
         candidates.push(apply_modifiers(
             ToolCandidate::new(
@@ -647,7 +678,7 @@ fn select_tool(
                 ToolInput::new()
                     .with_param("symbol", &top_label)
                     .with_param("top_k", "5"),
-                0.55,
+                sim_base,
                 format!("Exploring similar symbols around \"{top_label}\"."),
             ),
             &history,
@@ -907,15 +938,73 @@ fn parse_criteria_keywords(criteria: &str) -> Vec<String> {
 
 /// Whether a label is agent-internal metadata (should be excluded from criteria matching).
 fn is_metadata_label(label: &str) -> bool {
-    label.starts_with("desc:")
-        || label.starts_with("status:")
-        || label.starts_with("priority:")
-        || label.starts_with("criteria:")
-        || label.starts_with("goal:")
-        || label.starts_with("agent:")
-        || label.starts_with("episode:")
-        || label.starts_with("summary:")
-        || label.starts_with("tag:")
+    super::synthesize::is_metadata_label(label)
+}
+
+/// Code-related keywords that indicate a code-structure query.
+const CODE_KEYWORDS: &[&str] = &[
+    "module", "function", "struct", "trait", "enum", "type", "impl",
+    "architecture", "code", "crate", "method", "field", "vsa", "engine",
+    "agent", "ooda", "tool", "graph", "symbol", "triple", "fn", "mod",
+    "defines", "depends", "contains",
+];
+
+/// Whether a goal description is asking about code structure.
+fn is_code_goal(description: &str) -> bool {
+    let lower = description.to_lowercase();
+    CODE_KEYWORDS.iter().any(|kw| lower.contains(kw))
+}
+
+/// Find the best matching code entity for a goal description.
+///
+/// Scores all non-metadata symbols by keyword overlap with the description,
+/// returning the label of the best match (if any scores > 0).
+fn find_code_entity_for_query(
+    engine: &crate::engine::Engine,
+    description: &str,
+) -> Option<String> {
+    let desc_words: Vec<String> = description
+        .split_whitespace()
+        .map(|w| w.to_lowercase().trim_matches(|c: char| !c.is_alphanumeric()).to_string())
+        .filter(|w| !w.is_empty() && w.len() > 1)
+        .collect();
+
+    let symbols = engine.all_symbols();
+    let mut best_label: Option<String> = None;
+    let mut best_score = 0usize;
+
+    for sym in &symbols {
+        let label = &sym.label;
+        if is_metadata_label(label) {
+            continue;
+        }
+
+        // Score: count how many description words appear in (or match) the label.
+        let label_lower = label.to_lowercase();
+        let score: usize = desc_words
+            .iter()
+            .filter(|w| label_lower.contains(w.as_str()))
+            .count();
+
+        // Also check if the symbol has code-related triples (higher quality).
+        let has_code_triples = engine
+            .triples_from(sym.id)
+            .iter()
+            .any(|t| {
+                let pred = engine.resolve_label(t.predicate);
+                pred.starts_with("code:") || pred == "defines-fn" || pred == "defines-type"
+                    || pred == "defines-mod" || pred == "depends-on" || pred == "contains"
+            });
+
+        let adjusted_score = if has_code_triples { score + 2 } else { score };
+
+        if adjusted_score > best_score {
+            best_score = adjusted_score;
+            best_label = Some(label.clone());
+        }
+    }
+
+    if best_score > 0 { best_label } else { None }
 }
 
 /// Evaluate whether a goal's success criteria are satisfied by the current KG state.
