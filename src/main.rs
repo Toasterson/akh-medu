@@ -484,7 +484,10 @@ fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+                .unwrap_or_else(|_| {
+                    // Default: show akh-medu info, silence noisy deps (egg, hnsw).
+                    tracing_subscriber::EnvFilter::new("info,egg=warn,hnsw_rs=warn")
+                }),
         )
         .init();
 
@@ -1460,29 +1463,49 @@ fn main() -> Result<()> {
                         }
                     }
 
-                    match agent.run_until_complete() {
+                    let run_result = agent.run_until_complete();
+
+                    // Show summary regardless of how the run ended.
+                    let cycles = agent.cycle_count();
+                    let wm_len = agent.working_memory().len();
+
+                    match &run_result {
                         Ok(results) => {
                             println!(
                                 "Agent completed: {} cycles, {} goals",
                                 results.len(),
                                 agent.goals().len(),
                             );
-                            for g in agent.goals() {
-                                println!(
-                                    "  {} [{}]: {}",
-                                    engine.resolve_label(g.symbol_id),
-                                    g.status,
-                                    g.description,
-                                );
-                            }
                         }
                         Err(e) => {
                             println!("Agent stopped: {e}");
-                            println!(
-                                "  Completed {} cycles, WM has {} entries",
-                                agent.cycle_count(),
-                                agent.working_memory().len(),
-                            );
+                        }
+                    }
+
+                    // Always display goal status.
+                    println!("\nGoals:");
+                    for g in agent.goals() {
+                        println!(
+                            "  [{}] {}: {}",
+                            g.status,
+                            engine.resolve_label(g.symbol_id),
+                            g.description,
+                        );
+                    }
+
+                    // Show what the agent learned — display WM tool results.
+                    use akh_medu::agent::memory::WorkingMemoryKind;
+                    let tool_results: Vec<_> = agent
+                        .working_memory()
+                        .entries()
+                        .iter()
+                        .filter(|e| matches!(e.kind, WorkingMemoryKind::ToolResult))
+                        .collect();
+
+                    if !tool_results.is_empty() {
+                        println!("\nAgent findings ({cycles} cycles, {wm_len} WM entries):");
+                        for entry in &tool_results {
+                            println!("  {}", entry.content);
                         }
                     }
 

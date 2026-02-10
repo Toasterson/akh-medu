@@ -5,7 +5,7 @@
 
 use crate::engine::Engine;
 use crate::graph::Triple;
-use crate::symbol::{SymbolId, SymbolKind};
+use crate::symbol::SymbolId;
 
 use super::agent::AgentPredicates;
 use super::error::AgentResult;
@@ -100,6 +100,9 @@ impl Goal {
 }
 
 /// Create a goal and persist it in the knowledge graph.
+///
+/// If a symbol with the same goal label already exists (e.g. from a previous
+/// persisted session), it is reused rather than causing a duplicate-label error.
 pub fn create_goal(
     engine: &Engine,
     description: &str,
@@ -108,24 +111,28 @@ pub fn create_goal(
     predicates: &AgentPredicates,
 ) -> AgentResult<Goal> {
     let label = format!("goal:{}", description.chars().take(40).collect::<String>());
-    let goal_sym = engine
-        .create_symbol(SymbolKind::Entity, &label)?;
+    let goal_id = engine.resolve_or_create_entity(&label)?;
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
 
     // Store description.
     let desc_sym = engine
         .resolve_or_create_entity(&format!("desc:{description}"))?;
-    let _ = engine.add_triple(&Triple::new(goal_sym.id, predicates.has_description, desc_sym));
+    let _ = engine.add_triple(&Triple::new(goal_id, predicates.has_description, desc_sym));
 
     // Store status.
     let status_sym = engine
         .resolve_or_create_entity("status:active")?;
-    let _ = engine.add_triple(&Triple::new(goal_sym.id, predicates.has_status, status_sym));
+    let _ = engine.add_triple(&Triple::new(goal_id, predicates.has_status, status_sym));
 
     // Store priority.
     let priority_sym = engine
         .resolve_or_create_entity(&format!("priority:{priority}"))?;
     let _ = engine.add_triple(&Triple::new(
-        goal_sym.id,
+        goal_id,
         predicates.has_priority,
         priority_sym,
     ));
@@ -134,20 +141,20 @@ pub fn create_goal(
     let criteria_sym = engine
         .resolve_or_create_entity(&format!("criteria:{criteria}"))?;
     let _ = engine.add_triple(&Triple::new(
-        goal_sym.id,
+        goal_id,
         predicates.has_criteria,
         criteria_sym,
     ));
 
     Ok(Goal {
-        symbol_id: goal_sym.id,
+        symbol_id: goal_id,
         description: description.into(),
         status: GoalStatus::Active,
         priority,
         success_criteria: criteria.into(),
         parent: None,
         children: Vec::new(),
-        created_at: goal_sym.created_at,
+        created_at: now,
         cycles_worked: 0,
         last_progress_cycle: 0,
     })

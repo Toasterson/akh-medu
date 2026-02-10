@@ -606,11 +606,21 @@ fn select_tool(
     // ── reason: only when knowledge triples exist to reason about ──
     if has_knowledge {
         let t = &orientation.relevant_knowledge[0];
+        // Sanitise labels so each is a single s-expression token for egg.
+        // egg's parser splits on whitespace, so spaces/special chars in KG
+        // labels (e.g. "VSA module", "code:defines-fn") must become valid
+        // atomic symbols.
+        let sanitize = |label: String| -> String {
+            label
+                .chars()
+                .map(|c| if c.is_alphanumeric() || c == '_' { c } else { '_' })
+                .collect()
+        };
         let expr = format!(
             "(triple {} {} {})",
-            engine.resolve_label(t.subject),
-            engine.resolve_label(t.predicate),
-            engine.resolve_label(t.object),
+            sanitize(engine.resolve_label(t.subject)),
+            sanitize(engine.resolve_label(t.predicate)),
+            sanitize(engine.resolve_label(t.object)),
         );
 
         candidates.push(apply_modifiers(
@@ -791,11 +801,20 @@ fn select_tool(
 
 /// Act: execute the selected tool and update goal status.
 fn act(agent: &mut Agent, decision: &Decision, cycle: u64) -> AgentResult<ActionResult> {
-    let tool_output = agent.tool_registry.execute(
+    // Tool errors should NOT be fatal to the OODA loop — convert them into a
+    // failed ToolOutput so the agent can adapt (retry, switch tools, etc.).
+    let tool_output = match agent.tool_registry.execute(
         &decision.chosen_tool,
         decision.tool_input.clone(),
         &agent.engine,
-    )?;
+    ) {
+        Ok(output) => output,
+        Err(e) => ToolOutput {
+            result: format!("{e}"),
+            success: false,
+            symbols_involved: Vec::new(),
+        },
+    };
 
     // Record tool result in WM.
     let result_content = if tool_output.result.len() > 120 {
