@@ -214,6 +214,15 @@ fn ingest_file(
     add_triple(engine, module_sym, is_a, module_type, 1.0)?;
     add_triple(engine, module_sym, preds.defined_in, file_sym, 1.0)?;
 
+    // Extract file-level inner doc comments (//! at the top of the file).
+    // These appear as #![doc = "..."] attributes in syn::File.attrs.
+    if let Some(doc) = extract_inner_doc_comments(&syntax.attrs) {
+        let truncated = truncate(&doc, 256);
+        if let Ok(doc_sym) = engine.resolve_or_create_entity(&truncated) {
+            add_triple(engine, module_sym, preds.has_doc, doc_sym, 1.0)?;
+        }
+    }
+
     let mut visitor = CodeVisitor {
         engine,
         preds,
@@ -678,6 +687,14 @@ impl<'a> Visit<'a> for CodeVisitor<'_> {
             self.add_triple(mod_sym, self.is_a, mod_type, 1.0);
             self.add_triple(parent, self.preds.contains_mod, mod_sym, 1.0);
 
+            // Doc comments (/// on the mod declaration).
+            if let Some(doc) = Self::extract_doc_comments(&node.attrs) {
+                let truncated = truncate(&doc, 256);
+                if let Ok(doc_sym) = self.engine.resolve_or_create_entity(&truncated) {
+                    self.add_triple(mod_sym, self.preds.has_doc, doc_sym, 1.0);
+                }
+            }
+
             // Push onto module stack and visit contents.
             self.module_stack.push(mod_sym);
             syn::visit::visit_item_mod(self, node);
@@ -781,6 +798,29 @@ fn add_triple(
     let triple = Triple::new(s, p, o).with_confidence(confidence);
     engine.add_triple(&triple)?;
     Ok(())
+}
+
+/// Extract inner doc comments (`//!`) from file-level or module-level attributes.
+///
+/// These appear as `#![doc = "..."]` attributes in `syn::File::attrs`.
+fn extract_inner_doc_comments(attrs: &[syn::Attribute]) -> Option<String> {
+    let mut docs = Vec::new();
+    for attr in attrs {
+        if attr.path().is_ident("doc") {
+            if let syn::Meta::NameValue(nv) = &attr.meta {
+                if let syn::Expr::Lit(lit) = &nv.value {
+                    if let syn::Lit::Str(s) = &lit.lit {
+                        docs.push(s.value().trim().to_string());
+                    }
+                }
+            }
+        }
+    }
+    if docs.is_empty() {
+        None
+    } else {
+        Some(docs.join("\n"))
+    }
 }
 
 fn truncate(s: &str, max: usize) -> String {

@@ -131,7 +131,7 @@ const CODE_STRUCTURE_PREDICATES: &[&str] = &[
     "code:contains-mod", "code:defines-fn", "code:defines-struct",
     "code:defines-enum", "code:defines-type", "code:defines-mod",
     "code:depends-on", "code:defined-in",
-    "code:has-variant", "code:has-method", "code:has-field",
+    "code:has-variant", "code:has-method",
     "defines-fn", "defines-type", "defines-mod",
     "depends-on", "implements", "contains",
 ];
@@ -141,7 +141,7 @@ const CODE_ANNOTATION_PREDICATES: &[&str] = &[
     "code:has-visibility", "code:has-attribute", "code:has-doc",
     "code:line-count", "code:has-return-type", "code:returns-type",
     "code:derives-trait", "code:implements-trait",
-    "code:has-param",
+    "code:has-param", "code:has-field",
 ];
 
 /// Inferred predicates that are redundant with structural code predicates.
@@ -822,7 +822,7 @@ fn render_code_section(facts: &[ExtractedFact], engine: &crate::engine::Engine) 
                         .push(detail.clone());
                 }
                 "code:defines-struct" | "code:defines-enum" | "code:defines-type"
-                | "defines-type" | "implements" | "code:has-variant" | "code:has-field" => {
+                | "defines-type" | "implements" | "code:has-variant" => {
                     types
                         .entry(name.clone())
                         .or_default()
