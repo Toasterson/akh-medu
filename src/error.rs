@@ -64,6 +64,10 @@ pub enum AkhError {
     #[error(transparent)]
     #[diagnostic(transparent)]
     Glyph(#[from] crate::glyph::GlyphError),
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Grammar(#[from] crate::grammar::error::GrammarError),
 }
 
 // ---------------------------------------------------------------------------
