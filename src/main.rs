@@ -282,6 +282,12 @@ enum Commands {
         #[arg(long)]
         polish: bool,
     },
+
+    /// Bidirectional grammar system: translate between prose and symbols.
+    Grammar {
+        #[command(subcommand)]
+        action: GrammarAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -499,6 +505,71 @@ enum AgentAction {
         /// Fresh start: ignore persisted session and goals.
         #[arg(long)]
         fresh: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum GrammarAction {
+    /// List available grammar archetypes.
+    List,
+    /// Parse prose into abstract syntax and display the result.
+    Parse {
+        /// The prose text to parse.
+        input: String,
+    },
+    /// Linearize a triple through a grammar archetype.
+    Linearize {
+        /// Subject entity.
+        #[arg(long)]
+        subject: String,
+        /// Predicate relation.
+        #[arg(long)]
+        predicate: String,
+        /// Object entity.
+        #[arg(long)]
+        object: String,
+        /// Grammar archetype to use (default: all three).
+        #[arg(long)]
+        archetype: Option<String>,
+        /// Confidence value (0.0-1.0, optional).
+        #[arg(long)]
+        confidence: Option<f32>,
+    },
+    /// Compare all archetypes side-by-side on the same input.
+    Compare {
+        /// Subject entity.
+        #[arg(long)]
+        subject: String,
+        /// Predicate relation.
+        #[arg(long)]
+        predicate: String,
+        /// Object entity.
+        #[arg(long)]
+        object: String,
+        /// Confidence value (0.0-1.0, optional).
+        #[arg(long)]
+        confidence: Option<f32>,
+    },
+    /// Load a custom grammar archetype from a TOML file.
+    Load {
+        /// Path to the TOML grammar definition.
+        #[arg(long)]
+        file: PathBuf,
+        /// Linearize a test triple after loading to verify.
+        #[arg(long)]
+        test: bool,
+    },
+    /// Render existing KG triples through a grammar archetype.
+    Render {
+        /// Entity to render triples for (label or ID).
+        #[arg(long)]
+        entity: String,
+        /// Grammar archetype (default: formal).
+        #[arg(long, default_value = "formal")]
+        archetype: String,
+        /// Maximum triples to render.
+        #[arg(long, default_value = "20")]
+        max_triples: usize,
     },
 }
 
@@ -2847,6 +2918,243 @@ fn main() -> Result<()> {
             }
 
             let _ = engine.persist();
+        }
+
+        Commands::Grammar { action } => {
+            use akh_medu::grammar::{AbsTree, ConcreteGrammar, GrammarRegistry};
+            use akh_medu::grammar::concrete::LinContext;
+            use akh_medu::grammar::parser::{parse_prose, ParseResult};
+            use akh_medu::grammar::concrete::ParseContext;
+            use akh_medu::grammar::bridge::triple_to_abs;
+            use akh_medu::grammar::custom::CustomGrammar;
+
+            match action {
+                GrammarAction::List => {
+                    let reg = GrammarRegistry::new();
+                    println!("Available grammar archetypes:\n");
+                    let mut names = reg.list();
+                    names.sort();
+                    for name in names {
+                        let grammar = reg.get(name).unwrap();
+                        let default_marker = if name == reg.default_name() {
+                            " (default)"
+                        } else {
+                            ""
+                        };
+                        println!("  {}{}", name, default_marker);
+                        println!("    {}", grammar.description());
+                        println!();
+                    }
+                }
+
+                GrammarAction::Parse { input } => {
+                    let engine = Engine::new(config).into_diagnostic()?;
+                    let ctx = ParseContext::with_engine(
+                        engine.registry(),
+                        &engine.ops(),
+                        engine.item_memory(),
+                    );
+                    let result = parse_prose(&input, &ctx);
+                    match &result {
+                        ParseResult::Facts(facts) => {
+                            println!("Parsed {} fact(s):\n", facts.len());
+                            let reg = GrammarRegistry::new();
+                            let lin_ctx = LinContext::with_registry(engine.registry());
+                            for (i, fact) in facts.iter().enumerate() {
+                                println!("  {}. [{}]", i + 1, fact.cat());
+                                // Show in all three archetypes
+                                for archetype in &["formal", "terse", "narrative"] {
+                                    if let Ok(prose) = reg.get(archetype).unwrap().linearize(fact, &lin_ctx) {
+                                        println!("     {:<10} {}", format!("{archetype}:"), prose);
+                                    }
+                                }
+                                println!();
+                            }
+                        }
+                        ParseResult::Query { subject, .. } => {
+                            println!("Parsed as query: subject = \"{subject}\"");
+                        }
+                        ParseResult::Command(cmd) => {
+                            println!("Parsed as command: {cmd:?}");
+                        }
+                        ParseResult::Goal { description } => {
+                            println!("Parsed as goal: \"{description}\"");
+                        }
+                        ParseResult::Freeform { text, .. } => {
+                            println!("Could not parse into structured form.");
+                            println!("Freeform text: \"{text}\"");
+                        }
+                    }
+                }
+
+                GrammarAction::Linearize {
+                    subject,
+                    predicate,
+                    object,
+                    archetype,
+                    confidence,
+                } => {
+                    let reg = GrammarRegistry::new();
+
+                    let tree = if let Some(conf) = confidence {
+                        AbsTree::triple_with_confidence(
+                            AbsTree::entity(&subject),
+                            AbsTree::relation(&predicate),
+                            AbsTree::entity(&object),
+                            conf,
+                        )
+                    } else {
+                        AbsTree::triple(
+                            AbsTree::entity(&subject),
+                            AbsTree::relation(&predicate),
+                            AbsTree::entity(&object),
+                        )
+                    };
+
+                    if let Some(name) = archetype {
+                        match reg.linearize(&name, &tree) {
+                            Ok(prose) => println!("{prose}"),
+                            Err(e) => {
+                                eprintln!("Error: {e}");
+                                std::process::exit(1);
+                            }
+                        }
+                    } else {
+                        // Show all archetypes
+                        let mut names = reg.list();
+                        names.sort();
+                        for name in names {
+                            if let Ok(prose) = reg.linearize(name, &tree) {
+                                println!("{:<10} {}", format!("{name}:"), prose);
+                            }
+                        }
+                    }
+                }
+
+                GrammarAction::Compare {
+                    subject,
+                    predicate,
+                    object,
+                    confidence,
+                } => {
+                    let reg = GrammarRegistry::new();
+
+                    let tree = if let Some(conf) = confidence {
+                        AbsTree::triple_with_confidence(
+                            AbsTree::entity(&subject),
+                            AbsTree::relation(&predicate),
+                            AbsTree::entity(&object),
+                            conf,
+                        )
+                    } else {
+                        AbsTree::triple(
+                            AbsTree::entity(&subject),
+                            AbsTree::relation(&predicate),
+                            AbsTree::entity(&object),
+                        )
+                    };
+
+                    println!("Triple: ({subject}, {predicate}, {object})");
+                    if let Some(conf) = confidence {
+                        println!("Confidence: {conf:.2}");
+                    }
+                    println!();
+
+                    let mut names = reg.list();
+                    names.sort();
+                    let ctx = LinContext::default();
+                    for name in names {
+                        let grammar = reg.get(name).unwrap();
+                        println!("── {} ──", name);
+                        println!("  {}", grammar.description());
+                        match grammar.linearize(&tree, &ctx) {
+                            Ok(prose) => println!("  → {prose}"),
+                            Err(e) => println!("  ✗ {e}"),
+                        }
+                        println!();
+                    }
+                }
+
+                GrammarAction::Load { file, test } => {
+                    let content = std::fs::read_to_string(&file).into_diagnostic()?;
+                    let grammar = CustomGrammar::from_toml(&content).into_diagnostic()?;
+                    let name = grammar.name().to_string();
+                    let desc = grammar.description().to_string();
+                    println!("Loaded custom grammar: \"{name}\"");
+                    println!("  {desc}");
+
+                    if test {
+                        let ctx = LinContext::default();
+                        let tree = AbsTree::triple(
+                            AbsTree::entity("Dog"),
+                            AbsTree::relation("is-a"),
+                            AbsTree::entity("Mammal"),
+                        );
+                        match grammar.linearize(&tree, &ctx) {
+                            Ok(prose) => println!("\n  Test triple: {prose}"),
+                            Err(e) => println!("\n  Test failed: {e}"),
+                        }
+
+                        let gap = AbsTree::gap(AbsTree::entity("Dog"), "no habitat data");
+                        match grammar.linearize(&gap, &ctx) {
+                            Ok(prose) => println!("  Test gap:    {prose}"),
+                            Err(e) => println!("  Test failed: {e}"),
+                        }
+
+                        let sim = AbsTree::similarity(
+                            AbsTree::entity("Dog"),
+                            AbsTree::entity("Wolf"),
+                            0.87,
+                        );
+                        match grammar.linearize(&sim, &ctx) {
+                            Ok(prose) => println!("  Test sim:    {prose}"),
+                            Err(e) => println!("  Test failed: {e}"),
+                        }
+                    }
+                }
+
+                GrammarAction::Render {
+                    entity,
+                    archetype,
+                    max_triples,
+                } => {
+                    let engine = Engine::new(config).into_diagnostic()?;
+                    let reg = GrammarRegistry::new();
+                    let grammar = reg.get(&archetype).into_diagnostic()?;
+                    let lin_ctx = LinContext::with_registry(engine.registry());
+
+                    // Resolve the entity
+                    let symbol_id = engine.resolve_symbol(&entity).into_diagnostic()?;
+
+                    // Get triples from and to this entity
+                    let from_triples = engine.triples_from(symbol_id);
+                    let to_triples = engine.triples_to(symbol_id);
+
+                    let mut all_triples: Vec<_> = from_triples.into_iter().chain(to_triples).collect();
+                    all_triples.truncate(max_triples);
+
+                    if all_triples.is_empty() {
+                        println!("No triples found for '{entity}'.");
+                        return Ok(());
+                    }
+
+                    let entity_label = engine.resolve_label(symbol_id);
+                    println!(
+                        "Rendering {} triple(s) for '{}' via [{}] archetype:\n",
+                        all_triples.len(),
+                        entity_label,
+                        archetype,
+                    );
+
+                    for triple in &all_triples {
+                        let tree = triple_to_abs(triple, engine.registry());
+                        match grammar.linearize(&tree, &lin_ctx) {
+                            Ok(prose) => println!("  {prose}"),
+                            Err(e) => println!("  (error: {e})"),
+                        }
+                    }
+                }
+            }
         }
 
         Commands::DocGen {
