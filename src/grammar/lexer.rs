@@ -356,14 +356,36 @@ fn resolve_compounds(tokens: &mut Vec<Token>, registry: &SymbolRegistry) {
     }
 }
 
+/// Minimum similarity threshold for fuzzy resolution to accept a match.
+const DEFAULT_FUZZY_THRESHOLD: f32 = 0.6;
+
 /// Try VSA-based fuzzy resolution for an unresolved token.
-fn resolve_fuzzy(token: &mut Token, _ops: &VsaOps, item_memory: &ItemMemory) {
-    // Use item_memory to search for similar symbols
-    // We need a symbol ID to search, but for text we'd need text→vector encoding.
-    // For now, this is a placeholder that will be connected when the VSA text
-    // encoding pipeline is available. The lexer still works without it.
-    let _ = item_memory;
-    let _ = token;
+///
+/// Encodes the token's normalized text into a hypervector via
+/// [`encode_token`](crate::vsa::encode::encode_token), searches the
+/// item memory for the `k=3` most similar symbols, and accepts the
+/// best match if it exceeds [`DEFAULT_FUZZY_THRESHOLD`].
+fn resolve_fuzzy(token: &mut Token, ops: &VsaOps, item_memory: &ItemMemory) {
+    // Skip very short tokens — single characters are too ambiguous
+    if token.normalized.len() < 2 {
+        return;
+    }
+
+    let query_vec = crate::vsa::encode::encode_token(ops, &token.normalized);
+
+    let results = match item_memory.search(&query_vec, 3) {
+        Ok(r) => r,
+        Err(_) => return, // Silently fall through on search errors
+    };
+
+    if let Some(best) = results.first() {
+        if best.similarity > DEFAULT_FUZZY_THRESHOLD {
+            token.resolution = Resolution::Fuzzy {
+                symbol_id: best.symbol_id,
+                similarity: best.similarity,
+            };
+        }
+    }
 }
 
 /// Find a relational pattern in a token stream and return the split points.
@@ -397,6 +419,8 @@ pub fn find_relational_pattern(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::simd;
+    use crate::vsa::{Dimension, Encoding};
 
     #[test]
     fn tokenize_simple() {
@@ -474,5 +498,108 @@ mod tests {
         assert_eq!(lexicon.surface_form("is-a"), Some("is a".to_string()));
         assert_eq!(lexicon.surface_form("contains"), Some("contains".to_string()));
         assert_eq!(lexicon.surface_form("nonexistent"), None);
+    }
+
+    // ── resolve_fuzzy tests ─────────────────────────────────────────────
+
+    fn test_ops() -> VsaOps {
+        VsaOps::new(simd::best_kernel(), Dimension::TEST, Encoding::Bipolar)
+    }
+
+    #[test]
+    fn fuzzy_resolves_with_populated_item_memory() {
+        use crate::vsa::item_memory::ItemMemory;
+        let ops = test_ops();
+        let im = ItemMemory::new(Dimension::TEST, Encoding::Bipolar, 100);
+
+        // Insert a known symbol
+        let sym = crate::symbol::SymbolId::new(42).unwrap();
+        let vec = crate::vsa::encode::encode_token(&ops, "hello");
+        im.insert(sym, vec);
+
+        // Search for the same token — should find it with high similarity
+        let mut token = Token {
+            surface: "hello".into(),
+            normalized: "hello".into(),
+            span: Span { start: 0, end: 5 },
+            resolution: Resolution::Unresolved,
+            semantically_void: false,
+        };
+        resolve_fuzzy(&mut token, &ops, &im);
+
+        match &token.resolution {
+            Resolution::Fuzzy { symbol_id, similarity } => {
+                assert_eq!(*symbol_id, sym);
+                assert!(*similarity > 0.9, "similarity={similarity}");
+            }
+            other => panic!("expected Fuzzy, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fuzzy_short_tokens_skipped() {
+        use crate::vsa::item_memory::ItemMemory;
+        let ops = test_ops();
+        let im = ItemMemory::new(Dimension::TEST, Encoding::Bipolar, 100);
+
+        let mut token = Token {
+            surface: "a".into(),
+            normalized: "a".into(),
+            span: Span { start: 0, end: 1 },
+            resolution: Resolution::Unresolved,
+            semantically_void: false,
+        };
+        resolve_fuzzy(&mut token, &ops, &im);
+        assert!(matches!(token.resolution, Resolution::Unresolved));
+    }
+
+    #[test]
+    fn fuzzy_empty_memory_no_crash() {
+        use crate::vsa::item_memory::ItemMemory;
+        let ops = test_ops();
+        let im = ItemMemory::new(Dimension::TEST, Encoding::Bipolar, 100);
+
+        let mut token = Token {
+            surface: "hello".into(),
+            normalized: "hello".into(),
+            span: Span { start: 0, end: 5 },
+            resolution: Resolution::Unresolved,
+            semantically_void: false,
+        };
+        resolve_fuzzy(&mut token, &ops, &im);
+        // Should stay unresolved — no crash
+        assert!(matches!(token.resolution, Resolution::Unresolved));
+    }
+
+    #[test]
+    fn fuzzy_resolves_to_correct_symbol_not_random() {
+        use crate::vsa::item_memory::ItemMemory;
+        let ops = test_ops();
+        let im = ItemMemory::new(Dimension::TEST, Encoding::Bipolar, 100);
+
+        // Insert two symbols via encode_token with known labels
+        let sym_hello = crate::symbol::SymbolId::new(42).unwrap();
+        let sym_world = crate::symbol::SymbolId::new(43).unwrap();
+        let vec_hello = crate::vsa::encode::encode_token(&ops, "hello");
+        let vec_world = crate::vsa::encode::encode_token(&ops, "world");
+        im.insert(sym_hello, vec_hello);
+        im.insert(sym_world, vec_world);
+
+        // Searching for "hello" should find sym_hello, not sym_world
+        let mut token = Token {
+            surface: "hello".into(),
+            normalized: "hello".into(),
+            span: Span { start: 0, end: 5 },
+            resolution: Resolution::Unresolved,
+            semantically_void: false,
+        };
+        resolve_fuzzy(&mut token, &ops, &im);
+
+        match &token.resolution {
+            Resolution::Fuzzy { symbol_id, .. } => {
+                assert_eq!(*symbol_id, sym_hello, "should resolve to the correct symbol");
+            }
+            other => panic!("expected Fuzzy, got {other:?}"),
+        }
     }
 }

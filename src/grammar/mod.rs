@@ -51,7 +51,7 @@ pub mod terse;
 
 use std::collections::HashMap;
 
-pub use abs::{AbsTree, ProvenanceTag};
+pub use abs::{AbsTree, ProvenanceTag, VsaRoleSymbols};
 pub use cat::Cat;
 pub use concrete::{ConcreteGrammar, LinContext, ParseContext};
 pub use error::{GrammarError, GrammarResult};

@@ -112,6 +112,21 @@ pub enum GrammarError {
         help("The sentence appears truncated. Add the missing {expected} to complete it.")
     )]
     Incomplete { fragment: String, expected: String },
+
+    #[error("grounding incomplete: {unresolved_count} label(s) unresolved, first: \"{first_unresolved}\"")]
+    #[diagnostic(
+        code(akh::grammar::grounding_incomplete),
+        help(
+            "Some labels in the abstract syntax tree could not be resolved to \
+             known symbols. Ingest the missing entities first, or use fuzzy \
+             resolution via VSA to match approximate labels. \
+             First unresolved: \"{first_unresolved}\"."
+        )
+    )]
+    GroundingIncomplete {
+        unresolved_count: usize,
+        first_unresolved: String,
+    },
 }
 
 /// Result type for grammar operations.

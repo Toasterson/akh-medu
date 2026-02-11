@@ -6,9 +6,17 @@
 //!
 //! This is the GF-inspired "interlingua": one representation, many voices.
 
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+
 use serde::{Deserialize, Serialize};
 
+use crate::registry::SymbolRegistry;
 use crate::symbol::SymbolId;
+use crate::vsa::encode::{encode_label, encode_token};
+use crate::vsa::item_memory::ItemMemory;
+use crate::vsa::ops::VsaOps;
+use crate::vsa::HyperVec;
 
 use super::cat::Cat;
 use super::error::{GrammarError, GrammarResult};
@@ -48,6 +56,53 @@ impl std::fmt::Display for ProvenanceTag {
             ProvenanceTag::Enrichment => write!(f, "enrichment"),
             ProvenanceTag::UserAsserted => write!(f, "user-asserted"),
         }
+    }
+}
+
+/// Create a synthetic [`SymbolId`] from a string by hashing it.
+///
+/// Uses the high-bit convention (`hash | (1<<63)`) to avoid collisions
+/// with real allocated SymbolIds. The same string always produces the
+/// same synthetic ID.
+pub fn synthetic_id(name: &str) -> SymbolId {
+    let mut hasher = DefaultHasher::new();
+    name.hash(&mut hasher);
+    let hash = hasher.finish();
+    SymbolId::new(hash | (1u64 << 63)).expect("non-zero hash with high bit set")
+}
+
+/// Well-known synthetic [`SymbolId`]s for structural role encoding in VSA.
+///
+/// These IDs are used as "role" vectors when encoding structured `AbsTree`
+/// nodes (triples, similarity, sections) into compositional hypervectors.
+/// Follows the same pattern as `AgentPredicates` — resolved once at init.
+#[derive(Debug, Clone)]
+pub struct VsaRoleSymbols {
+    pub role_subject: SymbolId,
+    pub role_predicate: SymbolId,
+    pub role_object: SymbolId,
+    pub role_entity: SymbolId,
+    pub role_similar_to: SymbolId,
+    pub role_heading: SymbolId,
+}
+
+impl VsaRoleSymbols {
+    /// Create the well-known role symbols using deterministic hashing.
+    pub fn new() -> Self {
+        Self {
+            role_subject: synthetic_id("vsa-role:subject"),
+            role_predicate: synthetic_id("vsa-role:predicate"),
+            role_object: synthetic_id("vsa-role:object"),
+            role_entity: synthetic_id("vsa-role:entity"),
+            role_similar_to: synthetic_id("vsa-role:similar-to"),
+            role_heading: synthetic_id("vsa-role:heading"),
+        }
+    }
+}
+
+impl Default for VsaRoleSymbols {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -465,9 +520,375 @@ impl AbsTree {
     }
 }
 
+// ── Grounding & VSA encoding ────────────────────────────────────────────
+
+impl AbsTree {
+    /// Resolve labels in this tree against a [`SymbolRegistry`].
+    ///
+    /// Returns a new tree with `symbol_id` fields filled in where the
+    /// registry knows the label. Leaves unknown labels as `None`.
+    /// This is non-destructive — the original tree is not modified.
+    pub fn ground(&self, registry: &SymbolRegistry) -> Self {
+        match self {
+            AbsTree::EntityRef { label, symbol_id } => AbsTree::EntityRef {
+                label: label.clone(),
+                symbol_id: symbol_id.or_else(|| registry.lookup(label)),
+            },
+            AbsTree::RelationRef { label, symbol_id } => AbsTree::RelationRef {
+                label: label.clone(),
+                symbol_id: symbol_id.or_else(|| registry.lookup(label)),
+            },
+            AbsTree::Freeform(text) => AbsTree::Freeform(text.clone()),
+            AbsTree::Triple {
+                subject,
+                predicate,
+                object,
+            } => AbsTree::Triple {
+                subject: Box::new(subject.ground(registry)),
+                predicate: Box::new(predicate.ground(registry)),
+                object: Box::new(object.ground(registry)),
+            },
+            AbsTree::Similarity {
+                entity,
+                similar_to,
+                score,
+            } => AbsTree::Similarity {
+                entity: Box::new(entity.ground(registry)),
+                similar_to: Box::new(similar_to.ground(registry)),
+                score: *score,
+            },
+            AbsTree::Gap {
+                entity,
+                description,
+            } => AbsTree::Gap {
+                entity: Box::new(entity.ground(registry)),
+                description: description.clone(),
+            },
+            AbsTree::Inference {
+                expression,
+                simplified,
+            } => AbsTree::Inference {
+                expression: expression.clone(),
+                simplified: simplified.clone(),
+            },
+            AbsTree::CodeFact { kind, name, detail } => AbsTree::CodeFact {
+                kind: kind.clone(),
+                name: name.clone(),
+                detail: detail.clone(),
+            },
+            AbsTree::WithConfidence { inner, confidence } => AbsTree::WithConfidence {
+                inner: Box::new(inner.ground(registry)),
+                confidence: *confidence,
+            },
+            AbsTree::WithProvenance { inner, tag } => AbsTree::WithProvenance {
+                inner: Box::new(inner.ground(registry)),
+                tag: tag.clone(),
+            },
+            AbsTree::Conjunction { items, is_and } => AbsTree::Conjunction {
+                items: items.iter().map(|i| i.ground(registry)).collect(),
+                is_and: *is_and,
+            },
+            AbsTree::Section { heading, body } => AbsTree::Section {
+                heading: heading.clone(),
+                body: body.iter().map(|i| i.ground(registry)).collect(),
+            },
+            AbsTree::Document {
+                overview,
+                sections,
+                gaps,
+            } => AbsTree::Document {
+                overview: Box::new(overview.ground(registry)),
+                sections: sections.iter().map(|s| s.ground(registry)).collect(),
+                gaps: gaps.iter().map(|g| g.ground(registry)).collect(),
+            },
+        }
+    }
+
+    /// Count unresolved leaf nodes (EntityRef/RelationRef with `symbol_id: None`).
+    pub fn unresolved_count(&self) -> usize {
+        match self {
+            AbsTree::EntityRef { symbol_id: None, .. }
+            | AbsTree::RelationRef { symbol_id: None, .. } => 1,
+            AbsTree::Triple {
+                subject,
+                predicate,
+                object,
+            } => {
+                subject.unresolved_count()
+                    + predicate.unresolved_count()
+                    + object.unresolved_count()
+            }
+            AbsTree::Similarity {
+                entity, similar_to, ..
+            } => entity.unresolved_count() + similar_to.unresolved_count(),
+            AbsTree::Gap { entity, .. } => entity.unresolved_count(),
+            AbsTree::WithConfidence { inner, .. } | AbsTree::WithProvenance { inner, .. } => {
+                inner.unresolved_count()
+            }
+            AbsTree::Conjunction { items, .. } => {
+                items.iter().map(|i| i.unresolved_count()).sum()
+            }
+            AbsTree::Section { body, .. } => body.iter().map(|i| i.unresolved_count()).sum(),
+            AbsTree::Document {
+                overview,
+                sections,
+                gaps,
+            } => {
+                overview.unresolved_count()
+                    + sections.iter().map(|s| s.unresolved_count()).sum::<usize>()
+                    + gaps.iter().map(|g| g.unresolved_count()).sum::<usize>()
+            }
+            _ => 0,
+        }
+    }
+
+    /// Find the label of the first unresolved leaf node, if any.
+    pub fn first_unresolved(&self) -> Option<&str> {
+        match self {
+            AbsTree::EntityRef {
+                label,
+                symbol_id: None,
+            }
+            | AbsTree::RelationRef {
+                label,
+                symbol_id: None,
+            } => Some(label),
+            AbsTree::Triple {
+                subject,
+                predicate,
+                object,
+            } => subject
+                .first_unresolved()
+                .or_else(|| predicate.first_unresolved())
+                .or_else(|| object.first_unresolved()),
+            AbsTree::Similarity {
+                entity, similar_to, ..
+            } => entity
+                .first_unresolved()
+                .or_else(|| similar_to.first_unresolved()),
+            AbsTree::Gap { entity, .. } => entity.first_unresolved(),
+            AbsTree::WithConfidence { inner, .. } | AbsTree::WithProvenance { inner, .. } => {
+                inner.first_unresolved()
+            }
+            AbsTree::Conjunction { items, .. } => {
+                items.iter().find_map(|i| i.first_unresolved())
+            }
+            AbsTree::Section { body, .. } => body.iter().find_map(|i| i.first_unresolved()),
+            AbsTree::Document {
+                overview,
+                sections,
+                gaps,
+            } => overview
+                .first_unresolved()
+                .or_else(|| sections.iter().find_map(|s| s.first_unresolved()))
+                .or_else(|| gaps.iter().find_map(|g| g.first_unresolved())),
+            _ => None,
+        }
+    }
+
+    /// Encode this abstract syntax tree as a compositional hypervector.
+    ///
+    /// Grounded leaves use their known vector from `item_memory`; ungrounded
+    /// leaves fall back to hash-based `encode_token`. Composite nodes use
+    /// role-filler binding to preserve structure.
+    pub fn to_vsa(
+        &self,
+        ops: &VsaOps,
+        item_memory: &ItemMemory,
+        roles: &VsaRoleSymbols,
+    ) -> GrammarResult<HyperVec> {
+        match self {
+            // ── Leaves ──────────────────────────────────────────────────
+            AbsTree::EntityRef {
+                symbol_id: Some(id),
+                ..
+            }
+            | AbsTree::RelationRef {
+                symbol_id: Some(id),
+                ..
+            } => Ok(item_memory.get_or_create(ops, *id)),
+
+            AbsTree::EntityRef {
+                label,
+                symbol_id: None,
+            }
+            | AbsTree::RelationRef {
+                label,
+                symbol_id: None,
+            } => Ok(encode_token(ops, label)),
+
+            AbsTree::Freeform(text) => encode_label(ops, text).map_err(|e| {
+                GrammarError::VsaError {
+                    message: e.to_string(),
+                }
+            }),
+
+            // ── Composites ──────────────────────────────────────────────
+            AbsTree::Triple {
+                subject,
+                predicate,
+                object,
+            } => {
+                let s_vec = subject.to_vsa(ops, item_memory, roles)?;
+                let p_vec = predicate.to_vsa(ops, item_memory, roles)?;
+                let o_vec = object.to_vsa(ops, item_memory, roles)?;
+
+                let role_s = vsa_encode_symbol(ops, roles.role_subject);
+                let role_p = vsa_encode_symbol(ops, roles.role_predicate);
+                let role_o = vsa_encode_symbol(ops, roles.role_object);
+
+                let bound_s = ops.bind(&role_s, &s_vec).map_err(vsa_err)?;
+                let bound_p = ops.bind(&role_p, &p_vec).map_err(vsa_err)?;
+                let bound_o = ops.bind(&role_o, &o_vec).map_err(vsa_err)?;
+
+                ops.bundle(&[&bound_s, &bound_p, &bound_o])
+                    .map_err(vsa_err)
+            }
+
+            AbsTree::Similarity {
+                entity,
+                similar_to,
+                ..
+            } => {
+                let e_vec = entity.to_vsa(ops, item_memory, roles)?;
+                let s_vec = similar_to.to_vsa(ops, item_memory, roles)?;
+
+                let role_e = vsa_encode_symbol(ops, roles.role_entity);
+                let role_st = vsa_encode_symbol(ops, roles.role_similar_to);
+
+                let bound_e = ops.bind(&role_e, &e_vec).map_err(vsa_err)?;
+                let bound_s = ops.bind(&role_st, &s_vec).map_err(vsa_err)?;
+
+                ops.bundle(&[&bound_e, &bound_s]).map_err(vsa_err)
+            }
+
+            AbsTree::Gap {
+                entity,
+                description,
+            } => {
+                let e_vec = entity.to_vsa(ops, item_memory, roles)?;
+                let d_vec = encode_label(ops, description).map_err(vsa_err)?;
+                ops.bundle(&[&e_vec, &d_vec]).map_err(vsa_err)
+            }
+
+            AbsTree::Inference {
+                expression,
+                simplified,
+            } => {
+                let expr_vec = encode_label(ops, expression).map_err(vsa_err)?;
+                let simp_vec = encode_label(ops, simplified).map_err(vsa_err)?;
+                ops.bundle(&[&expr_vec, &simp_vec]).map_err(vsa_err)
+            }
+
+            AbsTree::CodeFact { kind, name, detail } => {
+                let k_vec = encode_token(ops, kind);
+                let n_vec = encode_token(ops, name);
+                let d_vec = encode_label(ops, detail).map_err(vsa_err)?;
+                ops.bundle(&[&k_vec, &n_vec, &d_vec]).map_err(vsa_err)
+            }
+
+            // ── Modifiers (transparent) ─────────────────────────────────
+            AbsTree::WithConfidence { inner, .. } | AbsTree::WithProvenance { inner, .. } => {
+                inner.to_vsa(ops, item_memory, roles)
+            }
+
+            // ── Structure ───────────────────────────────────────────────
+            AbsTree::Conjunction { items, .. } => {
+                if items.is_empty() {
+                    return Err(GrammarError::VsaError {
+                        message: "cannot encode empty conjunction".into(),
+                    });
+                }
+                let vecs: Vec<HyperVec> = items
+                    .iter()
+                    .map(|i| i.to_vsa(ops, item_memory, roles))
+                    .collect::<Result<_, _>>()?;
+                let refs: Vec<&HyperVec> = vecs.iter().collect();
+                ops.bundle(&refs).map_err(vsa_err)
+            }
+
+            AbsTree::Section { heading, body } => {
+                let heading_vec = encode_label(ops, heading).map_err(vsa_err)?;
+                let role_h = vsa_encode_symbol(ops, roles.role_heading);
+                let bound_h = ops.bind(&role_h, &heading_vec).map_err(vsa_err)?;
+
+                let mut all_vecs = vec![bound_h];
+                for item in body {
+                    all_vecs.push(item.to_vsa(ops, item_memory, roles)?);
+                }
+                let refs: Vec<&HyperVec> = all_vecs.iter().collect();
+                ops.bundle(&refs).map_err(vsa_err)
+            }
+
+            AbsTree::Document {
+                overview,
+                sections,
+                gaps,
+            } => {
+                let mut all_vecs = vec![overview.to_vsa(ops, item_memory, roles)?];
+                for s in sections {
+                    all_vecs.push(s.to_vsa(ops, item_memory, roles)?);
+                }
+                for g in gaps {
+                    all_vecs.push(g.to_vsa(ops, item_memory, roles)?);
+                }
+                let refs: Vec<&HyperVec> = all_vecs.iter().collect();
+                ops.bundle(&refs).map_err(vsa_err)
+            }
+        }
+    }
+}
+
+/// Helper: encode a SymbolId into a HyperVec (for role vectors).
+fn vsa_encode_symbol(ops: &VsaOps, id: SymbolId) -> HyperVec {
+    crate::vsa::encode::encode_symbol(ops, id)
+}
+
+/// Helper: convert VsaError → GrammarError.
+fn vsa_err(e: crate::error::VsaError) -> GrammarError {
+    GrammarError::VsaError {
+        message: e.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::simd;
+    use crate::symbol::{SymbolKind, SymbolMeta};
+    use crate::vsa::item_memory::ItemMemory;
+    use crate::vsa::{Dimension, Encoding};
+
+    fn test_ops() -> VsaOps {
+        VsaOps::new(simd::best_kernel(), Dimension::TEST, Encoding::Bipolar)
+    }
+
+    fn test_item_memory() -> ItemMemory {
+        ItemMemory::new(Dimension::TEST, Encoding::Bipolar, 1000)
+    }
+
+    fn test_registry_with_symbols() -> SymbolRegistry {
+        let reg = SymbolRegistry::new();
+        reg.register(SymbolMeta::new(
+            SymbolId::new(1).unwrap(),
+            SymbolKind::Entity,
+            "Dog",
+        ))
+        .unwrap();
+        reg.register(SymbolMeta::new(
+            SymbolId::new(2).unwrap(),
+            SymbolKind::Entity,
+            "Mammal",
+        ))
+        .unwrap();
+        reg.register(SymbolMeta::new(
+            SymbolId::new(3).unwrap(),
+            SymbolKind::Relation,
+            "is-a",
+        ))
+        .unwrap();
+        reg
+    }
 
     #[test]
     fn cat_returns_correct_category() {
@@ -556,5 +977,242 @@ mod tests {
         ]);
         let labels = tree.collect_labels();
         assert_eq!(labels, vec!["Dog", "is-a", "Mammal", "Cat", "is-a", "Mammal"]);
+    }
+
+    // ── VsaRoleSymbols tests ────────────────────────────────────────────
+
+    #[test]
+    fn role_symbols_are_distinct() {
+        let roles = VsaRoleSymbols::new();
+        let ids = [
+            roles.role_subject,
+            roles.role_predicate,
+            roles.role_object,
+            roles.role_entity,
+            roles.role_similar_to,
+            roles.role_heading,
+        ];
+        // All roles must be unique
+        for i in 0..ids.len() {
+            for j in (i + 1)..ids.len() {
+                assert_ne!(ids[i], ids[j], "role {i} and {j} collide");
+            }
+        }
+    }
+
+    #[test]
+    fn role_symbols_deterministic() {
+        let r1 = VsaRoleSymbols::new();
+        let r2 = VsaRoleSymbols::new();
+        assert_eq!(r1.role_subject, r2.role_subject);
+        assert_eq!(r1.role_heading, r2.role_heading);
+    }
+
+    // ── ground() tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn ground_resolves_known_labels() {
+        let reg = test_registry_with_symbols();
+        let tree = AbsTree::triple(
+            AbsTree::entity("Dog"),
+            AbsTree::relation("is-a"),
+            AbsTree::entity("Mammal"),
+        );
+        let grounded = tree.ground(&reg);
+
+        // Subject should resolve to Dog (id=1)
+        if let AbsTree::Triple { subject, predicate, object } = &grounded {
+            assert_eq!(subject.symbol_id(), Some(SymbolId::new(1).unwrap()));
+            assert_eq!(predicate.symbol_id(), Some(SymbolId::new(3).unwrap()));
+            assert_eq!(object.symbol_id(), Some(SymbolId::new(2).unwrap()));
+        } else {
+            panic!("expected Triple");
+        }
+    }
+
+    #[test]
+    fn ground_leaves_unknown_labels() {
+        let reg = test_registry_with_symbols();
+        let tree = AbsTree::entity("UnknownThing");
+        let grounded = tree.ground(&reg);
+        assert_eq!(grounded.symbol_id(), None);
+    }
+
+    #[test]
+    fn ground_preserves_existing_ids() {
+        let reg = test_registry_with_symbols();
+        let existing_id = SymbolId::new(999).unwrap();
+        let tree = AbsTree::entity_resolved("Dog", existing_id);
+        let grounded = tree.ground(&reg);
+        // Should keep the existing ID, not overwrite with registry's
+        assert_eq!(grounded.symbol_id(), Some(existing_id));
+    }
+
+    #[test]
+    fn ground_is_non_destructive() {
+        let reg = test_registry_with_symbols();
+        let tree = AbsTree::entity("Dog");
+        let grounded = tree.ground(&reg);
+        // Original should still be unresolved
+        assert_eq!(tree.symbol_id(), None);
+        // Grounded should be resolved
+        assert_eq!(grounded.symbol_id(), Some(SymbolId::new(1).unwrap()));
+    }
+
+    #[test]
+    fn unresolved_count_correct() {
+        let tree = AbsTree::triple(
+            AbsTree::entity("Dog"),
+            AbsTree::relation("is-a"),
+            AbsTree::entity_resolved("Mammal", SymbolId::new(2).unwrap()),
+        );
+        assert_eq!(tree.unresolved_count(), 2); // Dog and is-a
+    }
+
+    // ── to_vsa() tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn to_vsa_grounded_entity_correct_dim() {
+        let ops = test_ops();
+        let im = test_item_memory();
+        let roles = VsaRoleSymbols::new();
+        let id = SymbolId::new(42).unwrap();
+        let tree = AbsTree::entity_resolved("Dog", id);
+        let vec = tree.to_vsa(&ops, &im, &roles).unwrap();
+        assert_eq!(vec.dim(), ops.dim());
+    }
+
+    #[test]
+    fn to_vsa_ungrounded_entity_hash_encodes() {
+        let ops = test_ops();
+        let im = test_item_memory();
+        let roles = VsaRoleSymbols::new();
+        let tree = AbsTree::entity("Dog");
+        let vec = tree.to_vsa(&ops, &im, &roles).unwrap();
+        assert_eq!(vec.dim(), ops.dim());
+        // Same label should produce same vector
+        let vec2 = AbsTree::entity("Dog")
+            .to_vsa(&ops, &im, &roles)
+            .unwrap();
+        assert_eq!(vec, vec2);
+    }
+
+    #[test]
+    fn to_vsa_triple_valid_vector() {
+        let ops = test_ops();
+        let im = test_item_memory();
+        let roles = VsaRoleSymbols::new();
+        let tree = AbsTree::triple(
+            AbsTree::entity("Dog"),
+            AbsTree::relation("is-a"),
+            AbsTree::entity("Mammal"),
+        );
+        let vec = tree.to_vsa(&ops, &im, &roles).unwrap();
+        assert_eq!(vec.dim(), ops.dim());
+    }
+
+    #[test]
+    fn to_vsa_role_filler_recoverable_from_triple() {
+        let ops = test_ops();
+        let im = test_item_memory();
+        let roles = VsaRoleSymbols::new();
+
+        let subj_id = SymbolId::new(10).unwrap();
+        let tree = AbsTree::triple(
+            AbsTree::entity_resolved("Dog", subj_id),
+            AbsTree::relation("is-a"),
+            AbsTree::entity("Mammal"),
+        );
+        let triple_vec = tree.to_vsa(&ops, &im, &roles).unwrap();
+
+        // Unbind with role_subject to recover the subject
+        let role_s_vec = vsa_encode_symbol(&ops, roles.role_subject);
+        let recovered = ops.unbind(&triple_vec, &role_s_vec).unwrap();
+        let expected = im.get_or_create(&ops, subj_id);
+        let sim = ops.similarity(&recovered, &expected).unwrap();
+        // With 3 components bundled, recovery won't be exact but should
+        // be well above random
+        assert!(sim > 0.55, "recovered subject sim={sim}, expected > 0.55");
+    }
+
+    #[test]
+    fn to_vsa_similar_triples_higher_similarity() {
+        let ops = test_ops();
+        let im = test_item_memory();
+        let roles = VsaRoleSymbols::new();
+
+        let t1 = AbsTree::triple(
+            AbsTree::entity("Dog"),
+            AbsTree::relation("is-a"),
+            AbsTree::entity("Mammal"),
+        );
+        let t2 = AbsTree::triple(
+            AbsTree::entity("Cat"),
+            AbsTree::relation("is-a"),
+            AbsTree::entity("Mammal"),
+        );
+        let t3 = AbsTree::triple(
+            AbsTree::entity("Paris"),
+            AbsTree::relation("capital-of"),
+            AbsTree::entity("France"),
+        );
+
+        let v1 = t1.to_vsa(&ops, &im, &roles).unwrap();
+        let v2 = t2.to_vsa(&ops, &im, &roles).unwrap();
+        let v3 = t3.to_vsa(&ops, &im, &roles).unwrap();
+
+        let sim_related = ops.similarity(&v1, &v2).unwrap();
+        let sim_unrelated = ops.similarity(&v1, &v3).unwrap();
+
+        // Two triples sharing predicate+object should be more similar
+        // than two completely different triples
+        assert!(
+            sim_related > sim_unrelated,
+            "related={sim_related:.3} should be > unrelated={sim_unrelated:.3}"
+        );
+    }
+
+    #[test]
+    fn to_vsa_modifiers_transparent() {
+        let ops = test_ops();
+        let im = test_item_memory();
+        let roles = VsaRoleSymbols::new();
+
+        let inner = AbsTree::entity("Dog");
+        let with_conf = AbsTree::WithConfidence {
+            inner: Box::new(inner.clone()),
+            confidence: 0.9,
+        };
+
+        let v_inner = inner.to_vsa(&ops, &im, &roles).unwrap();
+        let v_conf = with_conf.to_vsa(&ops, &im, &roles).unwrap();
+        assert_eq!(v_inner, v_conf);
+    }
+
+    #[test]
+    fn to_vsa_conjunction_bundles() {
+        let ops = test_ops();
+        let im = test_item_memory();
+        let roles = VsaRoleSymbols::new();
+
+        let tree = AbsTree::and(vec![
+            AbsTree::entity("Dog"),
+            AbsTree::entity("Cat"),
+        ]);
+        let vec = tree.to_vsa(&ops, &im, &roles).unwrap();
+        assert_eq!(vec.dim(), ops.dim());
+    }
+
+    #[test]
+    fn to_vsa_empty_conjunction_errors() {
+        let ops = test_ops();
+        let im = test_item_memory();
+        let roles = VsaRoleSymbols::new();
+
+        let tree = AbsTree::Conjunction {
+            items: vec![],
+            is_and: true,
+        };
+        assert!(tree.to_vsa(&ops, &im, &roles).is_err());
     }
 }
