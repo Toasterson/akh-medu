@@ -1,5 +1,5 @@
 # Akh-Medu a new AI Architecture made to run on the CPU
-And made for People. Not for Robber Barrons.
+And made for People. Not for Robber Barons.
 
 # License
 This Repo is licensed under GPLv3.0 See LICENSE file. For integration into Proprietary apps, Contact the Author.
