@@ -9,6 +9,12 @@ use std::sync::Arc;
 use egg::{AstSize, Extractor, Rewrite, Runner};
 
 use crate::error::{AkhResult, EngineError, ProvenanceError, ReasonError, SymbolError};
+use crate::grammar::abs::AbsTree;
+use crate::grammar::concrete::{ConcreteGrammar, LinContext, ParseContext};
+use crate::grammar::custom::CustomGrammar;
+use crate::grammar::error::GrammarResult;
+use crate::grammar::parser::{parse_prose, ParseResult};
+use crate::grammar::GrammarRegistry;
 use crate::graph::analytics;
 use crate::export::{ProvenanceExport, SymbolExport, TripleExport};
 use crate::graph::index::KnowledgeGraph;
@@ -72,6 +78,7 @@ pub struct Engine {
     registry: SymbolRegistry,
     provenance_ledger: Option<ProvenanceLedger>,
     skill_manager: Option<SkillManager>,
+    grammar_registry: GrammarRegistry,
 }
 
 impl Engine {
@@ -176,6 +183,8 @@ impl Engine {
             }
         };
 
+        let grammar_registry = GrammarRegistry::new();
+
         Ok(Self {
             config,
             ops,
@@ -187,6 +196,7 @@ impl Engine {
             registry,
             provenance_ledger,
             skill_manager,
+            grammar_registry,
         })
     }
 
@@ -837,6 +847,163 @@ impl Engine {
     }
 
     // -----------------------------------------------------------------------
+    // Grammar API
+    // -----------------------------------------------------------------------
+
+    /// Get the grammar registry.
+    pub fn grammar_registry(&self) -> &GrammarRegistry {
+        &self.grammar_registry
+    }
+
+    /// Get a mutable reference to the grammar registry.
+    pub fn grammar_registry_mut(&mut self) -> &mut GrammarRegistry {
+        &mut self.grammar_registry
+    }
+
+    /// Parse prose input into a [`ParseResult`] using the grammar parser.
+    ///
+    /// Automatically provides the engine's registry, VSA ops, and item memory
+    /// for token resolution and fuzzy matching.
+    pub fn parse(&self, input: &str) -> ParseResult {
+        let ctx = ParseContext::with_engine(self.registry(), self.ops(), self.item_memory());
+        parse_prose(input, &ctx)
+    }
+
+    /// Linearize an abstract syntax tree through a named grammar archetype.
+    ///
+    /// If `grammar_name` is `None`, uses the default grammar.
+    pub fn linearize(&self, tree: &AbsTree, grammar_name: Option<&str>) -> GrammarResult<String> {
+        let name = grammar_name.unwrap_or(self.grammar_registry.default_name());
+        let grammar = self.grammar_registry.get(name)?;
+        let ctx = LinContext::with_registry(self.registry());
+        grammar.linearize(tree, &ctx)
+    }
+
+    /// Load a custom grammar from a TOML definition string.
+    ///
+    /// Returns the registered name of the grammar.
+    pub fn load_custom_grammar(&mut self, toml_content: &str) -> GrammarResult<String> {
+        let grammar = CustomGrammar::from_toml(toml_content)?;
+        let name = grammar.name().to_string();
+        self.grammar_registry.register(Box::new(grammar));
+        Ok(name)
+    }
+
+    /// Parse prose, extract facts, ground them, and commit triples to the KG.
+    ///
+    /// Returns a summary of what was ingested. Sentences that don't parse into
+    /// structured facts are silently skipped.
+    pub fn ingest_prose(&self, input: &str) -> AkhResult<ProseIngestResult> {
+        let result = self.parse(input);
+
+        let facts = match result {
+            ParseResult::Facts(facts) => facts,
+            ParseResult::Freeform { partial, .. } => {
+                if partial.is_empty() {
+                    // Fall through to sentence splitting for multi-sentence input
+                    return self.ingest_prose_sentences(input);
+                }
+                partial
+            }
+            _ => {
+                return Ok(ProseIngestResult {
+                    triples_ingested: 0,
+                    symbols_created: 0,
+                    trees: vec![],
+                })
+            }
+        };
+
+        // Ground each fact against the registry
+        let grounded: Vec<AbsTree> = facts.iter().map(|f| f.ground(&self.registry)).collect();
+
+        // Extract and commit triples from grounded trees
+        let mut triples_ingested = 0usize;
+        let symbols_before = self.registry.len();
+
+        for tree in &grounded {
+            triples_ingested += self.commit_abs_tree(tree)?;
+        }
+
+        let symbols_created = self.registry.len() - symbols_before;
+        Ok(ProseIngestResult {
+            triples_ingested,
+            symbols_created,
+            trees: grounded,
+        })
+    }
+
+    /// Walk an [`AbsTree`] and commit each Triple node to the knowledge graph.
+    fn commit_abs_tree(&self, tree: &AbsTree) -> AkhResult<usize> {
+        match tree {
+            AbsTree::Triple {
+                subject,
+                predicate,
+                object,
+            } => {
+                let s_label = subject.label().unwrap_or("?");
+                let p_label = predicate.label().unwrap_or("?");
+                let o_label = object.label().unwrap_or("?");
+
+                let s = self.resolve_or_create_entity(s_label)?;
+                let p = self.resolve_or_create_relation(p_label)?;
+                let o = self.resolve_or_create_entity(o_label)?;
+
+                self.add_triple(&Triple::new(s, p, o))?;
+                Ok(1)
+            }
+            AbsTree::WithConfidence { inner, confidence } => {
+                if let AbsTree::Triple {
+                    subject,
+                    predicate,
+                    object,
+                } = inner.as_ref()
+                {
+                    let s = self.resolve_or_create_entity(subject.label().unwrap_or("?"))?;
+                    let p = self.resolve_or_create_relation(predicate.label().unwrap_or("?"))?;
+                    let o = self.resolve_or_create_entity(object.label().unwrap_or("?"))?;
+                    self.add_triple(&Triple::new(s, p, o).with_confidence(*confidence))?;
+                    return Ok(1);
+                }
+                self.commit_abs_tree(inner)
+            }
+            AbsTree::Conjunction { items, .. } => {
+                let mut count = 0;
+                for item in items {
+                    count += self.commit_abs_tree(item)?;
+                }
+                Ok(count)
+            }
+            _ => Ok(0),
+        }
+    }
+
+    /// Split multi-sentence input on `.` boundaries and parse each individually.
+    fn ingest_prose_sentences(&self, input: &str) -> AkhResult<ProseIngestResult> {
+        let mut total_triples = 0usize;
+        let symbols_before = self.registry.len();
+        let mut all_trees = Vec::new();
+
+        for sentence in input.split('.').map(str::trim).filter(|s| !s.is_empty()) {
+            let result = self.parse(sentence);
+            if let ParseResult::Facts(facts) = result {
+                for fact in &facts {
+                    let grounded = fact.ground(&self.registry);
+                    total_triples += self.commit_abs_tree(&grounded)?;
+                    all_trees.push(grounded);
+                }
+            }
+        }
+
+        let symbols_created = self.registry.len() - symbols_before;
+        Ok(ProseIngestResult {
+            triples_ingested: total_triples,
+            symbols_created,
+            trees: all_trees,
+        })
+    }
+
+    // -----------------------------------------------------------------------
     // Accessors
     // -----------------------------------------------------------------------
 
@@ -951,6 +1118,17 @@ impl std::fmt::Display for EngineInfo {
     }
 }
 
+/// Result of ingesting prose through the grammar parser.
+#[derive(Debug)]
+pub struct ProseIngestResult {
+    /// Number of triples committed to the knowledge graph.
+    pub triples_ingested: usize,
+    /// Number of new symbols created during ingest.
+    pub symbols_created: usize,
+    /// The grounded abstract syntax trees that were extracted.
+    pub trees: Vec<AbsTree>,
+}
+
 impl std::fmt::Debug for Engine {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Engine")
@@ -1051,5 +1229,115 @@ mod tests {
         let sym = SymbolId::new(1).unwrap();
         let result = engine.provenance_of(sym);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_returns_facts_for_declarative_input() {
+        let engine = Engine::new(EngineConfig {
+            dimension: Dimension::TEST,
+            ..Default::default()
+        })
+        .unwrap();
+
+        let result = engine.parse("Dogs are mammals");
+        assert!(matches!(result, ParseResult::Facts(_)));
+    }
+
+    #[test]
+    fn linearize_triple_through_engine() {
+        let engine = Engine::new(EngineConfig {
+            dimension: Dimension::TEST,
+            ..Default::default()
+        })
+        .unwrap();
+
+        use crate::grammar::abs::AbsTree;
+        let tree = AbsTree::triple(
+            AbsTree::entity("Dog"),
+            AbsTree::relation("is-a"),
+            AbsTree::entity("Mammal"),
+        );
+        let prose = engine.linearize(&tree, Some("formal")).unwrap();
+        assert!(!prose.is_empty());
+        // Formal archetype should mention the entities
+        let lower = prose.to_lowercase();
+        assert!(lower.contains("dog"));
+        assert!(lower.contains("mammal"));
+    }
+
+    #[test]
+    fn ingest_prose_creates_triples() {
+        let engine = Engine::new(EngineConfig {
+            dimension: Dimension::TEST,
+            ..Default::default()
+        })
+        .unwrap();
+
+        let result = engine.ingest_prose("Dogs are mammals").unwrap();
+        assert!(
+            result.triples_ingested >= 1,
+            "expected at least 1 triple, got {}",
+            result.triples_ingested,
+        );
+        assert!(result.symbols_created >= 2, "expected at least 2 new symbols");
+        assert!(!result.trees.is_empty());
+
+        // Verify the triple exists in the KG
+        let dog = engine.lookup_symbol("Dogs").unwrap();
+        let triples = engine.triples_from(dog);
+        assert!(!triples.is_empty(), "Dog should have outgoing triples");
+    }
+
+    #[test]
+    fn ingest_prose_compound_sentence() {
+        let engine = Engine::new(EngineConfig {
+            dimension: Dimension::TEST,
+            ..Default::default()
+        })
+        .unwrap();
+
+        // Compound "and" sentence should produce 2 triples from a single parse
+        let result = engine
+            .ingest_prose("Dogs are mammals and cats are mammals")
+            .unwrap();
+        assert!(
+            result.triples_ingested >= 2,
+            "expected at least 2 triples from compound sentence, got {}",
+            result.triples_ingested,
+        );
+    }
+
+    #[test]
+    fn ingest_prose_sentence_splitting() {
+        let engine = Engine::new(EngineConfig {
+            dimension: Dimension::TEST,
+            ..Default::default()
+        })
+        .unwrap();
+
+        // Two separate sentences that individually parse but don't as a whole
+        let result = engine
+            .ingest_prose("Oxygen is an element. Water contains hydrogen.")
+            .unwrap();
+        assert!(
+            result.triples_ingested >= 1,
+            "expected at least 1 triple from sentence splitting, got {}",
+            result.triples_ingested,
+        );
+    }
+
+    #[test]
+    fn grammar_registry_accessible_from_engine() {
+        let engine = Engine::new(EngineConfig {
+            dimension: Dimension::TEST,
+            ..Default::default()
+        })
+        .unwrap();
+
+        let reg = engine.grammar_registry();
+        let names = reg.list();
+        assert!(names.contains(&"formal"));
+        assert!(names.contains(&"terse"));
+        assert!(names.contains(&"narrative"));
     }
 }

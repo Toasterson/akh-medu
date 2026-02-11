@@ -516,6 +516,9 @@ enum GrammarAction {
     Parse {
         /// The prose text to parse.
         input: String,
+        /// Commit parsed facts to the knowledge graph.
+        #[arg(long)]
+        ingest: bool,
     },
     /// Linearize a triple through a grammar archetype.
     Linearize {
@@ -2921,16 +2924,15 @@ fn main() -> Result<()> {
         }
 
         Commands::Grammar { action } => {
-            use akh_medu::grammar::{AbsTree, ConcreteGrammar, GrammarRegistry};
+            use akh_medu::grammar::AbsTree;
             use akh_medu::grammar::concrete::LinContext;
-            use akh_medu::grammar::parser::{parse_prose, ParseResult};
-            use akh_medu::grammar::concrete::ParseContext;
+            use akh_medu::grammar::parser::ParseResult;
             use akh_medu::grammar::bridge::triple_to_abs;
-            use akh_medu::grammar::custom::CustomGrammar;
 
             match action {
                 GrammarAction::List => {
-                    let reg = GrammarRegistry::new();
+                    let engine = Engine::new(config).into_diagnostic()?;
+                    let reg = engine.grammar_registry();
                     println!("Available grammar archetypes:\n");
                     let mut names = reg.list();
                     names.sort();
@@ -2947,42 +2949,49 @@ fn main() -> Result<()> {
                     }
                 }
 
-                GrammarAction::Parse { input } => {
+                GrammarAction::Parse { input, ingest } => {
                     let engine = Engine::new(config).into_diagnostic()?;
-                    let ctx = ParseContext::with_engine(
-                        engine.registry(),
-                        &engine.ops(),
-                        engine.item_memory(),
-                    );
-                    let result = parse_prose(&input, &ctx);
-                    match &result {
-                        ParseResult::Facts(facts) => {
-                            println!("Parsed {} fact(s):\n", facts.len());
-                            let reg = GrammarRegistry::new();
-                            let lin_ctx = LinContext::with_registry(engine.registry());
-                            for (i, fact) in facts.iter().enumerate() {
-                                println!("  {}. [{}]", i + 1, fact.cat());
-                                // Show in all three archetypes
-                                for archetype in &["formal", "terse", "narrative"] {
-                                    if let Ok(prose) = reg.get(archetype).unwrap().linearize(fact, &lin_ctx) {
-                                        println!("     {:<10} {}", format!("{archetype}:"), prose);
-                                    }
-                                }
-                                println!();
+
+                    if ingest {
+                        let result = engine.ingest_prose(&input).into_diagnostic()?;
+                        println!(
+                            "Ingested {} triple(s) ({} new symbol(s))",
+                            result.triples_ingested, result.symbols_created,
+                        );
+                        for tree in &result.trees {
+                            if let Ok(prose) = engine.linearize(tree, Some("formal")) {
+                                println!("  {prose}");
                             }
                         }
-                        ParseResult::Query { subject, .. } => {
-                            println!("Parsed as query: subject = \"{subject}\"");
-                        }
-                        ParseResult::Command(cmd) => {
-                            println!("Parsed as command: {cmd:?}");
-                        }
-                        ParseResult::Goal { description } => {
-                            println!("Parsed as goal: \"{description}\"");
-                        }
-                        ParseResult::Freeform { text, .. } => {
-                            println!("Could not parse into structured form.");
-                            println!("Freeform text: \"{text}\"");
+                        let _ = engine.persist();
+                    } else {
+                        let result = engine.parse(&input);
+                        match &result {
+                            ParseResult::Facts(facts) => {
+                                println!("Parsed {} fact(s):\n", facts.len());
+                                for (i, fact) in facts.iter().enumerate() {
+                                    println!("  {}. [{}]", i + 1, fact.cat());
+                                    for archetype in &["formal", "terse", "narrative"] {
+                                        if let Ok(prose) = engine.linearize(fact, Some(archetype)) {
+                                            println!("     {:<10} {}", format!("{archetype}:"), prose);
+                                        }
+                                    }
+                                    println!();
+                                }
+                            }
+                            ParseResult::Query { subject, .. } => {
+                                println!("Parsed as query: subject = \"{subject}\"");
+                            }
+                            ParseResult::Command(cmd) => {
+                                println!("Parsed as command: {cmd:?}");
+                            }
+                            ParseResult::Goal { description } => {
+                                println!("Parsed as goal: \"{description}\"");
+                            }
+                            ParseResult::Freeform { text, .. } => {
+                                println!("Could not parse into structured form.");
+                                println!("Freeform text: \"{text}\"");
+                            }
                         }
                     }
                 }
@@ -2994,7 +3003,7 @@ fn main() -> Result<()> {
                     archetype,
                     confidence,
                 } => {
-                    let reg = GrammarRegistry::new();
+                    let engine = Engine::new(config).into_diagnostic()?;
 
                     let tree = if let Some(conf) = confidence {
                         AbsTree::triple_with_confidence(
@@ -3012,7 +3021,7 @@ fn main() -> Result<()> {
                     };
 
                     if let Some(name) = archetype {
-                        match reg.linearize(&name, &tree) {
+                        match engine.linearize(&tree, Some(&name)) {
                             Ok(prose) => println!("{prose}"),
                             Err(e) => {
                                 eprintln!("Error: {e}");
@@ -3021,10 +3030,11 @@ fn main() -> Result<()> {
                         }
                     } else {
                         // Show all archetypes
+                        let reg = engine.grammar_registry();
                         let mut names = reg.list();
                         names.sort();
                         for name in names {
-                            if let Ok(prose) = reg.linearize(name, &tree) {
+                            if let Ok(prose) = engine.linearize(&tree, Some(name)) {
                                 println!("{:<10} {}", format!("{name}:"), prose);
                             }
                         }
@@ -3037,7 +3047,7 @@ fn main() -> Result<()> {
                     object,
                     confidence,
                 } => {
-                    let reg = GrammarRegistry::new();
+                    let engine = Engine::new(config).into_diagnostic()?;
 
                     let tree = if let Some(conf) = confidence {
                         AbsTree::triple_with_confidence(
@@ -3060,13 +3070,14 @@ fn main() -> Result<()> {
                     }
                     println!();
 
+                    let reg = engine.grammar_registry();
                     let mut names = reg.list();
                     names.sort();
-                    let ctx = LinContext::default();
                     for name in names {
                         let grammar = reg.get(name).unwrap();
                         println!("── {} ──", name);
                         println!("  {}", grammar.description());
+                        let ctx = LinContext::with_registry(engine.registry());
                         match grammar.linearize(&tree, &ctx) {
                             Ok(prose) => println!("  → {prose}"),
                             Err(e) => println!("  ✗ {e}"),
@@ -3076,27 +3087,27 @@ fn main() -> Result<()> {
                 }
 
                 GrammarAction::Load { file, test } => {
+                    let mut engine = Engine::new(config).into_diagnostic()?;
                     let content = std::fs::read_to_string(&file).into_diagnostic()?;
-                    let grammar = CustomGrammar::from_toml(&content).into_diagnostic()?;
-                    let name = grammar.name().to_string();
+                    let name = engine.load_custom_grammar(&content).into_diagnostic()?;
+                    let grammar = engine.grammar_registry().get(&name).into_diagnostic()?;
                     let desc = grammar.description().to_string();
                     println!("Loaded custom grammar: \"{name}\"");
                     println!("  {desc}");
 
                     if test {
-                        let ctx = LinContext::default();
                         let tree = AbsTree::triple(
                             AbsTree::entity("Dog"),
                             AbsTree::relation("is-a"),
                             AbsTree::entity("Mammal"),
                         );
-                        match grammar.linearize(&tree, &ctx) {
+                        match engine.linearize(&tree, Some(&name)) {
                             Ok(prose) => println!("\n  Test triple: {prose}"),
                             Err(e) => println!("\n  Test failed: {e}"),
                         }
 
                         let gap = AbsTree::gap(AbsTree::entity("Dog"), "no habitat data");
-                        match grammar.linearize(&gap, &ctx) {
+                        match engine.linearize(&gap, Some(&name)) {
                             Ok(prose) => println!("  Test gap:    {prose}"),
                             Err(e) => println!("  Test failed: {e}"),
                         }
@@ -3106,7 +3117,7 @@ fn main() -> Result<()> {
                             AbsTree::entity("Wolf"),
                             0.87,
                         );
-                        match grammar.linearize(&sim, &ctx) {
+                        match engine.linearize(&sim, Some(&name)) {
                             Ok(prose) => println!("  Test sim:    {prose}"),
                             Err(e) => println!("  Test failed: {e}"),
                         }
@@ -3119,9 +3130,6 @@ fn main() -> Result<()> {
                     max_triples,
                 } => {
                     let engine = Engine::new(config).into_diagnostic()?;
-                    let reg = GrammarRegistry::new();
-                    let grammar = reg.get(&archetype).into_diagnostic()?;
-                    let lin_ctx = LinContext::with_registry(engine.registry());
 
                     // Resolve the entity
                     let symbol_id = engine.resolve_symbol(&entity).into_diagnostic()?;
@@ -3148,7 +3156,7 @@ fn main() -> Result<()> {
 
                     for triple in &all_triples {
                         let tree = triple_to_abs(triple, engine.registry());
-                        match grammar.linearize(&tree, &lin_ctx) {
+                        match engine.linearize(&tree, Some(&archetype)) {
                             Ok(prose) => println!("  {prose}"),
                             Err(e) => println!("  (error: {e})"),
                         }
