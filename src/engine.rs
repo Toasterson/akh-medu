@@ -13,6 +13,7 @@ use crate::grammar::abs::AbsTree;
 use crate::grammar::concrete::{ConcreteGrammar, LinContext, ParseContext};
 use crate::grammar::custom::CustomGrammar;
 use crate::grammar::error::GrammarResult;
+use crate::grammar::lexer::Language;
 use crate::grammar::parser::{parse_prose, ParseResult};
 use crate::grammar::GrammarRegistry;
 use crate::graph::analytics;
@@ -49,6 +50,8 @@ pub struct EngineConfig {
     pub max_memory_mb: usize,
     /// Maximum expected symbols (capacity hint for item memory).
     pub max_symbols: usize,
+    /// Default language for parsing. `Auto` means detect from text.
+    pub language: Language,
 }
 
 impl Default for EngineConfig {
@@ -59,6 +62,7 @@ impl Default for EngineConfig {
             data_dir: None,
             max_memory_mb: 1024,
             max_symbols: 1_000_000,
+            language: Language::Auto,
         }
     }
 }
@@ -862,11 +866,37 @@ impl Engine {
 
     /// Parse prose input into a [`ParseResult`] using the grammar parser.
     ///
-    /// Automatically provides the engine's registry, VSA ops, and item memory
-    /// for token resolution and fuzzy matching.
+    /// Uses the engine's configured language. Automatically provides the
+    /// engine's registry, VSA ops, and item memory for token resolution.
     pub fn parse(&self, input: &str) -> ParseResult {
-        let ctx = ParseContext::with_engine(self.registry(), self.ops(), self.item_memory());
+        self.parse_with_language(input, self.config.language)
+    }
+
+    /// Parse prose input with an explicit language override.
+    pub fn parse_with_language(&self, input: &str, language: Language) -> ParseResult {
+        let ctx = ParseContext::with_engine_and_language(
+            self.registry(),
+            self.ops(),
+            self.item_memory(),
+            language,
+        );
         parse_prose(input, &ctx)
+    }
+
+    /// Parse a mixed-language corpus by detecting language per sentence.
+    ///
+    /// Each sentence is detected independently and parsed with the
+    /// appropriate language lexicon.
+    pub fn parse_mixed_corpus(&self, input: &str) -> Vec<(String, Language, ParseResult)> {
+        use crate::grammar::detect::detect_per_sentence;
+
+        detect_per_sentence(input)
+            .into_iter()
+            .map(|(sentence, detection)| {
+                let result = self.parse_with_language(&sentence, detection.language);
+                (sentence, detection.language, result)
+            })
+            .collect()
     }
 
     /// Linearize an abstract syntax tree through a named grammar archetype.

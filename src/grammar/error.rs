@@ -127,6 +127,17 @@ pub enum GrammarError {
         unresolved_count: usize,
         first_unresolved: String,
     },
+
+    #[error("unsupported language: \"{language}\"")]
+    #[diagnostic(
+        code(akh::grammar::unsupported_language),
+        help(
+            "The language \"{language}\" is not supported. \
+             Supported languages: en (English), ru (Russian), ar (Arabic), \
+             fr (French), es (Spanish), auto (auto-detect)."
+        )
+    )]
+    UnsupportedLanguage { language: String },
 }
 
 /// Result type for grammar operations.

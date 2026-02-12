@@ -9,10 +9,10 @@
 use super::abs::AbsTree;
 use super::concrete::ParseContext;
 use super::error::{GrammarError, GrammarResult};
-use super::lexer::{self, CommandKind, Lexicon, Token};
+use super::lexer::{self, CommandKind, Language, Lexicon, Token};
 
 /// The result of parsing prose input.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum ParseResult {
     /// One or more facts extracted as abstract syntax trees.
     Facts(Vec<AbsTree>),
@@ -45,7 +45,16 @@ pub fn parse_prose(input: &str, ctx: &ParseContext) -> ParseResult {
         };
     }
 
-    let lexicon = Lexicon::default_english();
+    // Select lexicon: explicit override > language-based > auto-detect
+    let effective_lang = if ctx.language == Language::Auto {
+        super::detect::detect_language(trimmed).language
+    } else {
+        ctx.language
+    };
+    let lexicon = ctx
+        .lexicon
+        .clone()
+        .unwrap_or_else(|| Lexicon::for_language(effective_lang));
 
     // 1. Commands (highest priority)
     if let Some(cmd) = lexicon.match_command(trimmed) {

@@ -41,12 +41,16 @@ pub mod bridge;
 pub mod cat;
 pub mod concrete;
 pub mod custom;
+pub mod detect;
+pub mod entity_resolution;
+pub mod equivalences;
 pub mod error;
 pub mod formal;
 pub mod lexer;
 pub mod morpho;
 pub mod narrative;
 pub mod parser;
+pub mod preprocess;
 pub mod terse;
 
 use std::collections::HashMap;
@@ -55,6 +59,7 @@ pub use abs::{AbsTree, ProvenanceTag, VsaRoleSymbols};
 pub use cat::Cat;
 pub use concrete::{ConcreteGrammar, LinContext, ParseContext};
 pub use error::{GrammarError, GrammarResult};
+pub use lexer::Language;
 pub use parser::ParseResult;
 
 /// Runtime registry of available concrete grammars.

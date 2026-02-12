@@ -42,6 +42,9 @@ syn = { version = "2", features = ["full", "visit"] }
 # HTTP (sync)
 ureq = "2"
 
+# Unicode
+unicode-normalization = "0.1"
+
 # Numeric
 rand = "0.8"
 
@@ -50,9 +53,21 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 clap = { version = "4.5", features = ["derive"] }
 
+# Server (feature-gated)
+axum = { version = "0.8", optional = true }
+tokio = { version = "1", features = ["full"], optional = true }
+
+[features]
+server = ["axum", "tokio"]
+
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
 tempfile = "3"
+
+[[bin]]
+name = "akh-medu-server"
+path = "src/bin/akh-medu-server.rs"
+required-features = ["server"]
 
 [[bench]]
 name = "vsa_ops"

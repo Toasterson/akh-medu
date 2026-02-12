@@ -14,6 +14,7 @@ use crate::vsa::ops::VsaOps;
 use super::abs::AbsTree;
 use super::cat::Cat;
 use super::error::GrammarResult;
+use super::lexer::{Language, Lexicon};
 
 /// Context available during linearization (AbsTree → prose).
 ///
@@ -22,6 +23,10 @@ use super::error::GrammarResult;
 pub struct LinContext<'a> {
     /// Symbol registry for resolving IDs to labels.
     pub registry: Option<&'a SymbolRegistry>,
+    /// Override lexicon for language-specific surface forms.
+    pub lexicon: Option<Lexicon>,
+    /// Target language for linearization.
+    pub language: Language,
 }
 
 impl<'a> LinContext<'a> {
@@ -29,6 +34,8 @@ impl<'a> LinContext<'a> {
     pub fn with_registry(registry: &'a SymbolRegistry) -> Self {
         Self {
             registry: Some(registry),
+            lexicon: None,
+            language: Language::Auto,
         }
     }
 
@@ -46,7 +53,11 @@ impl<'a> LinContext<'a> {
 
 impl Default for LinContext<'_> {
     fn default() -> Self {
-        Self { registry: None }
+        Self {
+            registry: None,
+            lexicon: None,
+            language: Language::Auto,
+        }
     }
 }
 
@@ -61,6 +72,10 @@ pub struct ParseContext<'a> {
     pub ops: Option<&'a VsaOps>,
     /// Item memory for similarity-based token resolution.
     pub item_memory: Option<&'a ItemMemory>,
+    /// Override lexicon (if `None`, selected by `language`).
+    pub lexicon: Option<Lexicon>,
+    /// Language to parse in.
+    pub language: Language,
 }
 
 impl<'a> ParseContext<'a> {
@@ -74,6 +89,24 @@ impl<'a> ParseContext<'a> {
             registry: Some(registry),
             ops: Some(ops),
             item_memory: Some(item_memory),
+            lexicon: None,
+            language: Language::Auto,
+        }
+    }
+
+    /// Create a context with full engine access and explicit language.
+    pub fn with_engine_and_language(
+        registry: &'a SymbolRegistry,
+        ops: &'a VsaOps,
+        item_memory: &'a ItemMemory,
+        language: Language,
+    ) -> Self {
+        Self {
+            registry: Some(registry),
+            ops: Some(ops),
+            item_memory: Some(item_memory),
+            lexicon: None,
+            language,
         }
     }
 }
@@ -84,6 +117,8 @@ impl Default for ParseContext<'_> {
             registry: None,
             ops: None,
             item_memory: None,
+            lexicon: None,
+            language: Language::Auto,
         }
     }
 }

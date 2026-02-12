@@ -18,6 +18,7 @@ use akh_medu::infer::InferenceQuery;
 use akh_medu::pipeline::{Pipeline, PipelineData, PipelineStage, StageConfig, StageKind};
 use akh_medu::provenance::DerivationKind;
 use akh_medu::symbol::SymbolId;
+use akh_medu::grammar::Language;
 use akh_medu::vsa::Dimension;
 
 #[derive(Parser)]
@@ -30,6 +31,10 @@ struct Cli {
     /// Hypervector dimension.
     #[arg(long, global = true, default_value = "10000")]
     dimension: usize,
+
+    /// Default language for parsing (en, ru, ar, fr, es, auto).
+    #[arg(long, global = true, default_value = "auto")]
+    language: String,
 
     #[command(subcommand)]
     command: Commands,
@@ -287,6 +292,19 @@ enum Commands {
     Grammar {
         #[command(subcommand)]
         action: GrammarAction,
+    },
+
+    /// Pre-process text chunks for the Eleutherios integration pipeline.
+    ///
+    /// Reads JSONL from stdin, extracts entities/claims, writes JSONL to stdout.
+    Preprocess {
+        /// Output format: "jsonl" (default) or "json".
+        #[arg(long, default_value = "jsonl")]
+        format: String,
+
+        /// Override language (en, ru, ar, fr, es). Default: auto-detect.
+        #[arg(long)]
+        language: Option<String>,
     },
 }
 
@@ -600,9 +618,12 @@ fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
+    let language = Language::from_code(&cli.language).unwrap_or(Language::Auto);
+
     let config = EngineConfig {
         dimension: Dimension(cli.dimension),
         data_dir: cli.data_dir.clone(),
+        language,
         ..Default::default()
     };
 
@@ -612,6 +633,7 @@ fn main() -> Result<()> {
             let config = EngineConfig {
                 data_dir: Some(data_dir.clone()),
                 dimension: Dimension(cli.dimension),
+                language,
                 ..Default::default()
             };
             let engine = Engine::new(config).into_diagnostic()?;
@@ -3199,6 +3221,65 @@ fn main() -> Result<()> {
                 }
             } else {
                 println!("{}", tool_output.result);
+            }
+        }
+
+        Commands::Preprocess { format, language: lang_override } => {
+            use std::io::{self, BufRead, Write as IoWrite};
+            use akh_medu::grammar::preprocess::{TextChunk, preprocess_chunk, PreProcessResponse, preprocess_batch};
+            use akh_medu::grammar::concrete::ParseContext as GrammarParseContext;
+
+            let engine = Engine::new(config).into_diagnostic()?;
+            let ctx = GrammarParseContext::with_engine(
+                engine.registry(),
+                engine.ops(),
+                engine.item_memory(),
+            );
+
+            let stdin = io::stdin();
+            let stdout = io::stdout();
+            let mut out = stdout.lock();
+
+            if format == "json" {
+                // Read all input as a JSON array of chunks
+                use std::io::Read as _;
+                let mut input = String::new();
+                stdin.lock().read_to_string(&mut input).into_diagnostic()?;
+                let chunks: Vec<TextChunk> = serde_json::from_str(&input).into_diagnostic()?;
+
+                // Apply language override
+                let chunks: Vec<TextChunk> = chunks.into_iter().map(|mut c| {
+                    if let Some(ref lang) = lang_override {
+                        c.language = Some(lang.clone());
+                    }
+                    c
+                }).collect();
+
+                let start = std::time::Instant::now();
+                let results = preprocess_batch(&chunks, &ctx);
+                let elapsed = start.elapsed().as_millis() as u64;
+
+                let response = PreProcessResponse {
+                    results,
+                    processing_time_ms: elapsed,
+                };
+                serde_json::to_writer_pretty(&mut out, &response).into_diagnostic()?;
+                writeln!(out).into_diagnostic()?;
+            } else {
+                // JSONL: one chunk per line in, one result per line out
+                for line in stdin.lock().lines() {
+                    let line = line.into_diagnostic()?;
+                    if line.trim().is_empty() {
+                        continue;
+                    }
+                    let mut chunk: TextChunk = serde_json::from_str(&line).into_diagnostic()?;
+                    if let Some(ref lang) = lang_override {
+                        chunk.language = Some(lang.clone());
+                    }
+                    let result = preprocess_chunk(&chunk, &ctx);
+                    serde_json::to_writer(&mut out, &result).into_diagnostic()?;
+                    writeln!(out).into_diagnostic()?;
+                }
             }
         }
     }

@@ -8,10 +8,67 @@
 //! The `Lexicon` maps function words to grammatical roles and relational
 //! patterns to canonical predicate labels.
 
+use serde::{Deserialize, Serialize};
+
 use crate::registry::SymbolRegistry;
 use crate::symbol::SymbolId;
 use crate::vsa::item_memory::ItemMemory;
 use crate::vsa::ops::VsaOps;
+
+/// Supported languages for the grammar system.
+///
+/// `Auto` means detect from text (Phase 10c). Until detection is wired,
+/// `Auto` falls back to English.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub enum Language {
+    English,
+    Russian,
+    Arabic,
+    French,
+    Spanish,
+    #[default]
+    Auto,
+}
+
+impl Language {
+    /// BCP 47 language tag.
+    pub fn bcp47(&self) -> &'static str {
+        match self {
+            Language::English => "en",
+            Language::Russian => "ru",
+            Language::Arabic => "ar",
+            Language::French => "fr",
+            Language::Spanish => "es",
+            Language::Auto => "auto",
+        }
+    }
+
+    /// Parse from a BCP 47 tag or common name.
+    pub fn from_code(code: &str) -> Option<Self> {
+        match code.to_lowercase().as_str() {
+            "en" | "english" => Some(Language::English),
+            "ru" | "russian" => Some(Language::Russian),
+            "ar" | "arabic" => Some(Language::Arabic),
+            "fr" | "french" => Some(Language::French),
+            "es" | "spanish" => Some(Language::Spanish),
+            "auto" => Some(Language::Auto),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for Language {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Language::English => write!(f, "English"),
+            Language::Russian => write!(f, "Russian"),
+            Language::Arabic => write!(f, "Arabic"),
+            Language::French => write!(f, "French"),
+            Language::Spanish => write!(f, "Spanish"),
+            Language::Auto => write!(f, "Auto"),
+        }
+    }
+}
 
 /// Byte-level source span for error reporting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,6 +118,7 @@ pub struct RelationalPattern {
 }
 
 /// The lexicon: maps surface forms to grammatical roles.
+#[derive(Clone)]
 pub struct Lexicon {
     /// Semantically void words (articles, determiners).
     void_words: Vec<String>,
@@ -75,7 +133,7 @@ pub struct Lexicon {
 }
 
 /// Non-declarative commands recognized by the lexer.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum CommandKind {
     Help,
     ShowStatus,
@@ -85,6 +143,20 @@ pub enum CommandKind {
 }
 
 impl Lexicon {
+    /// Get the lexicon for the given language.
+    ///
+    /// Returns the language-specific lexicon with relational patterns
+    /// that map to the same canonical predicates across all languages.
+    pub fn for_language(lang: Language) -> Self {
+        match lang {
+            Language::English | Language::Auto => Self::default_english(),
+            Language::Russian => Self::default_russian(),
+            Language::Arabic => Self::default_arabic(),
+            Language::French => Self::default_french(),
+            Language::Spanish => Self::default_spanish(),
+        }
+    }
+
     /// Build the default English lexicon with all patterns from the existing
     /// `nlp.rs` and `text_ingest.rs` modules.
     pub fn default_english() -> Self {
@@ -141,6 +213,224 @@ impl Lexicon {
             ("show status".into(), CommandKind::ShowStatus),
             ("show goals".into(), CommandKind::ShowStatus),
             ("list goals".into(), CommandKind::ShowStatus),
+        ];
+
+        Self {
+            void_words,
+            relational_patterns,
+            question_words,
+            goal_verbs,
+            commands,
+        }
+    }
+
+    /// Build the Russian lexicon.
+    ///
+    /// Relational patterns map to the same canonical predicates as English.
+    /// Commands stay English (CLI is English).
+    pub fn default_russian() -> Self {
+        let void_words = Vec::new(); // Russian has no articles
+
+        let relational_patterns = vec![
+            // Multi-word patterns (longest first)
+            rel("является частью", "part-of", 0.90),
+            rel("находится в", "located-in", 0.90),
+            rel("состоит из", "composed-of", 0.85),
+            rel("зависит от", "depends-on", 0.85),
+            rel("похож на", "similar-to", 0.85),
+            rel("содержит в себе", "contains", 0.85),
+            // Single/shorter patterns
+            rel("является", "is-a", 0.90),
+            rel("имеет", "has-a", 0.85),
+            rel("содержит", "contains", 0.85),
+            rel("вызывает", "causes", 0.85),
+            rel("определяет", "defines", 0.85),
+            rel("реализует", "implements", 0.85),
+            // "это" used as copula
+            rel("это", "is-a", 0.80),
+        ];
+
+        let question_words = vec![
+            "что".into(), "кто".into(), "где".into(), "когда".into(),
+            "как".into(), "почему".into(), "какой".into(), "какая".into(),
+            "какие".into(),
+        ];
+
+        let goal_verbs = vec![
+            "найти".into(), "изучить".into(), "обнаружить".into(),
+            "исследовать".into(), "определить".into(), "классифицировать".into(),
+        ];
+
+        // Commands stay English
+        let commands = vec![
+            ("help".into(), CommandKind::Help),
+            ("?".into(), CommandKind::Help),
+            ("status".into(), CommandKind::ShowStatus),
+        ];
+
+        Self {
+            void_words,
+            relational_patterns,
+            question_words,
+            goal_verbs,
+            commands,
+        }
+    }
+
+    /// Build the Arabic lexicon.
+    ///
+    /// Relational patterns map to the same canonical predicates as English.
+    pub fn default_arabic() -> Self {
+        let void_words = vec![
+            "ال".into(),  // definite article prefix (when tokenized separately)
+        ];
+
+        let relational_patterns = vec![
+            // Multi-word patterns (longest first)
+            rel("يحتوي على", "contains", 0.85),
+            rel("يقع في", "located-in", 0.90),
+            rel("جزء من", "part-of", 0.90),
+            rel("يتكون من", "composed-of", 0.85),
+            rel("يعتمد على", "depends-on", 0.85),
+            // Shorter patterns
+            rel("هو", "is-a", 0.90),
+            rel("هي", "is-a", 0.90),
+            rel("لديه", "has-a", 0.85),
+            rel("لديها", "has-a", 0.85),
+            rel("يسبب", "causes", 0.85),
+            rel("يشبه", "similar-to", 0.85),
+        ];
+
+        let question_words = vec![
+            "ما".into(), "من".into(), "أين".into(), "متى".into(),
+            "كيف".into(), "لماذا".into(), "هل".into(),
+        ];
+
+        let goal_verbs = vec![
+            "ابحث".into(), "اكتشف".into(), "حلل".into(),
+            "حدد".into(), "صنف".into(),
+        ];
+
+        let commands = vec![
+            ("help".into(), CommandKind::Help),
+            ("?".into(), CommandKind::Help),
+            ("status".into(), CommandKind::ShowStatus),
+        ];
+
+        Self {
+            void_words,
+            relational_patterns,
+            question_words,
+            goal_verbs,
+            commands,
+        }
+    }
+
+    /// Build the French lexicon.
+    ///
+    /// Relational patterns map to the same canonical predicates as English.
+    pub fn default_french() -> Self {
+        let void_words = vec![
+            "le".into(), "la".into(), "les".into(), "l'".into(),
+            "un".into(), "une".into(), "des".into(),
+            "du".into(), "de".into(), "d'".into(),
+        ];
+
+        let relational_patterns = vec![
+            // Multi-word patterns (longest first)
+            rel("est similaire à", "similar-to", 0.85),
+            rel("est similaire a", "similar-to", 0.85),  // without accent
+            rel("se trouve dans", "located-in", 0.90),
+            rel("est composé de", "composed-of", 0.85),
+            rel("est compose de", "composed-of", 0.85),  // without accent
+            rel("fait partie de", "part-of", 0.90),
+            rel("dépend de", "depends-on", 0.85),
+            rel("depend de", "depends-on", 0.85),  // without accent
+            // 2-word patterns
+            rel("est un", "is-a", 0.90),
+            rel("est une", "is-a", 0.90),
+            rel("a un", "has-a", 0.85),
+            rel("a une", "has-a", 0.85),
+            // Single patterns
+            rel("contient", "contains", 0.85),
+            rel("cause", "causes", 0.85),
+            rel("définit", "defines", 0.85),
+            rel("definit", "defines", 0.85),  // without accent
+        ];
+
+        let question_words = vec![
+            "que".into(), "qui".into(), "où".into(), "quand".into(),
+            "comment".into(), "pourquoi".into(), "quel".into(), "quelle".into(),
+            "quels".into(), "quelles".into(), "est-ce".into(),
+        ];
+
+        let goal_verbs = vec![
+            "trouver".into(), "découvrir".into(), "explorer".into(),
+            "analyser".into(), "déterminer".into(), "identifier".into(),
+            "classifier".into(),
+        ];
+
+        let commands = vec![
+            ("help".into(), CommandKind::Help),
+            ("?".into(), CommandKind::Help),
+            ("status".into(), CommandKind::ShowStatus),
+        ];
+
+        Self {
+            void_words,
+            relational_patterns,
+            question_words,
+            goal_verbs,
+            commands,
+        }
+    }
+
+    /// Build the Spanish lexicon.
+    ///
+    /// Relational patterns map to the same canonical predicates as English.
+    pub fn default_spanish() -> Self {
+        let void_words = vec![
+            "el".into(), "la".into(), "los".into(), "las".into(),
+            "un".into(), "una".into(), "unos".into(), "unas".into(),
+            "del".into(), "de".into(), "al".into(),
+        ];
+
+        let relational_patterns = vec![
+            // Multi-word patterns (longest first)
+            rel("es similar a", "similar-to", 0.85),
+            rel("se encuentra en", "located-in", 0.90),
+            rel("está compuesto de", "composed-of", 0.85),
+            rel("esta compuesto de", "composed-of", 0.85),  // without accent
+            rel("es parte de", "part-of", 0.90),
+            rel("depende de", "depends-on", 0.85),
+            // 2-word patterns
+            rel("es un", "is-a", 0.90),
+            rel("es una", "is-a", 0.90),
+            rel("tiene un", "has-a", 0.85),
+            rel("tiene una", "has-a", 0.85),
+            // Single patterns
+            rel("contiene", "contains", 0.85),
+            rel("causa", "causes", 0.85),
+            rel("tiene", "has-a", 0.80),
+            rel("define", "defines", 0.85),
+        ];
+
+        let question_words = vec![
+            "qué".into(), "que".into(), "quién".into(), "quien".into(),
+            "dónde".into(), "donde".into(), "cuándo".into(), "cuando".into(),
+            "cómo".into(), "como".into(), "por qué".into(),
+        ];
+
+        let goal_verbs = vec![
+            "encontrar".into(), "descubrir".into(), "explorar".into(),
+            "analizar".into(), "determinar".into(), "identificar".into(),
+            "clasificar".into(),
+        ];
+
+        let commands = vec![
+            ("help".into(), CommandKind::Help),
+            ("?".into(), CommandKind::Help),
+            ("status".into(), CommandKind::ShowStatus),
         ];
 
         Self {
@@ -252,6 +542,35 @@ fn extract_number(input: &str) -> Option<usize> {
 ///
 /// If `registry`, `ops`, and `item_memory` are provided, performs symbol
 /// resolution. Otherwise, all tokens are `Unresolved`.
+/// Check if a character is a punctuation mark that should be stripped from tokens.
+///
+/// Handles ASCII punctuation as well as Arabic, CJK, and typographic punctuation.
+fn is_strippable_punctuation(c: char) -> bool {
+    matches!(c,
+        '.' | ',' | '!' | ';' | ':' | '?' |
+        // Arabic punctuation
+        '\u{061F}' |  // ؟ Arabic question mark
+        '\u{061B}' |  // ؛ Arabic semicolon
+        '\u{06D4}' |  // ۔ Arabic full stop
+        '\u{060C}' |  // ، Arabic comma
+        // Guillemets and smart quotes
+        '\u{00AB}' |  // « left guillemet
+        '\u{00BB}' |  // » right guillemet
+        '\u{201C}' |  // " left double quote
+        '\u{201D}' |  // " right double quote
+        '\u{2018}' |  // ' left single quote
+        '\u{2019}' |  // ' right single quote
+        // CJK punctuation
+        '\u{FF0C}' |  // ， fullwidth comma
+        '\u{3002}' |  // 。 ideographic full stop
+        '\u{FF01}' |  // ！ fullwidth exclamation
+        '\u{FF1F}' |  // ？ fullwidth question mark
+        // Spanish inverted punctuation
+        '\u{00A1}' |  // ¡ inverted exclamation
+        '\u{00BF}'    // ¿ inverted question mark
+    )
+}
+
 pub fn tokenize(
     input: &str,
     registry: Option<&SymbolRegistry>,
@@ -259,7 +578,8 @@ pub fn tokenize(
     item_memory: Option<&ItemMemory>,
     lexicon: &Lexicon,
 ) -> Vec<Token> {
-    let trimmed = input.trim();
+    use unicode_normalization::UnicodeNormalization;
+    let trimmed: String = input.trim().nfc().collect();
     if trimmed.is_empty() {
         return Vec::new();
     }
@@ -273,8 +593,10 @@ pub fn tokenize(
         let start = trimmed[pos..].find(word).map(|i| i + pos).unwrap_or(pos);
         let end = start + word.len();
 
-        // Strip trailing punctuation (but preserve it for later)
-        let clean = word.trim_end_matches(|c: char| c == '.' || c == ',' || c == '!' || c == ';');
+        // Strip trailing punctuation (Unicode-aware)
+        let clean = word.trim_end_matches(is_strippable_punctuation);
+        // Also strip leading inverted punctuation (Spanish ¡¿)
+        let clean = clean.trim_start_matches(is_strippable_punctuation);
 
         raw_tokens.push(Token {
             surface: clean.to_string(),
