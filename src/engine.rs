@@ -12,6 +12,9 @@ use crate::error::{AkhResult, EngineError, ProvenanceError, ReasonError, SymbolE
 use crate::grammar::abs::AbsTree;
 use crate::grammar::concrete::{ConcreteGrammar, LinContext, ParseContext};
 use crate::grammar::custom::CustomGrammar;
+use crate::grammar::entity_resolution::{
+    EntityResolver, EquivalenceStats, LearnedEquivalence,
+};
 use crate::grammar::error::GrammarResult;
 use crate::grammar::lexer::Language;
 use crate::grammar::parser::{parse_prose, ParseResult};
@@ -83,6 +86,7 @@ pub struct Engine {
     provenance_ledger: Option<ProvenanceLedger>,
     skill_manager: Option<SkillManager>,
     grammar_registry: GrammarRegistry,
+    entity_resolver: EntityResolver,
 }
 
 impl Engine {
@@ -189,6 +193,9 @@ impl Engine {
 
         let grammar_registry = GrammarRegistry::new();
 
+        // Restore learned equivalences from persistent storage.
+        let entity_resolver = EntityResolver::load_from_store(&store);
+
         Ok(Self {
             config,
             ops,
@@ -201,6 +208,7 @@ impl Engine {
             provenance_ledger,
             skill_manager,
             grammar_registry,
+            entity_resolver,
         })
     }
 
@@ -851,6 +859,57 @@ impl Engine {
     }
 
     // -----------------------------------------------------------------------
+    // Equivalence learning
+    // -----------------------------------------------------------------------
+
+    /// Run all equivalence learning strategies on current engine state.
+    ///
+    /// Discovers new cross-lingual mappings from KG structure and VSA
+    /// similarity, then persists results to the durable store.
+    /// Returns the number of new equivalences discovered.
+    pub fn learn_equivalences(&mut self) -> AkhResult<usize> {
+        let total = self.entity_resolver.learn_from_kg(
+            &self.knowledge_graph,
+            &self.registry,
+        ) + self.entity_resolver.learn_from_vsa(
+            &self.ops,
+            &self.item_memory,
+            &self.registry,
+            0.65,
+        );
+
+        self.entity_resolver.persist_to_store(&self.store)?;
+        Ok(total)
+    }
+
+    /// Get equivalence statistics.
+    pub fn equivalence_stats(&self) -> EquivalenceStats {
+        self.entity_resolver.stats()
+    }
+
+    /// Export all learned equivalences.
+    pub fn export_equivalences(&self) -> Vec<LearnedEquivalence> {
+        self.entity_resolver.export_learned()
+    }
+
+    /// Import equivalences and persist to durable store.
+    pub fn import_equivalences(&mut self, equivs: &[LearnedEquivalence]) -> AkhResult<()> {
+        self.entity_resolver.import_equivalences(equivs);
+        self.entity_resolver.persist_to_store(&self.store)?;
+        Ok(())
+    }
+
+    /// Get a reference to the entity resolver.
+    pub fn entity_resolver(&self) -> &EntityResolver {
+        &self.entity_resolver
+    }
+
+    /// Get a mutable reference to the entity resolver.
+    pub fn entity_resolver_mut(&mut self) -> &mut EntityResolver {
+        &mut self.entity_resolver
+    }
+
+    // -----------------------------------------------------------------------
     // Grammar API
     // -----------------------------------------------------------------------
 
@@ -1095,7 +1154,7 @@ impl Engine {
         }
     }
 
-    /// Persist current state (registry, allocator, knowledge graph → SPARQL).
+    /// Persist current state (registry, allocator, equivalences, knowledge graph → SPARQL).
     pub fn persist(&self) -> AkhResult<()> {
         // Persist symbol registry.
         self.registry.persist(&self.store)?;
@@ -1108,6 +1167,9 @@ impl Engine {
             }
         })?;
         self.store.put_meta(b"sym_allocator_next", &encoded)?;
+
+        // Persist learned equivalences.
+        self.entity_resolver.persist_to_store(&self.store)?;
 
         // Sync knowledge graph to SPARQL store.
         if let Some(ref sparql) = self.sparql {
@@ -1166,6 +1228,7 @@ impl std::fmt::Debug for Engine {
             .field("item_memory", &self.item_memory)
             .field("knowledge_graph", &self.knowledge_graph)
             .field("registry", &self.registry)
+            .field("learned_equivalences", &self.entity_resolver.learned_count())
             .finish()
     }
 }

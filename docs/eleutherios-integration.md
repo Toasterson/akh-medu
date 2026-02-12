@@ -134,6 +134,10 @@ For network-accessible integration (e.g., Eleutherios calling akh-medu over HTTP
 | `GET` | `/health` | Status, version, supported languages |
 | `GET` | `/languages` | List languages with pattern counts |
 | `POST` | `/preprocess` | Pre-process text chunks |
+| `GET` | `/equivalences` | List all learned equivalences |
+| `GET` | `/equivalences/stats` | Equivalence counts by source |
+| `POST` | `/equivalences/learn` | Run learning strategies |
+| `POST` | `/equivalences/import` | Import equivalences from JSON |
 
 **POST /preprocess:**
 
@@ -205,6 +209,149 @@ under a canonical English label:
 
 The static equivalence table covers ~120 entries: countries, capitals, major
 organizations, and common domain terms (e.g., "mammal"/"млекопитающее"/"mammifère").
+
+### Dynamic Equivalence Learning
+
+Beyond the static table, akh-medu can **discover new equivalences dynamically**
+using three learning strategies. Discovered mappings persist across sessions via
+the durable store (redb).
+
+#### 4-Tier Resolution Order
+
+When resolving an entity, the resolver checks in this order:
+
+1. **Runtime aliases** — hot in-memory mappings added during the current session
+2. **Learned equivalences** — persisted mappings discovered by learning strategies
+3. **Static equivalence table** — ~120 hand-curated entries compiled into the binary
+4. **Fallback** — return the surface form unchanged
+
+Learned equivalences override the static table, allowing domain-specific corrections.
+
+#### Strategy 1: KG Structural Fingerprints
+
+Two entities in different languages that share identical relational patterns are
+likely the same concept.
+
+**How it works:**
+1. For each unresolved entity `e`, collect its "relational fingerprint": the set
+   of `(predicate, resolved_object)` tuples from the knowledge graph
+2. For each already-resolved entity `c`, collect its fingerprint too
+3. If `e` and `c` share >= 1 fingerprint tuple, propose `e -> c` with confidence
+   based on the overlap ratio
+
+**Example:** If the KG has `("собака", is-a, "млекопитающее")` and
+`("Dog", is-a, "mammal")`, and "млекопитающее" already resolves to "mammal",
+then "собака" structurally maps to "Dog".
+
+#### Strategy 2: VSA Similarity
+
+Hypervector encodings capture distributional similarity. For Latin-script
+near-matches (programme/program, organisation/organization) and transliterated
+names, VSA similarity catches what string matching misses.
+
+**How it works:**
+1. For each unresolved entity, encode its label as a hypervector
+2. Search item memory for the 5 nearest neighbors
+3. For results above the similarity threshold (>= 0.65), check if the matched
+   symbol resolves to a known canonical
+4. If yes, propose the equivalence with confidence = similarity score
+
+#### Strategy 3: Parallel Chunk Co-occurrence
+
+When Eleutherios sends parallel translations of the same content, entities at
+corresponding positions are likely equivalent.
+
+**How it works:**
+1. Group chunks by shared `chunk_id` prefix (e.g., `"doc1_en"` and `"doc1_ru"`
+   share prefix `"doc1"`)
+2. For each group with different languages, align entities by extraction order
+3. For entities at the same index across languages, propose equivalence
+
+**Chunk ID convention:** Use `{document_id}_{language_code}` format:
+```json
+{"id": "vol9-ch3_en", "text": "The archetype is a universal pattern.", "language": "en"}
+{"id": "vol9-ch3_ru", "text": "Архетип является универсальным паттерном.", "language": "ru"}
+```
+
+#### CLI Commands
+
+```bash
+# List all learned equivalences
+akh-medu equivalences list
+
+# Show counts by source (kg-structural, vsa-similarity, co-occurrence, manual)
+akh-medu equivalences stats
+
+# Run all learning strategies on current engine state
+akh-medu equivalences learn
+
+# Export to JSON for manual curation
+akh-medu equivalences export > equivalences.json
+
+# Import curated equivalences
+akh-medu equivalences import < equivalences.json
+```
+
+#### HTTP API
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/equivalences` | List all learned equivalences |
+| `GET` | `/equivalences/stats` | Counts by source |
+| `POST` | `/equivalences/learn` | Trigger learning, returns `{ discovered, total_learned }` |
+| `POST` | `/equivalences/import` | Bulk import from JSON body |
+
+**Example — trigger learning:**
+
+```bash
+curl -X POST http://localhost:8200/equivalences/learn
+# => {"discovered": 5, "total_learned": 12}
+```
+
+**Example — import curated equivalences:**
+
+```bash
+curl -X POST http://localhost:8200/equivalences/import \
+  -H 'Content-Type: application/json' \
+  -d '[
+    {"canonical": "Archetype", "surface": "архетип", "source_language": "ru", "confidence": 0.95, "source": "Manual"},
+    {"canonical": "Shadow", "surface": "тень", "source_language": "ru", "confidence": 0.95, "source": "Manual"}
+  ]'
+```
+
+#### Seeding Domain-Specific Equivalences
+
+For specialized corpora (e.g., Jungian psychology across languages), you can
+seed the equivalence table with domain terms:
+
+```json
+[
+  {"canonical": "archetype", "surface": "архетип", "source_language": "ru", "confidence": 1.0, "source": "Manual"},
+  {"canonical": "collective unconscious", "surface": "коллективное бессознательное", "source_language": "ru", "confidence": 1.0, "source": "Manual"},
+  {"canonical": "individuation", "surface": "индивидуация", "source_language": "ru", "confidence": 1.0, "source": "Manual"},
+  {"canonical": "shadow", "surface": "тень", "source_language": "ru", "confidence": 1.0, "source": "Manual"},
+  {"canonical": "anima", "surface": "анима", "source_language": "ru", "confidence": 1.0, "source": "Manual"},
+  {"canonical": "persona", "surface": "персона", "source_language": "ru", "confidence": 1.0, "source": "Manual"}
+]
+```
+
+Save as `jungian-terms.json` and import:
+
+```bash
+akh-medu equivalences import < jungian-terms.json
+```
+
+#### Equivalence Sources
+
+Each learned equivalence records how it was discovered:
+
+| Source | Description |
+|--------|-------------|
+| `Static` | From the compiled-in equivalence table |
+| `KgStructural` | Discovered by matching KG relational fingerprints |
+| `VsaSimilarity` | Discovered by hypervector distributional similarity |
+| `CoOccurrence` | Discovered from parallel chunk position correlation |
+| `Manual` | User-added via CLI or API import |
 
 ---
 

@@ -1,9 +1,13 @@
 //! akh-medu pre-processor HTTP server for the Eleutherios integration.
 //!
-//! Provides three endpoints:
+//! Provides endpoints for text preprocessing and equivalence management:
 //! - `POST /preprocess` — accepts `{ chunks: [{ id, text, language? }] }`, returns structured output
 //! - `GET /health` — status, version, supported languages
 //! - `GET /languages` — list languages with pattern counts
+//! - `GET /equivalences` — list all learned equivalences
+//! - `GET /equivalences/stats` — counts by source
+//! - `POST /equivalences/learn` — trigger learning, return new count
+//! - `POST /equivalences/import` — bulk import from JSON body
 //!
 //! Build and run with: `cargo run --features server --bin akh-medu-server`
 
@@ -15,9 +19,13 @@ use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Serialize;
+use tokio::sync::RwLock;
 
 use akh_medu::engine::{Engine, EngineConfig};
 use akh_medu::grammar::concrete::ParseContext;
+use akh_medu::grammar::entity_resolution::{
+    EquivalenceStats, LearnedEquivalence,
+};
 use akh_medu::grammar::lexer::Language;
 use akh_medu::grammar::preprocess::{
     preprocess_batch, PreProcessRequest, PreProcessResponse,
@@ -25,7 +33,7 @@ use akh_medu::grammar::preprocess::{
 use akh_medu::vsa::Dimension;
 
 struct AppState {
-    engine: Engine,
+    engine: RwLock<Engine>,
 }
 
 #[derive(Serialize)]
@@ -45,6 +53,17 @@ struct LanguageInfo {
 #[derive(Serialize)]
 struct LanguagesResponse {
     languages: Vec<LanguageInfo>,
+}
+
+#[derive(Serialize)]
+struct LearnResponse {
+    discovered: usize,
+    total_learned: usize,
+}
+
+#[derive(Serialize)]
+struct ImportResponse {
+    imported: usize,
 }
 
 async fn health() -> Json<HealthResponse> {
@@ -92,10 +111,11 @@ async fn preprocess(
     State(state): State<Arc<AppState>>,
     Json(request): Json<PreProcessRequest>,
 ) -> Result<Json<PreProcessResponse>, (StatusCode, String)> {
+    let engine = state.engine.read().await;
     let ctx = ParseContext::with_engine(
-        state.engine.registry(),
-        state.engine.ops(),
-        state.engine.item_memory(),
+        engine.registry(),
+        engine.ops(),
+        engine.item_memory(),
     );
 
     let start = Instant::now();
@@ -106,6 +126,46 @@ async fn preprocess(
         results,
         processing_time_ms: elapsed,
     }))
+}
+
+async fn equivalences_list(
+    State(state): State<Arc<AppState>>,
+) -> Json<Vec<LearnedEquivalence>> {
+    let engine = state.engine.read().await;
+    Json(engine.export_equivalences())
+}
+
+async fn equivalences_stats(
+    State(state): State<Arc<AppState>>,
+) -> Json<EquivalenceStats> {
+    let engine = state.engine.read().await;
+    Json(engine.equivalence_stats())
+}
+
+async fn equivalences_learn(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<LearnResponse>, (StatusCode, String)> {
+    let mut engine = state.engine.write().await;
+    let discovered = engine.learn_equivalences().map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, format!("learning failed: {e}"))
+    })?;
+    let stats = engine.equivalence_stats();
+    Ok(Json(LearnResponse {
+        discovered,
+        total_learned: stats.learned_total,
+    }))
+}
+
+async fn equivalences_import(
+    State(state): State<Arc<AppState>>,
+    Json(equivs): Json<Vec<LearnedEquivalence>>,
+) -> Result<Json<ImportResponse>, (StatusCode, String)> {
+    let count = equivs.len();
+    let mut engine = state.engine.write().await;
+    engine.import_equivalences(&equivs).map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, format!("import failed: {e}"))
+    })?;
+    Ok(Json(ImportResponse { imported: count }))
 }
 
 #[tokio::main]
@@ -125,12 +185,18 @@ async fn main() {
     let engine = Engine::new(config).expect("failed to initialize engine");
     tracing::info!("akh-medu pre-processor engine initialized");
 
-    let state = Arc::new(AppState { engine });
+    let state = Arc::new(AppState {
+        engine: RwLock::new(engine),
+    });
 
     let app = Router::new()
         .route("/health", get(health))
         .route("/languages", get(languages))
         .route("/preprocess", post(preprocess))
+        .route("/equivalences", get(equivalences_list))
+        .route("/equivalences/stats", get(equivalences_stats))
+        .route("/equivalences/learn", post(equivalences_learn))
+        .route("/equivalences/import", post(equivalences_import))
         .with_state(state);
 
     let bind = "0.0.0.0:8200";

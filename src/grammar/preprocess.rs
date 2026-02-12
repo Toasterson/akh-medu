@@ -119,7 +119,18 @@ fn infer_entity_type(predicate: &str, is_subject: bool) -> &'static str {
 /// Pre-process a single text chunk into structured output.
 ///
 /// Uses the grammar parser with auto-detection or an explicit language hint.
+/// Accepts an optional `EntityResolver` for cross-lingual resolution with
+/// learned equivalences. If `None`, creates a default (empty) resolver.
 pub fn preprocess_chunk(chunk: &TextChunk, ctx: &ParseContext) -> PreProcessorOutput {
+    preprocess_chunk_with_resolver(chunk, ctx, &EntityResolver::new())
+}
+
+/// Pre-process a single text chunk with an explicit entity resolver.
+pub fn preprocess_chunk_with_resolver(
+    chunk: &TextChunk,
+    ctx: &ParseContext,
+    resolver: &EntityResolver,
+) -> PreProcessorOutput {
     let lang_hint = chunk
         .language
         .as_deref()
@@ -174,7 +185,6 @@ pub fn preprocess_chunk(chunk: &TextChunk, ctx: &ParseContext) -> PreProcessorOu
     }
 
     // Run entity resolution (cross-lingual alias matching + dedup)
-    let resolver = EntityResolver::new();
     resolver.resolve_entities(&mut entities);
 
     PreProcessorOutput {
@@ -205,6 +215,31 @@ pub fn preprocess_mixed_corpus(text: &str, ctx: &ParseContext) -> Vec<PreProcess
 /// Pre-process a batch of chunks.
 pub fn preprocess_batch(chunks: &[TextChunk], ctx: &ParseContext) -> Vec<PreProcessorOutput> {
     chunks.iter().map(|chunk| preprocess_chunk(chunk, ctx)).collect()
+}
+
+/// Pre-process a batch of chunks with an explicit entity resolver.
+pub fn preprocess_batch_with_resolver(
+    chunks: &[TextChunk],
+    ctx: &ParseContext,
+    resolver: &EntityResolver,
+) -> Vec<PreProcessorOutput> {
+    chunks.iter()
+        .map(|chunk| preprocess_chunk_with_resolver(chunk, ctx, resolver))
+        .collect()
+}
+
+/// Pre-process a batch and then run co-occurrence learning on the results.
+///
+/// Returns the preprocessor outputs and the number of new equivalences
+/// discovered from parallel chunk alignment.
+pub fn preprocess_batch_with_learning(
+    chunks: &[TextChunk],
+    ctx: &ParseContext,
+    resolver: &mut EntityResolver,
+) -> (Vec<PreProcessorOutput>, usize) {
+    let outputs = preprocess_batch_with_resolver(chunks, ctx, resolver);
+    let discovered = resolver.learn_from_parallel_chunks(&outputs);
+    (outputs, discovered)
 }
 
 /// Extract entities and claims from an AbsTree node.

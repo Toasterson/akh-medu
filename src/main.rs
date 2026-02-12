@@ -306,6 +306,12 @@ enum Commands {
         #[arg(long)]
         language: Option<String>,
     },
+
+    /// Manage cross-lingual equivalence mappings.
+    Equivalences {
+        #[command(subcommand)]
+        action: EquivalenceAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -592,6 +598,20 @@ enum GrammarAction {
         #[arg(long, default_value = "20")]
         max_triples: usize,
     },
+}
+
+#[derive(Subcommand)]
+enum EquivalenceAction {
+    /// List all learned equivalences.
+    List,
+    /// Show equivalence statistics (counts by source).
+    Stats,
+    /// Run all learning strategies to discover new equivalences.
+    Learn,
+    /// Export learned equivalences as JSON to stdout.
+    Export,
+    /// Import equivalences from JSON on stdin.
+    Import,
 }
 
 fn main() -> Result<()> {
@@ -3279,6 +3299,62 @@ fn main() -> Result<()> {
                     let result = preprocess_chunk(&chunk, &ctx);
                     serde_json::to_writer(&mut out, &result).into_diagnostic()?;
                     writeln!(out).into_diagnostic()?;
+                }
+            }
+        }
+
+        Commands::Equivalences { action } => {
+            let mut engine = Engine::new(config).into_diagnostic()?;
+
+            match action {
+                EquivalenceAction::List => {
+                    let equivs = engine.export_equivalences();
+                    if equivs.is_empty() {
+                        println!("No learned equivalences yet. Run `equivalences learn` to discover some.");
+                    } else {
+                        println!("{:<30} {:<30} {:<8} {:<6} {}", "Surface", "Canonical", "Lang", "Conf", "Source");
+                        println!("{}", "-".repeat(90));
+                        for e in &equivs {
+                            println!(
+                                "{:<30} {:<30} {:<8} {:<6.2} {}",
+                                e.surface, e.canonical, e.source_language, e.confidence, e.source,
+                            );
+                        }
+                        println!("\nTotal: {} learned equivalences", equivs.len());
+                    }
+                }
+                EquivalenceAction::Stats => {
+                    let stats = engine.equivalence_stats();
+                    println!("Equivalence statistics:");
+                    println!("  runtime aliases:  {}", stats.runtime_aliases);
+                    println!("  learned total:    {}", stats.learned_total);
+                    println!("    kg-structural:  {}", stats.kg_structural);
+                    println!("    vsa-similarity: {}", stats.vsa_similarity);
+                    println!("    co-occurrence:  {}", stats.co_occurrence);
+                    println!("    manual:         {}", stats.manual);
+                }
+                EquivalenceAction::Learn => {
+                    let count = engine.learn_equivalences().into_diagnostic()?;
+                    println!("Discovered {count} new equivalences.");
+                    let stats = engine.equivalence_stats();
+                    println!("Total learned: {}", stats.learned_total);
+                }
+                EquivalenceAction::Export => {
+                    use std::io::Write as _;
+                    let equivs = engine.export_equivalences();
+                    let json = serde_json::to_string_pretty(&equivs).into_diagnostic()?;
+                    std::io::stdout().write_all(json.as_bytes()).into_diagnostic()?;
+                    std::io::stdout().write_all(b"\n").into_diagnostic()?;
+                }
+                EquivalenceAction::Import => {
+                    use std::io::Read as _;
+                    let mut input = String::new();
+                    std::io::stdin().read_to_string(&mut input).into_diagnostic()?;
+                    let equivs: Vec<akh_medu::grammar::entity_resolution::LearnedEquivalence> =
+                        serde_json::from_str(&input).into_diagnostic()?;
+                    let count = equivs.len();
+                    engine.import_equivalences(&equivs).into_diagnostic()?;
+                    println!("Imported {count} equivalences.");
                 }
             }
         }

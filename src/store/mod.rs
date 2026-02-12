@@ -126,6 +126,17 @@ impl TieredStore {
             None => Ok(None),
         }
     }
+
+    /// Scan all keys with the given prefix from the durable tier.
+    ///
+    /// Returns `(key, value)` pairs. Returns an empty vec if no durable
+    /// backend is configured.
+    pub fn scan_prefix(&self, prefix: &[u8]) -> StoreResult<Vec<(Vec<u8>, Vec<u8>)>> {
+        match &self.durable {
+            Some(d) => d.scan_prefix(prefix),
+            None => Ok(vec![]),
+        }
+    }
 }
 
 #[cfg(test)]
