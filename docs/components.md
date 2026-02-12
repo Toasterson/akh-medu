@@ -19,7 +19,10 @@
 | Reasoning (egg) | Implemented | `reason` | egg | AkhLang, built-in rewrite rules, equality saturation |
 | Engine facade | Implemented | `engine` | — | Top-level API, owns all subsystems |
 | CLI | Implemented | `main` | clap, miette | init, ingest, query, info subcommands |
-| Provenance | Stub | `provenance` | — | Types defined, ledger pending (Phase 2) |
-| Inference | Stub | `infer` | — | Query/result types defined, engine pending (Phase 2) |
-| Pipeline | Stub | `pipeline` | — | Stage types defined, DAG execution pending (Phase 2) |
-| Skills | Stub | `skills` | — | Manifest/state types defined, manager pending (Phase 3) |
+| Provenance | Implemented | `provenance` | redb, bincode | Persistent ledger with 4 redb tables, multi-index (derived/source/kind), batch ops |
+| Inference | Implemented | `infer` | egg | Spreading activation, backward chaining, superposition reasoning, VSA recovery, e-graph verification |
+| Pipeline | Implemented | `pipeline` | egg | Linear stage pipeline (Retrieve → Infer → Reason → Extract), built-in query/ingest pipelines |
+| Skills | Implemented | `skills` | egg, serde_json | MoE-style skillpacks with Cold/Warm/Hot lifecycle, memory budgets, dynamic rule compilation |
+| Graph analytics | Implemented | `graph::analytics` | petgraph | Degree centrality, PageRank, strongly connected components |
+| Agent | Implemented | `agent` | — | OODA loop, 9 tools, planning/reflection, session persistence, REPL mode |
+| Autonomous cycle | Implemented | `autonomous` | — | Symbol grounding, superposition inference, confidence fusion, KG commit |
