@@ -152,6 +152,7 @@ impl KnowledgeGraph {
                     confidence: edge.confidence,
                     timestamp: edge.timestamp,
                     provenance_id: edge.provenance_id,
+                    compartment_id: edge.compartment_id.clone(),
                 })
             })
             .collect()
@@ -177,6 +178,7 @@ impl KnowledgeGraph {
                     confidence: edge.confidence,
                     timestamp: edge.timestamp,
                     provenance_id: edge.provenance_id,
+                    compartment_id: edge.compartment_id.clone(),
                 })
             })
             .collect()
@@ -267,6 +269,7 @@ impl KnowledgeGraph {
                     confidence: edge.confidence,
                     timestamp: edge.timestamp,
                     provenance_id: edge.provenance_id,
+                    compartment_id: edge.compartment_id.clone(),
                 })
             })
             .collect()

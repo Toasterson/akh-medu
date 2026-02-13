@@ -87,6 +87,7 @@ pub struct Engine {
     skill_manager: Option<SkillManager>,
     grammar_registry: GrammarRegistry,
     entity_resolver: EntityResolver,
+    compartment_manager: Option<crate::compartment::CompartmentManager>,
 }
 
 impl Engine {
@@ -196,6 +197,16 @@ impl Engine {
         // Restore learned equivalences from persistent storage.
         let entity_resolver = EntityResolver::load_from_store(&store);
 
+        // Initialize compartment manager if data_dir has a compartments/ subdir.
+        let compartment_manager = config.data_dir.as_ref().map(|dir| {
+            let compartments_dir = dir.join("compartments");
+            let mgr = crate::compartment::CompartmentManager::new(compartments_dir);
+            if let Err(e) = mgr.discover() {
+                tracing::debug!(error = %e, "compartment discovery skipped");
+            }
+            mgr
+        });
+
         Ok(Self {
             config,
             ops,
@@ -209,6 +220,7 @@ impl Engine {
             skill_manager,
             grammar_registry,
             entity_resolver,
+            compartment_manager,
         })
     }
 
@@ -1131,6 +1143,11 @@ impl Engine {
         &self.config
     }
 
+    /// Get the compartment manager (if data_dir is configured).
+    pub fn compartments(&self) -> Option<&crate::compartment::CompartmentManager> {
+        self.compartment_manager.as_ref()
+    }
+
     /// Get system info (node count, triple count, symbol count, etc.)
     pub fn info(&self) -> EngineInfo {
         let provenance_count = self
@@ -1229,6 +1246,7 @@ impl std::fmt::Debug for Engine {
             .field("knowledge_graph", &self.knowledge_graph)
             .field("registry", &self.registry)
             .field("learned_equivalences", &self.entity_resolver.learned_count())
+            .field("compartment_manager", &self.compartment_manager)
             .finish()
     }
 }

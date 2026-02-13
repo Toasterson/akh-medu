@@ -181,7 +181,13 @@ pub fn synthesize(
     engine: &crate::engine::Engine,
     llm: Option<&OllamaClient>,
 ) -> NarrativeSummary {
-    synthesize_with_grammar(goal, entries, engine, llm, "narrative")
+    // Use the persona's grammar preference if the psyche compartment is loaded.
+    let grammar_name = engine
+        .compartments()
+        .and_then(|mgr| mgr.psyche())
+        .map(|p| p.persona.grammar_preference.clone())
+        .unwrap_or_else(|| "narrative".to_string());
+    synthesize_with_grammar(goal, entries, engine, llm, &grammar_name)
 }
 
 /// Synthesize with a specific grammar archetype (formal, terse, narrative, or custom).

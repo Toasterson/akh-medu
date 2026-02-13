@@ -265,6 +265,7 @@ fn decide(
         orientation,
         &agent.engine,
         &agent.working_memory,
+        agent.psyche.as_ref(),
     );
 
     // Record decision in WM.
@@ -378,6 +379,8 @@ struct ToolCandidate {
     episodic_bonus: f32,
     /// Bonus for being appropriate given memory pressure [0.0, 0.2].
     pressure_bonus: f32,
+    /// Bonus from the Jungian psyche archetype weights.
+    archetype_bonus: f32,
     /// Why this tool was considered.
     reasoning: String,
 }
@@ -385,7 +388,7 @@ struct ToolCandidate {
 impl ToolCandidate {
     fn total_score(&self) -> f32 {
         (self.base_score - self.recency_penalty + self.novelty_bonus
-            + self.episodic_bonus + self.pressure_bonus)
+            + self.episodic_bonus + self.pressure_bonus + self.archetype_bonus)
             .max(0.0)
     }
 
@@ -398,6 +401,7 @@ impl ToolCandidate {
             novelty_bonus: 0.0,
             episodic_bonus: 0.0,
             pressure_bonus: 0.0,
+            archetype_bonus: 0.0,
             reasoning,
         }
     }
@@ -504,6 +508,7 @@ fn select_tool(
     orientation: &Orientation,
     engine: &crate::engine::Engine,
     working_memory: &WorkingMemory,
+    psyche: Option<&crate::compartment::psyche::Psyche>,
 ) -> (String, ToolInput, String) {
     let history = GoalToolHistory::from_working_memory(working_memory, goal.symbol_id);
     let episodic_tools = extract_episodic_tool_hints(&observation.recalled_episodes);
@@ -824,6 +829,13 @@ fn select_tool(
         }
     }
 
+    // Apply psyche archetype bonus if available.
+    if let Some(psyche) = psyche {
+        for candidate in &mut candidates {
+            candidate.archetype_bonus = psyche.archetype_bias(&candidate.name);
+        }
+    }
+
     // Pick the highest-scored candidate.
     candidates.sort_by(|a, b| {
         b.total_score()
@@ -834,7 +846,7 @@ fn select_tool(
     if let Some(best) = candidates.into_iter().next() {
         let score = best.total_score();
         let reasoning = format!(
-            "{} [score={:.2}: base={:.2} recency=-{:.2} novelty=+{:.2} episodic=+{:.2} pressure=+{:.2}]",
+            "{} [score={:.2}: base={:.2} recency=-{:.2} novelty=+{:.2} episodic=+{:.2} pressure=+{:.2} archetype={:+.3}]",
             best.reasoning,
             score,
             best.base_score,
@@ -842,6 +854,7 @@ fn select_tool(
             best.novelty_bonus,
             best.episodic_bonus,
             best.pressure_bonus,
+            best.archetype_bonus,
         );
         (best.name, best.input, reasoning)
     } else {
@@ -858,6 +871,79 @@ fn select_tool(
 
 /// Act: execute the selected tool and update goal status.
 fn act(agent: &mut Agent, decision: &Decision, cycle: u64) -> AgentResult<ActionResult> {
+    // Shadow veto check: if the psyche vetoes this action, block it.
+    if let Some(ref psyche) = agent.psyche {
+        let action_desc = format!(
+            "tool={} input={:?}",
+            decision.chosen_tool, decision.tool_input
+        );
+        if let Some(veto) = psyche.check_shadow_veto(&action_desc) {
+            // Clone veto data before releasing the immutable borrow.
+            let veto_name = veto.name.clone();
+            let veto_explanation = veto.explanation.clone();
+            let veto_severity = veto.severity;
+
+            // Record provenance for the veto.
+            let mut prov = ProvenanceRecord::new(
+                decision.goal_id,
+                DerivationKind::ShadowVeto {
+                    pattern_name: veto_name.clone(),
+                    severity: veto_severity,
+                },
+            );
+            let _ = agent.engine.store_provenance(&mut prov);
+
+            // Record shadow encounter on psyche.
+            if let Some(ref mut p) = agent.psyche {
+                p.record_shadow_encounter();
+            }
+
+            let veto_output = ToolOutput {
+                result: format!(
+                    "VETOED by Shadow pattern '{}': {}",
+                    veto_name, veto_explanation
+                ),
+                success: false,
+                symbols_involved: Vec::new(),
+            };
+
+            let wm_id = agent
+                .working_memory
+                .push(WorkingMemoryEntry {
+                    id: 0,
+                    content: format!(
+                        "Tool result ({}):\n{}",
+                        decision.chosen_tool, veto_output.result
+                    ),
+                    symbols: vec![decision.goal_id],
+                    kind: WorkingMemoryKind::ToolResult,
+                    timestamp: 0,
+                    relevance: 0.8,
+                    source_cycle: cycle,
+                    reference_count: 0,
+                })
+                .ok();
+
+            return Ok(ActionResult {
+                tool_output: veto_output,
+                goal_progress: GoalProgress::Failed {
+                    reason: format!("Shadow veto: {}", veto_name),
+                },
+                new_wm_entries: wm_id.into_iter().collect(),
+            });
+        }
+
+        // Check shadow bias (non-blocking, just note it in reasoning).
+        let bias = psyche.check_shadow_bias(&action_desc);
+        if bias > 0.0 {
+            tracing::debug!(
+                tool = %decision.chosen_tool,
+                shadow_bias = bias,
+                "Shadow bias applied (non-blocking)"
+            );
+        }
+    }
+
     // Tool errors should NOT be fatal to the OODA loop — convert them into a
     // failed ToolOutput so the agent can adapt (retry, switch tools, etc.).
     let tool_output = match agent.tool_registry.execute(

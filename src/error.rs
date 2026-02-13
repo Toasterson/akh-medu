@@ -68,6 +68,10 @@ pub enum AkhError {
     #[error(transparent)]
     #[diagnostic(transparent)]
     Grammar(#[from] crate::grammar::error::GrammarError),
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Compartment(#[from] crate::compartment::CompartmentError),
 }
 
 // ---------------------------------------------------------------------------

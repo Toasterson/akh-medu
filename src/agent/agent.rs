@@ -120,6 +120,8 @@ pub struct Agent {
     pub(crate) last_reflection: Option<ReflectionResult>,
     /// Optional LLM client for narrative polishing.
     pub(crate) llm_client: Option<super::llm::OllamaClient>,
+    /// Optional Jungian psyche (loaded from the psyche compartment).
+    pub(crate) psyche: Option<crate::compartment::psyche::Psyche>,
 }
 
 impl Agent {
@@ -175,6 +177,11 @@ impl Agent {
         // Try to restore goals from KG.
         let goals = goal::restore_goals(&engine, &predicates).unwrap_or_default();
 
+        // Load psyche from compartment manager if available.
+        let psyche = engine
+            .compartments()
+            .and_then(|cm| cm.psyche());
+
         Ok(Self {
             engine,
             config,
@@ -186,6 +193,7 @@ impl Agent {
             plans: std::collections::HashMap::new(),
             last_reflection: None,
             llm_client: None,
+            psyche,
         })
     }
 
@@ -366,6 +374,16 @@ impl Agent {
     /// Set the optional LLM client for narrative polishing.
     pub fn set_llm_client(&mut self, client: super::llm::OllamaClient) {
         self.llm_client = Some(client);
+    }
+
+    /// Get the agent's psyche (read-only).
+    pub fn psyche(&self) -> Option<&crate::compartment::psyche::Psyche> {
+        self.psyche.as_ref()
+    }
+
+    /// Set or replace the agent's psyche.
+    pub fn set_psyche(&mut self, psyche: crate::compartment::psyche::Psyche) {
+        self.psyche = Some(psyche);
     }
 
     /// Synthesize human-readable narrative from the agent's working memory findings.
@@ -627,6 +645,7 @@ impl Agent {
             &self.goals,
             self.cycle_count,
             &self.config.reflection,
+            self.psyche.as_mut(),
         )?;
 
         // Record reflection in WM.
@@ -730,6 +749,19 @@ impl Agent {
                 message: format!("failed to persist cycle count: {e}"),
             })?;
 
+        // Persist psyche if loaded.
+        if let Some(ref psyche) = self.psyche {
+            let psyche_bytes =
+                bincode::serialize(psyche).map_err(|e| AgentError::ConsolidationFailed {
+                    message: format!("failed to serialize psyche: {e}"),
+                })?;
+            store
+                .put_meta(b"agent:psyche", &psyche_bytes)
+                .map_err(|e| AgentError::ConsolidationFailed {
+                    message: format!("failed to persist psyche: {e}"),
+                })?;
+        }
+
         // Flush the engine's durable store.
         self.engine
             .persist()
@@ -775,6 +807,18 @@ impl Agent {
         // Restore goals from KG.
         let goals = goal::restore_goals(&engine, &predicates).unwrap_or_default();
 
+        // Restore psyche: prefer persisted state, fall back to compartment manager.
+        let psyche = store
+            .get_meta(b"agent:psyche")
+            .ok()
+            .flatten()
+            .and_then(|bytes| bincode::deserialize::<crate::compartment::psyche::Psyche>(&bytes).ok())
+            .or_else(|| {
+                engine
+                    .compartments()
+                    .and_then(|cm| cm.psyche())
+            });
+
         Ok(Self {
             engine,
             config,
@@ -786,6 +830,7 @@ impl Agent {
             plans: std::collections::HashMap::new(),
             last_reflection: None,
             llm_client: None,
+            psyche,
         })
     }
 
@@ -809,6 +854,7 @@ impl std::fmt::Debug for Agent {
             .field("cycle_count", &self.cycle_count)
             .field("active_plans", &self.plans.len())
             .field("has_reflection", &self.last_reflection.is_some())
+            .field("has_psyche", &self.psyche.is_some())
             .finish()
     }
 }

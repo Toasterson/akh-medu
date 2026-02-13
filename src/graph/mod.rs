@@ -31,6 +31,9 @@ pub struct Triple {
     pub timestamp: u64,
     /// Optional provenance ID linking to the provenance ledger.
     pub provenance_id: Option<u64>,
+    /// Optional compartment that owns this triple.
+    #[serde(default)]
+    pub compartment_id: Option<String>,
 }
 
 impl Triple {
@@ -46,6 +49,7 @@ impl Triple {
                 .unwrap_or_default()
                 .as_secs(),
             provenance_id: None,
+            compartment_id: None,
         }
     }
 
@@ -58,6 +62,12 @@ impl Triple {
     /// Set the provenance ID.
     pub fn with_provenance(mut self, provenance_id: u64) -> Self {
         self.provenance_id = Some(provenance_id);
+        self
+    }
+
+    /// Set the compartment that owns this triple.
+    pub fn with_compartment(mut self, compartment_id: String) -> Self {
+        self.compartment_id = Some(compartment_id);
         self
     }
 }
@@ -73,6 +83,9 @@ pub struct EdgeData {
     pub provenance_id: Option<u64>,
     /// Timestamp.
     pub timestamp: u64,
+    /// Optional compartment that owns this edge.
+    #[serde(default)]
+    pub compartment_id: Option<String>,
 }
 
 impl From<&Triple> for EdgeData {
@@ -82,6 +95,7 @@ impl From<&Triple> for EdgeData {
             confidence: t.confidence,
             provenance_id: t.provenance_id,
             timestamp: t.timestamp,
+            compartment_id: t.compartment_id.clone(),
         }
     }
 }

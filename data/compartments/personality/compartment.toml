@@ -1,0 +1,6 @@
+id = "personality"
+name = "Default Personality"
+kind = "Core"
+description = "Default agent personality — Scholar persona with narrative grammar"
+grammar_ref = "narrative"
+tags = ["core", "personality"]

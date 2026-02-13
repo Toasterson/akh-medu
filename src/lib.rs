@@ -31,6 +31,7 @@
 
 pub mod agent;
 pub mod autonomous;
+pub mod compartment;
 pub mod engine;
 pub mod error;
 pub mod export;

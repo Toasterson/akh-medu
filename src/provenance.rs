@@ -105,6 +105,21 @@ pub enum DerivationKind {
     SemanticEnrichment {
         source: String,
     },
+    /// Knowledge loaded from a compartment.
+    CompartmentLoaded {
+        compartment_id: String,
+        source_file: String,
+    },
+    /// An action was vetoed by a Shadow pattern.
+    ShadowVeto {
+        pattern_name: String,
+        severity: f32,
+    },
+    /// The psyche adjusted archetype weights or persona during reflection.
+    PsycheEvolution {
+        trigger: String,
+        cycle: u64,
+    },
 }
 
 impl DerivationKind {
@@ -126,6 +141,9 @@ impl DerivationKind {
             Self::GapIdentified { .. } => 12,
             Self::SchemaDiscovered { .. } => 13,
             Self::SemanticEnrichment { .. } => 14,
+            Self::CompartmentLoaded { .. } => 15,
+            Self::ShadowVeto { .. } => 16,
+            Self::PsycheEvolution { .. } => 17,
         }
     }
 }

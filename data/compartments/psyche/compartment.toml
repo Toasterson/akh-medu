@@ -1,0 +1,5 @@
+id = "psyche"
+name = "Jungian Psyche"
+kind = "Core"
+description = "Agent psyche based on Carl Jung's analytical psychology model"
+tags = ["core", "ethics", "personality", "jungian"]

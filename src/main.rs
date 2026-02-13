@@ -3559,5 +3559,26 @@ fn format_derivation_kind(kind: &DerivationKind, engine: &Engine) -> String {
         DerivationKind::SemanticEnrichment { source } => {
             format!("semantic enrichment [{}]", source)
         }
+        DerivationKind::CompartmentLoaded {
+            compartment_id,
+            source_file,
+        } => {
+            format!(
+                "compartment loaded [{}] from \"{}\"",
+                compartment_id, source_file
+            )
+        }
+        DerivationKind::ShadowVeto {
+            pattern_name,
+            severity,
+        } => {
+            format!(
+                "shadow veto [{}] (severity: {:.2})",
+                pattern_name, severity
+            )
+        }
+        DerivationKind::PsycheEvolution { trigger, cycle } => {
+            format!("psyche evolution [{}] at cycle {}", trigger, cycle)
+        }
     }
 }

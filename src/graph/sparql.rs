@@ -16,6 +16,9 @@ use super::Triple;
 /// IRI namespace for akh-medu symbols.
 const AKH_NS: &str = "https://akh-medu.dev/sym/";
 
+/// IRI namespace for compartment named graphs.
+const COMPARTMENT_NS: &str = "https://akh-medu.dev/compartment/";
+
 /// Persistent SPARQL-capable RDF store.
 pub struct SparqlStore {
     store: Store,
@@ -54,22 +57,81 @@ impl SparqlStore {
     }
 
     /// Insert a triple into the SPARQL store.
+    ///
+    /// If the triple has a `compartment_id`, it is inserted into the corresponding
+    /// named graph. Otherwise it goes into the default graph.
     pub fn insert_triple(&self, triple: &Triple) -> GraphResult<()> {
+        self.insert_triple_in_graph(triple, triple.compartment_id.as_deref())
+    }
+
+    /// Insert a triple into a specific compartment graph (or DefaultGraph if None).
+    pub fn insert_triple_in_graph(
+        &self,
+        triple: &Triple,
+        compartment_id: Option<&str>,
+    ) -> GraphResult<()> {
         let subject = Self::symbol_to_iri(triple.subject);
         let predicate = Self::symbol_to_iri(triple.predicate);
         let object = Self::symbol_to_iri(triple.object);
 
-        let quad = Quad::new(
-            subject,
-            predicate,
-            object,
-            GraphNameRef::DefaultGraph,
-        );
+        match compartment_id {
+            Some(id) => {
+                let graph_iri =
+                    NamedNode::new(format!("{COMPARTMENT_NS}{id}")).expect("valid IRI");
+                let quad = Quad::new(
+                    subject,
+                    predicate,
+                    object,
+                    graph_iri.as_ref(),
+                );
+                self.store.insert(&quad).map_err(|e| GraphError::Sparql {
+                    message: format!("insert into graph {id} failed: {e}"),
+                })?;
+            }
+            None => {
+                let quad = Quad::new(
+                    subject,
+                    predicate,
+                    object,
+                    GraphNameRef::DefaultGraph,
+                );
+                self.store.insert(&quad).map_err(|e| GraphError::Sparql {
+                    message: format!("insert failed: {e}"),
+                })?;
+            }
+        }
 
-        self.store.insert(&quad).map_err(|e| GraphError::Sparql {
-            message: format!("insert failed: {e}"),
-        })?;
+        Ok(())
+    }
 
+    /// Execute a SPARQL SELECT query scoped to a specific compartment graph.
+    ///
+    /// Wraps the query with a `FROM <graph_iri>` clause.
+    pub fn query_in_graph(
+        &self,
+        sparql: &str,
+        compartment_id: &str,
+    ) -> GraphResult<Vec<Vec<(String, String)>>> {
+        let graph_iri = format!("{COMPARTMENT_NS}{compartment_id}");
+        // Inject FROM clause after SELECT
+        let scoped = if let Some(rest) = sparql.strip_prefix("SELECT") {
+            format!("SELECT FROM <{graph_iri}>{rest}")
+        } else {
+            sparql.to_string()
+        };
+        self.query_select(&scoped)
+    }
+
+    /// Remove all triples in a named compartment graph.
+    pub fn remove_graph(&self, compartment_id: &str) -> GraphResult<()> {
+        let graph_iri = format!("{COMPARTMENT_NS}{compartment_id}");
+        let drop_query = format!("DROP GRAPH <{graph_iri}>");
+        // Oxigraph may not support DROP GRAPH via query(), so we use update().
+        self.store
+            .update(&drop_query)
+            .map_err(|e| GraphError::Sparql {
+                message: format!("failed to drop graph {compartment_id}: {e}"),
+            })?;
         Ok(())
     }
 

@@ -135,6 +135,7 @@ pub fn reflect(
     goals: &[Goal],
     current_cycle: u64,
     config: &ReflectionConfig,
+    psyche: Option<&mut crate::compartment::psyche::Psyche>,
 ) -> AgentResult<ReflectionResult> {
     // ── Tool effectiveness ────────────────────────────────────────────
 
@@ -179,7 +180,7 @@ pub fn reflect(
         adjustments.len(),
     );
 
-    Ok(ReflectionResult {
+    let result = ReflectionResult {
         at_cycle: current_cycle,
         tool_insights,
         strategy_diversity,
@@ -187,7 +188,14 @@ pub fn reflect(
         memory_pressure,
         adjustments,
         summary,
-    })
+    };
+
+    // Psyche evolution (if loaded).
+    if let Some(psyche) = psyche {
+        psyche.evolve(&result);
+    }
+
+    Ok(result)
 }
 
 /// Analyze tool effectiveness from working memory entries.
