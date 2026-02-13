@@ -82,6 +82,80 @@ impl FormalGrammar {
                 "Code structure: {kind} `{name}` — {detail}."
             )),
 
+            AbsTree::CodeModule {
+                name,
+                role,
+                importance,
+                doc_summary,
+                children,
+            } => {
+                let desc = doc_summary
+                    .as_deref()
+                    .or(role.as_deref())
+                    .unwrap_or("serves an unspecified role");
+                let imp_tag = if importance.unwrap_or(0.0) > 0.7 {
+                    format!(" (importance: {:.2})", importance.unwrap())
+                } else {
+                    String::new()
+                };
+                let mut out = format!("The module `{name}` {desc}.{imp_tag}");
+                if !children.is_empty() {
+                    out.push_str(&format!("\nContains {} items:\n", children.len()));
+                    for child in children {
+                        let line = self.linearize_inner(child, ctx)?;
+                        out.push_str("- ");
+                        out.push_str(&line);
+                        out.push('\n');
+                    }
+                }
+                Ok(out)
+            }
+
+            AbsTree::CodeSignature {
+                kind,
+                name,
+                doc_summary,
+                params_or_fields,
+                return_type,
+                traits,
+                importance,
+            } => {
+                let star = if importance.unwrap_or(0.0) > 0.7 {
+                    "\u{2605} "
+                } else {
+                    ""
+                };
+                let doc = doc_summary.as_deref().unwrap_or("no documentation");
+                let params = if params_or_fields.is_empty() {
+                    String::new()
+                } else {
+                    format!(" params: ({}),", params_or_fields.join(", "))
+                };
+                let ret = return_type
+                    .as_ref()
+                    .map(|r| format!(" returns `{r}`."))
+                    .unwrap_or_else(|| ".".to_string());
+                let derives = if traits.is_empty() {
+                    String::new()
+                } else {
+                    format!(" [derives: {}]", traits.join(", "))
+                };
+                Ok(format!(
+                    "{star}{kind} `{name}` \u{2014} {doc}.{params}{ret}{derives}"
+                ))
+            }
+
+            AbsTree::DataFlow { steps } => {
+                let parts: Vec<String> = steps
+                    .iter()
+                    .map(|s| match &s.via_type {
+                        Some(t) => format!("`{}` \u{2192} {t}", s.name),
+                        None => format!("`{}`", s.name),
+                    })
+                    .collect();
+                Ok(format!("Data flow: {}", parts.join(" \u{2192} ")))
+            }
+
             AbsTree::WithConfidence { inner, confidence } => {
                 let text = self.linearize_inner(inner, ctx)?;
                 // Insert confidence before the final period

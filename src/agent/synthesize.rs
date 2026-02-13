@@ -150,12 +150,12 @@ const INFERRED_NOISE_PREDICATES: &[&str] = &[
 ];
 
 /// Whether a predicate indicates code structure (worth showing).
-fn is_code_predicate(pred: &str) -> bool {
+pub(crate) fn is_code_predicate(pred: &str) -> bool {
     CODE_STRUCTURE_PREDICATES.iter().any(|p| pred == *p)
 }
 
 /// Whether a predicate is a code annotation to skip.
-fn is_code_annotation(pred: &str) -> bool {
+pub(crate) fn is_code_annotation(pred: &str) -> bool {
     CODE_ANNOTATION_PREDICATES.iter().any(|p| pred == *p)
 }
 
@@ -165,22 +165,59 @@ fn is_inferred_noise(pred: &str) -> bool {
 }
 
 /// Whether a predicate is a semantic enrichment annotation (handled by Code Architecture section).
-fn is_semantic_predicate(pred: &str) -> bool {
+pub(crate) fn is_semantic_predicate(pred: &str) -> bool {
     pred.starts_with("semantic:")
 }
 
 // ── Pipeline ─────────────────────────────────────────────────────────────
 
 /// Top-level synthesis: extract facts from WM entries, group, render, optionally polish.
+///
+/// Uses the narrative grammar by default. For a specific grammar, use
+/// [`synthesize_with_grammar`].
 pub fn synthesize(
     goal: &str,
     entries: &[WorkingMemoryEntry],
     engine: &crate::engine::Engine,
     llm: Option<&OllamaClient>,
 ) -> NarrativeSummary {
+    synthesize_with_grammar(goal, entries, engine, llm, "narrative")
+}
+
+/// Synthesize with a specific grammar archetype (formal, terse, narrative, or custom).
+///
+/// Builds an `AbsTree::Document` from extracted facts, then linearizes through
+/// the chosen grammar. Falls back to template rendering if grammar linearization fails.
+pub fn synthesize_with_grammar(
+    goal: &str,
+    entries: &[WorkingMemoryEntry],
+    engine: &crate::engine::Engine,
+    llm: Option<&OllamaClient>,
+    grammar_name: &str,
+) -> NarrativeSummary {
     let facts = extract_facts(entries);
     let groups = group_facts(&facts);
-    let mut summary = render_template(goal, &groups, &facts, engine);
+
+    // Try grammar-based rendering via AbsTree.
+    let mut summary = {
+        let doc = super::synthesize_abs::build_document(goal, &groups, &facts, engine);
+        let registry = crate::grammar::GrammarRegistry::new();
+        let grammar = registry
+            .get(grammar_name)
+            .unwrap_or_else(|_| registry.default_grammar());
+        let ctx = crate::grammar::LinContext::with_registry(engine.registry());
+
+        crate::grammar::bridge::abs_to_summary(&doc, grammar, &ctx)
+            .unwrap_or_else(|_| render_template(goal, &groups, &facts, engine))
+    };
+
+    // Filter uninformative sections.
+    summary.sections.retain(|s| {
+        if s.prose.starts_with("No ") {
+            return false;
+        }
+        is_informative_section(s)
+    });
 
     if let Some(client) = llm {
         if client.is_available() {
@@ -194,7 +231,7 @@ pub fn synthesize(
 // ── Step 1: Extract facts ────────────────────────────────────────────────
 
 /// Parse each WM ToolResult entry into structured `ExtractedFact` values.
-fn extract_facts(entries: &[WorkingMemoryEntry]) -> Vec<ExtractedFact> {
+pub(crate) fn extract_facts(entries: &[WorkingMemoryEntry]) -> Vec<ExtractedFact> {
     let mut facts = Vec::new();
 
     for entry in entries {
@@ -607,7 +644,7 @@ fn parse_gap_facts(body: &str, tool: &str, cycle: u64) -> Vec<ExtractedFact> {
 
 /// Grouping key for fact organization.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-enum GroupKey {
+pub(crate) enum GroupKey {
     Entity(String),
     CodeStructure,
     RelatedConcepts,
@@ -616,12 +653,12 @@ enum GroupKey {
     Other,
 }
 
-struct FactGroup {
-    key: GroupKey,
-    facts: Vec<ExtractedFact>,
+pub(crate) struct FactGroup {
+    pub key: GroupKey,
+    pub facts: Vec<ExtractedFact>,
 }
 
-fn group_facts(facts: &[ExtractedFact]) -> Vec<FactGroup> {
+pub(crate) fn group_facts(facts: &[ExtractedFact]) -> Vec<FactGroup> {
     let mut groups: BTreeMap<GroupKey, Vec<ExtractedFact>> = BTreeMap::new();
 
     for fact in facts {
@@ -646,7 +683,7 @@ fn group_facts(facts: &[ExtractedFact]) -> Vec<FactGroup> {
 
 // ── Step 3: Render template ──────────────────────────────────────────────
 
-fn render_template(
+pub(crate) fn render_template(
     goal: &str,
     groups: &[FactGroup],
     all_facts: &[ExtractedFact],
@@ -1525,7 +1562,7 @@ const TRIVIAL_TYPES: &[&str] = &[
 ];
 
 /// Whether a section is informative enough to show (not just "X is a Module.").
-fn is_informative_section(section: &NarrativeSection) -> bool {
+pub(crate) fn is_informative_section(section: &NarrativeSection) -> bool {
     // Code Structure/Architecture, Related Concepts, etc. are always informative.
     if section.heading == "Code Structure"
         || section.heading == "Code Architecture"

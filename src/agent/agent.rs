@@ -378,6 +378,21 @@ impl Agent {
         )
     }
 
+    /// Synthesize findings using a specific grammar archetype.
+    pub fn synthesize_findings_with_grammar(
+        &self,
+        goal: &str,
+        grammar: &str,
+    ) -> super::synthesize::NarrativeSummary {
+        super::synthesize::synthesize_with_grammar(
+            goal,
+            self.working_memory.entries(),
+            &self.engine,
+            self.llm_client.as_ref(),
+            grammar,
+        )
+    }
+
     /// Clear all restored goals (for fresh-start mode).
     pub fn clear_goals(&mut self) {
         self.goals.clear();

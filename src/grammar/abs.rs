@@ -106,6 +106,13 @@ impl Default for VsaRoleSymbols {
     }
 }
 
+/// A step in a data flow chain between code components.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DataFlowStep {
+    pub name: String,
+    pub via_type: Option<String>,
+}
+
 /// Abstract syntax tree node — the shared semantic representation.
 ///
 /// All concrete grammars linearize from these nodes. The same tree can be
@@ -165,6 +172,31 @@ pub enum AbsTree {
         detail: String,
     },
 
+    /// A code module with optional semantic enrichment and child items.
+    CodeModule {
+        name: String,
+        role: Option<String>,
+        importance: Option<f32>,
+        doc_summary: Option<String>,
+        children: Vec<AbsTree>,
+    },
+
+    /// A code item (function/struct/enum/trait) with signature details.
+    CodeSignature {
+        kind: String,
+        name: String,
+        doc_summary: Option<String>,
+        params_or_fields: Vec<String>,
+        return_type: Option<String>,
+        traits: Vec<String>,
+        importance: Option<f32>,
+    },
+
+    /// A directed data flow chain between code components.
+    DataFlow {
+        steps: Vec<DataFlowStep>,
+    },
+
     // ── Modifiers ───────────────────────────────────────────────────────
 
     /// Wrap an inner node with a confidence score.
@@ -214,6 +246,9 @@ impl AbsTree {
             AbsTree::Gap { .. } => Cat::Gap,
             AbsTree::Inference { .. } => Cat::Inference,
             AbsTree::CodeFact { .. } => Cat::CodeFact,
+            AbsTree::CodeModule { .. } => Cat::CodeModule,
+            AbsTree::CodeSignature { .. } => Cat::CodeSignature,
+            AbsTree::DataFlow { .. } => Cat::DataFlow,
             AbsTree::WithConfidence { .. } => Cat::Confidence,
             AbsTree::WithProvenance { .. } => Cat::Provenance,
             AbsTree::Conjunction { .. } => Cat::Conjunction,
@@ -299,6 +334,12 @@ impl AbsTree {
                 }
                 Ok(())
             }
+            AbsTree::CodeModule { children, .. } => {
+                for child in children {
+                    child.validate()?;
+                }
+                Ok(())
+            }
             // Leaves and simple nodes are always valid.
             _ => Ok(()),
         }
@@ -330,7 +371,9 @@ impl AbsTree {
             | AbsTree::RelationRef { .. }
             | AbsTree::Freeform(_)
             | AbsTree::Inference { .. }
-            | AbsTree::CodeFact { .. } => 1,
+            | AbsTree::CodeFact { .. }
+            | AbsTree::CodeSignature { .. }
+            | AbsTree::DataFlow { .. } => 1,
 
             AbsTree::Triple {
                 subject,
@@ -350,6 +393,10 @@ impl AbsTree {
 
             AbsTree::Conjunction { items, .. } => {
                 1 + items.iter().map(|i| i.node_count()).sum::<usize>()
+            }
+
+            AbsTree::CodeModule { children, .. } => {
+                1 + children.iter().map(|c| c.node_count()).sum::<usize>()
             }
 
             AbsTree::Section { body, .. } => {
@@ -404,6 +451,11 @@ impl AbsTree {
             AbsTree::Conjunction { items, .. } => {
                 for item in items {
                     item.collect_labels_inner(out);
+                }
+            }
+            AbsTree::CodeModule { children, .. } => {
+                for child in children {
+                    child.collect_labels_inner(out);
                 }
             }
             AbsTree::Section { body, .. } => {
@@ -518,6 +570,41 @@ impl AbsTree {
             body,
         }
     }
+
+    /// Create a code module node with optional enrichment.
+    pub fn code_module(
+        name: impl Into<String>,
+        role: Option<String>,
+        importance: Option<f32>,
+        doc_summary: Option<String>,
+        children: Vec<AbsTree>,
+    ) -> Self {
+        AbsTree::CodeModule {
+            name: name.into(),
+            role,
+            importance,
+            doc_summary,
+            children,
+        }
+    }
+
+    /// Create a code signature node (other fields default to None/empty).
+    pub fn code_signature(kind: impl Into<String>, name: impl Into<String>) -> Self {
+        AbsTree::CodeSignature {
+            kind: kind.into(),
+            name: name.into(),
+            doc_summary: None,
+            params_or_fields: Vec::new(),
+            return_type: None,
+            traits: Vec::new(),
+            importance: None,
+        }
+    }
+
+    /// Create a data flow chain from steps.
+    pub fn data_flow(steps: Vec<DataFlowStep>) -> Self {
+        AbsTree::DataFlow { steps }
+    }
 }
 
 // ── Grounding & VSA encoding ────────────────────────────────────────────
@@ -576,6 +663,39 @@ impl AbsTree {
                 name: name.clone(),
                 detail: detail.clone(),
             },
+            AbsTree::CodeModule {
+                name,
+                role,
+                importance,
+                doc_summary,
+                children,
+            } => AbsTree::CodeModule {
+                name: name.clone(),
+                role: role.clone(),
+                importance: *importance,
+                doc_summary: doc_summary.clone(),
+                children: children.iter().map(|c| c.ground(registry)).collect(),
+            },
+            AbsTree::CodeSignature {
+                kind,
+                name,
+                doc_summary,
+                params_or_fields,
+                return_type,
+                traits,
+                importance,
+            } => AbsTree::CodeSignature {
+                kind: kind.clone(),
+                name: name.clone(),
+                doc_summary: doc_summary.clone(),
+                params_or_fields: params_or_fields.clone(),
+                return_type: return_type.clone(),
+                traits: traits.clone(),
+                importance: *importance,
+            },
+            AbsTree::DataFlow { steps } => AbsTree::DataFlow {
+                steps: steps.clone(),
+            },
             AbsTree::WithConfidence { inner, confidence } => AbsTree::WithConfidence {
                 inner: Box::new(inner.ground(registry)),
                 confidence: *confidence,
@@ -628,6 +748,9 @@ impl AbsTree {
             AbsTree::Conjunction { items, .. } => {
                 items.iter().map(|i| i.unresolved_count()).sum()
             }
+            AbsTree::CodeModule { children, .. } => {
+                children.iter().map(|c| c.unresolved_count()).sum()
+            }
             AbsTree::Section { body, .. } => body.iter().map(|i| i.unresolved_count()).sum(),
             AbsTree::Document {
                 overview,
@@ -672,6 +795,9 @@ impl AbsTree {
             }
             AbsTree::Conjunction { items, .. } => {
                 items.iter().find_map(|i| i.first_unresolved())
+            }
+            AbsTree::CodeModule { children, .. } => {
+                children.iter().find_map(|c| c.first_unresolved())
             }
             AbsTree::Section { body, .. } => body.iter().find_map(|i| i.first_unresolved()),
             AbsTree::Document {
@@ -785,6 +911,36 @@ impl AbsTree {
                 let n_vec = encode_token(ops, name);
                 let d_vec = encode_label(ops, detail).map_err(vsa_err)?;
                 ops.bundle(&[&k_vec, &n_vec, &d_vec]).map_err(vsa_err)
+            }
+
+            AbsTree::CodeModule { name, children, .. } => {
+                let n_vec = encode_token(ops, name);
+                let mut all_vecs = vec![n_vec];
+                for child in children {
+                    all_vecs.push(child.to_vsa(ops, item_memory, roles)?);
+                }
+                let refs: Vec<&HyperVec> = all_vecs.iter().collect();
+                ops.bundle(&refs).map_err(vsa_err)
+            }
+
+            AbsTree::CodeSignature { kind, name, .. } => {
+                let k_vec = encode_token(ops, kind);
+                let n_vec = encode_token(ops, name);
+                ops.bundle(&[&k_vec, &n_vec]).map_err(vsa_err)
+            }
+
+            AbsTree::DataFlow { steps } => {
+                if steps.is_empty() {
+                    return Err(GrammarError::VsaError {
+                        message: "cannot encode empty data flow".into(),
+                    });
+                }
+                let vecs: Vec<HyperVec> = steps
+                    .iter()
+                    .map(|s| encode_token(ops, &s.name))
+                    .collect();
+                let refs: Vec<&HyperVec> = vecs.iter().collect();
+                ops.bundle(&refs).map_err(vsa_err)
             }
 
             // ── Modifiers (transparent) ─────────────────────────────────

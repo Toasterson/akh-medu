@@ -205,6 +205,99 @@ impl CustomGrammar {
                 }
             }
 
+            AbsTree::CodeModule {
+                name,
+                role,
+                importance,
+                doc_summary,
+                children,
+            } => {
+                let children_text: Vec<String> = children
+                    .iter()
+                    .map(|c| self.linearize_inner(c, ctx))
+                    .collect::<GrammarResult<Vec<_>>>()?;
+                if let Some(template) = self.templates.get("code_module") {
+                    let mut vars = HashMap::new();
+                    vars.insert("name", name.clone());
+                    vars.insert("role", role.clone().unwrap_or_default());
+                    vars.insert(
+                        "importance",
+                        importance.map(|i| format!("{i:.2}")).unwrap_or_default(),
+                    );
+                    vars.insert("doc_summary", doc_summary.clone().unwrap_or_default());
+                    vars.insert("children", children_text.join("\n"));
+                    Ok(self.apply_template(template, &vars))
+                } else {
+                    let desc = doc_summary
+                        .as_deref()
+                        .or(role.as_deref())
+                        .unwrap_or("module");
+                    let mut out = format!("Module `{name}` ({desc}).");
+                    if !children_text.is_empty() {
+                        out.push('\n');
+                        for line in &children_text {
+                            out.push_str("- ");
+                            out.push_str(line);
+                            out.push('\n');
+                        }
+                    }
+                    Ok(out)
+                }
+            }
+
+            AbsTree::CodeSignature {
+                kind,
+                name,
+                params_or_fields,
+                return_type,
+                traits,
+                ..
+            } => {
+                if let Some(template) = self.templates.get("code_signature") {
+                    let mut vars = HashMap::new();
+                    vars.insert("kind", kind.clone());
+                    vars.insert("name", name.clone());
+                    vars.insert("params", params_or_fields.join(", "));
+                    vars.insert(
+                        "return_type",
+                        return_type.clone().unwrap_or_default(),
+                    );
+                    vars.insert("traits", traits.join(", "));
+                    Ok(self.apply_template(template, &vars))
+                } else {
+                    let params = params_or_fields.join(", ");
+                    let ret = return_type
+                        .as_ref()
+                        .map(|r| format!(" \u{2192} {r}"))
+                        .unwrap_or_default();
+                    Ok(format!("{kind} `{name}`({params}){ret}."))
+                }
+            }
+
+            AbsTree::DataFlow { steps } => {
+                if let Some(template) = self.templates.get("data_flow") {
+                    let flow: Vec<String> = steps
+                        .iter()
+                        .map(|s| match &s.via_type {
+                            Some(t) => format!("{} \u{2192} {t}", s.name),
+                            None => s.name.clone(),
+                        })
+                        .collect();
+                    let mut vars = HashMap::new();
+                    vars.insert("flow", flow.join(" \u{2192} "));
+                    Ok(self.apply_template(template, &vars))
+                } else {
+                    let flow: Vec<String> = steps
+                        .iter()
+                        .map(|s| match &s.via_type {
+                            Some(t) => format!("{} \u{2192} {t}", s.name),
+                            None => s.name.clone(),
+                        })
+                        .collect();
+                    Ok(format!("Flow: {}", flow.join(" \u{2192} ")))
+                }
+            }
+
             AbsTree::WithConfidence { inner, confidence } => {
                 let text = self.linearize_inner(inner, ctx)?;
                 Ok(format!("{text} (confidence: {confidence:.2})"))

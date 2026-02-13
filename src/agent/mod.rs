@@ -20,6 +20,7 @@ pub mod plan;
 pub mod reflect;
 pub mod semantic_enrichment;
 pub mod synthesize;
+pub mod synthesize_abs;
 pub mod tool;
 pub mod tool_semantics;
 pub mod tools;

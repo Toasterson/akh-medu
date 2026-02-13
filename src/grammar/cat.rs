@@ -31,6 +31,12 @@ pub enum Cat {
     Inference,
     /// A code structure fact (function, struct, module, etc.).
     CodeFact,
+    /// A code module with optional semantic enrichment.
+    CodeModule,
+    /// A code item (function/struct/enum/trait) with signature details.
+    CodeSignature,
+    /// A directed data flow chain between code components.
+    DataFlow,
     /// A quantifier or qualifier modifying another node.
     Modifier,
     /// A conjunction or disjunction of multiple items.
@@ -80,6 +86,9 @@ impl std::fmt::Display for Cat {
             Cat::Gap => write!(f, "Gap"),
             Cat::Inference => write!(f, "Inference"),
             Cat::CodeFact => write!(f, "CodeFact"),
+            Cat::CodeModule => write!(f, "CodeModule"),
+            Cat::CodeSignature => write!(f, "CodeSignature"),
+            Cat::DataFlow => write!(f, "DataFlow"),
             Cat::Modifier => write!(f, "Modifier"),
             Cat::Conjunction => write!(f, "Conjunction"),
             Cat::Document => write!(f, "Document"),

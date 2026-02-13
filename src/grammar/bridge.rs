@@ -129,17 +129,26 @@ pub fn abs_to_summary(
 
             let rendered_sections: Vec<NarrativeSection> = sections
                 .iter()
-                .map(|s| {
-                    let text = grammar.linearize(s, ctx)?;
-                    match s {
-                        AbsTree::Section { heading, .. } => Ok(NarrativeSection {
+                .map(|s| match s {
+                    AbsTree::Section { heading, body } => {
+                        // Linearize each body item separately to avoid
+                        // the heading being duplicated by the grammar's
+                        // Section rendering.
+                        let lines: Vec<String> = body
+                            .iter()
+                            .map(|item| grammar.linearize(item, ctx))
+                            .collect::<GrammarResult<Vec<_>>>()?;
+                        Ok(NarrativeSection {
                             heading: heading.clone(),
-                            prose: text,
-                        }),
-                        _ => Ok(NarrativeSection {
+                            prose: lines.join("\n"),
+                        })
+                    }
+                    _ => {
+                        let text = grammar.linearize(s, ctx)?;
+                        Ok(NarrativeSection {
                             heading: String::new(),
                             prose: text,
-                        }),
+                        })
                     }
                 })
                 .collect::<GrammarResult<Vec<_>>>()?;
@@ -214,6 +223,17 @@ pub fn abs_to_fact(tree: &AbsTree, source_tool: &str, source_cycle: u64) -> Opti
             name: name.clone(),
             detail: detail.clone(),
         },
+        AbsTree::CodeModule { name, .. } => FactKind::CodeFact {
+            kind: "module".to_string(),
+            name: name.clone(),
+            detail: "module".to_string(),
+        },
+        AbsTree::CodeSignature { kind, name, .. } => FactKind::CodeFact {
+            kind: kind.clone(),
+            name: name.clone(),
+            detail: kind.clone(),
+        },
+        AbsTree::DataFlow { .. } => return None,
         AbsTree::WithConfidence { inner, .. } | AbsTree::WithProvenance { inner, .. } => {
             return abs_to_fact(inner, source_tool, source_cycle);
         }
@@ -235,7 +255,14 @@ fn count_facts(tree: &AbsTree) -> usize {
         | AbsTree::Similarity { .. }
         | AbsTree::Gap { .. }
         | AbsTree::Inference { .. }
-        | AbsTree::CodeFact { .. } => 1,
+        | AbsTree::CodeFact { .. }
+        | AbsTree::CodeSignature { .. } => 1,
+
+        AbsTree::CodeModule { children, .. } => {
+            1 + children.iter().map(count_facts).sum::<usize>()
+        }
+
+        AbsTree::DataFlow { .. } => 0,
 
         AbsTree::WithConfidence { inner, .. } | AbsTree::WithProvenance { inner, .. } => {
             count_facts(inner)

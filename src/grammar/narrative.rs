@@ -135,6 +135,84 @@ impl NarrativeGrammar {
                 ))
             }
 
+            AbsTree::CodeModule {
+                name,
+                role,
+                importance,
+                doc_summary,
+                children,
+            } => {
+                let transition = self.next_transition();
+                let desc = doc_summary
+                    .as_deref()
+                    .or(role.as_deref())
+                    .unwrap_or("plays a role in the system");
+                let key_note = if importance.unwrap_or(0.0) > 0.7 {
+                    " It is a key component."
+                } else {
+                    ""
+                };
+                let mut out = format!("{transition}The **{name}** module {desc}.{key_note}");
+                if !children.is_empty() {
+                    out.push_str("\nIts contents include:\n");
+                    for child in children {
+                        let line = self.linearize_inner(child, ctx)?;
+                        out.push_str("- ");
+                        out.push_str(&line);
+                        out.push('\n');
+                    }
+                }
+                Ok(out)
+            }
+
+            AbsTree::CodeSignature {
+                kind,
+                name,
+                doc_summary,
+                params_or_fields,
+                return_type,
+                traits,
+                ..
+            } => {
+                let transition = self.next_transition();
+                let doc = doc_summary
+                    .as_deref()
+                    .map(|d| format!("{d}, "))
+                    .unwrap_or_default();
+                let params = if params_or_fields.is_empty() {
+                    String::new()
+                } else {
+                    format!("takes {}, ", params_or_fields.join(", "))
+                };
+                let ret = return_type
+                    .as_ref()
+                    .map(|r| format!("returning `{r}`"))
+                    .unwrap_or_default();
+                let derives = if traits.is_empty() {
+                    String::new()
+                } else {
+                    format!(", deriving {}", traits.join(", "))
+                };
+                Ok(format!(
+                    "{transition}The {kind} `{name}` {doc}{params}{ret}{derives}."
+                ))
+            }
+
+            AbsTree::DataFlow { steps } => {
+                let transition = self.next_transition();
+                let parts: Vec<String> = steps
+                    .iter()
+                    .map(|s| match &s.via_type {
+                        Some(t) => format!("`{}` (via {t})", s.name),
+                        None => format!("`{}`", s.name),
+                    })
+                    .collect();
+                Ok(format!(
+                    "{transition}Data flows through the system from {}.",
+                    parts.join(" to ")
+                ))
+            }
+
             AbsTree::WithConfidence { inner, confidence } => {
                 let text = self.linearize_inner(inner, ctx)?;
                 let qualifier = if *confidence > 0.9 {

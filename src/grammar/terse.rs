@@ -71,6 +71,67 @@ impl TerseGrammar {
                 Ok(format!("{kind}:{name} — {detail}"))
             }
 
+            AbsTree::CodeModule {
+                name,
+                role,
+                importance,
+                children,
+                ..
+            } => {
+                let role_tag = role.as_deref().unwrap_or("");
+                let star = if importance.unwrap_or(0.0) > 0.7 {
+                    "\u{2605}"
+                } else {
+                    ""
+                };
+                let mut out = format!("mod:{name}({role_tag}){star}\n");
+                for child in children {
+                    let line = self.linearize_inner(child, ctx)?;
+                    out.push_str("  ");
+                    out.push_str(&line);
+                    out.push('\n');
+                }
+                Ok(out)
+            }
+
+            AbsTree::CodeSignature {
+                kind,
+                name,
+                params_or_fields,
+                return_type,
+                traits,
+                importance,
+                ..
+            } => {
+                let star = if importance.unwrap_or(0.0) > 0.7 {
+                    "\u{2605}"
+                } else {
+                    ""
+                };
+                let params = params_or_fields.join(", ");
+                let ret = return_type
+                    .as_ref()
+                    .map(|r| format!(" \u{2192} {r}"))
+                    .unwrap_or_default();
+                let derives = if traits.is_empty() {
+                    String::new()
+                } else {
+                    format!(" [{}]", traits.join(", "))
+                };
+                Ok(format!("{kind}:{name}({params}){ret}{derives}{star}"))
+            }
+
+            AbsTree::DataFlow { steps } => {
+                let parts: Vec<String> = steps
+                    .iter()
+                    .map(|s| match &s.via_type {
+                        Some(t) => format!("{} -({t})>", s.name),
+                        None => s.name.clone(),
+                    })
+                    .collect();
+                Ok(parts.join(" "))
+            }
+
             AbsTree::WithConfidence { inner, confidence } => {
                 let text = self.linearize_inner(inner, ctx)?;
                 Ok(format!("{text} [{confidence:.2}]"))
