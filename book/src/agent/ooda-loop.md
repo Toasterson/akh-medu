@@ -62,6 +62,35 @@ The decision includes a score breakdown string for transparency:
 [score=0.85: base=0.80 recency=-0.00 novelty=+0.15 episodic=+0.00 pressure=+0.00 archetype=+0.030]
 ```
 
+#### VSA-Based Tool Selection
+
+Core tools (`kg_query`, `kg_mutate`, `memory_recall`, `reason`,
+`similarity_search`) are scored with hand-tuned state-dependent rules.
+All remaining tools -- external, library, and advanced -- use **VSA semantic
+scoring**: the goal description is encoded as a hypervector and compared
+against each tool's semantic profile via cosine-like similarity.
+
+Each tool carries a keyword array (17-25 words) that defines its semantic
+profile. A **synonym expansion** pass widens these at build time using a
+static lookup table (~20 root-word entries), so natural sentences like
+"What did that paper say about gravity?" activate `library_search` even
+when few tokens overlap with the base keywords.
+
+Tools with lower risk use lower activation thresholds:
+
+| Tool | Threshold | Multiplier | Danger |
+|------|-----------|------------|--------|
+| `library_search` | 0.50 | 0.80 | Safe |
+| `content_ingest` | 0.50 | 0.75 | Cautious |
+| `file_io` | 0.55 | 0.75 | Cautious/Danger |
+| `http_fetch` | 0.55 | 0.75 | Cautious |
+| `shell_exec` | 0.55 | 0.75 | Danger |
+| `user_interact` | 0.55 | 0.75 | Safe |
+
+The `infer_rules` and `gap_analysis` tools use adaptive scoring with floors
+and context boosts instead of hard thresholds, ensuring they remain available
+as fallback reasoning strategies.
+
 ### Act
 
 Executes the chosen tool and evaluates the outcome:
