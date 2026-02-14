@@ -63,6 +63,11 @@ akh-medu stores, reasons about, and discovers knowledge. You feed it facts
 - **[Reference](reference/components.md)** has the component status matrix and
   full CLI command reference.
 
+## Source Code
+
+The source code is on GitHub: [Toasterson/akh-medu](https://github.com/Toasterson/akh-medu)
+
 ## License
 
-akh-medu is licensed under the MIT License.
+akh-medu is licensed under the **GPLv3**. For integration into proprietary
+applications, contact the author.

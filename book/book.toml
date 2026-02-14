@@ -9,7 +9,7 @@ src = "src"
 build-dir = "book"
 
 [output.html]
-git-repository-url = "https://github.com/akh-medu/akh-medu"
+git-repository-url = "https://github.com/Toasterson/akh-medu"
 
 [output.html.search]
 enable = true
