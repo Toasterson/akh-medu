@@ -28,11 +28,7 @@ pub struct CompartmentManager {
 
 impl std::fmt::Debug for CompartmentManager {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let count = self
-            .compartments
-            .read()
-            .map(|c| c.len())
-            .unwrap_or(0);
+        let count = self.compartments.read().map(|c| c.len()).unwrap_or(0);
         f.debug_struct("CompartmentManager")
             .field("compartments_dir", &self.compartments_dir)
             .field("compartment_count", &count)
@@ -62,15 +58,17 @@ impl CompartmentManager {
             return Ok(0);
         }
 
-        let entries = std::fs::read_dir(&self.compartments_dir).map_err(|e| {
-            CompartmentError::Io {
+        let entries =
+            std::fs::read_dir(&self.compartments_dir).map_err(|e| CompartmentError::Io {
                 id: "<discovery>".into(),
                 source: e,
-            }
-        })?;
+            })?;
 
         let mut count = 0;
-        let mut compartments = self.compartments.write().expect("compartments lock poisoned");
+        let mut compartments = self
+            .compartments
+            .write()
+            .expect("compartments lock poisoned");
 
         for entry in entries {
             let entry = entry.map_err(|e| CompartmentError::Io {
@@ -87,12 +85,11 @@ impl CompartmentManager {
                 continue;
             }
 
-            let content = std::fs::read_to_string(&manifest_path).map_err(|e| {
-                CompartmentError::Io {
+            let content =
+                std::fs::read_to_string(&manifest_path).map_err(|e| CompartmentError::Io {
                     id: path.display().to_string(),
                     source: e,
-                }
-            })?;
+                })?;
 
             let manifest: CompartmentManifest =
                 toml::from_str(&content).map_err(|e| CompartmentError::InvalidManifest {
@@ -123,23 +120,18 @@ impl CompartmentManager {
     ///
     /// For the "psyche" core compartment, also deserializes the `Psyche` struct
     /// from `psyche.toml` in the compartment directory.
-    pub fn load(
-        &self,
-        id: &str,
-        engine: &crate::engine::Engine,
-    ) -> CompartmentResult<()> {
+    pub fn load(&self, id: &str, engine: &crate::engine::Engine) -> CompartmentResult<()> {
         let compartment_dir = self.compartments_dir.join(id);
 
         // Load psyche if this is the psyche compartment.
         if id == "psyche" {
             let psyche_path = compartment_dir.join("psyche.toml");
             let psyche = if psyche_path.exists() {
-                let content = std::fs::read_to_string(&psyche_path).map_err(|e| {
-                    CompartmentError::Io {
+                let content =
+                    std::fs::read_to_string(&psyche_path).map_err(|e| CompartmentError::Io {
                         id: id.into(),
                         source: e,
-                    }
-                })?;
+                    })?;
                 toml::from_str::<Psyche>(&content).unwrap_or_default()
             } else {
                 Psyche::default()
@@ -147,7 +139,10 @@ impl CompartmentManager {
             *self.psyche.write().expect("psyche lock poisoned") = Some(psyche);
         }
 
-        let mut compartments = self.compartments.write().expect("compartments lock poisoned");
+        let mut compartments = self
+            .compartments
+            .write()
+            .expect("compartments lock poisoned");
         let compartment = compartments
             .get_mut(id)
             .ok_or_else(|| CompartmentError::NotFound { id: id.into() })?;
@@ -161,20 +156,18 @@ impl CompartmentManager {
         if let Some(ref triples_file) = compartment.manifest.triples_file {
             let triples_path = compartment_dir.join(triples_file);
             if triples_path.exists() {
-                let content = std::fs::read_to_string(&triples_path).map_err(|e| {
-                    CompartmentError::Io {
+                let content =
+                    std::fs::read_to_string(&triples_path).map_err(|e| CompartmentError::Io {
                         id: id.into(),
                         source: e,
+                    })?;
+
+                let raw: Vec<serde_json::Value> = serde_json::from_str(&content).map_err(|e| {
+                    CompartmentError::InvalidManifest {
+                        path: triples_path.display().to_string(),
+                        message: format!("triples parse error: {e}"),
                     }
                 })?;
-
-                let raw: Vec<serde_json::Value> =
-                    serde_json::from_str(&content).map_err(|e| {
-                        CompartmentError::InvalidManifest {
-                            path: triples_path.display().to_string(),
-                            message: format!("triples parse error: {e}"),
-                        }
-                    })?;
 
                 let compartment_id = id.to_string();
                 for val in &raw {
@@ -219,12 +212,11 @@ impl CompartmentManager {
     }
 
     /// Unload a compartment's triples from the knowledge graph.
-    pub fn unload(
-        &self,
-        id: &str,
-        engine: &crate::engine::Engine,
-    ) -> CompartmentResult<()> {
-        let mut compartments = self.compartments.write().expect("compartments lock poisoned");
+    pub fn unload(&self, id: &str, engine: &crate::engine::Engine) -> CompartmentResult<()> {
+        let mut compartments = self
+            .compartments
+            .write()
+            .expect("compartments lock poisoned");
         let compartment = compartments
             .get_mut(id)
             .ok_or_else(|| CompartmentError::NotFound { id: id.into() })?;
@@ -249,7 +241,10 @@ impl CompartmentManager {
 
     /// Mark a loaded compartment as Active (influencing OODA loop).
     pub fn activate(&self, id: &str) -> CompartmentResult<()> {
-        let mut compartments = self.compartments.write().expect("compartments lock poisoned");
+        let mut compartments = self
+            .compartments
+            .write()
+            .expect("compartments lock poisoned");
         let compartment = compartments
             .get_mut(id)
             .ok_or_else(|| CompartmentError::NotFound { id: id.into() })?;
@@ -263,7 +258,10 @@ impl CompartmentManager {
 
     /// Mark an active compartment as merely Loaded (no longer influencing OODA).
     pub fn deactivate(&self, id: &str) -> CompartmentResult<()> {
-        let mut compartments = self.compartments.write().expect("compartments lock poisoned");
+        let mut compartments = self
+            .compartments
+            .write()
+            .expect("compartments lock poisoned");
         let compartment = compartments
             .get_mut(id)
             .ok_or_else(|| CompartmentError::NotFound { id: id.into() })?;
@@ -276,7 +274,10 @@ impl CompartmentManager {
 
     /// List all active compartment manifests.
     pub fn active_compartments(&self) -> Vec<CompartmentManifest> {
-        let compartments = self.compartments.read().expect("compartments lock poisoned");
+        let compartments = self
+            .compartments
+            .read()
+            .expect("compartments lock poisoned");
         compartments
             .values()
             .filter(|c| c.state == CompartmentState::Active)
@@ -286,13 +287,19 @@ impl CompartmentManager {
 
     /// Get the manifest for a specific compartment.
     pub fn get(&self, id: &str) -> Option<CompartmentManifest> {
-        let compartments = self.compartments.read().expect("compartments lock poisoned");
+        let compartments = self
+            .compartments
+            .read()
+            .expect("compartments lock poisoned");
         compartments.get(id).map(|c| c.manifest.clone())
     }
 
     /// List compartments of a specific kind.
     pub fn compartments_by_kind(&self, kind: CompartmentKind) -> Vec<CompartmentManifest> {
-        let compartments = self.compartments.read().expect("compartments lock poisoned");
+        let compartments = self
+            .compartments
+            .read()
+            .expect("compartments lock poisoned");
         compartments
             .values()
             .filter(|c| c.manifest.kind == kind)

@@ -124,11 +124,10 @@ impl EntityResolver {
     pub fn persist_to_store(&self, store: &TieredStore) -> StoreResult<()> {
         for equiv in self.learned.values() {
             let key_str = format!("equiv:{}", equiv.surface.to_lowercase());
-            let value = bincode::serialize(equiv).map_err(|e| {
-                crate::error::StoreError::Serialization {
+            let value =
+                bincode::serialize(equiv).map_err(|e| crate::error::StoreError::Serialization {
                     message: format!("failed to serialize learned equivalence: {e}"),
-                }
-            })?;
+                })?;
             store.put_meta(key_str.as_bytes(), &value)?;
         }
         Ok(())
@@ -258,11 +257,7 @@ impl EntityResolver {
     /// the unresolved entity as an alias for the resolved one.
     ///
     /// Returns the number of new equivalences discovered.
-    pub fn learn_from_kg(
-        &mut self,
-        kg: &KnowledgeGraph,
-        registry: &SymbolRegistry,
-    ) -> usize {
+    pub fn learn_from_kg(&mut self, kg: &KnowledgeGraph, registry: &SymbolRegistry) -> usize {
         let all_nodes = kg.nodes();
         let mut discovered = 0usize;
 
@@ -280,10 +275,12 @@ impl EntityResolver {
             let mut fingerprint = Vec::new();
 
             for triple in &triples {
-                let pred_label = registry.get(triple.predicate)
+                let pred_label = registry
+                    .get(triple.predicate)
                     .map(|m| m.label)
                     .unwrap_or_default();
-                let obj_label = registry.get(triple.object)
+                let obj_label = registry
+                    .get(triple.object)
                     .map(|m| m.label)
                     .unwrap_or_default();
 
@@ -319,13 +316,13 @@ impl EntityResolver {
                 }
 
                 // Count shared fingerprint tuples
-                let shared = unresolved_fp.iter()
+                let shared = unresolved_fp
+                    .iter()
                     .filter(|t| resolved_fp.contains(t))
                     .count();
 
                 if shared >= 1 {
-                    let overlap = shared as f32
-                        / unresolved_fp.len().max(resolved_fp.len()) as f32;
+                    let overlap = shared as f32 / unresolved_fp.len().max(resolved_fp.len()) as f32;
                     let confidence = overlap.min(0.95);
 
                     self.add_learned(LearnedEquivalence {
@@ -362,7 +359,8 @@ impl EntityResolver {
         let mut discovered = 0usize;
 
         // Collect unresolved labels
-        let unresolved: Vec<_> = all_symbols.iter()
+        let unresolved: Vec<_> = all_symbols
+            .iter()
             .filter(|meta| !self.resolve(&meta.label).resolved)
             .collect();
 
@@ -416,10 +414,7 @@ impl EntityResolver {
     /// positional equivalences.
     ///
     /// Returns the number of new equivalences discovered.
-    pub fn learn_from_parallel_chunks(
-        &mut self,
-        outputs: &[PreProcessorOutput],
-    ) -> usize {
+    pub fn learn_from_parallel_chunks(&mut self, outputs: &[PreProcessorOutput]) -> usize {
         if outputs.len() < 2 {
             return 0;
         }
@@ -451,9 +446,7 @@ impl EntityResolver {
             }
 
             // Check for different languages in the group
-            let languages: Vec<&str> = group.iter()
-                .map(|o| o.source_language.as_str())
-                .collect();
+            let languages: Vec<&str> = group.iter().map(|o| o.source_language.as_str()).collect();
 
             let has_multiple_langs = {
                 let mut unique = languages.clone();
@@ -661,7 +654,10 @@ mod tests {
         assert_eq!(entities.len(), 1, "should merge Moscow and Москва");
         assert_eq!(entities[0].canonical_name, "Moscow");
         assert!(entities[0].aliases.contains(&"Москва".to_string()));
-        assert_eq!(entities[0].confidence, 0.90, "should keep higher confidence");
+        assert_eq!(
+            entities[0].confidence, 0.90,
+            "should keep higher confidence"
+        );
     }
 
     #[test]
@@ -782,16 +778,14 @@ mod tests {
                 chunk_id: Some("doc1_en".to_string()),
                 source_language: "en".to_string(),
                 detected_language_confidence: 0.9,
-                entities: vec![
-                    ExtractedEntity {
-                        name: "archetype-concept".to_string(),
-                        entity_type: "CONCEPT".to_string(),
-                        canonical_name: "archetype-concept".to_string(),
-                        confidence: 0.9,
-                        aliases: vec![],
-                        source_language: "en".to_string(),
-                    },
-                ],
+                entities: vec![ExtractedEntity {
+                    name: "archetype-concept".to_string(),
+                    entity_type: "CONCEPT".to_string(),
+                    canonical_name: "archetype-concept".to_string(),
+                    confidence: 0.9,
+                    aliases: vec![],
+                    source_language: "en".to_string(),
+                }],
                 claims: vec![],
                 abs_trees: vec![],
             },
@@ -799,16 +793,14 @@ mod tests {
                 chunk_id: Some("doc1_ru".to_string()),
                 source_language: "ru".to_string(),
                 detected_language_confidence: 0.9,
-                entities: vec![
-                    ExtractedEntity {
-                        name: "архетип".to_string(),
-                        entity_type: "CONCEPT".to_string(),
-                        canonical_name: "архетип".to_string(),
-                        confidence: 0.9,
-                        aliases: vec![],
-                        source_language: "ru".to_string(),
-                    },
-                ],
+                entities: vec![ExtractedEntity {
+                    name: "архетип".to_string(),
+                    entity_type: "CONCEPT".to_string(),
+                    canonical_name: "архетип".to_string(),
+                    confidence: 0.9,
+                    aliases: vec![],
+                    source_language: "ru".to_string(),
+                }],
                 claims: vec![],
                 abs_trees: vec![],
             },
@@ -816,7 +808,10 @@ mod tests {
 
         let count = resolver.learn_from_parallel_chunks(&outputs);
         // "archetype-concept" resolves (via learned equiv), "архетип" does not
-        assert!(count >= 1, "should discover at least one co-occurrence equivalence, got {count}");
+        assert!(
+            count >= 1,
+            "should discover at least one co-occurrence equivalence, got {count}"
+        );
 
         let result = resolver.resolve("архетип");
         assert!(result.resolved);
@@ -882,7 +877,10 @@ mod tests {
         });
 
         let result = resolver.resolve("hund");
-        assert_eq!(result.canonical, "Dog", "should keep higher-confidence mapping");
+        assert_eq!(
+            result.canonical, "Dog",
+            "should keep higher-confidence mapping"
+        );
 
         // Higher confidence should replace
         resolver.add_learned(LearnedEquivalence {
@@ -894,6 +892,9 @@ mod tests {
         });
 
         let result = resolver.resolve("hund");
-        assert_eq!(result.canonical, "Canine", "should update to higher-confidence mapping");
+        assert_eq!(
+            result.canonical, "Canine",
+            "should update to higher-confidence mapping"
+        );
     }
 }

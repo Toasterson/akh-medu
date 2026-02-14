@@ -89,13 +89,10 @@ impl MmapStore {
                     message: "invalid mmap file header — is this an akh-medu data file?".into(),
                 });
             }
-            let version =
-                u32::from_le_bytes(mmap[8..12].try_into().expect("4 bytes for version"));
+            let version = u32::from_le_bytes(mmap[8..12].try_into().expect("4 bytes for version"));
             if version != HEADER_VERSION {
                 return Err(StoreError::Mmap {
-                    message: format!(
-                        "mmap file version {version} != expected {HEADER_VERSION}"
-                    ),
+                    message: format!("mmap file version {version} != expected {HEADER_VERSION}"),
                 });
             }
             // Rebuild index by scanning entries: each entry is [8-byte SymbolId][4-byte len][data]

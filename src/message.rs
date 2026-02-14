@@ -28,10 +28,7 @@ pub enum AkhMessage {
         expression: Option<String>,
     },
     /// Knowledge gap identified.
-    Gap {
-        entity: String,
-        description: String,
-    },
+    Gap { entity: String, description: String },
     /// Tool execution result.
     ToolResult {
         tool: String,
@@ -39,14 +36,9 @@ pub enum AkhMessage {
         output: String,
     },
     /// Synthesized narrative/document.
-    Narrative {
-        text: String,
-        grammar: String,
-    },
+    Narrative { text: String, grammar: String },
     /// System status or informational message.
-    System {
-        text: String,
-    },
+    System { text: String },
     /// Error message.
     Error {
         code: String,
@@ -62,9 +54,7 @@ pub enum AkhMessage {
         detail: Option<String>,
     },
     /// Prompt for user input.
-    Prompt {
-        question: String,
-    },
+    Prompt { question: String },
 }
 
 // ── MessageSink trait ───────────────────────────────────────────────────
@@ -236,10 +226,7 @@ impl AkhMessage {
         }
     }
 
-    pub fn goal_progress(
-        goal: impl Into<String>,
-        status: impl Into<String>,
-    ) -> Self {
+    pub fn goal_progress(goal: impl Into<String>, status: impl Into<String>) -> Self {
         Self::GoalProgress {
             goal: goal.into(),
             status: status.into(),
@@ -247,11 +234,7 @@ impl AkhMessage {
         }
     }
 
-    pub fn tool_result(
-        tool: impl Into<String>,
-        success: bool,
-        output: impl Into<String>,
-    ) -> Self {
+    pub fn tool_result(tool: impl Into<String>, success: bool, output: impl Into<String>) -> Self {
         Self::ToolResult {
             tool: tool.into(),
             success,

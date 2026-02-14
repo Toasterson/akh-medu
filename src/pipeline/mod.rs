@@ -9,9 +9,9 @@ use std::sync::Arc;
 use egg::{AstSize, Extractor, Rewrite, Runner};
 
 use crate::error::PipelineError;
-use crate::graph::index::KnowledgeGraph;
-use crate::graph::traverse::{traverse_bfs, TraversalConfig, TraversalResult};
 use crate::graph::Triple;
+use crate::graph::index::KnowledgeGraph;
+use crate::graph::traverse::{TraversalConfig, TraversalResult, traverse_bfs};
 use crate::infer::engine::InferEngine;
 use crate::infer::{InferenceQuery, InferenceResult};
 use crate::reason::AkhLang;
@@ -159,7 +159,11 @@ pub struct Pipeline {
 
 impl Pipeline {
     /// Run the pipeline with the given context and initial data.
-    pub fn run(&self, ctx: &PipelineContext, initial: PipelineData) -> PipelineResult<PipelineOutput> {
+    pub fn run(
+        &self,
+        ctx: &PipelineContext,
+        initial: PipelineData,
+    ) -> PipelineResult<PipelineOutput> {
         if self.stages.is_empty() {
             return Err(PipelineError::EmptyPipeline {
                 name: self.name.clone(),
@@ -170,14 +174,13 @@ impl Pipeline {
         let mut stage_results = Vec::with_capacity(self.stages.len());
 
         for (i, stage) in self.stages.iter().enumerate() {
-            let output = execute_stage(ctx, &current, stage).map_err(|e| {
-                PipelineError::StageFailure {
+            let output =
+                execute_stage(ctx, &current, stage).map_err(|e| PipelineError::StageFailure {
                     pipeline_name: self.name.clone(),
                     stage_name: stage.name.clone(),
                     stage_index: i,
                     source: Box::new(e),
-                }
-            })?;
+                })?;
             stage_results.push((stage.name.clone(), output.clone()));
             current = output;
         }
@@ -344,12 +347,13 @@ fn execute_infer(
         Arc::clone(&ctx.knowledge_graph),
     );
 
-    let result = engine.infer_with_rules(&query, &ctx.rules).map_err(|e| {
-        PipelineError::StageExecution {
-            stage_name: stage_name.into(),
-            message: format!("inference failed: {e}"),
-        }
-    })?;
+    let result =
+        engine
+            .infer_with_rules(&query, &ctx.rules)
+            .map_err(|e| PipelineError::StageExecution {
+                stage_name: stage_name.into(),
+                message: format!("inference failed: {e}"),
+            })?;
 
     Ok(PipelineData::Inference(result))
 }
@@ -388,9 +392,9 @@ fn execute_reason(
             if ids.len() == 1 {
                 ids[0].clone()
             } else {
-                ids.iter().skip(1).fold(ids[0].clone(), |acc, id| {
-                    format!("(bundle {} {})", acc, id)
-                })
+                ids.iter()
+                    .skip(1)
+                    .fold(ids[0].clone(), |acc, id| format!("(bundle {} {})", acc, id))
             }
         }
         PipelineData::Seeds(seeds) => {
@@ -401,9 +405,9 @@ fn execute_reason(
             if ids.len() == 1 {
                 ids[0].clone()
             } else {
-                ids.iter().skip(1).fold(ids[0].clone(), |acc, id| {
-                    format!("(bundle {} {})", acc, id)
-                })
+                ids.iter()
+                    .skip(1)
+                    .fold(ids[0].clone(), |acc, id| format!("(bundle {} {})", acc, id))
             }
         }
         other => {
@@ -415,12 +419,13 @@ fn execute_reason(
         }
     };
 
-    let expr = expr_str
-        .parse::<egg::RecExpr<AkhLang>>()
-        .map_err(|e| PipelineError::StageExecution {
-            stage_name: stage_name.into(),
-            message: format!("expression parse failed: {e}"),
-        })?;
+    let expr =
+        expr_str
+            .parse::<egg::RecExpr<AkhLang>>()
+            .map_err(|e| PipelineError::StageExecution {
+                stage_name: stage_name.into(),
+                message: format!("expression parse failed: {e}"),
+            })?;
 
     let runner = Runner::default()
         .with_iter_limit(max_iterations)
@@ -428,9 +433,10 @@ fn execute_reason(
         .with_expr(&expr)
         .run(&ctx.rules);
 
-    let saturated = runner.stop_reason.as_ref().is_some_and(|r| {
-        matches!(r, egg::StopReason::Saturated)
-    });
+    let saturated = runner
+        .stop_reason
+        .as_ref()
+        .is_some_and(|r| matches!(r, egg::StopReason::Saturated));
 
     let extractor = Extractor::new(&runner.egraph, AstSize);
     let (cost, best) = extractor.find_best(runner.roots[0]);
@@ -525,10 +531,7 @@ mod tests {
             stages: vec![],
         };
         let result = pipeline.run(&ctx, PipelineData::Seeds(vec![sym(1)]));
-        assert!(matches!(
-            result,
-            Err(PipelineError::EmptyPipeline { .. })
-        ));
+        assert!(matches!(result, Err(PipelineError::EmptyPipeline { .. })));
     }
 
     #[test]
@@ -557,9 +560,7 @@ mod tests {
             }],
         };
 
-        let output = pipeline
-            .run(&ctx, PipelineData::Seeds(vec![a]))
-            .unwrap();
+        let output = pipeline.run(&ctx, PipelineData::Seeds(vec![a])).unwrap();
         assert_eq!(output.stages_executed, 1);
         match &output.result {
             PipelineData::Traversal(tr) => {
@@ -596,9 +597,7 @@ mod tests {
             }],
         };
 
-        let output = pipeline
-            .run(&ctx, PipelineData::Seeds(vec![sun]))
-            .unwrap();
+        let output = pipeline.run(&ctx, PipelineData::Seeds(vec![sun])).unwrap();
         match &output.result {
             PipelineData::Inference(result) => {
                 let syms: Vec<SymbolId> = result.activations.iter().map(|(s, _)| *s).collect();
@@ -624,9 +623,7 @@ mod tests {
             .unwrap();
 
         let pipeline = Pipeline::query_pipeline();
-        let output = pipeline
-            .run(&ctx, PipelineData::Seeds(vec![a]))
-            .unwrap();
+        let output = pipeline.run(&ctx, PipelineData::Seeds(vec![a])).unwrap();
 
         assert_eq!(output.stages_executed, 3);
         assert!(matches!(output.result, PipelineData::Reasoning(_)));

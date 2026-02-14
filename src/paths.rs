@@ -32,7 +32,9 @@ pub enum PathError {
     #[error("workspace not found: \"{name}\"")]
     #[diagnostic(
         code(akh::paths::workspace_not_found),
-        help("Create it with `akh-medu workspace create {name}` or list existing workspaces with `akh-medu workspace list`.")
+        help(
+            "Create it with `akh-medu workspace create {name}` or list existing workspaces with `akh-medu workspace list`."
+        )
     )]
     WorkspaceNotFound { name: String },
 }
@@ -151,7 +153,9 @@ impl AkhPaths {
 
     /// Path to a workspace's config file.
     pub fn workspace_config_file(&self, name: &str) -> PathBuf {
-        self.config_dir.join("workspaces").join(format!("{name}.toml"))
+        self.config_dir
+            .join("workspaces")
+            .join(format!("{name}.toml"))
     }
 
     /// Path to the seeds directory.
@@ -251,10 +255,22 @@ mod tests {
 
         let ws = paths.workspace("myproject");
         assert_eq!(ws.name, "myproject");
-        assert_eq!(ws.root, PathBuf::from("/data/akh-medu/workspaces/myproject"));
-        assert_eq!(ws.kg_dir, PathBuf::from("/data/akh-medu/workspaces/myproject/kg"));
-        assert_eq!(ws.skills_dir, PathBuf::from("/data/akh-medu/workspaces/myproject/skills"));
-        assert_eq!(ws.scratch_dir, PathBuf::from("/data/akh-medu/workspaces/myproject/scratch"));
+        assert_eq!(
+            ws.root,
+            PathBuf::from("/data/akh-medu/workspaces/myproject")
+        );
+        assert_eq!(
+            ws.kg_dir,
+            PathBuf::from("/data/akh-medu/workspaces/myproject/kg")
+        );
+        assert_eq!(
+            ws.skills_dir,
+            PathBuf::from("/data/akh-medu/workspaces/myproject/skills")
+        );
+        assert_eq!(
+            ws.scratch_dir,
+            PathBuf::from("/data/akh-medu/workspaces/myproject/scratch")
+        );
         assert_eq!(
             ws.session_file,
             PathBuf::from("/state/akh-medu/sessions/myproject.bin")

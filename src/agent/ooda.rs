@@ -138,12 +138,9 @@ fn observe(agent: &mut Agent, cycle: u64) -> AgentResult<Observation> {
     // Recall relevant episodes if we have active goals.
     let mut recalled = Vec::new();
     if !active_goals.is_empty() {
-        if let Ok(episodes) = super::memory::recall_episodes(
-            &agent.engine,
-            &active_goals,
-            &agent.predicates,
-            3,
-        ) {
+        if let Ok(episodes) =
+            super::memory::recall_episodes(&agent.engine, &active_goals, &agent.predicates, 3)
+        {
             recalled = episodes;
         }
     }
@@ -269,9 +266,8 @@ fn decide(
     );
 
     // Record decision in WM.
-    let dec_content = format!(
-        "Decide: tool={tool_name}, goal=\"{goal_desc}\", reason={reasoning}",
-    );
+    let dec_content =
+        format!("Decide: tool={tool_name}, goal=\"{goal_desc}\", reason={reasoning}",);
     let _ = agent.working_memory.push(WorkingMemoryEntry {
         id: 0,
         content: dec_content,
@@ -286,7 +282,10 @@ fn decide(
     // Store provenance for the decision.
     let mut prov = ProvenanceRecord::new(
         goal_id,
-        DerivationKind::AgentDecision { goal: goal_id, cycle },
+        DerivationKind::AgentDecision {
+            goal: goal_id,
+            cycle,
+        },
     )
     .with_confidence(0.8);
     let _ = agent.engine.store_provenance(&mut prov);
@@ -350,12 +349,8 @@ impl GoalToolHistory {
     /// How recently a tool was used (0 = most recent, 1 = one before, etc).
     /// Returns None if never used for this goal.
     fn recency(&self, tool: &str) -> Option<usize> {
-        self.recent_tools
-            .iter()
-            .rev()
-            .position(|t| t == tool)
+        self.recent_tools.iter().rev().position(|t| t == tool)
     }
-
 }
 
 /// Parse tool name from a Decision WM entry content string.
@@ -387,8 +382,11 @@ struct ToolCandidate {
 
 impl ToolCandidate {
     fn total_score(&self) -> f32 {
-        (self.base_score - self.recency_penalty + self.novelty_bonus
-            + self.episodic_bonus + self.pressure_bonus + self.archetype_bonus)
+        (self.base_score - self.recency_penalty
+            + self.novelty_bonus
+            + self.episodic_bonus
+            + self.pressure_bonus
+            + self.archetype_bonus)
             .max(0.0)
     }
 
@@ -536,7 +534,8 @@ fn select_tool(
         // For code queries, prefer unexplored child entities discovered in
         // previous kg_query results, then fall back to top-level match.
         let query_symbol = if is_code_query {
-            unexplored_child.clone()
+            unexplored_child
+                .clone()
                 .or_else(|| find_code_entity_for_query(engine, &goal.description))
                 .unwrap_or_else(|| {
                     orientation
@@ -662,7 +661,13 @@ fn select_tool(
         let sanitize = |label: String| -> String {
             label
                 .chars()
-                .map(|c| if c.is_alphanumeric() || c == '_' { c } else { '_' })
+                .map(|c| {
+                    if c.is_alphanumeric() || c == '_' {
+                        c
+                    } else {
+                        '_'
+                    }
+                })
                 .collect()
         };
         let expr = format!(
@@ -720,38 +725,89 @@ fn select_tool(
         {
             // Score tools by semantic similarity to the goal vector.
             let vsa_tools: &[(&str, &[&str])] = &[
-                ("file_io", &["file", "read", "write", "save", "export", "data", "disk", "load", "document"]),
-                ("http_fetch", &["http", "url", "fetch", "web", "api", "download", "request", "network"]),
-                ("shell_exec", &["command", "shell", "execute", "run", "process", "script", "system", "terminal"]),
-                ("infer_rules", &["infer", "deduce", "derive", "transitive", "type", "hierarchy", "classify", "forward", "chain"]),
-                ("gap_analysis", &["gap", "missing", "incomplete", "discover", "explore", "what", "unknown", "coverage"]),
-                ("user_interact", &["ask", "user", "input", "question", "interact", "human", "prompt", "dialog"]),
+                (
+                    "file_io",
+                    &[
+                        "file", "read", "write", "save", "export", "data", "disk", "load",
+                        "document",
+                    ],
+                ),
+                (
+                    "http_fetch",
+                    &[
+                        "http", "url", "fetch", "web", "api", "download", "request", "network",
+                    ],
+                ),
+                (
+                    "shell_exec",
+                    &[
+                        "command", "shell", "execute", "run", "process", "script", "system",
+                        "terminal",
+                    ],
+                ),
+                (
+                    "infer_rules",
+                    &[
+                        "infer",
+                        "deduce",
+                        "derive",
+                        "transitive",
+                        "type",
+                        "hierarchy",
+                        "classify",
+                        "forward",
+                        "chain",
+                    ],
+                ),
+                (
+                    "gap_analysis",
+                    &[
+                        "gap",
+                        "missing",
+                        "incomplete",
+                        "discover",
+                        "explore",
+                        "what",
+                        "unknown",
+                        "coverage",
+                    ],
+                ),
+                (
+                    "user_interact",
+                    &[
+                        "ask", "user", "input", "question", "interact", "human", "prompt", "dialog",
+                    ],
+                ),
             ];
 
             for (tool_name, concepts) in vsa_tools {
-                let profile_vec = match crate::vsa::grounding::bundle_symbols(
-                    engine, ops, im, concepts,
-                ) {
-                    Ok(v) => v,
-                    Err(_) => continue,
-                };
+                let profile_vec =
+                    match crate::vsa::grounding::bundle_symbols(engine, ops, im, concepts) {
+                        Ok(v) => v,
+                        Err(_) => continue,
+                    };
 
                 let semantic_score = ops.similarity(&goal_vec, &profile_vec).unwrap_or(0.5);
 
                 // Apply context-aware adjustments on top of raw semantic score.
                 let (adjusted_base, input, reason) = match *tool_name {
                     "file_io" => {
-                        if semantic_score <= 0.55 { continue; }
+                        if semantic_score <= 0.55 {
+                            continue;
+                        }
                         (
                             semantic_score * 0.75,
-                            ToolInput::new()
-                                .with_param("action", "read")
-                                .with_param("path", &format!("{}.txt", goal_label.replace(' ', "_"))),
+                            ToolInput::new().with_param("action", "read").with_param(
+                                "path",
+                                &format!("{}.txt", goal_label.replace(' ', "_")),
+                            ),
                             format!("VSA semantic match for file I/O: {semantic_score:.3}"),
                         )
                     }
                     "http_fetch" => {
-                        if semantic_score <= 0.55 { continue; }
+                        if semantic_score <= 0.55 {
+                            continue;
+                        }
                         (
                             semantic_score * 0.75,
                             ToolInput::new().with_param("url", "https://example.com"),
@@ -759,7 +815,9 @@ fn select_tool(
                         )
                     }
                     "shell_exec" => {
-                        if semantic_score <= 0.55 { continue; }
+                        if semantic_score <= 0.55 {
+                            continue;
+                        }
                         (
                             semantic_score * 0.75,
                             ToolInput::new()
@@ -769,7 +827,9 @@ fn select_tool(
                         )
                     }
                     "infer_rules" => {
-                        if !has_knowledge { continue; }
+                        if !has_knowledge {
+                            continue;
+                        }
                         let recent_infer_count = history.count("infer_rules");
                         let context_boost = if recent_infer_count == 0 { 0.1 } else { 0.0 };
                         // Suppress when code children still need exploring.
@@ -806,7 +866,9 @@ fn select_tool(
                         )
                     }
                     "user_interact" => {
-                        if semantic_score <= 0.55 { continue; }
+                        if semantic_score <= 0.55 {
+                            continue;
+                        }
                         (
                             semantic_score * 0.75,
                             ToolInput::new().with_param(
@@ -972,7 +1034,10 @@ fn act(agent: &mut Agent, decision: &Decision, cycle: u64) -> AgentResult<Action
         .working_memory
         .push(WorkingMemoryEntry {
             id: 0,
-            content: format!("Tool result ({}):\n{}", decision.chosen_tool, result_content),
+            content: format!(
+                "Tool result ({}):\n{}",
+                decision.chosen_tool, result_content
+            ),
             symbols: tool_output.symbols_involved.clone(),
             kind: WorkingMemoryKind::ToolResult,
             timestamp: 0,
@@ -983,15 +1048,12 @@ fn act(agent: &mut Agent, decision: &Decision, cycle: u64) -> AgentResult<Action
         .ok();
 
     // Determine goal progress by evaluating success criteria.
-    let goal_progress = if let Some(goal) = agent
-        .goals
-        .iter()
-        .find(|g| g.symbol_id == decision.goal_id)
-    {
-        evaluate_goal_progress(goal, &tool_output, &agent.engine)
-    } else {
-        GoalProgress::NoChange
-    };
+    let goal_progress =
+        if let Some(goal) = agent.goals.iter().find(|g| g.symbol_id == decision.goal_id) {
+            evaluate_goal_progress(goal, &tool_output, &agent.engine)
+        } else {
+            GoalProgress::NoChange
+        };
 
     // Update goal tracking and status.
     if let Some(goal) = agent
@@ -1058,10 +1120,31 @@ fn is_metadata_label(label: &str) -> bool {
 
 /// Code-related keywords that indicate a code-structure query.
 const CODE_KEYWORDS: &[&str] = &[
-    "module", "function", "struct", "trait", "enum", "type", "impl",
-    "architecture", "code", "crate", "method", "field", "vsa", "engine",
-    "agent", "ooda", "tool", "graph", "symbol", "triple", "fn", "mod",
-    "defines", "depends", "contains",
+    "module",
+    "function",
+    "struct",
+    "trait",
+    "enum",
+    "type",
+    "impl",
+    "architecture",
+    "code",
+    "crate",
+    "method",
+    "field",
+    "vsa",
+    "engine",
+    "agent",
+    "ooda",
+    "tool",
+    "graph",
+    "symbol",
+    "triple",
+    "fn",
+    "mod",
+    "defines",
+    "depends",
+    "contains",
 ];
 
 /// Whether a goal description is asking about code structure.
@@ -1084,8 +1167,11 @@ fn find_unexplored_code_child(
     use super::memory::WorkingMemoryKind;
 
     let code_child_predicates = [
-        "code:contains-mod", "code:defines-fn", "code:defines-struct",
-        "code:defines-enum", "code:defines-type",
+        "code:contains-mod",
+        "code:defines-fn",
+        "code:defines-struct",
+        "code:defines-enum",
+        "code:defines-type",
     ];
 
     let mut discovered_children: Vec<String> = Vec::new();
@@ -1112,7 +1198,10 @@ fn find_unexplored_code_child(
             let object_raw = parts[2..].join(" -> ");
             // Strip trailing confidence
             let object = if let Some(bracket_pos) = object_raw.rfind("  [") {
-                object_raw[..bracket_pos].trim().trim_matches('"').to_string()
+                object_raw[..bracket_pos]
+                    .trim()
+                    .trim_matches('"')
+                    .to_string()
             } else {
                 object_raw.trim().trim_matches('"').to_string()
             };
@@ -1175,24 +1264,20 @@ fn find_unexplored_code_child(
     }
 
     // Sort by importance descending — prefer high-importance children first.
-    unexplored.sort_by(|a, b| {
-        b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
-    });
+    unexplored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
     unexplored.into_iter().next().map(|(label, _)| label)
 }
 
 /// Stop words that should not contribute to entity matching scores.
 const STOP_WORDS: &[&str] = &[
-    "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
-    "have", "has", "had", "do", "does", "did", "will", "would", "could",
-    "should", "may", "might", "shall", "can", "need", "dare", "ought",
-    "describe", "explain", "show", "list", "what", "how", "why", "when",
-    "where", "which", "who", "whom", "that", "this", "these", "those",
-    "it", "its", "of", "in", "on", "at", "to", "for", "with", "by",
-    "from", "about", "into", "through", "during", "before", "after",
-    "and", "or", "but", "not", "no", "all", "each", "every", "any",
-    "me", "my", "we", "our",
+    "the", "a", "an", "is", "are", "was", "were", "be", "been", "being", "have", "has", "had",
+    "do", "does", "did", "will", "would", "could", "should", "may", "might", "shall", "can",
+    "need", "dare", "ought", "describe", "explain", "show", "list", "what", "how", "why", "when",
+    "where", "which", "who", "whom", "that", "this", "these", "those", "it", "its", "of", "in",
+    "on", "at", "to", "for", "with", "by", "from", "about", "into", "through", "during", "before",
+    "after", "and", "or", "but", "not", "no", "all", "each", "every", "any", "me", "my", "we",
+    "our",
 ];
 
 /// Find the best matching code entity for a goal description.
@@ -1200,18 +1285,15 @@ const STOP_WORDS: &[&str] = &[
 /// Scores all non-metadata symbols by keyword overlap with the description.
 /// Uses exact word-boundary matching (not substring), filters stop words,
 /// and prefers shorter labels (more specific entities).
-fn find_code_entity_for_query(
-    engine: &crate::engine::Engine,
-    description: &str,
-) -> Option<String> {
+fn find_code_entity_for_query(engine: &crate::engine::Engine, description: &str) -> Option<String> {
     let desc_words: Vec<String> = description
         .split_whitespace()
-        .map(|w| w.to_lowercase().trim_matches(|c: char| !c.is_alphanumeric()).to_string())
-        .filter(|w| {
-            !w.is_empty()
-                && w.len() > 1
-                && !STOP_WORDS.contains(&w.as_str())
+        .map(|w| {
+            w.to_lowercase()
+                .trim_matches(|c: char| !c.is_alphanumeric())
+                .to_string()
         })
+        .filter(|w| !w.is_empty() && w.len() > 1 && !STOP_WORDS.contains(&w.as_str()))
         .collect();
 
     if desc_words.is_empty() {
@@ -1263,9 +1345,12 @@ fn find_code_entity_for_query(
             .iter()
             .filter(|t| {
                 let pred = engine.resolve_label(t.predicate);
-                pred == "code:contains-mod" || pred == "code:defines-fn"
-                    || pred == "code:defines-struct" || pred == "code:defines-enum"
-                    || pred == "code:depends-on" || pred == "code:defined-in"
+                pred == "code:contains-mod"
+                    || pred == "code:defines-fn"
+                    || pred == "code:defines-struct"
+                    || pred == "code:defines-enum"
+                    || pred == "code:depends-on"
+                    || pred == "code:defined-in"
             })
             .cloned()
             .collect();
@@ -1286,7 +1371,10 @@ fn find_code_entity_for_query(
             score -= 1;
         }
 
-        if score > best_score || (score == best_score && label.len() < best_label.as_ref().map_or(usize::MAX, |l| l.len())) {
+        if score > best_score
+            || (score == best_score
+                && label.len() < best_label.as_ref().map_or(usize::MAX, |l| l.len()))
+        {
             best_score = score;
             best_label = Some(label.clone());
         }
@@ -1299,10 +1387,7 @@ fn find_code_entity_for_query(
 ///
 /// Searches the entire KG for data symbols (not agent metadata) matching
 /// criteria keywords. Returns the match ratio in [0.0, 1.0].
-fn evaluate_criteria_against_kg(
-    goal: &Goal,
-    engine: &crate::engine::Engine,
-) -> f32 {
+fn evaluate_criteria_against_kg(goal: &Goal, engine: &crate::engine::Engine) -> f32 {
     let keywords = parse_criteria_keywords(&goal.success_criteria);
     if keywords.is_empty() {
         return 0.0;
@@ -1417,8 +1502,8 @@ fn evaluate_goal_progress(
     let advancement_threshold = 0.53;
 
     // Require both signals for completion, or one very strong signal
-    let both_above_threshold = tool_interference >= completion_threshold
-        && kg_interference >= completion_threshold;
+    let both_above_threshold =
+        tool_interference >= completion_threshold && kg_interference >= completion_threshold;
     let one_very_strong = best_interference >= strong_threshold;
 
     if both_above_threshold || one_very_strong {

@@ -26,13 +26,9 @@ pub struct TerseGrammar;
 impl TerseGrammar {
     fn linearize_inner(&self, tree: &AbsTree, ctx: &LinContext) -> GrammarResult<String> {
         match tree {
-            AbsTree::EntityRef { label, symbol_id } => {
-                Ok(ctx.resolve_label(label, *symbol_id))
-            }
+            AbsTree::EntityRef { label, symbol_id } => Ok(ctx.resolve_label(label, *symbol_id)),
 
-            AbsTree::RelationRef { label, symbol_id } => {
-                Ok(ctx.resolve_label(label, *symbol_id))
-            }
+            AbsTree::RelationRef { label, symbol_id } => Ok(ctx.resolve_label(label, *symbol_id)),
 
             AbsTree::Freeform(text) => Ok(text.clone()),
 
@@ -57,7 +53,10 @@ impl TerseGrammar {
                 Ok(format!("{e} ~ {s} ({score:.2})"))
             }
 
-            AbsTree::Gap { entity, description } => {
+            AbsTree::Gap {
+                entity,
+                description,
+            } => {
                 let e = self.linearize_inner(entity, ctx)?;
                 Ok(format!("? {e}: {description}"))
             }
@@ -67,9 +66,7 @@ impl TerseGrammar {
                 simplified,
             } => Ok(format!("{expression} ⇒ {simplified}")),
 
-            AbsTree::CodeFact { kind, name, detail } => {
-                Ok(format!("{kind}:{name} — {detail}"))
-            }
+            AbsTree::CodeFact { kind, name, detail } => Ok(format!("{kind}:{name} — {detail}")),
 
             AbsTree::CodeModule {
                 name,
@@ -352,11 +349,7 @@ mod tests {
     fn linearize_similarity() {
         let g = TerseGrammar;
         let ctx = LinContext::default();
-        let tree = AbsTree::similarity(
-            AbsTree::entity("Dog"),
-            AbsTree::entity("Wolf"),
-            0.87,
-        );
+        let tree = AbsTree::similarity(AbsTree::entity("Dog"), AbsTree::entity("Wolf"), 0.87);
         let result = g.linearize(&tree, &ctx).unwrap();
         assert_eq!(result, "Dog ~ Wolf (0.87)");
     }

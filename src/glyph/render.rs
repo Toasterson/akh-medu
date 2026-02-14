@@ -19,7 +19,6 @@ const GREEN: &str = "\x1b[32m";
 const BOLD: &str = "\x1b[1m";
 const DIM: &str = "\x1b[2m";
 
-
 /// Configuration for terminal rendering.
 #[derive(Debug, Clone)]
 pub struct RenderConfig {
@@ -137,10 +136,7 @@ pub fn render_legend(config: &RenderConfig) -> String {
             if config.color { BOLD } else { "" },
             if config.color { RESET } else { "" },
         ));
-        for glyph in catalog::all_glyphs()
-            .iter()
-            .filter(|g| g.category == *cat)
-        {
+        for glyph in catalog::all_glyphs().iter().filter(|g| g.category == *cat) {
             let display = if config.notation.use_pua {
                 glyph.pua_codepoint.to_string()
             } else {
@@ -236,11 +232,7 @@ fn render_entity_colored(engine: &Engine, symbol: SymbolId, config: &RenderConfi
 }
 
 /// Render a predicate with ANSI yellow color.
-fn render_predicate_colored(
-    engine: &Engine,
-    predicate: SymbolId,
-    config: &RenderConfig,
-) -> String {
+fn render_predicate_colored(engine: &Engine, predicate: SymbolId, config: &RenderConfig) -> String {
     let label = engine.resolve_label(predicate);
     if let Some(glyph) = catalog::lookup(&label) {
         let display = if config.notation.use_pua {
@@ -306,7 +298,10 @@ mod tests {
             ..Default::default()
         };
         let rendered = render_to_terminal(&engine, &[triple], &config);
-        assert!(rendered.contains("\x1b["), "should contain ANSI escape codes");
+        assert!(
+            rendered.contains("\x1b["),
+            "should contain ANSI escape codes"
+        );
     }
 
     #[test]

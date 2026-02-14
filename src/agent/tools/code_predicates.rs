@@ -120,7 +120,11 @@ mod tests {
         ];
 
         let unique: std::collections::HashSet<_> = ids.iter().collect();
-        assert_eq!(unique.len(), ids.len(), "all code predicates must be unique");
+        assert_eq!(
+            unique.len(),
+            ids.len(),
+            "all code predicates must be unique"
+        );
     }
 
     #[test]

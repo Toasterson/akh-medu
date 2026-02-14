@@ -5,14 +5,14 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::RwLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use egg::{Pattern, Rewrite};
 
 use crate::error::{SkillError, SkillResult};
-use crate::graph::index::KnowledgeGraph;
 use crate::graph::Triple;
+use crate::graph::index::KnowledgeGraph;
 use crate::reason::AkhLang;
 use crate::symbol::SymbolId;
 
@@ -130,9 +130,11 @@ impl SkillManager {
     /// Parse the manifest for a Cold skill, transitioning it to Warm.
     pub fn warm(&self, skill_id: &str) -> SkillResult<SkillManifest> {
         let mut skills = self.skills.write().expect("skills lock poisoned");
-        let skill = skills.get_mut(skill_id).ok_or_else(|| SkillError::NotFound {
-            name: skill_id.into(),
-        })?;
+        let skill = skills
+            .get_mut(skill_id)
+            .ok_or_else(|| SkillError::NotFound {
+                name: skill_id.into(),
+            })?;
 
         if skill.state != SkillState::Cold {
             return Err(SkillError::InvalidTransition {
@@ -168,9 +170,11 @@ impl SkillManager {
         knowledge_graph: &KnowledgeGraph,
     ) -> SkillResult<SkillActivation> {
         let mut skills = self.skills.write().expect("skills lock poisoned");
-        let skill = skills.get_mut(skill_id).ok_or_else(|| SkillError::NotFound {
-            name: skill_id.into(),
-        })?;
+        let skill = skills
+            .get_mut(skill_id)
+            .ok_or_else(|| SkillError::NotFound {
+                name: skill_id.into(),
+            })?;
 
         if skill.state != SkillState::Warm {
             return Err(SkillError::InvalidTransition {
@@ -193,11 +197,10 @@ impl SkillManager {
             .unwrap_or_else(|| "triples.json".into());
         let triples_path = skill_dir.join(&triples_file);
         if triples_path.exists() {
-            let content =
-                std::fs::read_to_string(&triples_path).map_err(|e| SkillError::Io {
-                    skill_id: skill_id.into(),
-                    source: e,
-                })?;
+            let content = std::fs::read_to_string(&triples_path).map_err(|e| SkillError::Io {
+                skill_id: skill_id.into(),
+                source: e,
+            })?;
 
             let raw_triples: Vec<serde_json::Value> =
                 serde_json::from_str(&content).map_err(|e| SkillError::InvalidManifest {
@@ -231,11 +234,10 @@ impl SkillManager {
         let rules_path = skill_dir.join(&rules_file);
         let mut rule_tuples: Vec<(String, String, String)> = Vec::new();
         if rules_path.exists() {
-            let content =
-                std::fs::read_to_string(&rules_path).map_err(|e| SkillError::Io {
-                    skill_id: skill_id.into(),
-                    source: e,
-                })?;
+            let content = std::fs::read_to_string(&rules_path).map_err(|e| SkillError::Io {
+                skill_id: skill_id.into(),
+                source: e,
+            })?;
 
             for (i, line) in content.lines().enumerate() {
                 let line = line.trim();
@@ -293,9 +295,11 @@ impl SkillManager {
     /// Triples already in the KG persist until engine restart.
     pub fn deactivate(&self, skill_id: &str) -> SkillResult<()> {
         let mut skills = self.skills.write().expect("skills lock poisoned");
-        let skill = skills.get_mut(skill_id).ok_or_else(|| SkillError::NotFound {
-            name: skill_id.into(),
-        })?;
+        let skill = skills
+            .get_mut(skill_id)
+            .ok_or_else(|| SkillError::NotFound {
+                name: skill_id.into(),
+            })?;
 
         if skill.state != SkillState::Hot {
             return Err(SkillError::InvalidTransition {
@@ -338,7 +342,10 @@ impl SkillManager {
 
     /// Build rewrite rules from all active (Hot) skills.
     pub fn active_rules(&self) -> Vec<Rewrite<AkhLang, ()>> {
-        let rule_sources = self.rule_sources.read().expect("rule_sources lock poisoned");
+        let rule_sources = self
+            .rule_sources
+            .read()
+            .expect("rule_sources lock poisoned");
         let mut rules = Vec::new();
 
         for (skill_id, tuples) in rule_sources.iter() {

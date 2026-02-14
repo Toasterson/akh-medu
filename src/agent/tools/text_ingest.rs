@@ -50,9 +50,7 @@ impl Tool for TextIngestTool {
             match std::fs::read_to_string(path.trim()) {
                 Ok(content) => content,
                 Err(e) => {
-                    return Ok(ToolOutput::err(format!(
-                        "Failed to read \"{path}\": {e}"
-                    )));
+                    return Ok(ToolOutput::err(format!("Failed to read \"{path}\": {e}")));
                 }
             }
         } else {
@@ -87,7 +85,8 @@ impl Tool for TextIngestTool {
     fn manifest(&self) -> ToolManifest {
         ToolManifest {
             name: "text_ingest".into(),
-            description: "Extracts triples from text and writes them to the knowledge graph.".into(),
+            description: "Extracts triples from text and writes them to the knowledge graph."
+                .into(),
             parameters: vec![
                 ToolParamSchema::required(
                     "text",
@@ -101,7 +100,8 @@ impl Tool for TextIngestTool {
             danger: DangerInfo {
                 level: DangerLevel::Cautious,
                 capabilities: HashSet::from([Capability::WriteKg]),
-                description: "Extracts triples from text and writes them to the knowledge graph.".into(),
+                description: "Extracts triples from text and writes them to the knowledge graph."
+                    .into(),
                 shadow_triggers: vec!["ingest".into()],
             },
             source: ToolSource::Native,
@@ -152,7 +152,9 @@ type ExtractedTriple = (String, String, String, f32);
 /// - "X is made of Y" → (X, composed-of, Y)
 fn extract_triples(sentence: &str) -> Vec<ExtractedTriple> {
     let mut results = Vec::new();
-    let s = sentence.trim().trim_end_matches(|c: char| c == '.' || c == '!' || c == '?');
+    let s = sentence
+        .trim()
+        .trim_end_matches(|c: char| c == '.' || c == '!' || c == '?');
 
     // Normalize whitespace.
     let words: Vec<&str> = s.split_whitespace().collect();
@@ -182,8 +184,16 @@ fn extract_triples(sentence: &str) -> Vec<ExtractedTriple> {
 fn try_is_a_pattern(words: &[&str], lower: &[String], results: &mut Vec<ExtractedTriple>) {
     for i in 0..lower.len().saturating_sub(3) {
         if lower[i + 1] == "is" && (lower[i + 2] == "a" || lower[i + 2] == "an") {
-            let subject = capitalize(words[..=i].join(" ").trim_matches(|c: char| !c.is_alphanumeric()));
-            let object = capitalize(words[i + 3..].join(" ").trim_matches(|c: char| !c.is_alphanumeric()));
+            let subject = capitalize(
+                words[..=i]
+                    .join(" ")
+                    .trim_matches(|c: char| !c.is_alphanumeric()),
+            );
+            let object = capitalize(
+                words[i + 3..]
+                    .join(" ")
+                    .trim_matches(|c: char| !c.is_alphanumeric()),
+            );
             if !subject.is_empty() && !object.is_empty() {
                 results.push((subject, "is-a".into(), object, 0.9));
                 return;
@@ -196,8 +206,13 @@ fn try_is_a_pattern(words: &[&str], lower: &[String], results: &mut Vec<Extracte
 fn try_are_pattern(words: &[&str], lower: &[String], results: &mut Vec<ExtractedTriple>) {
     for i in 0..lower.len().saturating_sub(2) {
         if lower[i + 1] == "are" {
-            let subject = capitalize(words[..=i].join(" ").trim_matches(|c: char| !c.is_alphanumeric()));
-            let rest_start = if i + 2 < lower.len() && (lower[i + 2] == "a" || lower[i + 2] == "an") {
+            let subject = capitalize(
+                words[..=i]
+                    .join(" ")
+                    .trim_matches(|c: char| !c.is_alphanumeric()),
+            );
+            let rest_start = if i + 2 < lower.len() && (lower[i + 2] == "a" || lower[i + 2] == "an")
+            {
                 i + 3
             } else {
                 i + 2
@@ -205,7 +220,11 @@ fn try_are_pattern(words: &[&str], lower: &[String], results: &mut Vec<Extracted
             if rest_start >= words.len() {
                 continue;
             }
-            let object = capitalize(words[rest_start..].join(" ").trim_matches(|c: char| !c.is_alphanumeric()));
+            let object = capitalize(
+                words[rest_start..]
+                    .join(" ")
+                    .trim_matches(|c: char| !c.is_alphanumeric()),
+            );
             if !subject.is_empty() && !object.is_empty() {
                 results.push((subject, "is-a".into(), object, 0.85));
                 return;
@@ -218,8 +237,13 @@ fn try_are_pattern(words: &[&str], lower: &[String], results: &mut Vec<Extracted
 fn try_has_pattern(words: &[&str], lower: &[String], results: &mut Vec<ExtractedTriple>) {
     for i in 0..lower.len().saturating_sub(2) {
         if lower[i + 1] == "has" {
-            let subject = capitalize(words[..=i].join(" ").trim_matches(|c: char| !c.is_alphanumeric()));
-            let rest_start = if i + 2 < lower.len() && (lower[i + 2] == "a" || lower[i + 2] == "an") {
+            let subject = capitalize(
+                words[..=i]
+                    .join(" ")
+                    .trim_matches(|c: char| !c.is_alphanumeric()),
+            );
+            let rest_start = if i + 2 < lower.len() && (lower[i + 2] == "a" || lower[i + 2] == "an")
+            {
                 i + 3
             } else {
                 i + 2
@@ -227,7 +251,11 @@ fn try_has_pattern(words: &[&str], lower: &[String], results: &mut Vec<Extracted
             if rest_start >= words.len() {
                 continue;
             }
-            let object = capitalize(words[rest_start..].join(" ").trim_matches(|c: char| !c.is_alphanumeric()));
+            let object = capitalize(
+                words[rest_start..]
+                    .join(" ")
+                    .trim_matches(|c: char| !c.is_alphanumeric()),
+            );
             if !subject.is_empty() && !object.is_empty() {
                 results.push((subject, "has-a".into(), object, 0.85));
                 return;
@@ -240,8 +268,16 @@ fn try_has_pattern(words: &[&str], lower: &[String], results: &mut Vec<Extracted
 fn try_contains_pattern(words: &[&str], lower: &[String], results: &mut Vec<ExtractedTriple>) {
     for i in 0..lower.len().saturating_sub(2) {
         if lower[i + 1] == "contains" {
-            let subject = capitalize(words[..=i].join(" ").trim_matches(|c: char| !c.is_alphanumeric()));
-            let object = capitalize(words[i + 2..].join(" ").trim_matches(|c: char| !c.is_alphanumeric()));
+            let subject = capitalize(
+                words[..=i]
+                    .join(" ")
+                    .trim_matches(|c: char| !c.is_alphanumeric()),
+            );
+            let object = capitalize(
+                words[i + 2..]
+                    .join(" ")
+                    .trim_matches(|c: char| !c.is_alphanumeric()),
+            );
             if !subject.is_empty() && !object.is_empty() {
                 results.push((subject, "contains".into(), object, 0.85));
                 return;
@@ -254,8 +290,16 @@ fn try_contains_pattern(words: &[&str], lower: &[String], results: &mut Vec<Extr
 fn try_part_of_pattern(words: &[&str], lower: &[String], results: &mut Vec<ExtractedTriple>) {
     for i in 0..lower.len().saturating_sub(4) {
         if lower[i + 1] == "is" && lower[i + 2] == "part" && lower[i + 3] == "of" {
-            let subject = capitalize(words[..=i].join(" ").trim_matches(|c: char| !c.is_alphanumeric()));
-            let object = capitalize(words[i + 4..].join(" ").trim_matches(|c: char| !c.is_alphanumeric()));
+            let subject = capitalize(
+                words[..=i]
+                    .join(" ")
+                    .trim_matches(|c: char| !c.is_alphanumeric()),
+            );
+            let object = capitalize(
+                words[i + 4..]
+                    .join(" ")
+                    .trim_matches(|c: char| !c.is_alphanumeric()),
+            );
             if !subject.is_empty() && !object.is_empty() {
                 results.push((subject, "part-of".into(), object, 0.9));
                 return;
@@ -268,8 +312,16 @@ fn try_part_of_pattern(words: &[&str], lower: &[String], results: &mut Vec<Extra
 fn try_causes_pattern(words: &[&str], lower: &[String], results: &mut Vec<ExtractedTriple>) {
     for i in 0..lower.len().saturating_sub(2) {
         if lower[i + 1] == "causes" {
-            let subject = capitalize(words[..=i].join(" ").trim_matches(|c: char| !c.is_alphanumeric()));
-            let object = capitalize(words[i + 2..].join(" ").trim_matches(|c: char| !c.is_alphanumeric()));
+            let subject = capitalize(
+                words[..=i]
+                    .join(" ")
+                    .trim_matches(|c: char| !c.is_alphanumeric()),
+            );
+            let object = capitalize(
+                words[i + 2..]
+                    .join(" ")
+                    .trim_matches(|c: char| !c.is_alphanumeric()),
+            );
             if !subject.is_empty() && !object.is_empty() {
                 results.push((subject, "causes".into(), object, 0.85));
                 return;
@@ -282,8 +334,16 @@ fn try_causes_pattern(words: &[&str], lower: &[String], results: &mut Vec<Extrac
 fn try_located_in_pattern(words: &[&str], lower: &[String], results: &mut Vec<ExtractedTriple>) {
     for i in 0..lower.len().saturating_sub(4) {
         if lower[i + 1] == "is" && lower[i + 2] == "located" && lower[i + 3] == "in" {
-            let subject = capitalize(words[..=i].join(" ").trim_matches(|c: char| !c.is_alphanumeric()));
-            let object = capitalize(words[i + 4..].join(" ").trim_matches(|c: char| !c.is_alphanumeric()));
+            let subject = capitalize(
+                words[..=i]
+                    .join(" ")
+                    .trim_matches(|c: char| !c.is_alphanumeric()),
+            );
+            let object = capitalize(
+                words[i + 4..]
+                    .join(" ")
+                    .trim_matches(|c: char| !c.is_alphanumeric()),
+            );
             if !subject.is_empty() && !object.is_empty() {
                 results.push((subject, "located-in".into(), object, 0.9));
                 return;
@@ -296,8 +356,16 @@ fn try_located_in_pattern(words: &[&str], lower: &[String], results: &mut Vec<Ex
 fn try_similar_to_pattern(words: &[&str], lower: &[String], results: &mut Vec<ExtractedTriple>) {
     for i in 0..lower.len().saturating_sub(4) {
         if lower[i + 1] == "is" && lower[i + 2] == "similar" && lower[i + 3] == "to" {
-            let subject = capitalize(words[..=i].join(" ").trim_matches(|c: char| !c.is_alphanumeric()));
-            let object = capitalize(words[i + 4..].join(" ").trim_matches(|c: char| !c.is_alphanumeric()));
+            let subject = capitalize(
+                words[..=i]
+                    .join(" ")
+                    .trim_matches(|c: char| !c.is_alphanumeric()),
+            );
+            let object = capitalize(
+                words[i + 4..]
+                    .join(" ")
+                    .trim_matches(|c: char| !c.is_alphanumeric()),
+            );
             if !subject.is_empty() && !object.is_empty() {
                 results.push((subject, "similar-to".into(), object, 0.8));
                 return;
@@ -311,8 +379,16 @@ fn try_which_is_pattern(words: &[&str], lower: &[String], results: &mut Vec<Extr
     for i in 0..lower.len().saturating_sub(4) {
         let w = lower[i + 1].trim_matches(',');
         if w == "which" && lower[i + 2] == "is" && (lower[i + 3] == "a" || lower[i + 3] == "an") {
-            let subject = capitalize(words[..=i].join(" ").trim_matches(|c: char| !c.is_alphanumeric()));
-            let object = capitalize(words[i + 4..].join(" ").trim_matches(|c: char| !c.is_alphanumeric()));
+            let subject = capitalize(
+                words[..=i]
+                    .join(" ")
+                    .trim_matches(|c: char| !c.is_alphanumeric()),
+            );
+            let object = capitalize(
+                words[i + 4..]
+                    .join(" ")
+                    .trim_matches(|c: char| !c.is_alphanumeric()),
+            );
             if !subject.is_empty() && !object.is_empty() {
                 results.push((subject, "is-a".into(), object, 0.85));
                 return;
@@ -325,8 +401,16 @@ fn try_which_is_pattern(words: &[&str], lower: &[String], results: &mut Vec<Extr
 fn try_made_of_pattern(words: &[&str], lower: &[String], results: &mut Vec<ExtractedTriple>) {
     for i in 0..lower.len().saturating_sub(4) {
         if lower[i + 1] == "is" && lower[i + 2] == "made" && lower[i + 3] == "of" {
-            let subject = capitalize(words[..=i].join(" ").trim_matches(|c: char| !c.is_alphanumeric()));
-            let object = capitalize(words[i + 4..].join(" ").trim_matches(|c: char| !c.is_alphanumeric()));
+            let subject = capitalize(
+                words[..=i]
+                    .join(" ")
+                    .trim_matches(|c: char| !c.is_alphanumeric()),
+            );
+            let object = capitalize(
+                words[i + 4..]
+                    .join(" ")
+                    .trim_matches(|c: char| !c.is_alphanumeric()),
+            );
             if !subject.is_empty() && !object.is_empty() {
                 results.push((subject, "composed-of".into(), object, 0.85));
                 return;
@@ -436,8 +520,8 @@ mod tests {
     #[test]
     fn text_tool_execute() {
         let engine = test_engine();
-        let input = ToolInput::new()
-            .with_param("text", "Dogs are mammals. Paris is located in France.");
+        let input =
+            ToolInput::new().with_param("text", "Dogs are mammals. Paris is located in France.");
 
         let tool = TextIngestTool;
         let result = tool.execute(&engine, input).unwrap();
@@ -452,8 +536,7 @@ mod tests {
         let file_path = dir.path().join("test.txt");
         std::fs::write(&file_path, "The eagle is a bird. Gold is a metal.").unwrap();
 
-        let input = ToolInput::new()
-            .with_param("text", &format!("file:{}", file_path.display()));
+        let input = ToolInput::new().with_param("text", &format!("file:{}", file_path.display()));
 
         let tool = TextIngestTool;
         let result = tool.execute(&engine, input).unwrap();

@@ -113,7 +113,9 @@ pub enum GrammarError {
     )]
     Incomplete { fragment: String, expected: String },
 
-    #[error("grounding incomplete: {unresolved_count} label(s) unresolved, first: \"{first_unresolved}\"")]
+    #[error(
+        "grounding incomplete: {unresolved_count} label(s) unresolved, first: \"{first_unresolved}\""
+    )]
     #[diagnostic(
         code(akh::grammar::grounding_incomplete),
         help(

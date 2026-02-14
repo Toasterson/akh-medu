@@ -64,11 +64,12 @@ impl FormalGrammar {
                 ))
             }
 
-            AbsTree::Gap { entity, description } => {
+            AbsTree::Gap {
+                entity,
+                description,
+            } => {
                 let e = self.linearize_inner(entity, ctx)?;
-                Ok(format!(
-                    "Knowledge gap identified for {e}: {description}."
-                ))
+                Ok(format!("Knowledge gap identified for {e}: {description}."))
             }
 
             AbsTree::Inference {
@@ -78,9 +79,9 @@ impl FormalGrammar {
                 "Reasoning result: the expression `{expression}` simplifies to `{simplified}`."
             )),
 
-            AbsTree::CodeFact { kind, name, detail } => Ok(format!(
-                "Code structure: {kind} `{name}` — {detail}."
-            )),
+            AbsTree::CodeFact { kind, name, detail } => {
+                Ok(format!("Code structure: {kind} `{name}` — {detail}."))
+            }
 
             AbsTree::CodeModule {
                 name,
@@ -341,11 +342,7 @@ mod tests {
     fn linearize_similarity() {
         let g = FormalGrammar;
         let ctx = LinContext::default();
-        let tree = AbsTree::similarity(
-            AbsTree::entity("Dog"),
-            AbsTree::entity("Wolf"),
-            0.87,
-        );
+        let tree = AbsTree::similarity(AbsTree::entity("Dog"), AbsTree::entity("Wolf"), 0.87);
         let result = g.linearize(&tree, &ctx).unwrap();
         assert!(result.contains("exhibits similarity to"));
         assert!(result.contains("0.87"));

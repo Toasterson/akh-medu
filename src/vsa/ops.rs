@@ -21,11 +21,7 @@ fn check_compatible(a: &HyperVec, b: &HyperVec) -> VsaResult<()> {
     }
     if a.encoding() != b.encoding() {
         return Err(VsaError::UnsupportedEncoding {
-            encoding: format!(
-                "mixed encodings: {} and {}",
-                a.encoding(),
-                b.encoding()
-            ),
+            encoding: format!("mixed encodings: {} and {}", a.encoding(), b.encoding()),
         });
     }
     Ok(())
@@ -162,8 +158,12 @@ impl VsaOps {
         check_compatible(a, b)?;
         // Convert to i8 bipolar representation for cosine
         let n = a.dim().0;
-        let a_i8: Vec<i8> = (0..n).map(|i| if a.get_bit(i) { 1i8 } else { -1i8 }).collect();
-        let b_i8: Vec<i8> = (0..n).map(|i| if b.get_bit(i) { 1i8 } else { -1i8 }).collect();
+        let a_i8: Vec<i8> = (0..n)
+            .map(|i| if a.get_bit(i) { 1i8 } else { -1i8 })
+            .collect();
+        let b_i8: Vec<i8> = (0..n)
+            .map(|i| if b.get_bit(i) { 1i8 } else { -1i8 })
+            .collect();
         Ok(self.kernel.cosine_similarity_i8(&a_i8, &b_i8))
     }
 }
@@ -200,7 +200,10 @@ mod tests {
         let b = ops.random(&mut rng);
         let sim = ops.similarity(&a, &b).unwrap();
         // Random vectors should have similarity ~0.5 ± noise
-        assert!(sim > 0.4 && sim < 0.6, "similarity was {sim}, expected ~0.5");
+        assert!(
+            sim > 0.4 && sim < 0.6,
+            "similarity was {sim}, expected ~0.5"
+        );
     }
 
     #[test]

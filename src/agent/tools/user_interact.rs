@@ -42,23 +42,17 @@ impl Tool for UserInteractTool {
         match std::io::stdin().read_line(&mut answer) {
             Ok(0) => {
                 // EOF — no input available.
-                Ok(ToolOutput::ok(
-                    "No user input available (stdin closed).",
-                ))
+                Ok(ToolOutput::ok("No user input available (stdin closed)."))
             }
             Ok(_) => {
                 let trimmed = answer.trim().to_string();
                 if trimmed.is_empty() {
                     Ok(ToolOutput::ok("User provided empty response."))
                 } else {
-                    Ok(ToolOutput::ok(format!(
-                        "User responded: \"{trimmed}\""
-                    )))
+                    Ok(ToolOutput::ok(format!("User responded: \"{trimmed}\"")))
                 }
             }
-            Err(e) => Ok(ToolOutput::err(format!(
-                "Failed to read user input: {e}"
-            ))),
+            Err(e) => Ok(ToolOutput::err(format!("Failed to read user input: {e}"))),
         }
     }
 
@@ -66,9 +60,10 @@ impl Tool for UserInteractTool {
         ToolManifest {
             name: "user_interact".into(),
             description: "Prompts the user for input — no side effects beyond I/O.".into(),
-            parameters: vec![
-                ToolParamSchema::required("question", "Question to ask the user."),
-            ],
+            parameters: vec![ToolParamSchema::required(
+                "question",
+                "Question to ask the user.",
+            )],
             danger: DangerInfo {
                 level: DangerLevel::Safe,
                 capabilities: HashSet::from([Capability::UserInteraction]),

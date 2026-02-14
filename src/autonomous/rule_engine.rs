@@ -122,7 +122,11 @@ impl RuleEngine {
                         if let Some(triple) =
                             self.instantiate_pattern(consequent, bindings, engine)?
                         {
-                            let key = (triple.subject.get(), triple.predicate.get(), triple.object.get());
+                            let key = (
+                                triple.subject.get(),
+                                triple.predicate.get(),
+                                triple.object.get(),
+                            );
 
                             // Skip if already in KG or already derived.
                             if engine.has_triple(triple.subject, triple.predicate, triple.object)
@@ -180,11 +184,8 @@ impl RuleEngine {
                 }
 
                 // Store provenance.
-                let antecedent_ids: Vec<SymbolId> = dt
-                    .antecedent_triples
-                    .iter()
-                    .map(|t| t.subject)
-                    .collect();
+                let antecedent_ids: Vec<SymbolId> =
+                    dt.antecedent_triples.iter().map(|t| t.subject).collect();
                 let mut record = ProvenanceRecord::new(
                     dt.triple.subject,
                     DerivationKind::RuleInference {
@@ -229,11 +230,11 @@ impl RuleEngine {
         }
 
         // Start with the first antecedent.
-        let mut results: Vec<(HashMap<String, SymbolId>, Vec<Triple>)> =
-            self.match_pattern(&rule.antecedents[0], &HashMap::new(), engine)?
-                .into_iter()
-                .map(|(b, t)| (b, vec![t]))
-                .collect();
+        let mut results: Vec<(HashMap<String, SymbolId>, Vec<Triple>)> = self
+            .match_pattern(&rule.antecedents[0], &HashMap::new(), engine)?
+            .into_iter()
+            .map(|(b, t)| (b, vec![t]))
+            .collect();
 
         // For each subsequent antecedent, extend existing bindings.
         for pattern in rule.antecedents.iter().skip(1) {
@@ -284,9 +285,18 @@ impl RuleEngine {
 
         for triple in &candidate_triples {
             let mut new_bindings = HashMap::new();
-            let matched = self.match_term(&pattern.subject, triple.subject, bindings, &mut new_bindings)
-                && self.match_term(&pattern.predicate, triple.predicate, bindings, &mut new_bindings)
-                && self.match_term(&pattern.object, triple.object, bindings, &mut new_bindings);
+            let matched =
+                self.match_term(
+                    &pattern.subject,
+                    triple.subject,
+                    bindings,
+                    &mut new_bindings,
+                ) && self.match_term(
+                    &pattern.predicate,
+                    triple.predicate,
+                    bindings,
+                    &mut new_bindings,
+                ) && self.match_term(&pattern.object, triple.object, bindings, &mut new_bindings);
 
             if matched {
                 results.push((new_bindings, triple.clone()));
@@ -406,13 +416,14 @@ mod tests {
     fn transitive_closure_derives_new_triple() {
         let engine = test_engine();
         // A is-a B, B is-a C => A is-a C
-        engine.ingest_label_triples(&[
-            ("A".into(), "is-a".into(), "B".into(), 1.0),
-            ("B".into(), "is-a".into(), "C".into(), 1.0),
-        ]).unwrap();
+        engine
+            .ingest_label_triples(&[
+                ("A".into(), "is-a".into(), "B".into(), 1.0),
+                ("B".into(), "is-a".into(), "C".into(), 1.0),
+            ])
+            .unwrap();
 
-        let re = RuleEngine::new(RuleEngineConfig::default())
-            .with_rules(RuleSet::builtin());
+        let re = RuleEngine::new(RuleEngineConfig::default()).with_rules(RuleSet::builtin());
         let result = re.run(&engine).unwrap();
 
         assert!(!result.derived.is_empty());
@@ -425,12 +436,11 @@ mod tests {
     #[test]
     fn symmetric_rule_derives_inverse() {
         let engine = test_engine();
-        engine.ingest_label_triples(&[
-            ("X".into(), "similar-to".into(), "Y".into(), 1.0),
-        ]).unwrap();
+        engine
+            .ingest_label_triples(&[("X".into(), "similar-to".into(), "Y".into(), 1.0)])
+            .unwrap();
 
-        let re = RuleEngine::new(RuleEngineConfig::default())
-            .with_rules(RuleSet::builtin());
+        let re = RuleEngine::new(RuleEngineConfig::default()).with_rules(RuleSet::builtin());
         let result = re.run(&engine).unwrap();
 
         let y = engine.lookup_symbol("Y").unwrap();
@@ -443,12 +453,11 @@ mod tests {
     #[test]
     fn inverse_relation_parent_child() {
         let engine = test_engine();
-        engine.ingest_label_triples(&[
-            ("Dad".into(), "parent-of".into(), "Kid".into(), 1.0),
-        ]).unwrap();
+        engine
+            .ingest_label_triples(&[("Dad".into(), "parent-of".into(), "Kid".into(), 1.0)])
+            .unwrap();
 
-        let re = RuleEngine::new(RuleEngineConfig::default())
-            .with_rules(RuleSet::builtin());
+        let re = RuleEngine::new(RuleEngineConfig::default()).with_rules(RuleSet::builtin());
         re.run(&engine).unwrap();
 
         let kid = engine.lookup_symbol("Kid").unwrap();
@@ -461,12 +470,15 @@ mod tests {
     fn fixpoint_reached_with_no_new_derivations() {
         let engine = test_engine();
         // Only one triple, transitive rules need chains.
-        engine.ingest_label_triples(&[
-            ("A".into(), "has-a".into(), "B".into(), 1.0),
-        ]).unwrap();
+        engine
+            .ingest_label_triples(&[("A".into(), "has-a".into(), "B".into(), 1.0)])
+            .unwrap();
 
-        let re = RuleEngine::new(RuleEngineConfig { max_iterations: 5, ..Default::default() })
-            .with_rules(RuleSet::builtin());
+        let re = RuleEngine::new(RuleEngineConfig {
+            max_iterations: 5,
+            ..Default::default()
+        })
+        .with_rules(RuleSet::builtin());
         let result = re.run(&engine).unwrap();
 
         // Fixpoint reached (no chains to close except symmetric "similar-to" which isn't present).
@@ -477,15 +489,20 @@ mod tests {
     fn max_iterations_respected() {
         let engine = test_engine();
         // Create a long chain so that each iteration derives one more hop.
-        engine.ingest_label_triples(&[
-            ("A".into(), "is-a".into(), "B".into(), 1.0),
-            ("B".into(), "is-a".into(), "C".into(), 1.0),
-            ("C".into(), "is-a".into(), "D".into(), 1.0),
-            ("D".into(), "is-a".into(), "E".into(), 1.0),
-        ]).unwrap();
+        engine
+            .ingest_label_triples(&[
+                ("A".into(), "is-a".into(), "B".into(), 1.0),
+                ("B".into(), "is-a".into(), "C".into(), 1.0),
+                ("C".into(), "is-a".into(), "D".into(), 1.0),
+                ("D".into(), "is-a".into(), "E".into(), 1.0),
+            ])
+            .unwrap();
 
-        let re = RuleEngine::new(RuleEngineConfig { max_iterations: 1, ..Default::default() })
-            .with_rules(RuleSet::builtin());
+        let re = RuleEngine::new(RuleEngineConfig {
+            max_iterations: 1,
+            ..Default::default()
+        })
+        .with_rules(RuleSet::builtin());
         let result = re.run(&engine).unwrap();
 
         // After 1 iteration, only direct transitive hops are derived.
@@ -497,10 +514,12 @@ mod tests {
     #[test]
     fn min_confidence_filter() {
         let engine = test_engine();
-        engine.ingest_label_triples(&[
-            ("A".into(), "is-a".into(), "B".into(), 0.3),
-            ("B".into(), "is-a".into(), "C".into(), 0.3),
-        ]).unwrap();
+        engine
+            .ingest_label_triples(&[
+                ("A".into(), "is-a".into(), "B".into(), 0.3),
+                ("B".into(), "is-a".into(), "C".into(), 0.3),
+            ])
+            .unwrap();
 
         let re = RuleEngine::new(RuleEngineConfig {
             min_confidence: 0.5,
@@ -516,16 +535,21 @@ mod tests {
     #[test]
     fn no_duplicate_derivations() {
         let engine = test_engine();
-        engine.ingest_label_triples(&[
-            ("X".into(), "similar-to".into(), "Y".into(), 1.0),
-        ]).unwrap();
+        engine
+            .ingest_label_triples(&[("X".into(), "similar-to".into(), "Y".into(), 1.0)])
+            .unwrap();
 
-        let re = RuleEngine::new(RuleEngineConfig { max_iterations: 5, ..Default::default() })
-            .with_rules(RuleSet::builtin());
+        let re = RuleEngine::new(RuleEngineConfig {
+            max_iterations: 5,
+            ..Default::default()
+        })
+        .with_rules(RuleSet::builtin());
         let result = re.run(&engine).unwrap();
 
         // Y similar-to X should be derived exactly once.
-        let y_sim_x: Vec<_> = result.derived.iter()
+        let y_sim_x: Vec<_> = result
+            .derived
+            .iter()
             .filter(|dt| dt.rule_name == "similar-to-symmetric")
             .collect();
         assert_eq!(y_sim_x.len(), 1);
@@ -534,16 +558,19 @@ mod tests {
     #[test]
     fn confidence_propagation() {
         let engine = test_engine();
-        engine.ingest_label_triples(&[
-            ("A".into(), "is-a".into(), "B".into(), 0.8),
-            ("B".into(), "is-a".into(), "C".into(), 0.9),
-        ]).unwrap();
+        engine
+            .ingest_label_triples(&[
+                ("A".into(), "is-a".into(), "B".into(), 0.8),
+                ("B".into(), "is-a".into(), "C".into(), 0.9),
+            ])
+            .unwrap();
 
-        let re = RuleEngine::new(RuleEngineConfig::default())
-            .with_rules(RuleSet::builtin());
+        let re = RuleEngine::new(RuleEngineConfig::default()).with_rules(RuleSet::builtin());
         let result = re.run(&engine).unwrap();
 
-        let a_c = result.derived.iter()
+        let a_c = result
+            .derived
+            .iter()
             .find(|dt| {
                 let a = engine.lookup_symbol("A").unwrap();
                 let c = engine.lookup_symbol("C").unwrap();
@@ -559,13 +586,15 @@ mod tests {
     fn max_new_triples_cap() {
         let engine = test_engine();
         // Create enough to generate many derivations.
-        engine.ingest_label_triples(&[
-            ("A".into(), "is-a".into(), "B".into(), 1.0),
-            ("B".into(), "is-a".into(), "C".into(), 1.0),
-            ("C".into(), "is-a".into(), "D".into(), 1.0),
-            ("D".into(), "is-a".into(), "E".into(), 1.0),
-            ("E".into(), "is-a".into(), "F".into(), 1.0),
-        ]).unwrap();
+        engine
+            .ingest_label_triples(&[
+                ("A".into(), "is-a".into(), "B".into(), 1.0),
+                ("B".into(), "is-a".into(), "C".into(), 1.0),
+                ("C".into(), "is-a".into(), "D".into(), 1.0),
+                ("D".into(), "is-a".into(), "E".into(), 1.0),
+                ("E".into(), "is-a".into(), "F".into(), 1.0),
+            ])
+            .unwrap();
 
         let re = RuleEngine::new(RuleEngineConfig {
             max_new_triples: 2,

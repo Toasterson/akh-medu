@@ -72,7 +72,8 @@ impl Tool for CsvIngestTool {
     fn manifest(&self) -> ToolManifest {
         ToolManifest {
             name: "csv_ingest".into(),
-            description: "Ingests CSV files into the knowledge graph — reads filesystem, writes KG.".into(),
+            description:
+                "Ingests CSV files into the knowledge graph — reads filesystem, writes KG.".into(),
             parameters: vec![
                 ToolParamSchema::required("path", "Path to the CSV file."),
                 ToolParamSchema::optional(
@@ -87,7 +88,9 @@ impl Tool for CsvIngestTool {
             danger: DangerInfo {
                 level: DangerLevel::Cautious,
                 capabilities: HashSet::from([Capability::WriteKg, Capability::ReadFilesystem]),
-                description: "Ingests CSV files into the knowledge graph — reads filesystem, writes KG.".into(),
+                description:
+                    "Ingests CSV files into the knowledge graph — reads filesystem, writes KG."
+                        .into(),
                 shadow_triggers: vec!["ingest".into(), "import".into()],
             },
             source: ToolSource::Native,
@@ -143,9 +146,7 @@ fn parse_spo(content: &str, delimiter: char, engine: &Engine) -> AgentResult<Too
         }
     }
 
-    let msg = format!(
-        "CSV SPO ingest: {ingested} triples ingested, {errors} errors."
-    );
+    let msg = format!("CSV SPO ingest: {ingested} triples ingested, {errors} errors.");
     Ok(ToolOutput::ok_with_symbols(msg, symbols))
 }
 
@@ -163,14 +164,15 @@ fn parse_entity(content: &str, delimiter: char, engine: &Engine) -> AgentResult<
                 }
             }
             None => {
-                return Ok(ToolOutput::err(
-                    "CSV entity format: no header line found.",
-                ));
+                return Ok(ToolOutput::err("CSV entity format: no header line found."));
             }
         }
     };
 
-    let headers: Vec<&str> = header_line.split(delimiter).map(|h| h.trim().trim_matches('"')).collect();
+    let headers: Vec<&str> = header_line
+        .split(delimiter)
+        .map(|h| h.trim().trim_matches('"'))
+        .collect();
     if headers.len() < 2 {
         return Ok(ToolOutput::err(
             "CSV entity format requires at least 2 columns (subject + 1 predicate).",
@@ -188,7 +190,10 @@ fn parse_entity(content: &str, delimiter: char, engine: &Engine) -> AgentResult<
             continue;
         }
 
-        let fields: Vec<&str> = line.split(delimiter).map(|f| f.trim().trim_matches('"')).collect();
+        let fields: Vec<&str> = line
+            .split(delimiter)
+            .map(|f| f.trim().trim_matches('"'))
+            .collect();
         if fields.is_empty() {
             continue;
         }
@@ -214,9 +219,7 @@ fn parse_entity(content: &str, delimiter: char, engine: &Engine) -> AgentResult<
         }
     }
 
-    let msg = format!(
-        "CSV entity ingest: {ingested} triples ingested, {errors} errors."
-    );
+    let msg = format!("CSV entity ingest: {ingested} triples ingested, {errors} errors.");
     Ok(ToolOutput::ok_with_symbols(msg, symbols))
 }
 

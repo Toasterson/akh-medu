@@ -1,10 +1,10 @@
 //! TUI widget rendering: message list, input area, status bar.
 
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
-use ratatui::Frame;
 
 use crate::message::AkhMessage;
 
@@ -39,7 +39,10 @@ pub fn message_to_line(msg: &AkhMessage) -> Line<'static> {
             }
             Line::from(spans)
         }
-        AkhMessage::Gap { entity, description } => Line::from(vec![
+        AkhMessage::Gap {
+            entity,
+            description,
+        } => Line::from(vec![
             Span::styled("[gap] ", Style::default().fg(Color::Red)),
             Span::styled(
                 entity.clone(),
@@ -63,10 +66,7 @@ pub fn message_to_line(msg: &AkhMessage) -> Line<'static> {
             ])
         }
         AkhMessage::Narrative { text, grammar } => Line::from(vec![
-            Span::styled(
-                format!("[{grammar}] "),
-                Style::default().fg(Color::Magenta),
-            ),
+            Span::styled(format!("[{grammar}] "), Style::default().fg(Color::Magenta)),
             Span::raw(text.clone()),
         ]),
         AkhMessage::System { text } => Line::from(vec![Span::styled(
@@ -100,10 +100,7 @@ pub fn message_to_line(msg: &AkhMessage) -> Line<'static> {
         } => {
             let mut spans = vec![
                 Span::styled("[goal] ", Style::default().fg(Color::Blue)),
-                Span::styled(
-                    goal.clone(),
-                    Style::default().add_modifier(Modifier::BOLD),
-                ),
+                Span::styled(goal.clone(), Style::default().add_modifier(Modifier::BOLD)),
                 Span::raw(format!(" — {status}")),
             ];
             if let Some(d) = detail {

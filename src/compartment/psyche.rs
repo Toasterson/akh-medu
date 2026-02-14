@@ -250,11 +250,7 @@ impl Psyche {
     /// Check if a tool's manifest + action description matches any veto pattern.
     ///
     /// Returns the first matched veto pattern, or `None` if no veto applies.
-    pub fn check_veto(
-        &self,
-        manifest: &ToolManifest,
-        action_desc: &str,
-    ) -> Option<&ShadowPattern> {
+    pub fn check_veto(&self, manifest: &ToolManifest, action_desc: &str) -> Option<&ShadowPattern> {
         self.shadow
             .veto_patterns
             .iter()
@@ -301,8 +297,7 @@ impl Psyche {
                         rebalanced = true;
                     }
                     "gap_analysis" | "user_interact" => {
-                        self.archetypes.healer =
-                            (self.archetypes.healer + delta).clamp(0.1, 0.95);
+                        self.archetypes.healer = (self.archetypes.healer + delta).clamp(0.1, 0.95);
                         rebalanced = true;
                     }
                     "file_io" | "http_fetch" | "shell_exec" => {
@@ -375,8 +370,7 @@ impl PsychePredicates {
             has_archetype_weight: engine
                 .resolve_or_create_relation("psyche:has_archetype_weight")?,
             has_shadow_pattern: engine.resolve_or_create_relation("psyche:has_shadow_pattern")?,
-            individuation_level: engine
-                .resolve_or_create_relation("psyche:individuation_level")?,
+            individuation_level: engine.resolve_or_create_relation("psyche:individuation_level")?,
             shadow_encounter: engine.resolve_or_create_relation("psyche:shadow_encounter")?,
         })
     }
@@ -416,12 +410,7 @@ mod tests {
                 level: DangerLevel::Critical,
                 capabilities: HashSet::from([Capability::ProcessExec]),
                 description: "arbitrary execution".into(),
-                shadow_triggers: vec![
-                    "exec".into(),
-                    "shell".into(),
-                    "rm".into(),
-                    "sudo".into(),
-                ],
+                shadow_triggers: vec!["exec".into(), "shell".into(), "rm".into(), "sudo".into()],
             },
             source: ToolSource::Native,
         }

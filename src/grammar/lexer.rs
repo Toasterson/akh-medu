@@ -83,9 +83,15 @@ pub enum Resolution {
     /// Exact match in SymbolRegistry (case-insensitive).
     Exact(SymbolId),
     /// Fuzzy match via VSA ItemMemory similarity search.
-    Fuzzy { symbol_id: SymbolId, similarity: f32 },
+    Fuzzy {
+        symbol_id: SymbolId,
+        similarity: f32,
+    },
     /// Multi-word compound resolved as a single symbol.
-    Compound { symbol_id: SymbolId, word_count: usize },
+    Compound {
+        symbol_id: SymbolId,
+        word_count: usize,
+    },
     /// No match found — treated as a new/unknown entity.
     Unresolved,
 }
@@ -160,9 +166,7 @@ impl Lexicon {
     /// Build the default English lexicon with all patterns from the existing
     /// `nlp.rs` and `text_ingest.rs` modules.
     pub fn default_english() -> Self {
-        let void_words = vec![
-            "a".into(), "an".into(), "the".into(),
-        ];
+        let void_words = vec!["a".into(), "an".into(), "the".into()];
 
         // Relational patterns sorted longest-first for greedy matching
         let relational_patterns = vec![
@@ -194,15 +198,30 @@ impl Lexicon {
         ];
 
         let question_words = vec![
-            "what".into(), "who".into(), "where".into(), "when".into(),
-            "how".into(), "why".into(), "which".into(),
-            "is".into(), "does".into(), "do".into(), "can".into(),
+            "what".into(),
+            "who".into(),
+            "where".into(),
+            "when".into(),
+            "how".into(),
+            "why".into(),
+            "which".into(),
+            "is".into(),
+            "does".into(),
+            "do".into(),
+            "can".into(),
         ];
 
         let goal_verbs = vec![
-            "find".into(), "learn".into(), "discover".into(), "explore".into(),
-            "search".into(), "analyze".into(), "investigate".into(),
-            "determine".into(), "classify".into(), "identify".into(),
+            "find".into(),
+            "learn".into(),
+            "discover".into(),
+            "explore".into(),
+            "search".into(),
+            "analyze".into(),
+            "investigate".into(),
+            "determine".into(),
+            "classify".into(),
+            "identify".into(),
         ];
 
         let commands = vec![
@@ -251,14 +270,24 @@ impl Lexicon {
         ];
 
         let question_words = vec![
-            "что".into(), "кто".into(), "где".into(), "когда".into(),
-            "как".into(), "почему".into(), "какой".into(), "какая".into(),
+            "что".into(),
+            "кто".into(),
+            "где".into(),
+            "когда".into(),
+            "как".into(),
+            "почему".into(),
+            "какой".into(),
+            "какая".into(),
             "какие".into(),
         ];
 
         let goal_verbs = vec![
-            "найти".into(), "изучить".into(), "обнаружить".into(),
-            "исследовать".into(), "определить".into(), "классифицировать".into(),
+            "найти".into(),
+            "изучить".into(),
+            "обнаружить".into(),
+            "исследовать".into(),
+            "определить".into(),
+            "классифицировать".into(),
         ];
 
         // Commands stay English
@@ -282,7 +311,7 @@ impl Lexicon {
     /// Relational patterns map to the same canonical predicates as English.
     pub fn default_arabic() -> Self {
         let void_words = vec![
-            "ال".into(),  // definite article prefix (when tokenized separately)
+            "ال".into(), // definite article prefix (when tokenized separately)
         ];
 
         let relational_patterns = vec![
@@ -302,13 +331,21 @@ impl Lexicon {
         ];
 
         let question_words = vec![
-            "ما".into(), "من".into(), "أين".into(), "متى".into(),
-            "كيف".into(), "لماذا".into(), "هل".into(),
+            "ما".into(),
+            "من".into(),
+            "أين".into(),
+            "متى".into(),
+            "كيف".into(),
+            "لماذا".into(),
+            "هل".into(),
         ];
 
         let goal_verbs = vec![
-            "ابحث".into(), "اكتشف".into(), "حلل".into(),
-            "حدد".into(), "صنف".into(),
+            "ابحث".into(),
+            "اكتشف".into(),
+            "حلل".into(),
+            "حدد".into(),
+            "صنف".into(),
         ];
 
         let commands = vec![
@@ -331,21 +368,28 @@ impl Lexicon {
     /// Relational patterns map to the same canonical predicates as English.
     pub fn default_french() -> Self {
         let void_words = vec![
-            "le".into(), "la".into(), "les".into(), "l'".into(),
-            "un".into(), "une".into(), "des".into(),
-            "du".into(), "de".into(), "d'".into(),
+            "le".into(),
+            "la".into(),
+            "les".into(),
+            "l'".into(),
+            "un".into(),
+            "une".into(),
+            "des".into(),
+            "du".into(),
+            "de".into(),
+            "d'".into(),
         ];
 
         let relational_patterns = vec![
             // Multi-word patterns (longest first)
             rel("est similaire à", "similar-to", 0.85),
-            rel("est similaire a", "similar-to", 0.85),  // without accent
+            rel("est similaire a", "similar-to", 0.85), // without accent
             rel("se trouve dans", "located-in", 0.90),
             rel("est composé de", "composed-of", 0.85),
-            rel("est compose de", "composed-of", 0.85),  // without accent
+            rel("est compose de", "composed-of", 0.85), // without accent
             rel("fait partie de", "part-of", 0.90),
             rel("dépend de", "depends-on", 0.85),
-            rel("depend de", "depends-on", 0.85),  // without accent
+            rel("depend de", "depends-on", 0.85), // without accent
             // 2-word patterns
             rel("est un", "is-a", 0.90),
             rel("est une", "is-a", 0.90),
@@ -355,18 +399,30 @@ impl Lexicon {
             rel("contient", "contains", 0.85),
             rel("cause", "causes", 0.85),
             rel("définit", "defines", 0.85),
-            rel("definit", "defines", 0.85),  // without accent
+            rel("definit", "defines", 0.85), // without accent
         ];
 
         let question_words = vec![
-            "que".into(), "qui".into(), "où".into(), "quand".into(),
-            "comment".into(), "pourquoi".into(), "quel".into(), "quelle".into(),
-            "quels".into(), "quelles".into(), "est-ce".into(),
+            "que".into(),
+            "qui".into(),
+            "où".into(),
+            "quand".into(),
+            "comment".into(),
+            "pourquoi".into(),
+            "quel".into(),
+            "quelle".into(),
+            "quels".into(),
+            "quelles".into(),
+            "est-ce".into(),
         ];
 
         let goal_verbs = vec![
-            "trouver".into(), "découvrir".into(), "explorer".into(),
-            "analyser".into(), "déterminer".into(), "identifier".into(),
+            "trouver".into(),
+            "découvrir".into(),
+            "explorer".into(),
+            "analyser".into(),
+            "déterminer".into(),
+            "identifier".into(),
             "classifier".into(),
         ];
 
@@ -390,9 +446,17 @@ impl Lexicon {
     /// Relational patterns map to the same canonical predicates as English.
     pub fn default_spanish() -> Self {
         let void_words = vec![
-            "el".into(), "la".into(), "los".into(), "las".into(),
-            "un".into(), "una".into(), "unos".into(), "unas".into(),
-            "del".into(), "de".into(), "al".into(),
+            "el".into(),
+            "la".into(),
+            "los".into(),
+            "las".into(),
+            "un".into(),
+            "una".into(),
+            "unos".into(),
+            "unas".into(),
+            "del".into(),
+            "de".into(),
+            "al".into(),
         ];
 
         let relational_patterns = vec![
@@ -400,7 +464,7 @@ impl Lexicon {
             rel("es similar a", "similar-to", 0.85),
             rel("se encuentra en", "located-in", 0.90),
             rel("está compuesto de", "composed-of", 0.85),
-            rel("esta compuesto de", "composed-of", 0.85),  // without accent
+            rel("esta compuesto de", "composed-of", 0.85), // without accent
             rel("es parte de", "part-of", 0.90),
             rel("depende de", "depends-on", 0.85),
             // 2-word patterns
@@ -416,14 +480,26 @@ impl Lexicon {
         ];
 
         let question_words = vec![
-            "qué".into(), "que".into(), "quién".into(), "quien".into(),
-            "dónde".into(), "donde".into(), "cuándo".into(), "cuando".into(),
-            "cómo".into(), "como".into(), "por qué".into(),
+            "qué".into(),
+            "que".into(),
+            "quién".into(),
+            "quien".into(),
+            "dónde".into(),
+            "donde".into(),
+            "cuándo".into(),
+            "cuando".into(),
+            "cómo".into(),
+            "como".into(),
+            "por qué".into(),
         ];
 
         let goal_verbs = vec![
-            "encontrar".into(), "descubrir".into(), "explorar".into(),
-            "analizar".into(), "determinar".into(), "identificar".into(),
+            "encontrar".into(),
+            "descubrir".into(),
+            "explorar".into(),
+            "analizar".into(),
+            "determinar".into(),
+            "identificar".into(),
             "clasificar".into(),
         ];
 
@@ -481,7 +557,8 @@ impl Lexicon {
             return Some(CommandKind::RunAgent { cycles });
         }
 
-        if lower.starts_with("show ") || lower.starts_with("render ") || lower.starts_with("graph ") {
+        if lower.starts_with("show ") || lower.starts_with("render ") || lower.starts_with("graph ")
+        {
             let rest = if lower.starts_with("show ") {
                 input.trim()[5..].trim()
             } else if lower.starts_with("render ") {
@@ -546,7 +623,8 @@ fn extract_number(input: &str) -> Option<usize> {
 ///
 /// Handles ASCII punctuation as well as Arabic, CJK, and typographic punctuation.
 fn is_strippable_punctuation(c: char) -> bool {
-    matches!(c,
+    matches!(
+        c,
         '.' | ',' | '!' | ';' | ':' | '?' |
         // Arabic punctuation
         '\u{061F}' |  // ؟ Arabic question mark
@@ -567,7 +645,7 @@ fn is_strippable_punctuation(c: char) -> bool {
         '\u{FF1F}' |  // ？ fullwidth question mark
         // Spanish inverted punctuation
         '\u{00A1}' |  // ¡ inverted exclamation
-        '\u{00BF}'    // ¿ inverted question mark
+        '\u{00BF}' // ¿ inverted question mark
     )
 }
 
@@ -774,7 +852,8 @@ mod tests {
     fn find_pattern_is_a() {
         let lexicon = Lexicon::default_english();
         let tokens = tokenize("Dog is a Mammal", None, None, None, &lexicon);
-        let pattern = &lexicon.relational_patterns()
+        let pattern = &lexicon
+            .relational_patterns()
             .iter()
             .find(|p| p.predicate_label == "is-a" && p.words == ["is", "a"])
             .unwrap();
@@ -789,7 +868,8 @@ mod tests {
     fn find_pattern_contains() {
         let lexicon = Lexicon::default_english();
         let tokens = tokenize("Module contains function", None, None, None, &lexicon);
-        let pattern = lexicon.relational_patterns()
+        let pattern = lexicon
+            .relational_patterns()
             .iter()
             .find(|p| p.predicate_label == "contains")
             .unwrap();
@@ -800,10 +880,22 @@ mod tests {
     #[test]
     fn command_matching() {
         let lexicon = Lexicon::default_english();
-        assert!(matches!(lexicon.match_command("help"), Some(CommandKind::Help)));
-        assert!(matches!(lexicon.match_command("status"), Some(CommandKind::ShowStatus)));
-        assert!(matches!(lexicon.match_command("run 5"), Some(CommandKind::RunAgent { cycles: Some(5) })));
-        assert!(matches!(lexicon.match_command("show Dog"), Some(CommandKind::RenderHiero { .. })));
+        assert!(matches!(
+            lexicon.match_command("help"),
+            Some(CommandKind::Help)
+        ));
+        assert!(matches!(
+            lexicon.match_command("status"),
+            Some(CommandKind::ShowStatus)
+        ));
+        assert!(matches!(
+            lexicon.match_command("run 5"),
+            Some(CommandKind::RunAgent { cycles: Some(5) })
+        ));
+        assert!(matches!(
+            lexicon.match_command("show Dog"),
+            Some(CommandKind::RenderHiero { .. })
+        ));
     }
 
     #[test]
@@ -818,7 +910,10 @@ mod tests {
     fn surface_form_lookup() {
         let lexicon = Lexicon::default_english();
         assert_eq!(lexicon.surface_form("is-a"), Some("is a".to_string()));
-        assert_eq!(lexicon.surface_form("contains"), Some("contains".to_string()));
+        assert_eq!(
+            lexicon.surface_form("contains"),
+            Some("contains".to_string())
+        );
         assert_eq!(lexicon.surface_form("nonexistent"), None);
     }
 
@@ -850,7 +945,10 @@ mod tests {
         resolve_fuzzy(&mut token, &ops, &im);
 
         match &token.resolution {
-            Resolution::Fuzzy { symbol_id, similarity } => {
+            Resolution::Fuzzy {
+                symbol_id,
+                similarity,
+            } => {
                 assert_eq!(*symbol_id, sym);
                 assert!(*similarity > 0.9, "similarity={similarity}");
             }
@@ -919,7 +1017,10 @@ mod tests {
 
         match &token.resolution {
             Resolution::Fuzzy { symbol_id, .. } => {
-                assert_eq!(*symbol_id, sym_hello, "should resolve to the correct symbol");
+                assert_eq!(
+                    *symbol_id, sym_hello,
+                    "should resolve to the correct symbol"
+                );
             }
             other => panic!("expected Fuzzy, got {other:?}"),
         }

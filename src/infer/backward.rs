@@ -176,12 +176,23 @@ mod tests {
         let engine = test_engine();
 
         let dog = engine.create_symbol(SymbolKind::Entity, "Dog").unwrap().id;
-        let mammal = engine.create_symbol(SymbolKind::Entity, "Mammal").unwrap().id;
-        let animal = engine.create_symbol(SymbolKind::Entity, "Animal").unwrap().id;
-        let is_a = engine.create_symbol(SymbolKind::Relation, "is-a").unwrap().id;
+        let mammal = engine
+            .create_symbol(SymbolKind::Entity, "Mammal")
+            .unwrap()
+            .id;
+        let animal = engine
+            .create_symbol(SymbolKind::Entity, "Animal")
+            .unwrap()
+            .id;
+        let is_a = engine
+            .create_symbol(SymbolKind::Relation, "is-a")
+            .unwrap()
+            .id;
 
         engine.add_triple(&Triple::new(dog, is_a, mammal)).unwrap();
-        engine.add_triple(&Triple::new(mammal, is_a, animal)).unwrap();
+        engine
+            .add_triple(&Triple::new(mammal, is_a, animal))
+            .unwrap();
 
         // Backward chain from "Animal" — should find Mammal→Animal and Dog→Mammal
         let chains = infer_backward(&engine, animal, &BackwardConfig::default()).unwrap();

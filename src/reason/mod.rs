@@ -64,9 +64,7 @@ mod tests {
     #[test]
     fn double_negation_simplifies() {
         let expr: egg::RecExpr<AkhLang> = "(not (not x))".parse().unwrap();
-        let runner = Runner::default()
-            .with_expr(&expr)
-            .run(&builtin_rules());
+        let runner = Runner::default().with_expr(&expr).run(&builtin_rules());
         let extractor = Extractor::new(&runner.egraph, AstSize);
         let (cost, best) = extractor.find_best(runner.roots[0]);
         assert_eq!(best.to_string(), "x");
@@ -76,9 +74,7 @@ mod tests {
     #[test]
     fn bind_self_inverse_simplifies() {
         let expr: egg::RecExpr<AkhLang> = "(bind a (bind a b))".parse().unwrap();
-        let runner = Runner::default()
-            .with_expr(&expr)
-            .run(&builtin_rules());
+        let runner = Runner::default().with_expr(&expr).run(&builtin_rules());
         let extractor = Extractor::new(&runner.egraph, AstSize);
         let (cost, best) = extractor.find_best(runner.roots[0]);
         assert_eq!(best.to_string(), "b");

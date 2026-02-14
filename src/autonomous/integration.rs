@@ -172,8 +172,8 @@ pub fn reasoning_cycle(
 
     for fc in &fused {
         if fc.quality_score >= config.commit_threshold && fc.is_constructive {
-            let triple =
-                Triple::new(fc.subject, fc.predicate, fc.object).with_confidence(fc.fused_confidence);
+            let triple = Triple::new(fc.subject, fc.predicate, fc.object)
+                .with_confidence(fc.fused_confidence);
             if engine.add_triple(&triple).is_ok() {
                 triples_committed += 1;
             }
@@ -210,8 +210,14 @@ mod tests {
         let engine = test_engine();
 
         let dog = engine.create_symbol(SymbolKind::Entity, "Dog").unwrap().id;
-        let mammal = engine.create_symbol(SymbolKind::Entity, "Mammal").unwrap().id;
-        let is_a = engine.create_symbol(SymbolKind::Relation, "is-a").unwrap().id;
+        let mammal = engine
+            .create_symbol(SymbolKind::Entity, "Mammal")
+            .unwrap()
+            .id;
+        let is_a = engine
+            .create_symbol(SymbolKind::Relation, "is-a")
+            .unwrap()
+            .id;
 
         engine.add_triple(&Triple::new(dog, is_a, mammal)).unwrap();
 

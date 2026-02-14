@@ -31,11 +31,7 @@ pub struct AkhTui {
 
 impl AkhTui {
     /// Create a new TUI instance.
-    pub fn new(
-        workspace: String,
-        engine: Arc<Engine>,
-        agent: Agent,
-    ) -> Self {
+    pub fn new(workspace: String, engine: Arc<Engine>, agent: Agent) -> Self {
         let grammar = engine
             .compartments()
             .and_then(|cm| cm.psyche())
@@ -78,9 +74,7 @@ impl AkhTui {
                         .agent
                         .goals()
                         .iter()
-                        .filter(|g| {
-                            matches!(g.status, crate::agent::GoalStatus::Active)
-                        })
+                        .filter(|g| matches!(g.status, crate::agent::GoalStatus::Active))
                         .count();
 
                     widgets::render(
@@ -144,9 +138,8 @@ impl AkhTui {
                 self.scroll_offset = self.scroll_offset.saturating_sub(10);
             }
             KeyCode::PageDown => {
-                self.scroll_offset = (self.scroll_offset + 10).min(
-                    self.messages.len().saturating_sub(1),
-                );
+                self.scroll_offset =
+                    (self.scroll_offset + 10).min(self.messages.len().saturating_sub(1));
             }
             KeyCode::Home => {
                 self.scroll_offset = 0;
@@ -169,8 +162,9 @@ impl AkhTui {
         }
 
         // User message — show it in the messages area.
-        self.messages
-            .push(AkhMessage::Prompt { question: format!("> {input}") });
+        self.messages.push(AkhMessage::Prompt {
+            question: format!("> {input}"),
+        });
 
         // Classify intent and process.
         let intent = crate::agent::classify_intent(input);
@@ -206,10 +200,8 @@ impl AkhTui {
                             .agent
                             .synthesize_findings_with_grammar(&description, &self.grammar);
                         if !summary.overview.is_empty() {
-                            self.messages.push(AkhMessage::narrative(
-                                &summary.overview,
-                                &self.grammar,
-                            ));
+                            self.messages
+                                .push(AkhMessage::narrative(&summary.overview, &self.grammar));
                         }
                         for section in &summary.sections {
                             self.messages.push(AkhMessage::narrative(
@@ -222,8 +214,7 @@ impl AkhTui {
                         }
                     }
                     Err(e) => {
-                        self.messages
-                            .push(AkhMessage::error("goal", e.to_string()));
+                        self.messages.push(AkhMessage::error("goal", e.to_string()));
                     }
                 }
             }
@@ -335,25 +326,24 @@ impl AkhTui {
 
                 if let Some(ref name) = entity {
                     match self.engine.resolve_symbol(name) {
-                        Ok(sym_id) => {
-                            match self.engine.extract_subgraph(&[sym_id], 1) {
-                                Ok(result) if !result.triples.is_empty() => {
-                                    let rendered = crate::glyph::render::render_to_terminal(
-                                        &self.engine, &result.triples, &render_config,
-                                    );
-                                    self.messages.push(AkhMessage::system(rendered));
-                                }
-                                _ => {
-                                    self.messages.push(AkhMessage::system(format!(
-                                        "No triples found around \"{name}\"."
-                                    )));
-                                }
+                        Ok(sym_id) => match self.engine.extract_subgraph(&[sym_id], 1) {
+                            Ok(result) if !result.triples.is_empty() => {
+                                let rendered = crate::glyph::render::render_to_terminal(
+                                    &self.engine,
+                                    &result.triples,
+                                    &render_config,
+                                );
+                                self.messages.push(AkhMessage::system(rendered));
                             }
-                        }
+                            _ => {
+                                self.messages.push(AkhMessage::system(format!(
+                                    "No triples found around \"{name}\"."
+                                )));
+                            }
+                        },
                         Err(_) => {
-                            self.messages.push(AkhMessage::system(format!(
-                                "Symbol \"{name}\" not found."
-                            )));
+                            self.messages
+                                .push(AkhMessage::system(format!("Symbol \"{name}\" not found.")));
                         }
                     }
                 } else {
@@ -364,7 +354,9 @@ impl AkhTui {
                         ));
                     } else {
                         let rendered = crate::glyph::render::render_to_terminal(
-                            &self.engine, &triples, &render_config,
+                            &self.engine,
+                            &triples,
+                            &render_config,
                         );
                         self.messages.push(AkhMessage::system(rendered));
                     }
@@ -403,9 +395,8 @@ impl AkhTui {
             "grammar" | "g" => {
                 if let Some(name) = parts.get(1) {
                     self.grammar = name.to_string();
-                    self.messages.push(AkhMessage::system(format!(
-                        "Grammar switched to: {name}"
-                    )));
+                    self.messages
+                        .push(AkhMessage::system(format!("Grammar switched to: {name}")));
                 } else {
                     self.messages.push(AkhMessage::system(format!(
                         "Current grammar: {}. Use /grammar <name> to switch.",
@@ -429,8 +420,7 @@ impl AkhTui {
             }
             "status" => {
                 let info = self.engine.info();
-                self.messages
-                    .push(AkhMessage::system(format!("{info}")));
+                self.messages.push(AkhMessage::system(format!("{info}")));
             }
             "seed" => {
                 if let Some(pack_name) = parts.get(1) {
@@ -450,14 +440,12 @@ impl AkhTui {
                             }
                         }
                         Err(e) => {
-                            self.messages
-                                .push(AkhMessage::error("seed", e.to_string()));
+                            self.messages.push(AkhMessage::error("seed", e.to_string()));
                         }
                     }
                 } else {
-                    self.messages.push(AkhMessage::system(
-                        "Usage: /seed <pack-name>".to_string(),
-                    ));
+                    self.messages
+                        .push(AkhMessage::system("Usage: /seed <pack-name>".to_string()));
                 }
             }
             _ => {

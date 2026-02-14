@@ -7,11 +7,11 @@
 use serde::{Deserialize, Serialize};
 
 use super::abs::AbsTree;
+use super::concrete::ParseContext;
 use super::detect::{detect_language, detect_per_sentence};
 use super::entity_resolution::EntityResolver;
 use super::lexer::Language;
-use super::parser::{parse_prose, ParseResult};
-use super::concrete::ParseContext;
+use super::parser::{ParseResult, parse_prose};
 
 /// A text chunk to pre-process (input from Eleutherios).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -131,10 +131,7 @@ pub fn preprocess_chunk_with_resolver(
     ctx: &ParseContext,
     resolver: &EntityResolver,
 ) -> PreProcessorOutput {
-    let lang_hint = chunk
-        .language
-        .as_deref()
-        .and_then(Language::from_code);
+    let lang_hint = chunk.language.as_deref().and_then(Language::from_code);
 
     let detection = detect_language(&chunk.text);
     let effective_lang = lang_hint.unwrap_or(detection.language);
@@ -169,7 +166,13 @@ pub fn preprocess_chunk_with_resolver(
                     let sub_result = parse_prose(sentence, &parse_ctx);
                     if let ParseResult::Facts(facts) = sub_result {
                         for fact in &facts {
-                            extract_from_tree(fact, sentence, &lang_code, &mut entities, &mut claims);
+                            extract_from_tree(
+                                fact,
+                                sentence,
+                                &lang_code,
+                                &mut entities,
+                                &mut claims,
+                            );
                             abs_trees.push(fact.clone());
                         }
                     }
@@ -214,7 +217,10 @@ pub fn preprocess_mixed_corpus(text: &str, ctx: &ParseContext) -> Vec<PreProcess
 
 /// Pre-process a batch of chunks.
 pub fn preprocess_batch(chunks: &[TextChunk], ctx: &ParseContext) -> Vec<PreProcessorOutput> {
-    chunks.iter().map(|chunk| preprocess_chunk(chunk, ctx)).collect()
+    chunks
+        .iter()
+        .map(|chunk| preprocess_chunk(chunk, ctx))
+        .collect()
 }
 
 /// Pre-process a batch of chunks with an explicit entity resolver.
@@ -223,7 +229,8 @@ pub fn preprocess_batch_with_resolver(
     ctx: &ParseContext,
     resolver: &EntityResolver,
 ) -> Vec<PreProcessorOutput> {
-    chunks.iter()
+    chunks
+        .iter()
         .map(|chunk| preprocess_chunk_with_resolver(chunk, ctx, resolver))
         .collect()
 }
@@ -360,7 +367,10 @@ mod tests {
         let ctx = ParseContext::default();
         let output = preprocess_chunk(&chunk, &ctx);
 
-        assert!(!output.claims.is_empty(), "should extract at least one claim");
+        assert!(
+            !output.claims.is_empty(),
+            "should extract at least one claim"
+        );
         assert_eq!(output.source_language, "en");
         assert!(!output.entities.is_empty(), "should extract entities");
     }
@@ -376,7 +386,10 @@ mod tests {
         let output = preprocess_chunk(&chunk, &ctx);
 
         assert_eq!(output.source_language, "ru");
-        assert!(!output.claims.is_empty(), "should extract claim from Russian text");
+        assert!(
+            !output.claims.is_empty(),
+            "should extract claim from Russian text"
+        );
         if let Some(claim) = output.claims.first() {
             assert_eq!(claim.predicate, "is-a");
             assert_eq!(claim.source_language, "ru");

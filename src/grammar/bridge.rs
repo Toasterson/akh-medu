@@ -207,7 +207,10 @@ pub fn abs_to_fact(tree: &AbsTree, source_tool: &str, source_cycle: u64) -> Opti
             similar_to: similar_to.label().unwrap_or("?").to_string(),
             score: *score,
         },
-        AbsTree::Gap { entity, description } => FactKind::Gap {
+        AbsTree::Gap {
+            entity,
+            description,
+        } => FactKind::Gap {
             entity: entity.label().unwrap_or("?").to_string(),
             description: description.clone(),
         },
@@ -258,9 +261,7 @@ fn count_facts(tree: &AbsTree) -> usize {
         | AbsTree::CodeFact { .. }
         | AbsTree::CodeSignature { .. } => 1,
 
-        AbsTree::CodeModule { children, .. } => {
-            1 + children.iter().map(count_facts).sum::<usize>()
-        }
+        AbsTree::CodeModule { children, .. } => 1 + children.iter().map(count_facts).sum::<usize>(),
 
         AbsTree::DataFlow { .. } => 0,
 

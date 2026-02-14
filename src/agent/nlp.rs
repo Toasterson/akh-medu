@@ -61,7 +61,11 @@ pub fn classify_intent(input: &str) -> UserIntent {
         } else {
             trimmed[6..].trim()
         };
-        let entity = if rest.is_empty() { None } else { Some(rest.to_string()) };
+        let entity = if rest.is_empty() {
+            None
+        } else {
+            Some(rest.to_string())
+        };
         return UserIntent::RenderHiero { entity };
     }
 
@@ -172,10 +176,7 @@ fn extract_number(input: &str) -> Option<usize> {
 
 /// Extract the subject from a question.
 fn extract_subject_from_question(input: &str) -> String {
-    let s = input
-        .trim()
-        .trim_end_matches('?')
-        .trim();
+    let s = input.trim().trim_end_matches('?').trim();
 
     // Remove leading question words.
     let words: Vec<&str> = s.split_whitespace().collect();
@@ -189,7 +190,9 @@ fn extract_subject_from_question(input: &str) -> String {
             // Also skip "is", "are", "do", "does", "can" after question word.
             if words.len() > 1 {
                 let second_lower = words[1].to_lowercase();
-                if ["is", "are", "do", "does", "can", "was", "were", "about"].contains(&second_lower.as_str()) {
+                if ["is", "are", "do", "does", "can", "was", "were", "about"]
+                    .contains(&second_lower.as_str())
+                {
                     2
                 } else {
                     1

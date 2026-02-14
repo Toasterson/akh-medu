@@ -8,8 +8,8 @@ use std::sync::OnceLock;
 
 use crate::glyph::GlyphError;
 use crate::symbol::SymbolId;
-use crate::vsa::item_memory::ItemMemory;
 use crate::vsa::HyperVec;
+use crate::vsa::item_memory::ItemMemory;
 
 /// Category of a radical primitive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -42,44 +42,201 @@ static RADICALS: OnceLock<[Radical; 32]> = OnceLock::new();
 fn build_radicals() -> [Radical; 32] {
     [
         // -- Beings (8): U+E100–U+E107 --
-        Radical { pua_codepoint: '\u{E100}', fallback: "\u{1F441}",  category: RadicalCategory::Beings, name: "eye" },
-        Radical { pua_codepoint: '\u{E101}', fallback: "\u{1F985}",  category: RadicalCategory::Beings, name: "bird" },
-        Radical { pua_codepoint: '\u{E102}', fallback: "\u{1F40D}",  category: RadicalCategory::Beings, name: "serpent" },
-        Radical { pua_codepoint: '\u{E103}', fallback: "\u{1F41F}",  category: RadicalCategory::Beings, name: "fish" },
-        Radical { pua_codepoint: '\u{E104}', fallback: "\u{270B}",   category: RadicalCategory::Beings, name: "hand" },
-        Radical { pua_codepoint: '\u{E105}', fallback: "\u{1F9B6}",  category: RadicalCategory::Beings, name: "foot" },
-        Radical { pua_codepoint: '\u{E106}', fallback: "\u{1F5FF}",  category: RadicalCategory::Beings, name: "face" },
-        Radical { pua_codepoint: '\u{E107}', fallback: "\u{1F9CD}",  category: RadicalCategory::Beings, name: "figure" },
-
+        Radical {
+            pua_codepoint: '\u{E100}',
+            fallback: "\u{1F441}",
+            category: RadicalCategory::Beings,
+            name: "eye",
+        },
+        Radical {
+            pua_codepoint: '\u{E101}',
+            fallback: "\u{1F985}",
+            category: RadicalCategory::Beings,
+            name: "bird",
+        },
+        Radical {
+            pua_codepoint: '\u{E102}',
+            fallback: "\u{1F40D}",
+            category: RadicalCategory::Beings,
+            name: "serpent",
+        },
+        Radical {
+            pua_codepoint: '\u{E103}',
+            fallback: "\u{1F41F}",
+            category: RadicalCategory::Beings,
+            name: "fish",
+        },
+        Radical {
+            pua_codepoint: '\u{E104}',
+            fallback: "\u{270B}",
+            category: RadicalCategory::Beings,
+            name: "hand",
+        },
+        Radical {
+            pua_codepoint: '\u{E105}',
+            fallback: "\u{1F9B6}",
+            category: RadicalCategory::Beings,
+            name: "foot",
+        },
+        Radical {
+            pua_codepoint: '\u{E106}',
+            fallback: "\u{1F5FF}",
+            category: RadicalCategory::Beings,
+            name: "face",
+        },
+        Radical {
+            pua_codepoint: '\u{E107}',
+            fallback: "\u{1F9CD}",
+            category: RadicalCategory::Beings,
+            name: "figure",
+        },
         // -- Nature (8): U+E108–U+E10F --
-        Radical { pua_codepoint: '\u{E108}', fallback: "\u{2600}",   category: RadicalCategory::Nature, name: "sun" },
-        Radical { pua_codepoint: '\u{E109}', fallback: "\u{263D}",   category: RadicalCategory::Nature, name: "moon" },
-        Radical { pua_codepoint: '\u{E10A}', fallback: "\u{224B}",   category: RadicalCategory::Nature, name: "water" },
-        Radical { pua_codepoint: '\u{E10B}', fallback: "\u{26F0}",   category: RadicalCategory::Nature, name: "mountain" },
-        Radical { pua_codepoint: '\u{E10C}', fallback: "\u{1F332}",  category: RadicalCategory::Nature, name: "tree" },
-        Radical { pua_codepoint: '\u{E10D}', fallback: "\u{1F525}",  category: RadicalCategory::Nature, name: "fire" },
-        Radical { pua_codepoint: '\u{E10E}', fallback: "\u{1F4A8}",  category: RadicalCategory::Nature, name: "wind" },
-        Radical { pua_codepoint: '\u{E10F}', fallback: "\u{2316}",   category: RadicalCategory::Nature, name: "earth" },
-
+        Radical {
+            pua_codepoint: '\u{E108}',
+            fallback: "\u{2600}",
+            category: RadicalCategory::Nature,
+            name: "sun",
+        },
+        Radical {
+            pua_codepoint: '\u{E109}',
+            fallback: "\u{263D}",
+            category: RadicalCategory::Nature,
+            name: "moon",
+        },
+        Radical {
+            pua_codepoint: '\u{E10A}',
+            fallback: "\u{224B}",
+            category: RadicalCategory::Nature,
+            name: "water",
+        },
+        Radical {
+            pua_codepoint: '\u{E10B}',
+            fallback: "\u{26F0}",
+            category: RadicalCategory::Nature,
+            name: "mountain",
+        },
+        Radical {
+            pua_codepoint: '\u{E10C}',
+            fallback: "\u{1F332}",
+            category: RadicalCategory::Nature,
+            name: "tree",
+        },
+        Radical {
+            pua_codepoint: '\u{E10D}',
+            fallback: "\u{1F525}",
+            category: RadicalCategory::Nature,
+            name: "fire",
+        },
+        Radical {
+            pua_codepoint: '\u{E10E}',
+            fallback: "\u{1F4A8}",
+            category: RadicalCategory::Nature,
+            name: "wind",
+        },
+        Radical {
+            pua_codepoint: '\u{E10F}',
+            fallback: "\u{2316}",
+            category: RadicalCategory::Nature,
+            name: "earth",
+        },
         // -- Structure (8): U+E110–U+E117 --
-        Radical { pua_codepoint: '\u{E110}', fallback: "\u{2302}",   category: RadicalCategory::Structure, name: "house" },
-        Radical { pua_codepoint: '\u{E111}', fallback: "\u{2503}",   category: RadicalCategory::Structure, name: "pillar" },
-        Radical { pua_codepoint: '\u{E112}', fallback: "\u{2229}",   category: RadicalCategory::Structure, name: "arch" },
-        Radical { pua_codepoint: '\u{E113}', fallback: "\u{2588}",   category: RadicalCategory::Structure, name: "wall" },
-        Radical { pua_codepoint: '\u{E114}', fallback: "\u{26E9}",   category: RadicalCategory::Structure, name: "gate" },
-        Radical { pua_codepoint: '\u{E115}', fallback: "\u{2550}",   category: RadicalCategory::Structure, name: "path" },
-        Radical { pua_codepoint: '\u{E116}', fallback: "\u{2517}",   category: RadicalCategory::Structure, name: "bridge" },
-        Radical { pua_codepoint: '\u{E117}', fallback: "\u{25EF}",   category: RadicalCategory::Structure, name: "tower" },
-
+        Radical {
+            pua_codepoint: '\u{E110}',
+            fallback: "\u{2302}",
+            category: RadicalCategory::Structure,
+            name: "house",
+        },
+        Radical {
+            pua_codepoint: '\u{E111}',
+            fallback: "\u{2503}",
+            category: RadicalCategory::Structure,
+            name: "pillar",
+        },
+        Radical {
+            pua_codepoint: '\u{E112}',
+            fallback: "\u{2229}",
+            category: RadicalCategory::Structure,
+            name: "arch",
+        },
+        Radical {
+            pua_codepoint: '\u{E113}',
+            fallback: "\u{2588}",
+            category: RadicalCategory::Structure,
+            name: "wall",
+        },
+        Radical {
+            pua_codepoint: '\u{E114}',
+            fallback: "\u{26E9}",
+            category: RadicalCategory::Structure,
+            name: "gate",
+        },
+        Radical {
+            pua_codepoint: '\u{E115}',
+            fallback: "\u{2550}",
+            category: RadicalCategory::Structure,
+            name: "path",
+        },
+        Radical {
+            pua_codepoint: '\u{E116}',
+            fallback: "\u{2517}",
+            category: RadicalCategory::Structure,
+            name: "bridge",
+        },
+        Radical {
+            pua_codepoint: '\u{E117}',
+            fallback: "\u{25EF}",
+            category: RadicalCategory::Structure,
+            name: "tower",
+        },
         // -- Abstract (8): U+E118–U+E11F --
-        Radical { pua_codepoint: '\u{E118}', fallback: "\u{2625}",   category: RadicalCategory::Abstract, name: "ankh" },
-        Radical { pua_codepoint: '\u{E119}', fallback: "\u{1F300}",  category: RadicalCategory::Abstract, name: "spiral" },
-        Radical { pua_codepoint: '\u{E11A}', fallback: "\u{2605}",   category: RadicalCategory::Abstract, name: "star" },
-        Radical { pua_codepoint: '\u{E11B}', fallback: "\u{27A4}",   category: RadicalCategory::Abstract, name: "arrow" },
-        Radical { pua_codepoint: '\u{E11C}', fallback: "\u{221E}",   category: RadicalCategory::Abstract, name: "loop" },
-        Radical { pua_codepoint: '\u{E11D}', fallback: "\u{2726}",   category: RadicalCategory::Abstract, name: "cross" },
-        Radical { pua_codepoint: '\u{E11E}', fallback: "\u{223F}",   category: RadicalCategory::Abstract, name: "wave" },
-        Radical { pua_codepoint: '\u{E11F}', fallback: "\u{00B7}",   category: RadicalCategory::Abstract, name: "dot" },
+        Radical {
+            pua_codepoint: '\u{E118}',
+            fallback: "\u{2625}",
+            category: RadicalCategory::Abstract,
+            name: "ankh",
+        },
+        Radical {
+            pua_codepoint: '\u{E119}',
+            fallback: "\u{1F300}",
+            category: RadicalCategory::Abstract,
+            name: "spiral",
+        },
+        Radical {
+            pua_codepoint: '\u{E11A}',
+            fallback: "\u{2605}",
+            category: RadicalCategory::Abstract,
+            name: "star",
+        },
+        Radical {
+            pua_codepoint: '\u{E11B}',
+            fallback: "\u{27A4}",
+            category: RadicalCategory::Abstract,
+            name: "arrow",
+        },
+        Radical {
+            pua_codepoint: '\u{E11C}',
+            fallback: "\u{221E}",
+            category: RadicalCategory::Abstract,
+            name: "loop",
+        },
+        Radical {
+            pua_codepoint: '\u{E11D}',
+            fallback: "\u{2726}",
+            category: RadicalCategory::Abstract,
+            name: "cross",
+        },
+        Radical {
+            pua_codepoint: '\u{E11E}',
+            fallback: "\u{223F}",
+            category: RadicalCategory::Abstract,
+            name: "wave",
+        },
+        Radical {
+            pua_codepoint: '\u{E11F}',
+            fallback: "\u{00B7}",
+            category: RadicalCategory::Abstract,
+            name: "dot",
+        },
     ]
 }
 
@@ -202,7 +359,8 @@ mod tests {
             assert!(
                 (0xE100..=0xE11F).contains(&cp),
                 "radical {} codepoint U+{:04X} out of range",
-                r.name, cp,
+                r.name,
+                cp,
             );
         }
     }
@@ -220,7 +378,10 @@ mod tests {
     fn compact_sigil_is_2_radicals() {
         let vec = test_vec(42);
         let sigil = generate_compact_sigil(&vec, false);
-        assert!(sigil.chars().count() >= 2, "compact sigil too short: {sigil}");
+        assert!(
+            sigil.chars().count() >= 2,
+            "compact sigil too short: {sigil}"
+        );
     }
 
     #[test]
@@ -255,10 +416,22 @@ mod tests {
 
     #[test]
     fn radical_categories_count() {
-        let beings = all_radicals().iter().filter(|r| r.category == RadicalCategory::Beings).count();
-        let nature = all_radicals().iter().filter(|r| r.category == RadicalCategory::Nature).count();
-        let structure = all_radicals().iter().filter(|r| r.category == RadicalCategory::Structure).count();
-        let abstr = all_radicals().iter().filter(|r| r.category == RadicalCategory::Abstract).count();
+        let beings = all_radicals()
+            .iter()
+            .filter(|r| r.category == RadicalCategory::Beings)
+            .count();
+        let nature = all_radicals()
+            .iter()
+            .filter(|r| r.category == RadicalCategory::Nature)
+            .count();
+        let structure = all_radicals()
+            .iter()
+            .filter(|r| r.category == RadicalCategory::Structure)
+            .count();
+        let abstr = all_radicals()
+            .iter()
+            .filter(|r| r.category == RadicalCategory::Abstract)
+            .count();
         assert_eq!(beings, 8);
         assert_eq!(nature, 8);
         assert_eq!(structure, 8);
