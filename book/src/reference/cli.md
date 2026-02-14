@@ -421,3 +421,52 @@ Discover schema patterns.
 ```bash
 akh-medu agent schema
 ```
+
+### agent daemon
+
+Run the agent as a background daemon with scheduled learning tasks.
+Requires `--features daemon` (or `--features server` which implies it).
+
+The daemon periodically runs: equivalence learning, reflection, memory
+consolidation, schema discovery, rule inference, gap analysis, and idle
+OODA cycles. It persists the session at a configurable interval and shuts
+down cleanly on Ctrl+C.
+
+```bash
+akh-medu agent daemon
+akh-medu agent daemon --equiv-interval 600 --reflect-interval 300
+akh-medu agent daemon --fresh --max-cycles 100
+akh-medu agent daemon --persist-interval 120 --rules-interval 900
+```
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--max-cycles <N>` | Maximum OODA cycles (0 = unlimited) | `0` |
+| `--fresh` | Ignore persisted session | off |
+| `--equiv-interval <SECS>` | Equivalence learning interval | `300` |
+| `--reflect-interval <SECS>` | Reflection interval | `180` |
+| `--rules-interval <SECS>` | Rule inference interval | `600` |
+| `--persist-interval <SECS>` | Session persist interval | `60` |
+
+## Background Learning
+
+The agent supports two forms of autonomous background learning:
+
+### TUI Idle Learning
+
+When using the TUI (`akh-medu agent chat` or `akh-medu agent repl`), the
+agent automatically runs background tasks during idle time (when you are
+not typing). No setup is required — it works out of the box.
+
+Tasks and default intervals:
+- Memory consolidation: every 2 minutes (if WM pressure is high)
+- Reflection: every 5 minutes
+- Equivalence learning: every 10 minutes
+- Rule inference: every 15 minutes
+
+### Daemon Mode
+
+For headless long-running operation, `agent daemon` runs a dedicated tokio
+event loop scheduling all background tasks at configurable intervals.
+This is useful for overnight knowledge base building or continuous
+ingestion workflows.

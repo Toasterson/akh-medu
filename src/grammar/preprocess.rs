@@ -560,7 +560,7 @@ mod tests {
         let resolver = engine.entity_resolver();
 
         // Run the library-enriched preprocessor
-        let output = preprocess_chunk_with_library(&chunk, &ctx, resolver, &engine);
+        let output = preprocess_chunk_with_library(&chunk, &ctx, &resolver, &engine);
 
         // Should at minimum produce the same entities as the base preprocessor
         assert!(!output.entities.is_empty(), "should extract entities");

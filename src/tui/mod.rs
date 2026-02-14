@@ -12,7 +12,7 @@ use std::time::Duration;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use miette::IntoDiagnostic;
 
-use crate::agent::{Agent, AgentConfig};
+use crate::agent::{Agent, AgentConfig, IdleScheduler};
 use crate::engine::Engine;
 use crate::message::AkhMessage;
 
@@ -27,6 +27,7 @@ pub struct AkhTui {
     scroll_offset: usize,
     should_quit: bool,
     tui_sink: Arc<sink::TuiSink>,
+    idle_scheduler: IdleScheduler,
 }
 
 impl AkhTui {
@@ -52,6 +53,7 @@ impl AkhTui {
             scroll_offset: 0,
             should_quit: false,
             tui_sink,
+            idle_scheduler: IdleScheduler::default(),
         }
     }
 
@@ -102,6 +104,14 @@ impl AkhTui {
                         continue;
                     }
                     self.handle_key(key.code, key.modifiers);
+                }
+            } else {
+                // Idle — run a background task if one is due.
+                if let Some(result) = self.idle_scheduler.tick(&mut self.agent) {
+                    self.messages.push(AkhMessage::system(format!(
+                        "[idle:{}] {}",
+                        result.task, result.summary,
+                    )));
                 }
             }
         }
