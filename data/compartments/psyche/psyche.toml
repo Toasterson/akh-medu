@@ -8,15 +8,19 @@ tone = ["clear", "methodical"]
 
 [[shadow.veto_patterns]]
 name = "destructive_action"
-triggers = ["delete all", "drop table", "rm -rf"]
+capability_triggers = ["ProcessExec"]
+danger_level_threshold = "Critical"
+action_triggers = ["delete all", "drop table", "rm -rf"]
 severity = 1.0
-explanation = "Destructive actions require explicit user confirmation."
+explanation = "Destructive or arbitrary execution actions require explicit user confirmation."
 
 [[shadow.bias_patterns]]
-name = "repetitive_loop"
-triggers = ["same tool", "repeated"]
+name = "filesystem_write"
+capability_triggers = ["WriteFilesystem"]
+danger_level_threshold = "Dangerous"
+action_triggers = []
 severity = 0.3
-explanation = "Detected repetitive pattern — try a different approach."
+explanation = "Filesystem writes carry moderate risk."
 
 [archetypes]
 healer = 0.5

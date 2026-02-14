@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use crate::engine::Engine;
 
 use super::error::{AgentError, AgentResult};
+use super::tool_manifest::ToolManifest;
 
 /// Description of a tool's interface.
 #[derive(Debug, Clone)]
@@ -114,11 +115,16 @@ pub trait Tool: Send + Sync {
 
     /// Execute the tool with the given input against the engine.
     fn execute(&self, engine: &Engine, input: ToolInput) -> AgentResult<ToolOutput>;
+
+    /// Return structured manifest describing this tool's danger metadata,
+    /// capabilities, and source.
+    fn manifest(&self) -> ToolManifest;
 }
 
 /// Registry of available tools.
 pub struct ToolRegistry {
     tools: HashMap<String, Box<dyn Tool>>,
+    manifests: HashMap<String, ToolManifest>,
 }
 
 impl ToolRegistry {
@@ -126,18 +132,32 @@ impl ToolRegistry {
     pub fn new() -> Self {
         Self {
             tools: HashMap::new(),
+            manifests: HashMap::new(),
         }
     }
 
-    /// Register a tool. If a tool with the same name exists, it is replaced.
+    /// Register a tool. Caches its manifest on registration.
+    /// If a tool with the same name exists, it is replaced.
     pub fn register(&mut self, tool: Box<dyn Tool>) {
-        let sig = tool.signature();
-        self.tools.insert(sig.name.clone(), tool);
+        let manifest = tool.manifest();
+        let name = manifest.name.clone();
+        self.manifests.insert(name.clone(), manifest);
+        self.tools.insert(name, tool);
     }
 
     /// Get a tool by name.
     pub fn get(&self, name: &str) -> Option<&dyn Tool> {
         self.tools.get(name).map(|b| b.as_ref())
+    }
+
+    /// Get a tool's manifest by name.
+    pub fn manifest(&self, name: &str) -> Option<&ToolManifest> {
+        self.manifests.get(name)
+    }
+
+    /// List all registered tool manifests.
+    pub fn list_manifests(&self) -> Vec<&ToolManifest> {
+        self.manifests.values().collect()
     }
 
     /// List all registered tool signatures.
@@ -185,7 +205,10 @@ impl std::fmt::Debug for ToolRegistry {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::*;
+    use crate::agent::tool_manifest::{Capability, DangerInfo, DangerLevel, ToolSource};
 
     struct DummyTool;
     impl Tool for DummyTool {
@@ -199,6 +222,20 @@ mod tests {
         fn execute(&self, _engine: &Engine, _input: ToolInput) -> AgentResult<ToolOutput> {
             Ok(ToolOutput::ok("dummy result"))
         }
+        fn manifest(&self) -> ToolManifest {
+            ToolManifest {
+                name: "dummy".into(),
+                description: "A test tool".into(),
+                parameters: vec![],
+                danger: DangerInfo {
+                    level: DangerLevel::Safe,
+                    capabilities: HashSet::from([Capability::ReadKg]),
+                    description: "Safe test tool".into(),
+                    shadow_triggers: vec![],
+                },
+                source: ToolSource::Native,
+            }
+        }
     }
 
     #[test]
@@ -208,6 +245,29 @@ mod tests {
         assert_eq!(reg.len(), 1);
         let sigs = reg.list();
         assert_eq!(sigs[0].name, "dummy");
+    }
+
+    #[test]
+    fn manifest_cached_on_register() {
+        let mut reg = ToolRegistry::new();
+        reg.register(Box::new(DummyTool));
+        let m = reg.manifest("dummy").unwrap();
+        assert_eq!(m.name, "dummy");
+        assert_eq!(m.danger.level, DangerLevel::Safe);
+    }
+
+    #[test]
+    fn list_manifests() {
+        let mut reg = ToolRegistry::new();
+        reg.register(Box::new(DummyTool));
+        let manifests = reg.list_manifests();
+        assert_eq!(manifests.len(), 1);
+    }
+
+    #[test]
+    fn manifest_missing_returns_none() {
+        let reg = ToolRegistry::new();
+        assert!(reg.manifest("nonexistent").is_none());
     }
 
     #[test]

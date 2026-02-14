@@ -7,7 +7,11 @@ use std::process::Command;
 
 use crate::agent::error::AgentResult;
 use crate::agent::tool::{Tool, ToolInput, ToolOutput, ToolParam, ToolSignature};
+use crate::agent::tool_manifest::{
+    Capability, DangerInfo, DangerLevel, ToolManifest, ToolParamSchema, ToolSource,
+};
 use crate::engine::Engine;
+use std::collections::HashSet;
 
 /// Maximum combined stdout+stderr size (64 KB).
 const MAX_OUTPUT_SIZE: usize = 64 * 1024;
@@ -149,6 +153,30 @@ impl Tool for ShellExecTool {
             Ok(ToolOutput::ok(result))
         } else {
             Ok(ToolOutput::err(result))
+        }
+    }
+
+    fn manifest(&self) -> ToolManifest {
+        ToolManifest {
+            name: "shell_exec".into(),
+            description: "Executes arbitrary shell commands — full system access.".into(),
+            parameters: vec![
+                ToolParamSchema::required("command", "Shell command to execute."),
+                ToolParamSchema::optional("timeout", "Timeout in seconds (default: 30)."),
+            ],
+            danger: DangerInfo {
+                level: DangerLevel::Critical,
+                capabilities: HashSet::from([Capability::ProcessExec]),
+                description: "Executes arbitrary shell commands — full system access.".into(),
+                shadow_triggers: vec![
+                    "exec".into(),
+                    "shell".into(),
+                    "command".into(),
+                    "rm".into(),
+                    "sudo".into(),
+                ],
+            },
+            source: ToolSource::Native,
         }
     }
 }

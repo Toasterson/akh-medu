@@ -122,6 +122,9 @@ pub struct Agent {
     pub(crate) llm_client: Option<super::llm::OllamaClient>,
     /// Optional Jungian psyche (loaded from the psyche compartment).
     pub(crate) psyche: Option<crate::compartment::psyche::Psyche>,
+    /// Optional WASM tool runtime (only when `wasm-tools` feature is enabled).
+    #[cfg(feature = "wasm-tools")]
+    pub(crate) wasm_runtime: Option<super::wasm_runtime::WasmToolRuntime>,
 }
 
 impl Agent {
@@ -162,6 +165,106 @@ impl Agent {
         registry.register(Box::new(tools::DocGenTool));
     }
 
+    /// Load CLI and WASM tools from active skills.
+    ///
+    /// For each Hot skill, reads `cli_tools` paths as `CliToolManifest` JSONs
+    /// and (if the `wasm-tools` feature is enabled) `wasm_tools` paths as WASM modules.
+    fn load_skill_tools(&mut self) {
+        let hot_skills: Vec<_> = self
+            .engine
+            .list_skills()
+            .into_iter()
+            .filter(|info| info.state == crate::skills::SkillState::Hot)
+            .collect();
+
+        if hot_skills.is_empty() {
+            return;
+        }
+
+        let data_dir = self
+            .engine
+            .config()
+            .data_dir
+            .as_ref()
+            .map(|d| d.join("skills"));
+
+        for info in &hot_skills {
+            let skill_dir = match &data_dir {
+                Some(base) => base.join(&info.id),
+                None => continue,
+            };
+
+            // Load CLI tools from manifest JSON files.
+            if let Ok(manifest) = Self::read_skill_manifest(&skill_dir) {
+                for cli_path in &manifest.cli_tools {
+                    let full_path = skill_dir.join(cli_path);
+                    match std::fs::read_to_string(&full_path) {
+                        Ok(json) => {
+                            match serde_json::from_str::<super::cli_tool::CliToolManifest>(&json) {
+                                Ok(cli_manifest) => {
+                                    let tool = super::cli_tool::CliTool::new(
+                                        cli_manifest,
+                                        Some(info.id.clone()),
+                                    );
+                                    self.tool_registry.register(Box::new(tool));
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        skill = %info.id,
+                                        path = %full_path.display(),
+                                        "Failed to parse CLI tool manifest: {e}"
+                                    );
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                skill = %info.id,
+                                path = %full_path.display(),
+                                "Failed to read CLI tool manifest: {e}"
+                            );
+                        }
+                    }
+                }
+
+                // Load WASM tools (feature-gated).
+                #[cfg(feature = "wasm-tools")]
+                if let Some(ref runtime) = self.wasm_runtime {
+                    for wasm_path in &manifest.wasm_tools {
+                        let full_path = skill_dir.join(wasm_path);
+                        match runtime.load_tool(
+                            &full_path.to_string_lossy(),
+                            Arc::clone(&self.engine),
+                            info.id.clone(),
+                            manifest.tool_config.clone(),
+                        ) {
+                            Ok(wasm_tool) => {
+                                self.tool_registry.register(Box::new(wasm_tool));
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    skill = %info.id,
+                                    path = %full_path.display(),
+                                    "Failed to load WASM tool: {e}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Read a skill's manifest JSON from its directory.
+    fn read_skill_manifest(
+        skill_dir: &std::path::Path,
+    ) -> Result<crate::skills::SkillManifest, String> {
+        let manifest_path = skill_dir.join("skill.json");
+        let json = std::fs::read_to_string(&manifest_path)
+            .map_err(|e| format!("read skill.json: {e}"))?;
+        serde_json::from_str(&json).map_err(|e| format!("parse skill.json: {e}"))
+    }
+
     /// Create a new agent wrapping the given engine.
     ///
     /// Initializes well-known predicates, registers built-in tools, and
@@ -182,7 +285,7 @@ impl Agent {
             .compartments()
             .and_then(|cm| cm.psyche());
 
-        Ok(Self {
+        let mut agent = Self {
             engine,
             config,
             working_memory,
@@ -194,7 +297,14 @@ impl Agent {
             last_reflection: None,
             llm_client: None,
             psyche,
-        })
+            #[cfg(feature = "wasm-tools")]
+            wasm_runtime: super::wasm_runtime::WasmToolRuntime::new().ok(),
+        };
+
+        // Load tools from active skills.
+        agent.load_skill_tools();
+
+        Ok(agent)
     }
 
     /// Add a new goal. Returns the goal's symbol ID.
@@ -819,7 +929,7 @@ impl Agent {
                     .and_then(|cm| cm.psyche())
             });
 
-        Ok(Self {
+        let mut agent = Self {
             engine,
             config,
             working_memory,
@@ -831,7 +941,14 @@ impl Agent {
             last_reflection: None,
             llm_client: None,
             psyche,
-        })
+            #[cfg(feature = "wasm-tools")]
+            wasm_runtime: super::wasm_runtime::WasmToolRuntime::new().ok(),
+        };
+
+        // Load tools from active skills.
+        agent.load_skill_tools();
+
+        Ok(agent)
     }
 
     /// Check whether a persisted session exists in the durable store.

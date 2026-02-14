@@ -4,8 +4,12 @@ use crate::agent::agent::AgentPredicates;
 use crate::agent::error::{AgentError, AgentResult};
 use crate::agent::memory;
 use crate::agent::tool::{Tool, ToolInput, ToolOutput, ToolParam, ToolSignature};
+use crate::agent::tool_manifest::{
+    Capability, DangerInfo, DangerLevel, ToolManifest, ToolParamSchema, ToolSource,
+};
 use crate::engine::Engine;
 use crate::symbol::SymbolId;
+use std::collections::HashSet;
 
 /// Recall episodic memories from long-term storage.
 pub struct MemoryRecallTool {
@@ -85,5 +89,29 @@ impl Tool for MemoryRecallTool {
 
         let result = format!("Recalled {} episode(s):\n{}", lines.len(), lines.join("\n"));
         Ok(ToolOutput::ok_with_symbols(result, all_symbols))
+    }
+
+    fn manifest(&self) -> ToolManifest {
+        ToolManifest {
+            name: "memory_recall".into(),
+            description: "Recall episodic memories by query symbols or tags.".into(),
+            parameters: vec![
+                ToolParamSchema::required(
+                    "query_symbols",
+                    "Comma-separated symbol names or IDs to query.",
+                ),
+                ToolParamSchema::optional(
+                    "top_k",
+                    "Maximum number of episodes to return (default: 5).",
+                ),
+            ],
+            danger: DangerInfo {
+                level: DangerLevel::Safe,
+                capabilities: HashSet::from([Capability::MemoryAccess, Capability::ReadKg]),
+                description: "Read-only episodic memory recall — no side effects.".into(),
+                shadow_triggers: vec![],
+            },
+            source: ToolSource::Native,
+        }
     }
 }

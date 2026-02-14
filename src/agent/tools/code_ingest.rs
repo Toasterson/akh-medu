@@ -5,6 +5,7 @@
 //! creates entity symbols and links them with `code:*` predicates. Every symbol
 //! created during ingestion gets a populated `SourceRef` for provenance.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use syn::spanned::Spanned;
@@ -13,6 +14,9 @@ use syn::{self, Visibility};
 
 use crate::agent::error::{AgentError, AgentResult};
 use crate::agent::tool::{Tool, ToolInput, ToolOutput, ToolParam, ToolSignature};
+use crate::agent::tool_manifest::{
+    Capability, DangerInfo, DangerLevel, ToolManifest, ToolParamSchema, ToolSource,
+};
 use crate::engine::Engine;
 use crate::graph::Triple;
 use crate::provenance::{DerivationKind, ProvenanceRecord};
@@ -110,6 +114,31 @@ impl Tool for CodeIngestTool {
             stats.files_processed, stats.triples_extracted, stats.symbols_created, stats.errors,
         );
         Ok(ToolOutput::ok_with_symbols(msg, all_symbols))
+    }
+
+    fn manifest(&self) -> ToolManifest {
+        ToolManifest {
+            name: "code_ingest".into(),
+            description: "Parses Rust source code and ingests structure into the knowledge graph.".into(),
+            parameters: vec![
+                ToolParamSchema::required("path", "File or directory path to ingest."),
+                ToolParamSchema::optional(
+                    "recursive",
+                    "Scan subdirectories (default: true).",
+                ),
+                ToolParamSchema::optional(
+                    "max_files",
+                    "Maximum number of files to process (default: 200).",
+                ),
+            ],
+            danger: DangerInfo {
+                level: DangerLevel::Cautious,
+                capabilities: HashSet::from([Capability::WriteKg, Capability::ReadFilesystem]),
+                description: "Parses Rust source code and ingests structure into the knowledge graph.".into(),
+                shadow_triggers: vec!["ingest".into(), "code".into()],
+            },
+            source: ToolSource::Native,
+        }
     }
 }
 

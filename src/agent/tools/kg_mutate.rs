@@ -2,8 +2,12 @@
 
 use crate::agent::error::AgentResult;
 use crate::agent::tool::{Tool, ToolInput, ToolOutput, ToolParam, ToolSignature};
+use crate::agent::tool_manifest::{
+    Capability, DangerInfo, DangerLevel, ToolManifest, ToolParamSchema, ToolSource,
+};
 use crate::engine::Engine;
 use crate::graph::Triple;
+use std::collections::HashSet;
 
 /// Add a triple to the knowledge graph.
 pub struct KgMutateTool;
@@ -65,5 +69,25 @@ impl Tool for KgMutateTool {
             confidence,
         );
         Ok(ToolOutput::ok_with_symbols(result, vec![s, p, o]))
+    }
+
+    fn manifest(&self) -> ToolManifest {
+        ToolManifest {
+            name: "kg_mutate".into(),
+            description: "Add a triple (subject, predicate, object) to the knowledge graph.".into(),
+            parameters: vec![
+                ToolParamSchema::required("subject", "Subject symbol name or ID."),
+                ToolParamSchema::required("predicate", "Predicate (relation) symbol name or ID."),
+                ToolParamSchema::required("object", "Object symbol name or ID."),
+                ToolParamSchema::optional("confidence", "Confidence score 0.0-1.0 (default: 1.0)."),
+            ],
+            danger: DangerInfo {
+                level: DangerLevel::Cautious,
+                capabilities: HashSet::from([Capability::WriteKg]),
+                description: "Mutates the knowledge graph by adding triples.".into(),
+                shadow_triggers: vec!["mutate".into(), "add triple".into()],
+            },
+            source: ToolSource::Native,
+        }
     }
 }

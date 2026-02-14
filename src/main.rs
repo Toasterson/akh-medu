@@ -3580,5 +3580,25 @@ fn format_derivation_kind(kind: &DerivationKind, engine: &Engine) -> String {
         DerivationKind::PsycheEvolution { trigger, cycle } => {
             format!("psyche evolution [{}] at cycle {}", trigger, cycle)
         }
+        DerivationKind::WasmToolExecution {
+            tool_name,
+            skill_id,
+            danger_level,
+        } => {
+            format!(
+                "WASM tool execution [{}] from skill \"{}\" (danger: {})",
+                tool_name, skill_id, danger_level
+            )
+        }
+        DerivationKind::CliToolExecution {
+            tool_name,
+            binary_path,
+            danger_level,
+        } => {
+            format!(
+                "CLI tool execution [{}] via \"{}\" (danger: {})",
+                tool_name, binary_path, danger_level
+            )
+        }
     }
 }

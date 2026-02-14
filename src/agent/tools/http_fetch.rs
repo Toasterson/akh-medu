@@ -6,7 +6,11 @@
 
 use crate::agent::error::AgentResult;
 use crate::agent::tool::{Tool, ToolInput, ToolOutput, ToolParam, ToolSignature};
+use crate::agent::tool_manifest::{
+    Capability, DangerInfo, DangerLevel, ToolManifest, ToolParamSchema, ToolSource,
+};
 use crate::engine::Engine;
+use std::collections::HashSet;
 
 /// Maximum response body size (256 KB).
 const MAX_RESPONSE_SIZE: u64 = 256 * 1024;
@@ -100,6 +104,29 @@ impl Tool for HttpFetchTool {
             Err(ureq::Error::Transport(transport)) => Ok(ToolOutput::err(format!(
                 "Transport error fetching \"{url}\": {transport}"
             ))),
+        }
+    }
+
+    fn manifest(&self) -> ToolManifest {
+        ToolManifest {
+            name: "http_fetch".into(),
+            description: "Fetches URLs via HTTP GET — network access.".into(),
+            parameters: vec![
+                ToolParamSchema::required("url", "URL to fetch."),
+                ToolParamSchema::optional("timeout", "Timeout in seconds (default: 10)."),
+            ],
+            danger: DangerInfo {
+                level: DangerLevel::Cautious,
+                capabilities: HashSet::from([Capability::Network]),
+                description: "Fetches URLs via HTTP GET — network access.".into(),
+                shadow_triggers: vec![
+                    "http".into(),
+                    "url".into(),
+                    "fetch".into(),
+                    "download".into(),
+                ],
+            },
+            source: ToolSource::Native,
         }
     }
 }

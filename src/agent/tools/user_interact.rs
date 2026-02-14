@@ -6,7 +6,11 @@
 
 use crate::agent::error::AgentResult;
 use crate::agent::tool::{Tool, ToolInput, ToolOutput, ToolParam, ToolSignature};
+use crate::agent::tool_manifest::{
+    Capability, DangerInfo, DangerLevel, ToolManifest, ToolParamSchema, ToolSource,
+};
 use crate::engine::Engine;
+use std::collections::HashSet;
 
 /// Ask the user a question and incorporate their answer.
 pub struct UserInteractTool;
@@ -55,6 +59,23 @@ impl Tool for UserInteractTool {
             Err(e) => Ok(ToolOutput::err(format!(
                 "Failed to read user input: {e}"
             ))),
+        }
+    }
+
+    fn manifest(&self) -> ToolManifest {
+        ToolManifest {
+            name: "user_interact".into(),
+            description: "Prompts the user for input — no side effects beyond I/O.".into(),
+            parameters: vec![
+                ToolParamSchema::required("question", "Question to ask the user."),
+            ],
+            danger: DangerInfo {
+                level: DangerLevel::Safe,
+                capabilities: HashSet::from([Capability::UserInteraction]),
+                description: "Prompts the user for input — no side effects beyond I/O.".into(),
+                shadow_triggers: vec![],
+            },
+            source: ToolSource::Native,
         }
     }
 }

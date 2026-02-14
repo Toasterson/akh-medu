@@ -2,7 +2,11 @@
 
 use crate::agent::error::AgentResult;
 use crate::agent::tool::{Tool, ToolInput, ToolOutput, ToolParam, ToolSignature};
+use crate::agent::tool_manifest::{
+    Capability, DangerInfo, DangerLevel, ToolManifest, ToolParamSchema, ToolSource,
+};
 use crate::engine::Engine;
+use std::collections::HashSet;
 
 /// Query triples from/to a symbol in the knowledge graph.
 pub struct KgQueryTool;
@@ -81,6 +85,27 @@ impl Tool for KgQueryTool {
                 lines.join("\n")
             );
             Ok(ToolOutput::ok_with_symbols(result, symbols))
+        }
+    }
+
+    fn manifest(&self) -> ToolManifest {
+        ToolManifest {
+            name: "kg_query".into(),
+            description: "Query triples from/to a symbol in the knowledge graph.".into(),
+            parameters: vec![
+                ToolParamSchema::required("symbol", "Symbol name or ID to query."),
+                ToolParamSchema::optional(
+                    "direction",
+                    "Direction: 'from', 'to', or 'both' (default: both).",
+                ),
+            ],
+            danger: DangerInfo {
+                level: DangerLevel::Safe,
+                capabilities: HashSet::from([Capability::ReadKg]),
+                description: "Read-only knowledge graph queries — no side effects.".into(),
+                shadow_triggers: vec![],
+            },
+            source: ToolSource::Native,
         }
     }
 }

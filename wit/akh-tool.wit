@@ -1,0 +1,80 @@
+package akh:tool@0.1.0;
+
+/// Host functions provided to WASM tool modules.
+interface host {
+    /// Query triples from/to a symbol in the knowledge graph.
+    kg-query: func(symbol: string, direction: string) -> result<string, string>;
+
+    /// Add a triple to the knowledge graph.
+    kg-mutate: func(subject: string, predicate: string, object: string, confidence: float32) -> result<string, string>;
+
+    /// Resolve a label to a SymbolId.
+    resolve-symbol: func(label: string) -> u64;
+
+    /// Resolve a SymbolId to its label.
+    resolve-label: func(symbol-id: u64) -> string;
+
+    /// Log a message at the given level ("trace", "debug", "info", "warn", "error").
+    log: func(level: string, message: string);
+
+    /// Get a configuration value by key (from skill's tool_config).
+    get-config: func(key: string) -> option<string>;
+}
+
+enum danger-level {
+    safe,
+    cautious,
+    dangerous,
+    critical,
+}
+
+enum capability {
+    read-kg,
+    write-kg,
+    read-filesystem,
+    write-filesystem,
+    network,
+    process-exec,
+    user-interaction,
+    reason,
+    vsa-access,
+    provenance-access,
+    memory-access,
+}
+
+record param-schema {
+    name: string,
+    description: string,
+    required: bool,
+    param-type: string,
+}
+
+record danger-info {
+    level: danger-level,
+    capabilities: list<capability>,
+    description: string,
+    shadow-triggers: list<string>,
+}
+
+record tool-manifest {
+    name: string,
+    description: string,
+    parameters: list<param-schema>,
+    danger: danger-info,
+}
+
+record tool-result {
+    success: bool,
+    result-text: string,
+    symbols-involved: list<u64>,
+}
+
+world akh-tool {
+    import host;
+
+    /// Return the tool's manifest (called once at load time).
+    export manifest: func() -> tool-manifest;
+
+    /// Execute the tool with JSON-encoded input parameters.
+    export execute: func(input-json: string) -> tool-result;
+}

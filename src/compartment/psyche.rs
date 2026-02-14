@@ -3,8 +3,11 @@
 //! Maps Carl Jung's analytical psychology concepts to concrete Rust data types
 //! that influence the agent's tool selection, output style, and ethical constraints.
 
+use std::collections::HashSet;
+
 use serde::{Deserialize, Serialize};
 
+use crate::agent::tool_manifest::{Capability, DangerLevel, ToolManifest};
 use crate::symbol::SymbolId;
 
 // ---------------------------------------------------------------------------
@@ -52,12 +55,24 @@ pub struct Shadow {
 }
 
 /// A single shadow pattern that can veto or bias an action.
+///
+/// Matching logic (any match triggers):
+/// 1. `capability_triggers` — tool manifest capabilities intersect pattern's set.
+/// 2. `danger_level_threshold` — tool's danger level >= threshold.
+/// 3. `action_triggers` — substring match in action description against tool's shadow_triggers.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShadowPattern {
     /// Human-readable name for this pattern.
     pub name: String,
-    /// Keywords or substrings that trigger this pattern when found in action descriptions.
-    pub triggers: Vec<String>,
+    /// Match on tool capabilities — any intersection triggers the pattern.
+    #[serde(default)]
+    pub capability_triggers: HashSet<Capability>,
+    /// Match on danger level — tool danger >= threshold triggers the pattern.
+    #[serde(default)]
+    pub danger_level_threshold: Option<DangerLevel>,
+    /// Match on tool's shadow_triggers — substring in action description.
+    #[serde(default)]
+    pub action_triggers: Vec<String>,
     /// Severity: 0.0 (ignorable) to 1.0 (absolute).
     pub severity: f32,
     /// Explanation shown when triggered.
@@ -112,21 +127,25 @@ impl Default for Psyche {
             shadow: Shadow {
                 veto_patterns: vec![ShadowPattern {
                     name: "destructive_action".into(),
-                    triggers: vec![
+                    capability_triggers: HashSet::from([Capability::ProcessExec]),
+                    danger_level_threshold: Some(DangerLevel::Critical),
+                    action_triggers: vec![
                         "delete all".into(),
                         "drop table".into(),
                         "rm -rf".into(),
                     ],
                     severity: 1.0,
-                    explanation: "Destructive actions require explicit user confirmation."
-                        .into(),
+                    explanation:
+                        "Destructive or arbitrary execution actions require explicit user confirmation."
+                            .into(),
                 }],
                 bias_patterns: vec![ShadowPattern {
-                    name: "repetitive_loop".into(),
-                    triggers: vec!["same tool".into(), "repeated".into()],
+                    name: "filesystem_write".into(),
+                    capability_triggers: HashSet::from([Capability::WriteFilesystem]),
+                    danger_level_threshold: Some(DangerLevel::Dangerous),
+                    action_triggers: vec![],
                     severity: 0.3,
-                    explanation:
-                        "Detected repetitive pattern — try a different approach.".into(),
+                    explanation: "Filesystem writes carry moderate risk.".into(),
                 }],
             },
             archetypes: ArchetypeWeights {
@@ -143,6 +162,48 @@ impl Default for Psyche {
                 dominant_archetype: "sage".into(),
             },
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Shadow pattern matching
+// ---------------------------------------------------------------------------
+
+impl ShadowPattern {
+    /// Check whether this pattern matches a tool manifest + action description.
+    ///
+    /// Returns true if **any** of the three criteria match:
+    /// 1. The tool's capabilities intersect this pattern's `capability_triggers`.
+    /// 2. The tool's danger level >= this pattern's `danger_level_threshold`.
+    /// 3. Any of the tool's `shadow_triggers` appear as substrings in `action_desc`.
+    fn matches(&self, manifest: &ToolManifest, action_desc: &str) -> bool {
+        // 1. Capability intersection.
+        if !self.capability_triggers.is_empty()
+            && !self
+                .capability_triggers
+                .is_disjoint(&manifest.danger.capabilities)
+        {
+            return true;
+        }
+
+        // 2. Danger level threshold.
+        if let Some(threshold) = self.danger_level_threshold {
+            if manifest.danger.level >= threshold {
+                return true;
+            }
+        }
+
+        // 3. Action trigger substring match against tool's shadow_triggers.
+        if !self.action_triggers.is_empty() {
+            let lower = action_desc.to_lowercase();
+            for trigger in &self.action_triggers {
+                if lower.contains(&trigger.to_lowercase()) {
+                    return true;
+                }
+            }
+        }
+
+        false
     }
 }
 
@@ -186,33 +247,28 @@ impl Psyche {
         (weight - 0.5) * 0.15
     }
 
-    /// Check if an action description matches any veto pattern.
+    /// Check if a tool's manifest + action description matches any veto pattern.
     ///
-    /// Returns the first matched veto pattern, or None if no veto applies.
-    pub fn check_shadow_veto(&self, action_description: &str) -> Option<&ShadowPattern> {
-        let lower = action_description.to_lowercase();
-        self.shadow.veto_patterns.iter().find(|pattern| {
-            pattern
-                .triggers
-                .iter()
-                .any(|trigger| lower.contains(&trigger.to_lowercase()))
-        })
+    /// Returns the first matched veto pattern, or `None` if no veto applies.
+    pub fn check_veto(
+        &self,
+        manifest: &ToolManifest,
+        action_desc: &str,
+    ) -> Option<&ShadowPattern> {
+        self.shadow
+            .veto_patterns
+            .iter()
+            .find(|pattern| pattern.matches(manifest, action_desc))
     }
 
     /// Returns the cumulative bias penalty from matched bias patterns.
     ///
     /// Each matched pattern contributes its severity to the total penalty.
-    pub fn check_shadow_bias(&self, action_description: &str) -> f32 {
-        let lower = action_description.to_lowercase();
+    pub fn check_bias(&self, manifest: &ToolManifest, action_desc: &str) -> f32 {
         self.shadow
             .bias_patterns
             .iter()
-            .filter(|pattern| {
-                pattern
-                    .triggers
-                    .iter()
-                    .any(|trigger| lower.contains(&trigger.to_lowercase()))
-            })
+            .filter(|pattern| pattern.matches(manifest, action_desc))
             .map(|pattern| pattern.severity)
             .sum()
     }
@@ -332,7 +388,62 @@ impl PsychePredicates {
 
 #[cfg(test)]
 mod tests {
+    use crate::agent::tool_manifest::{DangerInfo, ToolManifest, ToolParamSchema, ToolSource};
+
     use super::*;
+
+    fn safe_manifest(name: &str) -> ToolManifest {
+        ToolManifest {
+            name: name.into(),
+            description: "safe tool".into(),
+            parameters: vec![],
+            danger: DangerInfo {
+                level: DangerLevel::Safe,
+                capabilities: HashSet::from([Capability::ReadKg]),
+                description: "safe".into(),
+                shadow_triggers: vec![],
+            },
+            source: ToolSource::Native,
+        }
+    }
+
+    fn critical_exec_manifest() -> ToolManifest {
+        ToolManifest {
+            name: "shell_exec".into(),
+            description: "execute shell commands".into(),
+            parameters: vec![ToolParamSchema::required("command", "Shell command.")],
+            danger: DangerInfo {
+                level: DangerLevel::Critical,
+                capabilities: HashSet::from([Capability::ProcessExec]),
+                description: "arbitrary execution".into(),
+                shadow_triggers: vec![
+                    "exec".into(),
+                    "shell".into(),
+                    "rm".into(),
+                    "sudo".into(),
+                ],
+            },
+            source: ToolSource::Native,
+        }
+    }
+
+    fn dangerous_file_manifest() -> ToolManifest {
+        ToolManifest {
+            name: "file_io".into(),
+            description: "file read/write".into(),
+            parameters: vec![],
+            danger: DangerInfo {
+                level: DangerLevel::Dangerous,
+                capabilities: HashSet::from([
+                    Capability::ReadFilesystem,
+                    Capability::WriteFilesystem,
+                ]),
+                description: "filesystem access".into(),
+                shadow_triggers: vec!["write".into(), "delete".into()],
+            },
+            source: ToolSource::Native,
+        }
+    }
 
     #[test]
     fn default_psyche_has_scholar_persona() {
@@ -350,7 +461,6 @@ mod tests {
     #[test]
     fn archetype_bias_for_sage_tools() {
         let p = Psyche::default();
-        // sage weight = 0.7, so bias = (0.7 - 0.5) * 0.15 = 0.03
         let bias = p.archetype_bias("kg_query");
         assert!((bias - 0.03).abs() < 0.001);
     }
@@ -358,37 +468,74 @@ mod tests {
     #[test]
     fn archetype_bias_for_guardian_tools() {
         let p = Psyche::default();
-        // guardian weight = 0.4, so bias = (0.4 - 0.5) * 0.15 = -0.015
         let bias = p.archetype_bias("memory_recall");
         assert!((bias - (-0.015)).abs() < 0.001);
     }
 
     #[test]
-    fn shadow_veto_matches_destructive_action() {
+    fn check_veto_matches_by_capability() {
         let p = Psyche::default();
-        let veto = p.check_shadow_veto("tool=shell_exec input=rm -rf /");
+        let manifest = critical_exec_manifest();
+        // ProcessExec capability intersects the veto pattern's capability_triggers.
+        let veto = p.check_veto(&manifest, "run something");
         assert!(veto.is_some());
         assert_eq!(veto.unwrap().name, "destructive_action");
     }
 
     #[test]
-    fn shadow_veto_does_not_match_safe_action() {
+    fn check_veto_matches_by_danger_level() {
         let p = Psyche::default();
-        let veto = p.check_shadow_veto("tool=kg_query input=symbol=Sun direction=both");
+        // Critical tool with no matching capability but level >= Critical threshold.
+        let manifest = ToolManifest {
+            name: "custom_critical".into(),
+            description: "critical tool".into(),
+            parameters: vec![],
+            danger: DangerInfo {
+                level: DangerLevel::Critical,
+                capabilities: HashSet::new(), // no capabilities to match
+                description: "critical".into(),
+                shadow_triggers: vec![],
+            },
+            source: ToolSource::Native,
+        };
+        let veto = p.check_veto(&manifest, "anything");
+        assert!(veto.is_some());
+        assert_eq!(veto.unwrap().name, "destructive_action");
+    }
+
+    #[test]
+    fn check_veto_matches_by_action_triggers() {
+        let p = Psyche::default();
+        // Safe tool but action description contains "rm -rf".
+        let manifest = safe_manifest("safe_tool");
+        let veto = p.check_veto(&manifest, "tool=safe_tool input=rm -rf /");
+        assert!(veto.is_some());
+        assert_eq!(veto.unwrap().name, "destructive_action");
+    }
+
+    #[test]
+    fn check_veto_returns_none_for_safe_tool() {
+        let p = Psyche::default();
+        let manifest = safe_manifest("kg_query");
+        let veto = p.check_veto(&manifest, "tool=kg_query input=symbol=Sun direction=both");
         assert!(veto.is_none());
     }
 
     #[test]
-    fn shadow_bias_accumulates() {
+    fn check_bias_accumulates_for_matching_tools() {
         let p = Psyche::default();
-        let bias = p.check_shadow_bias("same tool repeated again");
+        let manifest = dangerous_file_manifest();
+        // The bias pattern matches WriteFilesystem capability and Dangerous level.
+        let bias = p.check_bias(&manifest, "writing to file");
         assert!(bias > 0.0);
+        assert!((bias - 0.3).abs() < f32::EPSILON);
     }
 
     #[test]
-    fn shadow_bias_zero_for_normal_action() {
+    fn check_bias_zero_for_safe_tool() {
         let p = Psyche::default();
-        let bias = p.check_shadow_bias("novel exploration query");
+        let manifest = safe_manifest("kg_query");
+        let bias = p.check_bias(&manifest, "normal query");
         assert!((bias - 0.0).abs() < f32::EPSILON);
     }
 }

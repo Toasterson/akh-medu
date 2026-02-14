@@ -54,6 +54,15 @@ pub struct SkillManifest {
     /// Path to rules file relative to skill directory.
     #[serde(default)]
     pub rules_file: Option<String>,
+    /// Paths to CLI tool manifest JSON files relative to skill directory.
+    #[serde(default)]
+    pub cli_tools: Vec<String>,
+    /// Paths to WASM component modules relative to skill directory.
+    #[serde(default)]
+    pub wasm_tools: Vec<String>,
+    /// Key-value configuration passed to tools (e.g., API keys, base URLs).
+    #[serde(default)]
+    pub tool_config: std::collections::HashMap<String, String>,
 }
 
 /// A skillpack with its manifest and current state.

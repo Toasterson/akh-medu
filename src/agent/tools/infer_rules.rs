@@ -2,8 +2,12 @@
 
 use crate::agent::error::AgentResult;
 use crate::agent::tool::{Tool, ToolInput, ToolOutput, ToolParam, ToolSignature};
+use crate::agent::tool_manifest::{
+    Capability, DangerInfo, DangerLevel, ToolManifest, ToolParamSchema, ToolSource,
+};
 use crate::autonomous::rule_engine::RuleEngineConfig;
 use crate::engine::Engine;
+use std::collections::HashSet;
 
 /// Agent tool that triggers forward-chaining rule inference.
 pub struct InferRulesTool;
@@ -71,5 +75,33 @@ impl Tool for InferRulesTool {
             .collect();
 
         Ok(ToolOutput::ok_with_symbols(lines.join("\n"), symbols))
+    }
+
+    fn manifest(&self) -> ToolManifest {
+        ToolManifest {
+            name: "infer_rules".into(),
+            description: "Forward-chaining inference — derives new triples from rules.".into(),
+            parameters: vec![
+                ToolParamSchema::optional(
+                    "max_iterations",
+                    "Maximum forward-chaining iterations (default: 5).",
+                ),
+                ToolParamSchema::optional(
+                    "min_confidence",
+                    "Minimum confidence for derived triples (default: 0.1).",
+                ),
+            ],
+            danger: DangerInfo {
+                level: DangerLevel::Safe,
+                capabilities: HashSet::from([
+                    Capability::Reason,
+                    Capability::ReadKg,
+                    Capability::WriteKg,
+                ]),
+                description: "Forward-chaining inference — derives new triples from rules.".into(),
+                shadow_triggers: vec![],
+            },
+            source: ToolSource::Native,
+        }
     }
 }

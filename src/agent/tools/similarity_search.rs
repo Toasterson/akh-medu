@@ -2,7 +2,11 @@
 
 use crate::agent::error::AgentResult;
 use crate::agent::tool::{Tool, ToolInput, ToolOutput, ToolParam, ToolSignature};
+use crate::agent::tool_manifest::{
+    Capability, DangerInfo, DangerLevel, ToolManifest, ToolParamSchema, ToolSource,
+};
 use crate::engine::Engine;
+use std::collections::HashSet;
 
 /// Find symbols similar to a given symbol using VSA hypervector similarity.
 pub struct SimilaritySearchTool;
@@ -69,5 +73,24 @@ impl Tool for SimilaritySearchTool {
             lines.join("\n")
         );
         Ok(ToolOutput::ok_with_symbols(result, symbols))
+    }
+
+    fn manifest(&self) -> ToolManifest {
+        ToolManifest {
+            name: "similarity_search".into(),
+            description:
+                "Find symbols similar to a given symbol via VSA hypervector similarity.".into(),
+            parameters: vec![
+                ToolParamSchema::required("symbol", "Symbol name or ID to search around."),
+                ToolParamSchema::optional("top_k", "Number of results to return (default: 5)."),
+            ],
+            danger: DangerInfo {
+                level: DangerLevel::Safe,
+                capabilities: HashSet::from([Capability::VsaAccess]),
+                description: "VSA-based semantic similarity search — no side effects.".into(),
+                shadow_triggers: vec![],
+            },
+            source: ToolSource::Native,
+        }
     }
 }

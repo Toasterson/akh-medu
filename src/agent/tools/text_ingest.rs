@@ -5,8 +5,12 @@
 
 use crate::agent::error::AgentResult;
 use crate::agent::tool::{Tool, ToolInput, ToolOutput, ToolParam, ToolSignature};
+use crate::agent::tool_manifest::{
+    Capability, DangerInfo, DangerLevel, ToolManifest, ToolParamSchema, ToolSource,
+};
 use crate::engine::Engine;
 use crate::symbol::SymbolId;
+use std::collections::HashSet;
 
 /// Extract triples from natural language text and add them to the KG.
 pub struct TextIngestTool;
@@ -78,6 +82,30 @@ impl Tool for TextIngestTool {
             total_extracted,
         );
         Ok(ToolOutput::ok_with_symbols(msg, symbols))
+    }
+
+    fn manifest(&self) -> ToolManifest {
+        ToolManifest {
+            name: "text_ingest".into(),
+            description: "Extracts triples from text and writes them to the knowledge graph.".into(),
+            parameters: vec![
+                ToolParamSchema::required(
+                    "text",
+                    "The text to extract triples from (inline text or file path with 'file:' prefix).",
+                ),
+                ToolParamSchema::optional(
+                    "max_sentences",
+                    "Maximum number of sentences to process (default: 100).",
+                ),
+            ],
+            danger: DangerInfo {
+                level: DangerLevel::Cautious,
+                capabilities: HashSet::from([Capability::WriteKg]),
+                description: "Extracts triples from text and writes them to the knowledge graph.".into(),
+                shadow_triggers: vec!["ingest".into()],
+            },
+            source: ToolSource::Native,
+        }
     }
 }
 

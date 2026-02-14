@@ -70,6 +70,28 @@ pub enum AgentError {
     )]
     CodeIngest { path: String, message: String },
 
+    #[error("shadow veto: pattern \"{pattern_name}\" blocked tool \"{tool_name}\"")]
+    #[diagnostic(
+        code(akh::agent::shadow_veto),
+        help(
+            "The psyche's shadow system vetoed this tool based on danger metadata. \
+             Check the tool's DangerLevel, capabilities, and action triggers."
+        )
+    )]
+    ShadowVeto {
+        tool_name: String,
+        pattern_name: String,
+        severity: f32,
+        explanation: String,
+    },
+
+    #[error("CLI tool error: {tool_name} — {message}")]
+    #[diagnostic(
+        code(akh::agent::cli_tool),
+        help("Check that the binary exists, is executable, and its CliToolManifest is valid.")
+    )]
+    CliToolError { tool_name: String, message: String },
+
     #[error("{0}")]
     #[diagnostic(
         code(akh::agent::engine),

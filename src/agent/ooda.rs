@@ -877,70 +877,73 @@ fn act(agent: &mut Agent, decision: &Decision, cycle: u64) -> AgentResult<Action
             "tool={} input={:?}",
             decision.chosen_tool, decision.tool_input
         );
-        if let Some(veto) = psyche.check_shadow_veto(&action_desc) {
-            // Clone veto data before releasing the immutable borrow.
-            let veto_name = veto.name.clone();
-            let veto_explanation = veto.explanation.clone();
-            let veto_severity = veto.severity;
+        if let Some(manifest) = agent.tool_registry.manifest(&decision.chosen_tool) {
+            // Structured veto check using manifest.
+            if let Some(veto) = psyche.check_veto(manifest, &action_desc) {
+                // Clone veto data before releasing the immutable borrow.
+                let veto_name = veto.name.clone();
+                let veto_explanation = veto.explanation.clone();
+                let veto_severity = veto.severity;
 
-            // Record provenance for the veto.
-            let mut prov = ProvenanceRecord::new(
-                decision.goal_id,
-                DerivationKind::ShadowVeto {
-                    pattern_name: veto_name.clone(),
-                    severity: veto_severity,
-                },
-            );
-            let _ = agent.engine.store_provenance(&mut prov);
+                // Record provenance for the veto.
+                let mut prov = ProvenanceRecord::new(
+                    decision.goal_id,
+                    DerivationKind::ShadowVeto {
+                        pattern_name: veto_name.clone(),
+                        severity: veto_severity,
+                    },
+                );
+                let _ = agent.engine.store_provenance(&mut prov);
 
-            // Record shadow encounter on psyche.
-            if let Some(ref mut p) = agent.psyche {
-                p.record_shadow_encounter();
+                // Record shadow encounter on psyche.
+                if let Some(ref mut p) = agent.psyche {
+                    p.record_shadow_encounter();
+                }
+
+                let veto_output = ToolOutput {
+                    result: format!(
+                        "VETOED by Shadow pattern '{}': {}",
+                        veto_name, veto_explanation
+                    ),
+                    success: false,
+                    symbols_involved: Vec::new(),
+                };
+
+                let wm_id = agent
+                    .working_memory
+                    .push(WorkingMemoryEntry {
+                        id: 0,
+                        content: format!(
+                            "Tool result ({}):\n{}",
+                            decision.chosen_tool, veto_output.result
+                        ),
+                        symbols: vec![decision.goal_id],
+                        kind: WorkingMemoryKind::ToolResult,
+                        timestamp: 0,
+                        relevance: 0.8,
+                        source_cycle: cycle,
+                        reference_count: 0,
+                    })
+                    .ok();
+
+                return Ok(ActionResult {
+                    tool_output: veto_output,
+                    goal_progress: GoalProgress::Failed {
+                        reason: format!("Shadow veto: {}", veto_name),
+                    },
+                    new_wm_entries: wm_id.into_iter().collect(),
+                });
             }
 
-            let veto_output = ToolOutput {
-                result: format!(
-                    "VETOED by Shadow pattern '{}': {}",
-                    veto_name, veto_explanation
-                ),
-                success: false,
-                symbols_involved: Vec::new(),
-            };
-
-            let wm_id = agent
-                .working_memory
-                .push(WorkingMemoryEntry {
-                    id: 0,
-                    content: format!(
-                        "Tool result ({}):\n{}",
-                        decision.chosen_tool, veto_output.result
-                    ),
-                    symbols: vec![decision.goal_id],
-                    kind: WorkingMemoryKind::ToolResult,
-                    timestamp: 0,
-                    relevance: 0.8,
-                    source_cycle: cycle,
-                    reference_count: 0,
-                })
-                .ok();
-
-            return Ok(ActionResult {
-                tool_output: veto_output,
-                goal_progress: GoalProgress::Failed {
-                    reason: format!("Shadow veto: {}", veto_name),
-                },
-                new_wm_entries: wm_id.into_iter().collect(),
-            });
-        }
-
-        // Check shadow bias (non-blocking, just note it in reasoning).
-        let bias = psyche.check_shadow_bias(&action_desc);
-        if bias > 0.0 {
-            tracing::debug!(
-                tool = %decision.chosen_tool,
-                shadow_bias = bias,
-                "Shadow bias applied (non-blocking)"
-            );
+            // Structured bias check (non-blocking, just note it in reasoning).
+            let bias = psyche.check_bias(manifest, &action_desc);
+            if bias > 0.0 {
+                tracing::debug!(
+                    tool = %decision.chosen_tool,
+                    shadow_bias = bias,
+                    "Shadow bias applied (non-blocking)"
+                );
+            }
         }
     }
 

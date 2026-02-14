@@ -120,6 +120,18 @@ pub enum DerivationKind {
         trigger: String,
         cycle: u64,
     },
+    /// A WASM tool was executed from a skill package.
+    WasmToolExecution {
+        tool_name: String,
+        skill_id: String,
+        danger_level: String,
+    },
+    /// A CLI tool was executed (external binary).
+    CliToolExecution {
+        tool_name: String,
+        binary_path: String,
+        danger_level: String,
+    },
 }
 
 impl DerivationKind {
@@ -144,6 +156,8 @@ impl DerivationKind {
             Self::CompartmentLoaded { .. } => 15,
             Self::ShadowVeto { .. } => 16,
             Self::PsycheEvolution { .. } => 17,
+            Self::WasmToolExecution { .. } => 18,
+            Self::CliToolExecution { .. } => 19,
         }
     }
 }

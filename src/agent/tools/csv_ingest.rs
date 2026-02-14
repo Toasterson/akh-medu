@@ -6,7 +6,11 @@
 
 use crate::agent::error::AgentResult;
 use crate::agent::tool::{Tool, ToolInput, ToolOutput, ToolParam, ToolSignature};
+use crate::agent::tool_manifest::{
+    Capability, DangerInfo, DangerLevel, ToolManifest, ToolParamSchema, ToolSource,
+};
 use crate::engine::Engine;
+use std::collections::HashSet;
 
 /// Ingest triples from a CSV file into the knowledge graph.
 pub struct CsvIngestTool;
@@ -62,6 +66,31 @@ impl Tool for CsvIngestTool {
             other => Ok(ToolOutput::err(format!(
                 "Unknown CSV format: \"{other}\". Use 'spo' or 'entity'."
             ))),
+        }
+    }
+
+    fn manifest(&self) -> ToolManifest {
+        ToolManifest {
+            name: "csv_ingest".into(),
+            description: "Ingests CSV files into the knowledge graph — reads filesystem, writes KG.".into(),
+            parameters: vec![
+                ToolParamSchema::required("path", "Path to the CSV file."),
+                ToolParamSchema::optional(
+                    "format",
+                    "CSV format: 'spo' or 'entity' (default: 'spo').",
+                ),
+                ToolParamSchema::optional(
+                    "delimiter",
+                    "Column delimiter character (default: ',').",
+                ),
+            ],
+            danger: DangerInfo {
+                level: DangerLevel::Cautious,
+                capabilities: HashSet::from([Capability::WriteKg, Capability::ReadFilesystem]),
+                description: "Ingests CSV files into the knowledge graph — reads filesystem, writes KG.".into(),
+                shadow_triggers: vec!["ingest".into(), "import".into()],
+            },
+            source: ToolSource::Native,
         }
     }
 }

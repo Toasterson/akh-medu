@@ -8,7 +8,11 @@ use std::path::PathBuf;
 
 use crate::agent::error::AgentResult;
 use crate::agent::tool::{Tool, ToolInput, ToolOutput, ToolParam, ToolSignature};
+use crate::agent::tool_manifest::{
+    Capability, DangerInfo, DangerLevel, ToolManifest, ToolParamSchema, ToolSource,
+};
 use crate::engine::Engine;
+use std::collections::HashSet;
 
 /// Read and write files for agent scratch / data purposes.
 pub struct FileIoTool {
@@ -145,6 +149,38 @@ impl Tool for FileIoTool {
             other => Ok(ToolOutput::err(format!(
                 "Unknown file_io action: \"{other}\". Use 'read' or 'write'."
             ))),
+        }
+    }
+
+    fn manifest(&self) -> ToolManifest {
+        ToolManifest {
+            name: "file_io".into(),
+            description: "Reads and writes files — filesystem side effects.".into(),
+            parameters: vec![
+                ToolParamSchema::required("action", "Action: 'read' or 'write'."),
+                ToolParamSchema::required(
+                    "path",
+                    "File path (absolute or relative to scratch dir).",
+                ),
+                ToolParamSchema::optional(
+                    "content",
+                    "Content to write (required for 'write' action).",
+                ),
+            ],
+            danger: DangerInfo {
+                level: DangerLevel::Dangerous,
+                capabilities: HashSet::from([
+                    Capability::ReadFilesystem,
+                    Capability::WriteFilesystem,
+                ]),
+                description: "Reads and writes files — filesystem side effects.".into(),
+                shadow_triggers: vec![
+                    "write".into(),
+                    "delete".into(),
+                    "overwrite".into(),
+                ],
+            },
+            source: ToolSource::Native,
         }
     }
 }

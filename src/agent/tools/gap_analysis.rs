@@ -2,8 +2,12 @@
 
 use crate::agent::error::AgentResult;
 use crate::agent::tool::{Tool, ToolInput, ToolOutput, ToolParam, ToolSignature};
+use crate::agent::tool_manifest::{
+    Capability, DangerInfo, DangerLevel, ToolManifest, ToolParamSchema, ToolSource,
+};
 use crate::autonomous::gap::GapAnalysisConfig;
 use crate::engine::Engine;
+use std::collections::HashSet;
 
 /// Agent tool that identifies knowledge gaps around goal symbols.
 pub struct GapAnalysisTool;
@@ -65,5 +69,26 @@ impl Tool for GapAnalysisTool {
         }
 
         Ok(ToolOutput::ok_with_symbols(lines.join("\n"), symbols))
+    }
+
+    fn manifest(&self) -> ToolManifest {
+        ToolManifest {
+            name: "gap_analysis".into(),
+            description: "Identifies missing knowledge via KG and VSA analysis — no side effects."
+                .into(),
+            parameters: vec![
+                ToolParamSchema::required("goal", "Goal symbol name or ID to analyze around."),
+                ToolParamSchema::optional("max_gaps", "Maximum gaps to report (default: 10)."),
+            ],
+            danger: DangerInfo {
+                level: DangerLevel::Safe,
+                capabilities: HashSet::from([Capability::ReadKg, Capability::VsaAccess]),
+                description:
+                    "Identifies missing knowledge via KG and VSA analysis — no side effects."
+                        .into(),
+                shadow_triggers: vec![],
+            },
+            source: ToolSource::Native,
+        }
     }
 }

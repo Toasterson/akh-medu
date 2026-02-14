@@ -21,9 +21,13 @@ pub mod reflect;
 pub mod semantic_enrichment;
 pub mod synthesize;
 pub mod synthesize_abs;
+pub mod cli_tool;
 pub mod tool;
+pub mod tool_manifest;
 pub mod tool_semantics;
 pub mod tools;
+#[cfg(feature = "wasm-tools")]
+pub mod wasm_runtime;
 
 pub use agent::{Agent, AgentConfig, AgentPredicates};
 pub use chat::Conversation;
@@ -43,3 +47,4 @@ pub use reflect::{Adjustment, ReflectionConfig, ReflectionResult};
 pub use semantic_enrichment::{EnrichmentResult, SemanticPredicates};
 pub use synthesize::NarrativeSummary;
 pub use tool::{Tool, ToolInput, ToolOutput, ToolRegistry, ToolSignature};
+pub use tool_manifest::{Capability, DangerInfo, DangerLevel, ToolManifest, ToolSource};

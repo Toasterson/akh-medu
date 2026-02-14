@@ -4,10 +4,13 @@
 //! Supports multiple targets: full architecture overview, single module, single
 //! type, or dependency graph. Optionally polishes Markdown output via LLM.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use crate::agent::error::AgentResult;
 use crate::agent::tool::{Tool, ToolInput, ToolOutput, ToolParam, ToolSignature};
+use crate::agent::tool_manifest::{
+    Capability, DangerInfo, DangerLevel, ToolManifest, ToolParamSchema, ToolSource,
+};
 use crate::engine::Engine;
 use crate::symbol::SymbolId;
 
@@ -186,6 +189,34 @@ impl Tool for DocGenTool {
 
         let result = result_parts.join("\n\n---\n\n");
         Ok(ToolOutput::ok(result))
+    }
+
+    fn manifest(&self) -> ToolManifest {
+        ToolManifest {
+            name: "doc_gen".into(),
+            description: "Generates documentation from knowledge graph — read-only.".into(),
+            parameters: vec![
+                ToolParamSchema::required(
+                    "target",
+                    "What to document: 'architecture', 'module:<name>', 'type:<name>', or 'dependencies'.",
+                ),
+                ToolParamSchema::optional(
+                    "format",
+                    "Output format: 'markdown' (default), 'json', or 'both'.",
+                ),
+                ToolParamSchema::optional(
+                    "polish",
+                    "Use LLM to polish Markdown output (default: false).",
+                ),
+            ],
+            danger: DangerInfo {
+                level: DangerLevel::Safe,
+                capabilities: HashSet::from([Capability::ReadKg]),
+                description: "Generates documentation from knowledge graph — read-only.".into(),
+                shadow_triggers: vec![],
+            },
+            source: ToolSource::Native,
+        }
     }
 }
 

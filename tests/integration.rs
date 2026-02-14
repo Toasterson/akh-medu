@@ -927,6 +927,20 @@ fn tool_registry_crud() {
         ) -> akh_medu::agent::AgentResult<ToolOutput> {
             Ok(ToolOutput::ok("custom result"))
         }
+        fn manifest(&self) -> akh_medu::agent::ToolManifest {
+            akh_medu::agent::ToolManifest {
+                name: "custom".into(),
+                description: "A custom tool".into(),
+                parameters: vec![],
+                danger: akh_medu::agent::DangerInfo {
+                    level: akh_medu::agent::DangerLevel::Safe,
+                    capabilities: HashSet::new(),
+                    description: "safe custom tool".into(),
+                    shadow_triggers: vec![],
+                },
+                source: akh_medu::agent::ToolSource::Native,
+            }
+        }
     }
 
     agent.register_tool(Box::new(CustomTool));
