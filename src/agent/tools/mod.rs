@@ -1,6 +1,7 @@
 //! Built-in tools for the agent: KG query, KG mutate, memory recall, reason,
-//! similarity search, file I/O, HTTP fetch, shell exec, user interaction,
-//! infer rules, gap analysis, CSV ingest, text ingest, code ingest, doc gen.
+//! similarity search, library search, file I/O, HTTP fetch, shell exec,
+//! user interaction, infer rules, gap analysis, CSV ingest, text ingest,
+//! code ingest, content ingest, doc gen.
 
 pub mod code_ingest;
 pub mod code_predicates;
@@ -13,6 +14,7 @@ pub mod http_fetch;
 pub mod infer_rules;
 pub mod kg_mutate;
 pub mod kg_query;
+pub mod library_search;
 pub mod memory_recall;
 pub mod reason;
 pub mod shell_exec;
@@ -31,6 +33,7 @@ pub use http_fetch::HttpFetchTool;
 pub use infer_rules::InferRulesTool;
 pub use kg_mutate::KgMutateTool;
 pub use kg_query::KgQueryTool;
+pub use library_search::LibrarySearchTool;
 pub use memory_recall::MemoryRecallTool;
 pub use reason::ReasonTool;
 pub use shell_exec::ShellExecTool;
