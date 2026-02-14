@@ -249,6 +249,115 @@ pub fn preprocess_batch_with_learning(
     (outputs, discovered)
 }
 
+/// Pre-process a single text chunk with library context enrichment.
+///
+/// Runs base preprocessing with the entity resolver, then searches the engine's
+/// library (paragraphs ingested as `para:*` symbols) for similar content. Entities
+/// found in matching library paragraphs boost confidence of extracted entities or
+/// are added as supplementary entities.
+pub fn preprocess_chunk_with_library(
+    chunk: &TextChunk,
+    ctx: &ParseContext,
+    resolver: &EntityResolver,
+    engine: &crate::engine::Engine,
+) -> PreProcessorOutput {
+    let mut output = preprocess_chunk_with_resolver(chunk, ctx, resolver);
+
+    // Encode chunk text as a query vector
+    let query_vec = match crate::vsa::grounding::encode_text_as_vector(
+        &chunk.text,
+        engine,
+        engine.ops(),
+        engine.item_memory(),
+    ) {
+        Ok(v) => v,
+        Err(_) => return output,
+    };
+
+    // Search for similar library paragraphs
+    let neighbors = match engine.search_similar(&query_vec, 15) {
+        Ok(n) => n,
+        Err(_) => return output,
+    };
+
+    // Filter to para:* symbols and take top 3
+    let para_matches: Vec<_> = neighbors
+        .iter()
+        .filter(|n| {
+            engine
+                .get_symbol_meta(n.symbol_id)
+                .is_ok_and(|m| m.label.starts_with("para:"))
+        })
+        .take(3)
+        .collect();
+
+    // Collect library entities from matching paragraphs
+    let mut library_entities: Vec<(String, f32)> = Vec::new();
+    for para in &para_matches {
+        let triples = engine.triples_from(para.symbol_id);
+        for triple in &triples {
+            let obj_label = match engine.get_symbol_meta(triple.object) {
+                Ok(m) => m.label,
+                Err(_) => continue,
+            };
+            // Skip structural labels
+            if obj_label.starts_with("para:")
+                || obj_label.starts_with("ch:")
+                || obj_label.starts_with("sec:")
+                || obj_label.parse::<u64>().is_ok()
+            {
+                continue;
+            }
+            library_entities.push((obj_label, para.similarity));
+        }
+    }
+
+    // Confidence boost: if library entity matches an extracted entity
+    for entity in output.entities.iter_mut() {
+        for (lib_label, _sim) in &library_entities {
+            if entity.canonical_name.to_lowercase() == lib_label.to_lowercase() {
+                entity.confidence = (entity.confidence + 0.05).min(1.0);
+                break;
+            }
+        }
+    }
+
+    // Supplementary entities: library entities not in extracted set with high similarity
+    let existing_names: std::collections::HashSet<String> = output
+        .entities
+        .iter()
+        .map(|e| e.canonical_name.to_lowercase())
+        .collect();
+
+    for (lib_label, sim) in &library_entities {
+        if *sim > 0.7 && !existing_names.contains(&lib_label.to_lowercase()) {
+            output.entities.push(ExtractedEntity {
+                name: lib_label.clone(),
+                entity_type: "CONCEPT".to_string(),
+                canonical_name: lib_label.clone(),
+                confidence: 0.6,
+                aliases: vec![],
+                source_language: output.source_language.clone(),
+            });
+        }
+    }
+
+    output
+}
+
+/// Pre-process a batch of chunks with library context enrichment.
+pub fn preprocess_batch_with_library(
+    chunks: &[TextChunk],
+    ctx: &ParseContext,
+    resolver: &EntityResolver,
+    engine: &crate::engine::Engine,
+) -> Vec<PreProcessorOutput> {
+    chunks
+        .iter()
+        .map(|chunk| preprocess_chunk_with_library(chunk, ctx, resolver, engine))
+        .collect()
+}
+
 /// Extract entities and claims from an AbsTree node.
 fn extract_from_tree(
     tree: &AbsTree,
@@ -424,6 +533,38 @@ mod tests {
         assert_eq!(predicate_to_claim_type("composed-of"), "STRUCTURAL");
         assert_eq!(predicate_to_claim_type("depends-on"), "DEPENDENCY");
         assert_eq!(predicate_to_claim_type("unknown"), "OTHER");
+    }
+
+    #[test]
+    fn preprocess_chunk_with_library_enriches_output() {
+        use crate::engine::{Engine, EngineConfig};
+        use crate::vsa::Dimension;
+
+        // Create an engine and ingest a fact so the KG has content
+        let engine = Engine::new(EngineConfig {
+            dimension: Dimension::TEST,
+            ..Default::default()
+        })
+        .unwrap();
+
+        // Ingest prose to create KG content
+        let _ = engine.ingest_prose("Dogs are mammals");
+
+        let chunk = TextChunk {
+            id: Some("test-lib".to_string()),
+            text: "Dogs are mammals".to_string(),
+            language: None,
+        };
+
+        let ctx = ParseContext::with_engine(engine.registry(), engine.ops(), engine.item_memory());
+        let resolver = engine.entity_resolver();
+
+        // Run the library-enriched preprocessor
+        let output = preprocess_chunk_with_library(&chunk, &ctx, resolver, &engine);
+
+        // Should at minimum produce the same entities as the base preprocessor
+        assert!(!output.entities.is_empty(), "should extract entities");
+        assert_eq!(output.source_language, "en");
     }
 
     #[test]

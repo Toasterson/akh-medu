@@ -318,6 +318,10 @@ enum Commands {
         /// Override language (en, ru, ar, fr, es). Default: auto-detect.
         #[arg(long)]
         language: Option<String>,
+
+        /// Enrich extracted entities with context from the shared content library.
+        #[arg(long)]
+        library_context: bool,
     },
 
     /// Manage cross-lingual equivalence mappings.
@@ -3005,10 +3009,12 @@ fn main() -> Result<()> {
         Commands::Preprocess {
             format,
             language: lang_override,
+            library_context,
         } => {
             use akh_medu::grammar::concrete::ParseContext as GrammarParseContext;
             use akh_medu::grammar::preprocess::{
-                PreProcessResponse, TextChunk, preprocess_batch, preprocess_chunk,
+                PreProcessResponse, TextChunk, preprocess_batch, preprocess_batch_with_library,
+                preprocess_chunk, preprocess_chunk_with_library,
             };
             use std::io::{self, BufRead, Write as IoWrite};
 
@@ -3042,7 +3048,16 @@ fn main() -> Result<()> {
                     .collect();
 
                 let start = std::time::Instant::now();
-                let results = preprocess_batch(&chunks, &ctx);
+                let results = if library_context {
+                    preprocess_batch_with_library(
+                        &chunks,
+                        &ctx,
+                        engine.entity_resolver(),
+                        &engine,
+                    )
+                } else {
+                    preprocess_batch(&chunks, &ctx)
+                };
                 let elapsed = start.elapsed().as_millis() as u64;
 
                 let response = PreProcessResponse {
@@ -3062,7 +3077,16 @@ fn main() -> Result<()> {
                     if let Some(ref lang) = lang_override {
                         chunk.language = Some(lang.clone());
                     }
-                    let result = preprocess_chunk(&chunk, &ctx);
+                    let result = if library_context {
+                        preprocess_chunk_with_library(
+                            &chunk,
+                            &ctx,
+                            engine.entity_resolver(),
+                            &engine,
+                        )
+                    } else {
+                        preprocess_chunk(&chunk, &ctx)
+                    };
                     serde_json::to_writer(&mut out, &result).into_diagnostic()?;
                     writeln!(out).into_diagnostic()?;
                 }
@@ -3102,6 +3126,7 @@ fn main() -> Result<()> {
                     println!("    kg-structural:  {}", stats.kg_structural);
                     println!("    vsa-similarity: {}", stats.vsa_similarity);
                     println!("    co-occurrence:  {}", stats.co_occurrence);
+                    println!("    library-context:{}", stats.library_context);
                     println!("    manual:         {}", stats.manual);
                 }
                 EquivalenceAction::Learn => {

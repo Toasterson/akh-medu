@@ -880,6 +880,13 @@ impl Engine {
                 &self.item_memory,
                 &self.registry,
                 0.65,
+            )
+            + self.entity_resolver.learn_from_library(
+                &self.ops,
+                &self.item_memory,
+                &self.registry,
+                &self.knowledge_graph,
+                0.65,
             );
 
         self.entity_resolver.persist_to_store(&self.store)?;
