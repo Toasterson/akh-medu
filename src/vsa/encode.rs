@@ -10,8 +10,8 @@ use rand::SeedableRng;
 
 use crate::symbol::SymbolId;
 
-use super::ops::{VsaOps, VsaResult};
 use super::HyperVec;
+use super::ops::{VsaOps, VsaResult};
 
 /// Encode a symbol ID into a hypervector using deterministic seeded randomness.
 ///
@@ -133,7 +133,10 @@ mod tests {
         let a = encode_symbol(&ops, SymbolId::new(1).unwrap());
         let b = encode_symbol(&ops, SymbolId::new(2).unwrap());
         let sim = ops.similarity(&a, &b).unwrap();
-        assert!(sim < 0.6, "different symbols should be dissimilar: sim={sim}");
+        assert!(
+            sim < 0.6,
+            "different symbols should be dissimilar: sim={sim}"
+        );
     }
 
     #[test]
@@ -189,7 +192,10 @@ mod tests {
         let a = encode_token(&ops, "dog");
         let b = encode_token(&ops, "cat");
         let sim = ops.similarity(&a, &b).unwrap();
-        assert!(sim < 0.6, "different tokens should be dissimilar: sim={sim}");
+        assert!(
+            sim < 0.6,
+            "different tokens should be dissimilar: sim={sim}"
+        );
     }
 
     #[test]

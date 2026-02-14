@@ -26,7 +26,9 @@ pub enum WorkspaceError {
     #[error("workspace \"{name}\" not found")]
     #[diagnostic(
         code(akh::workspace::not_found),
-        help("Create it with `akh-medu workspace create {name}` or list workspaces with `akh-medu workspace list`.")
+        help(
+            "Create it with `akh-medu workspace create {name}` or list workspaces with `akh-medu workspace list`."
+        )
     )]
     NotFound { name: String },
 
@@ -122,11 +124,7 @@ impl Default for WorkspaceConfig {
             language: default_language(),
             max_memory_mb: default_max_memory_mb(),
             max_symbols: default_max_symbols(),
-            seed_packs: vec![
-                "identity".into(),
-                "ontology".into(),
-                "common-sense".into(),
-            ],
+            seed_packs: vec!["identity".into(), "ontology".into(), "common-sense".into()],
             shared_partitions: Vec::new(),
         }
     }
@@ -169,11 +167,10 @@ impl WorkspaceConfig {
 
     /// Load from a TOML file.
     pub fn load(path: &std::path::Path) -> WorkspaceResult<Self> {
-        let content =
-            std::fs::read_to_string(path).map_err(|e| WorkspaceError::ConfigRead {
-                path: path.display().to_string(),
-                source: e,
-            })?;
+        let content = std::fs::read_to_string(path).map_err(|e| WorkspaceError::ConfigRead {
+            path: path.display().to_string(),
+            source: e,
+        })?;
         toml::from_str(&content).map_err(|e| WorkspaceError::ConfigParse {
             path: path.display().to_string(),
             message: e.to_string(),
@@ -220,10 +217,12 @@ impl WorkspaceManager {
         }
 
         // Create directory structure.
-        ws_paths.ensure_dirs().map_err(|e| WorkspaceError::ConfigWrite {
-            path: ws_paths.root.display().to_string(),
-            source: std::io::Error::new(std::io::ErrorKind::Other, e.to_string()),
-        })?;
+        ws_paths
+            .ensure_dirs()
+            .map_err(|e| WorkspaceError::ConfigWrite {
+                path: ws_paths.root.display().to_string(),
+                source: std::io::Error::new(std::io::ErrorKind::Other, e.to_string()),
+            })?;
 
         // Save workspace config.
         let config_path = self.paths.workspace_config_file(&config.name);
@@ -300,11 +299,7 @@ impl WorkspaceManager {
 /// Check if a legacy `.akh-medu` directory exists in the current working directory.
 pub fn detect_legacy_data_dir() -> Option<PathBuf> {
     let legacy = PathBuf::from(".akh-medu");
-    if legacy.is_dir() {
-        Some(legacy)
-    } else {
-        None
-    }
+    if legacy.is_dir() { Some(legacy) } else { None }
 }
 
 #[cfg(test)]

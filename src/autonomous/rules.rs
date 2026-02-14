@@ -422,12 +422,11 @@ impl RuleSet {
 
     /// Parse a rule set from JSON.
     pub fn from_json(json: &str, source: &str) -> AutonomousResult<Self> {
-        let rules: Vec<InferenceRule> = serde_json::from_str(json).map_err(|e| {
-            AutonomousError::RuleParse {
+        let rules: Vec<InferenceRule> =
+            serde_json::from_str(json).map_err(|e| AutonomousError::RuleParse {
                 rule_name: String::new(),
                 message: format!("JSON parse error: {e}"),
-            }
-        })?;
+            })?;
         Ok(Self {
             name: source.to_string(),
             rules,
@@ -586,7 +585,11 @@ mod tests {
     #[test]
     fn builtin_is_a_transitive_structure() {
         let rs = RuleSet::builtin();
-        let rule = rs.rules.iter().find(|r| r.name == "is-a-transitive").unwrap();
+        let rule = rs
+            .rules
+            .iter()
+            .find(|r| r.name == "is-a-transitive")
+            .unwrap();
         assert_eq!(rule.antecedents.len(), 2);
         assert_eq!(rule.consequents.len(), 1);
         assert_eq!(rule.confidence_factor, 0.95);

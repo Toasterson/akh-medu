@@ -5,10 +5,12 @@
 //! via redb with multiple indices for efficient lookup.
 
 use std::num::NonZeroU64;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use redb::{Database, MultimapTableDefinition, ReadableTable, ReadableTableMetadata, TableDefinition};
+use redb::{
+    Database, MultimapTableDefinition, ReadableTable, ReadableTableMetadata, TableDefinition,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{ProvenanceError, ProvenanceResult, StoreError};
@@ -47,10 +49,7 @@ pub enum DerivationKind {
     /// Seed symbol provided by the user at query time.
     Seed,
     /// Inferred by following a graph edge.
-    GraphEdge {
-        from: SymbolId,
-        predicate: SymbolId,
-    },
+    GraphEdge { from: SymbolId, predicate: SymbolId },
     /// Inferred via VSA unbind + cleanup recovery.
     VsaRecovery {
         from: SymbolId,
@@ -73,10 +72,7 @@ pub enum DerivationKind {
     /// Aggregated from multiple sources.
     Aggregated,
     /// The agent made a decision during an OODA cycle.
-    AgentDecision {
-        goal: SymbolId,
-        cycle: u64,
-    },
+    AgentDecision { goal: SymbolId, cycle: u64 },
     /// The agent consolidated a working memory entry to episodic memory.
     AgentConsolidation {
         reason: String,
@@ -93,33 +89,20 @@ pub enum DerivationKind {
         interference_signal: f32,
     },
     /// Identified by gap analysis as missing knowledge.
-    GapIdentified {
-        gap_kind: String,
-        severity: f32,
-    },
+    GapIdentified { gap_kind: String, severity: f32 },
     /// Discovered via schema pattern analysis.
-    SchemaDiscovered {
-        pattern_type: String,
-    },
+    SchemaDiscovered { pattern_type: String },
     /// Derived by VSA-based semantic enrichment (role classification, importance, data flow).
-    SemanticEnrichment {
-        source: String,
-    },
+    SemanticEnrichment { source: String },
     /// Knowledge loaded from a compartment.
     CompartmentLoaded {
         compartment_id: String,
         source_file: String,
     },
     /// An action was vetoed by a Shadow pattern.
-    ShadowVeto {
-        pattern_name: String,
-        severity: f32,
-    },
+    ShadowVeto { pattern_name: String, severity: f32 },
     /// The psyche adjusted archetype weights or persona during reflection.
-    PsycheEvolution {
-        trigger: String,
-        cycle: u64,
-    },
+    PsycheEvolution { trigger: String, cycle: u64 },
     /// A WASM tool was executed from a skill package.
     WasmToolExecution {
         tool_name: String,
@@ -286,8 +269,7 @@ impl ProvenanceLedger {
         {
             let txn = db.begin_write().map_err(|e| redb_err(e))?;
             // Opening the tables creates them if absent.
-            txn.open_table(PROVENANCE_TABLE)
-                .map_err(|e| redb_err(e))?;
+            txn.open_table(PROVENANCE_TABLE).map_err(|e| redb_err(e))?;
             txn.open_multimap_table(DERIVED_INDEX)
                 .map_err(|e| redb_err(e))?;
             txn.open_multimap_table(SOURCE_INDEX)
@@ -300,9 +282,7 @@ impl ProvenanceLedger {
         // Recover max ID from the primary table.
         let max_id = {
             let txn = db.begin_read().map_err(|e| redb_err(e))?;
-            let table = txn
-                .open_table(PROVENANCE_TABLE)
-                .map_err(|e| redb_err(e))?;
+            let table = txn.open_table(PROVENANCE_TABLE).map_err(|e| redb_err(e))?;
             let mut max = 0u64;
             let iter = table.iter().map_err(|e| redb_err(e))?;
             for entry in iter {
@@ -334,14 +314,9 @@ impl ProvenanceLedger {
             })
         })?;
 
-        let txn = self
-            .db
-            .begin_write()
-            .map_err(|e| redb_err(e))?;
+        let txn = self.db.begin_write().map_err(|e| redb_err(e))?;
         {
-            let mut table = txn
-                .open_table(PROVENANCE_TABLE)
-                .map_err(|e| redb_err(e))?;
+            let mut table = txn.open_table(PROVENANCE_TABLE).map_err(|e| redb_err(e))?;
             table
                 .insert(raw_id, encoded.as_slice())
                 .map_err(|e| redb_err(e))?;
@@ -358,8 +333,7 @@ impl ProvenanceLedger {
                 .open_multimap_table(SOURCE_INDEX)
                 .map_err(|e| redb_err(e))?;
             for src in &record.sources {
-                idx.insert(src.get(), raw_id)
-                    .map_err(|e| redb_err(e))?;
+                idx.insert(src.get(), raw_id).map_err(|e| redb_err(e))?;
             }
         }
         {
@@ -402,14 +376,9 @@ impl ProvenanceLedger {
             encoded_batch.push((raw_id, encoded));
         }
 
-        let txn = self
-            .db
-            .begin_write()
-            .map_err(|e| redb_err(e))?;
+        let txn = self.db.begin_write().map_err(|e| redb_err(e))?;
         {
-            let mut table = txn
-                .open_table(PROVENANCE_TABLE)
-                .map_err(|e| redb_err(e))?;
+            let mut table = txn.open_table(PROVENANCE_TABLE).map_err(|e| redb_err(e))?;
             for (raw_id, encoded) in &encoded_batch {
                 table
                     .insert(*raw_id, encoded.as_slice())
@@ -449,23 +418,17 @@ impl ProvenanceLedger {
 
     /// Get a provenance record by its ID.
     pub fn get(&self, id: ProvenanceId) -> ProvenanceResult<ProvenanceRecord> {
-        let txn = self
-            .db
-            .begin_read()
-            .map_err(|e| redb_err(e))?;
-        let table = txn
-            .open_table(PROVENANCE_TABLE)
-            .map_err(|e| redb_err(e))?;
+        let txn = self.db.begin_read().map_err(|e| redb_err(e))?;
+        let table = txn.open_table(PROVENANCE_TABLE).map_err(|e| redb_err(e))?;
         let guard = table
             .get(id.get())
             .map_err(|e| redb_err(e))?
             .ok_or(ProvenanceError::NotFound { id: id.get() })?;
-        let record: ProvenanceRecord =
-            bincode::deserialize(guard.value()).map_err(|e| {
-                ProvenanceError::Store(StoreError::Serialization {
-                    message: format!("provenance record deserialize: {e}"),
-                })
-            })?;
+        let record: ProvenanceRecord = bincode::deserialize(guard.value()).map_err(|e| {
+            ProvenanceError::Store(StoreError::Serialization {
+                message: format!("provenance record deserialize: {e}"),
+            })
+        })?;
         Ok(record)
     }
 
@@ -488,13 +451,8 @@ impl ProvenanceLedger {
 
     /// Total number of provenance records.
     pub fn len(&self) -> ProvenanceResult<usize> {
-        let txn = self
-            .db
-            .begin_read()
-            .map_err(|e| redb_err(e))?;
-        let table = txn
-            .open_table(PROVENANCE_TABLE)
-            .map_err(|e| redb_err(e))?;
+        let txn = self.db.begin_read().map_err(|e| redb_err(e))?;
+        let table = txn.open_table(PROVENANCE_TABLE).map_err(|e| redb_err(e))?;
         Ok(table.len().map_err(|e| redb_err(e))? as usize)
     }
 
@@ -513,16 +471,11 @@ impl ProvenanceLedger {
         table_def: &MultimapTableDefinition<u64, u64>,
         key: u64,
     ) -> ProvenanceResult<Vec<ProvenanceRecord>> {
-        let txn = self
-            .db
-            .begin_read()
-            .map_err(|e| redb_err(e))?;
+        let txn = self.db.begin_read().map_err(|e| redb_err(e))?;
         let idx = txn
             .open_multimap_table(*table_def)
             .map_err(|e| redb_err(e))?;
-        let primary = txn
-            .open_table(PROVENANCE_TABLE)
-            .map_err(|e| redb_err(e))?;
+        let primary = txn.open_table(PROVENANCE_TABLE).map_err(|e| redb_err(e))?;
 
         let values = idx.get(key).map_err(|e| redb_err(e))?;
 
@@ -545,16 +498,11 @@ impl ProvenanceLedger {
 
     /// Retrieve records given a u8-keyed multimap index (kind).
     fn records_from_kind_index(&self, tag: u8) -> ProvenanceResult<Vec<ProvenanceRecord>> {
-        let txn = self
-            .db
-            .begin_read()
-            .map_err(|e| redb_err(e))?;
+        let txn = self.db.begin_read().map_err(|e| redb_err(e))?;
         let idx = txn
             .open_multimap_table(KIND_INDEX)
             .map_err(|e| redb_err(e))?;
-        let primary = txn
-            .open_table(PROVENANCE_TABLE)
-            .map_err(|e| redb_err(e))?;
+        let primary = txn.open_table(PROVENANCE_TABLE).map_err(|e| redb_err(e))?;
 
         let values = idx.get(tag).map_err(|e| redb_err(e))?;
 
@@ -654,10 +602,13 @@ mod tests {
         let ledger = ProvenanceLedger::open(db).unwrap();
 
         let source = sym(5);
-        let mut r1 = ProvenanceRecord::new(sym(10), DerivationKind::GraphEdge {
-            from: source,
-            predicate: sym(100),
-        })
+        let mut r1 = ProvenanceRecord::new(
+            sym(10),
+            DerivationKind::GraphEdge {
+                from: source,
+                predicate: sym(100),
+            },
+        )
         .with_sources(vec![source]);
         let mut r2 = ProvenanceRecord::new(sym(20), DerivationKind::Reasoned)
             .with_sources(vec![source, sym(6)]);
@@ -719,8 +670,8 @@ mod tests {
 
         let stored_id = {
             let ledger = ProvenanceLedger::open(Arc::clone(&db)).unwrap();
-            let mut record = ProvenanceRecord::new(sym(42), DerivationKind::Extracted)
-                .with_confidence(0.95);
+            let mut record =
+                ProvenanceRecord::new(sym(42), DerivationKind::Extracted).with_confidence(0.95);
             ledger.store(&mut record).unwrap()
         };
 

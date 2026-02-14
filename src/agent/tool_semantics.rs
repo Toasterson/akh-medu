@@ -4,10 +4,10 @@
 //! semantic vector against each tool's semantic profile via VSA similarity.
 
 use crate::engine::Engine;
+use crate::vsa::HyperVec;
 use crate::vsa::grounding::{bundle_symbols, encode_text_as_vector};
 use crate::vsa::item_memory::ItemMemory;
 use crate::vsa::ops::{VsaOps, VsaResult};
-use crate::vsa::HyperVec;
 
 use super::tool::ToolRegistry;
 
@@ -27,106 +27,152 @@ const TOOL_CONCEPTS: &[(&str, &[&str])] = &[
     (
         "kg_query",
         &[
-            "query", "search", "knowledge", "triple", "find", "graph",
-            "lookup", "explore", "discover",
+            "query",
+            "search",
+            "knowledge",
+            "triple",
+            "find",
+            "graph",
+            "lookup",
+            "explore",
+            "discover",
         ],
     ),
     (
         "kg_mutate",
         &[
-            "create", "add", "insert", "connect", "link", "triple",
-            "build", "store", "write",
+            "create", "add", "insert", "connect", "link", "triple", "build", "store", "write",
         ],
     ),
     (
         "memory_recall",
         &[
-            "remember", "recall", "memory", "episode", "past",
-            "experience", "history",
+            "remember",
+            "recall",
+            "memory",
+            "episode",
+            "past",
+            "experience",
+            "history",
         ],
     ),
     (
         "reason",
         &[
-            "reason", "logic", "infer", "deduce", "simplify",
-            "expression", "symbolic", "analyze",
+            "reason",
+            "logic",
+            "infer",
+            "deduce",
+            "simplify",
+            "expression",
+            "symbolic",
+            "analyze",
         ],
     ),
     (
         "similarity_search",
         &[
-            "similar", "like", "related", "compare", "cluster",
-            "neighbor", "analogy",
+            "similar", "like", "related", "compare", "cluster", "neighbor", "analogy",
         ],
     ),
     (
         "file_io",
         &[
-            "file", "read", "write", "save", "export", "data",
-            "disk", "load", "document",
+            "file", "read", "write", "save", "export", "data", "disk", "load", "document",
         ],
     ),
     (
         "http_fetch",
         &[
-            "http", "url", "fetch", "web", "api", "download",
-            "request", "network",
+            "http", "url", "fetch", "web", "api", "download", "request", "network",
         ],
     ),
     (
         "shell_exec",
         &[
-            "command", "shell", "execute", "run", "process",
-            "script", "system", "terminal",
+            "command", "shell", "execute", "run", "process", "script", "system", "terminal",
         ],
     ),
     (
         "user_interact",
         &[
-            "ask", "user", "input", "question", "interact",
-            "human", "prompt", "dialog",
+            "ask", "user", "input", "question", "interact", "human", "prompt", "dialog",
         ],
     ),
     (
         "infer_rules",
         &[
-            "infer", "deduce", "derive", "transitive", "type",
-            "hierarchy", "classify", "forward", "chain",
+            "infer",
+            "deduce",
+            "derive",
+            "transitive",
+            "type",
+            "hierarchy",
+            "classify",
+            "forward",
+            "chain",
         ],
     ),
     (
         "gap_analysis",
         &[
-            "gap", "missing", "incomplete", "discover", "explore",
-            "what", "unknown", "coverage",
+            "gap",
+            "missing",
+            "incomplete",
+            "discover",
+            "explore",
+            "what",
+            "unknown",
+            "coverage",
         ],
     ),
     (
         "csv_ingest",
         &[
-            "csv", "ingest", "import", "table", "data", "load",
-            "column", "row", "spreadsheet",
+            "csv",
+            "ingest",
+            "import",
+            "table",
+            "data",
+            "load",
+            "column",
+            "row",
+            "spreadsheet",
         ],
     ),
     (
         "text_ingest",
         &[
-            "text", "ingest", "extract", "sentence", "natural",
-            "language", "parse", "read", "document",
+            "text", "ingest", "extract", "sentence", "natural", "language", "parse", "read",
+            "document",
         ],
     ),
     (
         "code_ingest",
         &[
-            "code", "rust", "source", "parse", "function", "struct",
-            "module", "trait", "architecture", "analyze",
+            "code",
+            "rust",
+            "source",
+            "parse",
+            "function",
+            "struct",
+            "module",
+            "trait",
+            "architecture",
+            "analyze",
         ],
     ),
     (
         "doc_gen",
         &[
-            "document", "explain", "describe", "architecture",
-            "generate", "write", "summarize", "overview",
+            "document",
+            "explain",
+            "describe",
+            "architecture",
+            "generate",
+            "write",
+            "summarize",
+            "overview",
         ],
     ),
 ];
@@ -141,7 +187,11 @@ pub fn build_tool_profiles(
     item_memory: &ItemMemory,
     tool_registry: &ToolRegistry,
 ) -> Vec<ToolProfile> {
-    let registered: Vec<String> = tool_registry.list().iter().map(|s| s.name.clone()).collect();
+    let registered: Vec<String> = tool_registry
+        .list()
+        .iter()
+        .map(|s| s.name.clone())
+        .collect();
 
     let mut profiles = Vec::new();
 
@@ -185,11 +235,7 @@ pub fn build_tool_profiles(
 /// Score a tool's relevance to a goal vector via VSA similarity.
 ///
 /// Returns a score in [0.0, 1.0] where 1.0 means perfect semantic match.
-pub fn semantic_tool_score(
-    goal_vec: &HyperVec,
-    tool_profile: &ToolProfile,
-    ops: &VsaOps,
-) -> f32 {
+pub fn semantic_tool_score(goal_vec: &HyperVec, tool_profile: &ToolProfile, ops: &VsaOps) -> f32 {
     ops.similarity(goal_vec, &tool_profile.semantic_vec)
         .unwrap_or(0.5)
 }
@@ -263,8 +309,7 @@ mod tests {
         let im = engine.item_memory();
 
         let profiles = build_tool_profiles(&engine, ops, im, &registry);
-        let goal_vec =
-            encode_goal_semantics("search for knowledge", "", &engine, ops, im).unwrap();
+        let goal_vec = encode_goal_semantics("search for knowledge", "", &engine, ops, im).unwrap();
 
         let kg_score = profiles
             .iter()
@@ -292,8 +337,7 @@ mod tests {
         let im = engine.item_memory();
 
         let profiles = build_tool_profiles(&engine, ops, im, &registry);
-        let goal_vec =
-            encode_goal_semantics("read data from file", "", &engine, ops, im).unwrap();
+        let goal_vec = encode_goal_semantics("read data from file", "", &engine, ops, im).unwrap();
 
         let file_score = profiles
             .iter()

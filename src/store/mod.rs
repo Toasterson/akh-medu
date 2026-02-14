@@ -67,10 +67,7 @@ impl TieredStore {
     }
 
     /// Create a fully tiered store with all backends.
-    pub fn with_persistence(
-        data_dir: &std::path::Path,
-        mmap_name: &str,
-    ) -> StoreResult<Self> {
+    pub fn with_persistence(data_dir: &std::path::Path, mmap_name: &str) -> StoreResult<Self> {
         let warm = mmap::MmapStore::open_or_create(data_dir, mmap_name)?;
         let durable = durable::DurableStore::open(data_dir)?;
         Ok(Self {
@@ -102,8 +99,7 @@ impl TieredStore {
 
     /// Check if a key exists in any tier.
     pub fn contains(&self, key: SymbolId) -> bool {
-        self.hot.contains(key)
-            || self.warm.as_ref().is_some_and(|w| w.contains(key))
+        self.hot.contains(key) || self.warm.as_ref().is_some_and(|w| w.contains(key))
     }
 
     /// Number of entries in the hot tier.

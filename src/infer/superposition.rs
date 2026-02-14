@@ -8,8 +8,8 @@
 use crate::error::InferError;
 use crate::provenance::{DerivationKind, ProvenanceRecord};
 use crate::symbol::SymbolId;
-use crate::vsa::ops::VsaOps;
 use crate::vsa::HyperVec;
+use crate::vsa::ops::VsaOps;
 
 use super::engine::InferResult;
 
@@ -169,20 +169,18 @@ impl SuperpositionState {
 
             if let Some(j) = best_merge {
                 // Merge: bundle patterns, boost confidence
-                let merged_pattern = match ops
-                    .bundle(&[&self.hypotheses[i].pattern, &self.hypotheses[j].pattern])
-                {
-                    Ok(p) => p,
-                    Err(_) => {
-                        new_hypotheses.push(self.hypotheses[i].clone());
-                        continue;
-                    }
-                };
+                let merged_pattern =
+                    match ops.bundle(&[&self.hypotheses[i].pattern, &self.hypotheses[j].pattern]) {
+                        Ok(p) => p,
+                        Err(_) => {
+                            new_hypotheses.push(self.hypotheses[i].clone());
+                            continue;
+                        }
+                    };
 
                 // Confidence boost: constructive interference reinforces
-                let merged_confidence = (self.hypotheses[i].confidence
-                    + self.hypotheses[j].confidence)
-                    * 0.6; // Noisy-OR-like boost
+                let merged_confidence =
+                    (self.hypotheses[i].confidence + self.hypotheses[j].confidence) * 0.6; // Noisy-OR-like boost
 
                 let mut merged_activated = self.hypotheses[i].activated.clone();
                 for (sym, conf) in &self.hypotheses[j].activated {
@@ -224,12 +222,7 @@ impl SuperpositionState {
     ///
     /// When a hypothesis contradicts the evidence pattern (low similarity),
     /// reduce its confidence. Prune below min_confidence.
-    pub fn collapse_destructive(
-        &mut self,
-        evidence: &HyperVec,
-        ops: &VsaOps,
-        min_confidence: f32,
-    ) {
+    pub fn collapse_destructive(&mut self, evidence: &HyperVec, ops: &VsaOps, min_confidence: f32) {
         for hyp in &mut self.hypotheses {
             if let Ok(sim) = ops.similarity(&hyp.pattern, evidence) {
                 // Scale from [0.0, 1.0] similarity to [-1.0, +1.0] interference
@@ -389,12 +382,8 @@ mod tests {
         engine.add_triple(&Triple::new(a, rel, b)).unwrap();
         engine.add_triple(&Triple::new(a, rel, c)).unwrap();
 
-        let result = infer_with_superposition(
-            &[a],
-            &engine,
-            &SuperpositionConfig::default(),
-        )
-        .unwrap();
+        let result =
+            infer_with_superposition(&[a], &engine, &SuperpositionConfig::default()).unwrap();
 
         // Should have produced multiple hypotheses
         assert!(

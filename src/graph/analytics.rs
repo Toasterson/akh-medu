@@ -89,7 +89,11 @@ pub fn pagerank(
         })
         .collect();
 
-    results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    results.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     Ok(results)
 }
 
@@ -109,9 +113,7 @@ pub struct ConnectedComponent {
 }
 
 /// Find strongly connected components. Returns sorted by size desc.
-pub fn strongly_connected_components(
-    kg: &KnowledgeGraph,
-) -> GraphResult<Vec<ConnectedComponent>> {
+pub fn strongly_connected_components(kg: &KnowledgeGraph) -> GraphResult<Vec<ConnectedComponent>> {
     let graph = kg.graph();
     let reverse_map = kg.node_index_to_symbol();
 
@@ -160,10 +162,8 @@ pub fn shortest_path(
     let reverse_map = kg.node_index_to_symbol();
 
     // Use the forward map for O(1) lookup of start/end indices.
-    let forward_map: HashMap<SymbolId, NodeIndex> = reverse_map
-        .iter()
-        .map(|(&idx, &sym)| (sym, idx))
-        .collect();
+    let forward_map: HashMap<SymbolId, NodeIndex> =
+        reverse_map.iter().map(|(&idx, &sym)| (sym, idx)).collect();
 
     let from_idx = forward_map[&from];
     let to_idx = forward_map[&to];
@@ -242,7 +242,10 @@ mod tests {
         let components = strongly_connected_components(&kg).unwrap();
         // The 3 nodes in the cycle form one SCC
         let cycle_scc = components.iter().find(|c| c.size >= 3);
-        assert!(cycle_scc.is_some(), "should find a component with 3+ members");
+        assert!(
+            cycle_scc.is_some(),
+            "should find a component with 3+ members"
+        );
         let members = &cycle_scc.unwrap().members;
         assert!(members.contains(&sym(1)));
         assert!(members.contains(&sym(2)));

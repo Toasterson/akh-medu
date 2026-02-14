@@ -66,8 +66,7 @@ impl Tool for ShellExecTool {
         };
 
         // Poll for completion with a timeout loop.
-        let deadline = std::time::Instant::now()
-            + std::time::Duration::from_secs(timeout_secs);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
 
         let status = loop {
             match child.try_wait() {
@@ -84,9 +83,7 @@ impl Tool for ShellExecTool {
                     std::thread::sleep(std::time::Duration::from_millis(50));
                 }
                 Err(e) => {
-                    return Ok(ToolOutput::err(format!(
-                        "Failed to wait on command: {e}"
-                    )));
+                    return Ok(ToolOutput::err(format!("Failed to wait on command: {e}")));
                 }
             }
         };

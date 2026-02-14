@@ -15,7 +15,8 @@ impl Tool for ReasonTool {
     fn signature(&self) -> ToolSignature {
         ToolSignature {
             name: "reason".into(),
-            description: "Simplify or rewrite a symbolic expression using e-graph reasoning.".into(),
+            description: "Simplify or rewrite a symbolic expression using e-graph reasoning."
+                .into(),
             parameters: vec![ToolParam {
                 name: "expression".into(),
                 description: "S-expression to simplify (e.g. \"(not (not x))\").".into(),
@@ -42,7 +43,8 @@ impl Tool for ReasonTool {
     fn manifest(&self) -> ToolManifest {
         ToolManifest {
             name: "reason".into(),
-            description: "Simplify or rewrite a symbolic expression using e-graph reasoning.".into(),
+            description: "Simplify or rewrite a symbolic expression using e-graph reasoning."
+                .into(),
             parameters: vec![ToolParamSchema::required(
                 "expression",
                 "S-expression to simplify (e.g. \"(not (not x))\").",

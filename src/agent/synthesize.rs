@@ -92,12 +92,23 @@ fn contains_metadata_ref(line: &str) -> bool {
 
     // Exact metadata tokens
     let metadata_tokens = [
-        "status:active", "status:completed", "status:failed", "status:pending",
+        "status:active",
+        "status:completed",
+        "status:failed",
+        "status:pending",
         "status:suspended",
-        "agent:has_description", "agent:has_status", "agent:has_priority",
-        "agent:has_criteria", "agent:is_goal",
-        "priority:128", "priority:200",
-        "goal:", "episode:", "summary:", "tag:", "desc:",
+        "agent:has_description",
+        "agent:has_status",
+        "agent:has_priority",
+        "agent:has_criteria",
+        "agent:is_goal",
+        "priority:128",
+        "priority:200",
+        "goal:",
+        "episode:",
+        "summary:",
+        "tag:",
+        "desc:",
     ];
     if metadata_tokens.iter().any(|tok| lower.contains(tok)) {
         return true;
@@ -126,26 +137,40 @@ fn strip_leading_score(s: &str) -> &str {
 
 /// Structural code predicates worth showing in narrative (NOT annotations).
 const CODE_STRUCTURE_PREDICATES: &[&str] = &[
-    "code:contains-mod", "code:defines-fn", "code:defines-struct",
-    "code:defines-enum", "code:defines-type", "code:defines-mod",
-    "code:depends-on", "code:defined-in",
-    "code:has-variant", "code:has-method",
-    "defines-fn", "defines-type", "defines-mod",
-    "depends-on", "implements", "contains",
+    "code:contains-mod",
+    "code:defines-fn",
+    "code:defines-struct",
+    "code:defines-enum",
+    "code:defines-type",
+    "code:defines-mod",
+    "code:depends-on",
+    "code:defined-in",
+    "code:has-variant",
+    "code:has-method",
+    "defines-fn",
+    "defines-type",
+    "defines-mod",
+    "depends-on",
+    "implements",
+    "contains",
 ];
 
 /// Code annotation predicates to skip (noise in narrative — queried from KG when needed).
 const CODE_ANNOTATION_PREDICATES: &[&str] = &[
-    "code:has-visibility", "code:has-attribute", "code:has-doc",
-    "code:line-count", "code:has-return-type", "code:returns-type",
-    "code:derives-trait", "code:implements-trait",
-    "code:has-param", "code:has-field",
+    "code:has-visibility",
+    "code:has-attribute",
+    "code:has-doc",
+    "code:line-count",
+    "code:has-return-type",
+    "code:returns-type",
+    "code:derives-trait",
+    "code:implements-trait",
+    "code:has-param",
+    "code:has-field",
 ];
 
 /// Inferred predicates that are redundant with structural code predicates.
-const INFERRED_NOISE_PREDICATES: &[&str] = &[
-    "child-of", "part-of", "similar-to", "has-a",
-];
+const INFERRED_NOISE_PREDICATES: &[&str] = &["child-of", "part-of", "similar-to", "has-a"];
 
 /// Whether a predicate indicates code structure (worth showing).
 pub(crate) fn is_code_predicate(pred: &str) -> bool {
@@ -243,7 +268,11 @@ pub(crate) fn extract_facts(entries: &[WorkingMemoryEntry]) -> Vec<ExtractedFact
 
         match source_tool.as_str() {
             "kg_query" => {
-                facts.extend(parse_kg_query_facts(&body, &source_tool, entry.source_cycle));
+                facts.extend(parse_kg_query_facts(
+                    &body,
+                    &source_tool,
+                    entry.source_cycle,
+                ));
             }
             "similarity_search" => {
                 facts.extend(parse_similarity_facts(
@@ -286,9 +315,7 @@ pub(crate) fn extract_facts(entries: &[WorkingMemoryEntry]) -> Vec<ExtractedFact
             } => format!("T:{subject}:{predicate}:{object}"),
             FactKind::CodeFact { kind, name, detail } => format!("C:{kind}:{name}:{detail}"),
             FactKind::Similarity {
-                entity,
-                similar_to,
-                ..
+                entity, similar_to, ..
             } => format!("S:{entity}:{similar_to}"),
             FactKind::Gap {
                 entity,
@@ -390,10 +417,7 @@ fn parse_kg_query_facts(body: &str, tool: &str, cycle: u64) -> Vec<ExtractedFact
                     source_tool: tool.to_string(),
                     source_cycle: cycle,
                 });
-            } else if !is_metadata_label(&s)
-                && !is_metadata_label(&p)
-                && !is_metadata_label(&o)
-            {
+            } else if !is_metadata_label(&s) && !is_metadata_label(&p) && !is_metadata_label(&o) {
                 facts.push(ExtractedFact {
                     kind: fact,
                     source_tool: tool.to_string(),
@@ -568,7 +592,12 @@ fn parse_infer_facts(body: &str, tool: &str, cycle: u64) -> Vec<ExtractedFact> {
     }
 }
 
-fn facts_from_infer_triple(_facts: &mut Vec<ExtractedFact>, _fact: FactKind, _tool: &str, _cycle: u64) {
+fn facts_from_infer_triple(
+    _facts: &mut Vec<ExtractedFact>,
+    _fact: FactKind,
+    _tool: &str,
+    _cycle: u64,
+) {
     // Individual infer triples are bundled into the Derivation count.
 }
 
@@ -663,9 +692,7 @@ pub(crate) fn group_facts(facts: &[ExtractedFact]) -> Vec<FactGroup> {
             FactKind::CodeFact { .. } => GroupKey::CodeStructure,
             FactKind::Similarity { .. } => GroupKey::RelatedConcepts,
             FactKind::Gap { .. } => GroupKey::KnowledgeGaps,
-            FactKind::Inference { .. } | FactKind::Derivation { .. } => {
-                GroupKey::ReasoningResults
-            }
+            FactKind::Inference { .. } | FactKind::Derivation { .. } => GroupKey::ReasoningResults,
             FactKind::Raw(_) => GroupKey::Other,
         };
         groups.entry(key).or_default().push(fact.clone());
@@ -686,11 +713,7 @@ pub(crate) fn render_template(
     engine: &crate::engine::Engine,
 ) -> NarrativeSummary {
     let total_facts = all_facts.len();
-    let max_cycle = all_facts
-        .iter()
-        .map(|f| f.source_cycle)
-        .max()
-        .unwrap_or(0);
+    let max_cycle = all_facts.iter().map(|f| f.source_cycle).max().unwrap_or(0);
     let topic_count = groups
         .iter()
         .filter(|g| !matches!(g.key, GroupKey::Other | GroupKey::KnowledgeGaps))
@@ -832,7 +855,10 @@ fn render_entity_section(entity: &str, facts: &[ExtractedFact]) -> NarrativeSect
     }
 }
 
-fn render_code_section(facts: &[ExtractedFact], engine: &crate::engine::Engine) -> NarrativeSection {
+fn render_code_section(
+    facts: &[ExtractedFact],
+    engine: &crate::engine::Engine,
+) -> NarrativeSection {
     let mut modules: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut functions: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut types: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -854,12 +880,13 @@ fn render_code_section(facts: &[ExtractedFact], engine: &crate::engine::Engine) 
                         .or_default()
                         .push(detail.clone());
                 }
-                "code:defines-struct" | "code:defines-enum" | "code:defines-type"
-                | "defines-type" | "implements" | "code:has-variant" => {
-                    types
-                        .entry(name.clone())
-                        .or_default()
-                        .push(detail.clone());
+                "code:defines-struct"
+                | "code:defines-enum"
+                | "code:defines-type"
+                | "defines-type"
+                | "implements"
+                | "code:has-variant" => {
+                    types.entry(name.clone()).or_default().push(detail.clone());
                 }
                 "depends-on" | "code:depends-on" => {
                     deps.entry(name.clone()).or_default().push(detail.clone());
@@ -938,9 +965,7 @@ fn render_code_section(facts: &[ExtractedFact], engine: &crate::engine::Engine) 
         let lower = label.to_lowercase();
         engine.all_symbols().iter().find_map(|sym| {
             let sym_lower = sym.label.to_lowercase();
-            if sym_lower == lower
-                || sym_lower.ends_with(&format!("::{lower}"))
-            {
+            if sym_lower == lower || sym_lower.ends_with(&format!("::{lower}")) {
                 Some(sym.id)
             } else {
                 None
@@ -1040,21 +1065,24 @@ fn render_code_section(facts: &[ExtractedFact], engine: &crate::engine::Engine) 
 
     if let Some(ref primary_name) = primary {
         // ── Purpose header from primary roles ──
-        let primary_roles: Vec<String> = sem_preds.as_ref().and_then(|preds| {
-            let sym = resolve_sym(primary_name)?;
-            let triples = engine.triples_from(sym);
-            let roles: Vec<String> = triples
-                .iter()
-                .filter(|t| t.predicate == preds.has_role)
-                .map(|t| {
-                    engine
-                        .resolve_label(t.object)
-                        .trim_start_matches("role:")
-                        .to_string()
-                })
-                .collect();
-            if roles.is_empty() { None } else { Some(roles) }
-        }).unwrap_or_default();
+        let primary_roles: Vec<String> = sem_preds
+            .as_ref()
+            .and_then(|preds| {
+                let sym = resolve_sym(primary_name)?;
+                let triples = engine.triples_from(sym);
+                let roles: Vec<String> = triples
+                    .iter()
+                    .filter(|t| t.predicate == preds.has_role)
+                    .map(|t| {
+                        engine
+                            .resolve_label(t.object)
+                            .trim_start_matches("role:")
+                            .to_string()
+                    })
+                    .collect();
+                if roles.is_empty() { None } else { Some(roles) }
+            })
+            .unwrap_or_default();
 
         if let Some(children) = modules.get(primary_name) {
             // Sort children by importance (highest first), falling back to name order.
@@ -1149,15 +1177,19 @@ fn render_code_section(facts: &[ExtractedFact], engine: &crate::engine::Engine) 
                 // 3. Plain (bare) — just "contains N submodules"
                 let purpose_sentence = if let Some(doc) = get_doc(primary_name) {
                     let sentence = first_sentence_of(&doc);
-                    format!("The **{primary_name}** module {}",
-                        lowercase_first(&sentence))
+                    format!(
+                        "The **{primary_name}** module {}",
+                        lowercase_first(&sentence)
+                    )
                 } else if !primary_roles.is_empty() {
                     let role_desc = primary_roles.join(" and ");
                     format!("The **{primary_name}** module is a {role_desc} layer.")
                 } else {
-                    format!("The **{primary_name}** module contains {} submodule{}.",
+                    format!(
+                        "The **{primary_name}** module contains {} submodule{}.",
                         total_children,
-                        if total_children == 1 { "" } else { "s" })
+                        if total_children == 1 { "" } else { "s" }
+                    )
                 };
 
                 let children_block = format!(
@@ -1240,7 +1272,9 @@ fn render_code_section(facts: &[ExtractedFact], engine: &crate::engine::Engine) 
             .map(|d| format!(" \u{2014} {}", lowercase_first(&first_sentence_of(&d))))
             .unwrap_or_default();
         let list = format_code_list(children);
-        prose_parts.push(format!("The **{parent}** module{doc_purpose} contains {list}."));
+        prose_parts.push(format!(
+            "The **{parent}** module{doc_purpose} contains {list}."
+        ));
     }
 
     for (owner, fns) in &functions {
@@ -1293,8 +1327,8 @@ fn render_code_section(facts: &[ExtractedFact], engine: &crate::engine::Engine) 
 
     // Use "Code Architecture" heading when enrichment data is present,
     // fall back to "Code Structure" when it's purely structural.
-    let has_enrichment = sem_preds.is_some()
-        && primary.as_ref().is_some_and(|p| get_role(p).is_some());
+    let has_enrichment =
+        sem_preds.is_some() && primary.as_ref().is_some_and(|p| get_role(p).is_some());
     let heading = if has_enrichment {
         "Code Architecture"
     } else {
@@ -1409,9 +1443,7 @@ fn render_other_section(facts: &[ExtractedFact]) -> Option<NarrativeSection> {
 // ── Helpers ──────────────────────────────────────────────────────────────
 
 /// Trivial type-only section: entity sections that say only "X is a Module/Function/Struct".
-const TRIVIAL_TYPES: &[&str] = &[
-    "Module", "Function", "Struct", "Enum", "Type", "Trait",
-];
+const TRIVIAL_TYPES: &[&str] = &["Module", "Function", "Struct", "Enum", "Type", "Trait"];
 
 /// Whether a section is informative enough to show (not just "X is a Module.").
 pub(crate) fn is_informative_section(section: &NarrativeSection) -> bool {
@@ -1595,7 +1627,9 @@ mod tests {
         // First should be CodeFact (defines-fn is code predicate)
         assert!(matches!(&facts[0].kind, FactKind::CodeFact { kind, .. } if kind == "defines-fn"));
         // Second should be Triple (is-a is not code predicate)
-        assert!(matches!(&facts[1].kind, FactKind::Triple { predicate, .. } if predicate == "is-a"));
+        assert!(
+            matches!(&facts[1].kind, FactKind::Triple { predicate, .. } if predicate == "is-a")
+        );
     }
 
     #[test]
@@ -1618,7 +1652,9 @@ mod tests {
         let facts = extract_facts(&[entry]);
         // Only the defines-fn fact should survive, has-visibility is annotation noise
         assert_eq!(facts.len(), 1);
-        assert!(matches!(&facts[0].kind, FactKind::CodeFact { kind, .. } if kind == "code:defines-fn"));
+        assert!(
+            matches!(&facts[0].kind, FactKind::CodeFact { kind, .. } if kind == "code:defines-fn")
+        );
     }
 
     #[test]
@@ -1629,7 +1665,9 @@ mod tests {
         );
         let facts = extract_facts(&[entry]);
         assert_eq!(facts.len(), 2);
-        assert!(matches!(&facts[0].kind, FactKind::Similarity { score, .. } if (*score - 0.85).abs() < 0.01));
+        assert!(
+            matches!(&facts[0].kind, FactKind::Similarity { score, .. } if (*score - 0.85).abs() < 0.01)
+        );
     }
 
     #[test]
@@ -1665,7 +1703,11 @@ mod tests {
 
         let groups = group_facts(&facts);
         // Should have Entity("Engine") and KnowledgeGaps groups
-        assert!(groups.iter().any(|g| g.key == GroupKey::Entity("Engine".into())));
+        assert!(
+            groups
+                .iter()
+                .any(|g| g.key == GroupKey::Entity("Engine".into()))
+        );
         assert!(groups.iter().any(|g| g.key == GroupKey::KnowledgeGaps));
     }
 
@@ -1720,13 +1762,19 @@ mod tests {
 
     #[test]
     fn metadata_noise_filters_agent_triples() {
-        assert!(is_metadata_noise("Added triple: \"goal:test\" -> agent:has_criteria -> \"data\" [0.70]"));
-        assert!(!is_metadata_noise("Added triple: \"Vsa\" -> is-a -> \"Module\" [1.00]"));
+        assert!(is_metadata_noise(
+            "Added triple: \"goal:test\" -> agent:has_criteria -> \"data\" [0.70]"
+        ));
+        assert!(!is_metadata_noise(
+            "Added triple: \"Vsa\" -> is-a -> \"Module\" [1.00]"
+        ));
     }
 
     #[test]
     fn contains_metadata_ref_catches_embedded() {
-        assert!(contains_metadata_ref("[0.90] status:completed has only 1 connection"));
+        assert!(contains_metadata_ref(
+            "[0.90] status:completed has only 1 connection"
+        ));
         assert!(contains_metadata_ref("agent:has_description is sparse"));
         assert!(!contains_metadata_ref("Engine has 5 functions"));
     }
@@ -1800,7 +1848,11 @@ mod tests {
         );
         let facts = extract_facts(&[entry]);
         // Only the Engine gap should survive — truncated stubs are skipped.
-        assert_eq!(facts.len(), 1, "truncated gaps should be filtered, got: {facts:?}");
+        assert_eq!(
+            facts.len(),
+            1,
+            "truncated gaps should be filtered, got: {facts:?}"
+        );
         assert!(matches!(&facts[0].kind, FactKind::Gap { entity, .. } if entity == "Engine"));
     }
 
@@ -2026,8 +2078,18 @@ mod tests {
         }
 
         // HyperVec has many more facts (struct definitions).
-        for t in &["Clone", "Debug", "Serialize", "Deserialize", "Eq",
-                    "Hash", "PartialEq", "data", "encoding", "dim"] {
+        for t in &[
+            "Clone",
+            "Debug",
+            "Serialize",
+            "Deserialize",
+            "Eq",
+            "Hash",
+            "PartialEq",
+            "data",
+            "encoding",
+            "dim",
+        ] {
             facts.push(ExtractedFact {
                 kind: FactKind::CodeFact {
                     kind: "code:defines-type".into(),
@@ -2069,7 +2131,8 @@ mod tests {
 
         // Only the defines-type fact should survive — derives are now annotations.
         assert_eq!(
-            facts.len(), 1,
+            facts.len(),
+            1,
             "derive traits should be filtered as annotations, got: {facts:?}",
         );
         assert!(
@@ -2115,7 +2178,9 @@ mod tests {
 
         // The doc comment should appear as the purpose sentence.
         assert!(
-            section.prose.contains("implements Vector Symbolic Architecture"),
+            section
+                .prose
+                .contains("implements Vector Symbolic Architecture"),
             "doc comment should render as purpose. Prose: {}",
             section.prose,
         );
@@ -2288,7 +2353,9 @@ mod tests {
 
         // Should gracefully fall back to plain purpose.
         assert!(
-            section.prose.contains("**Vsa** module contains 2 submodules"),
+            section
+                .prose
+                .contains("**Vsa** module contains 2 submodules"),
             "should fall back to plain purpose when no doc/enrichment. Prose: {}",
             section.prose,
         );
@@ -2309,14 +2376,8 @@ mod tests {
             first_sentence_of("Single sentence without trailing space."),
             "Single sentence without trailing space.",
         );
-        assert_eq!(
-            first_sentence_of("No period here"),
-            "No period here",
-        );
-        assert_eq!(
-            first_sentence_of("Line one\nLine two"),
-            "Line one",
-        );
+        assert_eq!(first_sentence_of("No period here"), "No period here",);
+        assert_eq!(first_sentence_of("Line one\nLine two"), "Line one",);
     }
 
     #[test]

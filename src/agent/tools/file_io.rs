@@ -65,7 +65,11 @@ impl Tool for FileIoTool {
                 match std::fs::read_to_string(&path) {
                     Ok(content) => {
                         let truncated = if content.len() > 4096 {
-                            format!("{}... [truncated at 4096 bytes, total: {}]", &content[..4096], content.len())
+                            format!(
+                                "{}... [truncated at 4096 bytes, total: {}]",
+                                &content[..4096],
+                                content.len()
+                            )
                         } else {
                             content.clone()
                         };
@@ -174,11 +178,7 @@ impl Tool for FileIoTool {
                     Capability::WriteFilesystem,
                 ]),
                 description: "Reads and writes files — filesystem side effects.".into(),
-                shadow_triggers: vec![
-                    "write".into(),
-                    "delete".into(),
-                    "overwrite".into(),
-                ],
+                shadow_triggers: vec!["write".into(), "delete".into(), "overwrite".into()],
             },
             source: ToolSource::Native,
         }

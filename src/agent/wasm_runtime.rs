@@ -105,19 +105,19 @@ mod inner {
             let mut store = Store::new(wasm_engine, state);
             let linker = Linker::new(wasm_engine);
 
-            let instance = linker
-                .instantiate(&mut store, component)
-                .map_err(|e| AgentError::ToolExecution {
+            let instance = linker.instantiate(&mut store, component).map_err(|e| {
+                AgentError::ToolExecution {
                     tool_name: "wasm_runtime".into(),
                     message: format!("failed to instantiate WASM component: {e}"),
-                })?;
+                }
+            })?;
 
-            let manifest_fn = instance
-                .get_func(&mut store, "manifest")
-                .ok_or_else(|| AgentError::ToolExecution {
+            let manifest_fn = instance.get_func(&mut store, "manifest").ok_or_else(|| {
+                AgentError::ToolExecution {
                     tool_name: "wasm_runtime".into(),
                     message: "WASM component does not export 'manifest' function".into(),
-                })?;
+                }
+            })?;
 
             let mut results = vec![Val::String(String::new())];
             manifest_fn
@@ -144,12 +144,11 @@ mod inner {
         wasm_path: &str,
     ) -> AgentResult<ToolManifest> {
         // We expect the WASM module to return JSON-encoded manifest.
-        let v: serde_json::Value = serde_json::from_str(json).map_err(|e| {
-            AgentError::ToolExecution {
+        let v: serde_json::Value =
+            serde_json::from_str(json).map_err(|e| AgentError::ToolExecution {
                 tool_name: "wasm_runtime".into(),
                 message: format!("failed to parse manifest JSON: {e}"),
-            }
-        })?;
+            })?;
 
         let name = v["name"].as_str().unwrap_or("unknown").to_string();
         let description = v["description"].as_str().unwrap_or("").to_string();
@@ -259,12 +258,11 @@ mod inner {
         }
 
         fn execute(&self, _engine: &Engine, input: ToolInput) -> AgentResult<ToolOutput> {
-            let input_json = serde_json::to_string(&input.params).map_err(|e| {
-                AgentError::ToolExecution {
+            let input_json =
+                serde_json::to_string(&input.params).map_err(|e| AgentError::ToolExecution {
                     tool_name: self.manifest.name.clone(),
                     message: format!("failed to serialize input: {e}"),
-                }
-            })?;
+                })?;
 
             // Each execute() creates a fresh Store for isolation.
             let state = ToolHostState {
@@ -281,20 +279,16 @@ mod inner {
                     message: format!("failed to instantiate WASM component: {e}"),
                 })?;
 
-            let execute_fn = instance
-                .get_func(&mut store, "execute")
-                .ok_or_else(|| AgentError::ToolExecution {
+            let execute_fn = instance.get_func(&mut store, "execute").ok_or_else(|| {
+                AgentError::ToolExecution {
                     tool_name: self.manifest.name.clone(),
                     message: "WASM component does not export 'execute' function".into(),
-                })?;
+                }
+            })?;
 
             let mut results = vec![Val::String(String::new())];
             execute_fn
-                .call(
-                    &mut store,
-                    &[Val::String(input_json)],
-                    &mut results,
-                )
+                .call(&mut store, &[Val::String(input_json)], &mut results)
                 .map_err(|e| AgentError::ToolExecution {
                     tool_name: self.manifest.name.clone(),
                     message: format!("WASM execute() trapped: {e}"),

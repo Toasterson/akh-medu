@@ -149,7 +149,10 @@ mod tests {
         let a = vec![1i8; 128];
         let b = vec![1i8; 128];
         let sim = kernel.cosine_similarity_i8(&a, &b);
-        assert!((sim - 1.0).abs() < 0.001, "identical vectors should have cosine ~1.0");
+        assert!(
+            (sim - 1.0).abs() < 0.001,
+            "identical vectors should have cosine ~1.0"
+        );
 
         let c = vec![-1i8; 128];
         let sim_neg = kernel.cosine_similarity_i8(&a, &c);

@@ -97,9 +97,7 @@ impl Tool for HttpFetchTool {
                 } else {
                     body
                 };
-                Ok(ToolOutput::err(format!(
-                    "HTTP error {code}: {preview}"
-                )))
+                Ok(ToolOutput::err(format!("HTTP error {code}: {preview}")))
             }
             Err(ureq::Error::Transport(transport)) => Ok(ToolOutput::err(format!(
                 "Transport error fetching \"{url}\": {transport}"

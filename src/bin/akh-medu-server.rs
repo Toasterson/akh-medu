@@ -41,7 +41,7 @@ use akh_medu::agent::{Agent, AgentConfig};
 use akh_medu::engine::{Engine, EngineConfig};
 use akh_medu::grammar::concrete::ParseContext;
 use akh_medu::grammar::entity_resolution::{EquivalenceStats, LearnedEquivalence};
-use akh_medu::grammar::preprocess::{preprocess_batch, PreProcessRequest, PreProcessResponse};
+use akh_medu::grammar::preprocess::{PreProcessRequest, PreProcessResponse, preprocess_batch};
 use akh_medu::message::AkhMessage;
 use akh_medu::paths::AkhPaths;
 use akh_medu::seeds::SeedRegistry;
@@ -155,9 +155,7 @@ async fn health(State(state): State<Arc<ServerState>>) -> Json<HealthResponse> {
     })
 }
 
-async fn list_workspaces(
-    State(state): State<Arc<ServerState>>,
-) -> Json<WorkspaceListResponse> {
+async fn list_workspaces(State(state): State<Arc<ServerState>>) -> Json<WorkspaceListResponse> {
     let names = state.paths.list_workspaces();
     Json(WorkspaceListResponse { workspaces: names })
 }
@@ -231,11 +229,7 @@ async fn workspace_preprocess(
     Json(request): Json<PreProcessRequest>,
 ) -> Result<Json<PreProcessResponse>, (StatusCode, String)> {
     let engine = state.get_engine(&name).await?;
-    let ctx = ParseContext::with_engine(
-        engine.registry(),
-        engine.ops(),
-        engine.item_memory(),
-    );
+    let ctx = ParseContext::with_engine(engine.registry(), engine.ops(), engine.item_memory());
 
     let start = Instant::now();
     let results = preprocess_batch(&request.chunks, &ctx);
@@ -333,11 +327,7 @@ async fn handle_ws_session(mut socket: WebSocket, engine: Arc<Engine>, ws_name: 
     let _ = agent.persist_session();
 }
 
-fn process_ws_input(
-    input: &WsInput,
-    agent: &mut Agent,
-    engine: &Engine,
-) -> Vec<AkhMessage> {
+fn process_ws_input(input: &WsInput, agent: &mut Agent, engine: &Engine) -> Vec<AkhMessage> {
     let mut msgs = Vec::new();
 
     match input.msg_type.as_str() {
@@ -386,8 +376,7 @@ fn process_ws_input(
                 }
                 akh_medu::agent::UserIntent::Assert { text } => {
                     use akh_medu::agent::tool::Tool;
-                    let tool_input =
-                        akh_medu::agent::ToolInput::new().with_param("text", &text);
+                    let tool_input = akh_medu::agent::ToolInput::new().with_param("text", &text);
                     match akh_medu::agent::tools::TextIngestTool.execute(engine, tool_input) {
                         Ok(output) => {
                             msgs.push(AkhMessage::tool_result(
@@ -420,8 +409,7 @@ fn process_ws_input(
                                     }
                                     Err(_) => break,
                                 }
-                                let active =
-                                    akh_medu::agent::goal::active_goals(agent.goals());
+                                let active = akh_medu::agent::goal::active_goals(agent.goals());
                                 if active.is_empty() {
                                     break;
                                 }
@@ -472,9 +460,7 @@ fn process_ws_input(
                     ));
                 }
                 _ => {
-                    msgs.push(AkhMessage::system(
-                        "Unrecognized input.".to_string(),
-                    ));
+                    msgs.push(AkhMessage::system("Unrecognized input.".to_string()));
                 }
             }
         }
@@ -504,9 +490,7 @@ fn process_ws_input(
                     }
                 }
                 _ => {
-                    msgs.push(AkhMessage::system(format!(
-                        "Unknown command: \"{cmd}\""
-                    )));
+                    msgs.push(AkhMessage::system(format!("Unknown command: \"{cmd}\"")));
                 }
             }
         }
@@ -521,19 +505,13 @@ fn process_ws_input(
     msgs
 }
 
-async fn send_akh_message(
-    socket: &mut WebSocket,
-    msg: &AkhMessage,
-) -> Result<(), axum::Error> {
+async fn send_akh_message(socket: &mut WebSocket, msg: &AkhMessage) -> Result<(), axum::Error> {
     let json = serde_json::to_string(msg).unwrap_or_default();
     socket.send(Message::Text(json.into())).await
 }
 
 /// Helper for error sending when we may not have a socket.
-async fn send_message(
-    _msg: &AkhMessage,
-    _socket: &mut Option<&mut WebSocket>,
-) -> Result<(), ()> {
+async fn send_message(_msg: &AkhMessage, _socket: &mut Option<&mut WebSocket>) -> Result<(), ()> {
     // No-op when socket is None.
     Ok(())
 }
@@ -544,17 +522,14 @@ async fn send_message(
 async fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| {
-                    tracing_subscriber::EnvFilter::new("info,egg=warn,hnsw_rs=warn")
-                }),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                tracing_subscriber::EnvFilter::new("info,egg=warn,hnsw_rs=warn")
+            }),
         )
         .init();
 
-    let bind = std::env::var("AKH_SERVER_BIND")
-        .unwrap_or_else(|_| "0.0.0.0".to_string());
-    let port = std::env::var("AKH_SERVER_PORT")
-        .unwrap_or_else(|_| "8200".to_string());
+    let bind = std::env::var("AKH_SERVER_BIND").unwrap_or_else(|_| "0.0.0.0".to_string());
+    let port = std::env::var("AKH_SERVER_PORT").unwrap_or_else(|_| "8200".to_string());
     let addr = format!("{bind}:{port}");
 
     let paths = AkhPaths::resolve().unwrap_or_else(|e| {
@@ -579,15 +554,9 @@ async fn main() {
         .route("/workspaces/{name}", delete(delete_workspace))
         .route("/workspaces/{name}/status", get(workspace_status))
         // Seed packs.
-        .route(
-            "/workspaces/{ws_name}/seed/{pack_name}",
-            post(apply_seed),
-        )
+        .route("/workspaces/{ws_name}/seed/{pack_name}", post(apply_seed))
         // Preprocessing.
-        .route(
-            "/workspaces/{name}/preprocess",
-            post(workspace_preprocess),
-        )
+        .route("/workspaces/{name}/preprocess", post(workspace_preprocess))
         .route(
             "/workspaces/{name}/equivalences",
             get(workspace_equivalences),

@@ -34,17 +34,12 @@ impl Tool for SimilaritySearchTool {
 
     fn execute(&self, engine: &Engine, input: ToolInput) -> AgentResult<ToolOutput> {
         let symbol_str = input.require("symbol", "similarity_search")?;
-        let top_k: usize = input
-            .get("top_k")
-            .and_then(|k| k.parse().ok())
-            .unwrap_or(5);
+        let top_k: usize = input.get("top_k").and_then(|k| k.parse().ok()).unwrap_or(5);
 
-        let symbol_id = engine
-            .resolve_symbol(symbol_str)?;
+        let symbol_id = engine.resolve_symbol(symbol_str)?;
         let label = engine.resolve_label(symbol_id);
 
-        let results = engine
-            .search_similar_to(symbol_id, top_k)?;
+        let results = engine.search_similar_to(symbol_id, top_k)?;
 
         if results.is_empty() {
             return Ok(ToolOutput::ok_with_symbols(
@@ -78,8 +73,8 @@ impl Tool for SimilaritySearchTool {
     fn manifest(&self) -> ToolManifest {
         ToolManifest {
             name: "similarity_search".into(),
-            description:
-                "Find symbols similar to a given symbol via VSA hypervector similarity.".into(),
+            description: "Find symbols similar to a given symbol via VSA hypervector similarity."
+                .into(),
             parameters: vec![
                 ToolParamSchema::required("symbol", "Symbol name or ID to search around."),
                 ToolParamSchema::optional("top_k", "Number of results to return (default: 5)."),

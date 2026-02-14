@@ -42,10 +42,7 @@ pub enum PartitionError {
     Storage { message: String },
 
     #[error("partition query error: {message}")]
-    #[diagnostic(
-        code(akh::partition::query),
-        help("Check the SPARQL query syntax.")
-    )]
+    #[diagnostic(code(akh::partition::query), help("Check the SPARQL query syntax."))]
     Query { message: String },
 }
 
@@ -118,14 +115,13 @@ impl PartitionManager {
             return Ok(0);
         }
 
-        let entries = std::fs::read_dir(&self.partitions_dir).map_err(|e| {
-            PartitionError::Storage {
+        let entries =
+            std::fs::read_dir(&self.partitions_dir).map_err(|e| PartitionError::Storage {
                 message: format!(
                     "failed to read partitions dir {}: {e}",
                     self.partitions_dir.display()
                 ),
-            }
-        })?;
+            })?;
 
         let mut count = 0;
         for entry in entries.flatten() {
@@ -186,11 +182,12 @@ impl PartitionManager {
 
     /// Remove a shared partition (deletes data on disk).
     pub fn remove(&mut self, name: &str) -> PartitionResult<()> {
-        let partition = self.partitions.remove(name).ok_or_else(|| {
-            PartitionError::NotFound {
+        let partition = self
+            .partitions
+            .remove(name)
+            .ok_or_else(|| PartitionError::NotFound {
                 name: name.to_string(),
-            }
-        })?;
+            })?;
 
         if let PartitionSource::Shared { path } = &partition.source {
             if path.exists() {
@@ -243,9 +240,11 @@ pub fn query_partition(
         format!("SELECT * WHERE {{ GRAPH <{graph_iri}> {{ {sparql_pattern} }} }}")
     };
 
-    sparql.query_select(&query).map_err(|e| PartitionError::Query {
-        message: format!("partition query failed: {e}"),
-    })
+    sparql
+        .query_select(&query)
+        .map_err(|e| PartitionError::Query {
+            message: format!("partition query failed: {e}"),
+        })
 }
 
 #[cfg(test)]

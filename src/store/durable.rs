@@ -138,13 +138,11 @@ impl DurableStore {
                         message: format!("range scan failed: {e}"),
                     })?
             }
-            None => {
-                table
-                    .range::<&[u8]>(prefix..)
-                    .map_err(|e| StoreError::Redb {
-                        message: format!("range scan failed: {e}"),
-                    })?
-            }
+            None => table
+                .range::<&[u8]>(prefix..)
+                .map_err(|e| StoreError::Redb {
+                    message: format!("range scan failed: {e}"),
+                })?,
         };
 
         for entry in iter {

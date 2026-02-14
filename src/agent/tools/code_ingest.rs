@@ -119,13 +119,11 @@ impl Tool for CodeIngestTool {
     fn manifest(&self) -> ToolManifest {
         ToolManifest {
             name: "code_ingest".into(),
-            description: "Parses Rust source code and ingests structure into the knowledge graph.".into(),
+            description: "Parses Rust source code and ingests structure into the knowledge graph."
+                .into(),
             parameters: vec![
                 ToolParamSchema::required("path", "File or directory path to ingest."),
-                ToolParamSchema::optional(
-                    "recursive",
-                    "Scan subdirectories (default: true).",
-                ),
+                ToolParamSchema::optional("recursive", "Scan subdirectories (default: true)."),
                 ToolParamSchema::optional(
                     "max_files",
                     "Maximum number of files to process (default: 200).",
@@ -134,7 +132,8 @@ impl Tool for CodeIngestTool {
             danger: DangerInfo {
                 level: DangerLevel::Cautious,
                 capabilities: HashSet::from([Capability::WriteKg, Capability::ReadFilesystem]),
-                description: "Parses Rust source code and ingests structure into the knowledge graph.".into(),
+                description:
+                    "Parses Rust source code and ingests structure into the knowledge graph.".into(),
                 shadow_triggers: vec!["ingest".into(), "code".into()],
             },
             source: ToolSource::Native,
@@ -223,14 +222,8 @@ fn ingest_file(
         .to_string();
 
     // Create a file entity symbol.
-    let file_sym = resolve_or_create_entity_with_source(
-        engine,
-        &rel_path,
-        &rel_path,
-        0,
-        0,
-        source.len(),
-    )?;
+    let file_sym =
+        resolve_or_create_entity_with_source(engine, &rel_path, &rel_path, 0, 0, source.len())?;
 
     let file_type = engine.resolve_or_create_entity("File")?;
     add_triple(engine, file_sym, is_a, file_type, 1.0)?;
@@ -491,7 +484,11 @@ impl<'a> Visit<'a> for CodeVisitor<'_> {
             // Parameters.
             for param in &node.sig.inputs {
                 if let syn::FnArg::Typed(pat_type) = param {
-                    let param_label = format!("{}:{}", pat_to_string(&pat_type.pat), type_label(&pat_type.ty));
+                    let param_label = format!(
+                        "{}:{}",
+                        pat_to_string(&pat_type.pat),
+                        type_label(&pat_type.ty)
+                    );
                     if let Ok(param_sym) = self.engine.resolve_or_create_entity(&param_label) {
                         self.add_triple(fn_sym, self.preds.has_param, param_sym, 1.0);
                     }
@@ -538,8 +535,7 @@ impl<'a> Visit<'a> for CodeVisitor<'_> {
             // Fields.
             for field in &node.fields {
                 if let Some(ref ident) = field.ident {
-                    let field_label =
-                        format!("{}:{}", ident, type_label(&field.ty));
+                    let field_label = format!("{}:{}", ident, type_label(&field.ty));
                     if let Ok(field_sym) = self.engine.resolve_or_create_entity(&field_label) {
                         self.add_triple(struct_sym, self.preds.has_field, field_sym, 1.0);
                     }
@@ -676,8 +672,7 @@ impl<'a> Visit<'a> for CodeVisitor<'_> {
         for item in &node.items {
             if let syn::ImplItem::Fn(method) = item {
                 let method_name = method.sig.ident.to_string();
-                if let Some(method_sym) = self.create_entity(&method_name, &method.sig.ident)
-                {
+                if let Some(method_sym) = self.create_entity(&method_name, &method.sig.ident) {
                     let fn_type = self
                         .engine
                         .resolve_or_create_entity("Function")
@@ -953,7 +948,10 @@ mod tests {
 
         // SymbolId entity should exist.
         let sym_id = engine.lookup_symbol("SymbolId");
-        assert!(sym_id.is_ok(), "SymbolId entity should exist after ingesting symbol.rs");
+        assert!(
+            sym_id.is_ok(),
+            "SymbolId entity should exist after ingesting symbol.rs"
+        );
     }
 
     #[test]
