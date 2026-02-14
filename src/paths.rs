@@ -125,6 +125,9 @@ impl AkhPaths {
 
     /// Create all base directories. Idempotent.
     pub fn ensure_dirs(&self) -> PathResult<()> {
+        let library_dir = self.library_dir();
+        let library_inbox = self.library_inbox();
+        let library_docs = self.library_documents_dir();
         for dir in [
             &self.config_dir,
             &self.data_dir,
@@ -137,6 +140,9 @@ impl AkhPaths {
             &self.state_dir.join("sessions"),
             &self.state_dir.join("logs"),
             &self.config_dir.join("workspaces"),
+            &library_dir,
+            &library_inbox,
+            &library_docs,
         ] {
             std::fs::create_dir_all(dir).map_err(|e| PathError::CreateDir {
                 path: dir.display().to_string(),
@@ -161,6 +167,21 @@ impl AkhPaths {
     /// Path to the seeds directory.
     pub fn seeds_dir(&self) -> PathBuf {
         self.data_dir.join("seeds")
+    }
+
+    /// Path to the shared content library directory.
+    pub fn library_dir(&self) -> PathBuf {
+        self.data_dir.join("library")
+    }
+
+    /// Path to the library inbox directory (watched for new files).
+    pub fn library_inbox(&self) -> PathBuf {
+        self.data_dir.join("library").join("inbox")
+    }
+
+    /// Path to the library documents directory.
+    pub fn library_documents_dir(&self) -> PathBuf {
+        self.data_dir.join("library").join("documents")
     }
 }
 

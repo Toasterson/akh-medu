@@ -45,6 +45,11 @@ oxigraph = "0.4"
 # Code analysis
 syn = { version = "2", features = ["full", "visit"] }
 
+# Document parsing
+scraper = "0.23"
+pdf-extract = "0.10"
+epub = "2"
+
 # HTTP (sync)
 ureq = "2"
 

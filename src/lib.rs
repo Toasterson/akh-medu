@@ -39,6 +39,7 @@ pub mod glyph;
 pub mod grammar;
 pub mod graph;
 pub mod infer;
+pub mod library;
 pub mod message;
 pub mod partition;
 pub mod paths;

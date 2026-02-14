@@ -115,6 +115,12 @@ pub enum DerivationKind {
         binary_path: String,
         danger_level: String,
     },
+    /// Knowledge derived from document ingestion in the content library.
+    DocumentIngested {
+        document_id: String,
+        format: String,
+        chunk_index: u32,
+    },
 }
 
 impl DerivationKind {
@@ -141,6 +147,7 @@ impl DerivationKind {
             Self::PsycheEvolution { .. } => 17,
             Self::WasmToolExecution { .. } => 18,
             Self::CliToolExecution { .. } => 19,
+            Self::DocumentIngested { .. } => 20,
         }
     }
 }
