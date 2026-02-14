@@ -61,7 +61,7 @@ rules until no more simplifications are possible. This provides:
 │   VSA    │Knowledge │Reasoning │Inference │   Agent      │
 │  Ops     │  Graph   │  (egg)   │ Engine   │  OODA Loop   │
 ├──────────┼──────────┼──────────┼──────────┼──────────────┤
-│ HyperVec │petgraph  │ rewrite  │spreading │ 15 tools     │
+│ HyperVec │petgraph  │ rewrite  │spreading │ 17 tools     │
 │ SIMD     │oxigraph  │ rules    │backward  │ planning     │
 │ ItemMem  │SPARQL    │ e-graphs │superpos. │ psyche       │
 ├──────────┴──────────┴──────────┴──────────┴──────────────┤

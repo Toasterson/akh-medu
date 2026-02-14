@@ -22,6 +22,10 @@
 - [Planning and Reflection](agent/planning.md)
 - [Jungian Psyche](agent/psyche.md)
 
+# Library
+
+- [Shared Content Library](library/overview.md)
+
 # Advanced
 
 - [Knowledge Compartments](advanced/compartments.md)

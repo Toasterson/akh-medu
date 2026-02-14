@@ -258,6 +258,20 @@ akh-medu equivalences export > equivs.json
 akh-medu equivalences import < equivs.json
 ```
 
+### library
+
+Manage the shared content library. See [Shared Content Library](../library/overview.md).
+
+```bash
+akh-medu library add paper.pdf
+akh-medu library add https://example.com/article --title "My Article" --tags "physics"
+akh-medu library list
+akh-medu library search --query "quantum entanglement" --top-k 10
+akh-medu library info <ID>
+akh-medu library remove <ID>
+akh-medu library watch --dir /path/to/papers/
+```
+
 ### code-ingest
 
 Ingest Rust source code.
