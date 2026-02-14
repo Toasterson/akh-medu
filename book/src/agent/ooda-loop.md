@@ -172,7 +172,8 @@ EpisodicEntry {
 ```
 
 Consolidation fires automatically when memory pressure exceeds 0.8, or
-manually via `agent consolidate`.
+manually via `agent consolidate`. In [background learning](autonomy.md)
+modes, consolidation also runs on a periodic schedule.
 
 ## Session Persistence
 
@@ -186,6 +187,10 @@ akh-medu agent run --goals "..." --max-cycles 20
 # Resume where you left off
 akh-medu agent resume --max-cycles 50
 ```
+
+Session persistence also underpins [autonomous background learning](autonomy.md):
+the daemon persists periodically, and TUI idle learning accumulates across
+sessions.
 
 ## CLI Commands
 
@@ -202,8 +207,15 @@ akh-medu agent run --goals "..." --max-cycles 10 --fresh
 # Interactive REPL
 akh-medu agent repl
 
+# Interactive TUI chat (with idle background learning)
+akh-medu agent chat
+
 # Resume persisted session
 akh-medu agent resume
+
+# Background daemon (requires --features daemon)
+akh-medu agent daemon
+akh-medu agent daemon --equiv-interval 600 --fresh
 
 # Trigger consolidation
 akh-medu agent consolidate
@@ -211,6 +223,9 @@ akh-medu agent consolidate
 # Recall episodic memories
 akh-medu agent recall --query "mammals" --top-k 5
 ```
+
+See [Autonomous Background Learning](autonomy.md) for details on the
+daemon and TUI idle scheduler.
 
 ## Configuration
 
