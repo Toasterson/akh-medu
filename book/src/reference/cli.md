@@ -244,7 +244,14 @@ Pre-process text for the Eleutherios pipeline.
 cat chunks.jsonl | akh-medu preprocess --format jsonl
 cat chunks.json  | akh-medu preprocess --format json
 cat chunks.jsonl | akh-medu preprocess --format jsonl --language ru
+cat chunks.jsonl | akh-medu preprocess --format jsonl --library-context
 ```
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--format <jsonl\|json>` | Input/output format | `jsonl` |
+| `--language <CODE>` | Override language detection | auto |
+| `--library-context` | Enrich entities with shared library paragraph context | off |
 
 ### equivalences
 
