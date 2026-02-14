@@ -18,6 +18,6 @@ pub mod predicates;
 
 pub use catalog::LibraryCatalog;
 pub use error::{LibraryError, LibraryResult};
-pub use ingest::{ingest_document, ingest_file, ingest_url, IngestConfig, IngestResult};
+pub use ingest::{IngestConfig, IngestResult, ingest_document, ingest_file, ingest_url};
 pub use model::{ContentFormat, DocumentRecord, DocumentSource};
 pub use predicates::LibraryPredicates;

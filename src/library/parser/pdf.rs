@@ -97,9 +97,7 @@ impl ContentParser for PdfParser {
                 }
 
                 elements.push(DocumentElement {
-                    kind: ElementKind::Paragraph {
-                        chunk_index,
-                    },
+                    kind: ElementKind::Paragraph { chunk_index },
                     heading: format!("para:{chunk_index}"),
                     text: normalized.clone(),
                 });

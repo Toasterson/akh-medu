@@ -165,9 +165,7 @@ fn extract_structure(document: &Html) -> (Vec<DocumentElement>, Vec<ContentChunk
                 let ch = if has_h1 { chapter_ordinal } else { 0 };
 
                 elements.push(DocumentElement {
-                    kind: ElementKind::Paragraph {
-                        chunk_index,
-                    },
+                    kind: ElementKind::Paragraph { chunk_index },
                     heading: format!("para:{chunk_index}"),
                     text: text.clone(),
                 });
@@ -211,7 +209,11 @@ mod tests {
 
         assert_eq!(doc.metadata.title.as_deref(), Some("Test Page"));
         assert_eq!(doc.raw_chunks.len(), 3);
-        assert!(doc.raw_chunks[0].text.contains("First paragraph of chapter one"));
+        assert!(
+            doc.raw_chunks[0]
+                .text
+                .contains("First paragraph of chapter one")
+        );
         assert!(doc.raw_chunks[2].text.contains("chapter two"));
     }
 

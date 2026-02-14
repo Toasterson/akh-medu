@@ -146,15 +146,14 @@ impl Tool for LibrarySearchTool {
             parameters: vec![
                 ToolParamSchema::required("query", "Natural language search text."),
                 ToolParamSchema::optional("top_k", "Number of results to return (default: 5)."),
-                ToolParamSchema::optional(
-                    "document",
-                    "Filter to a specific document slug.",
-                ),
+                ToolParamSchema::optional("document", "Filter to a specific document slug."),
             ],
             danger: DangerInfo {
                 level: DangerLevel::Safe,
                 capabilities: HashSet::from([Capability::VsaAccess, Capability::ReadKg]),
-                description: "VSA-based semantic search of library content — read-only, no side effects.".into(),
+                description:
+                    "VSA-based semantic search of library content — read-only, no side effects."
+                        .into(),
                 shadow_triggers: vec![],
             },
             source: ToolSource::Native,

@@ -9,7 +9,7 @@ use std::time::Duration;
 use crate::engine::Engine;
 use crate::library::catalog::LibraryCatalog;
 use crate::library::error::{LibraryError, LibraryResult};
-use crate::library::ingest::{ingest_file, IngestConfig};
+use crate::library::ingest::{IngestConfig, ingest_file};
 
 /// Configuration for the inbox watcher.
 pub struct InboxConfig {
@@ -120,11 +120,7 @@ fn process_inbox_file(
     if let Some(filename) = path.file_name() {
         let dest = done_dir.join(filename);
         std::fs::rename(path, &dest).map_err(|e| LibraryError::CatalogIo {
-            message: format!(
-                "move {} -> {}: {e}",
-                path.display(),
-                dest.display()
-            ),
+            message: format!("move {} -> {}: {e}", path.display(), dest.display()),
         })?;
     }
 

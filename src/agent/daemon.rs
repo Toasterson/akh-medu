@@ -7,8 +7,8 @@
 
 use std::time::Duration;
 
-use super::error::AgentResult;
 use super::Agent;
+use super::error::AgentResult;
 use crate::message::AkhMessage;
 
 // ---------------------------------------------------------------------------
@@ -138,7 +138,9 @@ impl AgentDaemon {
 
         // Final persist on shutdown.
         self.persist();
-        self.agent.sink().emit(&AkhMessage::system("daemon stopped"));
+        self.agent
+            .sink()
+            .emit(&AkhMessage::system("daemon stopped"));
         Ok(())
     }
 
@@ -204,7 +206,8 @@ impl AgentDaemon {
             Ok(result) => {
                 self.agent.sink().emit(&AkhMessage::system(format!(
                     "[daemon:consolidation] {} entries evicted, {} episodes stored",
-                    result.entries_evicted, result.episodes_created.len(),
+                    result.entries_evicted,
+                    result.episodes_created.len(),
                 )));
                 tracing::info!(
                     evicted = result.entries_evicted,
@@ -298,8 +301,7 @@ impl AgentDaemon {
                 self.total_cycles += 1;
                 self.agent.sink().emit(&AkhMessage::system(format!(
                     "[daemon:cycle] tool={}, success={}",
-                    result.decision.chosen_tool,
-                    result.action_result.tool_output.success,
+                    result.decision.chosen_tool, result.action_result.tool_output.success,
                 )));
                 tracing::info!(
                     tool = %result.decision.chosen_tool,

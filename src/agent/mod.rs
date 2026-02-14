@@ -33,8 +33,11 @@ pub mod wasm_runtime;
 
 pub use agent::{Agent, AgentConfig, AgentPredicates};
 pub use chat::Conversation;
+#[cfg(feature = "daemon")]
+pub use daemon::{AgentDaemon, DaemonConfig};
 pub use error::{AgentError, AgentResult};
 pub use goal::{Goal, GoalStatus};
+pub use idle::{IdleScheduler, IdleTaskResult};
 pub use memory::{
     ConsolidationConfig, ConsolidationResult, EpisodicEntry, WorkingMemory, WorkingMemoryEntry,
     WorkingMemoryKind,
@@ -46,7 +49,4 @@ pub use reflect::{Adjustment, ReflectionConfig, ReflectionResult};
 pub use semantic_enrichment::{EnrichmentResult, SemanticPredicates};
 pub use synthesize::NarrativeSummary;
 pub use tool::{Tool, ToolInput, ToolOutput, ToolRegistry, ToolSignature};
-#[cfg(feature = "daemon")]
-pub use daemon::{AgentDaemon, DaemonConfig};
-pub use idle::{IdleScheduler, IdleTaskResult};
 pub use tool_manifest::{Capability, DangerInfo, DangerLevel, ToolManifest, ToolSource};

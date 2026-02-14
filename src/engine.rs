@@ -875,12 +875,7 @@ impl Engine {
         let total = {
             let mut resolver = self.entity_resolver.write().unwrap();
             resolver.learn_from_kg(&self.knowledge_graph, &self.registry)
-                + resolver.learn_from_vsa(
-                    &self.ops,
-                    &self.item_memory,
-                    &self.registry,
-                    0.65,
-                )
+                + resolver.learn_from_vsa(&self.ops, &self.item_memory, &self.registry, 0.65)
                 + resolver.learn_from_library(
                     &self.ops,
                     &self.item_memory,
@@ -890,7 +885,10 @@ impl Engine {
                 )
         };
 
-        self.entity_resolver.read().unwrap().persist_to_store(&self.store)?;
+        self.entity_resolver
+            .read()
+            .unwrap()
+            .persist_to_store(&self.store)?;
         Ok(total)
     }
 
@@ -906,8 +904,14 @@ impl Engine {
 
     /// Import equivalences and persist to durable store.
     pub fn import_equivalences(&self, equivs: &[LearnedEquivalence]) -> AkhResult<()> {
-        self.entity_resolver.write().unwrap().import_equivalences(equivs);
-        self.entity_resolver.read().unwrap().persist_to_store(&self.store)?;
+        self.entity_resolver
+            .write()
+            .unwrap()
+            .import_equivalences(equivs);
+        self.entity_resolver
+            .read()
+            .unwrap()
+            .persist_to_store(&self.store)?;
         Ok(())
     }
 
@@ -1180,7 +1184,10 @@ impl Engine {
         self.store.put_meta(b"sym_allocator_next", &encoded)?;
 
         // Persist learned equivalences.
-        self.entity_resolver.read().unwrap().persist_to_store(&self.store)?;
+        self.entity_resolver
+            .read()
+            .unwrap()
+            .persist_to_store(&self.store)?;
 
         // Sync knowledge graph to SPARQL store.
         if let Some(ref sparql) = self.sparql {

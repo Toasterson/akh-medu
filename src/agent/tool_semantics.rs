@@ -86,15 +86,30 @@ const TOOL_CONCEPTS: &[(&str, &[&str])] = &[
     (
         "file_io",
         &[
-            "file", "read", "write", "save", "export", "data", "disk", "load", "document",
-            "import", "open", "close", "directory", "folder", "path", "output", "input",
+            "file",
+            "read",
+            "write",
+            "save",
+            "export",
+            "data",
+            "disk",
+            "load",
+            "document",
+            "import",
+            "open",
+            "close",
+            "directory",
+            "folder",
+            "path",
+            "output",
+            "input",
         ],
     ),
     (
         "http_fetch",
         &[
-            "http", "url", "fetch", "web", "api", "download", "request", "network",
-            "website", "page", "online", "internet", "get", "endpoint", "link", "browse",
+            "http", "url", "fetch", "web", "api", "download", "request", "network", "website",
+            "page", "online", "internet", "get", "endpoint", "link", "browse",
         ],
     ),
     (
@@ -107,8 +122,8 @@ const TOOL_CONCEPTS: &[(&str, &[&str])] = &[
     (
         "user_interact",
         &[
-            "ask", "user", "input", "question", "interact", "human", "prompt", "dialog",
-            "clarify", "confirm", "respond", "answer", "feedback", "help",
+            "ask", "user", "input", "question", "interact", "human", "prompt", "dialog", "clarify",
+            "confirm", "respond", "answer", "feedback", "help",
         ],
     ),
     (
@@ -263,26 +278,59 @@ const TOOL_CONCEPTS: &[(&str, &[&str])] = &[
 /// so that natural-language queries activate the right tool even when
 /// few tokens overlap with the static keyword arrays.
 const SYNONYM_TABLE: &[(&str, &[&str])] = &[
-    ("search", &["find", "look", "seek", "locate", "query", "browse"]),
-    ("document", &["paper", "article", "text", "note", "file", "book"]),
+    (
+        "search",
+        &["find", "look", "seek", "locate", "query", "browse"],
+    ),
+    (
+        "document",
+        &["paper", "article", "text", "note", "file", "book"],
+    ),
     ("fetch", &["get", "retrieve", "download", "obtain", "pull"]),
     ("write", &["save", "store", "output", "export", "persist"]),
     ("read", &["load", "open", "view", "inspect", "examine"]),
     ("execute", &["run", "invoke", "launch", "start", "trigger"]),
-    ("ask", &["question", "inquire", "prompt", "request", "clarify"]),
-    ("infer", &["deduce", "derive", "conclude", "reason", "imply"]),
-    ("knowledge", &["information", "data", "facts", "content", "learn"]),
-    ("missing", &["absent", "lacking", "incomplete", "gap", "sparse"]),
+    (
+        "ask",
+        &["question", "inquire", "prompt", "request", "clarify"],
+    ),
+    (
+        "infer",
+        &["deduce", "derive", "conclude", "reason", "imply"],
+    ),
+    (
+        "knowledge",
+        &["information", "data", "facts", "content", "learn"],
+    ),
+    (
+        "missing",
+        &["absent", "lacking", "incomplete", "gap", "sparse"],
+    ),
     ("import", &["ingest", "load", "absorb", "capture", "add"]),
-    ("library", &["collection", "catalog", "archive", "repository"]),
+    (
+        "library",
+        &["collection", "catalog", "archive", "repository"],
+    ),
     ("similar", &["like", "related", "analogous", "comparable"]),
-    ("memory", &["recall", "remember", "history", "past", "episode"]),
-    ("create", &["build", "construct", "make", "generate", "produce"]),
-    ("analyze", &["examine", "inspect", "study", "evaluate", "assess"]),
+    (
+        "memory",
+        &["recall", "remember", "history", "past", "episode"],
+    ),
+    (
+        "create",
+        &["build", "construct", "make", "generate", "produce"],
+    ),
+    (
+        "analyze",
+        &["examine", "inspect", "study", "evaluate", "assess"],
+    ),
     ("command", &["shell", "terminal", "bash", "cli", "program"]),
     ("web", &["http", "url", "website", "online", "internet"]),
     ("topic", &["subject", "theme", "concept", "domain", "area"]),
-    ("quote", &["excerpt", "passage", "citation", "reference", "mention"]),
+    (
+        "quote",
+        &["excerpt", "passage", "citation", "reference", "mention"],
+    ),
 ];
 
 /// Expand a set of keywords with synonyms from the static lookup table.

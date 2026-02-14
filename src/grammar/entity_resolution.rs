@@ -969,8 +969,8 @@ mod tests {
 
     #[test]
     fn learn_from_library_discovers_equivalence() {
-        use crate::graph::index::KnowledgeGraph;
         use crate::graph::Triple;
+        use crate::graph::index::KnowledgeGraph;
         use crate::simd;
         use crate::symbol::{AtomicSymbolAllocator, SymbolKind, SymbolMeta};
         use crate::vsa::item_memory::ItemMemory;

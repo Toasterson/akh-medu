@@ -43,11 +43,10 @@ impl LibraryCatalog {
                 message: format!("create dir {}: {e}", parent.display()),
             })?;
         }
-        let json = serde_json::to_string_pretty(&self.records).map_err(|e| {
-            LibraryError::CatalogIo {
+        let json =
+            serde_json::to_string_pretty(&self.records).map_err(|e| LibraryError::CatalogIo {
                 message: format!("serialize catalog: {e}"),
-            }
-        })?;
+            })?;
         std::fs::write(&self.path, json).map_err(|e| LibraryError::CatalogIo {
             message: format!("write {}: {e}", self.path.display()),
         })?;
@@ -103,13 +102,7 @@ pub fn slugify(title: &str) -> String {
     title
         .to_lowercase()
         .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() {
-                c
-            } else {
-                '-'
-            }
-        })
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect::<String>()
         .split('-')
         .filter(|s| !s.is_empty())
@@ -124,7 +117,10 @@ mod tests {
     #[test]
     fn slugify_basic() {
         assert_eq!(slugify("Hello World"), "hello-world");
-        assert_eq!(slugify("Rust Programming Language"), "rust-programming-language");
+        assert_eq!(
+            slugify("Rust Programming Language"),
+            "rust-programming-language"
+        );
         assert_eq!(slugify("  Multiple   Spaces  "), "multiple-spaces");
         assert_eq!(slugify("special!@#chars"), "special-chars");
     }

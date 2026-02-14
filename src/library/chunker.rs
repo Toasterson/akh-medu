@@ -46,7 +46,14 @@ pub fn normalize_chunks(raw: &[ContentChunk], config: &ChunkConfig) -> Vec<Conte
     for chunk in raw {
         // If this chunk starts a new chapter, flush the buffer first.
         if chunk.chapter != buffer_chapter && !buffer.is_empty() {
-            emit_chunk(&mut result, &mut idx, &buffer, buffer_chapter, buffer_section, config);
+            emit_chunk(
+                &mut result,
+                &mut idx,
+                &buffer,
+                buffer_chapter,
+                buffer_section,
+                config,
+            );
             buffer.clear();
             buffer_words = 0;
         }
@@ -62,7 +69,14 @@ pub fn normalize_chunks(raw: &[ContentChunk], config: &ChunkConfig) -> Vec<Conte
 
         // If buffer exceeds target, flush.
         if buffer_words >= config.target_words {
-            emit_chunk(&mut result, &mut idx, &buffer, buffer_chapter, buffer_section, config);
+            emit_chunk(
+                &mut result,
+                &mut idx,
+                &buffer,
+                buffer_chapter,
+                buffer_section,
+                config,
+            );
             buffer.clear();
             buffer_words = 0;
         }
@@ -78,7 +92,14 @@ pub fn normalize_chunks(raw: &[ContentChunk], config: &ChunkConfig) -> Vec<Conte
             last.text.push_str(&buffer);
             last.word_count += buffer_words;
         } else {
-            emit_chunk(&mut result, &mut idx, &buffer, buffer_chapter, buffer_section, config);
+            emit_chunk(
+                &mut result,
+                &mut idx,
+                &buffer,
+                buffer_chapter,
+                buffer_section,
+                config,
+            );
         }
     }
 
@@ -226,7 +247,10 @@ mod tests {
     fn long_chunk_split_at_sentences() {
         // Create a chunk with many words that exceeds max.
         let sentence = "This is a test sentence with multiple words.";
-        let text = std::iter::repeat(sentence).take(20).collect::<Vec<_>>().join(" ");
+        let text = std::iter::repeat(sentence)
+            .take(20)
+            .collect::<Vec<_>>()
+            .join(" ");
         let raw = vec![make_chunk(0, &text, 0)];
         let config = ChunkConfig {
             min_words: 5,

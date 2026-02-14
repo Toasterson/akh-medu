@@ -3106,12 +3106,7 @@ fn main() -> Result<()> {
 
                 let start = std::time::Instant::now();
                 let results = if library_context {
-                    preprocess_batch_with_library(
-                        &chunks,
-                        &ctx,
-                        &engine.entity_resolver(),
-                        &engine,
-                    )
+                    preprocess_batch_with_library(&chunks, &ctx, &engine.entity_resolver(), &engine)
                 } else {
                     preprocess_batch(&chunks, &ctx)
                 };
@@ -3259,13 +3254,8 @@ fn main() -> Result<()> {
                             .into_diagnostic()?
                     } else {
                         let path = PathBuf::from(&source);
-                        akh_medu::library::ingest_file(
-                            &engine,
-                            &mut catalog,
-                            &path,
-                            ingest_config,
-                        )
-                        .into_diagnostic()?
+                        akh_medu::library::ingest_file(&engine, &mut catalog, &path, ingest_config)
+                            .into_diagnostic()?
                     };
 
                     println!("Ingested: {}", result.record.title);
@@ -3311,27 +3301,21 @@ fn main() -> Result<()> {
                 LibraryAction::Search { query, top_k } => {
                     use akh_medu::vsa::encode::encode_label;
 
-                    let query_vec =
-                        encode_label(engine.ops(), &query).into_diagnostic()?;
-                    let results = engine.item_memory().search(&query_vec, top_k).into_diagnostic()?;
+                    let query_vec = encode_label(engine.ops(), &query).into_diagnostic()?;
+                    let results = engine
+                        .item_memory()
+                        .search(&query_vec, top_k)
+                        .into_diagnostic()?;
 
                     if results.is_empty() {
                         println!("No matching content found for: \"{query}\"");
                     } else {
                         println!("Search results for \"{query}\":");
-                        println!(
-                            "{:<8} {:<10} {}",
-                            "Rank", "Sim", "Symbol"
-                        );
+                        println!("{:<8} {:<10} {}", "Rank", "Sim", "Symbol");
                         println!("{}", "-".repeat(60));
                         for (rank, result) in results.iter().enumerate() {
                             let label = engine.resolve_label(result.symbol_id);
-                            println!(
-                                "{:<8} {:<10.4} {}",
-                                rank + 1,
-                                result.similarity,
-                                label,
-                            );
+                            println!("{:<8} {:<10.4} {}", rank + 1, result.similarity, label,);
                         }
                     }
                 }
@@ -3372,10 +3356,7 @@ fn main() -> Result<()> {
                             doc.tags.join(", ")
                         }
                     );
-                    println!(
-                        "  Ingested: {} (unix timestamp)",
-                        doc.ingested_at
-                    );
+                    println!("  Ingested: {} (unix timestamp)", doc.ingested_at);
                 }
             }
         }

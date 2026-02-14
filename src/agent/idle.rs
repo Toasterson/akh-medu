@@ -38,10 +38,10 @@ impl Default for IdleScheduler {
             last_consolidation_check: now,
             last_rules: now,
             // Longer intervals than daemon — TUI is interactive, don't steal CPU.
-            equivalence_interval: Duration::from_secs(600),  // 10 min
-            reflection_interval: Duration::from_secs(300),   // 5 min
+            equivalence_interval: Duration::from_secs(600), // 10 min
+            reflection_interval: Duration::from_secs(300),  // 5 min
             consolidation_interval: Duration::from_secs(120), // 2 min
-            rules_interval: Duration::from_secs(900),        // 15 min
+            rules_interval: Duration::from_secs(900),       // 15 min
         }
     }
 }
@@ -118,7 +118,8 @@ impl IdleScheduler {
                             task: "consolidation",
                             summary: format!(
                                 "consolidated {} entries, {} episodes created",
-                                result.entries_evicted, result.episodes_created.len(),
+                                result.entries_evicted,
+                                result.episodes_created.len(),
                             ),
                         }),
                         Err(e) => Some(IdleTaskResult {
@@ -154,9 +155,7 @@ impl IdleScheduler {
                         let applied = agent.apply_adjustments(&safe).unwrap_or(0);
                         Some(IdleTaskResult {
                             task: "reflection",
-                            summary: format!(
-                                "{adj_count} insights, {applied} adjustments applied",
-                            ),
+                            summary: format!("{adj_count} insights, {applied} adjustments applied",),
                         })
                     }
                     Err(e) => Some(IdleTaskResult {
@@ -186,7 +185,8 @@ impl IdleScheduler {
                         task: "rules",
                         summary: format!(
                             "{} new triples from {} iterations",
-                            result.derived.len(), result.iterations,
+                            result.derived.len(),
+                            result.iterations,
                         ),
                     }),
                     Err(e) => Some(IdleTaskResult {

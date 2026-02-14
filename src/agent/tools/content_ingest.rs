@@ -104,21 +104,11 @@ impl Tool for ContentIngestTool {
     fn manifest(&self) -> ToolManifest {
         ToolManifest {
             name: "content_ingest".into(),
-            description: "Ingest documents (files, URLs) into the shared content library."
-                .into(),
+            description: "Ingest documents (files, URLs) into the shared content library.".into(),
             parameters: vec![
-                ToolParamSchema::required(
-                    "source",
-                    "File path or URL to ingest into the library.",
-                ),
-                ToolParamSchema::optional(
-                    "title",
-                    "Override document title.",
-                ),
-                ToolParamSchema::optional(
-                    "tags",
-                    "Comma-separated tags for categorization.",
-                ),
+                ToolParamSchema::required("source", "File path or URL to ingest into the library."),
+                ToolParamSchema::optional("title", "Override document title."),
+                ToolParamSchema::optional("tags", "Comma-separated tags for categorization."),
             ],
             danger: DangerInfo {
                 level: DangerLevel::Cautious,

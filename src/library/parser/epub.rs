@@ -21,12 +21,11 @@ impl ContentParser for EpubParser {
 
     fn parse(&self, data: &[u8]) -> LibraryResult<ParsedDocument> {
         let cursor = Cursor::new(data.to_vec());
-        let mut doc = epub::doc::EpubDoc::from_reader(cursor).map_err(|e| {
-            LibraryError::ParseError {
+        let mut doc =
+            epub::doc::EpubDoc::from_reader(cursor).map_err(|e| LibraryError::ParseError {
                 format: "epub".into(),
                 message: e.to_string(),
-            }
-        })?;
+            })?;
 
         let metadata = extract_epub_metadata(&doc);
 
@@ -107,9 +106,7 @@ impl ContentParser for EpubParser {
                         }
 
                         elements.push(DocumentElement {
-                            kind: ElementKind::Paragraph {
-                                chunk_index,
-                            },
+                            kind: ElementKind::Paragraph { chunk_index },
                             heading: format!("para:{chunk_index}"),
                             text: text.clone(),
                         });

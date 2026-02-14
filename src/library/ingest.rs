@@ -7,8 +7,8 @@ use std::path::Path;
 
 use crate::engine::Engine;
 use crate::graph::Triple;
-use crate::library::catalog::{slugify, LibraryCatalog};
-use crate::library::chunker::{normalize_chunks, ChunkConfig};
+use crate::library::catalog::{LibraryCatalog, slugify};
+use crate::library::chunker::{ChunkConfig, normalize_chunks};
 use crate::library::error::{LibraryError, LibraryResult};
 use crate::library::model::*;
 use crate::library::parser;
@@ -120,7 +120,16 @@ pub fn ingest_document(
     let mut triple_count = 0usize;
 
     // Metadata triples.
-    triple_count += add_metadata_triples(engine, doc_sym, &parsed.metadata, &preds, &source, format, &config.tags, &slug)?;
+    triple_count += add_metadata_triples(
+        engine,
+        doc_sym,
+        &parsed.metadata,
+        &preds,
+        &source,
+        format,
+        &config.tags,
+        &slug,
+    )?;
 
     // 7. Create structural elements + triples.
     let mut chapter_symbols: Vec<(usize, SymbolId)> = Vec::new();
@@ -248,10 +257,12 @@ pub fn ingest_url(
     url: &str,
     config: IngestConfig,
 ) -> LibraryResult<IngestResult> {
-    let response = ureq::get(url).call().map_err(|e| LibraryError::FetchError {
-        url: url.into(),
-        message: e.to_string(),
-    })?;
+    let response = ureq::get(url)
+        .call()
+        .map_err(|e| LibraryError::FetchError {
+            url: url.into(),
+            message: e.to_string(),
+        })?;
 
     // Detect format from Content-Type.
     let content_type = response.content_type().to_string();
@@ -382,12 +393,12 @@ fn run_nlp_extraction(engine: &Engine, text: &str, slug: &str) -> LibraryResult<
     for sentence in &sentences {
         for (subject, predicate, object, confidence) in extract_triples(sentence) {
             let s = create_entity(engine, &subject, slug)?;
-            let p = engine
-                .resolve_or_create_relation(&predicate)
-                .map_err(|e| LibraryError::IngestFailed {
+            let p = engine.resolve_or_create_relation(&predicate).map_err(|e| {
+                LibraryError::IngestFailed {
                     document: slug.into(),
                     message: format!("create relation '{predicate}': {e}"),
-                })?;
+                }
+            })?;
             let o = create_entity(engine, &object, slug)?;
             let triple = Triple::new(s, p, o).with_confidence(confidence);
             let _ = engine.add_triple(&triple); // Tolerate duplicates.
@@ -398,7 +409,13 @@ fn run_nlp_extraction(engine: &Engine, text: &str, slug: &str) -> LibraryResult<
 }
 
 /// Store a provenance record for a derived chunk symbol.
-fn store_provenance(engine: &Engine, symbol: SymbolId, slug: &str, format: ContentFormat, chunk_index: u32) {
+fn store_provenance(
+    engine: &Engine,
+    symbol: SymbolId,
+    slug: &str,
+    format: ContentFormat,
+    chunk_index: u32,
+) {
     let kind = DerivationKind::DocumentIngested {
         document_id: slug.to_string(),
         format: format.as_str().to_string(),
@@ -450,12 +467,47 @@ fn extract_triples(sentence: &str) -> Vec<ExtractedTriple> {
     try_pattern(&words, &lower, &["is", "an"], "is-a", 0.9, &mut results);
     try_pattern(&words, &lower, &["has", "a"], "has-a", 0.85, &mut results);
     try_pattern(&words, &lower, &["has", "an"], "has-a", 0.85, &mut results);
-    try_pattern(&words, &lower, &["contains"], "contains", 0.85, &mut results);
-    try_pattern(&words, &lower, &["is", "part", "of"], "part-of", 0.9, &mut results);
+    try_pattern(
+        &words,
+        &lower,
+        &["contains"],
+        "contains",
+        0.85,
+        &mut results,
+    );
+    try_pattern(
+        &words,
+        &lower,
+        &["is", "part", "of"],
+        "part-of",
+        0.9,
+        &mut results,
+    );
     try_pattern(&words, &lower, &["causes"], "causes", 0.85, &mut results);
-    try_pattern(&words, &lower, &["is", "located", "in"], "located-in", 0.9, &mut results);
-    try_pattern(&words, &lower, &["is", "similar", "to"], "similar-to", 0.8, &mut results);
-    try_pattern(&words, &lower, &["is", "made", "of"], "composed-of", 0.85, &mut results);
+    try_pattern(
+        &words,
+        &lower,
+        &["is", "located", "in"],
+        "located-in",
+        0.9,
+        &mut results,
+    );
+    try_pattern(
+        &words,
+        &lower,
+        &["is", "similar", "to"],
+        "similar-to",
+        0.8,
+        &mut results,
+    );
+    try_pattern(
+        &words,
+        &lower,
+        &["is", "made", "of"],
+        "composed-of",
+        0.85,
+        &mut results,
+    );
     try_pattern(&words, &lower, &["are"], "is-a", 0.85, &mut results);
     try_pattern(&words, &lower, &["has"], "has-a", 0.85, &mut results);
 
