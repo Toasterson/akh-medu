@@ -1,0 +1,15 @@
+[book]
+title = "akh-medu"
+authors = ["akh-medu contributors"]
+description = "Neuro-symbolic AI engine: VSA + knowledge graphs + symbolic reasoning"
+language = "en"
+src = "src"
+
+[build]
+build-dir = "book"
+
+[output.html]
+git-repository-url = "https://github.com/akh-medu/akh-medu"
+
+[output.html.search]
+enable = true
