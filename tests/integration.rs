@@ -2811,22 +2811,6 @@ fn intent_classify_freeform() {
 }
 
 #[test]
-fn ollama_client_probe_unreachable() {
-    use akh_medu::agent::{OllamaClient, OllamaConfig};
-
-    let config = OllamaConfig {
-        base_url: "http://127.0.0.1:1".into(),
-        ..Default::default()
-    };
-    let mut client = OllamaClient::new(config);
-    assert!(!client.probe(), "probe to unreachable port should return false");
-    assert!(!client.is_available());
-
-    // generate/chat should fail gracefully
-    assert!(client.generate("test", None).is_err());
-}
-
-#[test]
 fn conversation_serialize_deserialize() {
     use akh_medu::agent::Conversation;
 
@@ -2843,7 +2827,7 @@ fn conversation_serialize_deserialize() {
 }
 
 #[test]
-fn chat_roundtrip_without_ollama() {
+fn chat_roundtrip_intent_pipeline() {
     // Integration test: classify intent, execute assertion via TextIngestTool, query result.
     let engine = Engine::new(EngineConfig {
         dimension: Dimension::TEST,
@@ -2890,8 +2874,8 @@ fn chat_roundtrip_without_ollama() {
 }
 
 #[test]
-fn graceful_fallback_without_ollama() {
-    // All features should work without Ollama — no panics, no unwraps on None.
+fn core_features_work_standalone() {
+    // All core features work — no panics, no unwraps on None.
     let engine = Engine::new(EngineConfig {
         dimension: Dimension::TEST,
         ..Default::default()
@@ -2899,20 +2883,20 @@ fn graceful_fallback_without_ollama() {
     .unwrap();
     let engine = Arc::new(engine);
 
-    // Agent creation works without Ollama.
+    // Agent creation works.
     let agent = Agent::new(Arc::clone(&engine), AgentConfig::default()).unwrap();
     assert_eq!(agent.cycle_count(), 0);
 
-    // Conversation works without Ollama.
+    // Conversation works.
     let mut conv = akh_medu::agent::Conversation::new(10);
     conv.add_turn("test".into(), "response".into());
     assert_eq!(conv.len(), 1);
 
-    // Intent classification works without Ollama (regex-only).
+    // Intent classification works (regex-based).
     let intent = akh_medu::agent::classify_intent("What is the capital of France?");
     assert!(matches!(intent, akh_medu::agent::UserIntent::Query { .. }));
 
-    // Text ingest works without Ollama (regex extraction).
+    // Text ingest works (regex extraction).
     use akh_medu::agent::tool::Tool;
     let input = akh_medu::agent::ToolInput::new().with_param("text", "Paris is the capital of France");
     let output = akh_medu::agent::tools::TextIngestTool.execute(&engine, input).unwrap();

@@ -2,7 +2,7 @@
 //! Markdown and/or JSON documentation.
 //!
 //! Supports multiple targets: full architecture overview, single module, single
-//! type, or dependency graph. Optionally polishes Markdown output via LLM.
+//! type, or dependency graph.
 
 use std::collections::{BTreeMap, HashSet};
 
@@ -141,11 +141,6 @@ impl Tool for DocGenTool {
                     description: "Output format: 'markdown' (default), 'json', or 'both'.".into(),
                     required: false,
                 },
-                ToolParam {
-                    name: "polish".into(),
-                    description: "Use LLM to polish Markdown output. Default: false.".into(),
-                    required: false,
-                },
             ],
         }
     }
@@ -156,11 +151,6 @@ impl Tool for DocGenTool {
             .get("format")
             .map(DocFormat::parse)
             .unwrap_or(DocFormat::Markdown);
-        let polish: bool = input
-            .get("polish")
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(false);
-
         let target = DocTarget::parse(target_str);
         let preds = CodePredicates::init(engine)?;
 
@@ -175,10 +165,7 @@ impl Tool for DocGenTool {
         let triples_consulted = engine.all_triples().len();
 
         if format == DocFormat::Markdown || format == DocFormat::Both {
-            let mut md = render_markdown(&sections, 1);
-            if polish {
-                md = polish_with_llm(engine, &md);
-            }
+            let md = render_markdown(&sections, 1);
             result_parts.push(md);
         }
 
@@ -203,10 +190,6 @@ impl Tool for DocGenTool {
                 ToolParamSchema::optional(
                     "format",
                     "Output format: 'markdown' (default), 'json', or 'both'.",
-                ),
-                ToolParamSchema::optional(
-                    "polish",
-                    "Use LLM to polish Markdown output (default: false).",
                 ),
             ],
             danger: DangerInfo {
@@ -645,29 +628,6 @@ fn get_string_object(engine: &Engine, subject: SymbolId, predicate: SymbolId) ->
         .into_iter()
         .find(|t| t.predicate == predicate)
         .map(|t| engine.resolve_label(t.object))
-}
-
-/// Optional LLM polishing of Markdown.
-fn polish_with_llm(_engine: &Engine, markdown: &str) -> String {
-    use crate::agent::llm::{OllamaClient, OllamaConfig};
-
-    let mut client = OllamaClient::new(OllamaConfig::default());
-    if !client.probe() {
-        tracing::info!("Ollama not available, skipping LLM polish");
-        return markdown.to_string();
-    }
-
-    let system = "You are a technical writer. Polish the following auto-generated documentation \
-                  into clear prose. Do not add facts not present. Keep all technical details accurate. \
-                  Return only the polished Markdown.";
-
-    match client.generate(markdown, Some(system)) {
-        Ok(polished) => polished,
-        Err(e) => {
-            tracing::warn!(error = %e, "LLM polish failed, using template output");
-            markdown.to_string()
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------

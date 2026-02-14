@@ -118,8 +118,8 @@ pub struct Agent {
     pub(crate) plans: std::collections::HashMap<u64, Plan>,
     /// Most recent reflection result.
     pub(crate) last_reflection: Option<ReflectionResult>,
-    /// Optional LLM client for narrative polishing.
-    pub(crate) llm_client: Option<super::llm::OllamaClient>,
+    /// Structured message output sink.
+    pub(crate) sink: Arc<dyn crate::message::MessageSink>,
     /// Optional Jungian psyche (loaded from the psyche compartment).
     pub(crate) psyche: Option<crate::compartment::psyche::Psyche>,
     /// Optional WASM tool runtime (only when `wasm-tools` feature is enabled).
@@ -295,7 +295,7 @@ impl Agent {
             cycle_count: 0,
             plans: std::collections::HashMap::new(),
             last_reflection: None,
-            llm_client: None,
+            sink: Arc::new(crate::message::StdoutSink),
             psyche,
             #[cfg(feature = "wasm-tools")]
             wasm_runtime: super::wasm_runtime::WasmToolRuntime::new().ok(),
@@ -481,9 +481,14 @@ impl Agent {
         &self.predicates
     }
 
-    /// Set the optional LLM client for narrative polishing.
-    pub fn set_llm_client(&mut self, client: super::llm::OllamaClient) {
-        self.llm_client = Some(client);
+    /// Set the message sink for structured output.
+    pub fn set_sink(&mut self, sink: Arc<dyn crate::message::MessageSink>) {
+        self.sink = sink;
+    }
+
+    /// Get a reference to the current message sink.
+    pub fn sink(&self) -> &dyn crate::message::MessageSink {
+        self.sink.as_ref()
     }
 
     /// Get the agent's psyche (read-only).
@@ -502,7 +507,6 @@ impl Agent {
             goal,
             self.working_memory.entries(),
             &self.engine,
-            self.llm_client.as_ref(),
         )
     }
 
@@ -516,7 +520,6 @@ impl Agent {
             goal,
             self.working_memory.entries(),
             &self.engine,
-            self.llm_client.as_ref(),
             grammar,
         )
     }
@@ -939,7 +942,7 @@ impl Agent {
             cycle_count,
             plans: std::collections::HashMap::new(),
             last_reflection: None,
-            llm_client: None,
+            sink: Arc::new(crate::message::StdoutSink),
             psyche,
             #[cfg(feature = "wasm-tools")]
             wasm_runtime: super::wasm_runtime::WasmToolRuntime::new().ok(),

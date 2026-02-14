@@ -99,9 +99,6 @@ pub enum AgentError {
     )]
     Engine(Box<crate::error::AkhError>),
 
-    #[error(transparent)]
-    #[diagnostic(transparent)]
-    Llm(#[from] super::llm::LlmError),
 }
 
 impl From<crate::error::AkhError> for AgentError {

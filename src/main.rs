@@ -24,9 +24,13 @@ use akh_medu::vsa::Dimension;
 #[derive(Parser)]
 #[command(name = "akh-medu", version, about = "Neuro-symbolic AI engine")]
 struct Cli {
-    /// Data directory for persistent storage.
+    /// Data directory for persistent storage (overrides XDG workspace path).
     #[arg(long, global = true)]
     data_dir: Option<PathBuf>,
+
+    /// Workspace name (default: "default"). Workspaces live under XDG data dir.
+    #[arg(short = 'w', long, global = true, default_value = "default")]
+    workspace: String,
 
     /// Hypervector dimension.
     #[arg(long, global = true, default_value = "10000")]
@@ -42,8 +46,14 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Initialize a new akh-medu data directory.
+    /// Initialize a new workspace (creates XDG directory structure).
     Init,
+
+    /// Manage workspaces.
+    Workspace {
+        #[command(subcommand)]
+        action: WorkspaceAction,
+    },
 
     /// Ingest triples from a file (JSON, CSV, or text format).
     Ingest {
@@ -234,17 +244,20 @@ enum Commands {
         action: AgentAction,
     },
 
-    /// Interactive chat with the knowledge base.
+    /// Manage seed packs (knowledge bootstrapping).
+    Seed {
+        #[command(subcommand)]
+        action: SeedAction,
+    },
+
+    /// Interactive chat with the knowledge base (launches TUI).
     Chat {
         /// Skill pack to load on start (optional).
         #[arg(long)]
         skill: Option<String>,
-        /// Ollama model override (default: llama3.2).
+        /// Headless mode: use plain stdin/stdout instead of TUI.
         #[arg(long)]
-        model: Option<String>,
-        /// Disable Ollama (regex-only mode).
-        #[arg(long)]
-        no_ollama: bool,
+        headless: bool,
     },
 
     /// Ingest Rust source code into the knowledge graph.
@@ -449,12 +462,6 @@ enum AgentAction {
         /// Maximum OODA cycles.
         #[arg(long, default_value = "10")]
         max_cycles: usize,
-        /// Ollama model override.
-        #[arg(long)]
-        model: Option<String>,
-        /// Disable Ollama LLM polishing.
-        #[arg(long)]
-        no_ollama: bool,
         /// Fresh start: ignore persisted goals from previous sessions.
         #[arg(long)]
         fresh: bool,
@@ -478,11 +485,14 @@ enum AgentAction {
         #[arg(long, default_value = "10")]
         max_cycles: usize,
     },
-    /// Interactive REPL: run cycles one at a time with user input between each.
+    /// Interactive REPL (launches TUI).
     Repl {
         /// Goal descriptions (comma-separated). Omit to resume existing goals.
         #[arg(long)]
         goals: Option<String>,
+        /// Headless mode: use plain stdin/stdout instead of TUI.
+        #[arg(long)]
+        headless: bool,
     },
     /// Generate and display a plan for a goal.
     Plan {
@@ -515,20 +525,17 @@ enum AgentAction {
     },
     /// Discover schema patterns from the knowledge graph.
     Schema,
-    /// Interactive chat: ask questions, agent explores and answers in prose.
+    /// Interactive chat (launches TUI).
     Chat {
-        /// Ollama model override (default: llama3.2).
-        #[arg(long)]
-        model: Option<String>,
-        /// Disable Ollama LLM polishing.
-        #[arg(long)]
-        no_ollama: bool,
         /// Maximum OODA cycles per question.
         #[arg(long, default_value = "5")]
         max_cycles: usize,
         /// Fresh start: ignore persisted session and goals.
         #[arg(long)]
         fresh: bool,
+        /// Headless mode: use plain stdin/stdout instead of TUI.
+        #[arg(long)]
+        headless: bool,
     },
 }
 
@@ -614,6 +621,40 @@ enum EquivalenceAction {
     Import,
 }
 
+#[derive(Subcommand)]
+enum SeedAction {
+    /// List available seed packs.
+    List,
+    /// Apply a seed pack to the current workspace.
+    Apply {
+        /// Seed pack ID.
+        pack: String,
+    },
+    /// Show which seeds have been applied.
+    Status,
+}
+
+#[derive(Subcommand)]
+enum WorkspaceAction {
+    /// List all workspaces.
+    List,
+    /// Create a new workspace.
+    Create {
+        /// Workspace name.
+        name: String,
+    },
+    /// Delete a workspace and all its data.
+    Delete {
+        /// Workspace name.
+        name: String,
+    },
+    /// Show workspace info.
+    Info {
+        /// Workspace name (defaults to current workspace).
+        name: Option<String>,
+    },
+}
+
 fn main() -> Result<()> {
     miette::set_hook(Box::new(|_| {
         Box::new(
@@ -640,25 +681,163 @@ fn main() -> Result<()> {
 
     let language = Language::from_code(&cli.language).unwrap_or(Language::Auto);
 
+    // Resolve data directory: explicit --data-dir wins, otherwise XDG workspace.
+    let (data_dir, xdg_paths) = if let Some(ref explicit) = cli.data_dir {
+        (Some(explicit.clone()), None)
+    } else {
+        match akh_medu::paths::AkhPaths::resolve() {
+            Ok(paths) => {
+                let ws = paths.workspace(&cli.workspace);
+                let dir = ws.kg_dir.clone();
+                (Some(dir), Some(paths))
+            }
+            Err(_) => (None, None),
+        }
+    };
+
     let config = EngineConfig {
         dimension: Dimension(cli.dimension),
-        data_dir: cli.data_dir.clone(),
+        data_dir: data_dir.clone(),
         language,
         ..Default::default()
     };
 
     match cli.command {
         Commands::Init => {
-            let data_dir = cli.data_dir.unwrap_or_else(|| PathBuf::from(".akh-medu"));
+            // Resolve the effective data directory.
+            let effective_dir = if let Some(ref explicit) = cli.data_dir {
+                explicit.clone()
+            } else if let Some(ref paths) = xdg_paths {
+                let ws_paths = paths.workspace(&cli.workspace);
+                paths.ensure_dirs().into_diagnostic()?;
+                ws_paths.ensure_dirs().into_diagnostic()?;
+
+                // Save default workspace config if it doesn't exist.
+                let config_path = paths.workspace_config_file(&cli.workspace);
+                if !config_path.exists() {
+                    let ws_config =
+                        akh_medu::workspace::WorkspaceConfig::with_name(&cli.workspace);
+                    ws_config.save(&config_path).into_diagnostic()?;
+                }
+
+                ws_paths.kg_dir.clone()
+            } else {
+                PathBuf::from(".akh-medu")
+            };
+
             let config = EngineConfig {
-                data_dir: Some(data_dir.clone()),
+                data_dir: Some(effective_dir.clone()),
                 dimension: Dimension(cli.dimension),
                 language,
                 ..Default::default()
             };
             let engine = Engine::new(config).into_diagnostic()?;
-            println!("Initialized akh-medu at {}", data_dir.display());
+            println!("Initialized workspace \"{}\" at {}", cli.workspace, effective_dir.display());
             println!("{}", engine.info());
+        }
+
+        Commands::Workspace { action } => {
+            let paths = xdg_paths.ok_or_else(|| {
+                miette::miette!("Cannot resolve XDG paths. Set HOME environment variable.")
+            })?;
+            paths.ensure_dirs().into_diagnostic()?;
+
+            let mgr = akh_medu::workspace::WorkspaceManager::new(paths);
+
+            match action {
+                WorkspaceAction::List => {
+                    let names = mgr.list();
+                    if names.is_empty() {
+                        println!("No workspaces found. Create one with: akh-medu workspace create <name>");
+                    } else {
+                        println!("Workspaces:");
+                        for name in &names {
+                            println!("  {name}");
+                        }
+                    }
+                }
+                WorkspaceAction::Create { name } => {
+                    let ws_config = akh_medu::workspace::WorkspaceConfig::with_name(&name);
+                    let ws_paths = mgr.create(ws_config).into_diagnostic()?;
+                    println!("Created workspace \"{name}\" at {}", ws_paths.root.display());
+                }
+                WorkspaceAction::Delete { name } => {
+                    mgr.delete(&name).into_diagnostic()?;
+                    println!("Deleted workspace \"{name}\".");
+                }
+                WorkspaceAction::Info { name } => {
+                    let ws_name = name.as_deref().unwrap_or(&cli.workspace);
+                    let info = mgr.info(ws_name).into_diagnostic()?;
+                    println!("Workspace: {}", info.name);
+                    println!("  Dimension: {}", info.dimension);
+                    println!("  Encoding: {}", info.encoding);
+                    println!("  Language: {}", info.language);
+                    println!("  Max memory: {} MB", info.max_memory_mb);
+                    println!("  Seed packs: {}", if info.seed_packs.is_empty() {
+                        "(none)".to_string()
+                    } else {
+                        info.seed_packs.join(", ")
+                    });
+                    let ws_paths = mgr.paths().workspace(ws_name);
+                    println!("  Data dir: {}", ws_paths.root.display());
+                }
+            }
+        }
+
+        Commands::Seed { action } => {
+            let seeds_dir = xdg_paths
+                .as_ref()
+                .map(|p| p.seeds_dir())
+                .unwrap_or_else(|| PathBuf::from(".akh-medu/seeds"));
+
+            let registry = akh_medu::seeds::SeedRegistry::discover(&seeds_dir);
+
+            match action {
+                SeedAction::List => {
+                    let packs = registry.list();
+                    if packs.is_empty() {
+                        println!("No seed packs available.");
+                    } else {
+                        println!("Available seed packs:");
+                        for pack in packs {
+                            let source = match &pack.source {
+                                akh_medu::seeds::SeedSource::Bundled => "bundled",
+                                akh_medu::seeds::SeedSource::External(_) => "external",
+                            };
+                            println!(
+                                "  {} v{} ({}) — {} [{} triples]",
+                                pack.id,
+                                pack.version,
+                                source,
+                                pack.description,
+                                pack.triples.len(),
+                            );
+                        }
+                    }
+                }
+                SeedAction::Apply { pack } => {
+                    let engine = Engine::new(config).into_diagnostic()?;
+                    let report = registry.apply(&pack, &engine).into_diagnostic()?;
+                    if report.already_applied {
+                        println!("Seed \"{}\" was already applied.", report.id);
+                    } else {
+                        println!(
+                            "Applied seed \"{}\": {} triples added, {} skipped.",
+                            report.id, report.triples_applied, report.triples_skipped,
+                        );
+                    }
+                }
+                SeedAction::Status => {
+                    let engine = Engine::new(config).into_diagnostic()?;
+                    let packs = registry.list();
+                    println!("Seed status for workspace \"{}\":", cli.workspace);
+                    for pack in packs {
+                        let applied = akh_medu::seeds::is_seed_applied_public(&engine, &pack.id);
+                        let status = if applied { "applied" } else { "not applied" };
+                        println!("  {} — {status}", pack.id);
+                    }
+                }
+            }
         }
 
         Commands::Ingest { file, format, csv_format, max_sentences } => {
@@ -1216,11 +1395,10 @@ fn main() -> Result<()> {
                     println!("  rules:       {}", info.rule_count);
                 }
                 SkillAction::Scaffold { name } => {
-                    let data_dir = cli
-                        .data_dir
+                    let skill_base = data_dir
                         .as_deref()
                         .unwrap_or_else(|| std::path::Path::new(".akh-medu"));
-                    let skill_dir = data_dir.join("skills").join(&name);
+                    let skill_dir = skill_base.join("skills").join(&name);
                     std::fs::create_dir_all(&skill_dir).into_diagnostic()?;
 
                     // Write skill.json template.
@@ -1595,8 +1773,6 @@ fn main() -> Result<()> {
                 AgentAction::Run {
                     goals,
                     max_cycles,
-                    model,
-                    no_ollama,
                     fresh,
                 } => {
                     let agent_config = AgentConfig {
@@ -1608,21 +1784,6 @@ fn main() -> Result<()> {
 
                     if fresh {
                         agent.clear_goals();
-                    }
-
-                    // Optionally set up Ollama for narrative polishing.
-                    if !no_ollama {
-                        let mut ollama_config = akh_medu::agent::OllamaConfig::default();
-                        if let Some(ref m) = model {
-                            ollama_config.model = m.clone();
-                        }
-                        let mut client = akh_medu::agent::OllamaClient::new(ollama_config);
-                        if client.probe() {
-                            if let Err(e) = client.ensure_model() {
-                                eprintln!("Warning: {e}");
-                            }
-                            agent.set_llm_client(client);
-                        }
                     }
 
                     for goal_str in goals.split(',') {
@@ -1794,321 +1955,107 @@ fn main() -> Result<()> {
                     agent.persist_session().into_diagnostic()?;
                 }
 
-                AgentAction::Repl { goals } => {
-                    // Resume or create a fresh agent.
-                    let agent_config = AgentConfig::default();
-                    let mut agent = if goals.is_none()
-                        && Agent::has_persisted_session(&engine)
-                    {
-                        let a =
-                            Agent::resume(Arc::clone(&engine), agent_config).into_diagnostic()?;
-                        println!(
-                            "Resumed session: cycle {}, {} WM entries, {} goals",
-                            a.cycle_count(),
-                            a.working_memory().len(),
-                            a.goals().len(),
-                        );
-                        a
+                AgentAction::Repl { goals, headless } => {
+                    if !headless {
+                        // TUI mode.
+                        let agent_config = AgentConfig::default();
+                        let fresh = goals.is_none();
+                        let mut agent = if !fresh && Agent::has_persisted_session(&engine) {
+                            Agent::resume(Arc::clone(&engine), agent_config).into_diagnostic()?
+                        } else {
+                            Agent::new(Arc::clone(&engine), agent_config).into_diagnostic()?
+                        };
+
+                        // Add goals if provided.
+                        if let Some(ref goals_str) = goals {
+                            for goal_str in goals_str.split(',') {
+                                let goal = goal_str.trim();
+                                if !goal.is_empty() {
+                                    agent
+                                        .add_goal(goal, 128, "Agent-determined completion")
+                                        .into_diagnostic()?;
+                                }
+                            }
+                        }
+
+                        let ws_name = cli.workspace.clone();
+                        let mut tui = akh_medu::tui::AkhTui::new(ws_name, Arc::clone(&engine), agent);
+                        tui.run()?;
                     } else {
-                        Agent::new(Arc::clone(&engine), agent_config).into_diagnostic()?
-                    };
+                        // Headless REPL (legacy stdin/stdout mode).
+                        let agent_config = AgentConfig::default();
+                        let mut agent = if goals.is_none()
+                            && Agent::has_persisted_session(&engine)
+                        {
+                            let a =
+                                Agent::resume(Arc::clone(&engine), agent_config).into_diagnostic()?;
+                            println!(
+                                "Resumed session: cycle {}, {} WM entries, {} goals",
+                                a.cycle_count(),
+                                a.working_memory().len(),
+                                a.goals().len(),
+                            );
+                            a
+                        } else {
+                            Agent::new(Arc::clone(&engine), agent_config).into_diagnostic()?
+                        };
 
-                    // Add goals if provided.
-                    if let Some(ref goals_str) = goals {
-                        for goal_str in goals_str.split(',') {
-                            let goal = goal_str.trim();
-                            if !goal.is_empty() {
-                                agent
-                                    .add_goal(goal, 128, "Agent-determined completion")
-                                    .into_diagnostic()?;
+                        if let Some(ref goals_str) = goals {
+                            for goal_str in goals_str.split(',') {
+                                let goal = goal_str.trim();
+                                if !goal.is_empty() {
+                                    agent
+                                        .add_goal(goal, 128, "Agent-determined completion")
+                                        .into_diagnostic()?;
+                                }
                             }
                         }
-                    }
 
-                    println!("Agent REPL — q:quit, c:consolidate, p:plan, r:reflect, s:status, t:tools, i:infer, g:gaps, d:schema, h:hiero, hl:legend, Enter:cycle");
-                    print_repl_status(&agent, &engine);
+                        println!("Agent REPL (headless) — q:quit, s:status, Enter:cycle");
+                        print_repl_status(&agent, &engine);
 
-                    let stdin = std::io::stdin();
-                    let mut input = String::new();
+                        let stdin = std::io::stdin();
+                        let mut input = String::new();
 
-                    loop {
-                        input.clear();
-                        print!("> ");
-                        // Flush stdout so the prompt appears before blocking on read.
-                        use std::io::Write;
-                        std::io::stdout().flush().ok();
+                        loop {
+                            input.clear();
+                            print!("> ");
+                            use std::io::Write;
+                            std::io::stdout().flush().ok();
 
-                        if stdin.read_line(&mut input).into_diagnostic()? == 0 {
-                            // EOF
-                            break;
-                        }
-
-                        let cmd = input.trim();
-
-                        match cmd {
-                            "q" | "quit" | "exit" => break,
-                            "c" | "consolidate" => {
-                                match agent.consolidate() {
-                                    Ok(r) => println!(
-                                        "Consolidated: {} persisted, {} evicted",
-                                        r.entries_persisted, r.entries_evicted,
-                                    ),
-                                    Err(e) => println!("Consolidation error: {e}"),
-                                }
+                            if stdin.read_line(&mut input).into_diagnostic()? == 0 {
+                                break;
                             }
-                            "s" | "status" => {
-                                print_repl_status(&agent, &engine);
-                            }
-                            "t" | "tools" => {
-                                for sig in agent.list_tools() {
-                                    println!("  {} — {}", sig.name, sig.description);
-                                }
-                            }
-                            "p" | "plan" => {
-                                let active = agent.goals().iter()
-                                    .find(|g| matches!(g.status, akh_medu::agent::GoalStatus::Active));
-                                if let Some(goal) = active {
-                                    let gid = goal.symbol_id;
-                                    match agent.plan_goal(gid) {
-                                        Ok(plan) => {
-                                            println!("Plan: {}", plan.strategy);
-                                            for step in &plan.steps {
-                                                let status = match &step.status {
-                                                    akh_medu::agent::StepStatus::Pending => ".",
-                                                    akh_medu::agent::StepStatus::Active => ">",
-                                                    akh_medu::agent::StepStatus::Completed => "✓",
-                                                    akh_medu::agent::StepStatus::Failed { .. } => "✗",
-                                                    akh_medu::agent::StepStatus::Skipped => "-",
-                                                };
-                                                println!(
-                                                    "  [{}] {}: {}",
-                                                    status, step.tool_name, step.rationale,
-                                                );
-                                            }
-                                        }
-                                        Err(e) => println!("Plan error: {e}"),
-                                    }
-                                } else {
-                                    println!("No active goals to plan for.");
-                                }
-                            }
-                            "r" | "reflect" => {
-                                match agent.reflect() {
-                                    Ok(result) => {
-                                        println!("{}", result.summary);
-                                        for adj in &result.adjustments {
-                                            match adj {
-                                                akh_medu::agent::Adjustment::IncreasePriority { from, to, reason, .. } =>
-                                                    println!("  [+] {} → {}: {}", from, to, reason),
-                                                akh_medu::agent::Adjustment::DecreasePriority { from, to, reason, .. } =>
-                                                    println!("  [-] {} → {}: {}", from, to, reason),
-                                                akh_medu::agent::Adjustment::SuggestNewGoal { description, reason, .. } =>
-                                                    println!("  [new] {}: {}", description, reason),
-                                                akh_medu::agent::Adjustment::SuggestAbandon { reason, .. } =>
-                                                    println!("  [abandon] {}", reason),
-                                            }
-                                        }
-                                    }
-                                    Err(e) => println!("Reflect error: {e}"),
-                                }
-                            }
-                            "i" | "infer" => {
-                                let rule_config = RuleEngineConfig {
-                                    max_iterations: 5,
-                                    min_confidence: 0.1,
-                                    ..Default::default()
-                                };
-                                match engine.run_rules(rule_config) {
-                                    Ok(result) => {
-                                        println!(
-                                            "Derived {} triple(s) in {} iteration(s){}",
-                                            result.derived.len(),
-                                            result.iterations,
-                                            if result.reached_fixpoint { " (fixpoint)" } else { "" },
-                                        );
-                                        for dt in &result.derived {
+
+                            let cmd = input.trim();
+                            match cmd {
+                                "q" | "quit" | "exit" => break,
+                                "s" | "status" => print_repl_status(&agent, &engine),
+                                _ => {
+                                    match agent.run_cycle() {
+                                        Ok(result) => {
                                             println!(
-                                                "  [{}] \"{}\" -> {} -> \"{}\"",
-                                                dt.rule_name,
-                                                engine.resolve_label(dt.triple.subject),
-                                                engine.resolve_label(dt.triple.predicate),
-                                                engine.resolve_label(dt.triple.object),
+                                                "Cycle {} — tool={}, progress={:?}",
+                                                result.cycle_number,
+                                                result.decision.chosen_tool,
+                                                result.action_result.goal_progress,
                                             );
-                                        }
-                                    }
-                                    Err(e) => println!("Infer error: {e}"),
-                                }
-                            }
-                            cmd if cmd.starts_with("g ") || cmd.starts_with("gaps ") => {
-                                let goal_name = cmd
-                                    .strip_prefix("gaps ")
-                                    .or_else(|| cmd.strip_prefix("g "))
-                                    .unwrap_or("")
-                                    .trim();
-                                if goal_name.is_empty() {
-                                    println!("Usage: g <goal-symbol>");
-                                } else {
-                                    match engine.resolve_symbol(goal_name) {
-                                        Ok(goal_id) => {
-                                            let gap_config = GapAnalysisConfig {
-                                                max_gaps: 10,
-                                                ..Default::default()
-                                            };
-                                            match engine.analyze_gaps(&[goal_id], gap_config) {
-                                                Ok(result) => {
-                                                    println!(
-                                                        "Gaps: {} analyzed, {} dead ends, {:.0}% coverage",
-                                                        result.entities_analyzed,
-                                                        result.dead_ends,
-                                                        result.coverage_score * 100.0,
-                                                    );
-                                                    for gap in &result.gaps {
-                                                        println!(
-                                                            "  [{:.2}] \"{}\" — {}",
-                                                            gap.severity,
-                                                            engine.resolve_label(gap.entity),
-                                                            gap.description,
-                                                        );
-                                                    }
-                                                }
-                                                Err(e) => println!("Gap analysis error: {e}"),
-                                            }
-                                        }
-                                        Err(e) => println!("Symbol resolve error: {e}"),
-                                    }
-                                }
-                            }
-                            "hl" | "legend" => {
-                                let rc = glyph::RenderConfig {
-                                    color: true,
-                                    notation: glyph::NotationConfig {
-                                        use_pua: glyph::catalog::font_available(),
-                                        ..Default::default()
-                                    },
-                                    ..Default::default()
-                                };
-                                println!("{}", glyph::render::render_legend(&rc));
-                            }
-                            cmd if cmd == "h" || cmd == "hiero" || cmd.starts_with("h ") || cmd.starts_with("hiero ") => {
-                                let entity_name = cmd
-                                    .strip_prefix("hiero ")
-                                    .or_else(|| cmd.strip_prefix("h "))
-                                    .unwrap_or("")
-                                    .trim();
-
-                                let rc = glyph::RenderConfig {
-                                    color: true,
-                                    notation: glyph::NotationConfig {
-                                        use_pua: glyph::catalog::font_available(),
-                                        ..Default::default()
-                                    },
-                                    ..Default::default()
-                                };
-
-                                if entity_name.is_empty() {
-                                    // Render all triples.
-                                    let triples = engine.all_triples();
-                                    if triples.is_empty() {
-                                        println!("No triples in knowledge graph.");
-                                    } else {
-                                        println!(
-                                            "{}",
-                                            glyph::render::render_to_terminal(&engine, &triples, &rc)
-                                        );
-                                    }
-                                } else {
-                                    match engine.resolve_symbol(entity_name) {
-                                        Ok(sym_id) => {
-                                            match engine.extract_subgraph(&[sym_id], 1) {
-                                                Ok(result) => {
-                                                    if result.triples.is_empty() {
-                                                        println!("No triples around \"{}\".", entity_name);
-                                                    } else {
-                                                        println!(
-                                                            "{}",
-                                                            glyph::render::render_to_terminal(
-                                                                &engine,
-                                                                &result.triples,
-                                                                &rc,
-                                                            )
-                                                        );
-                                                    }
-                                                }
-                                                Err(e) => println!("Subgraph error: {e}"),
-                                            }
-                                        }
-                                        Err(e) => println!("Symbol error: {e}"),
-                                    }
-                                }
-                            }
-                            "d" | "schema" => {
-                                let schema_config = SchemaDiscoveryConfig::default();
-                                match engine.discover_schema(schema_config) {
-                                    Ok(result) => {
-                                        if result.types.is_empty() {
-                                            println!("No schema patterns discovered.");
-                                        } else {
-                                            println!("Discovered {} type(s):", result.types.len());
-                                            for dt in &result.types {
-                                                let name = dt
-                                                    .type_symbol
-                                                    .map(|s| engine.resolve_label(s))
-                                                    .unwrap_or_else(|| {
-                                                        format!("cluster({})", engine.resolve_label(dt.exemplar))
-                                                    });
-                                                println!(
-                                                    "  {} — {} members",
-                                                    name, dt.members.len(),
-                                                );
-                                            }
-                                        }
-                                    }
-                                    Err(e) => println!("Schema error: {e}"),
-                                }
-                            }
-                            cmd if cmd.starts_with("goal ") => {
-                                let desc = cmd.strip_prefix("goal ").unwrap_or("").trim();
-                                if desc.is_empty() {
-                                    println!("Usage: goal <description>");
-                                } else {
-                                    match agent.add_goal(desc, 128, "Agent-determined completion") {
-                                        Ok(id) => println!("Added goal: {}", engine.resolve_label(id)),
-                                        Err(e) => println!("Error adding goal: {e}"),
-                                    }
-                                }
-                            }
-                            _ => {
-                                // Default: run one OODA cycle.
-                                match agent.run_cycle() {
-                                    Ok(result) => {
-                                        println!(
-                                            "Cycle {} — tool={}, goal=\"{}\", progress={:?}",
-                                            result.cycle_number,
-                                            result.decision.chosen_tool,
-                                            engine.resolve_label(result.decision.goal_id),
-                                            result.action_result.goal_progress,
-                                        );
-                                        println!(
-                                            "  Result: {}",
-                                            if result.action_result.tool_output.result.len() > 100 {
-                                                format!(
-                                                    "{}...",
-                                                    &result.action_result.tool_output.result[..100]
-                                                )
+                                            let output = &result.action_result.tool_output.result;
+                                            if output.len() > 100 {
+                                                println!("  Result: {}...", &output[..100]);
                                             } else {
-                                                result.action_result.tool_output.result.clone()
+                                                println!("  Result: {output}");
                                             }
-                                        );
+                                        }
+                                        Err(e) => println!("Cycle error: {e}"),
                                     }
-                                    Err(e) => println!("Cycle error: {e}"),
                                 }
                             }
                         }
-                    }
 
-                    // Persist session on exit.
-                    agent.persist_session().into_diagnostic()?;
-                    println!("Session persisted. Use `agent resume` to continue.");
+                        agent.persist_session().into_diagnostic()?;
+                        println!("Session persisted.");
+                    }
                 }
 
                 AgentAction::Plan { goal, priority } => {
@@ -2347,185 +2294,94 @@ fn main() -> Result<()> {
                 }
 
                 AgentAction::Chat {
-                    model,
-                    no_ollama,
                     max_cycles,
                     fresh,
+                    headless,
                 } => {
-                    let agent_config = AgentConfig {
-                        max_cycles,
-                        ..Default::default()
-                    };
-
-                    // Resume or create fresh agent.
-                    let mut agent = if !fresh && Agent::has_persisted_session(&engine) {
-                        let a = Agent::resume(Arc::clone(&engine), agent_config)
-                            .into_diagnostic()?;
-                        println!(
-                            "Resumed session: cycle {}, {} WM entries, {} goals",
-                            a.cycle_count(),
-                            a.working_memory().len(),
-                            a.goals().len(),
-                        );
-                        a
-                    } else {
-                        Agent::new(Arc::clone(&engine), agent_config).into_diagnostic()?
-                    };
-
-                    if fresh {
-                        agent.clear_goals();
-                    }
-
-                    // Optionally set up Ollama.
-                    if !no_ollama {
-                        let mut ollama_config = akh_medu::agent::OllamaConfig::default();
-                        if let Some(ref m) = model {
-                            ollama_config.model = m.clone();
-                        }
-                        let mut client = akh_medu::agent::OllamaClient::new(ollama_config);
-                        if client.probe() {
-                            if let Err(e) = client.ensure_model() {
-                                eprintln!("Warning: {e}");
-                            } else {
-                                println!("LLM available (model: {})", client.model());
-                            }
-                            agent.set_llm_client(client);
-                        } else {
-                            println!("No LLM — using template-based responses.");
-                        }
-                    }
-
-                    // Restore or create conversation state.
-                    let mut conversation = {
-                        let store = engine.store();
-                        store
-                            .get_meta(b"agent:chat:conversation")
-                            .ok()
-                            .flatten()
-                            .and_then(|bytes| {
-                                akh_medu::agent::Conversation::from_bytes(&bytes).ok()
-                            })
-                            .unwrap_or_else(|| akh_medu::agent::Conversation::new(100))
-                    };
-
-                    println!("akh-medu agent chat (type 'help' for commands, 'quit' to exit)\n");
-
-                    use std::io::Write as _;
-                    let stdin = std::io::stdin();
-                    let mut input = String::new();
-
-                    loop {
-                        input.clear();
-                        print!("> ");
-                        std::io::stdout().flush().ok();
-
-                        if stdin.read_line(&mut input).into_diagnostic()? == 0 {
-                            break; // EOF
-                        }
-
-                        let cmd = input.trim();
-                        if cmd.is_empty() {
-                            continue;
-                        }
-
-                        match cmd {
-                            "quit" | "exit" | "q" => break,
-                            "help" | "h" => {
-                                println!("Commands:");
-                                println!("  <question>  — ask about the knowledge base");
-                                println!("  status      — show goal status");
-                                println!("  goals       — list active goals");
-                                println!("  help        — this message");
-                                println!("  quit        — exit chat");
-                                continue;
-                            }
-                            "status" | "s" => {
-                                println!("Cycle: {}, WM entries: {}, Goals: {}",
-                                    agent.cycle_count(),
-                                    agent.working_memory().len(),
-                                    agent.goals().len(),
-                                );
-                                for g in agent.goals() {
-                                    println!("  [{}] {}", g.status, g.description);
-                                }
-                                continue;
-                            }
-                            "goals" | "g" => {
-                                if agent.goals().is_empty() {
-                                    println!("No active goals.");
-                                } else {
-                                    for g in agent.goals() {
-                                        println!(
-                                            "  [{}] {}: {}",
-                                            g.status,
-                                            engine.resolve_label(g.symbol_id),
-                                            g.description,
-                                        );
-                                    }
-                                }
-                                continue;
-                            }
-                            _ => {}
-                        }
-
-                        // Treat input as a question — create temporary goal and run cycles.
-                        let question = cmd.to_string();
-                        let goal_desc = format!("chat: {question}");
-                        let goal_id = match agent
-                            .add_goal(&goal_desc, 200, "Agent-determined completion")
-                        {
-                            Ok(id) => id,
-                            Err(e) => {
-                                eprintln!("Error: {e}");
-                                continue;
-                            }
+                    if !headless {
+                        // TUI mode.
+                        let agent_config = AgentConfig {
+                            max_cycles,
+                            ..Default::default()
                         };
+                        let ws_name = cli.workspace.clone();
+                        akh_medu::tui::launch(&ws_name, Arc::clone(&engine), agent_config, fresh)?;
+                    } else {
+                        // Headless mode (legacy stdin/stdout).
+                        let agent_config = AgentConfig {
+                            max_cycles,
+                            ..Default::default()
+                        };
+                        let mut agent = if !fresh && Agent::has_persisted_session(&engine) {
+                            Agent::resume(Arc::clone(&engine), agent_config).into_diagnostic()?
+                        } else {
+                            Agent::new(Arc::clone(&engine), agent_config).into_diagnostic()?
+                        };
+                        if fresh {
+                            agent.clear_goals();
+                        }
 
-                        // Run cycles for this question.
-                        match agent.run_until_complete() {
-                            Ok(_) => {}
-                            Err(e) => {
-                                eprintln!("(agent stopped: {e})");
+                        println!("akh-medu agent chat (headless). Type 'quit' to exit.\n");
+                        use std::io::Write as _;
+                        let stdin = std::io::stdin();
+                        let mut input = String::new();
+
+                        loop {
+                            input.clear();
+                            print!("> ");
+                            std::io::stdout().flush().ok();
+                            if stdin.read_line(&mut input).into_diagnostic()? == 0 {
+                                break;
                             }
-                        }
-
-                        // Synthesize and display findings.
-                        let summary = agent.synthesize_findings(&question);
-                        println!("\n{}", summary.overview);
-                        for section in &summary.sections {
-                            println!("\n## {}", section.heading);
-                            println!("{}", section.prose);
-                        }
-                        if !summary.gaps.is_empty() {
-                            println!("\nOpen questions:");
-                            for gap in &summary.gaps {
-                                println!("  - {gap}");
+                            let cmd = input.trim();
+                            if cmd.is_empty() {
+                                continue;
                             }
+                            if cmd == "quit" || cmd == "exit" || cmd == "q" {
+                                break;
+                            }
+
+                            let question = cmd.to_string();
+                            let goal_desc = format!("chat: {question}");
+                            let goal_id = match agent
+                                .add_goal(&goal_desc, 200, "Agent-determined completion")
+                            {
+                                Ok(id) => id,
+                                Err(e) => {
+                                    eprintln!("Error: {e}");
+                                    continue;
+                                }
+                            };
+
+                            match agent.run_until_complete() {
+                                Ok(_) => {}
+                                Err(e) => eprintln!("(agent stopped: {e})"),
+                            }
+
+                            let summary = agent.synthesize_findings(&question);
+                            println!("\n{}", summary.overview);
+                            for section in &summary.sections {
+                                println!("\n## {}", section.heading);
+                                println!("{}", section.prose);
+                            }
+                            if !summary.gaps.is_empty() {
+                                println!("\nOpen questions:");
+                                for gap in &summary.gaps {
+                                    println!("  - {gap}");
+                                }
+                            }
+                            println!();
+                            let _ = agent.complete_goal(goal_id);
                         }
-                        println!();
 
-                        // Mark the chat goal as completed.
-                        let _ = agent.complete_goal(goal_id);
-
-                        // Store exchange in conversation.
-                        let response_text = format!("{summary}");
-                        conversation.add_turn(question, response_text);
+                        agent.persist_session().into_diagnostic()?;
+                        println!("Session saved.");
                     }
-
-                    // Persist agent session.
-                    agent.persist_session().into_diagnostic()?;
-
-                    // Persist conversation.
-                    if let Ok(bytes) = conversation.to_bytes() {
-                        let _ = engine.store().put_meta(b"agent:chat:conversation", &bytes);
-                    }
-
-                    println!("Session saved.");
                 }
             }
         }
 
-        Commands::Chat { skill, model, no_ollama } => {
+        Commands::Chat { skill, headless } => {
             let engine = Arc::new(Engine::new(config).into_diagnostic()?);
 
             // Load skill if specified.
@@ -2556,317 +2412,131 @@ fn main() -> Result<()> {
                 }
             }
 
-            // Set up Ollama client (optional).
-            let mut ollama = if no_ollama {
-                None
-            } else {
-                let mut ollama_config = akh_medu::agent::OllamaConfig::default();
-                if let Some(ref m) = model {
-                    ollama_config.model = m.clone();
-                }
-                let mut client = akh_medu::agent::OllamaClient::new(ollama_config);
-                if client.probe() {
-                    println!("Ollama available (model: {})", client.model());
-                    Some(client)
-                } else {
-                    println!("Ollama not available, using regex-only mode.");
-                    None
-                }
-            };
-
-            // Set up agent for goal-based interactions.
             let agent_config = AgentConfig {
                 max_cycles: 20,
                 ..Default::default()
             };
-            let mut agent = Agent::new(Arc::clone(&engine), agent_config).into_diagnostic()?;
-            let mut conversation = akh_medu::agent::Conversation::new(100);
+            let ws_name = cli.workspace.clone();
 
-            println!("akh-medu chat (type 'help' for commands, 'quit' to exit)");
-            println!();
+            if !headless {
+                // TUI mode.
+                akh_medu::tui::launch(&ws_name, engine, agent_config, false)?;
+            } else {
+                // Headless mode (legacy stdin/stdout).
+                let mut agent = Agent::new(Arc::clone(&engine), agent_config).into_diagnostic()?;
+                let mut conversation = akh_medu::agent::Conversation::new(100);
 
-            loop {
-                eprint!("> ");
-                let mut input = String::new();
-                match std::io::stdin().read_line(&mut input) {
-                    Ok(0) => break, // EOF
-                    Ok(_) => {}
-                    Err(e) => {
-                        eprintln!("Read error: {e}");
+                println!("akh-medu chat (headless). Type 'quit' to exit.\n");
+
+                loop {
+                    eprint!("> ");
+                    let mut input = String::new();
+                    match std::io::stdin().read_line(&mut input) {
+                        Ok(0) => break,
+                        Ok(_) => {}
+                        Err(e) => {
+                            eprintln!("Read error: {e}");
+                            break;
+                        }
+                    }
+
+                    let trimmed = input.trim();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+                    if trimmed == "quit" || trimmed == "exit" || trimmed == "q" {
                         break;
                     }
-                }
 
-                let trimmed = input.trim();
-                if trimmed.is_empty() {
-                    continue;
-                }
-                if trimmed == "quit" || trimmed == "exit" || trimmed == "q" {
-                    break;
-                }
-
-                let intent = akh_medu::agent::classify_intent(trimmed);
-                let response = match intent {
-                    akh_medu::agent::UserIntent::Help => {
-                        "Commands:\n  \
-                         <question>?    Query the knowledge base\n  \
-                         <fact>         Assert a fact (e.g., \"Dogs are mammals\")\n  \
-                         find <topic>   Set an agent goal\n  \
-                         run [N]        Run N OODA cycles\n  \
-                         status         Show agent status\n  \
-                         show <entity>  Render hieroglyphic notation\n  \
-                         help           Show this help\n  \
-                         quit           Exit"
-                            .to_string()
-                    }
-
-                    akh_medu::agent::UserIntent::ShowStatus => {
-                        let goals = agent.goals();
-                        let active = akh_medu::agent::goal::active_goals(&goals);
-                        format!(
-                            "Cycle: {}, Goals: {} active / {} total, WM: {} entries, Triples: {}",
-                            agent.cycle_count(),
-                            active.len(),
-                            goals.len(),
-                            agent.working_memory().len(),
-                            engine.all_triples().len(),
-                        )
-                    }
-
-                    akh_medu::agent::UserIntent::Query { subject } => {
-                        // KG search via engine.
-                        let mut lines = Vec::new();
-                        match engine.resolve_symbol(&subject) {
-                            Ok(sym_id) => {
-                                let from_triples = engine.triples_from(sym_id);
-                                let to_triples = engine.triples_to(sym_id);
-                                let label = engine.resolve_label(sym_id);
-
-                                for t in &from_triples {
-                                    lines.push(format!(
-                                        "  {} -> {} -> {} [{:.2}]",
-                                        label,
-                                        engine.resolve_label(t.predicate),
-                                        engine.resolve_label(t.object),
-                                        t.confidence,
-                                    ));
-                                }
-                                for t in &to_triples {
-                                    lines.push(format!(
-                                        "  {} -> {} -> {} [{:.2}]",
-                                        engine.resolve_label(t.subject),
-                                        engine.resolve_label(t.predicate),
-                                        label,
-                                        t.confidence,
-                                    ));
-                                }
-
-                                if lines.is_empty() {
-                                    // Try similarity search.
-                                    if let Ok(similar) = engine.search_similar_to(sym_id, 5) {
-                                        if !similar.is_empty() {
-                                            lines.push(format!("No triples for \"{subject}\", but similar symbols:"));
-                                            for sr in &similar {
-                                                lines.push(format!(
-                                                    "  {} (similarity: {:.3})",
-                                                    engine.resolve_label(sr.symbol_id),
-                                                    sr.similarity,
-                                                ));
-                                            }
-                                        }
-                                    }
-                                }
-
-                                if lines.is_empty() {
-                                    format!("No information found for \"{subject}\".")
-                                } else {
-                                    // Optionally synthesize NL answer via Ollama.
-                                    let kg_text = lines.join("\n");
-                                    if let Some(ref mut client) = ollama {
-                                        match client.generate(
-                                            &format!(
-                                                "Based on these facts:\n{}\n\nAnswer: {}",
-                                                kg_text, trimmed,
-                                            ),
-                                            Some("You are a helpful assistant. Answer the question using only the provided facts. Be concise."),
-                                        ) {
-                                            Ok(answer) => format!("{answer}\n\nKG facts:\n{kg_text}"),
-                                            Err(_) => kg_text,
-                                        }
-                                    } else {
-                                        kg_text
-                                    }
-                                }
-                            }
-                            Err(_) => format!("Symbol \"{subject}\" not found in knowledge base."),
+                    let intent = akh_medu::agent::classify_intent(trimmed);
+                    let response = match intent {
+                        akh_medu::agent::UserIntent::Help => {
+                            "Commands: <question>? query, <fact> assert, find <topic> goal, status, help, quit"
+                                .to_string()
                         }
-                    }
-
-                    akh_medu::agent::UserIntent::Assert { text } => {
-                        // Extract triples using regex (and optionally LLM).
-                        use akh_medu::agent::tools::TextIngestTool;
-                        use akh_medu::agent::tool::Tool;
-
-                        let tool_input = akh_medu::agent::ToolInput::new()
-                            .with_param("text", &text);
-                        match TextIngestTool.execute(&engine, tool_input) {
-                            Ok(output) => {
-                                // Auto-ground after ingest.
-                                let ops = engine.ops();
-                                let im = engine.item_memory();
-                                let gc = akh_medu::vsa::grounding::GroundingConfig::default();
-                                let _ = akh_medu::vsa::grounding::ground_all(&engine, ops, im, &gc);
-                                output.result
-                            }
-                            Err(e) => format!("Extraction error: {e}"),
+                        akh_medu::agent::UserIntent::ShowStatus => {
+                            format!(
+                                "Cycle: {}, Goals: {}, WM: {} entries, Triples: {}",
+                                agent.cycle_count(),
+                                agent.goals().len(),
+                                agent.working_memory().len(),
+                                engine.all_triples().len(),
+                            )
                         }
-                    }
-
-                    akh_medu::agent::UserIntent::SetGoal { description } => {
-                        match agent.add_goal(&description, 128, "Agent-determined completion") {
-                            Ok(_) => {
-                                // Run a few OODA cycles.
-                                let mut results = Vec::new();
-                                for _ in 0..5 {
-                                    match agent.run_cycle() {
-                                        Ok(r) => {
-                                            results.push(format!(
-                                                "  [{}] {} -> {}",
-                                                r.cycle_number,
-                                                r.decision.chosen_tool,
-                                                if r.action_result.tool_output.result.len() > 80 {
-                                                    format!("{}...", &r.action_result.tool_output.result[..80])
-                                                } else {
-                                                    r.action_result.tool_output.result.clone()
-                                                },
-                                            ));
-                                        }
-                                        Err(e) => {
-                                            results.push(format!("  Error: {e}"));
-                                            break;
-                                        }
-                                    }
-                                    // Check if goal completed.
-                                    let active = akh_medu::agent::goal::active_goals(agent.goals());
-                                    if active.is_empty() {
-                                        break;
-                                    }
-                                }
-                                format!("Goal set: \"{description}\"\n{}", results.join("\n"))
-                            }
-                            Err(e) => format!("Failed to set goal: {e}"),
-                        }
-                    }
-
-                    akh_medu::agent::UserIntent::RunAgent { cycles } => {
-                        let n = cycles.unwrap_or(1);
-                        let mut results = Vec::new();
-                        for _ in 0..n {
-                            match agent.run_cycle() {
-                                Ok(r) => {
-                                    results.push(format!(
-                                        "  [{}] {} -> {:?}",
-                                        r.cycle_number,
-                                        r.decision.chosen_tool,
-                                        r.action_result.goal_progress,
-                                    ));
-                                }
-                                Err(e) => {
-                                    results.push(format!("  Error: {e}"));
-                                    break;
-                                }
-                            }
-                        }
-                        if results.is_empty() {
-                            "No active goals to run.".to_string()
-                        } else {
-                            results.join("\n")
-                        }
-                    }
-
-                    akh_medu::agent::UserIntent::RenderHiero { entity } => {
-                        let render_config = akh_medu::glyph::RenderConfig {
-                            color: true,
-                            notation: akh_medu::glyph::NotationConfig {
-                                use_pua: akh_medu::glyph::catalog::font_available(),
-                                show_confidence: true,
-                                show_provenance: false,
-                                show_sigils: true,
-                                compact: false,
-                            },
-                            ..Default::default()
-                        };
-
-                        if let Some(ref name) = entity {
-                            match engine.resolve_symbol(name) {
+                        akh_medu::agent::UserIntent::Query { subject } => {
+                            match engine.resolve_symbol(&subject) {
                                 Ok(sym_id) => {
-                                    match engine.extract_subgraph(&[sym_id], 1) {
-                                        Ok(result) if !result.triples.is_empty() => {
-                                            akh_medu::glyph::render::render_to_terminal(
-                                                &engine, &result.triples, &render_config,
-                                            )
-                                        }
-                                        _ => format!("No triples found around \"{name}\"."),
+                                    let from = engine.triples_from(sym_id);
+                                    let to = engine.triples_to(sym_id);
+                                    let mut lines = Vec::new();
+                                    for t in &from {
+                                        lines.push(format!(
+                                            "  {} -> {} -> {}",
+                                            engine.resolve_label(t.subject),
+                                            engine.resolve_label(t.predicate),
+                                            engine.resolve_label(t.object),
+                                        ));
+                                    }
+                                    for t in &to {
+                                        lines.push(format!(
+                                            "  {} -> {} -> {}",
+                                            engine.resolve_label(t.subject),
+                                            engine.resolve_label(t.predicate),
+                                            engine.resolve_label(t.object),
+                                        ));
+                                    }
+                                    if lines.is_empty() {
+                                        format!("No information found for \"{subject}\".")
+                                    } else {
+                                        lines.join("\n")
                                     }
                                 }
-                                Err(_) => format!("Symbol \"{name}\" not found."),
-                            }
-                        } else {
-                            let triples = engine.all_triples();
-                            if triples.is_empty() {
-                                "No triples in knowledge graph.".to_string()
-                            } else {
-                                akh_medu::glyph::render::render_to_terminal(
-                                    &engine, &triples, &render_config,
-                                )
+                                Err(_) => format!("Symbol \"{subject}\" not found."),
                             }
                         }
-                    }
-
-                    akh_medu::agent::UserIntent::Freeform { text } => {
-                        if let Some(ref mut client) = ollama {
-                            // Send to Ollama with KG context.
-                            let symbols = engine.all_symbols();
-                            let context = if symbols.len() <= 20 {
-                                symbols.iter().map(|s| s.label.clone()).collect::<Vec<_>>().join(", ")
-                            } else {
-                                format!("{} symbols in knowledge base", symbols.len())
-                            };
-
-                            match client.generate(
-                                &text,
-                                Some(&format!(
-                                    "You are a helpful assistant. The knowledge base contains: {}. \
-                                     Answer based on this context when relevant.",
-                                    context,
-                                )),
-                            ) {
-                                Ok(answer) => answer,
-                                Err(_) => {
-                                    "I don't understand that input. Type 'help' for commands.".to_string()
+                        akh_medu::agent::UserIntent::Assert { text } => {
+                            use akh_medu::agent::tool::Tool;
+                            let tool_input = akh_medu::agent::ToolInput::new().with_param("text", &text);
+                            match akh_medu::agent::tools::TextIngestTool.execute(&engine, tool_input) {
+                                Ok(output) => output.result,
+                                Err(e) => format!("Extraction error: {e}"),
+                            }
+                        }
+                        akh_medu::agent::UserIntent::SetGoal { description } => {
+                            match agent.add_goal(&description, 128, "Agent-determined completion") {
+                                Ok(_) => format!("Goal set: \"{description}\""),
+                                Err(e) => format!("Failed to set goal: {e}"),
+                            }
+                        }
+                        akh_medu::agent::UserIntent::RunAgent { cycles } => {
+                            let n = cycles.unwrap_or(1);
+                            let mut out = Vec::new();
+                            for _ in 0..n {
+                                match agent.run_cycle() {
+                                    Ok(r) => out.push(format!("[{}] {}", r.cycle_number, r.decision.chosen_tool)),
+                                    Err(e) => { out.push(format!("Error: {e}")); break; }
                                 }
                             }
-                        } else {
-                            "I don't understand that input. Type 'help' for commands.".to_string()
+                            out.join("\n")
                         }
-                    }
-                };
+                        akh_medu::agent::UserIntent::RenderHiero { .. } => {
+                            "Hieroglyphic rendering not available in headless mode. Use the TUI.".to_string()
+                        }
+                        akh_medu::agent::UserIntent::Freeform { .. } => {
+                            "I don't understand that. Type 'help' for commands.".to_string()
+                        }
+                    };
 
-                println!("{response}");
-                println!();
+                    println!("{response}\n");
+                    conversation.add_turn(trimmed.to_string(), response);
+                }
 
-                conversation.add_turn(trimmed.to_string(), response);
+                agent.persist_session().into_diagnostic()?;
+                if let Ok(bytes) = conversation.to_bytes() {
+                    let _ = engine.store().put_meta(b"chat:conversation", &bytes);
+                }
+                println!("Session saved.");
             }
-
-            // Persist session.
-            agent.persist_session().into_diagnostic()?;
-
-            // Persist conversation.
-            if let Ok(bytes) = conversation.to_bytes() {
-                let _ = engine.store().put_meta(b"chat:conversation", &bytes);
-            }
-
-            println!("Session saved.");
         }
 
         Commands::CodeIngest {

@@ -12,7 +12,6 @@ pub mod agent;
 pub mod chat;
 pub mod error;
 pub mod goal;
-pub mod llm;
 pub mod memory;
 pub mod nlp;
 pub mod ooda;
@@ -33,7 +32,6 @@ pub use agent::{Agent, AgentConfig, AgentPredicates};
 pub use chat::Conversation;
 pub use error::{AgentError, AgentResult};
 pub use goal::{Goal, GoalStatus};
-pub use llm::{LlmError, OllamaClient, OllamaConfig};
 pub use memory::{
     ConsolidationConfig, ConsolidationResult, EpisodicEntry, WorkingMemory, WorkingMemoryEntry,
     WorkingMemoryKind,

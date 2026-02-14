@@ -4,11 +4,9 @@
 //! 1. `extract_facts()` — parse WM ToolResult entries into structured facts
 //! 2. `group_facts()` — group by topic (entity, code structure, similarity, etc.)
 //! 3. `render_template()` — build a `NarrativeSummary` from grouped facts
-//! 4. `polish_with_llm()` — optionally refine prose via Ollama (graceful fallback)
 
 use std::collections::{BTreeMap, HashSet};
 
-use super::llm::OllamaClient;
 use super::memory::{WorkingMemoryEntry, WorkingMemoryKind};
 
 // ── Public types ─────────────────────────────────────────────────────────
@@ -179,7 +177,6 @@ pub fn synthesize(
     goal: &str,
     entries: &[WorkingMemoryEntry],
     engine: &crate::engine::Engine,
-    llm: Option<&OllamaClient>,
 ) -> NarrativeSummary {
     // Use the persona's grammar preference if the psyche compartment is loaded.
     let grammar_name = engine
@@ -187,7 +184,7 @@ pub fn synthesize(
         .and_then(|mgr| mgr.psyche())
         .map(|p| p.persona.grammar_preference.clone())
         .unwrap_or_else(|| "narrative".to_string());
-    synthesize_with_grammar(goal, entries, engine, llm, &grammar_name)
+    synthesize_with_grammar(goal, entries, engine, &grammar_name)
 }
 
 /// Synthesize with a specific grammar archetype (formal, terse, narrative, or custom).
@@ -198,7 +195,6 @@ pub fn synthesize_with_grammar(
     goal: &str,
     entries: &[WorkingMemoryEntry],
     engine: &crate::engine::Engine,
-    llm: Option<&OllamaClient>,
     grammar_name: &str,
 ) -> NarrativeSummary {
     let facts = extract_facts(entries);
@@ -224,12 +220,6 @@ pub fn synthesize_with_grammar(
         }
         is_informative_section(s)
     });
-
-    if let Some(client) = llm {
-        if client.is_available() {
-            summary = polish_with_llm(summary, client);
-        }
-    }
 
     summary
 }
@@ -1414,150 +1404,6 @@ fn render_other_section(facts: &[ExtractedFact]) -> Option<NarrativeSection> {
         heading: "Other Findings".to_string(),
         prose: lines.join("\n"),
     })
-}
-
-// ── Step 4: Optional LLM polish ──────────────────────────────────────────
-
-fn polish_with_llm(summary: NarrativeSummary, client: &OllamaClient) -> NarrativeSummary {
-    // Protect the "Code Architecture" section from LLM rewriting. It already
-    // has well-formatted enrichment annotations (role labels, importance stars,
-    // data flow lines) that LLMs consistently strip when paraphrasing.
-    let protected_idx = summary
-        .sections
-        .iter()
-        .position(|s| s.heading == "Code Architecture");
-    let protected_section = protected_idx.map(|i| summary.sections[i].clone());
-
-    let mut polishable_sections = summary.sections.clone();
-    if let Some(idx) = protected_idx {
-        polishable_sections.remove(idx);
-    }
-
-    let polishable = NarrativeSummary {
-        overview: summary.overview.clone(),
-        sections: polishable_sections,
-        gaps: summary.gaps.clone(),
-        facts_count: summary.facts_count,
-    };
-
-    let template_text = format_summary_as_text(&polishable);
-
-    let system = "Rewrite the following agent findings into clear, concise prose. \
-        Preserve all facts exactly. Do not add information not present in the input. \
-        Do NOT speculate about what modules, functions, or types do — only describe \
-        relationships and names that appear in the input. \
-        Keep ## Markdown headings. Be conversational but factual.";
-
-    match client.generate(&template_text, Some(system)) {
-        Ok(polished) => {
-            let mut result = parse_polished_response(&polished, &polishable);
-            // Re-insert the protected Code Architecture section at its original position.
-            if let Some(section) = protected_section {
-                let insert_idx = protected_idx.unwrap_or(0).min(result.sections.len());
-                result.sections.insert(insert_idx, section);
-            }
-            result
-        }
-        Err(_) => summary, // Graceful degradation to template
-    }
-}
-
-fn format_summary_as_text(summary: &NarrativeSummary) -> String {
-    let mut text = summary.overview.clone();
-    text.push('\n');
-    for section in &summary.sections {
-        text.push_str(&format!("\n## {}\n{}\n", section.heading, section.prose));
-    }
-    if !summary.gaps.is_empty() {
-        text.push_str("\n## Knowledge Gaps\n");
-        for gap in &summary.gaps {
-            text.push_str(&format!("- {gap}\n"));
-        }
-    }
-    text
-}
-
-fn parse_polished_response(polished: &str, original: &NarrativeSummary) -> NarrativeSummary {
-    // Split polished text by ## headings
-    let mut sections = Vec::new();
-    let mut overview = String::new();
-    let mut current_heading = String::new();
-    let mut current_body = String::new();
-    let mut gaps = original.gaps.clone();
-
-    for line in polished.lines() {
-        if let Some(heading) = line.strip_prefix("## ") {
-            // Flush previous section
-            if !current_heading.is_empty() {
-                if current_heading == "Knowledge Gaps" {
-                    // Parse gap lines
-                    gaps = current_body
-                        .lines()
-                        .filter_map(|l| {
-                            let t = l.trim().strip_prefix("- ").unwrap_or(l.trim());
-                            if t.is_empty() {
-                                None
-                            } else {
-                                Some(t.to_string())
-                            }
-                        })
-                        .collect();
-                } else {
-                    sections.push(NarrativeSection {
-                        heading: current_heading.clone(),
-                        prose: current_body.trim().to_string(),
-                    });
-                }
-            } else if !current_body.trim().is_empty() {
-                overview = current_body.trim().to_string();
-            }
-            current_heading = heading.trim().to_string();
-            current_body.clear();
-        } else {
-            current_body.push_str(line);
-            current_body.push('\n');
-        }
-    }
-
-    // Flush last section
-    if !current_heading.is_empty() {
-        if current_heading == "Knowledge Gaps" {
-            gaps = current_body
-                .lines()
-                .filter_map(|l| {
-                    let t = l.trim().strip_prefix("- ").unwrap_or(l.trim());
-                    if t.is_empty() {
-                        None
-                    } else {
-                        Some(t.to_string())
-                    }
-                })
-                .collect();
-        } else {
-            sections.push(NarrativeSection {
-                heading: current_heading,
-                prose: current_body.trim().to_string(),
-            });
-        }
-    } else if overview.is_empty() && !current_body.trim().is_empty() {
-        overview = current_body.trim().to_string();
-    }
-
-    // Fallback to original overview if parsing failed
-    if overview.is_empty() {
-        overview = original.overview.clone();
-    }
-
-    NarrativeSummary {
-        overview,
-        sections: if sections.is_empty() {
-            original.sections.clone()
-        } else {
-            sections
-        },
-        gaps,
-        facts_count: original.facts_count,
-    }
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────

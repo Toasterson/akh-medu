@@ -1,0 +1,191 @@
+[seed]
+id = "ontology"
+name = "Fundamental Ontology"
+version = "1.0.0"
+description = "Core ontological relations and category hierarchy"
+
+# -- Relation definitions --
+
+[[triples]]
+subject = "is-a"
+predicate = "is-a"
+object = "relation"
+confidence = 1.0
+
+[[triples]]
+subject = "has-part"
+predicate = "is-a"
+object = "relation"
+confidence = 1.0
+
+[[triples]]
+subject = "causes"
+predicate = "is-a"
+object = "relation"
+confidence = 1.0
+
+[[triples]]
+subject = "precedes"
+predicate = "is-a"
+object = "relation"
+confidence = 1.0
+
+[[triples]]
+subject = "similar-to"
+predicate = "is-a"
+object = "relation"
+confidence = 1.0
+
+[[triples]]
+subject = "opposite-of"
+predicate = "is-a"
+object = "relation"
+confidence = 1.0
+
+[[triples]]
+subject = "instance-of"
+predicate = "is-a"
+object = "relation"
+confidence = 1.0
+
+[[triples]]
+subject = "subclass-of"
+predicate = "is-a"
+object = "relation"
+confidence = 1.0
+
+[[triples]]
+subject = "has-property"
+predicate = "is-a"
+object = "relation"
+confidence = 1.0
+
+[[triples]]
+subject = "located-in"
+predicate = "is-a"
+object = "relation"
+confidence = 1.0
+
+[[triples]]
+subject = "member-of"
+predicate = "is-a"
+object = "relation"
+confidence = 1.0
+
+[[triples]]
+subject = "created-by"
+predicate = "is-a"
+object = "relation"
+confidence = 1.0
+
+# -- Category hierarchy --
+
+[[triples]]
+subject = "entity"
+predicate = "is-a"
+object = "concept"
+confidence = 1.0
+
+[[triples]]
+subject = "concept"
+predicate = "is-a"
+object = "abstract-thing"
+confidence = 1.0
+
+[[triples]]
+subject = "relation"
+predicate = "is-a"
+object = "concept"
+confidence = 1.0
+
+[[triples]]
+subject = "physical-object"
+predicate = "subclass-of"
+object = "entity"
+confidence = 1.0
+
+[[triples]]
+subject = "living-thing"
+predicate = "subclass-of"
+object = "physical-object"
+confidence = 1.0
+
+[[triples]]
+subject = "animal"
+predicate = "subclass-of"
+object = "living-thing"
+confidence = 1.0
+
+[[triples]]
+subject = "plant"
+predicate = "subclass-of"
+object = "living-thing"
+confidence = 1.0
+
+[[triples]]
+subject = "person"
+predicate = "subclass-of"
+object = "animal"
+confidence = 1.0
+
+[[triples]]
+subject = "place"
+predicate = "subclass-of"
+object = "entity"
+confidence = 1.0
+
+[[triples]]
+subject = "event"
+predicate = "subclass-of"
+object = "entity"
+confidence = 1.0
+
+[[triples]]
+subject = "process"
+predicate = "subclass-of"
+object = "event"
+confidence = 1.0
+
+[[triples]]
+subject = "artifact"
+predicate = "subclass-of"
+object = "physical-object"
+confidence = 1.0
+
+[[triples]]
+subject = "tool"
+predicate = "subclass-of"
+object = "artifact"
+confidence = 1.0
+
+# -- Relation properties --
+
+[[triples]]
+subject = "is-a"
+predicate = "has-property"
+object = "transitive"
+confidence = 1.0
+
+[[triples]]
+subject = "subclass-of"
+predicate = "has-property"
+object = "transitive"
+confidence = 1.0
+
+[[triples]]
+subject = "has-part"
+predicate = "has-property"
+object = "transitive"
+confidence = 1.0
+
+[[triples]]
+subject = "similar-to"
+predicate = "has-property"
+object = "symmetric"
+confidence = 1.0
+
+[[triples]]
+subject = "opposite-of"
+predicate = "has-property"
+object = "symmetric"
+confidence = 1.0

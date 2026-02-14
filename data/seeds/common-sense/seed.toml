@@ -1,0 +1,227 @@
+[seed]
+id = "common-sense"
+name = "Common Sense Knowledge"
+version = "1.0.0"
+description = "Basic world knowledge: animals, materials, spatial relations, temporal concepts"
+
+# -- Animals --
+
+[[triples]]
+subject = "dog"
+predicate = "is-a"
+object = "animal"
+confidence = 0.95
+
+[[triples]]
+subject = "cat"
+predicate = "is-a"
+object = "animal"
+confidence = 0.95
+
+[[triples]]
+subject = "bird"
+predicate = "is-a"
+object = "animal"
+confidence = 0.95
+
+[[triples]]
+subject = "fish"
+predicate = "is-a"
+object = "animal"
+confidence = 0.95
+
+[[triples]]
+subject = "mammal"
+predicate = "subclass-of"
+object = "animal"
+confidence = 0.95
+
+[[triples]]
+subject = "dog"
+predicate = "is-a"
+object = "mammal"
+confidence = 0.95
+
+[[triples]]
+subject = "cat"
+predicate = "is-a"
+object = "mammal"
+confidence = 0.95
+
+[[triples]]
+subject = "animal"
+predicate = "has-property"
+object = "alive"
+confidence = 0.9
+
+# -- Materials & substances --
+
+[[triples]]
+subject = "water"
+predicate = "is-a"
+object = "substance"
+confidence = 0.95
+
+[[triples]]
+subject = "metal"
+predicate = "is-a"
+object = "material"
+confidence = 0.95
+
+[[triples]]
+subject = "wood"
+predicate = "is-a"
+object = "material"
+confidence = 0.95
+
+[[triples]]
+subject = "water"
+predicate = "has-property"
+object = "liquid"
+confidence = 0.8
+
+[[triples]]
+subject = "metal"
+predicate = "has-property"
+object = "solid"
+confidence = 0.9
+
+# -- Spatial --
+
+[[triples]]
+subject = "Earth"
+predicate = "is-a"
+object = "planet"
+confidence = 1.0
+
+[[triples]]
+subject = "Sun"
+predicate = "is-a"
+object = "star"
+confidence = 1.0
+
+[[triples]]
+subject = "Earth"
+predicate = "orbits"
+object = "Sun"
+confidence = 1.0
+
+[[triples]]
+subject = "ocean"
+predicate = "located-in"
+object = "Earth"
+confidence = 0.95
+
+[[triples]]
+subject = "continent"
+predicate = "located-in"
+object = "Earth"
+confidence = 0.95
+
+# -- Temporal --
+
+[[triples]]
+subject = "day"
+predicate = "has-part"
+object = "morning"
+confidence = 0.9
+
+[[triples]]
+subject = "day"
+predicate = "has-part"
+object = "afternoon"
+confidence = 0.9
+
+[[triples]]
+subject = "day"
+predicate = "has-part"
+object = "evening"
+confidence = 0.9
+
+[[triples]]
+subject = "year"
+predicate = "has-part"
+object = "month"
+confidence = 0.9
+
+[[triples]]
+subject = "month"
+predicate = "has-part"
+object = "week"
+confidence = 0.9
+
+[[triples]]
+subject = "week"
+predicate = "has-part"
+object = "day"
+confidence = 0.9
+
+# -- Basic properties --
+
+[[triples]]
+subject = "fire"
+predicate = "has-property"
+object = "hot"
+confidence = 0.95
+
+[[triples]]
+subject = "ice"
+predicate = "has-property"
+object = "cold"
+confidence = 0.95
+
+[[triples]]
+subject = "fire"
+predicate = "causes"
+object = "heat"
+confidence = 0.9
+
+[[triples]]
+subject = "rain"
+predicate = "causes"
+object = "wet"
+confidence = 0.9
+
+[[triples]]
+subject = "gravity"
+predicate = "causes"
+object = "falling"
+confidence = 0.95
+
+# -- Human basics --
+
+[[triples]]
+subject = "human"
+predicate = "is-a"
+object = "person"
+confidence = 0.95
+
+[[triples]]
+subject = "human"
+predicate = "has-capability"
+object = "language"
+confidence = 0.95
+
+[[triples]]
+subject = "human"
+predicate = "has-capability"
+object = "reasoning"
+confidence = 0.95
+
+[[triples]]
+subject = "food"
+predicate = "is-a"
+object = "substance"
+confidence = 0.9
+
+[[triples]]
+subject = "human"
+predicate = "needs"
+object = "food"
+confidence = 0.9
+
+[[triples]]
+subject = "human"
+predicate = "needs"
+object = "water"
+confidence = 0.95
