@@ -4,6 +4,7 @@
 
 pub mod code_ingest;
 pub mod code_predicates;
+pub mod content_ingest;
 pub mod csv_ingest;
 pub mod doc_gen;
 pub mod file_io;
@@ -21,6 +22,7 @@ pub mod user_interact;
 
 pub use code_ingest::CodeIngestTool;
 pub use code_predicates::CodePredicates;
+pub use content_ingest::ContentIngestTool;
 pub use csv_ingest::CsvIngestTool;
 pub use doc_gen::DocGenTool;
 pub use file_io::FileIoTool;

@@ -11,6 +11,8 @@ pub enum CompartmentKind {
     Skill,
     /// Attached to a project context.
     Project,
+    /// Shared content library document.
+    Library,
 }
 
 impl std::fmt::Display for CompartmentKind {
@@ -19,6 +21,7 @@ impl std::fmt::Display for CompartmentKind {
             Self::Core => write!(f, "Core"),
             Self::Skill => write!(f, "Skill"),
             Self::Project => write!(f, "Project"),
+            Self::Library => write!(f, "Library"),
         }
     }
 }
