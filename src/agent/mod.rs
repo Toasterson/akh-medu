@@ -11,8 +11,11 @@
 pub mod agent;
 pub mod chat;
 pub mod cli_tool;
+#[cfg(feature = "daemon")]
+pub mod daemon;
 pub mod error;
 pub mod goal;
+pub mod idle;
 pub mod memory;
 pub mod nlp;
 pub mod ooda;
@@ -43,4 +46,7 @@ pub use reflect::{Adjustment, ReflectionConfig, ReflectionResult};
 pub use semantic_enrichment::{EnrichmentResult, SemanticPredicates};
 pub use synthesize::NarrativeSummary;
 pub use tool::{Tool, ToolInput, ToolOutput, ToolRegistry, ToolSignature};
+#[cfg(feature = "daemon")]
+pub use daemon::{AgentDaemon, DaemonConfig};
+pub use idle::{IdleScheduler, IdleTaskResult};
 pub use tool_manifest::{Capability, DangerInfo, DangerLevel, ToolManifest, ToolSource};

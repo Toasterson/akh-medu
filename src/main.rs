@@ -547,6 +547,28 @@ enum AgentAction {
         #[arg(long)]
         headless: bool,
     },
+    /// Run as a background daemon with scheduled learning tasks.
+    #[cfg(feature = "daemon")]
+    Daemon {
+        /// Maximum OODA cycles (0 = unlimited).
+        #[arg(long, default_value = "0")]
+        max_cycles: usize,
+        /// Fresh start: ignore persisted session.
+        #[arg(long)]
+        fresh: bool,
+        /// Equivalence learning interval in seconds.
+        #[arg(long, default_value = "300")]
+        equiv_interval: u64,
+        /// Reflection interval in seconds.
+        #[arg(long, default_value = "180")]
+        reflect_interval: u64,
+        /// Rule inference interval in seconds.
+        #[arg(long, default_value = "600")]
+        rules_interval: u64,
+        /// Session persist interval in seconds.
+        #[arg(long, default_value = "60")]
+        persist_interval: u64,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2465,6 +2487,41 @@ fn main() -> Result<()> {
                         println!("Session saved.");
                     }
                 }
+
+                #[cfg(feature = "daemon")]
+                AgentAction::Daemon {
+                    max_cycles,
+                    fresh,
+                    equiv_interval,
+                    reflect_interval,
+                    rules_interval,
+                    persist_interval,
+                } => {
+                    use akh_medu::agent::{AgentDaemon, DaemonConfig};
+
+                    let agent_config = AgentConfig::default();
+                    let mut agent = if !fresh && Agent::has_persisted_session(&engine) {
+                        Agent::resume(Arc::clone(&engine), agent_config).into_diagnostic()?
+                    } else {
+                        Agent::new(Arc::clone(&engine), agent_config).into_diagnostic()?
+                    };
+                    if fresh {
+                        agent.clear_goals();
+                    }
+
+                    let daemon_config = DaemonConfig {
+                        equivalence_interval: std::time::Duration::from_secs(equiv_interval),
+                        reflection_interval: std::time::Duration::from_secs(reflect_interval),
+                        rule_inference_interval: std::time::Duration::from_secs(rules_interval),
+                        persist_interval: std::time::Duration::from_secs(persist_interval),
+                        max_cycles,
+                        ..DaemonConfig::default()
+                    };
+
+                    let rt = tokio::runtime::Runtime::new().into_diagnostic()?;
+                    let mut daemon = AgentDaemon::new(agent, daemon_config);
+                    rt.block_on(daemon.run()).into_diagnostic()?;
+                }
             }
         }
 
@@ -3052,7 +3109,7 @@ fn main() -> Result<()> {
                     preprocess_batch_with_library(
                         &chunks,
                         &ctx,
-                        engine.entity_resolver(),
+                        &engine.entity_resolver(),
                         &engine,
                     )
                 } else {
@@ -3081,7 +3138,7 @@ fn main() -> Result<()> {
                         preprocess_chunk_with_library(
                             &chunk,
                             &ctx,
-                            engine.entity_resolver(),
+                            &engine.entity_resolver(),
                             &engine,
                         )
                     } else {
@@ -3094,7 +3151,7 @@ fn main() -> Result<()> {
         }
 
         Commands::Equivalences { action } => {
-            let mut engine = Engine::new(config).into_diagnostic()?;
+            let engine = Engine::new(config).into_diagnostic()?;
 
             match action {
                 EquivalenceAction::List => {
