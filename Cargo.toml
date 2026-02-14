@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2024"
 description = "Neuro-symbolic AI engine: VSA + knowledge graphs + symbolic reasoning"
 license = "GPL-3.0-only"
+repository = "https://github.com/Toasterson/akh-medu"
+homepage = "https://akh-medu.dev"
+readme = "README.md"
+keywords = ["ai", "knowledge-graph", "vsa", "reasoning", "neuro-symbolic"]
+categories = ["science", "algorithms", "command-line-utilities"]
 
 [dependencies]
 # Error handling
