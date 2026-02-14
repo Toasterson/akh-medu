@@ -778,6 +778,13 @@ fn select_tool(
                         "ask", "user", "input", "question", "interact", "human", "prompt", "dialog",
                     ],
                 ),
+                (
+                    "content_ingest",
+                    &[
+                        "ingest", "document", "book", "pdf", "epub", "html", "article", "website",
+                        "library", "read", "parse", "content",
+                    ],
+                ),
             ];
 
             for (tool_name, concepts) in vsa_tools {
@@ -876,6 +883,16 @@ fn select_tool(
                                 &format!("What should I know about: {}?", goal.description),
                             ),
                             format!("VSA semantic match for user interaction: {semantic_score:.3}"),
+                        )
+                    }
+                    "content_ingest" => {
+                        if semantic_score <= 0.55 {
+                            continue;
+                        }
+                        (
+                            semantic_score * 0.75,
+                            ToolInput::new().with_param("source", &goal_label),
+                            format!("VSA semantic match for content ingest: {semantic_score:.3}"),
                         )
                     }
                     _ => continue,

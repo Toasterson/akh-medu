@@ -325,6 +325,12 @@ enum Commands {
         #[command(subcommand)]
         action: EquivalenceAction,
     },
+
+    /// Manage the shared content library (ingest books, websites, documents).
+    Library {
+        #[command(subcommand)]
+        action: LibraryAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -619,6 +625,51 @@ enum EquivalenceAction {
     Export,
     /// Import equivalences from JSON on stdin.
     Import,
+}
+
+#[derive(Subcommand)]
+enum LibraryAction {
+    /// Add a document to the library (file path or URL).
+    Add {
+        /// File path or URL to ingest.
+        source: String,
+        /// Override document title.
+        #[arg(long)]
+        title: Option<String>,
+        /// Tags for categorization (comma-separated).
+        #[arg(long)]
+        tags: Option<String>,
+        /// Override format detection (html, pdf, epub, text).
+        #[arg(long)]
+        format: Option<String>,
+    },
+    /// List all documents in the library.
+    List,
+    /// Search library content by text similarity.
+    Search {
+        /// Query text to search for.
+        #[arg(long)]
+        query: String,
+        /// Maximum results to return.
+        #[arg(long, default_value = "5")]
+        top_k: usize,
+    },
+    /// Remove a document from the library.
+    Remove {
+        /// Document ID (slug) to remove.
+        id: String,
+    },
+    /// Show detailed information about a document.
+    Info {
+        /// Document ID (slug).
+        id: String,
+    },
+    /// Watch a directory for new files and auto-ingest them.
+    Watch {
+        /// Directory to watch (defaults to the library inbox).
+        #[arg(long)]
+        dir: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -3082,6 +3133,170 @@ fn main() -> Result<()> {
                 }
             }
         }
+
+        Commands::Library { action } => {
+            let paths = xdg_paths.ok_or_else(|| {
+                miette::miette!("Cannot resolve XDG paths. Set HOME environment variable.")
+            })?;
+            paths.ensure_dirs().into_diagnostic()?;
+            let library_dir = paths.library_dir();
+            let engine = Engine::new(config).into_diagnostic()?;
+
+            match action {
+                LibraryAction::Add {
+                    source,
+                    title,
+                    tags,
+                    format,
+                } => {
+                    let mut catalog =
+                        akh_medu::library::LibraryCatalog::open(&library_dir).into_diagnostic()?;
+
+                    let tag_list: Vec<String> = tags
+                        .map(|t| t.split(',').map(|s| s.trim().to_string()).collect())
+                        .unwrap_or_default();
+
+                    let fmt = format.and_then(|f| match f.as_str() {
+                        "html" => Some(akh_medu::library::ContentFormat::Html),
+                        "pdf" => Some(akh_medu::library::ContentFormat::Pdf),
+                        "epub" => Some(akh_medu::library::ContentFormat::Epub),
+                        "text" | "txt" => Some(akh_medu::library::ContentFormat::PlainText),
+                        _ => None,
+                    });
+
+                    let ingest_config = akh_medu::library::IngestConfig {
+                        title,
+                        tags: tag_list,
+                        format: fmt,
+                        ..Default::default()
+                    };
+
+                    let result = if source.starts_with("http://") || source.starts_with("https://")
+                    {
+                        akh_medu::library::ingest_url(&engine, &mut catalog, &source, ingest_config)
+                            .into_diagnostic()?
+                    } else {
+                        let path = PathBuf::from(&source);
+                        akh_medu::library::ingest_file(
+                            &engine,
+                            &mut catalog,
+                            &path,
+                            ingest_config,
+                        )
+                        .into_diagnostic()?
+                    };
+
+                    println!("Ingested: {}", result.record.title);
+                    println!("  ID:      {}", result.record.id);
+                    println!("  Format:  {}", result.record.format);
+                    println!("  Chunks:  {}", result.chunk_count);
+                    println!("  Triples: {}", result.triple_count);
+                }
+
+                LibraryAction::List => {
+                    let catalog =
+                        akh_medu::library::LibraryCatalog::open(&library_dir).into_diagnostic()?;
+
+                    if catalog.is_empty() {
+                        println!(
+                            "Library is empty. Add a document with: akh-medu library add <file-or-url>"
+                        );
+                    } else {
+                        println!(
+                            "{:<30} {:<20} {:<8} {:<8} {}",
+                            "ID", "Title", "Format", "Chunks", "Tags"
+                        );
+                        println!("{}", "-".repeat(80));
+                        for doc in catalog.list() {
+                            let title_short = if doc.title.len() > 18 {
+                                format!("{}...", &doc.title[..18])
+                            } else {
+                                doc.title.clone()
+                            };
+                            println!(
+                                "{:<30} {:<20} {:<8} {:<8} {}",
+                                doc.id,
+                                title_short,
+                                doc.format,
+                                doc.chunk_count,
+                                doc.tags.join(", "),
+                            );
+                        }
+                        println!("\nTotal: {} document(s)", catalog.len());
+                    }
+                }
+
+                LibraryAction::Search { query, top_k } => {
+                    use akh_medu::vsa::encode::encode_label;
+
+                    let query_vec =
+                        encode_label(engine.ops(), &query).into_diagnostic()?;
+                    let results = engine.item_memory().search(&query_vec, top_k).into_diagnostic()?;
+
+                    if results.is_empty() {
+                        println!("No matching content found for: \"{query}\"");
+                    } else {
+                        println!("Search results for \"{query}\":");
+                        println!(
+                            "{:<8} {:<10} {}",
+                            "Rank", "Sim", "Symbol"
+                        );
+                        println!("{}", "-".repeat(60));
+                        for (rank, result) in results.iter().enumerate() {
+                            let label = engine.resolve_label(result.symbol_id);
+                            println!(
+                                "{:<8} {:<10.4} {}",
+                                rank + 1,
+                                result.similarity,
+                                label,
+                            );
+                        }
+                    }
+                }
+
+                LibraryAction::Remove { id } => {
+                    let mut catalog =
+                        akh_medu::library::LibraryCatalog::open(&library_dir).into_diagnostic()?;
+                    let removed = catalog.remove(&id).into_diagnostic()?;
+                    println!("Removed: {} (\"{}\")", removed.id, removed.title);
+                }
+
+                LibraryAction::Watch { dir } => {
+                    let inbox_dir = dir.unwrap_or_else(|| paths.library_inbox());
+                    let inbox_config =
+                        akh_medu::library::inbox::InboxConfig::new(inbox_dir, library_dir);
+                    akh_medu::library::inbox::watch_inbox(&engine, &inbox_config)
+                        .into_diagnostic()?;
+                }
+
+                LibraryAction::Info { id } => {
+                    let catalog =
+                        akh_medu::library::LibraryCatalog::open(&library_dir).into_diagnostic()?;
+                    let doc = catalog.get(&id).ok_or_else(|| {
+                        miette::miette!("Document not found: \"{id}\". Use `library list` to see available documents.")
+                    })?;
+
+                    println!("Document: {}", doc.title);
+                    println!("  ID:       {}", doc.id);
+                    println!("  Format:   {}", doc.format);
+                    println!("  Source:   {}", doc.source);
+                    println!("  Chunks:   {}", doc.chunk_count);
+                    println!("  Triples:  {}", doc.triple_count);
+                    println!(
+                        "  Tags:     {}",
+                        if doc.tags.is_empty() {
+                            "(none)".to_string()
+                        } else {
+                            doc.tags.join(", ")
+                        }
+                    );
+                    println!(
+                        "  Ingested: {} (unix timestamp)",
+                        doc.ingested_at
+                    );
+                }
+            }
+        }
     }
 
     Ok(())
@@ -3317,6 +3532,16 @@ fn format_derivation_kind(kind: &DerivationKind, engine: &Engine) -> String {
             format!(
                 "CLI tool execution [{}] via \"{}\" (danger: {})",
                 tool_name, binary_path, danger_level
+            )
+        }
+        DerivationKind::DocumentIngested {
+            document_id,
+            format,
+            chunk_index,
+        } => {
+            format!(
+                "document ingested [{}] format={} chunk={}",
+                document_id, format, chunk_index
             )
         }
     }

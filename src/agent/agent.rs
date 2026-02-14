@@ -157,6 +157,7 @@ impl Agent {
         registry.register(Box::new(tools::CsvIngestTool));
         registry.register(Box::new(tools::TextIngestTool));
         registry.register(Box::new(tools::CodeIngestTool));
+        registry.register(Box::new(tools::ContentIngestTool));
 
         // Documentation generation.
         registry.register(Box::new(tools::DocGenTool));
