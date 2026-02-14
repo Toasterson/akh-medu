@@ -186,9 +186,10 @@ impl WorkingMemory {
     /// Returns `(next_id, entries_bytes)` — the next ID counter and bincode-encoded entries.
     pub fn serialize(&self) -> AgentResult<(u64, Vec<u8>)> {
         let next_id = self.next_id.load(Ordering::Relaxed);
-        let bytes = bincode::serialize(&self.entries).map_err(|e| AgentError::ConsolidationFailed {
-            message: format!("failed to serialize working memory: {e}"),
-        })?;
+        let bytes =
+            bincode::serialize(&self.entries).map_err(|e| AgentError::ConsolidationFailed {
+                message: format!("failed to serialize working memory: {e}"),
+            })?;
         Ok((next_id, bytes))
     }
 
@@ -296,7 +297,10 @@ fn score_entry(
             // Check if any of the entry's symbols appear in triples reachable from the goal symbol.
             for sym in &entry.symbols {
                 let triples = engine.triples_from(goal.symbol_id);
-                if triples.iter().any(|t| t.object == *sym || t.subject == *sym) {
+                if triples
+                    .iter()
+                    .any(|t| t.object == *sym || t.subject == *sym)
+                {
                     max_rel = max_rel.max(0.8);
                 }
                 // Also check if the goal itself is in the entry's symbols.
@@ -400,8 +404,7 @@ fn persist_episode(
 ) -> AgentResult<SymbolId> {
     // Create the episode entity.
     let episode_label = format!("episode:{}", entry.id);
-    let episode = engine
-        .create_symbol(SymbolKind::Entity, &episode_label)?;
+    let episode = engine.create_symbol(SymbolKind::Entity, &episode_label)?;
 
     // Link the episode to its summary via has_summary predicate.
     // We store the summary as the episode's own label (already done above),
@@ -411,9 +414,12 @@ fn persist_episode(
     } else {
         format!("summary:{}", entry.content)
     };
-    let summary_sym = engine
-        .resolve_or_create_entity(&summary_label)?;
-    let _ = engine.add_triple(&Triple::new(episode.id, predicates.has_summary, summary_sym));
+    let summary_sym = engine.resolve_or_create_entity(&summary_label)?;
+    let _ = engine.add_triple(&Triple::new(
+        episode.id,
+        predicates.has_summary,
+        summary_sym,
+    ));
 
     // Link to learned symbols.
     for sym in &entry.symbols {
@@ -428,14 +434,16 @@ fn persist_episode(
         WorkingMemoryKind::Inference => "tag:inference",
         WorkingMemoryKind::ToolResult => "tag:tool_result",
     };
-    let tag_sym = engine
-        .resolve_or_create_entity(kind_tag_label)?;
+    let tag_sym = engine.resolve_or_create_entity(kind_tag_label)?;
     let _ = engine.add_triple(&Triple::new(episode.id, predicates.has_tag, tag_sym));
 
     // Mark as episodic memory type.
-    let mem_type_sym = engine
-        .resolve_or_create_entity("episodic_memory")?;
-    let _ = engine.add_triple(&Triple::new(episode.id, predicates.memory_type, mem_type_sym));
+    let mem_type_sym = engine.resolve_or_create_entity("episodic_memory")?;
+    let _ = engine.add_triple(&Triple::new(
+        episode.id,
+        predicates.memory_type,
+        mem_type_sym,
+    ));
 
     // Store provenance.
     let reason = format!(
@@ -499,9 +507,11 @@ pub fn recall_episodes(
 
     // Sort by timestamp (most recent first), then relevance.
     episodes.sort_by(|a, b| {
-        b.timestamp
-            .cmp(&a.timestamp)
-            .then(b.relevance_score.partial_cmp(&a.relevance_score).unwrap_or(std::cmp::Ordering::Equal))
+        b.timestamp.cmp(&a.timestamp).then(
+            b.relevance_score
+                .partial_cmp(&a.relevance_score)
+                .unwrap_or(std::cmp::Ordering::Equal),
+        )
     });
     episodes.truncate(top_k);
 
@@ -520,7 +530,9 @@ fn reconstruct_episode(
     }
 
     // Check if this is actually an episode (has memory_type link).
-    let is_episode = triples.iter().any(|t| t.predicate == predicates.memory_type);
+    let is_episode = triples
+        .iter()
+        .any(|t| t.predicate == predicates.memory_type);
     if !is_episode {
         return None;
     }
@@ -551,7 +563,7 @@ fn reconstruct_episode(
         learnings,
         tags,
         consolidation_reason: String::new(), // would need provenance lookup for full detail
-        relevance_score: 0.0, // would need provenance lookup
+        relevance_score: 0.0,                // would need provenance lookup
         timestamp,
     })
 }
@@ -577,7 +589,11 @@ mod tests {
     fn push_and_retrieve() {
         let mut wm = WorkingMemory::new(10);
         let id = wm
-            .push(make_entry(WorkingMemoryKind::Observation, "saw something", 1))
+            .push(make_entry(
+                WorkingMemoryKind::Observation,
+                "saw something",
+                1,
+            ))
             .unwrap();
         assert_eq!(wm.len(), 1);
         let entry = wm.get(id).unwrap();

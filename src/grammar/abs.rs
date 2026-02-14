@@ -13,10 +13,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::registry::SymbolRegistry;
 use crate::symbol::SymbolId;
+use crate::vsa::HyperVec;
 use crate::vsa::encode::{encode_label, encode_token};
 use crate::vsa::item_memory::ItemMemory;
 use crate::vsa::ops::VsaOps;
-use crate::vsa::HyperVec;
 
 use super::cat::Cat;
 use super::error::{GrammarError, GrammarResult};
@@ -121,7 +121,6 @@ pub struct DataFlowStep {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum AbsTree {
     // ── Leaves ──────────────────────────────────────────────────────────
-
     /// A reference to an entity (resolved or unresolved).
     EntityRef {
         label: String,
@@ -138,7 +137,6 @@ pub enum AbsTree {
     Freeform(String),
 
     // ── Composites ──────────────────────────────────────────────────────
-
     /// A subject-predicate-object statement.
     Triple {
         subject: Box<AbsTree>,
@@ -193,12 +191,9 @@ pub enum AbsTree {
     },
 
     /// A directed data flow chain between code components.
-    DataFlow {
-        steps: Vec<DataFlowStep>,
-    },
+    DataFlow { steps: Vec<DataFlowStep> },
 
     // ── Modifiers ───────────────────────────────────────────────────────
-
     /// Wrap an inner node with a confidence score.
     WithConfidence {
         inner: Box<AbsTree>,
@@ -212,7 +207,6 @@ pub enum AbsTree {
     },
 
     // ── Structure ───────────────────────────────────────────────────────
-
     /// A conjunction (and) or disjunction (or) of multiple items.
     Conjunction {
         items: Vec<AbsTree>,
@@ -221,10 +215,7 @@ pub enum AbsTree {
     },
 
     /// A titled section containing body items.
-    Section {
-        heading: String,
-        body: Vec<AbsTree>,
-    },
+    Section { heading: String, body: Vec<AbsTree> },
 
     /// A complete document with overview, sections, and gaps.
     Document {
@@ -293,7 +284,9 @@ impl AbsTree {
                 predicate.validate()?;
                 object.validate()
             }
-            AbsTree::Similarity { entity, similar_to, .. } => {
+            AbsTree::Similarity {
+                entity, similar_to, ..
+            } => {
                 entity.validate()?;
                 similar_to.validate()
             }
@@ -399,9 +392,7 @@ impl AbsTree {
                 1 + children.iter().map(|c| c.node_count()).sum::<usize>()
             }
 
-            AbsTree::Section { body, .. } => {
-                1 + body.iter().map(|i| i.node_count()).sum::<usize>()
-            }
+            AbsTree::Section { body, .. } => 1 + body.iter().map(|i| i.node_count()).sum::<usize>(),
 
             AbsTree::Document {
                 overview,
@@ -727,8 +718,12 @@ impl AbsTree {
     /// Count unresolved leaf nodes (EntityRef/RelationRef with `symbol_id: None`).
     pub fn unresolved_count(&self) -> usize {
         match self {
-            AbsTree::EntityRef { symbol_id: None, .. }
-            | AbsTree::RelationRef { symbol_id: None, .. } => 1,
+            AbsTree::EntityRef {
+                symbol_id: None, ..
+            }
+            | AbsTree::RelationRef {
+                symbol_id: None, ..
+            } => 1,
             AbsTree::Triple {
                 subject,
                 predicate,
@@ -745,9 +740,7 @@ impl AbsTree {
             AbsTree::WithConfidence { inner, .. } | AbsTree::WithProvenance { inner, .. } => {
                 inner.unresolved_count()
             }
-            AbsTree::Conjunction { items, .. } => {
-                items.iter().map(|i| i.unresolved_count()).sum()
-            }
+            AbsTree::Conjunction { items, .. } => items.iter().map(|i| i.unresolved_count()).sum(),
             AbsTree::CodeModule { children, .. } => {
                 children.iter().map(|c| c.unresolved_count()).sum()
             }
@@ -793,9 +786,7 @@ impl AbsTree {
             AbsTree::WithConfidence { inner, .. } | AbsTree::WithProvenance { inner, .. } => {
                 inner.first_unresolved()
             }
-            AbsTree::Conjunction { items, .. } => {
-                items.iter().find_map(|i| i.first_unresolved())
-            }
+            AbsTree::Conjunction { items, .. } => items.iter().find_map(|i| i.first_unresolved()),
             AbsTree::CodeModule { children, .. } => {
                 children.iter().find_map(|c| c.first_unresolved())
             }
@@ -843,11 +834,11 @@ impl AbsTree {
                 symbol_id: None,
             } => Ok(encode_token(ops, label)),
 
-            AbsTree::Freeform(text) => encode_label(ops, text).map_err(|e| {
-                GrammarError::VsaError {
+            AbsTree::Freeform(text) => {
+                encode_label(ops, text).map_err(|e| GrammarError::VsaError {
                     message: e.to_string(),
-                }
-            }),
+                })
+            }
 
             // ── Composites ──────────────────────────────────────────────
             AbsTree::Triple {
@@ -867,14 +858,11 @@ impl AbsTree {
                 let bound_p = ops.bind(&role_p, &p_vec).map_err(vsa_err)?;
                 let bound_o = ops.bind(&role_o, &o_vec).map_err(vsa_err)?;
 
-                ops.bundle(&[&bound_s, &bound_p, &bound_o])
-                    .map_err(vsa_err)
+                ops.bundle(&[&bound_s, &bound_p, &bound_o]).map_err(vsa_err)
             }
 
             AbsTree::Similarity {
-                entity,
-                similar_to,
-                ..
+                entity, similar_to, ..
             } => {
                 let e_vec = entity.to_vsa(ops, item_memory, roles)?;
                 let s_vec = similar_to.to_vsa(ops, item_memory, roles)?;
@@ -935,10 +923,8 @@ impl AbsTree {
                         message: "cannot encode empty data flow".into(),
                     });
                 }
-                let vecs: Vec<HyperVec> = steps
-                    .iter()
-                    .map(|s| encode_token(ops, &s.name))
-                    .collect();
+                let vecs: Vec<HyperVec> =
+                    steps.iter().map(|s| encode_token(ops, &s.name)).collect();
                 let refs: Vec<&HyperVec> = vecs.iter().collect();
                 ops.bundle(&refs).map_err(vsa_err)
             }
@@ -1132,7 +1118,10 @@ mod tests {
             ),
         ]);
         let labels = tree.collect_labels();
-        assert_eq!(labels, vec!["Dog", "is-a", "Mammal", "Cat", "is-a", "Mammal"]);
+        assert_eq!(
+            labels,
+            vec!["Dog", "is-a", "Mammal", "Cat", "is-a", "Mammal"]
+        );
     }
 
     // ── VsaRoleSymbols tests ────────────────────────────────────────────
@@ -1177,7 +1166,12 @@ mod tests {
         let grounded = tree.ground(&reg);
 
         // Subject should resolve to Dog (id=1)
-        if let AbsTree::Triple { subject, predicate, object } = &grounded {
+        if let AbsTree::Triple {
+            subject,
+            predicate,
+            object,
+        } = &grounded
+        {
             assert_eq!(subject.symbol_id(), Some(SymbolId::new(1).unwrap()));
             assert_eq!(predicate.symbol_id(), Some(SymbolId::new(3).unwrap()));
             assert_eq!(object.symbol_id(), Some(SymbolId::new(2).unwrap()));
@@ -1247,9 +1241,7 @@ mod tests {
         let vec = tree.to_vsa(&ops, &im, &roles).unwrap();
         assert_eq!(vec.dim(), ops.dim());
         // Same label should produce same vector
-        let vec2 = AbsTree::entity("Dog")
-            .to_vsa(&ops, &im, &roles)
-            .unwrap();
+        let vec2 = AbsTree::entity("Dog").to_vsa(&ops, &im, &roles).unwrap();
         assert_eq!(vec, vec2);
     }
 
@@ -1351,10 +1343,7 @@ mod tests {
         let im = test_item_memory();
         let roles = VsaRoleSymbols::new();
 
-        let tree = AbsTree::and(vec![
-            AbsTree::entity("Dog"),
-            AbsTree::entity("Cat"),
-        ]);
+        let tree = AbsTree::and(vec![AbsTree::entity("Dog"), AbsTree::entity("Cat")]);
         let vec = tree.to_vsa(&ops, &im, &roles).unwrap();
         assert_eq!(vec.dim(), ops.dim());
     }

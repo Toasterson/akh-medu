@@ -68,9 +68,7 @@ impl NarrativeGrammar {
 
     fn linearize_inner(&self, tree: &AbsTree, ctx: &LinContext) -> GrammarResult<String> {
         match tree {
-            AbsTree::EntityRef { label, symbol_id } => {
-                Ok(ctx.resolve_label(label, *symbol_id))
-            }
+            AbsTree::EntityRef { label, symbol_id } => Ok(ctx.resolve_label(label, *symbol_id)),
 
             AbsTree::RelationRef { label, symbol_id } => {
                 let resolved = ctx.resolve_label(label, *symbol_id);
@@ -112,7 +110,10 @@ impl NarrativeGrammar {
                 Ok(format!("{transition}{e} shares {strength} to {s}."))
             }
 
-            AbsTree::Gap { entity, description } => {
+            AbsTree::Gap {
+                entity,
+                description,
+            } => {
                 let e = self.linearize_inner(entity, ctx)?;
                 let opener = self.next_gap_opener();
                 Ok(format!("{opener}: regarding {e}, {description}."))
@@ -250,13 +251,16 @@ impl NarrativeGrammar {
                 if *is_and {
                     Ok(parts.join(" "))
                 } else {
-                    let items_str: Vec<String> = parts.iter().map(|p| {
-                        if let Some(stripped) = p.strip_suffix('.') {
-                            stripped.to_string()
-                        } else {
-                            p.clone()
-                        }
-                    }).collect();
+                    let items_str: Vec<String> = parts
+                        .iter()
+                        .map(|p| {
+                            if let Some(stripped) = p.strip_suffix('.') {
+                                stripped.to_string()
+                            } else {
+                                p.clone()
+                            }
+                        })
+                        .collect();
                     Ok(format!(
                         "Either {}, depending on the context.",
                         morpho::join_list(&items_str, "or")

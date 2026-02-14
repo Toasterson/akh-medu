@@ -72,6 +72,10 @@ pub enum AkhError {
     #[error(transparent)]
     #[diagnostic(transparent)]
     Compartment(#[from] crate::compartment::CompartmentError),
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Library(#[from] crate::library::LibraryError),
 }
 
 // ---------------------------------------------------------------------------
@@ -394,7 +398,9 @@ pub enum ReasonError {
     #[error("expression parse error: {message}")]
     #[diagnostic(
         code(akh::reason::parse_error),
-        help("The expression could not be parsed. Check for balanced parentheses and valid operators.")
+        help(
+            "The expression could not be parsed. Check for balanced parentheses and valid operators."
+        )
     )]
     ParseError { message: String },
 }
@@ -644,14 +650,15 @@ mod tests {
             actual: 5_000,
         };
         let akh: AkhError = err.into();
-        assert!(matches!(akh, AkhError::Vsa(VsaError::DimensionMismatch { .. })));
+        assert!(matches!(
+            akh,
+            AkhError::Vsa(VsaError::DimensionMismatch { .. })
+        ));
     }
 
     #[test]
     fn store_error_converts_to_akh_error() {
-        let err = StoreError::NotFound {
-            key: "test".into(),
-        };
+        let err = StoreError::NotFound { key: "test".into() };
         let akh: AkhError = err.into();
         assert!(matches!(akh, AkhError::Store(StoreError::NotFound { .. })));
     }

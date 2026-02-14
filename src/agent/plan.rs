@@ -179,10 +179,16 @@ pub fn generate_plan(
                         .unwrap_or(0.5)
                 };
 
-                let knowledge_score = score(&["find", "query", "search", "discover", "explore", "list", "identify"]);
-                let reasoning_score = score(&["reason", "infer", "deduce", "classify", "analyze", "why"]);
-                let creation_score = score(&["create", "add", "build", "connect", "link", "store", "write"]);
-                let external_score = score(&["file", "http", "command", "shell", "fetch", "download"]);
+                let knowledge_score = score(&[
+                    "find", "query", "search", "discover", "explore", "list", "identify",
+                ]);
+                let reasoning_score =
+                    score(&["reason", "infer", "deduce", "classify", "analyze", "why"]);
+                let creation_score = score(&[
+                    "create", "add", "build", "connect", "link", "store", "write",
+                ]);
+                let external_score =
+                    score(&["file", "http", "command", "shell", "fetch", "download"]);
                 let similarity_score = score(&["similar", "like", "related", "compare", "cluster"]);
 
                 // Threshold: random similarity is ~0.50, so 0.55 indicates real signal.
@@ -198,11 +204,32 @@ pub fn generate_plan(
             Err(_) => {
                 // Keyword fallback
                 (
-                    contains_any(&goal_lower, &["find", "query", "search", "discover", "what", "list", "identify"]),
-                    contains_any(&goal_lower, &["reason", "infer", "deduce", "classify", "analyze", "why"]),
-                    contains_any(&goal_lower, &["create", "add", "build", "connect", "link", "store", "write"]),
-                    contains_any(&goal_lower, &["file", "http", "url", "command", "shell", "fetch", "download"]),
-                    contains_any(&goal_lower, &["similar", "like", "related", "compare", "cluster"]),
+                    contains_any(
+                        &goal_lower,
+                        &[
+                            "find", "query", "search", "discover", "what", "list", "identify",
+                        ],
+                    ),
+                    contains_any(
+                        &goal_lower,
+                        &["reason", "infer", "deduce", "classify", "analyze", "why"],
+                    ),
+                    contains_any(
+                        &goal_lower,
+                        &[
+                            "create", "add", "build", "connect", "link", "store", "write",
+                        ],
+                    ),
+                    contains_any(
+                        &goal_lower,
+                        &[
+                            "file", "http", "url", "command", "shell", "fetch", "download",
+                        ],
+                    ),
+                    contains_any(
+                        &goal_lower,
+                        &["similar", "like", "related", "compare", "cluster"],
+                    ),
                 )
             }
         }
@@ -370,9 +397,21 @@ pub fn generate_plan(
         let im = engine.item_memory();
 
         let external_tools: &[(&str, &[&str], &str)] = &[
-            ("file_io", &["file", "read", "write", "save", "export", "data", "disk"], "file I/O"),
-            ("http_fetch", &["http", "url", "fetch", "web", "api", "download", "network"], "HTTP fetch"),
-            ("shell_exec", &["command", "shell", "execute", "run", "process", "script"], "shell exec"),
+            (
+                "file_io",
+                &["file", "read", "write", "save", "export", "data", "disk"],
+                "file I/O",
+            ),
+            (
+                "http_fetch",
+                &["http", "url", "fetch", "web", "api", "download", "network"],
+                "HTTP fetch",
+            ),
+            (
+                "shell_exec",
+                &["command", "shell", "execute", "run", "process", "script"],
+                "shell exec",
+            ),
         ];
 
         if let Ok(goal_vec) =
@@ -484,19 +523,12 @@ pub fn generate_plan(
             .collect();
 
         // Skip the first step that duplicates a previously-used tool.
-        if let Some(skip_idx) = steps
-            .iter()
-            .position(|s| used_tools.contains(&s.tool_name))
-        {
+        if let Some(skip_idx) = steps.iter().position(|s| used_tools.contains(&s.tool_name)) {
             steps[skip_idx].status = StepStatus::Skipped;
         }
     }
 
-    let strategy = format!(
-        "Attempt {}: {}",
-        attempt + 1,
-        strategy_parts.join(" → ")
-    );
+    let strategy = format!("Attempt {}: {}", attempt + 1, strategy_parts.join(" → "));
 
     Ok(Plan {
         goal_id: goal.goal_id(),

@@ -70,10 +70,7 @@ pub enum ToolSource {
     /// Compiled into the binary.
     Native,
     /// Loaded from a WASM component module.
-    Wasm {
-        skill_id: String,
-        wasm_path: String,
-    },
+    Wasm { skill_id: String, wasm_path: String },
     /// An external binary executed directly (no shell).
     Cli {
         binary_path: String,

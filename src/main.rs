@@ -12,13 +12,13 @@ use akh_medu::autonomous::{GapAnalysisConfig, RuleEngineConfig, SchemaDiscoveryC
 use akh_medu::engine::{Engine, EngineConfig};
 use akh_medu::error::EngineError;
 use akh_medu::glyph;
-use akh_medu::graph::traverse::TraversalConfig;
+use akh_medu::grammar::Language;
 use akh_medu::graph::Triple;
+use akh_medu::graph::traverse::TraversalConfig;
 use akh_medu::infer::InferenceQuery;
 use akh_medu::pipeline::{Pipeline, PipelineData, PipelineStage, StageConfig, StageKind};
 use akh_medu::provenance::DerivationKind;
 use akh_medu::symbol::SymbolId;
-use akh_medu::grammar::Language;
 use akh_medu::vsa::Dimension;
 
 #[derive(Parser)]
@@ -318,12 +318,22 @@ enum Commands {
         /// Override language (en, ru, ar, fr, es). Default: auto-detect.
         #[arg(long)]
         language: Option<String>,
+
+        /// Enrich extracted entities with context from the shared content library.
+        #[arg(long)]
+        library_context: bool,
     },
 
     /// Manage cross-lingual equivalence mappings.
     Equivalences {
         #[command(subcommand)]
         action: EquivalenceAction,
+    },
+
+    /// Manage the shared content library (ingest books, websites, documents).
+    Library {
+        #[command(subcommand)]
+        action: LibraryAction,
     },
 }
 
@@ -537,6 +547,28 @@ enum AgentAction {
         #[arg(long)]
         headless: bool,
     },
+    /// Run as a background daemon with scheduled learning tasks.
+    #[cfg(feature = "daemon")]
+    Daemon {
+        /// Maximum OODA cycles (0 = unlimited).
+        #[arg(long, default_value = "0")]
+        max_cycles: usize,
+        /// Fresh start: ignore persisted session.
+        #[arg(long)]
+        fresh: bool,
+        /// Equivalence learning interval in seconds.
+        #[arg(long, default_value = "300")]
+        equiv_interval: u64,
+        /// Reflection interval in seconds.
+        #[arg(long, default_value = "180")]
+        reflect_interval: u64,
+        /// Rule inference interval in seconds.
+        #[arg(long, default_value = "600")]
+        rules_interval: u64,
+        /// Session persist interval in seconds.
+        #[arg(long, default_value = "60")]
+        persist_interval: u64,
+    },
 }
 
 #[derive(Subcommand)]
@@ -622,6 +654,51 @@ enum EquivalenceAction {
 }
 
 #[derive(Subcommand)]
+enum LibraryAction {
+    /// Add a document to the library (file path or URL).
+    Add {
+        /// File path or URL to ingest.
+        source: String,
+        /// Override document title.
+        #[arg(long)]
+        title: Option<String>,
+        /// Tags for categorization (comma-separated).
+        #[arg(long)]
+        tags: Option<String>,
+        /// Override format detection (html, pdf, epub, text).
+        #[arg(long)]
+        format: Option<String>,
+    },
+    /// List all documents in the library.
+    List,
+    /// Search library content by text similarity.
+    Search {
+        /// Query text to search for.
+        #[arg(long)]
+        query: String,
+        /// Maximum results to return.
+        #[arg(long, default_value = "5")]
+        top_k: usize,
+    },
+    /// Remove a document from the library.
+    Remove {
+        /// Document ID (slug) to remove.
+        id: String,
+    },
+    /// Show detailed information about a document.
+    Info {
+        /// Document ID (slug).
+        id: String,
+    },
+    /// Watch a directory for new files and auto-ingest them.
+    Watch {
+        /// Directory to watch (defaults to the library inbox).
+        #[arg(long)]
+        dir: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
 enum SeedAction {
     /// List available seed packs.
     List,
@@ -669,11 +746,10 @@ fn main() -> Result<()> {
 
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| {
-                    // Default: show akh-medu info, silence noisy deps (egg, hnsw).
-                    tracing_subscriber::EnvFilter::new("info,egg=warn,hnsw_rs=warn")
-                }),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                // Default: show akh-medu info, silence noisy deps (egg, hnsw).
+                tracing_subscriber::EnvFilter::new("info,egg=warn,hnsw_rs=warn")
+            }),
         )
         .init();
 
@@ -715,8 +791,7 @@ fn main() -> Result<()> {
                 // Save default workspace config if it doesn't exist.
                 let config_path = paths.workspace_config_file(&cli.workspace);
                 if !config_path.exists() {
-                    let ws_config =
-                        akh_medu::workspace::WorkspaceConfig::with_name(&cli.workspace);
+                    let ws_config = akh_medu::workspace::WorkspaceConfig::with_name(&cli.workspace);
                     ws_config.save(&config_path).into_diagnostic()?;
                 }
 
@@ -732,7 +807,11 @@ fn main() -> Result<()> {
                 ..Default::default()
             };
             let engine = Engine::new(config).into_diagnostic()?;
-            println!("Initialized workspace \"{}\" at {}", cli.workspace, effective_dir.display());
+            println!(
+                "Initialized workspace \"{}\" at {}",
+                cli.workspace,
+                effective_dir.display()
+            );
             println!("{}", engine.info());
         }
 
@@ -748,7 +827,9 @@ fn main() -> Result<()> {
                 WorkspaceAction::List => {
                     let names = mgr.list();
                     if names.is_empty() {
-                        println!("No workspaces found. Create one with: akh-medu workspace create <name>");
+                        println!(
+                            "No workspaces found. Create one with: akh-medu workspace create <name>"
+                        );
                     } else {
                         println!("Workspaces:");
                         for name in &names {
@@ -759,7 +840,10 @@ fn main() -> Result<()> {
                 WorkspaceAction::Create { name } => {
                     let ws_config = akh_medu::workspace::WorkspaceConfig::with_name(&name);
                     let ws_paths = mgr.create(ws_config).into_diagnostic()?;
-                    println!("Created workspace \"{name}\" at {}", ws_paths.root.display());
+                    println!(
+                        "Created workspace \"{name}\" at {}",
+                        ws_paths.root.display()
+                    );
                 }
                 WorkspaceAction::Delete { name } => {
                     mgr.delete(&name).into_diagnostic()?;
@@ -773,11 +857,14 @@ fn main() -> Result<()> {
                     println!("  Encoding: {}", info.encoding);
                     println!("  Language: {}", info.language);
                     println!("  Max memory: {} MB", info.max_memory_mb);
-                    println!("  Seed packs: {}", if info.seed_packs.is_empty() {
-                        "(none)".to_string()
-                    } else {
-                        info.seed_packs.join(", ")
-                    });
+                    println!(
+                        "  Seed packs: {}",
+                        if info.seed_packs.is_empty() {
+                            "(none)".to_string()
+                        } else {
+                            info.seed_packs.join(", ")
+                        }
+                    );
                     let ws_paths = mgr.paths().workspace(ws_name);
                     println!("  Data dir: {}", ws_paths.root.display());
                 }
@@ -840,7 +927,12 @@ fn main() -> Result<()> {
             }
         }
 
-        Commands::Ingest { file, format, csv_format, max_sentences } => {
+        Commands::Ingest {
+            file,
+            format,
+            csv_format,
+            max_sentences,
+        } => {
             let engine = Engine::new(config).into_diagnostic()?;
 
             match format.as_str() {
@@ -861,21 +953,30 @@ fn main() -> Result<()> {
                     if is_label_format {
                         let mut label_triples = Vec::new();
                         for (i, val) in triples.iter().enumerate() {
-                            let subject = val["subject"].as_str().ok_or_else(|| {
-                                EngineError::IngestFormat {
-                                    message: format!("triple {i}: missing or non-string 'subject' field"),
-                                }
-                            }).into_diagnostic()?;
-                            let predicate = val["predicate"].as_str().ok_or_else(|| {
-                                EngineError::IngestFormat {
-                                    message: format!("triple {i}: missing or non-string 'predicate' field"),
-                                }
-                            }).into_diagnostic()?;
-                            let object = val["object"].as_str().ok_or_else(|| {
-                                EngineError::IngestFormat {
-                                    message: format!("triple {i}: missing or non-string 'object' field"),
-                                }
-                            }).into_diagnostic()?;
+                            let subject = val["subject"]
+                                .as_str()
+                                .ok_or_else(|| EngineError::IngestFormat {
+                                    message: format!(
+                                        "triple {i}: missing or non-string 'subject' field"
+                                    ),
+                                })
+                                .into_diagnostic()?;
+                            let predicate = val["predicate"]
+                                .as_str()
+                                .ok_or_else(|| EngineError::IngestFormat {
+                                    message: format!(
+                                        "triple {i}: missing or non-string 'predicate' field"
+                                    ),
+                                })
+                                .into_diagnostic()?;
+                            let object = val["object"]
+                                .as_str()
+                                .ok_or_else(|| EngineError::IngestFormat {
+                                    message: format!(
+                                        "triple {i}: missing or non-string 'object' field"
+                                    ),
+                                })
+                                .into_diagnostic()?;
                             let confidence = val["confidence"].as_f64().unwrap_or(1.0) as f32;
 
                             label_triples.push((
@@ -920,8 +1021,8 @@ fn main() -> Result<()> {
                     }
                 }
                 "csv" => {
-                    use akh_medu::agent::tools::CsvIngestTool;
                     use akh_medu::agent::tool::{Tool, ToolInput};
+                    use akh_medu::agent::tools::CsvIngestTool;
 
                     let input = ToolInput::new()
                         .with_param("path", file.to_str().unwrap_or(""))
@@ -932,8 +1033,8 @@ fn main() -> Result<()> {
                     println!("{}", output.result);
                 }
                 "text" => {
-                    use akh_medu::agent::tools::TextIngestTool;
                     use akh_medu::agent::tool::{Tool, ToolInput};
+                    use akh_medu::agent::tools::TextIngestTool;
 
                     let input = ToolInput::new()
                         .with_param("text", &format!("file:{}", file.display()))
@@ -973,7 +1074,13 @@ fn main() -> Result<()> {
         Commands::Bootstrap => {
             let engine = Engine::new(config).into_diagnostic()?;
 
-            let skill_names = ["astronomy", "common_sense", "geography", "science", "language"];
+            let skill_names = [
+                "astronomy",
+                "common_sense",
+                "geography",
+                "science",
+                "language",
+            ];
             let mut total_triples = 0usize;
             let mut total_rules = 0usize;
             let mut skills_loaded = 0usize;
@@ -1016,10 +1123,7 @@ fn main() -> Result<()> {
             match engine.run_rules(rule_config) {
                 Ok(result) => {
                     let derived_count = result.derived.len();
-                    println!(
-                        "Running inference... derived {} new triples",
-                        derived_count,
-                    );
+                    println!("Running inference... derived {} new triples", derived_count,);
                     total_triples += derived_count;
                 }
                 Err(e) => {
@@ -1030,7 +1134,10 @@ fn main() -> Result<()> {
             let _ = engine.persist();
             println!(
                 "Bootstrap complete: {} base + derived = {} total triples, {} skills, {} rules.",
-                total_triples - total_rules, total_triples, skills_loaded, total_rules,
+                total_triples - total_rules,
+                total_triples,
+                skills_loaded,
+                total_rules,
             );
         }
 
@@ -1122,7 +1229,9 @@ fn main() -> Result<()> {
                 max_results,
             };
 
-            let result = engine.traverse(&seed_ids, traverse_config).into_diagnostic()?;
+            let result = engine
+                .traverse(&seed_ids, traverse_config)
+                .into_diagnostic()?;
 
             if format == "json" {
                 let json_triples: Vec<serde_json::Value> = result
@@ -1229,7 +1338,9 @@ fn main() -> Result<()> {
             let b_label = engine.resolve_label(b_id);
             let c_label = engine.resolve_label(c_id);
 
-            let results = engine.infer_analogy(a_id, b_id, c_id, top_k).into_diagnostic()?;
+            let results = engine
+                .infer_analogy(a_id, b_id, c_id, top_k)
+                .into_diagnostic()?;
 
             println!("Analogy: \"{a_label}\" : \"{b_label}\" :: \"{c_label}\" : ?");
             for (i, (sym_id, confidence)) in results.iter().enumerate() {
@@ -1289,10 +1400,7 @@ fn main() -> Result<()> {
                     } else {
                         println!("Symbols ({}):", symbols.len());
                         for meta in &symbols {
-                            println!(
-                                "  {} / {} [{}]",
-                                meta.label, meta.id, meta.kind
-                            );
+                            println!("  {} / {} [{}]", meta.label, meta.id, meta.kind);
                         }
                     }
                 }
@@ -1596,7 +1704,9 @@ fn main() -> Result<()> {
                     if results.is_empty() {
                         println!("No nodes in graph.");
                     } else {
-                        println!("PageRank (damping={damping}, iterations={iterations}, top {top_k}):");
+                        println!(
+                            "PageRank (damping={damping}, iterations={iterations}, top {top_k}):"
+                        );
                         for (i, pr) in results.iter().take(top_k).enumerate() {
                             let label = engine.resolve_label(pr.symbol);
                             println!(
@@ -1657,10 +1767,7 @@ fn main() -> Result<()> {
                             println!("  {}", labels.join(" -> "));
                         }
                         None => {
-                            println!(
-                                "No path found from \"{}\" to \"{}\".",
-                                from_label, to_label
-                            );
+                            println!("No path found from \"{}\" to \"{}\".", from_label, to_label);
                         }
                     }
                 }
@@ -1692,17 +1799,15 @@ fn main() -> Result<()> {
                 println!("{}", glyph::render::render_legend(&render_config));
             } else if let Some(ref name) = entity {
                 let sym_id = engine.resolve_symbol(name).into_diagnostic()?;
-                let result = engine.extract_subgraph(&[sym_id], depth).into_diagnostic()?;
+                let result = engine
+                    .extract_subgraph(&[sym_id], depth)
+                    .into_diagnostic()?;
                 if result.triples.is_empty() {
                     println!("No triples found around \"{}\".", name);
                 } else {
                     println!(
                         "{}",
-                        glyph::render::render_to_terminal(
-                            &engine,
-                            &result.triples,
-                            &render_config,
-                        )
+                        glyph::render::render_to_terminal(&engine, &result.triples, &render_config,)
                     );
                 }
             } else if all {
@@ -1716,7 +1821,9 @@ fn main() -> Result<()> {
                     );
                 }
             } else {
-                println!("Usage: render --entity <name> [--depth N] | render --all | render --legend");
+                println!(
+                    "Usage: render --entity <name> [--depth N] | render --all | render --legend"
+                );
             }
         }
 
@@ -1859,8 +1966,7 @@ fn main() -> Result<()> {
 
                 AgentAction::Recall { query, top_k } => {
                     let agent_config = AgentConfig::default();
-                    let agent =
-                        Agent::new(Arc::clone(&engine), agent_config).into_diagnostic()?;
+                    let agent = Agent::new(Arc::clone(&engine), agent_config).into_diagnostic()?;
 
                     let query_ids: std::result::Result<Vec<SymbolId>, _> = query
                         .split(',')
@@ -1887,8 +1993,7 @@ fn main() -> Result<()> {
 
                 AgentAction::Tools => {
                     let agent_config = AgentConfig::default();
-                    let agent =
-                        Agent::new(Arc::clone(&engine), agent_config).into_diagnostic()?;
+                    let agent = Agent::new(Arc::clone(&engine), agent_config).into_diagnostic()?;
 
                     let tools = agent.list_tools();
                     println!("Registered tools ({}):", tools.len());
@@ -1979,16 +2084,16 @@ fn main() -> Result<()> {
                         }
 
                         let ws_name = cli.workspace.clone();
-                        let mut tui = akh_medu::tui::AkhTui::new(ws_name, Arc::clone(&engine), agent);
+                        let mut tui =
+                            akh_medu::tui::AkhTui::new(ws_name, Arc::clone(&engine), agent);
                         tui.run()?;
                     } else {
                         // Headless REPL (legacy stdin/stdout mode).
                         let agent_config = AgentConfig::default();
-                        let mut agent = if goals.is_none()
-                            && Agent::has_persisted_session(&engine)
+                        let mut agent = if goals.is_none() && Agent::has_persisted_session(&engine)
                         {
-                            let a =
-                                Agent::resume(Arc::clone(&engine), agent_config).into_diagnostic()?;
+                            let a = Agent::resume(Arc::clone(&engine), agent_config)
+                                .into_diagnostic()?;
                             println!(
                                 "Resumed session: cycle {}, {} WM entries, {} goals",
                                 a.cycle_count(),
@@ -2031,25 +2136,23 @@ fn main() -> Result<()> {
                             match cmd {
                                 "q" | "quit" | "exit" => break,
                                 "s" | "status" => print_repl_status(&agent, &engine),
-                                _ => {
-                                    match agent.run_cycle() {
-                                        Ok(result) => {
-                                            println!(
-                                                "Cycle {} — tool={}, progress={:?}",
-                                                result.cycle_number,
-                                                result.decision.chosen_tool,
-                                                result.action_result.goal_progress,
-                                            );
-                                            let output = &result.action_result.tool_output.result;
-                                            if output.len() > 100 {
-                                                println!("  Result: {}...", &output[..100]);
-                                            } else {
-                                                println!("  Result: {output}");
-                                            }
+                                _ => match agent.run_cycle() {
+                                    Ok(result) => {
+                                        println!(
+                                            "Cycle {} — tool={}, progress={:?}",
+                                            result.cycle_number,
+                                            result.decision.chosen_tool,
+                                            result.action_result.goal_progress,
+                                        );
+                                        let output = &result.action_result.tool_output.result;
+                                        if output.len() > 100 {
+                                            println!("  Result: {}...", &output[..100]);
+                                        } else {
+                                            println!("  Result: {output}");
                                         }
-                                        Err(e) => println!("Cycle error: {e}"),
                                     }
-                                }
+                                    Err(e) => println!("Cycle error: {e}"),
+                                },
                             }
                         }
 
@@ -2126,19 +2229,25 @@ fn main() -> Result<()> {
                         for adj in &result.adjustments {
                             match adj {
                                 akh_medu::agent::Adjustment::IncreasePriority {
-                                    from, to, reason, ..
+                                    from,
+                                    to,
+                                    reason,
+                                    ..
                                 } => println!("  [+] Priority {} → {}: {}", from, to, reason),
                                 akh_medu::agent::Adjustment::DecreasePriority {
-                                    from, to, reason, ..
+                                    from,
+                                    to,
+                                    reason,
+                                    ..
                                 } => println!("  [-] Priority {} → {}: {}", from, to, reason),
                                 akh_medu::agent::Adjustment::SuggestNewGoal {
                                     description,
                                     reason,
                                     ..
                                 } => println!("  [new] \"{}\": {}", description, reason),
-                                akh_medu::agent::Adjustment::SuggestAbandon {
-                                    reason, ..
-                                } => println!("  [abandon] {}", reason),
+                                akh_medu::agent::Adjustment::SuggestAbandon { reason, .. } => {
+                                    println!("  [abandon] {}", reason)
+                                }
                             }
                         }
                     }
@@ -2226,9 +2335,7 @@ fn main() -> Result<()> {
                 AgentAction::Schema => {
                     let schema_config = SchemaDiscoveryConfig::default();
 
-                    let result = engine
-                        .discover_schema(schema_config)
-                        .into_diagnostic()?;
+                    let result = engine.discover_schema(schema_config).into_diagnostic()?;
 
                     if result.types.is_empty()
                         && result.co_occurring_predicates.is_empty()
@@ -2343,9 +2450,11 @@ fn main() -> Result<()> {
 
                             let question = cmd.to_string();
                             let goal_desc = format!("chat: {question}");
-                            let goal_id = match agent
-                                .add_goal(&goal_desc, 200, "Agent-determined completion")
-                            {
+                            let goal_id = match agent.add_goal(
+                                &goal_desc,
+                                200,
+                                "Agent-determined completion",
+                            ) {
                                 Ok(id) => id,
                                 Err(e) => {
                                     eprintln!("Error: {e}");
@@ -2378,6 +2487,41 @@ fn main() -> Result<()> {
                         println!("Session saved.");
                     }
                 }
+
+                #[cfg(feature = "daemon")]
+                AgentAction::Daemon {
+                    max_cycles,
+                    fresh,
+                    equiv_interval,
+                    reflect_interval,
+                    rules_interval,
+                    persist_interval,
+                } => {
+                    use akh_medu::agent::{AgentDaemon, DaemonConfig};
+
+                    let agent_config = AgentConfig::default();
+                    let mut agent = if !fresh && Agent::has_persisted_session(&engine) {
+                        Agent::resume(Arc::clone(&engine), agent_config).into_diagnostic()?
+                    } else {
+                        Agent::new(Arc::clone(&engine), agent_config).into_diagnostic()?
+                    };
+                    if fresh {
+                        agent.clear_goals();
+                    }
+
+                    let daemon_config = DaemonConfig {
+                        equivalence_interval: std::time::Duration::from_secs(equiv_interval),
+                        reflection_interval: std::time::Duration::from_secs(reflect_interval),
+                        rule_inference_interval: std::time::Duration::from_secs(rules_interval),
+                        persist_interval: std::time::Duration::from_secs(persist_interval),
+                        max_cycles,
+                        ..DaemonConfig::default()
+                    };
+
+                    let rt = tokio::runtime::Runtime::new().into_diagnostic()?;
+                    let mut daemon = AgentDaemon::new(agent, daemon_config);
+                    rt.block_on(daemon.run()).into_diagnostic()?;
+                }
             }
         }
 
@@ -2402,7 +2546,9 @@ fn main() -> Result<()> {
                 let ops = engine.ops();
                 let im = engine.item_memory();
                 let grounding_config = akh_medu::vsa::grounding::GroundingConfig::default();
-                if let Ok(result) = akh_medu::vsa::grounding::ground_all(&engine, ops, im, &grounding_config) {
+                if let Ok(result) =
+                    akh_medu::vsa::grounding::ground_all(&engine, ops, im, &grounding_config)
+                {
                     if result.symbols_updated > 0 {
                         println!(
                             "Grounded {} symbols in {} round(s).",
@@ -2621,9 +2767,7 @@ fn main() -> Result<()> {
                 Ok(result) => {
                     println!(
                         "Semantic enrichment complete:\n  Roles classified: {}\n  Importance scores: {}\n  Flow edges: {}",
-                        result.roles_enriched,
-                        result.importance_enriched,
-                        result.flows_detected,
+                        result.roles_enriched, result.importance_enriched, result.flows_detected,
                     );
                 }
                 Err(e) => {
@@ -2637,9 +2781,9 @@ fn main() -> Result<()> {
 
         Commands::Grammar { action } => {
             use akh_medu::grammar::AbsTree;
+            use akh_medu::grammar::bridge::triple_to_abs;
             use akh_medu::grammar::concrete::LinContext;
             use akh_medu::grammar::parser::ParseResult;
-            use akh_medu::grammar::bridge::triple_to_abs;
 
             match action {
                 GrammarAction::List => {
@@ -2685,7 +2829,11 @@ fn main() -> Result<()> {
                                     println!("  {}. [{}]", i + 1, fact.cat());
                                     for archetype in &["formal", "terse", "narrative"] {
                                         if let Ok(prose) = engine.linearize(fact, Some(archetype)) {
-                                            println!("     {:<10} {}", format!("{archetype}:"), prose);
+                                            println!(
+                                                "     {:<10} {}",
+                                                format!("{archetype}:"),
+                                                prose
+                                            );
                                         }
                                     }
                                     println!();
@@ -2850,7 +2998,8 @@ fn main() -> Result<()> {
                     let from_triples = engine.triples_from(symbol_id);
                     let to_triples = engine.triples_to(symbol_id);
 
-                    let mut all_triples: Vec<_> = from_triples.into_iter().chain(to_triples).collect();
+                    let mut all_triples: Vec<_> =
+                        from_triples.into_iter().chain(to_triples).collect();
                     all_triples.truncate(max_triples);
 
                     if all_triples.is_empty() {
@@ -2914,10 +3063,17 @@ fn main() -> Result<()> {
             }
         }
 
-        Commands::Preprocess { format, language: lang_override } => {
-            use std::io::{self, BufRead, Write as IoWrite};
-            use akh_medu::grammar::preprocess::{TextChunk, preprocess_chunk, PreProcessResponse, preprocess_batch};
+        Commands::Preprocess {
+            format,
+            language: lang_override,
+            library_context,
+        } => {
             use akh_medu::grammar::concrete::ParseContext as GrammarParseContext;
+            use akh_medu::grammar::preprocess::{
+                PreProcessResponse, TextChunk, preprocess_batch, preprocess_batch_with_library,
+                preprocess_chunk, preprocess_chunk_with_library,
+            };
+            use std::io::{self, BufRead, Write as IoWrite};
 
             let engine = Engine::new(config).into_diagnostic()?;
             let ctx = GrammarParseContext::with_engine(
@@ -2938,15 +3094,27 @@ fn main() -> Result<()> {
                 let chunks: Vec<TextChunk> = serde_json::from_str(&input).into_diagnostic()?;
 
                 // Apply language override
-                let chunks: Vec<TextChunk> = chunks.into_iter().map(|mut c| {
-                    if let Some(ref lang) = lang_override {
-                        c.language = Some(lang.clone());
-                    }
-                    c
-                }).collect();
+                let chunks: Vec<TextChunk> = chunks
+                    .into_iter()
+                    .map(|mut c| {
+                        if let Some(ref lang) = lang_override {
+                            c.language = Some(lang.clone());
+                        }
+                        c
+                    })
+                    .collect();
 
                 let start = std::time::Instant::now();
-                let results = preprocess_batch(&chunks, &ctx);
+                let results = if library_context {
+                    preprocess_batch_with_library(
+                        &chunks,
+                        &ctx,
+                        &engine.entity_resolver(),
+                        &engine,
+                    )
+                } else {
+                    preprocess_batch(&chunks, &ctx)
+                };
                 let elapsed = start.elapsed().as_millis() as u64;
 
                 let response = PreProcessResponse {
@@ -2966,7 +3134,16 @@ fn main() -> Result<()> {
                     if let Some(ref lang) = lang_override {
                         chunk.language = Some(lang.clone());
                     }
-                    let result = preprocess_chunk(&chunk, &ctx);
+                    let result = if library_context {
+                        preprocess_chunk_with_library(
+                            &chunk,
+                            &ctx,
+                            &engine.entity_resolver(),
+                            &engine,
+                        )
+                    } else {
+                        preprocess_chunk(&chunk, &ctx)
+                    };
                     serde_json::to_writer(&mut out, &result).into_diagnostic()?;
                     writeln!(out).into_diagnostic()?;
                 }
@@ -2974,15 +3151,20 @@ fn main() -> Result<()> {
         }
 
         Commands::Equivalences { action } => {
-            let mut engine = Engine::new(config).into_diagnostic()?;
+            let engine = Engine::new(config).into_diagnostic()?;
 
             match action {
                 EquivalenceAction::List => {
                     let equivs = engine.export_equivalences();
                     if equivs.is_empty() {
-                        println!("No learned equivalences yet. Run `equivalences learn` to discover some.");
+                        println!(
+                            "No learned equivalences yet. Run `equivalences learn` to discover some."
+                        );
                     } else {
-                        println!("{:<30} {:<30} {:<8} {:<6} {}", "Surface", "Canonical", "Lang", "Conf", "Source");
+                        println!(
+                            "{:<30} {:<30} {:<8} {:<6} {}",
+                            "Surface", "Canonical", "Lang", "Conf", "Source"
+                        );
                         println!("{}", "-".repeat(90));
                         for e in &equivs {
                             println!(
@@ -3001,6 +3183,7 @@ fn main() -> Result<()> {
                     println!("    kg-structural:  {}", stats.kg_structural);
                     println!("    vsa-similarity: {}", stats.vsa_similarity);
                     println!("    co-occurrence:  {}", stats.co_occurrence);
+                    println!("    library-context:{}", stats.library_context);
                     println!("    manual:         {}", stats.manual);
                 }
                 EquivalenceAction::Learn => {
@@ -3013,18 +3196,186 @@ fn main() -> Result<()> {
                     use std::io::Write as _;
                     let equivs = engine.export_equivalences();
                     let json = serde_json::to_string_pretty(&equivs).into_diagnostic()?;
-                    std::io::stdout().write_all(json.as_bytes()).into_diagnostic()?;
+                    std::io::stdout()
+                        .write_all(json.as_bytes())
+                        .into_diagnostic()?;
                     std::io::stdout().write_all(b"\n").into_diagnostic()?;
                 }
                 EquivalenceAction::Import => {
                     use std::io::Read as _;
                     let mut input = String::new();
-                    std::io::stdin().read_to_string(&mut input).into_diagnostic()?;
+                    std::io::stdin()
+                        .read_to_string(&mut input)
+                        .into_diagnostic()?;
                     let equivs: Vec<akh_medu::grammar::entity_resolution::LearnedEquivalence> =
                         serde_json::from_str(&input).into_diagnostic()?;
                     let count = equivs.len();
                     engine.import_equivalences(&equivs).into_diagnostic()?;
                     println!("Imported {count} equivalences.");
+                }
+            }
+        }
+
+        Commands::Library { action } => {
+            let paths = xdg_paths.ok_or_else(|| {
+                miette::miette!("Cannot resolve XDG paths. Set HOME environment variable.")
+            })?;
+            paths.ensure_dirs().into_diagnostic()?;
+            let library_dir = paths.library_dir();
+            let engine = Engine::new(config).into_diagnostic()?;
+
+            match action {
+                LibraryAction::Add {
+                    source,
+                    title,
+                    tags,
+                    format,
+                } => {
+                    let mut catalog =
+                        akh_medu::library::LibraryCatalog::open(&library_dir).into_diagnostic()?;
+
+                    let tag_list: Vec<String> = tags
+                        .map(|t| t.split(',').map(|s| s.trim().to_string()).collect())
+                        .unwrap_or_default();
+
+                    let fmt = format.and_then(|f| match f.as_str() {
+                        "html" => Some(akh_medu::library::ContentFormat::Html),
+                        "pdf" => Some(akh_medu::library::ContentFormat::Pdf),
+                        "epub" => Some(akh_medu::library::ContentFormat::Epub),
+                        "text" | "txt" => Some(akh_medu::library::ContentFormat::PlainText),
+                        _ => None,
+                    });
+
+                    let ingest_config = akh_medu::library::IngestConfig {
+                        title,
+                        tags: tag_list,
+                        format: fmt,
+                        ..Default::default()
+                    };
+
+                    let result = if source.starts_with("http://") || source.starts_with("https://")
+                    {
+                        akh_medu::library::ingest_url(&engine, &mut catalog, &source, ingest_config)
+                            .into_diagnostic()?
+                    } else {
+                        let path = PathBuf::from(&source);
+                        akh_medu::library::ingest_file(
+                            &engine,
+                            &mut catalog,
+                            &path,
+                            ingest_config,
+                        )
+                        .into_diagnostic()?
+                    };
+
+                    println!("Ingested: {}", result.record.title);
+                    println!("  ID:      {}", result.record.id);
+                    println!("  Format:  {}", result.record.format);
+                    println!("  Chunks:  {}", result.chunk_count);
+                    println!("  Triples: {}", result.triple_count);
+                }
+
+                LibraryAction::List => {
+                    let catalog =
+                        akh_medu::library::LibraryCatalog::open(&library_dir).into_diagnostic()?;
+
+                    if catalog.is_empty() {
+                        println!(
+                            "Library is empty. Add a document with: akh-medu library add <file-or-url>"
+                        );
+                    } else {
+                        println!(
+                            "{:<30} {:<20} {:<8} {:<8} {}",
+                            "ID", "Title", "Format", "Chunks", "Tags"
+                        );
+                        println!("{}", "-".repeat(80));
+                        for doc in catalog.list() {
+                            let title_short = if doc.title.len() > 18 {
+                                format!("{}...", &doc.title[..18])
+                            } else {
+                                doc.title.clone()
+                            };
+                            println!(
+                                "{:<30} {:<20} {:<8} {:<8} {}",
+                                doc.id,
+                                title_short,
+                                doc.format,
+                                doc.chunk_count,
+                                doc.tags.join(", "),
+                            );
+                        }
+                        println!("\nTotal: {} document(s)", catalog.len());
+                    }
+                }
+
+                LibraryAction::Search { query, top_k } => {
+                    use akh_medu::vsa::encode::encode_label;
+
+                    let query_vec =
+                        encode_label(engine.ops(), &query).into_diagnostic()?;
+                    let results = engine.item_memory().search(&query_vec, top_k).into_diagnostic()?;
+
+                    if results.is_empty() {
+                        println!("No matching content found for: \"{query}\"");
+                    } else {
+                        println!("Search results for \"{query}\":");
+                        println!(
+                            "{:<8} {:<10} {}",
+                            "Rank", "Sim", "Symbol"
+                        );
+                        println!("{}", "-".repeat(60));
+                        for (rank, result) in results.iter().enumerate() {
+                            let label = engine.resolve_label(result.symbol_id);
+                            println!(
+                                "{:<8} {:<10.4} {}",
+                                rank + 1,
+                                result.similarity,
+                                label,
+                            );
+                        }
+                    }
+                }
+
+                LibraryAction::Remove { id } => {
+                    let mut catalog =
+                        akh_medu::library::LibraryCatalog::open(&library_dir).into_diagnostic()?;
+                    let removed = catalog.remove(&id).into_diagnostic()?;
+                    println!("Removed: {} (\"{}\")", removed.id, removed.title);
+                }
+
+                LibraryAction::Watch { dir } => {
+                    let inbox_dir = dir.unwrap_or_else(|| paths.library_inbox());
+                    let inbox_config =
+                        akh_medu::library::inbox::InboxConfig::new(inbox_dir, library_dir);
+                    akh_medu::library::inbox::watch_inbox(&engine, &inbox_config)
+                        .into_diagnostic()?;
+                }
+
+                LibraryAction::Info { id } => {
+                    let catalog =
+                        akh_medu::library::LibraryCatalog::open(&library_dir).into_diagnostic()?;
+                    let doc = catalog.get(&id).ok_or_else(|| {
+                        miette::miette!("Document not found: \"{id}\". Use `library list` to see available documents.")
+                    })?;
+
+                    println!("Document: {}", doc.title);
+                    println!("  ID:       {}", doc.id);
+                    println!("  Format:   {}", doc.format);
+                    println!("  Source:   {}", doc.source);
+                    println!("  Chunks:   {}", doc.chunk_count);
+                    println!("  Triples:  {}", doc.triple_count);
+                    println!(
+                        "  Tags:     {}",
+                        if doc.tags.is_empty() {
+                            "(none)".to_string()
+                        } else {
+                            doc.tags.join(", ")
+                        }
+                    );
+                    println!(
+                        "  Ingested: {} (unix timestamp)",
+                        doc.ingested_at
+                    );
                 }
             }
         }
@@ -3040,38 +3391,35 @@ fn print_repl_status(agent: &Agent, engine: &Engine) {
         agent.cycle_count(),
         agent.working_memory().len(),
         agent.working_memory().capacity(),
-        agent.goals().iter().filter(|g| matches!(g.status, akh_medu::agent::GoalStatus::Active)).count(),
+        agent
+            .goals()
+            .iter()
+            .filter(|g| matches!(g.status, akh_medu::agent::GoalStatus::Active))
+            .count(),
         agent.goals().len(),
     );
     for g in agent.goals() {
-        println!(
-            "    [{}] {}",
-            g.status,
-            engine.resolve_label(g.symbol_id),
-        );
+        println!("    [{}] {}", g.status, engine.resolve_label(g.symbol_id),);
     }
 }
 
 /// Print pipeline output in summary format.
-fn print_pipeline_output_summary(
-    output: &akh_medu::pipeline::PipelineOutput,
-    engine: &Engine,
-) {
-    println!(
-        "Pipeline — {} stages executed",
-        output.stages_executed
-    );
+fn print_pipeline_output_summary(output: &akh_medu::pipeline::PipelineOutput, engine: &Engine) {
+    println!("Pipeline — {} stages executed", output.stages_executed);
     for (i, (name, data)) in output.stage_results.iter().enumerate() {
         let summary = format_pipeline_data_summary(data, engine);
-        println!("  [{}/{}] {}: {}", i + 1, output.stages_executed, name, summary);
+        println!(
+            "  [{}/{}] {}: {}",
+            i + 1,
+            output.stages_executed,
+            name,
+            summary
+        );
     }
 }
 
 /// Print pipeline output in JSON format.
-fn print_pipeline_output_json(
-    output: &akh_medu::pipeline::PipelineOutput,
-    engine: &Engine,
-) {
+fn print_pipeline_output_json(output: &akh_medu::pipeline::PipelineOutput, engine: &Engine) {
     let stages: Vec<serde_json::Value> = output
         .stage_results
         .iter()
@@ -3087,15 +3435,25 @@ fn print_pipeline_output_json(
         "stages": stages,
         "result": format_pipeline_data_summary(&output.result, engine),
     });
-    println!("{}", serde_json::to_string_pretty(&json).unwrap_or_default());
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&json).unwrap_or_default()
+    );
 }
 
 /// Format a PipelineData variant as a one-line summary.
-fn format_pipeline_data_summary(data: &akh_medu::pipeline::PipelineData, engine: &Engine) -> String {
+fn format_pipeline_data_summary(
+    data: &akh_medu::pipeline::PipelineData,
+    engine: &Engine,
+) -> String {
     use akh_medu::pipeline::PipelineData;
     match data {
         PipelineData::Seeds(seeds) => {
-            let labels: Vec<String> = seeds.iter().take(5).map(|s| engine.resolve_label(*s)).collect();
+            let labels: Vec<String> = seeds
+                .iter()
+                .take(5)
+                .map(|s| engine.resolve_label(*s))
+                .collect();
             format!("{} seeds [{}]", seeds.len(), labels.join(", "))
         }
         PipelineData::Triples(triples) => {
@@ -3163,10 +3521,7 @@ fn format_derivation_kind(kind: &DerivationKind, engine: &Engine) -> String {
                 engine.resolve_label(*c)
             )
         }
-        DerivationKind::FillerRecovery {
-            subject,
-            predicate,
-        } => {
+        DerivationKind::FillerRecovery { subject, predicate } => {
             format!(
                 "filler recovery (\"{}\", \"{}\")",
                 engine.resolve_label(*subject),
@@ -3214,14 +3569,8 @@ fn format_derivation_kind(kind: &DerivationKind, engine: &Engine) -> String {
                 path_count, interference_signal
             )
         }
-        DerivationKind::GapIdentified {
-            gap_kind,
-            severity,
-        } => {
-            format!(
-                "gap identified [{}] (severity: {:.2})",
-                gap_kind, severity
-            )
+        DerivationKind::GapIdentified { gap_kind, severity } => {
+            format!("gap identified [{}] (severity: {:.2})", gap_kind, severity)
         }
         DerivationKind::SchemaDiscovered { pattern_type } => {
             format!("schema discovered [{}]", pattern_type)
@@ -3242,10 +3591,7 @@ fn format_derivation_kind(kind: &DerivationKind, engine: &Engine) -> String {
             pattern_name,
             severity,
         } => {
-            format!(
-                "shadow veto [{}] (severity: {:.2})",
-                pattern_name, severity
-            )
+            format!("shadow veto [{}] (severity: {:.2})", pattern_name, severity)
         }
         DerivationKind::PsycheEvolution { trigger, cycle } => {
             format!("psyche evolution [{}] at cycle {}", trigger, cycle)
@@ -3268,6 +3614,16 @@ fn format_derivation_kind(kind: &DerivationKind, engine: &Engine) -> String {
             format!(
                 "CLI tool execution [{}] via \"{}\" (danger: {})",
                 tool_name, binary_path, danger_level
+            )
+        }
+        DerivationKind::DocumentIngested {
+            document_id,
+            format,
+            chunk_index,
+        } => {
+            format!(
+                "document ingested [{}] format={} chunk={}",
+                document_id, format, chunk_index
             )
         }
     }

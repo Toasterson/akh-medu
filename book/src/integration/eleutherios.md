@@ -798,6 +798,23 @@ corresponding positions are likely equivalent.
 {"id": "report-ch3_ru", "text": "Эксперимент был проведён в Москве.", "language": "ru"}
 ```
 
+#### Strategy 4: Library Paragraph Context
+
+When a shared content library has been populated (via `library add`), unresolved
+entities can be matched against library paragraph embeddings.
+
+**How it works:**
+1. For each unresolved entity, encode its label as a hypervector
+2. Search item memory for the 20 nearest neighbors, filtering to `para:*` symbols
+3. For matching library paragraphs, walk KG triples to find connected entities
+4. Skip structural labels (`para:`, `ch:`, `sec:`, numeric indices)
+5. If a connected entity resolves to a known canonical, propose the equivalence
+   with confidence `(similarity * 0.85).min(0.85)`
+
+**Example:** If the library contains a paragraph about "Jungian psychology" that
+connects to "Archetype", and an unresolved entity "архетип" has a similar
+embedding, the strategy proposes `"архетип" → "Archetype"`.
+
 #### Equivalence Sources
 
 Each learned equivalence records how it was discovered:
@@ -808,6 +825,7 @@ Each learned equivalence records how it was discovered:
 | `KgStructural` | Discovered by matching KG relational fingerprints |
 | `VsaSimilarity` | Discovered by hypervector distributional similarity |
 | `CoOccurrence` | Discovered from parallel chunk position correlation |
+| `LibraryContext` | Discovered from shared library paragraph context |
 | `Manual` | User-added via CLI or API import |
 
 ### Managing Equivalences via CLI
@@ -837,7 +855,7 @@ curl -s http://localhost:8200/equivalences | python3 -m json.tool
 
 # Show statistics
 curl -s http://localhost:8200/equivalences/stats | python3 -m json.tool
-# => {"runtime_aliases": 0, "learned_total": 12, "kg_structural": 3, "vsa_similarity": 4, "co_occurrence": 2, "manual": 3}
+# => {"runtime_aliases": 0, "learned_total": 12, "kg_structural": 3, "vsa_similarity": 4, "co_occurrence": 2, "library_context": 0, "manual": 3}
 
 # Trigger learning
 curl -s -X POST http://localhost:8200/equivalences/learn | python3 -m json.tool
@@ -1380,6 +1398,7 @@ cat chunks.jsonl | ./target/release/akh-medu preprocess --format jsonl --languag
 |--------|-------------|---------|
 | `--format <jsonl\|json>` | Input/output format | jsonl |
 | `--language <CODE>` | Override language detection | auto |
+| `--library-context` | Enrich entities with shared library context | off |
 
 #### `ingest`
 

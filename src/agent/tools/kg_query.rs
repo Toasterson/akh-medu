@@ -35,8 +35,7 @@ impl Tool for KgQueryTool {
         let symbol_str = input.require("symbol", "kg_query")?;
         let direction = input.get("direction").unwrap_or("both");
 
-        let symbol_id = engine
-            .resolve_symbol(symbol_str)?;
+        let symbol_id = engine.resolve_symbol(symbol_str)?;
 
         let label = engine.resolve_label(symbol_id);
         let mut lines = Vec::new();

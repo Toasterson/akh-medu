@@ -219,8 +219,8 @@ fn build_architecture_doc(engine: &Engine, preds: &CodePredicates) -> Vec<DocSec
         let modules = find_entities_of_type(engine, isa, mod_type);
 
         for (mod_id, mod_label) in &modules {
-            let mut sub = DocSection::new(format!("Module: {mod_label}"))
-                .with_symbols(vec![mod_id.get()]);
+            let mut sub =
+                DocSection::new(format!("Module: {mod_label}")).with_symbols(vec![mod_id.get()]);
 
             // Doc comment.
             let doc = get_string_object(engine, *mod_id, preds.has_doc);
@@ -274,10 +274,7 @@ fn build_architecture_doc(engine: &Engine, preds: &CodePredicates) -> Vec<DocSec
             if triple.predicate == isa {
                 let obj_label = engine.resolve_label(triple.object);
                 let subj_label = engine.resolve_label(triple.subject);
-                type_groups
-                    .entry(obj_label)
-                    .or_default()
-                    .push(subj_label);
+                type_groups.entry(obj_label).or_default().push(subj_label);
             }
         }
 
@@ -307,9 +304,8 @@ fn build_architecture_doc(engine: &Engine, preds: &CodePredicates) -> Vec<DocSec
         for (type_name, traits) in &impls {
             let mut sorted = traits.clone();
             sorted.sort();
-            impl_section = impl_section.with_subsection(
-                DocSection::new(type_name.clone()).with_body(sorted.join(", ")),
-            );
+            impl_section = impl_section
+                .with_subsection(DocSection::new(type_name.clone()).with_body(sorted.join(", ")));
         }
         if !impls.is_empty() {
             sections.push(impl_section);
@@ -323,13 +319,14 @@ fn build_module_doc(engine: &Engine, preds: &CodePredicates, name: &str) -> Vec<
     let mod_id = match engine.lookup_symbol(name) {
         Ok(id) => id,
         Err(_) => {
-            return vec![DocSection::new(format!("Module: {name}"))
-                .with_body(format!("Module '{name}' not found in the knowledge graph."))];
+            return vec![
+                DocSection::new(format!("Module: {name}"))
+                    .with_body(format!("Module '{name}' not found in the knowledge graph.")),
+            ];
         }
     };
 
-    let mut section =
-        DocSection::new(format!("Module: {name}")).with_symbols(vec![mod_id.get()]);
+    let mut section = DocSection::new(format!("Module: {name}")).with_symbols(vec![mod_id.get()]);
 
     // Doc comment.
     if let Some(doc) = get_string_object(engine, mod_id, preds.has_doc) {
@@ -343,8 +340,7 @@ fn build_module_doc(engine: &Engine, preds: &CodePredicates, name: &str) -> Vec<
         .filter(|t| t.predicate == preds.defines_fn)
         .map(|t| {
             let label = engine.resolve_label(t.object);
-            let ret = get_string_object(engine, t.object, preds.returns_type)
-                .unwrap_or_default();
+            let ret = get_string_object(engine, t.object, preds.returns_type).unwrap_or_default();
             if ret.is_empty() {
                 label
             } else {
@@ -353,9 +349,7 @@ fn build_module_doc(engine: &Engine, preds: &CodePredicates, name: &str) -> Vec<
         })
         .collect();
     if !fns.is_empty() {
-        section = section.with_subsection(
-            DocSection::new("Functions").with_body(fns.join("\n")),
-        );
+        section = section.with_subsection(DocSection::new("Functions").with_body(fns.join("\n")));
     }
 
     // Structs.
@@ -366,8 +360,7 @@ fn build_module_doc(engine: &Engine, preds: &CodePredicates, name: &str) -> Vec<
         .map(|t| engine.resolve_label(t.object))
         .collect();
     if !structs.is_empty() {
-        section = section
-            .with_subsection(DocSection::new("Structs").with_body(structs.join(", ")));
+        section = section.with_subsection(DocSection::new("Structs").with_body(structs.join(", ")));
     }
 
     // Enums.
@@ -378,8 +371,7 @@ fn build_module_doc(engine: &Engine, preds: &CodePredicates, name: &str) -> Vec<
         .map(|t| engine.resolve_label(t.object))
         .collect();
     if !enums.is_empty() {
-        section = section
-            .with_subsection(DocSection::new("Enums").with_body(enums.join(", ")));
+        section = section.with_subsection(DocSection::new("Enums").with_body(enums.join(", ")));
     }
 
     // Traits.
@@ -390,8 +382,7 @@ fn build_module_doc(engine: &Engine, preds: &CodePredicates, name: &str) -> Vec<
         .map(|t| engine.resolve_label(t.object))
         .collect();
     if !traits.is_empty() {
-        section = section
-            .with_subsection(DocSection::new("Traits").with_body(traits.join(", ")));
+        section = section.with_subsection(DocSection::new("Traits").with_body(traits.join(", ")));
     }
 
     // Submodules.
@@ -402,8 +393,8 @@ fn build_module_doc(engine: &Engine, preds: &CodePredicates, name: &str) -> Vec<
         .map(|t| engine.resolve_label(t.object))
         .collect();
     if !submods.is_empty() {
-        section = section
-            .with_subsection(DocSection::new("Submodules").with_body(submods.join(", ")));
+        section =
+            section.with_subsection(DocSection::new("Submodules").with_body(submods.join(", ")));
     }
 
     vec![section]
@@ -413,13 +404,14 @@ fn build_type_doc(engine: &Engine, preds: &CodePredicates, name: &str) -> Vec<Do
     let type_id = match engine.lookup_symbol(name) {
         Ok(id) => id,
         Err(_) => {
-            return vec![DocSection::new(format!("Type: {name}"))
-                .with_body(format!("Type '{name}' not found in the knowledge graph."))];
+            return vec![
+                DocSection::new(format!("Type: {name}"))
+                    .with_body(format!("Type '{name}' not found in the knowledge graph.")),
+            ];
         }
     };
 
-    let mut section =
-        DocSection::new(format!("Type: {name}")).with_symbols(vec![type_id.get()]);
+    let mut section = DocSection::new(format!("Type: {name}")).with_symbols(vec![type_id.get()]);
 
     // Doc comment.
     if let Some(doc) = get_string_object(engine, type_id, preds.has_doc) {
@@ -434,8 +426,7 @@ fn build_type_doc(engine: &Engine, preds: &CodePredicates, name: &str) -> Vec<Do
         .map(|t| engine.resolve_label(t.object))
         .collect();
     if !fields.is_empty() {
-        section = section
-            .with_subsection(DocSection::new("Fields").with_body(fields.join("\n")));
+        section = section.with_subsection(DocSection::new("Fields").with_body(fields.join("\n")));
     }
 
     // Variants.
@@ -446,8 +437,8 @@ fn build_type_doc(engine: &Engine, preds: &CodePredicates, name: &str) -> Vec<Do
         .map(|t| engine.resolve_label(t.object))
         .collect();
     if !variants.is_empty() {
-        section = section
-            .with_subsection(DocSection::new("Variants").with_body(variants.join(", ")));
+        section =
+            section.with_subsection(DocSection::new("Variants").with_body(variants.join(", ")));
     }
 
     // Methods.
@@ -458,8 +449,7 @@ fn build_type_doc(engine: &Engine, preds: &CodePredicates, name: &str) -> Vec<Do
         .map(|t| engine.resolve_label(t.object))
         .collect();
     if !methods.is_empty() {
-        section = section
-            .with_subsection(DocSection::new("Methods").with_body(methods.join(", ")));
+        section = section.with_subsection(DocSection::new("Methods").with_body(methods.join(", ")));
     }
 
     // Trait implementations.
@@ -470,8 +460,8 @@ fn build_type_doc(engine: &Engine, preds: &CodePredicates, name: &str) -> Vec<Do
         .map(|t| engine.resolve_label(t.object))
         .collect();
     if !traits.is_empty() {
-        section = section
-            .with_subsection(DocSection::new("Implements").with_body(traits.join(", ")));
+        section =
+            section.with_subsection(DocSection::new("Implements").with_body(traits.join(", ")));
     }
 
     // Derives.
@@ -482,8 +472,7 @@ fn build_type_doc(engine: &Engine, preds: &CodePredicates, name: &str) -> Vec<Do
         .map(|t| engine.resolve_label(t.object))
         .collect();
     if !derives.is_empty() {
-        section = section
-            .with_subsection(DocSection::new("Derives").with_body(derives.join(", ")));
+        section = section.with_subsection(DocSection::new("Derives").with_body(derives.join(", ")));
     }
 
     vec![section]
@@ -507,9 +496,8 @@ fn build_dependency_doc(engine: &Engine, preds: &CodePredicates) -> Vec<DocSecti
         for (source, targets) in &deps {
             let mut sorted = targets.clone();
             sorted.sort();
-            section = section.with_subsection(
-                DocSection::new(source.clone()).with_body(sorted.join(", ")),
-            );
+            section = section
+                .with_subsection(DocSection::new(source.clone()).with_body(sorted.join(", ")));
         }
     }
 
@@ -658,10 +646,20 @@ mod tests {
 
     #[test]
     fn doc_target_parse() {
-        assert!(matches!(DocTarget::parse("architecture"), DocTarget::Architecture));
-        assert!(matches!(DocTarget::parse("dependencies"), DocTarget::Dependencies));
-        assert!(matches!(DocTarget::parse("module:vsa"), DocTarget::Module { ref name } if name == "vsa"));
-        assert!(matches!(DocTarget::parse("type:Engine"), DocTarget::Type { ref name } if name == "Engine"));
+        assert!(matches!(
+            DocTarget::parse("architecture"),
+            DocTarget::Architecture
+        ));
+        assert!(matches!(
+            DocTarget::parse("dependencies"),
+            DocTarget::Dependencies
+        ));
+        assert!(
+            matches!(DocTarget::parse("module:vsa"), DocTarget::Module { ref name } if name == "vsa")
+        );
+        assert!(
+            matches!(DocTarget::parse("type:Engine"), DocTarget::Type { ref name } if name == "Engine")
+        );
     }
 
     #[test]
@@ -727,9 +725,11 @@ mod tests {
 
     #[test]
     fn render_markdown_basic() {
-        let sections = vec![DocSection::new("Title")
-            .with_body("Some text.")
-            .with_subsection(DocSection::new("Sub").with_body("Sub text."))];
+        let sections = vec![
+            DocSection::new("Title")
+                .with_body("Some text.")
+                .with_subsection(DocSection::new("Sub").with_body("Sub text.")),
+        ];
         let md = render_markdown(&sections, 1);
         assert!(md.contains("# Title"));
         assert!(md.contains("## Sub"));

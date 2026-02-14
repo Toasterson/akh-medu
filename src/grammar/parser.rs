@@ -17,10 +17,7 @@ pub enum ParseResult {
     /// One or more facts extracted as abstract syntax trees.
     Facts(Vec<AbsTree>),
     /// A query with a subject hint.
-    Query {
-        subject: String,
-        tree: AbsTree,
-    },
+    Query { subject: String, tree: AbsTree },
     /// A system command.
     Command(CommandKind),
     /// A goal-setting directive.
@@ -70,20 +67,11 @@ pub fn parse_prose(input: &str, ctx: &ParseContext) -> ParseResult {
     if is_question(trimmed, &lexicon) {
         let subject = extract_question_subject(trimmed);
         let tree = AbsTree::entity(&subject);
-        return ParseResult::Query {
-            subject,
-            tree,
-        };
+        return ParseResult::Query { subject, tree };
     }
 
     // Tokenize for pattern matching
-    let tokens = lexer::tokenize(
-        trimmed,
-        ctx.registry,
-        ctx.ops,
-        ctx.item_memory,
-        &lexicon,
-    );
+    let tokens = lexer::tokenize(trimmed, ctx.registry, ctx.ops, ctx.item_memory, &lexicon);
 
     // 4. Compound sentences (split on "and"/"or")
     if let Some(result) = try_compound(&tokens, &lexicon) {
@@ -129,11 +117,7 @@ fn is_question(input: &str, lexicon: &Lexicon) -> bool {
     if input.trim_end().ends_with('?') {
         return true;
     }
-    let first_word = input
-        .split_whitespace()
-        .next()
-        .unwrap_or("")
-        .to_lowercase();
+    let first_word = input.split_whitespace().next().unwrap_or("").to_lowercase();
     lexicon.is_question_word(&first_word)
 }
 
@@ -344,7 +328,11 @@ fn token_to_entity(token: &Token) -> AbsTree {
 }
 
 /// Compute confidence from resolution quality and pattern base confidence.
-fn compute_confidence(subject: &AbsTree, object: &AbsTree, pattern: &lexer::RelationalPattern) -> f32 {
+fn compute_confidence(
+    subject: &AbsTree,
+    object: &AbsTree,
+    pattern: &lexer::RelationalPattern,
+) -> f32 {
     let base = pattern.default_confidence;
     let subj_factor = resolution_confidence(subject);
     let obj_factor = resolution_confidence(object);

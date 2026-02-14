@@ -98,7 +98,6 @@ pub enum AgentError {
         help("An engine-level error occurred during an agent operation.")
     )]
     Engine(Box<crate::error::AkhError>),
-
 }
 
 impl From<crate::error::AkhError> for AgentError {

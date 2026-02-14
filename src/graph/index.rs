@@ -7,9 +7,9 @@ use std::collections::HashMap;
 use std::sync::RwLock;
 
 use dashmap::DashMap;
+use petgraph::Direction;
 use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::visit::EdgeRef;
-use petgraph::Direction;
 
 use crate::error::GraphError;
 use crate::symbol::SymbolId;
@@ -196,8 +196,7 @@ impl KnowledgeGraph {
 
     /// Number of triples (edges).
     pub fn triple_count(&self) -> usize {
-        self.triple_count
-            .load(std::sync::atomic::Ordering::Relaxed)
+        self.triple_count.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Get all node symbols.
@@ -217,7 +216,10 @@ impl KnowledgeGraph {
 
     /// Build a reverse lookup: NodeIndex -> SymbolId.
     pub fn node_index_to_symbol(&self) -> HashMap<NodeIndex, SymbolId> {
-        self.node_index.iter().map(|e| (*e.value(), *e.key())).collect()
+        self.node_index
+            .iter()
+            .map(|e| (*e.value(), *e.key()))
+            .collect()
     }
 
     /// Bulk-load triples into the graph. Used for restoring from persistent storage.

@@ -32,7 +32,9 @@ pub enum PathError {
     #[error("workspace not found: \"{name}\"")]
     #[diagnostic(
         code(akh::paths::workspace_not_found),
-        help("Create it with `akh-medu workspace create {name}` or list existing workspaces with `akh-medu workspace list`.")
+        help(
+            "Create it with `akh-medu workspace create {name}` or list existing workspaces with `akh-medu workspace list`."
+        )
     )]
     WorkspaceNotFound { name: String },
 }
@@ -123,6 +125,9 @@ impl AkhPaths {
 
     /// Create all base directories. Idempotent.
     pub fn ensure_dirs(&self) -> PathResult<()> {
+        let library_dir = self.library_dir();
+        let library_inbox = self.library_inbox();
+        let library_docs = self.library_documents_dir();
         for dir in [
             &self.config_dir,
             &self.data_dir,
@@ -135,6 +140,9 @@ impl AkhPaths {
             &self.state_dir.join("sessions"),
             &self.state_dir.join("logs"),
             &self.config_dir.join("workspaces"),
+            &library_dir,
+            &library_inbox,
+            &library_docs,
         ] {
             std::fs::create_dir_all(dir).map_err(|e| PathError::CreateDir {
                 path: dir.display().to_string(),
@@ -151,12 +159,29 @@ impl AkhPaths {
 
     /// Path to a workspace's config file.
     pub fn workspace_config_file(&self, name: &str) -> PathBuf {
-        self.config_dir.join("workspaces").join(format!("{name}.toml"))
+        self.config_dir
+            .join("workspaces")
+            .join(format!("{name}.toml"))
     }
 
     /// Path to the seeds directory.
     pub fn seeds_dir(&self) -> PathBuf {
         self.data_dir.join("seeds")
+    }
+
+    /// Path to the shared content library directory.
+    pub fn library_dir(&self) -> PathBuf {
+        self.data_dir.join("library")
+    }
+
+    /// Path to the library inbox directory (watched for new files).
+    pub fn library_inbox(&self) -> PathBuf {
+        self.data_dir.join("library").join("inbox")
+    }
+
+    /// Path to the library documents directory.
+    pub fn library_documents_dir(&self) -> PathBuf {
+        self.data_dir.join("library").join("documents")
     }
 }
 
@@ -251,10 +276,22 @@ mod tests {
 
         let ws = paths.workspace("myproject");
         assert_eq!(ws.name, "myproject");
-        assert_eq!(ws.root, PathBuf::from("/data/akh-medu/workspaces/myproject"));
-        assert_eq!(ws.kg_dir, PathBuf::from("/data/akh-medu/workspaces/myproject/kg"));
-        assert_eq!(ws.skills_dir, PathBuf::from("/data/akh-medu/workspaces/myproject/skills"));
-        assert_eq!(ws.scratch_dir, PathBuf::from("/data/akh-medu/workspaces/myproject/scratch"));
+        assert_eq!(
+            ws.root,
+            PathBuf::from("/data/akh-medu/workspaces/myproject")
+        );
+        assert_eq!(
+            ws.kg_dir,
+            PathBuf::from("/data/akh-medu/workspaces/myproject/kg")
+        );
+        assert_eq!(
+            ws.skills_dir,
+            PathBuf::from("/data/akh-medu/workspaces/myproject/skills")
+        );
+        assert_eq!(
+            ws.scratch_dir,
+            PathBuf::from("/data/akh-medu/workspaces/myproject/scratch")
+        );
         assert_eq!(
             ws.session_file,
             PathBuf::from("/state/akh-medu/sessions/myproject.bin")

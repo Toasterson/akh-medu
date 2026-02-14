@@ -56,12 +56,15 @@ rules until no more simplifications are possible. This provides:
 
 ```
 ┌──────────────────────────────────────────────────────────┐
+│              Daemon / TUI Idle Scheduler                  │
+│  Equivalence · Reflection · Rules · Schema · Gaps        │
+├──────────────────────────────────────────────────────────┤
 │                      Engine API                          │
 ├──────────┬──────────┬──────────┬──────────┬──────────────┤
 │   VSA    │Knowledge │Reasoning │Inference │   Agent      │
 │  Ops     │  Graph   │  (egg)   │ Engine   │  OODA Loop   │
 ├──────────┼──────────┼──────────┼──────────┼──────────────┤
-│ HyperVec │petgraph  │ rewrite  │spreading │ 15 tools     │
+│ HyperVec │petgraph  │ rewrite  │spreading │ 17 tools     │
 │ SIMD     │oxigraph  │ rules    │backward  │ planning     │
 │ ItemMem  │SPARQL    │ e-graphs │superpos. │ psyche       │
 ├──────────┴──────────┴──────────┴──────────┴──────────────┤
@@ -71,6 +74,11 @@ rules until no more simplifications are possible. This provides:
 │  Hot (DashMap) · Warm (mmap) · Durable (redb)            │
 └──────────────────────────────────────────────────────────┘
 ```
+
+The top layer -- the daemon and TUI idle scheduler -- drives autonomous
+background learning. It sits above the Engine API and periodically calls
+into subsystems (equivalence learning, rule inference, schema discovery)
+without user prompting. See [Autonomous Background Learning](../agent/autonomy.md).
 
 ## Data Flow
 

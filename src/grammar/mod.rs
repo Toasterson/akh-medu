@@ -77,7 +77,10 @@ impl GrammarRegistry {
         let mut grammars: HashMap<String, Box<dyn ConcreteGrammar>> = HashMap::new();
         grammars.insert("formal".into(), Box::new(formal::FormalGrammar));
         grammars.insert("terse".into(), Box::new(terse::TerseGrammar));
-        grammars.insert("narrative".into(), Box::new(narrative::NarrativeGrammar::new()));
+        grammars.insert(
+            "narrative".into(),
+            Box::new(narrative::NarrativeGrammar::new()),
+        );
 
         Self {
             grammars,

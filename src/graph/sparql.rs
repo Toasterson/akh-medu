@@ -10,8 +10,8 @@ use oxigraph::store::Store;
 use crate::error::GraphError;
 use crate::symbol::SymbolId;
 
-use super::index::{GraphResult, KnowledgeGraph};
 use super::Triple;
+use super::index::{GraphResult, KnowledgeGraph};
 
 /// IRI namespace for akh-medu symbols.
 const AKH_NS: &str = "https://akh-medu.dev/sym/";
@@ -76,25 +76,14 @@ impl SparqlStore {
 
         match compartment_id {
             Some(id) => {
-                let graph_iri =
-                    NamedNode::new(format!("{COMPARTMENT_NS}{id}")).expect("valid IRI");
-                let quad = Quad::new(
-                    subject,
-                    predicate,
-                    object,
-                    graph_iri.as_ref(),
-                );
+                let graph_iri = NamedNode::new(format!("{COMPARTMENT_NS}{id}")).expect("valid IRI");
+                let quad = Quad::new(subject, predicate, object, graph_iri.as_ref());
                 self.store.insert(&quad).map_err(|e| GraphError::Sparql {
                     message: format!("insert into graph {id} failed: {e}"),
                 })?;
             }
             None => {
-                let quad = Quad::new(
-                    subject,
-                    predicate,
-                    object,
-                    GraphNameRef::DefaultGraph,
-                );
+                let quad = Quad::new(subject, predicate, object, GraphNameRef::DefaultGraph);
                 self.store.insert(&quad).map_err(|e| GraphError::Sparql {
                     message: format!("insert failed: {e}"),
                 })?;
@@ -142,11 +131,12 @@ impl SparqlStore {
     /// triples will have default confidence of 1.0.
     // TODO: Store confidence via reification or named graphs to preserve across restarts.
     pub fn all_triples(&self) -> GraphResult<Vec<Triple>> {
-        let results = self.store.query("SELECT ?s ?p ?o WHERE { ?s ?p ?o }").map_err(|e| {
-            GraphError::Sparql {
+        let results = self
+            .store
+            .query("SELECT ?s ?p ?o WHERE { ?s ?p ?o }")
+            .map_err(|e| GraphError::Sparql {
                 message: format!("SPARQL all_triples query failed: {e}"),
-            }
-        })?;
+            })?;
 
         let mut triples = Vec::new();
         match results {
@@ -160,9 +150,21 @@ impl SparqlStore {
                     let o_term = solution.get("o");
 
                     if let (Some(s), Some(p), Some(o)) = (s_term, p_term, o_term) {
-                        let s_iri = s.to_string().trim_matches('<').trim_matches('>').to_string();
-                        let p_iri = p.to_string().trim_matches('<').trim_matches('>').to_string();
-                        let o_iri = o.to_string().trim_matches('<').trim_matches('>').to_string();
+                        let s_iri = s
+                            .to_string()
+                            .trim_matches('<')
+                            .trim_matches('>')
+                            .to_string();
+                        let p_iri = p
+                            .to_string()
+                            .trim_matches('<')
+                            .trim_matches('>')
+                            .to_string();
+                        let o_iri = o
+                            .to_string()
+                            .trim_matches('<')
+                            .trim_matches('>')
+                            .to_string();
 
                         if let (Some(subject), Some(predicate), Some(object)) = (
                             Self::iri_to_symbol(&s_iri),
@@ -195,10 +197,7 @@ impl SparqlStore {
     }
 
     /// Execute a SPARQL SELECT query and return results as Vec of binding maps.
-    pub fn query_select(
-        &self,
-        sparql: &str,
-    ) -> GraphResult<Vec<Vec<(String, String)>>> {
+    pub fn query_select(&self, sparql: &str) -> GraphResult<Vec<Vec<(String, String)>>> {
         let results = self.store.query(sparql).map_err(|e| GraphError::Sparql {
             message: format!("SPARQL query failed: {e}"),
         })?;

@@ -14,7 +14,8 @@ akh-medu stores, reasons about, and discovers knowledge. You feed it facts
   superposition reasoning
 - **Reason** symbolically using e-graph rewrite rules (equality saturation)
 - **Search** semantically using high-dimensional binary vectors (VSA)
-- **Act** autonomously via an OODA-loop agent with 15 built-in tools
+- **Act** autonomously via an OODA-loop agent with 17 built-in tools
+- **Learn** continuously in the background via idle-time scheduling and daemon mode
 - **Parse** and generate natural language in 5 languages via a grammar framework
 - **Serve** knowledge over REST and WebSocket APIs
 
@@ -22,13 +23,16 @@ akh-medu stores, reasons about, and discovers knowledge. You feed it facts
 
 ```
 ┌──────────────────────────────────────────────────────────┐
+│              Daemon / TUI Idle Scheduler                  │
+│  Equivalence · Reflection · Rules · Schema · Gaps        │
+├──────────────────────────────────────────────────────────┤
 │                      Engine API                          │
 │  create_symbol · add_triple · infer · query · traverse   │
 ├──────────┬──────────┬──────────┬──────────┬──────────────┤
 │   VSA    │Knowledge │Reasoning │Inference │   Agent      │
 │  Ops     │  Graph   │  (egg)   │ Engine   │  OODA Loop   │
 │ ─────────│──────────│──────────│──────────│──────────────│
-│ HyperVec │petgraph  │ rewrite  │spreading │ 15 tools     │
+│ HyperVec │petgraph  │ rewrite  │spreading │ 17 tools     │
 │ SIMD     │oxigraph  │ rules    │backward  │ planning     │
 │ ItemMem  │SPARQL    │ e-graphs │superpos. │ psyche       │
 ├──────────┴──────────┴──────────┴──────────┴──────────────┤
@@ -56,7 +60,8 @@ akh-medu stores, reasons about, and discovers knowledge. You feed it facts
   building from source and your first knowledge session.
 - **[Concepts](concepts/architecture.md)** explains the core data model and
   reasoning strategies.
-- **[Agent](agent/ooda-loop.md)** covers the autonomous OODA-loop agent.
+- **[Agent](agent/ooda-loop.md)** covers the autonomous OODA-loop agent,
+  including [background learning](agent/autonomy.md) and daemon mode.
 - **[Advanced](advanced/compartments.md)** dives into compartments, workspaces,
   grammars, and shared partitions.
 - **[Server](server/overview.md)** documents the REST and WebSocket APIs.

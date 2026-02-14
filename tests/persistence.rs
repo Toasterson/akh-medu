@@ -46,7 +46,10 @@ fn symbols_survive_restart() {
         assert_eq!(engine.lookup_symbol("SUN").unwrap(), sun_id);
 
         // resolve_symbol by name should work.
-        assert_eq!(engine.resolve_symbol("Star").unwrap(), engine.lookup_symbol("star").unwrap());
+        assert_eq!(
+            engine.resolve_symbol("Star").unwrap(),
+            engine.lookup_symbol("star").unwrap()
+        );
     }
 }
 
@@ -134,7 +137,9 @@ fn triples_survive_restart() {
         let is_a = engine.create_symbol(SymbolKind::Relation, "is-a").unwrap();
         let star = engine.create_symbol(SymbolKind::Entity, "Star").unwrap();
         let earth = engine.create_symbol(SymbolKind::Entity, "Earth").unwrap();
-        let orbits = engine.create_symbol(SymbolKind::Relation, "orbits").unwrap();
+        let orbits = engine
+            .create_symbol(SymbolKind::Relation, "orbits")
+            .unwrap();
 
         engine
             .add_triple(&Triple::new(sun.id, is_a.id, star.id))

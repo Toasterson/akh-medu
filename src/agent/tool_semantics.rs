@@ -2,12 +2,18 @@
 //!
 //! Instead of keyword matching, tools are selected by comparing a goal's
 //! semantic vector against each tool's semantic profile via VSA similarity.
+//!
+//! Synonym expansion widens the effective vocabulary so natural-language
+//! queries ("What did that paper say about gravity?") activate the right
+//! tool even when few tokens overlap with the static keyword arrays.
+
+use std::collections::HashSet;
 
 use crate::engine::Engine;
+use crate::vsa::HyperVec;
 use crate::vsa::grounding::{bundle_symbols, encode_text_as_vector};
 use crate::vsa::item_memory::ItemMemory;
 use crate::vsa::ops::{VsaOps, VsaResult};
-use crate::vsa::HyperVec;
 
 use super::tool::ToolRegistry;
 
@@ -23,125 +29,298 @@ pub struct ToolProfile {
 ///
 /// These are the concepts that each tool is semantically related to.
 /// The vectors are derived from KG symbols (grounded), not hardcoded keywords.
+/// Synonym expansion via [`expand_with_synonyms`] widens these further at
+/// profile-build time.
 const TOOL_CONCEPTS: &[(&str, &[&str])] = &[
     (
         "kg_query",
         &[
-            "query", "search", "knowledge", "triple", "find", "graph",
-            "lookup", "explore", "discover",
+            "query",
+            "search",
+            "knowledge",
+            "triple",
+            "find",
+            "graph",
+            "lookup",
+            "explore",
+            "discover",
         ],
     ),
     (
         "kg_mutate",
         &[
-            "create", "add", "insert", "connect", "link", "triple",
-            "build", "store", "write",
+            "create", "add", "insert", "connect", "link", "triple", "build", "store", "write",
         ],
     ),
     (
         "memory_recall",
         &[
-            "remember", "recall", "memory", "episode", "past",
-            "experience", "history",
+            "remember",
+            "recall",
+            "memory",
+            "episode",
+            "past",
+            "experience",
+            "history",
         ],
     ),
     (
         "reason",
         &[
-            "reason", "logic", "infer", "deduce", "simplify",
-            "expression", "symbolic", "analyze",
+            "reason",
+            "logic",
+            "infer",
+            "deduce",
+            "simplify",
+            "expression",
+            "symbolic",
+            "analyze",
         ],
     ),
     (
         "similarity_search",
         &[
-            "similar", "like", "related", "compare", "cluster",
-            "neighbor", "analogy",
+            "similar", "like", "related", "compare", "cluster", "neighbor", "analogy",
         ],
     ),
     (
         "file_io",
         &[
-            "file", "read", "write", "save", "export", "data",
-            "disk", "load", "document",
+            "file", "read", "write", "save", "export", "data", "disk", "load", "document",
+            "import", "open", "close", "directory", "folder", "path", "output", "input",
         ],
     ),
     (
         "http_fetch",
         &[
-            "http", "url", "fetch", "web", "api", "download",
-            "request", "network",
+            "http", "url", "fetch", "web", "api", "download", "request", "network",
+            "website", "page", "online", "internet", "get", "endpoint", "link", "browse",
         ],
     ),
     (
         "shell_exec",
         &[
-            "command", "shell", "execute", "run", "process",
-            "script", "system", "terminal",
+            "command", "shell", "execute", "run", "process", "script", "system", "terminal",
+            "bash", "program", "invoke", "launch", "pipe", "cli", "binary",
         ],
     ),
     (
         "user_interact",
         &[
-            "ask", "user", "input", "question", "interact",
-            "human", "prompt", "dialog",
+            "ask", "user", "input", "question", "interact", "human", "prompt", "dialog",
+            "clarify", "confirm", "respond", "answer", "feedback", "help",
         ],
     ),
     (
         "infer_rules",
         &[
-            "infer", "deduce", "derive", "transitive", "type",
-            "hierarchy", "classify", "forward", "chain",
+            "infer",
+            "deduce",
+            "derive",
+            "transitive",
+            "type",
+            "hierarchy",
+            "classify",
+            "forward",
+            "chain",
+            "reason",
+            "logic",
+            "imply",
+            "conclude",
+            "rule",
+            "ontology",
+            "propagate",
         ],
     ),
     (
         "gap_analysis",
         &[
-            "gap", "missing", "incomplete", "discover", "explore",
-            "what", "unknown", "coverage",
+            "gap",
+            "missing",
+            "incomplete",
+            "discover",
+            "explore",
+            "what",
+            "unknown",
+            "coverage",
+            "lack",
+            "absent",
+            "need",
+            "require",
+            "insufficient",
+            "sparse",
         ],
     ),
     (
         "csv_ingest",
         &[
-            "csv", "ingest", "import", "table", "data", "load",
-            "column", "row", "spreadsheet",
+            "csv",
+            "ingest",
+            "import",
+            "table",
+            "data",
+            "load",
+            "column",
+            "row",
+            "spreadsheet",
         ],
     ),
     (
         "text_ingest",
         &[
-            "text", "ingest", "extract", "sentence", "natural",
-            "language", "parse", "read", "document",
+            "text", "ingest", "extract", "sentence", "natural", "language", "parse", "read",
+            "document",
         ],
     ),
     (
         "code_ingest",
         &[
-            "code", "rust", "source", "parse", "function", "struct",
-            "module", "trait", "architecture", "analyze",
+            "code",
+            "rust",
+            "source",
+            "parse",
+            "function",
+            "struct",
+            "module",
+            "trait",
+            "architecture",
+            "analyze",
+        ],
+    ),
+    (
+        "content_ingest",
+        &[
+            "ingest",
+            "document",
+            "book",
+            "pdf",
+            "epub",
+            "html",
+            "article",
+            "website",
+            "library",
+            "read",
+            "parse",
+            "content",
+            "import",
+            "fetch",
+            "download",
+            "add",
+            "store",
+            "learn",
+            "absorb",
+            "paper",
+            "capture",
+            "save",
+            "publication",
+        ],
+    ),
+    (
+        "library_search",
+        &[
+            "search",
+            "library",
+            "find",
+            "document",
+            "paragraph",
+            "content",
+            "lookup",
+            "recall",
+            "retrieve",
+            "what",
+            "about",
+            "said",
+            "mention",
+            "topic",
+            "learn",
+            "reference",
+            "quote",
+            "knowledge",
+            "look",
+            "paper",
+            "book",
+            "article",
         ],
     ),
     (
         "doc_gen",
         &[
-            "document", "explain", "describe", "architecture",
-            "generate", "write", "summarize", "overview",
+            "document",
+            "explain",
+            "describe",
+            "architecture",
+            "generate",
+            "write",
+            "summarize",
+            "overview",
         ],
     ),
 ];
 
+/// Static synonym lookup table mapping root words to related terms.
+///
+/// Expanding tool concepts with synonyms widens the effective vocabulary
+/// so that natural-language queries activate the right tool even when
+/// few tokens overlap with the static keyword arrays.
+const SYNONYM_TABLE: &[(&str, &[&str])] = &[
+    ("search", &["find", "look", "seek", "locate", "query", "browse"]),
+    ("document", &["paper", "article", "text", "note", "file", "book"]),
+    ("fetch", &["get", "retrieve", "download", "obtain", "pull"]),
+    ("write", &["save", "store", "output", "export", "persist"]),
+    ("read", &["load", "open", "view", "inspect", "examine"]),
+    ("execute", &["run", "invoke", "launch", "start", "trigger"]),
+    ("ask", &["question", "inquire", "prompt", "request", "clarify"]),
+    ("infer", &["deduce", "derive", "conclude", "reason", "imply"]),
+    ("knowledge", &["information", "data", "facts", "content", "learn"]),
+    ("missing", &["absent", "lacking", "incomplete", "gap", "sparse"]),
+    ("import", &["ingest", "load", "absorb", "capture", "add"]),
+    ("library", &["collection", "catalog", "archive", "repository"]),
+    ("similar", &["like", "related", "analogous", "comparable"]),
+    ("memory", &["recall", "remember", "history", "past", "episode"]),
+    ("create", &["build", "construct", "make", "generate", "produce"]),
+    ("analyze", &["examine", "inspect", "study", "evaluate", "assess"]),
+    ("command", &["shell", "terminal", "bash", "cli", "program"]),
+    ("web", &["http", "url", "website", "online", "internet"]),
+    ("topic", &["subject", "theme", "concept", "domain", "area"]),
+    ("quote", &["excerpt", "passage", "citation", "reference", "mention"]),
+];
+
+/// Expand a set of keywords with synonyms from the static lookup table.
+///
+/// Returns the original keywords plus any discovered synonyms, deduplicated.
+pub fn expand_with_synonyms(keywords: &[&str]) -> Vec<String> {
+    let mut result: HashSet<String> = keywords.iter().map(|k| k.to_string()).collect();
+
+    for keyword in keywords {
+        let kw_lower = keyword.to_lowercase();
+        for (root, synonyms) in SYNONYM_TABLE {
+            if kw_lower == *root || synonyms.contains(&kw_lower.as_str()) {
+                result.insert(root.to_string());
+                for syn in *synonyms {
+                    result.insert(syn.to_string());
+                }
+            }
+        }
+    }
+
+    result.into_iter().collect()
+}
+
 /// Build semantic profiles for all registered tools.
 ///
 /// Each tool gets a hypervector that is the bundle of its related
-/// concept symbols, looked up or created in the engine.
+/// concept symbols (expanded with synonyms), looked up or created in the engine.
 pub fn build_tool_profiles(
     engine: &Engine,
     ops: &VsaOps,
     item_memory: &ItemMemory,
     tool_registry: &ToolRegistry,
 ) -> Vec<ToolProfile> {
-    let registered: Vec<String> = tool_registry.list().iter().map(|s| s.name.clone()).collect();
+    let registered: Vec<String> = tool_registry
+        .list()
+        .iter()
+        .map(|s| s.name.clone())
+        .collect();
 
     let mut profiles = Vec::new();
 
@@ -150,7 +329,11 @@ pub fn build_tool_profiles(
             continue;
         }
 
-        match bundle_symbols(engine, ops, item_memory, concepts) {
+        // Expand concepts with synonyms for wider vocabulary coverage.
+        let expanded = expand_with_synonyms(concepts);
+        let expanded_refs: Vec<&str> = expanded.iter().map(|s| s.as_str()).collect();
+
+        match bundle_symbols(engine, ops, item_memory, &expanded_refs) {
             Ok(semantic_vec) => {
                 profiles.push(ToolProfile {
                     name: tool_name.to_string(),
@@ -185,11 +368,7 @@ pub fn build_tool_profiles(
 /// Score a tool's relevance to a goal vector via VSA similarity.
 ///
 /// Returns a score in [0.0, 1.0] where 1.0 means perfect semantic match.
-pub fn semantic_tool_score(
-    goal_vec: &HyperVec,
-    tool_profile: &ToolProfile,
-    ops: &VsaOps,
-) -> f32 {
+pub fn semantic_tool_score(goal_vec: &HyperVec, tool_profile: &ToolProfile, ops: &VsaOps) -> f32 {
     ops.similarity(goal_vec, &tool_profile.semantic_vec)
         .unwrap_or(0.5)
 }
@@ -263,8 +442,7 @@ mod tests {
         let im = engine.item_memory();
 
         let profiles = build_tool_profiles(&engine, ops, im, &registry);
-        let goal_vec =
-            encode_goal_semantics("search for knowledge", "", &engine, ops, im).unwrap();
+        let goal_vec = encode_goal_semantics("search for knowledge", "", &engine, ops, im).unwrap();
 
         let kg_score = profiles
             .iter()
@@ -292,8 +470,7 @@ mod tests {
         let im = engine.item_memory();
 
         let profiles = build_tool_profiles(&engine, ops, im, &registry);
-        let goal_vec =
-            encode_goal_semantics("read data from file", "", &engine, ops, im).unwrap();
+        let goal_vec = encode_goal_semantics("read data from file", "", &engine, ops, im).unwrap();
 
         let file_score = profiles
             .iter()
@@ -311,6 +488,24 @@ mod tests {
             file_score > reason_score,
             "file_io ({file_score:.3}) should score higher than reason ({reason_score:.3}) for file goal"
         );
+    }
+
+    #[test]
+    fn expand_with_synonyms_adds_related_terms() {
+        let expanded = expand_with_synonyms(&["search", "document"]);
+        // Original keywords present.
+        assert!(expanded.contains(&"search".to_string()));
+        assert!(expanded.contains(&"document".to_string()));
+        // Synonyms of "search" added.
+        assert!(expanded.contains(&"find".to_string()));
+        assert!(expanded.contains(&"locate".to_string()));
+        // Synonyms of "document" added.
+        assert!(expanded.contains(&"paper".to_string()));
+        assert!(expanded.contains(&"article".to_string()));
+        // Unknown word passes through unchanged.
+        let expanded2 = expand_with_synonyms(&["xyzzy"]);
+        assert!(expanded2.contains(&"xyzzy".to_string()));
+        assert_eq!(expanded2.len(), 1);
     }
 
     #[test]

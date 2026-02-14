@@ -8,13 +8,13 @@ use std::collections::HashSet;
 
 use std::sync::Arc;
 
-use akh_medu::agent::{Agent, AgentConfig};
 use akh_medu::agent::goal::GoalStatus;
 use akh_medu::agent::memory::{WorkingMemory, WorkingMemoryEntry, WorkingMemoryKind};
 use akh_medu::agent::tool::{Tool, ToolInput, ToolOutput, ToolSignature};
+use akh_medu::agent::{Agent, AgentConfig};
 use akh_medu::engine::{Engine, EngineConfig};
-use akh_medu::graph::traverse::TraversalConfig;
 use akh_medu::graph::Triple;
+use akh_medu::graph::traverse::TraversalConfig;
 use akh_medu::infer::InferenceQuery;
 use akh_medu::pipeline::{Pipeline, PipelineData, PipelineStage, StageConfig, StageKind};
 use akh_medu::symbol::{SymbolId, SymbolKind};
@@ -47,7 +47,9 @@ fn end_to_end_create_ingest_infer() {
     let is_a = engine.create_symbol(SymbolKind::Relation, "is-a").unwrap();
     let star = engine.create_symbol(SymbolKind::Entity, "Star").unwrap();
     let moon = engine.create_symbol(SymbolKind::Entity, "Moon").unwrap();
-    let orbits = engine.create_symbol(SymbolKind::Relation, "orbits").unwrap();
+    let orbits = engine
+        .create_symbol(SymbolKind::Relation, "orbits")
+        .unwrap();
 
     // Ingest triples.
     engine
@@ -105,7 +107,9 @@ fn introspection_apis() {
     let is_a = engine.create_symbol(SymbolKind::Relation, "is-a").unwrap();
     let star = engine.create_symbol(SymbolKind::Entity, "Star").unwrap();
     let moon = engine.create_symbol(SymbolKind::Entity, "Moon").unwrap();
-    let orbits = engine.create_symbol(SymbolKind::Relation, "orbits").unwrap();
+    let orbits = engine
+        .create_symbol(SymbolKind::Relation, "orbits")
+        .unwrap();
 
     engine
         .add_triple(&Triple::new(sun.id, is_a.id, star.id))
@@ -168,7 +172,11 @@ fn export_symbol_table() {
 
     // All symbols in all_symbols() should appear in the export table.
     for meta in &all_symbols {
-        assert!(export_table.iter().any(|e| e.id == meta.id.get() && e.label == meta.label));
+        assert!(
+            export_table
+                .iter()
+                .any(|e| e.id == meta.id.get() && e.label == meta.label)
+        );
     }
 }
 
@@ -241,7 +249,10 @@ fn resolve_or_create_entity_idempotent() {
     let id1 = engine.resolve_or_create_entity("Sun").unwrap();
     let id2 = engine.resolve_or_create_entity("Sun").unwrap();
 
-    assert_eq!(id1, id2, "calling resolve_or_create twice should return same ID");
+    assert_eq!(
+        id1, id2,
+        "calling resolve_or_create twice should return same ID"
+    );
 }
 
 #[test]
@@ -251,7 +262,10 @@ fn resolve_or_create_relation_idempotent() {
     let id1 = engine.resolve_or_create_relation("is-a").unwrap();
     let id2 = engine.resolve_or_create_relation("is-a").unwrap();
 
-    assert_eq!(id1, id2, "calling resolve_or_create twice should return same ID");
+    assert_eq!(
+        id1, id2,
+        "calling resolve_or_create twice should return same ID"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -315,7 +329,10 @@ fn traverse_with_predicate_filter() {
 
     // Only orbits edges should appear.
     for t in &result.triples {
-        assert_eq!(t.predicate, orbits_id, "only 'orbits' predicates should appear");
+        assert_eq!(
+            t.predicate, orbits_id,
+            "only 'orbits' predicates should appear"
+        );
     }
 }
 
@@ -328,9 +345,7 @@ fn sparql_select_query() {
     let dir = tempfile::TempDir::new().unwrap();
     let engine = persistent_engine(dir.path());
 
-    let triples = vec![
-        ("Sun".into(), "is-a".into(), "Star".into(), 1.0),
-    ];
+    let triples = vec![("Sun".into(), "is-a".into(), "Star".into(), 1.0)];
     engine.ingest_label_triples(&triples).unwrap();
 
     // Sync to SPARQL.
@@ -340,7 +355,10 @@ fn sparql_select_query() {
         .sparql_query("SELECT ?s ?p ?o WHERE { ?s ?p ?o }")
         .unwrap();
 
-    assert!(!results.is_empty(), "SPARQL should return at least one result");
+    assert!(
+        !results.is_empty(),
+        "SPARQL should return at least one result"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -399,11 +417,7 @@ fn skill_scaffold_creates_template() {
     )
     .unwrap();
 
-    std::fs::write(
-        skill_dir.join("rules.txt"),
-        "# Rewrite rules\n",
-    )
-    .unwrap();
+    std::fs::write(skill_dir.join("rules.txt"), "# Rewrite rules\n").unwrap();
 
     // Verify files exist.
     assert!(skill_dir.join("skill.json").exists());
@@ -463,7 +477,10 @@ fn load_skill_with_label_triples() {
     .unwrap();
 
     let activation = engine.load_skill("test-labels").unwrap();
-    assert!(activation.triples_loaded >= 2, "should load at least 2 label-based triples");
+    assert!(
+        activation.triples_loaded >= 2,
+        "should load at least 2 label-based triples"
+    );
 
     // Verify symbols were created.
     assert!(engine.lookup_symbol("Alpha").is_ok());
@@ -514,19 +531,14 @@ fn analogy_basic() {
 
     // Analogy: Sun:Star :: Earth:?
     let results = engine.infer_analogy(sun_id, star_id, earth_id, 5).unwrap();
-    assert!(
-        !results.is_empty(),
-        "analogy should return results"
-    );
+    assert!(!results.is_empty(), "analogy should return results");
 }
 
 #[test]
 fn filler_recovery_basic() {
     let engine = test_engine();
 
-    let triples = vec![
-        ("Sun".into(), "is-a".into(), "Star".into(), 1.0),
-    ];
+    let triples = vec![("Sun".into(), "is-a".into(), "Star".into(), 1.0)];
     engine.ingest_label_triples(&triples).unwrap();
 
     let sun_id = engine.lookup_symbol("Sun").unwrap();
@@ -534,10 +546,7 @@ fn filler_recovery_basic() {
 
     // Recover filler for (Sun, is-a).
     let results = engine.recover_filler(sun_id, is_a_id, 5).unwrap();
-    assert!(
-        !results.is_empty(),
-        "filler recovery should return results"
-    );
+    assert!(!results.is_empty(), "filler recovery should return results");
 }
 
 // ---------------------------------------------------------------------------
@@ -563,7 +572,10 @@ fn degree_centrality_basic() {
     let sun_id = engine.lookup_symbol("Sun").unwrap();
     let sun_dc = results.iter().find(|dc| dc.symbol == sun_id).unwrap();
     assert!(sun_dc.total >= 3, "Sun should have at least 3 total degree");
-    assert_eq!(results[0].symbol, sun_id, "Sun should be first (highest degree)");
+    assert_eq!(
+        results[0].symbol, sun_id,
+        "Sun should be first (highest degree)"
+    );
 }
 
 #[test]
@@ -601,7 +613,10 @@ fn scc_finds_cycle() {
     let components = engine.strongly_connected_components().unwrap();
     // A, B, C form one SCC.
     let cycle_scc = components.iter().find(|c| c.size >= 3);
-    assert!(cycle_scc.is_some(), "should find a component with 3+ members");
+    assert!(
+        cycle_scc.is_some(),
+        "should find a component with 3+ members"
+    );
 
     let a_id = engine.lookup_symbol("A").unwrap();
     let b_id = engine.lookup_symbol("B").unwrap();
@@ -662,9 +677,7 @@ fn pipeline_query_via_engine() {
 fn pipeline_custom_stages() {
     let engine = test_engine();
 
-    let triples = vec![
-        ("Sun".into(), "is-a".into(), "Star".into(), 1.0),
-    ];
+    let triples = vec![("Sun".into(), "is-a".into(), "Star".into(), 1.0)];
     engine.ingest_label_triples(&triples).unwrap();
 
     let sun_id = engine.lookup_symbol("Sun").unwrap();
@@ -856,10 +869,7 @@ fn goal_create_and_decompose() {
 
     // Verify goal is in KG.
     let triples = engine.triples_from(parent_id);
-    assert!(
-        !triples.is_empty(),
-        "goal should have triples in KG"
-    );
+    assert!(!triples.is_empty(), "goal should have triples in KG");
 }
 
 #[test]
@@ -868,9 +878,7 @@ fn goal_status_transitions() {
     let engine = Arc::new(persistent_engine(dir.path()));
     let mut agent = Agent::new(engine, AgentConfig::default()).unwrap();
 
-    let goal_id = agent
-        .add_goal("Test goal", 128, "Test criteria")
-        .unwrap();
+    let goal_id = agent.add_goal("Test goal", 128, "Test criteria").unwrap();
 
     // Initially active.
     assert!(matches!(agent.goals()[0].status, GoalStatus::Active));
@@ -884,9 +892,9 @@ fn goal_status_transitions() {
 fn tool_registry_crud() {
     let mut agent = test_agent();
 
-    // Should have 15 built-in tools (5 core + 4 external + 2 autonomous + 3 ingest + 1 doc).
+    // Should have 17 built-in tools (5 core + 4 external + 2 autonomous + 4 ingest + 1 library search + 1 doc).
     let tools = agent.list_tools();
-    assert_eq!(tools.len(), 15);
+    assert_eq!(tools.len(), 17);
 
     let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
     // Core tools.
@@ -907,6 +915,9 @@ fn tool_registry_crud() {
     assert!(names.contains(&"csv_ingest"));
     assert!(names.contains(&"text_ingest"));
     assert!(names.contains(&"code_ingest"));
+    assert!(names.contains(&"content_ingest"));
+    // Library search.
+    assert!(names.contains(&"library_search"));
     // Documentation tools.
     assert!(names.contains(&"doc_gen"));
 
@@ -944,7 +955,7 @@ fn tool_registry_crud() {
     }
 
     agent.register_tool(Box::new(CustomTool));
-    assert_eq!(agent.list_tools().len(), 16);
+    assert_eq!(agent.list_tools().len(), 18);
 }
 
 #[test]
@@ -952,7 +963,9 @@ fn kg_query_tool_execution() {
     let mut agent = test_agent_with_data();
 
     // Add a goal so we have context.
-    agent.add_goal("Find stars", 128, "Find star symbols").unwrap();
+    agent
+        .add_goal("Find stars", 128, "Find star symbols")
+        .unwrap();
 
     // Execute the kg_query tool directly.
     let _input = ToolInput::new()
@@ -964,9 +977,7 @@ fn kg_query_tool_execution() {
         .expect("Sun should exist");
 
     // Use the tool registry.
-    let result = agent
-        .engine()
-        .triples_from(output);
+    let result = agent.engine().triples_from(output);
     assert!(!result.is_empty(), "Sun should have outgoing triples");
 }
 
@@ -1001,20 +1012,14 @@ fn consolidation_persists_episodes() {
 
     // Now consolidate.
     let result = agent.consolidate().unwrap();
-    assert!(
-        result.entries_scored > 0,
-        "should have scored WM entries"
-    );
+    assert!(result.entries_scored > 0, "should have scored WM entries");
     // Episodes should be created (since min_relevance is 0).
     // The exact count depends on WM entries, which come from the cycle.
 
     // Verify episodes are in the KG.
     for ep_id in &result.episodes_created {
         let triples = engine.triples_from(*ep_id);
-        assert!(
-            !triples.is_empty(),
-            "episode should have triples in KG"
-        );
+        assert!(!triples.is_empty(), "episode should have triples in KG");
     }
 }
 
@@ -1047,7 +1052,12 @@ fn consolidation_provenance_tracking() {
         if let Ok(records) = provenance {
             let consolidation_records: Vec<_> = records
                 .iter()
-                .filter(|r| matches!(r.kind, akh_medu::provenance::DerivationKind::AgentConsolidation { .. }))
+                .filter(|r| {
+                    matches!(
+                        r.kind,
+                        akh_medu::provenance::DerivationKind::AgentConsolidation { .. }
+                    )
+                })
                 .collect();
             assert!(
                 !consolidation_records.is_empty(),
@@ -1062,7 +1072,11 @@ fn ooda_single_cycle() {
     let mut agent = test_agent_with_data();
 
     agent
-        .add_goal("Find all stars in the knowledge graph", 200, "List star symbols")
+        .add_goal(
+            "Find all stars in the knowledge graph",
+            200,
+            "List star symbols",
+        )
         .unwrap();
 
     let result = agent.run_cycle().unwrap();
@@ -1090,7 +1104,10 @@ fn agent_run_until_complete() {
 
     // Now run_until_complete should return immediately (no active goals).
     let results = agent.run_until_complete().unwrap();
-    assert!(results.is_empty(), "no active goals, should return immediately");
+    assert!(
+        results.is_empty(),
+        "no active goals, should return immediately"
+    );
 }
 
 #[test]
@@ -1115,7 +1132,9 @@ fn episodic_recall_by_tag() {
     };
     let mut agent = Agent::new(engine.clone(), config).unwrap();
 
-    agent.add_goal("Consolidate and recall", 128, "test").unwrap();
+    agent
+        .add_goal("Consolidate and recall", 128, "test")
+        .unwrap();
     let _ = agent.run_cycle();
     let consolidation = agent.consolidate().unwrap();
 
@@ -1172,10 +1191,7 @@ fn agent_persistence_roundtrip() {
 
         // Goals should be restored from KG.
         let restored_goals = agent.goals();
-        assert!(
-            !restored_goals.is_empty(),
-            "goals should survive restart"
-        );
+        assert!(!restored_goals.is_empty(), "goals should survive restart");
         let has_persistent = restored_goals
             .iter()
             .any(|g| g.description.contains("Persistent goal"));
@@ -1193,7 +1209,11 @@ fn reference_count_incremented_during_decide() {
     // Use criteria that won't self-match against goal metadata in KG,
     // so the goal stays active across multiple cycles.
     agent
-        .add_goal("Explore astronomy data", 128, "Comprehensive verification of dataset completeness")
+        .add_goal(
+            "Explore astronomy data",
+            128,
+            "Comprehensive verification of dataset completeness",
+        )
         .unwrap();
 
     // Run one cycle to populate WM, then run a second to trigger decide on existing entries.
@@ -1231,9 +1251,7 @@ fn goal_status_restore_deterministic() {
     {
         let engine = Arc::new(persistent_engine(dir.path()));
         let mut agent = Agent::new(engine.clone(), AgentConfig::default()).unwrap();
-        let goal_id = agent
-            .add_goal("Multi-status goal", 128, "test")
-            .unwrap();
+        let goal_id = agent.add_goal("Multi-status goal", 128, "test").unwrap();
 
         // Transition: Active -> Completed (adds a second has_status triple).
         agent.complete_goal(goal_id).unwrap();
@@ -1287,7 +1305,10 @@ fn criteria_evaluation_completes_goal() {
         Ok(cycles) => {
             // Goal was completed before max_cycles.
             assert!(
-                agent.goals().iter().any(|g| matches!(g.status, GoalStatus::Completed)),
+                agent
+                    .goals()
+                    .iter()
+                    .any(|g| matches!(g.status, GoalStatus::Completed)),
                 "goal should be marked completed. Ran {} cycles.",
                 cycles.len()
             );
@@ -1546,10 +1567,7 @@ fn criteria_evaluation_uses_kg_state() {
     let result = agent.run_until_complete();
     match result {
         Ok(cycles) => {
-            assert!(
-                !cycles.is_empty(),
-                "should have run at least one cycle"
-            );
+            assert!(!cycles.is_empty(), "should have run at least one cycle");
         }
         Err(_) => {
             // Even if max cycles reached, the agent should have run cycles.
@@ -1913,8 +1931,15 @@ fn no_persisted_session_returns_fresh_agent() {
 
     // Resume should still work, returning a fresh agent.
     let agent = Agent::resume(engine, AgentConfig::default()).unwrap();
-    assert_eq!(agent.cycle_count(), 0, "fresh resume should start at cycle 0");
-    assert!(agent.working_memory().is_empty(), "fresh resume should have empty WM");
+    assert_eq!(
+        agent.cycle_count(),
+        0,
+        "fresh resume should start at cycle 0"
+    );
+    assert!(
+        agent.working_memory().is_empty(),
+        "fresh resume should have empty WM"
+    );
 }
 
 #[test]
@@ -2083,7 +2108,10 @@ fn plan_generation_produces_steps() {
 
     let plan = agent.plan_goal(goal_id).unwrap();
 
-    assert!(plan.total_steps() >= 1, "plan should have at least one step");
+    assert!(
+        plan.total_steps() >= 1,
+        "plan should have at least one step"
+    );
     assert_eq!(plan.status, akh_medu::agent::PlanStatus::Active);
     assert!(plan.has_remaining_steps());
     assert_eq!(plan.completed_count(), 0);
@@ -2094,7 +2122,7 @@ fn plan_generation_produces_steps() {
 
 #[test]
 fn plan_step_completion_advances() {
-    use akh_medu::agent::plan::{Plan, PlanStep, PlanStatus, StepStatus};
+    use akh_medu::agent::plan::{Plan, PlanStatus, PlanStep, StepStatus};
 
     let mut plan = Plan {
         goal_id: SymbolId::new(1).unwrap(),
@@ -2153,9 +2181,7 @@ fn backtrack_generates_alternative_plan() {
 #[test]
 fn reflection_produces_insights() {
     let mut agent = test_agent_with_data();
-    agent
-        .add_goal("Find stars", 128, "stars found")
-        .unwrap();
+    agent.add_goal("Find stars", 128, "stars found").unwrap();
 
     // Run a few cycles to populate WM with tool results.
     for _ in 0..3 {
@@ -2175,11 +2201,11 @@ fn meta_reasoning_adjusts_priorities() {
     use akh_medu::agent::Adjustment;
 
     let mut agent = test_agent_with_data();
-    let goal_id = agent
-        .add_goal("Find stars", 128, "stars found")
-        .unwrap();
+    let goal_id = agent.add_goal("Find stars", 128, "stars found").unwrap();
 
-    let original_priority = agent.goals().iter()
+    let original_priority = agent
+        .goals()
+        .iter()
         .find(|g| g.symbol_id == goal_id)
         .unwrap()
         .priority;
@@ -2195,7 +2221,9 @@ fn meta_reasoning_adjusts_priorities() {
     let applied = agent.apply_adjustments(&adjustments).unwrap();
     assert_eq!(applied, 1);
 
-    let new_priority = agent.goals().iter()
+    let new_priority = agent
+        .goals()
+        .iter()
         .find(|g| g.symbol_id == goal_id)
         .unwrap()
         .priority;
@@ -2237,9 +2265,10 @@ fn rule_inference_transitive_closure() {
     // Dog is-a Animal should be derived via transitive closure.
     let dog = engine.lookup_symbol("Dog").unwrap();
     let animal = engine.lookup_symbol("Animal").unwrap();
-    let derived_match = result.derived.iter().any(|dt| {
-        dt.triple.subject == dog && dt.triple.object == animal
-    });
+    let derived_match = result
+        .derived
+        .iter()
+        .any(|dt| dt.triple.subject == dog && dt.triple.object == animal);
     assert!(derived_match, "Dog is-a Animal should be derived");
     assert!(result.derived.len() >= 1);
 
@@ -2251,9 +2280,7 @@ fn rule_inference_transitive_closure() {
 fn rule_inference_inverse_relations() {
     let engine = test_engine();
     engine
-        .ingest_label_triples(&[
-            ("Alice".into(), "parent-of".into(), "Bob".into(), 1.0),
-        ])
+        .ingest_label_triples(&[("Alice".into(), "parent-of".into(), "Bob".into(), 1.0)])
         .unwrap();
 
     let config = akh_medu::autonomous::RuleEngineConfig::default();
@@ -2268,9 +2295,10 @@ fn rule_inference_inverse_relations() {
         "Bob child-of Alice should be derived"
     );
 
-    let derived_match = result.derived.iter().any(|dt| {
-        dt.rule_name == "parent-child-inverse"
-    });
+    let derived_match = result
+        .derived
+        .iter()
+        .any(|dt| dt.rule_name == "parent-child-inverse");
     assert!(derived_match, "parent-child-inverse rule should fire");
 }
 
@@ -2279,9 +2307,7 @@ fn rule_inference_provenance_tracking() {
     let dir = tempfile::tempdir().unwrap();
     let engine = persistent_engine(dir.path());
     engine
-        .ingest_label_triples(&[
-            ("X".into(), "similar-to".into(), "Y".into(), 1.0),
-        ])
+        .ingest_label_triples(&[("X".into(), "similar-to".into(), "Y".into(), 1.0)])
         .unwrap();
 
     let config = akh_medu::autonomous::RuleEngineConfig::default();
@@ -2289,9 +2315,10 @@ fn rule_inference_provenance_tracking() {
 
     // Y similar-to X should be derived via symmetric rule.
     assert!(!result.derived.is_empty());
-    let derived_match = result.derived.iter().any(|dt| {
-        dt.rule_name == "similar-to-symmetric"
-    });
+    let derived_match = result
+        .derived
+        .iter()
+        .any(|dt| dt.rule_name == "similar-to-symmetric");
     assert!(derived_match, "similar-to-symmetric rule should fire");
 
     // Check provenance was stored.
@@ -2363,7 +2390,10 @@ fn confidence_fusion_multiple_paths() {
 
     // Noisy-OR: 1 - (1-0.72)(1-0.6) = 1 - 0.28*0.4 = 1 - 0.112 = 0.888
     let fused = noisy_or(&[0.72, 0.6]);
-    assert!((fused - 0.888).abs() < 0.001, "noisy-or of [0.72, 0.6] should be ~0.888, got {fused}");
+    assert!(
+        (fused - 0.888).abs() < 0.001,
+        "noisy-or of [0.72, 0.6] should be ~0.888, got {fused}"
+    );
 
     // Fused confidence always exceeds any individual path.
     assert!(fused > 0.72);
@@ -2401,7 +2431,10 @@ fn schema_discovery_finds_types() {
     let result = engine.discover_schema(config).unwrap();
 
     // Should discover at least one type cluster (Dog, Cat, Horse share the same predicates).
-    assert!(!result.types.is_empty(), "should discover at least one entity type");
+    assert!(
+        !result.types.is_empty(),
+        "should discover at least one entity type"
+    );
     let first_type = &result.types[0];
     assert!(first_type.members.len() >= 3);
 }
@@ -2412,7 +2445,12 @@ fn agent_uses_infer_and_gap_tools() {
     engine
         .ingest_label_triples(&[
             ("Star".into(), "is-a".into(), "CelestialBody".into(), 1.0),
-            ("CelestialBody".into(), "is-a".into(), "PhysicalObject".into(), 1.0),
+            (
+                "CelestialBody".into(),
+                "is-a".into(),
+                "PhysicalObject".into(),
+                1.0,
+            ),
             ("Sun".into(), "is-a".into(), "Star".into(), 1.0),
         ])
         .unwrap();
@@ -2446,7 +2484,10 @@ fn agent_uses_infer_and_gap_tools() {
     let all_tools: Vec<String> = agent.list_tools().iter().map(|t| t.name.clone()).collect();
     assert!(all_tools.contains(&"infer_rules".to_string()));
     assert!(all_tools.contains(&"gap_analysis".to_string()));
-    assert!(!tools_used.is_empty(), "agent should have run at least one cycle");
+    assert!(
+        !tools_used.is_empty(),
+        "agent should have run at least one cycle"
+    );
 }
 
 // ===========================================================================
@@ -2470,7 +2511,11 @@ fn hieroglyphic_render_triple() {
         show_sigils: false,
         compact: true,
     };
-    let rendered = akh_medu::glyph::notation::render_triple(&engine, &Triple::new(dog.id, is_a.id, animal.id), &config);
+    let rendered = akh_medu::glyph::notation::render_triple(
+        &engine,
+        &Triple::new(dog.id, is_a.id, animal.id),
+        &config,
+    );
 
     // Should contain the is-a glyph fallback (△) and entity labels.
     assert!(rendered.contains("Dog"), "should contain subject label");
@@ -2480,7 +2525,10 @@ fn hieroglyphic_render_triple() {
         "should contain is-a glyph fallback (△)"
     );
     // Should contain confidence dots.
-    assert!(rendered.contains('\u{25CF}'), "should contain filled confidence dots");
+    assert!(
+        rendered.contains('\u{25CF}'),
+        "should contain filled confidence dots"
+    );
 }
 
 #[test]
@@ -2489,10 +2537,8 @@ fn hieroglyphic_sigil_unique() {
     let dog = engine.create_symbol(SymbolKind::Entity, "Dog").unwrap();
     let cat = engine.create_symbol(SymbolKind::Entity, "Cat").unwrap();
 
-    let s1 = akh_medu::glyph::sigil::sigil_for_symbol(dog.id, engine.item_memory(), false)
-        .unwrap();
-    let s2 = akh_medu::glyph::sigil::sigil_for_symbol(cat.id, engine.item_memory(), false)
-        .unwrap();
+    let s1 = akh_medu::glyph::sigil::sigil_for_symbol(dog.id, engine.item_memory(), false).unwrap();
+    let s2 = akh_medu::glyph::sigil::sigil_for_symbol(cat.id, engine.item_memory(), false).unwrap();
 
     // Different symbols should (very likely) produce different sigils.
     // With 32^3 combinations and random VSA vectors, collision probability is negligible.
@@ -2508,8 +2554,12 @@ fn hieroglyphic_subgraph() {
     let has_a = engine.create_symbol(SymbolKind::Relation, "has-a").unwrap();
     let legs = engine.create_symbol(SymbolKind::Entity, "Legs").unwrap();
 
-    engine.add_triple(&Triple::new(dog.id, is_a.id, animal.id)).unwrap();
-    engine.add_triple(&Triple::new(dog.id, has_a.id, legs.id)).unwrap();
+    engine
+        .add_triple(&Triple::new(dog.id, is_a.id, animal.id))
+        .unwrap();
+    engine
+        .add_triple(&Triple::new(dog.id, has_a.id, legs.id))
+        .unwrap();
 
     let triples = vec![
         Triple::new(dog.id, is_a.id, animal.id),
@@ -2526,8 +2576,14 @@ fn hieroglyphic_subgraph() {
     let rendered = akh_medu::glyph::notation::render_subgraph(&engine, &triples, &config);
 
     // Block format should have curly braces for grouped triples.
-    assert!(rendered.contains('{'), "block format should have opening brace");
-    assert!(rendered.contains('}'), "block format should have closing brace");
+    assert!(
+        rendered.contains('{'),
+        "block format should have opening brace"
+    );
+    assert!(
+        rendered.contains('}'),
+        "block format should have closing brace"
+    );
     assert!(rendered.contains("Animal"));
     assert!(rendered.contains("Legs"));
 }
@@ -2546,14 +2602,29 @@ fn hieroglyphic_legend() {
 
     // Should list all 35 fixed glyphs.
     assert!(legend.contains("is-a"), "legend should contain is-a");
-    assert!(legend.contains("type:person"), "legend should contain type:person");
-    assert!(legend.contains("prov:asserted"), "legend should contain prov:asserted");
-    assert!(legend.contains("struct:triple"), "legend should contain struct:triple");
+    assert!(
+        legend.contains("type:person"),
+        "legend should contain type:person"
+    );
+    assert!(
+        legend.contains("prov:asserted"),
+        "legend should contain prov:asserted"
+    );
+    assert!(
+        legend.contains("struct:triple"),
+        "legend should contain struct:triple"
+    );
 
     // Should list all 32 radicals.
     assert!(legend.contains("eye"), "legend should contain eye radical");
-    assert!(legend.contains("ankh"), "legend should contain ankh radical");
-    assert!(legend.contains("star"), "legend should contain star radical");
+    assert!(
+        legend.contains("ankh"),
+        "legend should contain ankh radical"
+    );
+    assert!(
+        legend.contains("star"),
+        "legend should contain star radical"
+    );
 
     // Count lines with radical entries (should have 32).
     let radical_lines: Vec<&str> = legend.lines().filter(|l| l.contains("[")).collect();
@@ -2600,15 +2671,24 @@ fn engine_with_skills() -> (Engine, tempfile::TempDir) {
 fn skill_pack_common_sense_loads() {
     let (engine, _dir) = engine_with_skills();
     let activation = engine.load_skill("common_sense").unwrap();
-    assert!(activation.triples_loaded > 100, "common_sense should have >100 triples");
-    assert!(activation.rules_loaded > 0, "common_sense should have rules");
+    assert!(
+        activation.triples_loaded > 100,
+        "common_sense should have >100 triples"
+    );
+    assert!(
+        activation.rules_loaded > 0,
+        "common_sense should have rules"
+    );
 }
 
 #[test]
 fn skill_pack_geography_loads() {
     let (engine, _dir) = engine_with_skills();
     let activation = engine.load_skill("geography").unwrap();
-    assert!(activation.triples_loaded > 80, "geography should have >80 triples");
+    assert!(
+        activation.triples_loaded > 80,
+        "geography should have >80 triples"
+    );
     assert!(activation.rules_loaded > 0, "geography should have rules");
 }
 
@@ -2616,7 +2696,10 @@ fn skill_pack_geography_loads() {
 fn skill_pack_science_loads() {
     let (engine, _dir) = engine_with_skills();
     let activation = engine.load_skill("science").unwrap();
-    assert!(activation.triples_loaded > 80, "science should have >80 triples");
+    assert!(
+        activation.triples_loaded > 80,
+        "science should have >80 triples"
+    );
     assert!(activation.rules_loaded > 0, "science should have rules");
 }
 
@@ -2624,14 +2707,17 @@ fn skill_pack_science_loads() {
 fn skill_pack_language_loads() {
     let (engine, _dir) = engine_with_skills();
     let activation = engine.load_skill("language").unwrap();
-    assert!(activation.triples_loaded > 60, "language should have >60 triples");
+    assert!(
+        activation.triples_loaded > 60,
+        "language should have >60 triples"
+    );
     assert!(activation.rules_loaded > 0, "language should have rules");
 }
 
 #[test]
 fn csv_ingest_spo_and_entity() {
-    use akh_medu::agent::tools::CsvIngestTool;
     use akh_medu::agent::tool::{Tool, ToolInput};
+    use akh_medu::agent::tools::CsvIngestTool;
 
     let engine = test_engine();
     let dir = tempfile::TempDir::new().unwrap();
@@ -2659,12 +2745,14 @@ fn csv_ingest_spo_and_entity() {
 
 #[test]
 fn text_ingest_extracts_triples() {
-    use akh_medu::agent::tools::TextIngestTool;
     use akh_medu::agent::tool::{Tool, ToolInput};
+    use akh_medu::agent::tools::TextIngestTool;
 
     let engine = test_engine();
-    let input = ToolInput::new()
-        .with_param("text", "Dogs are mammals. Paris is located in France. The wheel is part of the car.");
+    let input = ToolInput::new().with_param(
+        "text",
+        "Dogs are mammals. Paris is located in France. The wheel is part of the car.",
+    );
     let result = TextIngestTool.execute(&engine, input).unwrap();
     assert!(result.success);
     assert!(result.result.contains("extracted 3 triple(s)"));
@@ -2675,21 +2763,33 @@ fn bootstrap_loads_skills_and_grounds() {
     let (engine, _dir) = engine_with_skills();
 
     // Load all skills.
-    let skill_names = ["astronomy", "common_sense", "geography", "science", "language"];
+    let skill_names = [
+        "astronomy",
+        "common_sense",
+        "geography",
+        "science",
+        "language",
+    ];
     let mut total = 0;
     for name in &skill_names {
         if let Ok(activation) = engine.load_skill(name) {
             total += activation.triples_loaded;
         }
     }
-    assert!(total > 200, "should load >200 triples across all skills, got {total}");
+    assert!(
+        total > 200,
+        "should load >200 triples across all skills, got {total}"
+    );
 
     // Run grounding.
     let ops = engine.ops();
     let im = engine.item_memory();
     let config = akh_medu::vsa::grounding::GroundingConfig::default();
     let grounding = akh_medu::vsa::grounding::ground_all(&engine, ops, im, &config).unwrap();
-    assert!(grounding.symbols_updated > 0, "grounding should update symbols");
+    assert!(
+        grounding.symbols_updated > 0,
+        "grounding should update symbols"
+    );
 }
 
 #[test]
@@ -2736,8 +2836,14 @@ fn new_tools_accessible_in_ooda() {
     // Verify new tools are registered and accessible.
     let tools = agent.list_tools();
     let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
-    assert!(names.contains(&"csv_ingest"), "csv_ingest should be registered");
-    assert!(names.contains(&"text_ingest"), "text_ingest should be registered");
+    assert!(
+        names.contains(&"csv_ingest"),
+        "csv_ingest should be registered"
+    );
+    assert!(
+        names.contains(&"text_ingest"),
+        "text_ingest should be registered"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -2746,11 +2852,14 @@ fn new_tools_accessible_in_ooda() {
 
 #[test]
 fn intent_classify_query() {
-    use akh_medu::agent::{classify_intent, UserIntent};
+    use akh_medu::agent::{UserIntent, classify_intent};
 
     match classify_intent("What is a dog?") {
         UserIntent::Query { subject } => {
-            assert!(subject.to_lowercase().contains("dog"), "subject should contain 'dog', got: {subject}");
+            assert!(
+                subject.to_lowercase().contains("dog"),
+                "subject should contain 'dog', got: {subject}"
+            );
         }
         other => panic!("Expected Query, got {other:?}"),
     }
@@ -2758,7 +2867,7 @@ fn intent_classify_query() {
 
 #[test]
 fn intent_classify_assert() {
-    use akh_medu::agent::{classify_intent, UserIntent};
+    use akh_medu::agent::{UserIntent, classify_intent};
 
     match classify_intent("Dogs are mammals") {
         UserIntent::Assert { text } => {
@@ -2770,11 +2879,14 @@ fn intent_classify_assert() {
 
 #[test]
 fn intent_classify_goal() {
-    use akh_medu::agent::{classify_intent, UserIntent};
+    use akh_medu::agent::{UserIntent, classify_intent};
 
     match classify_intent("Find similar animals to Dog") {
         UserIntent::SetGoal { description } => {
-            assert!(description.contains("similar animals"), "desc: {description}");
+            assert!(
+                description.contains("similar animals"),
+                "desc: {description}"
+            );
         }
         other => panic!("Expected SetGoal, got {other:?}"),
     }
@@ -2782,7 +2894,7 @@ fn intent_classify_goal() {
 
 #[test]
 fn intent_classify_status() {
-    use akh_medu::agent::{classify_intent, UserIntent};
+    use akh_medu::agent::{UserIntent, classify_intent};
 
     assert!(matches!(classify_intent("status"), UserIntent::ShowStatus));
     assert!(matches!(classify_intent("goals"), UserIntent::ShowStatus));
@@ -2790,7 +2902,7 @@ fn intent_classify_status() {
 
 #[test]
 fn intent_classify_render() {
-    use akh_medu::agent::{classify_intent, UserIntent};
+    use akh_medu::agent::{UserIntent, classify_intent};
 
     match classify_intent("show Dog") {
         UserIntent::RenderHiero { entity } => {
@@ -2802,7 +2914,7 @@ fn intent_classify_render() {
 
 #[test]
 fn intent_classify_freeform() {
-    use akh_medu::agent::{classify_intent, UserIntent};
+    use akh_medu::agent::{UserIntent, classify_intent};
 
     assert!(matches!(
         classify_intent("tell me something interesting"),
@@ -2823,7 +2935,10 @@ fn conversation_serialize_deserialize() {
 
     assert_eq!(restored.len(), 2);
     assert_eq!(restored.turns()[0].user_input, "What is a cat?");
-    assert_eq!(restored.turns()[1].agent_response, "Cats are domestic animals.");
+    assert_eq!(
+        restored.turns()[1].agent_response,
+        "Cats are domestic animals."
+    );
 }
 
 #[test]
@@ -2846,7 +2961,11 @@ fn chat_roundtrip_intent_pipeline() {
         let output = akh_medu::agent::tools::TextIngestTool
             .execute(&engine, tool_input)
             .unwrap();
-        assert!(output.success, "TextIngestTool should succeed: {}", output.result);
+        assert!(
+            output.success,
+            "TextIngestTool should succeed: {}",
+            output.result
+        );
         assert!(
             output.result.contains("is-a") || output.result.contains("triple"),
             "Should mention extracted triple: {}",
@@ -2898,7 +3017,10 @@ fn core_features_work_standalone() {
 
     // Text ingest works (regex extraction).
     use akh_medu::agent::tool::Tool;
-    let input = akh_medu::agent::ToolInput::new().with_param("text", "Paris is the capital of France");
-    let output = akh_medu::agent::tools::TextIngestTool.execute(&engine, input).unwrap();
+    let input =
+        akh_medu::agent::ToolInput::new().with_param("text", "Paris is the capital of France");
+    let output = akh_medu::agent::tools::TextIngestTool
+        .execute(&engine, input)
+        .unwrap();
     assert!(output.success);
 }

@@ -114,8 +114,8 @@ pub fn fuse_paths(
 
         // Quality score.
         let normalized_interference = (interference + 1.0) / 2.0;
-        let quality = config.confidence_weight * fused
-            + config.interference_weight * normalized_interference;
+        let quality =
+            config.confidence_weight * fused + config.interference_weight * normalized_interference;
 
         results.push(FusedConfidence {
             subject,
@@ -141,7 +141,10 @@ pub fn fuse_paths(
 
 /// Noisy-OR: `1 - product(1 - ci)` for independent evidence sources.
 pub fn noisy_or(confidences: &[f32]) -> f32 {
-    let product: f32 = confidences.iter().map(|c| 1.0 - c.clamp(0.0, 1.0)).product();
+    let product: f32 = confidences
+        .iter()
+        .map(|c| 1.0 - c.clamp(0.0, 1.0))
+        .product();
     1.0 - product
 }
 
@@ -212,9 +215,13 @@ mod tests {
     #[test]
     fn fuse_empty_paths() {
         let engine = test_engine();
-        let result =
-            fuse_paths(&[], engine.ops(), engine.item_memory(), &FusionConfig::default())
-                .unwrap();
+        let result = fuse_paths(
+            &[],
+            engine.ops(),
+            engine.item_memory(),
+            &FusionConfig::default(),
+        )
+        .unwrap();
         assert!(result.is_empty());
     }
 
@@ -238,9 +245,13 @@ mod tests {
             rule_name: "test".into(),
         }];
 
-        let result =
-            fuse_paths(&paths, engine.ops(), engine.item_memory(), &FusionConfig::default())
-                .unwrap();
+        let result = fuse_paths(
+            &paths,
+            engine.ops(),
+            engine.item_memory(),
+            &FusionConfig::default(),
+        )
+        .unwrap();
 
         assert_eq!(result.len(), 1);
         assert!((result[0].fused_confidence - 0.8).abs() < 0.001);
@@ -277,9 +288,13 @@ mod tests {
             },
         ];
 
-        let result =
-            fuse_paths(&paths, engine.ops(), engine.item_memory(), &FusionConfig::default())
-                .unwrap();
+        let result = fuse_paths(
+            &paths,
+            engine.ops(),
+            engine.item_memory(),
+            &FusionConfig::default(),
+        )
+        .unwrap();
 
         assert_eq!(result.len(), 1);
         // Noisy-OR: 1 - (1-0.6)(1-0.7) = 0.88
@@ -308,9 +323,13 @@ mod tests {
             rule_name: "test".into(),
         }];
 
-        let result =
-            fuse_paths(&paths, engine.ops(), engine.item_memory(), &FusionConfig::default())
-                .unwrap();
+        let result = fuse_paths(
+            &paths,
+            engine.ops(),
+            engine.item_memory(),
+            &FusionConfig::default(),
+        )
+        .unwrap();
 
         assert!(result[0].quality_score >= 0.0 && result[0].quality_score <= 1.0);
     }

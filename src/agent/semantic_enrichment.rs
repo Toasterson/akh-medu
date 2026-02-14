@@ -10,8 +10,8 @@ use crate::engine::Engine;
 use crate::graph::Triple;
 use crate::provenance::{DerivationKind, ProvenanceRecord};
 use crate::symbol::SymbolId;
-use crate::vsa::grounding::bundle_symbols;
 use crate::vsa::HyperVec;
+use crate::vsa::grounding::bundle_symbols;
 
 use super::error::AgentResult;
 use super::tools::code_predicates::CodePredicates;
@@ -67,43 +67,61 @@ const ROLE_ARCHETYPES: &[(&str, &[&str])] = &[
     (
         "storage",
         &[
-            "store", "memory", "index", "search", "insert", "get", "cache",
-            "persist", "retrieve", "database",
+            "store", "memory", "index", "search", "insert", "get", "cache", "persist", "retrieve",
+            "database",
         ],
     ),
     (
         "transformation",
         &[
-            "encode", "transform", "convert", "map", "parse", "serialize",
-            "format", "decode",
+            "encode",
+            "transform",
+            "convert",
+            "map",
+            "parse",
+            "serialize",
+            "format",
+            "decode",
         ],
     ),
     (
         "computation",
         &[
-            "calculate", "compute", "operate", "process", "evaluate",
-            "execute", "run", "apply", "reduce",
+            "calculate",
+            "compute",
+            "operate",
+            "process",
+            "evaluate",
+            "execute",
+            "run",
+            "apply",
+            "reduce",
         ],
     ),
     (
         "coordination",
         &[
-            "dispatch", "registry", "route", "manage", "orchestrate",
-            "coordinate", "pipeline", "schedule",
+            "dispatch",
+            "registry",
+            "route",
+            "manage",
+            "orchestrate",
+            "coordinate",
+            "pipeline",
+            "schedule",
         ],
     ),
     (
         "analysis",
         &[
-            "analyze", "inspect", "measure", "compare", "score", "rank",
-            "detect", "diagnose", "gap",
+            "analyze", "inspect", "measure", "compare", "score", "rank", "detect", "diagnose",
+            "gap",
         ],
     ),
     (
         "interface",
         &[
-            "api", "client", "request", "response", "handler", "endpoint",
-            "command", "cli", "repl",
+            "api", "client", "request", "response", "handler", "endpoint", "command", "cli", "repl",
         ],
     ),
 ];
@@ -150,10 +168,7 @@ pub struct ModuleProfile {
 /// For each entity with outgoing `code:contains-mod`, `code:defines-fn`,
 /// `code:defines-struct`, etc. triples, bundle all child labels into a
 /// profile vector.
-fn build_module_profiles(
-    engine: &Engine,
-    code_preds: &CodePredicates,
-) -> Vec<ModuleProfile> {
+fn build_module_profiles(engine: &Engine, code_preds: &CodePredicates) -> Vec<ModuleProfile> {
     let ops = engine.ops();
     let im = engine.item_memory();
 
@@ -282,9 +297,8 @@ pub fn classify_and_persist_roles(
         };
 
         // Create role entity and add has-role triple.
-        let role_sym = engine.resolve_or_create_entity(
-            &format!("role:{}", classification.primary),
-        )?;
+        let role_sym =
+            engine.resolve_or_create_entity(&format!("role:{}", classification.primary))?;
         let triple = Triple::new(profile.symbol, predicates.has_role, role_sym)
             .with_confidence(classification.primary_confidence);
         engine.add_triple(&triple)?;
@@ -304,11 +318,9 @@ pub fn classify_and_persist_roles(
             &classification.secondary,
             classification.secondary_confidence,
         ) {
-            let sec_sym = engine.resolve_or_create_entity(
-                &format!("role:{sec_role}"),
-            )?;
-            let sec_triple = Triple::new(profile.symbol, predicates.has_role, sec_sym)
-                .with_confidence(sec_conf);
+            let sec_sym = engine.resolve_or_create_entity(&format!("role:{sec_role}"))?;
+            let sec_triple =
+                Triple::new(profile.symbol, predicates.has_role, sec_sym).with_confidence(sec_conf);
             engine.add_triple(&sec_triple)?;
         }
 
@@ -344,9 +356,7 @@ pub fn compute_and_persist_importance(
 
     for score in &scores {
         let normalized = (score.score / max_score) as f32;
-        let imp_sym = engine.resolve_or_create_entity(
-            &format!("importance:{:.2}", normalized),
-        )?;
+        let imp_sym = engine.resolve_or_create_entity(&format!("importance:{:.2}", normalized))?;
         let triple = Triple::new(score.symbol, predicates.importance, imp_sym);
         engine.add_triple(&triple)?;
 
@@ -428,9 +438,7 @@ pub fn detect_and_persist_flows(
 
         // Also check types defined by this module (produces).
         for t in &triples {
-            if t.predicate == code_preds.defines_struct
-                || t.predicate == code_preds.defines_enum
-            {
+            if t.predicate == code_preds.defines_struct || t.predicate == code_preds.defines_enum {
                 produces.insert(engine.resolve_label(t.object));
             }
         }
@@ -465,8 +473,8 @@ pub fn detect_and_persist_flows(
             }
 
             // Persist flow edge: producer -> flows-to -> consumer.
-            let confidence = (shared.len() as f32 / module_ios[i].produces.len().max(1) as f32)
-                .min(1.0);
+            let confidence =
+                (shared.len() as f32 / module_ios[i].produces.len().max(1) as f32).min(1.0);
             let flow_triple = Triple::new(
                 module_ios[i].symbol,
                 predicates.flows_to,
@@ -478,11 +486,8 @@ pub fn detect_and_persist_flows(
             // Persist the mediating types.
             for type_name in &shared {
                 if let Ok(type_sym) = engine.resolve_or_create_entity(type_name) {
-                    let via_triple = Triple::new(
-                        module_ios[i].symbol,
-                        predicates.flow_via_type,
-                        type_sym,
-                    );
+                    let via_triple =
+                        Triple::new(module_ios[i].symbol, predicates.flow_via_type, type_sym);
                     engine.add_triple(&via_triple)?;
                 }
             }
@@ -549,7 +554,11 @@ pub fn lookup_role(
     triples
         .iter()
         .filter(|t| t.predicate == predicates.has_role)
-        .max_by(|a, b| a.confidence.partial_cmp(&b.confidence).unwrap_or(std::cmp::Ordering::Equal))
+        .max_by(|a, b| {
+            a.confidence
+                .partial_cmp(&b.confidence)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
         .map(|t| {
             engine
                 .resolve_label(t.object)
@@ -619,9 +628,7 @@ pub fn importance_ranking(
     let all_symbols = engine.all_symbols();
     let mut ranked: Vec<(SymbolId, f32)> = all_symbols
         .iter()
-        .filter_map(|sym| {
-            lookup_importance(engine, sym.id, predicates).map(|imp| (sym.id, imp))
-        })
+        .filter_map(|sym| lookup_importance(engine, sym.id, predicates).map(|imp| (sym.id, imp)))
         .collect();
 
     ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -685,7 +692,9 @@ pub fn build_flow_chain(
         let name = engine.resolve_label(current);
         let via_type = if let Some(targets) = edges.get(&current) {
             // Pick the first via_type for the chain display.
-            targets.first().and_then(|(_, types)| types.first().cloned())
+            targets
+                .first()
+                .and_then(|(_, types)| types.first().cloned())
         } else {
             None
         };
@@ -737,7 +746,11 @@ mod tests {
             preds.flow_via_type,
         ];
         let unique: HashSet<_> = ids.iter().collect();
-        assert_eq!(unique.len(), ids.len(), "all semantic predicates must be unique");
+        assert_eq!(
+            unique.len(),
+            ids.len(),
+            "all semantic predicates must be unique"
+        );
     }
 
     #[test]
@@ -819,7 +832,10 @@ mod tests {
         let result = enrich(&engine).unwrap();
 
         // Should have enriched at least the Vsa module.
-        assert!(result.roles_enriched > 0, "should classify at least one role");
+        assert!(
+            result.roles_enriched > 0,
+            "should classify at least one role"
+        );
         assert!(result.importance_enriched > 0, "should compute importance");
 
         // Verify role triple exists.

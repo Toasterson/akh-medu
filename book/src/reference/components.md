@@ -24,5 +24,7 @@
 | Pipeline | Implemented | `pipeline` | egg | Linear stage pipeline (Retrieve → Infer → Reason → Extract), built-in query/ingest pipelines |
 | Skills | Implemented | `skills` | egg, serde_json | MoE-style skillpacks with Cold/Warm/Hot lifecycle, memory budgets, dynamic rule compilation |
 | Graph analytics | Implemented | `graph::analytics` | petgraph | Degree centrality, PageRank, strongly connected components |
-| Agent | Implemented | `agent` | — | OODA loop, 9 tools, planning/reflection, session persistence, REPL mode |
+| Agent | Implemented | `agent` | — | OODA loop, 17 tools, planning/reflection, session persistence, REPL mode |
 | Autonomous cycle | Implemented | `autonomous` | — | Symbol grounding, superposition inference, confidence fusion, KG commit |
+| TUI idle learning | Implemented | `agent::idle` | — | Background consolidation, reflection, equivalence learning, rule inference during TUI idle time |
+| Agent daemon | Implemented | `agent::daemon` | tokio (feature-gated) | Long-running background process with 8 scheduled tasks, session persistence, graceful shutdown |

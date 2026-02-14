@@ -62,6 +62,35 @@ The decision includes a score breakdown string for transparency:
 [score=0.85: base=0.80 recency=-0.00 novelty=+0.15 episodic=+0.00 pressure=+0.00 archetype=+0.030]
 ```
 
+#### VSA-Based Tool Selection
+
+Core tools (`kg_query`, `kg_mutate`, `memory_recall`, `reason`,
+`similarity_search`) are scored with hand-tuned state-dependent rules.
+All remaining tools -- external, library, and advanced -- use **VSA semantic
+scoring**: the goal description is encoded as a hypervector and compared
+against each tool's semantic profile via cosine-like similarity.
+
+Each tool carries a keyword array (17-25 words) that defines its semantic
+profile. A **synonym expansion** pass widens these at build time using a
+static lookup table (~20 root-word entries), so natural sentences like
+"What did that paper say about gravity?" activate `library_search` even
+when few tokens overlap with the base keywords.
+
+Tools with lower risk use lower activation thresholds:
+
+| Tool | Threshold | Multiplier | Danger |
+|------|-----------|------------|--------|
+| `library_search` | 0.50 | 0.80 | Safe |
+| `content_ingest` | 0.50 | 0.75 | Cautious |
+| `file_io` | 0.55 | 0.75 | Cautious/Danger |
+| `http_fetch` | 0.55 | 0.75 | Cautious |
+| `shell_exec` | 0.55 | 0.75 | Danger |
+| `user_interact` | 0.55 | 0.75 | Safe |
+
+The `infer_rules` and `gap_analysis` tools use adaptive scoring with floors
+and context boosts instead of hard thresholds, ensuring they remain available
+as fallback reasoning strategies.
+
 ### Act
 
 Executes the chosen tool and evaluates the outcome:
@@ -143,7 +172,8 @@ EpisodicEntry {
 ```
 
 Consolidation fires automatically when memory pressure exceeds 0.8, or
-manually via `agent consolidate`.
+manually via `agent consolidate`. In [background learning](autonomy.md)
+modes, consolidation also runs on a periodic schedule.
 
 ## Session Persistence
 
@@ -157,6 +187,10 @@ akh-medu agent run --goals "..." --max-cycles 20
 # Resume where you left off
 akh-medu agent resume --max-cycles 50
 ```
+
+Session persistence also underpins [autonomous background learning](autonomy.md):
+the daemon persists periodically, and TUI idle learning accumulates across
+sessions.
 
 ## CLI Commands
 
@@ -173,8 +207,15 @@ akh-medu agent run --goals "..." --max-cycles 10 --fresh
 # Interactive REPL
 akh-medu agent repl
 
+# Interactive TUI chat (with idle background learning)
+akh-medu agent chat
+
 # Resume persisted session
 akh-medu agent resume
+
+# Background daemon (requires --features daemon)
+akh-medu agent daemon
+akh-medu agent daemon --equiv-interval 600 --fresh
 
 # Trigger consolidation
 akh-medu agent consolidate
@@ -182,6 +223,9 @@ akh-medu agent consolidate
 # Recall episodic memories
 akh-medu agent recall --query "mammals" --top-k 5
 ```
+
+See [Autonomous Background Learning](autonomy.md) for details on the
+daemon and TUI idle scheduler.
 
 ## Configuration
 

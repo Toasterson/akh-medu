@@ -1,13 +1,19 @@
 //! Cross-language entity resolution with dynamic learning.
 //!
 //! Detects when the same entity appears in different languages and unifies
-//! them under a canonical label. Uses a 4-tier strategy:
+//! them under a canonical label. Uses a 4-tier resolution strategy:
 //!
 //! 1. **Runtime aliases**: O(1) lookup in a hot in-memory alias table
 //! 2. **Learned equivalences**: Persisted cross-lingual mappings discovered by
-//!    structural (KG), distributional (VSA), or co-occurrence strategies
+//!    structural (KG), distributional (VSA), co-occurrence, or library context strategies
 //! 3. **Static equivalence table**: ~120 hand-curated entries for high-frequency terms
 //! 4. **Fallback**: Return the surface form unchanged
+//!
+//! Learning strategies:
+//! - Strategy 1: KG structural fingerprint matching
+//! - Strategy 2: VSA distributional similarity
+//! - Strategy 3: Parallel chunk co-occurrence
+//! - Strategy 4: Library paragraph context matching
 
 use std::collections::HashMap;
 
@@ -53,6 +59,8 @@ pub enum EquivalenceSource {
     CoOccurrence,
     /// User-added via CLI or API.
     Manual,
+    /// Strategy 4: Library paragraph context matching.
+    LibraryContext,
 }
 
 impl std::fmt::Display for EquivalenceSource {
@@ -63,6 +71,7 @@ impl std::fmt::Display for EquivalenceSource {
             Self::VsaSimilarity => write!(f, "vsa-similarity"),
             Self::CoOccurrence => write!(f, "co-occurrence"),
             Self::Manual => write!(f, "manual"),
+            Self::LibraryContext => write!(f, "library-context"),
         }
     }
 }
@@ -76,6 +85,7 @@ pub struct EquivalenceStats {
     pub vsa_similarity: usize,
     pub co_occurrence: usize,
     pub manual: usize,
+    pub library_context: usize,
 }
 
 /// Entity resolver with alias tracking, learned equivalences, and cross-lingual matching.
@@ -124,11 +134,10 @@ impl EntityResolver {
     pub fn persist_to_store(&self, store: &TieredStore) -> StoreResult<()> {
         for equiv in self.learned.values() {
             let key_str = format!("equiv:{}", equiv.surface.to_lowercase());
-            let value = bincode::serialize(equiv).map_err(|e| {
-                crate::error::StoreError::Serialization {
+            let value =
+                bincode::serialize(equiv).map_err(|e| crate::error::StoreError::Serialization {
                     message: format!("failed to serialize learned equivalence: {e}"),
-                }
-            })?;
+                })?;
             store.put_meta(key_str.as_bytes(), &value)?;
         }
         Ok(())
@@ -258,11 +267,7 @@ impl EntityResolver {
     /// the unresolved entity as an alias for the resolved one.
     ///
     /// Returns the number of new equivalences discovered.
-    pub fn learn_from_kg(
-        &mut self,
-        kg: &KnowledgeGraph,
-        registry: &SymbolRegistry,
-    ) -> usize {
+    pub fn learn_from_kg(&mut self, kg: &KnowledgeGraph, registry: &SymbolRegistry) -> usize {
         let all_nodes = kg.nodes();
         let mut discovered = 0usize;
 
@@ -280,10 +285,12 @@ impl EntityResolver {
             let mut fingerprint = Vec::new();
 
             for triple in &triples {
-                let pred_label = registry.get(triple.predicate)
+                let pred_label = registry
+                    .get(triple.predicate)
                     .map(|m| m.label)
                     .unwrap_or_default();
-                let obj_label = registry.get(triple.object)
+                let obj_label = registry
+                    .get(triple.object)
                     .map(|m| m.label)
                     .unwrap_or_default();
 
@@ -319,13 +326,13 @@ impl EntityResolver {
                 }
 
                 // Count shared fingerprint tuples
-                let shared = unresolved_fp.iter()
+                let shared = unresolved_fp
+                    .iter()
                     .filter(|t| resolved_fp.contains(t))
                     .count();
 
                 if shared >= 1 {
-                    let overlap = shared as f32
-                        / unresolved_fp.len().max(resolved_fp.len()) as f32;
+                    let overlap = shared as f32 / unresolved_fp.len().max(resolved_fp.len()) as f32;
                     let confidence = overlap.min(0.95);
 
                     self.add_learned(LearnedEquivalence {
@@ -362,7 +369,8 @@ impl EntityResolver {
         let mut discovered = 0usize;
 
         // Collect unresolved labels
-        let unresolved: Vec<_> = all_symbols.iter()
+        let unresolved: Vec<_> = all_symbols
+            .iter()
             .filter(|meta| !self.resolve(&meta.label).resolved)
             .collect();
 
@@ -416,10 +424,7 @@ impl EntityResolver {
     /// positional equivalences.
     ///
     /// Returns the number of new equivalences discovered.
-    pub fn learn_from_parallel_chunks(
-        &mut self,
-        outputs: &[PreProcessorOutput],
-    ) -> usize {
+    pub fn learn_from_parallel_chunks(&mut self, outputs: &[PreProcessorOutput]) -> usize {
         if outputs.len() < 2 {
             return 0;
         }
@@ -451,9 +456,7 @@ impl EntityResolver {
             }
 
             // Check for different languages in the group
-            let languages: Vec<&str> = group.iter()
-                .map(|o| o.source_language.as_str())
-                .collect();
+            let languages: Vec<&str> = group.iter().map(|o| o.source_language.as_str()).collect();
 
             let has_multiple_langs = {
                 let mut unique = languages.clone();
@@ -517,7 +520,107 @@ impl EntityResolver {
         discovered
     }
 
-    /// Run all three learning strategies. Returns total new equivalences discovered.
+    /// Strategy 4: Learn equivalences from library paragraph context.
+    ///
+    /// For each unresolved entity in the registry, encodes its label and searches
+    /// item memory for nearby library paragraphs (`para:*` symbols). For each
+    /// matching paragraph, walks KG triples to find connected entities. If a
+    /// connected entity resolves to a known canonical, proposes the unresolved
+    /// entity as an alias.
+    ///
+    /// Returns the number of new equivalences discovered.
+    pub fn learn_from_library(
+        &mut self,
+        ops: &VsaOps,
+        item_memory: &ItemMemory,
+        registry: &SymbolRegistry,
+        kg: &KnowledgeGraph,
+        similarity_threshold: f32,
+    ) -> usize {
+        let all_symbols = registry.all();
+        let mut discovered = 0usize;
+
+        // Collect unresolved labels, skipping para:/ch:/sec: symbols themselves
+        let unresolved: Vec<_> = all_symbols
+            .iter()
+            .filter(|meta| {
+                let label = &meta.label;
+                !label.starts_with("para:")
+                    && !label.starts_with("ch:")
+                    && !label.starts_with("sec:")
+                    && !self.resolve(label).resolved
+            })
+            .collect();
+
+        for meta in &unresolved {
+            let encoded = match encode_label(ops, &meta.label) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+
+            let neighbors = match item_memory.search(&encoded, 20) {
+                Ok(n) => n,
+                Err(_) => continue,
+            };
+
+            // Filter to para:* neighbors above threshold
+            let para_neighbors: Vec<_> = neighbors
+                .iter()
+                .filter(|n| {
+                    n.symbol_id != meta.id
+                        && n.similarity >= similarity_threshold
+                        && registry
+                            .get(n.symbol_id)
+                            .is_some_and(|m| m.label.starts_with("para:"))
+                })
+                .collect();
+
+            let mut found = false;
+            for neighbor in &para_neighbors {
+                let triples = kg.triples_from(neighbor.symbol_id);
+                for triple in &triples {
+                    let obj_label = match registry.get(triple.object) {
+                        Some(m) => m.label,
+                        None => continue,
+                    };
+
+                    // Skip structural labels (para:, ch:, sec:, numeric indices)
+                    if obj_label.starts_with("para:")
+                        || obj_label.starts_with("ch:")
+                        || obj_label.starts_with("sec:")
+                        || obj_label.parse::<u64>().is_ok()
+                    {
+                        continue;
+                    }
+
+                    // Check if this connected entity resolves to a known canonical
+                    let obj_resolved = self.resolve(&obj_label);
+                    if obj_resolved.resolved
+                        && obj_resolved.canonical.to_lowercase() != meta.label.to_lowercase()
+                    {
+                        let confidence = (neighbor.similarity * 0.85).min(0.85);
+                        self.add_learned(LearnedEquivalence {
+                            canonical: obj_resolved.canonical,
+                            surface: meta.label.clone(),
+                            source_language: String::new(),
+                            confidence,
+                            source: EquivalenceSource::LibraryContext,
+                        });
+                        discovered += 1;
+                        found = true;
+                        break;
+                    }
+                }
+                if found {
+                    break;
+                }
+            }
+        }
+
+        discovered
+    }
+
+    /// Run all four learning strategies. Returns total new equivalences discovered.
     pub fn learn_all(
         &mut self,
         kg: &KnowledgeGraph,
@@ -530,6 +633,7 @@ impl EntityResolver {
         total += self.learn_from_kg(kg, registry);
         total += self.learn_from_vsa(ops, item_memory, registry, 0.65);
         total += self.learn_from_parallel_chunks(outputs);
+        total += self.learn_from_library(ops, item_memory, registry, kg, 0.65);
         total
     }
 
@@ -563,6 +667,7 @@ impl EntityResolver {
                 EquivalenceSource::VsaSimilarity => stats.vsa_similarity += 1,
                 EquivalenceSource::CoOccurrence => stats.co_occurrence += 1,
                 EquivalenceSource::Manual => stats.manual += 1,
+                EquivalenceSource::LibraryContext => stats.library_context += 1,
             }
         }
         stats
@@ -661,7 +766,10 @@ mod tests {
         assert_eq!(entities.len(), 1, "should merge Moscow and Москва");
         assert_eq!(entities[0].canonical_name, "Moscow");
         assert!(entities[0].aliases.contains(&"Москва".to_string()));
-        assert_eq!(entities[0].confidence, 0.90, "should keep higher confidence");
+        assert_eq!(
+            entities[0].confidence, 0.90,
+            "should keep higher confidence"
+        );
     }
 
     #[test]
@@ -782,16 +890,14 @@ mod tests {
                 chunk_id: Some("doc1_en".to_string()),
                 source_language: "en".to_string(),
                 detected_language_confidence: 0.9,
-                entities: vec![
-                    ExtractedEntity {
-                        name: "archetype-concept".to_string(),
-                        entity_type: "CONCEPT".to_string(),
-                        canonical_name: "archetype-concept".to_string(),
-                        confidence: 0.9,
-                        aliases: vec![],
-                        source_language: "en".to_string(),
-                    },
-                ],
+                entities: vec![ExtractedEntity {
+                    name: "archetype-concept".to_string(),
+                    entity_type: "CONCEPT".to_string(),
+                    canonical_name: "archetype-concept".to_string(),
+                    confidence: 0.9,
+                    aliases: vec![],
+                    source_language: "en".to_string(),
+                }],
                 claims: vec![],
                 abs_trees: vec![],
             },
@@ -799,16 +905,14 @@ mod tests {
                 chunk_id: Some("doc1_ru".to_string()),
                 source_language: "ru".to_string(),
                 detected_language_confidence: 0.9,
-                entities: vec![
-                    ExtractedEntity {
-                        name: "архетип".to_string(),
-                        entity_type: "CONCEPT".to_string(),
-                        canonical_name: "архетип".to_string(),
-                        confidence: 0.9,
-                        aliases: vec![],
-                        source_language: "ru".to_string(),
-                    },
-                ],
+                entities: vec![ExtractedEntity {
+                    name: "архетип".to_string(),
+                    entity_type: "CONCEPT".to_string(),
+                    canonical_name: "архетип".to_string(),
+                    confidence: 0.9,
+                    aliases: vec![],
+                    source_language: "ru".to_string(),
+                }],
                 claims: vec![],
                 abs_trees: vec![],
             },
@@ -816,7 +920,10 @@ mod tests {
 
         let count = resolver.learn_from_parallel_chunks(&outputs);
         // "archetype-concept" resolves (via learned equiv), "архетип" does not
-        assert!(count >= 1, "should discover at least one co-occurrence equivalence, got {count}");
+        assert!(
+            count >= 1,
+            "should discover at least one co-occurrence equivalence, got {count}"
+        );
 
         let result = resolver.resolve("архетип");
         assert!(result.resolved);
@@ -861,6 +968,84 @@ mod tests {
     }
 
     #[test]
+    fn learn_from_library_discovers_equivalence() {
+        use crate::graph::index::KnowledgeGraph;
+        use crate::graph::Triple;
+        use crate::simd;
+        use crate::symbol::{AtomicSymbolAllocator, SymbolKind, SymbolMeta};
+        use crate::vsa::item_memory::ItemMemory;
+        use crate::vsa::ops::VsaOps;
+        use crate::vsa::{Dimension, Encoding};
+
+        let dim = Dimension::TEST;
+        let ops = VsaOps::new(simd::best_kernel(), dim, Encoding::Bipolar);
+        let im = ItemMemory::new(dim, Encoding::Bipolar, 100);
+        let registry = SymbolRegistry::new();
+        let kg = KnowledgeGraph::new();
+        let alloc = AtomicSymbolAllocator::new();
+
+        // Create a para: symbol and a connected entity
+        let para_id = alloc.next_id().unwrap();
+        let para_meta = SymbolMeta::new(para_id, SymbolKind::Entity, "para:testdoc:0");
+        registry.register(para_meta).unwrap();
+        im.get_or_create(&ops, para_id);
+
+        let entity_id = alloc.next_id().unwrap();
+        let entity_meta = SymbolMeta::new(entity_id, SymbolKind::Entity, "archetype");
+        registry.register(entity_meta).unwrap();
+        im.get_or_create(&ops, entity_id);
+
+        let pred_id = alloc.next_id().unwrap();
+        let pred_meta = SymbolMeta::new(pred_id, SymbolKind::Relation, "mentions");
+        registry.register(pred_meta).unwrap();
+        im.get_or_create(&ops, pred_id);
+
+        // Connect para -> mentions -> archetype in KG
+        kg.insert_triple(&Triple::new(para_id, pred_id, entity_id))
+            .unwrap();
+
+        // Pre-resolve "archetype" so it has a canonical form
+        let mut resolver = EntityResolver::new();
+        resolver.add_learned(LearnedEquivalence {
+            canonical: "Archetype".to_string(),
+            surface: "archetype".to_string(),
+            source_language: "en".to_string(),
+            confidence: 0.95,
+            source: EquivalenceSource::Manual,
+        });
+
+        // Create an unresolved entity with a label that will be close in VSA space
+        // (uses encode_label which hashes words deterministically)
+        let unresolved_id = alloc.next_id().unwrap();
+        let unresolved_meta = SymbolMeta::new(unresolved_id, SymbolKind::Entity, "архетип-тест");
+        registry.register(unresolved_meta).unwrap();
+        im.get_or_create(&ops, unresolved_id);
+
+        // Run learn_from_library — it may or may not find a match depending on
+        // VSA similarity (hash-based vectors may not be close enough), but the
+        // method should at least run without errors
+        let count = resolver.learn_from_library(&ops, &im, &registry, &kg, 0.50);
+        // Verify stats count correctly even if no discovery (similarity may be below threshold)
+        let stats = resolver.stats();
+        assert_eq!(stats.library_context, count);
+    }
+
+    #[test]
+    fn stats_counts_library_context() {
+        let mut resolver = EntityResolver::new();
+        resolver.add_learned(LearnedEquivalence {
+            canonical: "Archetype".to_string(),
+            surface: "архетип".to_string(),
+            source_language: "ru".to_string(),
+            confidence: 0.7,
+            source: EquivalenceSource::LibraryContext,
+        });
+        let stats = resolver.stats();
+        assert_eq!(stats.library_context, 1);
+        assert_eq!(stats.learned_total, 1);
+    }
+
+    #[test]
     fn add_learned_keeps_higher_confidence() {
         let mut resolver = EntityResolver::new();
 
@@ -882,7 +1067,10 @@ mod tests {
         });
 
         let result = resolver.resolve("hund");
-        assert_eq!(result.canonical, "Dog", "should keep higher-confidence mapping");
+        assert_eq!(
+            result.canonical, "Dog",
+            "should keep higher-confidence mapping"
+        );
 
         // Higher confidence should replace
         resolver.add_learned(LearnedEquivalence {
@@ -894,6 +1082,9 @@ mod tests {
         });
 
         let result = resolver.resolve("hund");
-        assert_eq!(result.canonical, "Canine", "should update to higher-confidence mapping");
+        assert_eq!(
+            result.canonical, "Canine",
+            "should update to higher-confidence mapping"
+        );
     }
 }

@@ -16,8 +16,8 @@ impl Tool for GapAnalysisTool {
     fn signature(&self) -> ToolSignature {
         ToolSignature {
             name: "gap_analysis".into(),
-            description: "Identify knowledge gaps: dead ends, missing predicates, incomplete types."
-                .into(),
+            description:
+                "Identify knowledge gaps: dead ends, missing predicates, incomplete types.".into(),
             parameters: vec![
                 ToolParam {
                     name: "goal".into(),
@@ -60,10 +60,7 @@ impl Tool for GapAnalysisTool {
         let mut symbols = vec![goal_id];
 
         for gap in &result.gaps {
-            lines.push(format!(
-                "  [{:.2}] {}",
-                gap.severity, gap.description
-            ));
+            lines.push(format!("  [{:.2}] {}", gap.severity, gap.description));
             symbols.push(gap.entity);
             symbols.extend(&gap.suggested_predicates);
         }
@@ -84,8 +81,7 @@ impl Tool for GapAnalysisTool {
                 level: DangerLevel::Safe,
                 capabilities: HashSet::from([Capability::ReadKg, Capability::VsaAccess]),
                 description:
-                    "Identifies missing knowledge via KG and VSA analysis — no side effects."
-                        .into(),
+                    "Identifies missing knowledge via KG and VSA analysis — no side effects.".into(),
                 shadow_triggers: vec![],
             },
             source: ToolSource::Native,

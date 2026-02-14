@@ -8,8 +8,8 @@ use std::collections::{HashSet, VecDeque};
 use crate::error::GraphError;
 use crate::symbol::SymbolId;
 
-use super::index::KnowledgeGraph;
 use super::Triple;
+use super::index::KnowledgeGraph;
 
 /// Configuration for a graph traversal.
 #[derive(Debug, Clone)]

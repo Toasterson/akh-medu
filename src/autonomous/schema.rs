@@ -431,9 +431,12 @@ mod tests {
         // "specific" implies "general" (3/3 = 1.0).
         let specific = engine.lookup_symbol("specific").unwrap();
         let general = engine.lookup_symbol("general").unwrap();
-        assert!(result.relation_hierarchies.iter().any(|h| {
-            h.specific == specific && h.general == general
-        }));
+        assert!(
+            result
+                .relation_hierarchies
+                .iter()
+                .any(|h| { h.specific == specific && h.general == general })
+        );
     }
 
     #[test]

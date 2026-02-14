@@ -251,9 +251,7 @@ mod tests {
     fn batch_insert() {
         let ops = test_ops();
         let mem = ItemMemory::new(Dimension::TEST, Encoding::Bipolar, 1000);
-        let syms: Vec<SymbolId> = (1..=100u64)
-            .map(|i| SymbolId::new(i).unwrap())
-            .collect();
+        let syms: Vec<SymbolId> = (1..=100u64).map(|i| SymbolId::new(i).unwrap()).collect();
 
         mem.insert_batch(&ops, &syms);
         assert_eq!(mem.len(), 100);

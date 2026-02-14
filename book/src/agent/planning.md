@@ -76,7 +76,9 @@ akh-medu agent plan
 ## Reflection
 
 After every N cycles (configurable), the agent pauses to reflect on its
-performance.
+performance. Reflection also runs automatically on a periodic schedule
+during [background learning](autonomy.md) (every 5 minutes in TUI idle
+mode, every 3 minutes in daemon mode).
 
 ### What Reflection Examines
 

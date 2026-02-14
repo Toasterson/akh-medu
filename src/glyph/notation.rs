@@ -238,9 +238,7 @@ mod tests {
     #[test]
     fn subgraph_block_format() {
         let (engine, dog, is_a, animal) = setup();
-        let has_a = engine
-            .create_symbol(SymbolKind::Relation, "has-a")
-            .unwrap();
+        let has_a = engine.create_symbol(SymbolKind::Relation, "has-a").unwrap();
         let legs = engine.create_symbol(SymbolKind::Entity, "Legs").unwrap();
         engine
             .add_triple(&Triple::new(dog, has_a.id, legs.id))
@@ -283,9 +281,7 @@ mod tests {
     #[test]
     fn chain_rendering() {
         let (engine, dog, is_a, animal) = setup();
-        let mammal = engine
-            .create_symbol(SymbolKind::Entity, "Mammal")
-            .unwrap();
+        let mammal = engine.create_symbol(SymbolKind::Entity, "Mammal").unwrap();
         let chain = vec![(dog, is_a, animal), (animal, is_a, mammal.id)];
         let config = NotationConfig {
             show_sigils: false,

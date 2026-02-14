@@ -49,8 +49,11 @@ pub fn detect_language(text: &str) -> DetectionResult {
                 cyrillic += 1;
             }
             // Arabic + Arabic Supplement + Arabic Extended-A
-            '\u{0600}'..='\u{06FF}' | '\u{0750}'..='\u{077F}' | '\u{08A0}'..='\u{08FF}' |
-            '\u{FB50}'..='\u{FDFF}' | '\u{FE70}'..='\u{FEFF}' => {
+            '\u{0600}'..='\u{06FF}'
+            | '\u{0750}'..='\u{077F}'
+            | '\u{08A0}'..='\u{08FF}'
+            | '\u{FB50}'..='\u{FDFF}'
+            | '\u{FE70}'..='\u{FEFF}' => {
                 arabic += 1;
             }
             // Latin (Basic + Extended-A + Extended-B)
@@ -113,20 +116,19 @@ fn detect_latin_language(text: &str) -> DetectionResult {
 
     // Word-based markers
     const ENGLISH_MARKERS: &[&str] = &[
-        "the", "is", "are", "was", "were", "with", "from", "this", "that",
-        "and", "for", "not", "but", "have", "has", "had", "will", "would",
-        "can", "could", "should", "it", "they", "we", "you", "he", "she",
+        "the", "is", "are", "was", "were", "with", "from", "this", "that", "and", "for", "not",
+        "but", "have", "has", "had", "will", "would", "can", "could", "should", "it", "they", "we",
+        "you", "he", "she",
     ];
     const FRENCH_MARKERS: &[&str] = &[
-        "le", "la", "les", "des", "est", "dans", "avec", "une", "sur",
-        "pour", "pas", "qui", "que", "sont", "ont", "fait", "plus",
-        "mais", "aussi", "cette", "ces", "nous", "vous", "ils", "elles",
+        "le", "la", "les", "des", "est", "dans", "avec", "une", "sur", "pour", "pas", "qui", "que",
+        "sont", "ont", "fait", "plus", "mais", "aussi", "cette", "ces", "nous", "vous", "ils",
+        "elles",
     ];
     const SPANISH_MARKERS: &[&str] = &[
-        "el", "los", "las", "está", "esta", "tiene", "tiene", "por",
-        "para", "pero", "también", "tambien", "como", "más", "mas",
-        "son", "hay", "ser", "estar", "muy", "todo", "puede", "sobre",
-        "nos", "ese", "esa", "estos",
+        "el", "los", "las", "está", "esta", "tiene", "tiene", "por", "para", "pero", "también",
+        "tambien", "como", "más", "mas", "son", "hay", "ser", "estar", "muy", "todo", "puede",
+        "sobre", "nos", "ese", "esa", "estos",
     ];
 
     for word in &words {
@@ -191,11 +193,20 @@ fn detect_latin_language(text: &str) -> DetectionResult {
 
     // Pick winner. If scores are very close, confidence is lower.
     let (language, raw_confidence) = if en_norm >= fr_norm && en_norm >= es_norm {
-        (Language::English, 0.60 + (en_norm - fr_norm.max(es_norm)).min(0.20))
+        (
+            Language::English,
+            0.60 + (en_norm - fr_norm.max(es_norm)).min(0.20),
+        )
     } else if fr_norm >= en_norm && fr_norm >= es_norm {
-        (Language::French, 0.60 + (fr_norm - en_norm.max(es_norm)).min(0.20))
+        (
+            Language::French,
+            0.60 + (fr_norm - en_norm.max(es_norm)).min(0.20),
+        )
     } else {
-        (Language::Spanish, 0.60 + (es_norm - en_norm.max(fr_norm)).min(0.20))
+        (
+            Language::Spanish,
+            0.60 + (es_norm - en_norm.max(fr_norm)).min(0.20),
+        )
     };
 
     DetectionResult {
@@ -246,13 +257,14 @@ fn split_sentences(text: &str) -> Vec<String> {
 }
 
 fn is_sentence_end(c: char) -> bool {
-    matches!(c,
+    matches!(
+        c,
         '.' | '!' | '?' |
         '\u{061F}' |  // ؟ Arabic question mark
         '\u{06D4}' |  // ۔ Arabic full stop
         '\u{3002}' |  // 。 CJK full stop
         '\u{FF01}' |  // ！ fullwidth exclamation
-        '\u{FF1F}'    // ？ fullwidth question mark
+        '\u{FF1F}' // ？ fullwidth question mark
     )
 }
 
@@ -264,14 +276,22 @@ mod tests {
     fn detect_cyrillic_as_russian() {
         let result = detect_language("Собака является млекопитающим");
         assert_eq!(result.language, Language::Russian);
-        assert!(result.confidence >= 0.90, "confidence={}", result.confidence);
+        assert!(
+            result.confidence >= 0.90,
+            "confidence={}",
+            result.confidence
+        );
     }
 
     #[test]
     fn detect_arabic_text() {
         let result = detect_language("القطة حيوان أليف");
         assert_eq!(result.language, Language::Arabic);
-        assert!(result.confidence >= 0.90, "confidence={}", result.confidence);
+        assert!(
+            result.confidence >= 0.90,
+            "confidence={}",
+            result.confidence
+        );
     }
 
     #[test]

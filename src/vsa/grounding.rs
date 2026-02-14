@@ -7,9 +7,9 @@
 use crate::engine::Engine;
 use crate::symbol::SymbolId;
 
+use super::HyperVec;
 use super::item_memory::ItemMemory;
 use super::ops::{VsaOps, VsaResult};
-use super::HyperVec;
 
 /// Configuration for the grounding process.
 #[derive(Debug, Clone)]
@@ -112,7 +112,12 @@ pub fn ground_symbol(
     // neighborhood bit, otherwise keep the self bit. This is implemented
     // deterministically using a seeded RNG based on the symbol to ensure
     // reproducibility.
-    blend_vectors(&current_vec, &shifted_neighborhood, config.neighbor_weight, symbol)
+    blend_vectors(
+        &current_vec,
+        &shifted_neighborhood,
+        config.neighbor_weight,
+        symbol,
+    )
 }
 
 /// Probabilistic bit-level blending for binary hypervectors.
@@ -319,8 +324,14 @@ mod tests {
 
         let dog = engine.create_symbol(SymbolKind::Entity, "Dog").unwrap().id;
         let cat = engine.create_symbol(SymbolKind::Entity, "Cat").unwrap().id;
-        let mammal = engine.create_symbol(SymbolKind::Entity, "Mammal").unwrap().id;
-        let is_a = engine.create_symbol(SymbolKind::Relation, "is-a").unwrap().id;
+        let mammal = engine
+            .create_symbol(SymbolKind::Entity, "Mammal")
+            .unwrap()
+            .id;
+        let is_a = engine
+            .create_symbol(SymbolKind::Relation, "is-a")
+            .unwrap()
+            .id;
 
         engine.add_triple(&Triple::new(dog, is_a, mammal)).unwrap();
         engine.add_triple(&Triple::new(cat, is_a, mammal)).unwrap();
@@ -352,14 +363,31 @@ mod tests {
         let im = engine.item_memory();
 
         let dog = engine.create_symbol(SymbolKind::Entity, "Dog").unwrap().id;
-        let paris = engine.create_symbol(SymbolKind::Entity, "Paris").unwrap().id;
-        let mammal = engine.create_symbol(SymbolKind::Entity, "Mammal").unwrap().id;
-        let france = engine.create_symbol(SymbolKind::Entity, "France").unwrap().id;
-        let is_a = engine.create_symbol(SymbolKind::Relation, "is-a").unwrap().id;
-        let capital_of = engine.create_symbol(SymbolKind::Relation, "capital-of").unwrap().id;
+        let paris = engine
+            .create_symbol(SymbolKind::Entity, "Paris")
+            .unwrap()
+            .id;
+        let mammal = engine
+            .create_symbol(SymbolKind::Entity, "Mammal")
+            .unwrap()
+            .id;
+        let france = engine
+            .create_symbol(SymbolKind::Entity, "France")
+            .unwrap()
+            .id;
+        let is_a = engine
+            .create_symbol(SymbolKind::Relation, "is-a")
+            .unwrap()
+            .id;
+        let capital_of = engine
+            .create_symbol(SymbolKind::Relation, "capital-of")
+            .unwrap()
+            .id;
 
         engine.add_triple(&Triple::new(dog, is_a, mammal)).unwrap();
-        engine.add_triple(&Triple::new(paris, capital_of, france)).unwrap();
+        engine
+            .add_triple(&Triple::new(paris, capital_of, france))
+            .unwrap();
 
         let config = GroundingConfig::default();
         ground_all(&engine, ops, im, &config).unwrap();

@@ -20,10 +20,7 @@ use super::error::{AutonomousError, AutonomousResult};
 #[derive(Debug, Clone)]
 pub enum GapKind {
     /// Entity with few connections.
-    DeadEnd {
-        in_degree: usize,
-        out_degree: usize,
-    },
+    DeadEnd { in_degree: usize, out_degree: usize },
     /// Entity missing a predicate that similar entities have.
     MissingPredicate {
         expected_predicate: SymbolId,
@@ -155,10 +152,7 @@ pub fn analyze_gaps(
                     continue;
                 }
                 for pred in outgoing_predicates(engine, sr.symbol_id) {
-                    pred_counts
-                        .entry(pred)
-                        .or_default()
-                        .push(sr.symbol_id);
+                    pred_counts.entry(pred).or_default().push(sr.symbol_id);
                 }
             }
 
@@ -249,7 +243,11 @@ pub fn analyze_gaps(
     }
 
     // Sort by severity descending.
-    gaps.sort_by(|a, b| b.severity.partial_cmp(&a.severity).unwrap_or(std::cmp::Ordering::Equal));
+    gaps.sort_by(|a, b| {
+        b.severity
+            .partial_cmp(&a.severity)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     gaps.truncate(config.max_gaps);
 
     let coverage_score = if entities_analyzed > 0 {
@@ -352,7 +350,12 @@ mod tests {
 
         // B has only 1 incoming edge — should be flagged as dead end.
         assert!(result.dead_ends > 0);
-        assert!(result.gaps.iter().any(|g| matches!(g.kind, GapKind::DeadEnd { .. })));
+        assert!(
+            result
+                .gaps
+                .iter()
+                .any(|g| matches!(g.kind, GapKind::DeadEnd { .. }))
+        );
     }
 
     #[test]
@@ -374,9 +377,10 @@ mod tests {
         let result = analyze_gaps(&engine, &[b], &config).unwrap();
 
         // B has 3 connections (1 in, 2 out), should not be a dead end.
-        let b_dead = result.gaps.iter().any(|g| {
-            g.entity == b && matches!(g.kind, GapKind::DeadEnd { .. })
-        });
+        let b_dead = result
+            .gaps
+            .iter()
+            .any(|g| g.entity == b && matches!(g.kind, GapKind::DeadEnd { .. }));
         assert!(!b_dead);
     }
 
@@ -429,8 +433,11 @@ mod tests {
         let result = analyze_gaps(&engine, &[animal], &GapAnalysisConfig::default()).unwrap();
 
         let dog3 = engine.lookup_symbol("Dog3").unwrap();
-        assert!(result.gaps.iter().any(|g| {
-            g.entity == dog3 && matches!(g.kind, GapKind::IncompleteType { .. })
-        }));
+        assert!(
+            result
+                .gaps
+                .iter()
+                .any(|g| { g.entity == dog3 && matches!(g.kind, GapKind::IncompleteType { .. }) })
+        );
     }
 }

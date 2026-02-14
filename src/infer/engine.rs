@@ -12,9 +12,9 @@ use crate::error::InferError;
 use crate::graph::index::KnowledgeGraph;
 use crate::reason::AkhLang;
 use crate::symbol::SymbolId;
+use crate::vsa::HyperVec;
 use crate::vsa::item_memory::ItemMemory;
 use crate::vsa::ops::VsaOps;
-use crate::vsa::HyperVec;
 
 use super::{DerivationKind, InferenceQuery, InferenceResult, ProvenanceRecord};
 
@@ -158,15 +158,13 @@ impl InferEngine {
                                 .with_confidence(graph_confidence)
                                 .with_depth(depth + 1),
                             );
-                            let obj_vec =
-                                self.item_memory.get_or_create(&self.ops, triple.object);
+                            let obj_vec = self.item_memory.get_or_create(&self.ops, triple.object);
                             new_vecs.push(obj_vec);
                         }
                     }
 
                     // --- VSA recovery: unbind(subject, predicate) → recovered ---
-                    let pred_vec =
-                        self.item_memory.get_or_create(&self.ops, triple.predicate);
+                    let pred_vec = self.item_memory.get_or_create(&self.ops, triple.predicate);
                     let recovered = self.ops.unbind(&sym_vec, &pred_vec)?;
 
                     if let Ok(search_results) = self.item_memory.search(&recovered, 1) {
@@ -180,8 +178,7 @@ impl InferEngine {
                                 // similarity is a ceiling, not the sole confidence.
                                 let vsa_confidence =
                                     parent_confidence * edge_confidence.min(sr.similarity);
-                                let combined =
-                                    graph_confidence.max(vsa_confidence);
+                                let combined = graph_confidence.max(vsa_confidence);
                                 if combined >= query.min_confidence {
                                     if ctx.activate(sr.symbol_id, combined) {
                                         ctx.provenance.push(
@@ -197,9 +194,8 @@ impl InferEngine {
                                             .with_confidence(combined)
                                             .with_depth(depth + 1),
                                         );
-                                        let sr_vec = self
-                                            .item_memory
-                                            .get_or_create(&self.ops, sr.symbol_id);
+                                        let sr_vec =
+                                            self.item_memory.get_or_create(&self.ops, sr.symbol_id);
                                         new_vecs.push(sr_vec);
                                     }
                                 }
@@ -340,7 +336,12 @@ mod tests {
     use crate::vsa::{Dimension, Encoding};
 
     /// Helper to build a test inference engine with shared subsystems.
-    fn test_engine() -> (InferEngine, Arc<VsaOps>, Arc<ItemMemory>, Arc<KnowledgeGraph>) {
+    fn test_engine() -> (
+        InferEngine,
+        Arc<VsaOps>,
+        Arc<ItemMemory>,
+        Arc<KnowledgeGraph>,
+    ) {
         let ops = Arc::new(VsaOps::new(
             simd::best_kernel(),
             Dimension::TEST,
@@ -389,8 +390,7 @@ mod tests {
 
         let result = engine.infer(&query).unwrap();
         // Star should be in the activations (inferred via graph edge)
-        let activated_symbols: Vec<SymbolId> =
-            result.activations.iter().map(|(s, _)| *s).collect();
+        let activated_symbols: Vec<SymbolId> = result.activations.iter().map(|(s, _)| *s).collect();
         assert!(
             activated_symbols.contains(&star),
             "Star should be activated; got: {activated_symbols:?}"
@@ -484,10 +484,7 @@ mod tests {
         // should recover something close to subject (since bind(s,p) XOR p = s)
         // and unbind(subj, pred) should recover something that we search for
         let results = engine.recover_filler(subject, predicate, 5).unwrap();
-        assert!(
-            !results.is_empty(),
-            "Filler recovery should return results"
-        );
+        assert!(!results.is_empty(), "Filler recovery should return results");
     }
 
     #[test]
@@ -505,10 +502,7 @@ mod tests {
 
         // Analogy: a:b :: c:?
         let results = engine.infer_analogy(a, b, c, 5).unwrap();
-        assert!(
-            !results.is_empty(),
-            "Analogy should return results"
-        );
+        assert!(!results.is_empty(), "Analogy should return results");
     }
 
     #[test]
@@ -551,7 +545,10 @@ mod tests {
 
         // Should have at least a Seed record
         assert!(
-            result.provenance.iter().any(|p| p.kind == DerivationKind::Seed),
+            result
+                .provenance
+                .iter()
+                .any(|p| p.kind == DerivationKind::Seed),
             "Should have a Seed provenance record"
         );
 

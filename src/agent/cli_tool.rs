@@ -165,8 +165,8 @@ impl Tool for CliTool {
         };
 
         // Poll for completion with timeout.
-        let deadline = std::time::Instant::now()
-            + std::time::Duration::from_secs(self.manifest.timeout_secs);
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_secs(self.manifest.timeout_secs);
 
         let status = loop {
             match child.try_wait() {
@@ -185,9 +185,7 @@ impl Tool for CliTool {
                     std::thread::sleep(std::time::Duration::from_millis(50));
                 }
                 Err(e) => {
-                    return Ok(ToolOutput::err(format!(
-                        "Failed to wait on command: {e}"
-                    )));
+                    return Ok(ToolOutput::err(format!("Failed to wait on command: {e}")));
                 }
             }
         };

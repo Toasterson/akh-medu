@@ -1,7 +1,8 @@
 # Tools
 
-The agent has 15 built-in tools organized into three categories: core
-knowledge tools, external interaction tools, and advanced tools.
+The agent has 17 built-in tools organized into four categories: core
+knowledge tools, external interaction tools, library tools, and advanced
+tools.
 
 ## Tool Architecture
 
@@ -115,6 +116,36 @@ Prompt the user for input via stdout/stdin.
 | `prompt` | yes | Question to display |
 | `timeout_secs` | no | Input timeout |
 
+## Library Tools
+
+### content_ingest
+
+Ingest a document (file or URL) into the [shared content library](../library/overview.md).
+Parses HTML, PDF, EPUB, or plain text. Extracts triples and creates VSA
+embeddings for semantic search.
+
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| `source` | yes | File path or URL to ingest |
+| `title` | no | Override document title |
+| `tags` | no | Comma-separated tags for categorization |
+
+Danger level: **Cautious** (fetches/reads documents, writes triples + VSA embeddings).
+
+### library_search
+
+Search the shared content library for paragraphs matching a natural language
+query via VSA semantic similarity. Returns the most relevant library paragraphs
+with document context and similarity scores.
+
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| `query` | yes | Natural language search text |
+| `top_k` | no | Number of results (default: 5) |
+| `document` | no | Filter to a specific document slug |
+
+Danger level: **Safe** (read-only VSA search, no side effects).
+
 ## Advanced Tools
 
 ### infer_rules
@@ -186,8 +217,9 @@ DangerLevel::Danger   // Write/exec capability (shell_exec, file_io write)
 
 Capabilities tracked:
 - `ReadKg`, `WriteKg` -- knowledge graph operations
-- `FileIo` -- filesystem access
-- `NetworkAccess` -- HTTP requests
+- `VsaAccess` -- VSA similarity search
+- `ReadFilesystem` -- filesystem reads
+- `Network` -- HTTP requests
 - `ShellExec` -- command execution
 - `UserInteraction` -- stdin/stdout
 

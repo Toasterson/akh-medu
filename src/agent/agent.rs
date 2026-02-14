@@ -12,10 +12,10 @@ use crate::symbol::SymbolId;
 use bincode;
 
 use super::error::{AgentError, AgentResult};
-use super::goal::{self, Goal, GoalStatus, DEFAULT_STALL_THRESHOLD};
+use super::goal::{self, DEFAULT_STALL_THRESHOLD, Goal, GoalStatus};
 use super::memory::{
-    consolidate, recall_episodes, ConsolidationConfig, ConsolidationResult, EpisodicEntry,
-    WorkingMemory, WorkingMemoryEntry, WorkingMemoryKind,
+    ConsolidationConfig, ConsolidationResult, EpisodicEntry, WorkingMemory, WorkingMemoryEntry,
+    WorkingMemoryKind, consolidate, recall_episodes,
 };
 use super::ooda::{self, OodaCycleResult};
 use super::plan::{self, Plan, PlanStatus};
@@ -93,7 +93,8 @@ impl AgentPredicates {
             has_summary: engine.resolve_or_create_relation("agent:has_summary")?,
             has_tag: engine.resolve_or_create_relation("agent:has_tag")?,
             learned: engine.resolve_or_create_relation("agent:learned")?,
-            consolidation_reason: engine.resolve_or_create_relation("agent:consolidation_reason")?,
+            consolidation_reason: engine
+                .resolve_or_create_relation("agent:consolidation_reason")?,
             from_cycle: engine.resolve_or_create_relation("agent:from_cycle")?,
             memory_type: engine.resolve_or_create_relation("agent:memory_type")?,
         })
@@ -142,11 +143,7 @@ impl Agent {
         registry.register(Box::new(tools::SimilaritySearchTool));
 
         // External world-interaction tools.
-        let scratch_dir = engine
-            .config()
-            .data_dir
-            .as_ref()
-            .map(|d| d.join("scratch"));
+        let scratch_dir = engine.config().data_dir.as_ref().map(|d| d.join("scratch"));
         registry.register(Box::new(tools::FileIoTool::new(scratch_dir)));
         registry.register(Box::new(tools::HttpFetchTool));
         registry.register(Box::new(tools::ShellExecTool));
@@ -160,6 +157,10 @@ impl Agent {
         registry.register(Box::new(tools::CsvIngestTool));
         registry.register(Box::new(tools::TextIngestTool));
         registry.register(Box::new(tools::CodeIngestTool));
+        registry.register(Box::new(tools::ContentIngestTool));
+
+        // Library search.
+        registry.register(Box::new(tools::LibrarySearchTool));
 
         // Documentation generation.
         registry.register(Box::new(tools::DocGenTool));
@@ -260,8 +261,8 @@ impl Agent {
         skill_dir: &std::path::Path,
     ) -> Result<crate::skills::SkillManifest, String> {
         let manifest_path = skill_dir.join("skill.json");
-        let json = std::fs::read_to_string(&manifest_path)
-            .map_err(|e| format!("read skill.json: {e}"))?;
+        let json =
+            std::fs::read_to_string(&manifest_path).map_err(|e| format!("read skill.json: {e}"))?;
         serde_json::from_str(&json).map_err(|e| format!("parse skill.json: {e}"))
     }
 
@@ -281,9 +282,7 @@ impl Agent {
         let goals = goal::restore_goals(&engine, &predicates).unwrap_or_default();
 
         // Load psyche from compartment manager if available.
-        let psyche = engine
-            .compartments()
-            .and_then(|cm| cm.psyche());
+        let psyche = engine.compartments().and_then(|cm| cm.psyche());
 
         let mut agent = Self {
             engine,
@@ -314,7 +313,13 @@ impl Agent {
         priority: u8,
         criteria: &str,
     ) -> AgentResult<SymbolId> {
-        let g = goal::create_goal(&self.engine, description, priority, criteria, &self.predicates)?;
+        let g = goal::create_goal(
+            &self.engine,
+            description,
+            priority,
+            criteria,
+            &self.predicates,
+        )?;
         let id = g.symbol_id;
         self.goals.push(g);
         Ok(id)
@@ -438,11 +443,7 @@ impl Agent {
     }
 
     /// Recall episodic memories by query symbols.
-    pub fn recall(
-        &self,
-        query: &[SymbolId],
-        top_k: usize,
-    ) -> AgentResult<Vec<EpisodicEntry>> {
+    pub fn recall(&self, query: &[SymbolId], top_k: usize) -> AgentResult<Vec<EpisodicEntry>> {
         recall_episodes(&self.engine, query, &self.predicates, top_k)
     }
 
@@ -503,11 +504,7 @@ impl Agent {
 
     /// Synthesize human-readable narrative from the agent's working memory findings.
     pub fn synthesize_findings(&self, goal: &str) -> super::synthesize::NarrativeSummary {
-        super::synthesize::synthesize(
-            goal,
-            self.working_memory.entries(),
-            &self.engine,
-        )
+        super::synthesize::synthesize(goal, self.working_memory.entries(), &self.engine)
     }
 
     /// Synthesize findings using a specific grammar archetype.
@@ -651,7 +648,11 @@ impl Agent {
         let key = goal_id.get();
 
         // Return existing active plan.
-        if self.plans.get(&key).is_some_and(|p| p.status == PlanStatus::Active) {
+        if self
+            .plans
+            .get(&key)
+            .is_some_and(|p| p.status == PlanStatus::Active)
+        {
             return Ok(&self.plans[&key]);
         }
 
@@ -662,18 +663,9 @@ impl Agent {
             .ok_or(AgentError::GoalNotFound { goal_id: key })?
             .clone();
 
-        let attempt = self
-            .plans
-            .get(&key)
-            .map(|p| p.attempt + 1)
-            .unwrap_or(0);
+        let attempt = self.plans.get(&key).map(|p| p.attempt + 1).unwrap_or(0);
 
-        let new_plan = plan::generate_plan(
-            &goal,
-            &self.engine,
-            &self.working_memory,
-            attempt,
-        )?;
+        let new_plan = plan::generate_plan(&goal, &self.engine, &self.working_memory, attempt)?;
 
         // Record plan creation in WM.
         let _ = self.working_memory.push(WorkingMemoryEntry {
@@ -720,12 +712,7 @@ impl Agent {
             .ok_or(AgentError::GoalNotFound { goal_id: key })?
             .clone();
 
-        let new_plan = plan::generate_plan(
-            &goal,
-            &self.engine,
-            &self.working_memory,
-            attempt,
-        )?;
+        let new_plan = plan::generate_plan(&goal, &self.engine, &self.working_memory, attempt)?;
 
         let _ = self.working_memory.push(WorkingMemoryEntry {
             id: 0,
@@ -786,12 +773,8 @@ impl Agent {
 
         for adj in adjustments {
             match adj {
-                Adjustment::IncreasePriority {
-                    goal_id, to, ..
-                }
-                | Adjustment::DecreasePriority {
-                    goal_id, to, ..
-                } => {
+                Adjustment::IncreasePriority { goal_id, to, .. }
+                | Adjustment::DecreasePriority { goal_id, to, .. } => {
                     if let Some(g) = self.goals.iter_mut().find(|g| g.symbol_id == *goal_id) {
                         g.priority = *to;
                         applied += 1;
@@ -851,11 +834,10 @@ impl Agent {
             })?;
 
         // Persist cycle count.
-        let cycle_bytes = bincode::serialize(&self.cycle_count).map_err(|e| {
-            AgentError::ConsolidationFailed {
+        let cycle_bytes =
+            bincode::serialize(&self.cycle_count).map_err(|e| AgentError::ConsolidationFailed {
                 message: format!("failed to serialize cycle count: {e}"),
-            }
-        })?;
+            })?;
         store
             .put_meta(b"agent:cycle_count", &cycle_bytes)
             .map_err(|e| AgentError::ConsolidationFailed {
@@ -925,12 +907,10 @@ impl Agent {
             .get_meta(b"agent:psyche")
             .ok()
             .flatten()
-            .and_then(|bytes| bincode::deserialize::<crate::compartment::psyche::Psyche>(&bytes).ok())
-            .or_else(|| {
-                engine
-                    .compartments()
-                    .and_then(|cm| cm.psyche())
-            });
+            .and_then(|bytes| {
+                bincode::deserialize::<crate::compartment::psyche::Psyche>(&bytes).ok()
+            })
+            .or_else(|| engine.compartments().and_then(|cm| cm.psyche()));
 
         let mut agent = Self {
             engine,

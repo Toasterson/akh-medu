@@ -107,9 +107,7 @@ impl CustomGrammar {
 
     fn linearize_inner(&self, tree: &AbsTree, ctx: &LinContext) -> GrammarResult<String> {
         match tree {
-            AbsTree::EntityRef { label, symbol_id } => {
-                Ok(ctx.resolve_label(label, *symbol_id))
-            }
+            AbsTree::EntityRef { label, symbol_id } => Ok(ctx.resolve_label(label, *symbol_id)),
 
             AbsTree::RelationRef { label, symbol_id } => {
                 let resolved = ctx.resolve_label(label, *symbol_id);
@@ -166,7 +164,10 @@ impl CustomGrammar {
                 }
             }
 
-            AbsTree::Gap { entity, description } => {
+            AbsTree::Gap {
+                entity,
+                description,
+            } => {
                 let e = self.linearize_inner(entity, ctx)?;
 
                 if let Some(template) = self.templates.get("gap") {
@@ -258,10 +259,7 @@ impl CustomGrammar {
                     vars.insert("kind", kind.clone());
                     vars.insert("name", name.clone());
                     vars.insert("params", params_or_fields.join(", "));
-                    vars.insert(
-                        "return_type",
-                        return_type.clone().unwrap_or_default(),
-                    );
+                    vars.insert("return_type", return_type.clone().unwrap_or_default());
                     vars.insert("traits", traits.join(", "));
                     Ok(self.apply_template(template, &vars))
                 } else {
@@ -452,21 +450,14 @@ code_fact = "In the codex, {kind} '{name}' is recorded: {detail}."
         let ctx = LinContext::default();
         let tree = AbsTree::gap(AbsTree::entity("Dog"), "no habitat data");
         let result = grammar.linearize(&tree, &ctx).unwrap();
-        assert_eq!(
-            result,
-            "The scrolls are silent on Dog: no habitat data."
-        );
+        assert_eq!(result, "The scrolls are silent on Dog: no habitat data.");
     }
 
     #[test]
     fn linearize_custom_similarity() {
         let grammar = CustomGrammar::from_toml(MYTHIC_TOML).unwrap();
         let ctx = LinContext::default();
-        let tree = AbsTree::similarity(
-            AbsTree::entity("Dog"),
-            AbsTree::entity("Wolf"),
-            0.87,
-        );
+        let tree = AbsTree::similarity(AbsTree::entity("Dog"), AbsTree::entity("Wolf"), 0.87);
         let result = grammar.linearize(&tree, &ctx).unwrap();
         assert!(result.contains("mirrors"));
         assert!(result.contains("great tapestry"));

@@ -119,32 +119,20 @@ pub fn create_goal(
         .as_secs();
 
     // Store description.
-    let desc_sym = engine
-        .resolve_or_create_entity(&format!("desc:{description}"))?;
+    let desc_sym = engine.resolve_or_create_entity(&format!("desc:{description}"))?;
     let _ = engine.add_triple(&Triple::new(goal_id, predicates.has_description, desc_sym));
 
     // Store status.
-    let status_sym = engine
-        .resolve_or_create_entity("status:active")?;
+    let status_sym = engine.resolve_or_create_entity("status:active")?;
     let _ = engine.add_triple(&Triple::new(goal_id, predicates.has_status, status_sym));
 
     // Store priority.
-    let priority_sym = engine
-        .resolve_or_create_entity(&format!("priority:{priority}"))?;
-    let _ = engine.add_triple(&Triple::new(
-        goal_id,
-        predicates.has_priority,
-        priority_sym,
-    ));
+    let priority_sym = engine.resolve_or_create_entity(&format!("priority:{priority}"))?;
+    let _ = engine.add_triple(&Triple::new(goal_id, predicates.has_priority, priority_sym));
 
     // Store criteria.
-    let criteria_sym = engine
-        .resolve_or_create_entity(&format!("criteria:{criteria}"))?;
-    let _ = engine.add_triple(&Triple::new(
-        goal_id,
-        predicates.has_criteria,
-        criteria_sym,
-    ));
+    let criteria_sym = engine.resolve_or_create_entity(&format!("criteria:{criteria}"))?;
+    let _ = engine.add_triple(&Triple::new(goal_id, predicates.has_criteria, criteria_sym));
 
     Ok(Goal {
         symbol_id: goal_id,
@@ -198,8 +186,7 @@ pub fn update_goal_status(
     predicates: &AgentPredicates,
 ) -> AgentResult<()> {
     let status_label = format!("status:{}", new_status.as_label());
-    let status_sym = engine
-        .resolve_or_create_entity(&status_label)?;
+    let status_sym = engine.resolve_or_create_entity(&status_label)?;
     let _ = engine.add_triple(&Triple::new(
         goal.symbol_id,
         predicates.has_status,
@@ -237,9 +224,14 @@ pub fn restore_goals(engine: &Engine, predicates: &AgentPredicates) -> AgentResu
             || description_raw.starts_with('&')
             || description_raw.starts_with('(')
             || description_raw.contains("::")
-            || (description_raw.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            || (description_raw
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_')
                 && description_raw.len() < 15
-                && description_raw.chars().next().is_some_and(|c| c.is_ascii_uppercase()))
+                && description_raw
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_uppercase()))
         {
             continue;
         }
@@ -335,12 +327,18 @@ pub fn generate_sub_goal_descriptions(description: &str) -> Vec<(String, u8, Str
     // No natural split — generate generic exploration sub-goals.
     vec![
         (
-            format!("Query knowledge about: {}", &description.chars().take(30).collect::<String>()),
+            format!(
+                "Query knowledge about: {}",
+                &description.chars().take(30).collect::<String>()
+            ),
             200,
             format!("Find relevant triples for: {description}"),
         ),
         (
-            format!("Reason about: {}", &description.chars().take(30).collect::<String>()),
+            format!(
+                "Reason about: {}",
+                &description.chars().take(30).collect::<String>()
+            ),
             180,
             format!("Apply reasoning to: {description}"),
         ),
@@ -388,7 +386,9 @@ mod tests {
     #[test]
     fn goal_validation_filters_garbage_labels() {
         // Valid goals
-        assert!(is_valid_goal_label("goal:describe the VSA module architecture"));
+        assert!(is_valid_goal_label(
+            "goal:describe the VSA module architecture"
+        ));
         assert!(is_valid_goal_label("goal:find all dependencies"));
         assert!(is_valid_goal_label("goal:explore code structure"));
 
@@ -412,20 +412,18 @@ mod tests {
 
     #[test]
     fn clear_goals_empties_list() {
-        let mut goals = vec![
-            Goal {
-                symbol_id: SymbolId::new(1).unwrap(),
-                description: "test".into(),
-                status: GoalStatus::Active,
-                priority: 128,
-                success_criteria: String::new(),
-                parent: None,
-                children: Vec::new(),
-                created_at: 0,
-                cycles_worked: 0,
-                last_progress_cycle: 0,
-            },
-        ];
+        let mut goals = vec![Goal {
+            symbol_id: SymbolId::new(1).unwrap(),
+            description: "test".into(),
+            status: GoalStatus::Active,
+            priority: 128,
+            success_criteria: String::new(),
+            parent: None,
+            children: Vec::new(),
+            created_at: 0,
+            cycles_worked: 0,
+            last_progress_cycle: 0,
+        }];
         clear_goals(&mut goals);
         assert!(goals.is_empty());
     }

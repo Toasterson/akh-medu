@@ -21,7 +21,9 @@ pub enum SeedError {
     #[error("seed pack not found: \"{id}\"")]
     #[diagnostic(
         code(akh::seed::not_found),
-        help("List available packs with `akh-medu seed list`. Check the seeds directory at ~/.local/share/akh-medu/seeds/")
+        help(
+            "List available packs with `akh-medu seed list`. Check the seeds directory at ~/.local/share/akh-medu/seeds/"
+        )
     )]
     NotFound { id: String },
 
@@ -33,10 +35,7 @@ pub enum SeedError {
     Parse { id: String, message: String },
 
     #[error("failed to read seed file: {path}")]
-    #[diagnostic(
-        code(akh::seed::io),
-        help("Ensure the file exists and is readable.")
-    )]
+    #[diagnostic(code(akh::seed::io), help("Ensure the file exists and is readable."))]
     Io {
         path: String,
         #[source]
@@ -46,7 +45,9 @@ pub enum SeedError {
     #[error("failed to apply seed \"{id}\": {message}")]
     #[diagnostic(
         code(akh::seed::apply),
-        help("Check that the engine is writable and triple subjects/predicates/objects are valid.")
+        help(
+            "Check that the engine is writable and triple subjects/predicates/objects are valid."
+        )
     )]
     Apply { id: String, message: String },
 }
@@ -149,13 +150,15 @@ fn bundled_packs() -> Vec<SeedPack> {
         (COMMON_SENSE_TOML, "common-sense"),
     ]
     .iter()
-    .filter_map(|(toml, id)| match parse_seed_toml(toml, SeedSource::Bundled) {
-        Ok(pack) => Some(pack),
-        Err(e) => {
-            tracing::warn!(seed = id, "Failed to parse bundled seed: {e}");
-            None
-        }
-    })
+    .filter_map(
+        |(toml, id)| match parse_seed_toml(toml, SeedSource::Bundled) {
+            Ok(pack) => Some(pack),
+            Err(e) => {
+                tracing::warn!(seed = id, "Failed to parse bundled seed: {e}");
+                None
+            }
+        },
+    )
     .collect()
 }
 
@@ -188,10 +191,7 @@ impl SeedRegistry {
                 if seed_file.is_file() {
                     match std::fs::read_to_string(&seed_file) {
                         Ok(content) => {
-                            match parse_seed_toml(
-                                &content,
-                                SeedSource::External(entry.path()),
-                            ) {
+                            match parse_seed_toml(&content, SeedSource::External(entry.path())) {
                                 Ok(pack) => {
                                     registry.packs.insert(pack.id.clone(), pack);
                                 }
@@ -226,9 +226,9 @@ impl SeedRegistry {
 
     /// Get a seed pack by ID.
     pub fn get(&self, id: &str) -> SeedResult<&SeedPack> {
-        self.packs.get(id).ok_or_else(|| SeedError::NotFound {
-            id: id.to_string(),
-        })
+        self.packs
+            .get(id)
+            .ok_or_else(|| SeedError::NotFound { id: id.to_string() })
     }
 
     /// Apply a single seed pack to an engine. Idempotent via `akh:seed-applied` tracking.
@@ -238,11 +238,7 @@ impl SeedRegistry {
     }
 
     /// Apply multiple seed packs. Returns a report per pack.
-    pub fn apply_all(
-        &self,
-        pack_ids: &[String],
-        engine: &Engine,
-    ) -> SeedResult<Vec<SeedReport>> {
+    pub fn apply_all(&self, pack_ids: &[String], engine: &Engine) -> SeedResult<Vec<SeedReport>> {
         let mut reports = Vec::new();
         for id in pack_ids {
             reports.push(self.apply(id, engine)?);
@@ -442,6 +438,9 @@ mod tests {
         assert_eq!(reports.len(), 3);
 
         let total: usize = reports.iter().map(|r| r.triples_applied).sum();
-        assert!(total > 30, "Expected 30+ triples from all seeds, got {total}");
+        assert!(
+            total > 30,
+            "Expected 30+ triples from all seeds, got {total}"
+        );
     }
 }

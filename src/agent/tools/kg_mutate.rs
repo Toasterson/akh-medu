@@ -51,15 +51,11 @@ impl Tool for KgMutateTool {
             .and_then(|c| c.parse().ok())
             .unwrap_or(1.0);
 
-        let s = engine
-            .resolve_or_create_entity(subject_str)?;
-        let p = engine
-            .resolve_or_create_relation(predicate_str)?;
-        let o = engine
-            .resolve_or_create_entity(object_str)?;
+        let s = engine.resolve_or_create_entity(subject_str)?;
+        let p = engine.resolve_or_create_relation(predicate_str)?;
+        let o = engine.resolve_or_create_entity(object_str)?;
 
-        engine
-            .add_triple(&Triple::new(s, p, o).with_confidence(confidence))?;
+        engine.add_triple(&Triple::new(s, p, o).with_confidence(confidence))?;
 
         let result = format!(
             "Added triple: \"{}\" -> {} -> \"{}\" [{:.2}]",

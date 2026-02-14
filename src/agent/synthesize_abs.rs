@@ -13,8 +13,8 @@ use crate::grammar::bridge::fact_to_abs;
 
 use super::semantic_enrichment::SemanticPredicates;
 use super::synthesize::{
-    ExtractedFact, FactKind, GroupKey, FactGroup,
-    is_code_predicate, is_code_annotation, is_semantic_predicate,
+    ExtractedFact, FactGroup, FactKind, GroupKey, is_code_annotation, is_code_predicate,
+    is_semantic_predicate,
 };
 use super::tools::code_predicates::CodePredicates;
 
@@ -51,10 +51,7 @@ pub(crate) fn build_document(
                         if entity.is_empty() {
                             gaps.push(AbsTree::Freeform(description.clone()));
                         } else {
-                            gaps.push(AbsTree::gap(
-                                AbsTree::entity(entity),
-                                description.as_str(),
-                            ));
+                            gaps.push(AbsTree::gap(AbsTree::entity(entity), description.as_str()));
                         }
                     }
                 }
@@ -80,11 +77,7 @@ pub(crate) fn build_document(
 /// Build the overview Freeform node.
 fn build_overview(goal: &str, all_facts: &[ExtractedFact], groups: &[FactGroup]) -> AbsTree {
     let total_facts = all_facts.len();
-    let max_cycle = all_facts
-        .iter()
-        .map(|f| f.source_cycle)
-        .max()
-        .unwrap_or(0);
+    let max_cycle = all_facts.iter().map(|f| f.source_cycle).max().unwrap_or(0);
     let topic_count = groups
         .iter()
         .filter(|g| !matches!(g.key, GroupKey::Other | GroupKey::KnowledgeGaps))
@@ -109,10 +102,7 @@ fn build_entity_section(entity: &str, facts: &[ExtractedFact]) -> AbsTree {
     let mut body = Vec::new();
 
     for fact in facts {
-        if let FactKind::Triple {
-            predicate, ..
-        } = &fact.kind
-        {
+        if let FactKind::Triple { predicate, .. } = &fact.kind {
             // Skip predicates handled by Code Architecture section.
             if is_code_predicate(predicate)
                 || is_code_annotation(predicate)
@@ -150,12 +140,13 @@ fn build_code_section(facts: &[ExtractedFact], engine: &Engine) -> AbsTree {
                         .or_default()
                         .push(detail.clone());
                 }
-                "code:defines-struct" | "code:defines-enum" | "code:defines-type"
-                | "defines-type" | "implements" | "code:has-variant" => {
-                    types
-                        .entry(name.clone())
-                        .or_default()
-                        .push(detail.clone());
+                "code:defines-struct"
+                | "code:defines-enum"
+                | "code:defines-type"
+                | "defines-type"
+                | "implements"
+                | "code:has-variant" => {
+                    types.entry(name.clone()).or_default().push(detail.clone());
                 }
                 "depends-on" | "code:depends-on" => {
                     deps.entry(name.clone()).or_default().push(detail.clone());
@@ -429,7 +420,13 @@ fn build_code_section(facts: &[ExtractedFact], engine: &Engine) -> AbsTree {
             .iter()
             .map(|c| AbsTree::Freeform(format!("`{c}`")))
             .collect();
-        body.push(AbsTree::code_module(parent.clone(), role, imp, doc, child_nodes));
+        body.push(AbsTree::code_module(
+            parent.clone(),
+            role,
+            imp,
+            doc,
+            child_nodes,
+        ));
     }
 
     for (owner, fns) in &functions {
@@ -473,8 +470,8 @@ fn build_code_section(facts: &[ExtractedFact], engine: &Engine) -> AbsTree {
     body.extend(extra_items);
 
     // Choose heading based on enrichment availability.
-    let has_enrichment = sem_preds.is_some()
-        && primary.as_ref().is_some_and(|p| get_role(p).is_some());
+    let has_enrichment =
+        sem_preds.is_some() && primary.as_ref().is_some_and(|p| get_role(p).is_some());
     let heading = if has_enrichment {
         "Code Architecture"
     } else {
@@ -511,7 +508,13 @@ fn build_child_node(
 
     if let Some(ts) = types.get(child) {
         for t in ts {
-            child_items.push(build_type_signature(t, get_importance, get_fields, get_derives, get_doc));
+            child_items.push(build_type_signature(
+                t,
+                get_importance,
+                get_fields,
+                get_derives,
+                get_doc,
+            ));
         }
     }
 
@@ -591,13 +594,12 @@ fn build_reasoning_section(facts: &[ExtractedFact]) -> AbsTree {
                     || expression.is_empty()
                     || simplified.is_empty()
                     || simplified == expression;
-                if is_noise {
-                    None
-                } else {
-                    Some(fact_to_abs(f))
-                }
+                if is_noise { None } else { Some(fact_to_abs(f)) }
             }
-            FactKind::Derivation { count, iterations: _ } => {
+            FactKind::Derivation {
+                count,
+                iterations: _,
+            } => {
                 if *count > 0 && *count <= 100 {
                     Some(fact_to_abs(f))
                 } else {

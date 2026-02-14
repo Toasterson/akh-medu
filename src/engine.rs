@@ -4,27 +4,25 @@
 //! for ingesting knowledge, querying, and managing the system.
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use egg::{AstSize, Extractor, Rewrite, Runner};
 
 use crate::error::{AkhResult, EngineError, ProvenanceError, ReasonError, SymbolError};
+use crate::export::{ProvenanceExport, SymbolExport, TripleExport};
+use crate::grammar::GrammarRegistry;
 use crate::grammar::abs::AbsTree;
 use crate::grammar::concrete::{ConcreteGrammar, LinContext, ParseContext};
 use crate::grammar::custom::CustomGrammar;
-use crate::grammar::entity_resolution::{
-    EntityResolver, EquivalenceStats, LearnedEquivalence,
-};
+use crate::grammar::entity_resolution::{EntityResolver, EquivalenceStats, LearnedEquivalence};
 use crate::grammar::error::GrammarResult;
 use crate::grammar::lexer::Language;
-use crate::grammar::parser::{parse_prose, ParseResult};
-use crate::grammar::GrammarRegistry;
+use crate::grammar::parser::{ParseResult, parse_prose};
+use crate::graph::Triple;
 use crate::graph::analytics;
-use crate::export::{ProvenanceExport, SymbolExport, TripleExport};
 use crate::graph::index::KnowledgeGraph;
 use crate::graph::sparql::SparqlStore;
 use crate::graph::traverse::{TraversalConfig, TraversalResult};
-use crate::graph::Triple;
 use crate::infer::engine::InferEngine;
 use crate::infer::{InferenceQuery, InferenceResult};
 use crate::pipeline::{Pipeline, PipelineContext, PipelineData, PipelineOutput};
@@ -32,8 +30,8 @@ use crate::provenance::{DerivationKind, ProvenanceId, ProvenanceLedger, Provenan
 use crate::reason::AkhLang;
 use crate::registry::SymbolRegistry;
 use crate::simd;
-use crate::skills::manager::SkillManager;
 use crate::skills::SkillInfo;
+use crate::skills::manager::SkillManager;
 use crate::store::TieredStore;
 use crate::symbol::{AtomicSymbolAllocator, SymbolId, SymbolKind, SymbolMeta};
 use crate::vsa::item_memory::{ItemMemory, SearchResult};
@@ -86,7 +84,7 @@ pub struct Engine {
     provenance_ledger: Option<ProvenanceLedger>,
     skill_manager: Option<SkillManager>,
     grammar_registry: GrammarRegistry,
-    entity_resolver: EntityResolver,
+    entity_resolver: RwLock<EntityResolver>,
     compartment_manager: Option<crate::compartment::CompartmentManager>,
 }
 
@@ -122,16 +120,16 @@ impl Engine {
             std::fs::create_dir_all(dir).map_err(|_| EngineError::DataDir {
                 path: dir.display().to_string(),
             })?;
-            let store = TieredStore::with_persistence(dir, "symbols")
-                .map_err(|e| EngineError::InvalidConfig {
-                    message: format!("failed to create tiered store: {e}"),
-                })?;
-            let sparql_dir = dir.join("oxigraph");
-            let sparql = SparqlStore::open(&sparql_dir).map_err(|e| {
+            let store = TieredStore::with_persistence(dir, "symbols").map_err(|e| {
                 EngineError::InvalidConfig {
-                    message: format!("failed to create SPARQL store: {e}"),
+                    message: format!("failed to create tiered store: {e}"),
                 }
             })?;
+            let sparql_dir = dir.join("oxigraph");
+            let sparql =
+                SparqlStore::open(&sparql_dir).map_err(|e| EngineError::InvalidConfig {
+                    message: format!("failed to create SPARQL store: {e}"),
+                })?;
 
             // Initialize provenance ledger from the durable store's database.
             let ledger = if let Some(ref durable) = store.durable {
@@ -195,7 +193,7 @@ impl Engine {
         let grammar_registry = GrammarRegistry::new();
 
         // Restore learned equivalences from persistent storage.
-        let entity_resolver = EntityResolver::load_from_store(&store);
+        let entity_resolver = RwLock::new(EntityResolver::load_from_store(&store));
 
         // Initialize compartment manager if data_dir has a compartments/ subdir.
         let compartment_manager = config.data_dir.as_ref().map(|dir| {
@@ -225,7 +223,11 @@ impl Engine {
     }
 
     /// Allocate a new symbol with the given kind and label.
-    pub fn create_symbol(&self, kind: SymbolKind, label: impl Into<String>) -> AkhResult<SymbolMeta> {
+    pub fn create_symbol(
+        &self,
+        kind: SymbolKind,
+        label: impl Into<String>,
+    ) -> AkhResult<SymbolMeta> {
         let id = self.symbol_allocator.next_id()?;
         let meta = SymbolMeta::new(id, kind, label);
 
@@ -233,11 +235,10 @@ impl Engine {
         self.registry.register(meta.clone())?;
 
         // Store metadata in tiered store.
-        let encoded = bincode::serialize(&meta).map_err(|e| {
-            crate::error::StoreError::Serialization {
+        let encoded =
+            bincode::serialize(&meta).map_err(|e| crate::error::StoreError::Serialization {
                 message: format!("failed to serialize symbol meta: {e}"),
-            }
-        })?;
+            })?;
         self.store.put(id, encoded);
 
         // Create hypervector in item memory.
@@ -274,12 +275,12 @@ impl Engine {
         symbol: SymbolId,
         top_k: usize,
     ) -> AkhResult<Vec<SearchResult>> {
-        let vec = self
-            .item_memory
-            .get(symbol)
-            .ok_or(crate::error::VsaError::HypervectorNotFound {
-                symbol_id: symbol.get(),
-            })?;
+        let vec =
+            self.item_memory
+                .get(symbol)
+                .ok_or(crate::error::VsaError::HypervectorNotFound {
+                    symbol_id: symbol.get(),
+                })?;
         self.search_similar(&vec, top_k)
     }
 
@@ -438,9 +439,7 @@ impl Engine {
         let mgr = self
             .skill_manager
             .as_ref()
-            .ok_or(crate::error::SkillError::NotFound {
-                name: name.into(),
-            })?;
+            .ok_or(crate::error::SkillError::NotFound { name: name.into() })?;
 
         // Check if the skill has label-based triples.
         let skill_dir = mgr.skills_dir().join(name);
@@ -469,9 +468,7 @@ impl Engine {
         let mgr = self
             .skill_manager
             .as_ref()
-            .ok_or(crate::error::SkillError::NotFound {
-                name: name.into(),
-            })?;
+            .ok_or(crate::error::SkillError::NotFound { name: name.into() })?;
         Ok(mgr.deactivate(name)?)
     }
 
@@ -488,9 +485,7 @@ impl Engine {
         let mgr = self
             .skill_manager
             .as_ref()
-            .ok_or(crate::error::SkillError::NotFound {
-                name: name.into(),
-            })?;
+            .ok_or(crate::error::SkillError::NotFound { name: name.into() })?;
         Ok(mgr.get_info(name)?)
     }
 
@@ -500,16 +495,22 @@ impl Engine {
 
     /// Look up a symbol by label (case-insensitive).
     pub fn lookup_symbol(&self, label: &str) -> AkhResult<SymbolId> {
-        self.registry
-            .lookup(label)
-            .ok_or_else(|| SymbolError::LabelNotFound { label: label.into() }.into())
+        self.registry.lookup(label).ok_or_else(|| {
+            SymbolError::LabelNotFound {
+                label: label.into(),
+            }
+            .into()
+        })
     }
 
     /// Get metadata for a symbol by ID.
     pub fn get_symbol_meta(&self, id: SymbolId) -> AkhResult<SymbolMeta> {
-        self.registry
-            .get(id)
-            .ok_or_else(|| SymbolError::NotFound { symbol_id: id.get() }.into())
+        self.registry.get(id).ok_or_else(|| {
+            SymbolError::NotFound {
+                symbol_id: id.get(),
+            }
+            .into()
+        })
     }
 
     /// List all registered symbols with metadata.
@@ -540,9 +541,7 @@ impl Engine {
 
     /// Check if a specific triple exists.
     pub fn has_triple(&self, s: SymbolId, p: SymbolId, o: SymbolId) -> bool {
-        self.knowledge_graph
-            .objects_of(s, p)
-            .contains(&o)
+        self.knowledge_graph.objects_of(s, p).contains(&o)
     }
 
     /// Get all triples where symbol is subject.
@@ -706,10 +705,8 @@ impl Engine {
     /// Parses the expression as AkhLang, runs equality saturation with all active rules,
     /// extracts the lowest-cost equivalent expression.
     pub fn simplify_expression(&self, expr: &str) -> AkhResult<String> {
-        let parsed: egg::RecExpr<AkhLang> = expr.parse().map_err(|e| {
-            ReasonError::ParseError {
-                message: format!("{e}"),
-            }
+        let parsed: egg::RecExpr<AkhLang> = expr.parse().map_err(|e| ReasonError::ParseError {
+            message: format!("{e}"),
         })?;
 
         let rules = self.all_rules();
@@ -729,9 +726,7 @@ impl Engine {
         let mgr = self
             .skill_manager
             .as_ref()
-            .ok_or(crate::error::SkillError::NotFound {
-                name: name.into(),
-            })?;
+            .ok_or(crate::error::SkillError::NotFound { name: name.into() })?;
 
         // Ensure discovered and warmed.
         let _ = mgr.discover();
@@ -750,18 +745,15 @@ impl Engine {
                 }
             })?;
 
-            let raw: Vec<serde_json::Value> =
-                serde_json::from_str(&content).map_err(|e| {
-                    crate::error::SkillError::InvalidManifest {
-                        path: triples_path.display().to_string(),
-                        message: format!("triples parse error: {e}"),
-                    }
-                })?;
+            let raw: Vec<serde_json::Value> = serde_json::from_str(&content).map_err(|e| {
+                crate::error::SkillError::InvalidManifest {
+                    path: triples_path.display().to_string(),
+                    message: format!("triples parse error: {e}"),
+                }
+            })?;
 
             // Detect label-based format by checking first element.
-            let is_label_format = raw
-                .first()
-                .is_some_and(|v| v.get("subject").is_some());
+            let is_label_format = raw.first().is_some_and(|v| v.get("subject").is_some());
 
             if is_label_format {
                 for val in &raw {
@@ -809,22 +801,22 @@ impl Engine {
         damping: f64,
         iterations: usize,
     ) -> AkhResult<Vec<analytics::PageRankScore>> {
-        Ok(analytics::pagerank(&self.knowledge_graph, damping, iterations)?)
+        Ok(analytics::pagerank(
+            &self.knowledge_graph,
+            damping,
+            iterations,
+        )?)
     }
 
     /// Find strongly connected components.
-    pub fn strongly_connected_components(
-        &self,
-    ) -> AkhResult<Vec<analytics::ConnectedComponent>> {
-        Ok(analytics::strongly_connected_components(&self.knowledge_graph)?)
+    pub fn strongly_connected_components(&self) -> AkhResult<Vec<analytics::ConnectedComponent>> {
+        Ok(analytics::strongly_connected_components(
+            &self.knowledge_graph,
+        )?)
     }
 
     /// Find shortest path (by hop count) between two symbols.
-    pub fn shortest_path(
-        &self,
-        from: SymbolId,
-        to: SymbolId,
-    ) -> AkhResult<Option<Vec<SymbolId>>> {
+    pub fn shortest_path(&self, from: SymbolId, to: SymbolId) -> AkhResult<Option<Vec<SymbolId>>> {
         Ok(analytics::shortest_path(&self.knowledge_graph, from, to)?)
     }
 
@@ -879,46 +871,49 @@ impl Engine {
     /// Discovers new cross-lingual mappings from KG structure and VSA
     /// similarity, then persists results to the durable store.
     /// Returns the number of new equivalences discovered.
-    pub fn learn_equivalences(&mut self) -> AkhResult<usize> {
-        let total = self.entity_resolver.learn_from_kg(
-            &self.knowledge_graph,
-            &self.registry,
-        ) + self.entity_resolver.learn_from_vsa(
-            &self.ops,
-            &self.item_memory,
-            &self.registry,
-            0.65,
-        );
+    pub fn learn_equivalences(&self) -> AkhResult<usize> {
+        let total = {
+            let mut resolver = self.entity_resolver.write().unwrap();
+            resolver.learn_from_kg(&self.knowledge_graph, &self.registry)
+                + resolver.learn_from_vsa(
+                    &self.ops,
+                    &self.item_memory,
+                    &self.registry,
+                    0.65,
+                )
+                + resolver.learn_from_library(
+                    &self.ops,
+                    &self.item_memory,
+                    &self.registry,
+                    &self.knowledge_graph,
+                    0.65,
+                )
+        };
 
-        self.entity_resolver.persist_to_store(&self.store)?;
+        self.entity_resolver.read().unwrap().persist_to_store(&self.store)?;
         Ok(total)
     }
 
     /// Get equivalence statistics.
     pub fn equivalence_stats(&self) -> EquivalenceStats {
-        self.entity_resolver.stats()
+        self.entity_resolver.read().unwrap().stats()
     }
 
     /// Export all learned equivalences.
     pub fn export_equivalences(&self) -> Vec<LearnedEquivalence> {
-        self.entity_resolver.export_learned()
+        self.entity_resolver.read().unwrap().export_learned()
     }
 
     /// Import equivalences and persist to durable store.
-    pub fn import_equivalences(&mut self, equivs: &[LearnedEquivalence]) -> AkhResult<()> {
-        self.entity_resolver.import_equivalences(equivs);
-        self.entity_resolver.persist_to_store(&self.store)?;
+    pub fn import_equivalences(&self, equivs: &[LearnedEquivalence]) -> AkhResult<()> {
+        self.entity_resolver.write().unwrap().import_equivalences(equivs);
+        self.entity_resolver.read().unwrap().persist_to_store(&self.store)?;
         Ok(())
     }
 
-    /// Get a reference to the entity resolver.
-    pub fn entity_resolver(&self) -> &EntityResolver {
-        &self.entity_resolver
-    }
-
-    /// Get a mutable reference to the entity resolver.
-    pub fn entity_resolver_mut(&mut self) -> &mut EntityResolver {
-        &mut self.entity_resolver
+    /// Get a read lock on the entity resolver.
+    pub fn entity_resolver(&self) -> std::sync::RwLockReadGuard<'_, EntityResolver> {
+        self.entity_resolver.read().unwrap()
     }
 
     // -----------------------------------------------------------------------
@@ -1011,7 +1006,7 @@ impl Engine {
                     triples_ingested: 0,
                     symbols_created: 0,
                     trees: vec![],
-                })
+                });
             }
         };
 
@@ -1178,15 +1173,14 @@ impl Engine {
 
         // Persist allocator next-ID so new symbols resume correctly after restart.
         let next = self.symbol_allocator.peek_next();
-        let encoded = bincode::serialize(&next).map_err(|e| {
-            crate::error::StoreError::Serialization {
+        let encoded =
+            bincode::serialize(&next).map_err(|e| crate::error::StoreError::Serialization {
                 message: format!("failed to serialize allocator state: {e}"),
-            }
-        })?;
+            })?;
         self.store.put_meta(b"sym_allocator_next", &encoded)?;
 
         // Persist learned equivalences.
-        self.entity_resolver.persist_to_store(&self.store)?;
+        self.entity_resolver.read().unwrap().persist_to_store(&self.store)?;
 
         // Sync knowledge graph to SPARQL store.
         if let Some(ref sparql) = self.sparql {
@@ -1245,7 +1239,10 @@ impl std::fmt::Debug for Engine {
             .field("item_memory", &self.item_memory)
             .field("knowledge_graph", &self.knowledge_graph)
             .field("registry", &self.registry)
-            .field("learned_equivalences", &self.entity_resolver.learned_count())
+            .field(
+                "learned_equivalences",
+                &self.entity_resolver.read().unwrap().learned_count(),
+            )
             .field("compartment_manager", &self.compartment_manager)
             .finish()
     }
@@ -1390,7 +1387,10 @@ mod tests {
             "expected at least 1 triple, got {}",
             result.triples_ingested,
         );
-        assert!(result.symbols_created >= 2, "expected at least 2 new symbols");
+        assert!(
+            result.symbols_created >= 2,
+            "expected at least 2 new symbols"
+        );
         assert!(!result.trees.is_empty());
 
         // Verify the triple exists in the KG

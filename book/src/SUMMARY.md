@@ -20,7 +20,12 @@
 - [OODA Loop](agent/ooda-loop.md)
 - [Tools](agent/tools.md)
 - [Planning and Reflection](agent/planning.md)
+- [Autonomous Background Learning](agent/autonomy.md)
 - [Jungian Psyche](agent/psyche.md)
+
+# Library
+
+- [Shared Content Library](library/overview.md)
 
 # Advanced
 

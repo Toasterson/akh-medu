@@ -97,10 +97,7 @@ pub enum Adjustment {
         reason: String,
     },
     /// Suggest abandoning a stagnant goal.
-    SuggestAbandon {
-        goal_id: SymbolId,
-        reason: String,
-    },
+    SuggestAbandon { goal_id: SymbolId, reason: String },
 }
 
 /// The full output of a reflection cycle.
@@ -436,7 +433,15 @@ mod tests {
         let adjustments = compute_adjustments(&goals, &[], &goal_insights, &config);
 
         // Should have at least a DecreasePriority and SuggestNewGoal.
-        assert!(adjustments.iter().any(|a| matches!(a, Adjustment::DecreasePriority { .. })));
-        assert!(adjustments.iter().any(|a| matches!(a, Adjustment::SuggestNewGoal { .. })));
+        assert!(
+            adjustments
+                .iter()
+                .any(|a| matches!(a, Adjustment::DecreasePriority { .. }))
+        );
+        assert!(
+            adjustments
+                .iter()
+                .any(|a| matches!(a, Adjustment::SuggestNewGoal { .. }))
+        );
     }
 }
