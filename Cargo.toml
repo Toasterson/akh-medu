@@ -77,7 +77,8 @@ tower-http = { version = "0.6", features = ["cors"], optional = true }
 wasmtime = { version = "29", features = ["component-model"], optional = true }
 
 [features]
-server = ["axum", "tokio", "tower-http"]
+daemon = ["tokio"]
+server = ["daemon", "axum", "tower-http"]
 wasm-tools = ["wasmtime"]
 
 [dev-dependencies]

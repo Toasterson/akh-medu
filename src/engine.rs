@@ -4,7 +4,7 @@
 //! for ingesting knowledge, querying, and managing the system.
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use egg::{AstSize, Extractor, Rewrite, Runner};
 
@@ -84,7 +84,7 @@ pub struct Engine {
     provenance_ledger: Option<ProvenanceLedger>,
     skill_manager: Option<SkillManager>,
     grammar_registry: GrammarRegistry,
-    entity_resolver: EntityResolver,
+    entity_resolver: RwLock<EntityResolver>,
     compartment_manager: Option<crate::compartment::CompartmentManager>,
 }
 
@@ -193,7 +193,7 @@ impl Engine {
         let grammar_registry = GrammarRegistry::new();
 
         // Restore learned equivalences from persistent storage.
-        let entity_resolver = EntityResolver::load_from_store(&store);
+        let entity_resolver = RwLock::new(EntityResolver::load_from_store(&store));
 
         // Initialize compartment manager if data_dir has a compartments/ subdir.
         let compartment_manager = config.data_dir.as_ref().map(|dir| {
@@ -871,53 +871,49 @@ impl Engine {
     /// Discovers new cross-lingual mappings from KG structure and VSA
     /// similarity, then persists results to the durable store.
     /// Returns the number of new equivalences discovered.
-    pub fn learn_equivalences(&mut self) -> AkhResult<usize> {
-        let total = self
-            .entity_resolver
-            .learn_from_kg(&self.knowledge_graph, &self.registry)
-            + self.entity_resolver.learn_from_vsa(
-                &self.ops,
-                &self.item_memory,
-                &self.registry,
-                0.65,
-            )
-            + self.entity_resolver.learn_from_library(
-                &self.ops,
-                &self.item_memory,
-                &self.registry,
-                &self.knowledge_graph,
-                0.65,
-            );
+    pub fn learn_equivalences(&self) -> AkhResult<usize> {
+        let total = {
+            let mut resolver = self.entity_resolver.write().unwrap();
+            resolver.learn_from_kg(&self.knowledge_graph, &self.registry)
+                + resolver.learn_from_vsa(
+                    &self.ops,
+                    &self.item_memory,
+                    &self.registry,
+                    0.65,
+                )
+                + resolver.learn_from_library(
+                    &self.ops,
+                    &self.item_memory,
+                    &self.registry,
+                    &self.knowledge_graph,
+                    0.65,
+                )
+        };
 
-        self.entity_resolver.persist_to_store(&self.store)?;
+        self.entity_resolver.read().unwrap().persist_to_store(&self.store)?;
         Ok(total)
     }
 
     /// Get equivalence statistics.
     pub fn equivalence_stats(&self) -> EquivalenceStats {
-        self.entity_resolver.stats()
+        self.entity_resolver.read().unwrap().stats()
     }
 
     /// Export all learned equivalences.
     pub fn export_equivalences(&self) -> Vec<LearnedEquivalence> {
-        self.entity_resolver.export_learned()
+        self.entity_resolver.read().unwrap().export_learned()
     }
 
     /// Import equivalences and persist to durable store.
-    pub fn import_equivalences(&mut self, equivs: &[LearnedEquivalence]) -> AkhResult<()> {
-        self.entity_resolver.import_equivalences(equivs);
-        self.entity_resolver.persist_to_store(&self.store)?;
+    pub fn import_equivalences(&self, equivs: &[LearnedEquivalence]) -> AkhResult<()> {
+        self.entity_resolver.write().unwrap().import_equivalences(equivs);
+        self.entity_resolver.read().unwrap().persist_to_store(&self.store)?;
         Ok(())
     }
 
-    /// Get a reference to the entity resolver.
-    pub fn entity_resolver(&self) -> &EntityResolver {
-        &self.entity_resolver
-    }
-
-    /// Get a mutable reference to the entity resolver.
-    pub fn entity_resolver_mut(&mut self) -> &mut EntityResolver {
-        &mut self.entity_resolver
+    /// Get a read lock on the entity resolver.
+    pub fn entity_resolver(&self) -> std::sync::RwLockReadGuard<'_, EntityResolver> {
+        self.entity_resolver.read().unwrap()
     }
 
     // -----------------------------------------------------------------------
@@ -1184,7 +1180,7 @@ impl Engine {
         self.store.put_meta(b"sym_allocator_next", &encoded)?;
 
         // Persist learned equivalences.
-        self.entity_resolver.persist_to_store(&self.store)?;
+        self.entity_resolver.read().unwrap().persist_to_store(&self.store)?;
 
         // Sync knowledge graph to SPARQL store.
         if let Some(ref sparql) = self.sparql {
@@ -1245,7 +1241,7 @@ impl std::fmt::Debug for Engine {
             .field("registry", &self.registry)
             .field(
                 "learned_equivalences",
-                &self.entity_resolver.learned_count(),
+                &self.entity_resolver.read().unwrap().learned_count(),
             )
             .field("compartment_manager", &self.compartment_manager)
             .finish()
