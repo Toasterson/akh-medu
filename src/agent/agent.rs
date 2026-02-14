@@ -159,6 +159,9 @@ impl Agent {
         registry.register(Box::new(tools::CodeIngestTool));
         registry.register(Box::new(tools::ContentIngestTool));
 
+        // Library search.
+        registry.register(Box::new(tools::LibrarySearchTool));
+
         // Documentation generation.
         registry.register(Box::new(tools::DocGenTool));
     }
