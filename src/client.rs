@@ -725,6 +725,26 @@ impl AkhClient {
     }
 
     // -----------------------------------------------------------------------
+    // Workspace role
+    // -----------------------------------------------------------------------
+
+    /// Assign a role to the workspace (write-once).
+    pub fn assign_role(&self, role: &str) -> ClientResult<()> {
+        match self {
+            AkhClient::Local(e) => Ok(e.assign_role(role)?),
+            AkhClient::Remote { .. } => {
+                #[derive(Serialize)]
+                struct Req<'a> {
+                    role: &'a str,
+                }
+                let _: serde_json::Value =
+                    self.post_json("/assign-role", &Req { role })?;
+                Ok(())
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // Library
     // -----------------------------------------------------------------------
 

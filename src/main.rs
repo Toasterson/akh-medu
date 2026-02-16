@@ -946,16 +946,8 @@ fn main() -> Result<()> {
                     }
                 }
                 WorkspaceAction::AssignRole { name, role } => {
-                    let ws_paths = mgr.resolve(&name).into_diagnostic()?;
-                    let engine_config = EngineConfig {
-                        dimension: Dimension(cli.dimension),
-                        data_dir: Some(ws_paths.kg_dir.clone()),
-                        language,
-                        ..Default::default()
-                    };
-                    let engine = Engine::new(engine_config).into_diagnostic()?;
-                    engine.assign_role(&role).into_diagnostic()?;
-                    engine.persist().into_diagnostic()?;
+                    let client = resolve_client(&name, config, Some(mgr.paths()))?;
+                    client.assign_role(&role).into_diagnostic()?;
                     println!("Assigned role \"{role}\" to workspace \"{name}\".");
                 }
             }
