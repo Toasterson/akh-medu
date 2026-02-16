@@ -354,21 +354,29 @@ impl AkhTui {
                                 "No facts found for \"{subject}\"."
                             )));
                         } else {
-                            for t in &from_triples {
-                                self.messages.push(AkhMessage::fact(format!(
-                                    "{} {} {}",
-                                    engine.resolve_label(t.subject),
-                                    engine.resolve_label(t.predicate),
-                                    engine.resolve_label(t.object),
-                                )));
+                            let mut all_triples = from_triples;
+                            all_triples.extend(to_triples);
+                            let summary =
+                                crate::agent::synthesize::synthesize_from_triples(
+                                    &subject,
+                                    &all_triples,
+                                    engine,
+                                    &self.grammar,
+                                );
+                            if !summary.overview.is_empty() {
+                                self.messages.push(AkhMessage::narrative(
+                                    &summary.overview,
+                                    &self.grammar,
+                                ));
                             }
-                            for t in &to_triples {
-                                self.messages.push(AkhMessage::fact(format!(
-                                    "{} {} {}",
-                                    engine.resolve_label(t.subject),
-                                    engine.resolve_label(t.predicate),
-                                    engine.resolve_label(t.object),
-                                )));
+                            for section in &summary.sections {
+                                self.messages.push(AkhMessage::narrative(
+                                    format!("## {}\n{}", section.heading, section.prose),
+                                    &self.grammar,
+                                ));
+                            }
+                            for gap in &summary.gaps {
+                                self.messages.push(AkhMessage::gap("(unknown)", gap));
                             }
                         }
                     }

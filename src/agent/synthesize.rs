@@ -249,6 +249,75 @@ pub fn synthesize_with_grammar(
     summary
 }
 
+/// Synthesize a narrative from raw KG triples (no working memory needed).
+///
+/// Converts `graph::Triple` values into `ExtractedFact` items, then runs the
+/// standard `group_facts()` → `build_document()` → grammar linearization pipeline.
+/// Used by the TUI Query handler to produce natural language instead of raw triples.
+pub fn synthesize_from_triples(
+    subject: &str,
+    triples: &[crate::graph::Triple],
+    engine: &crate::engine::Engine,
+    grammar_name: &str,
+) -> NarrativeSummary {
+    let facts: Vec<ExtractedFact> = triples
+        .iter()
+        .filter_map(|t| {
+            let subj = engine.resolve_label(t.subject);
+            let pred = engine.resolve_label(t.predicate);
+            let obj = engine.resolve_label(t.object);
+
+            // Skip agent-internal metadata labels.
+            if is_metadata_label(&pred) || is_metadata_label(&obj) || is_metadata_label(&subj) {
+                return None;
+            }
+
+            Some(ExtractedFact {
+                kind: FactKind::Triple {
+                    subject: subj,
+                    predicate: pred,
+                    object: obj,
+                },
+                source_tool: "kg_query".to_string(),
+                source_cycle: 0,
+            })
+        })
+        .collect();
+
+    if facts.is_empty() {
+        return NarrativeSummary {
+            overview: format!("No non-metadata facts found for \"{subject}\"."),
+            sections: Vec::new(),
+            gaps: Vec::new(),
+            facts_count: 0,
+        };
+    }
+
+    let groups = group_facts(&facts);
+
+    let mut summary = {
+        let doc = super::synthesize_abs::build_document(subject, &groups, &facts, engine);
+        let registry = crate::grammar::GrammarRegistry::new();
+        let grammar = registry
+            .get(grammar_name)
+            .unwrap_or_else(|_| registry.default_grammar());
+        let ctx = crate::grammar::LinContext::with_registry(engine.registry());
+
+        crate::grammar::bridge::abs_to_summary(&doc, grammar, &ctx)
+            .unwrap_or_else(|_| render_template(subject, &groups, &facts, engine))
+    };
+
+    // Filter uninformative sections (same as synthesize_with_grammar).
+    summary.sections.retain(|s| {
+        if s.prose.starts_with("No ") {
+            return false;
+        }
+        is_informative_section(s)
+    });
+
+    summary
+}
+
 // ── Step 1: Extract facts ────────────────────────────────────────────────
 
 /// Parse each WM ToolResult entry into structured `ExtractedFact` values.
