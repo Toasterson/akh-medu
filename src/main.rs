@@ -2816,27 +2816,41 @@ fn main() -> Result<()> {
                                 Ok(sym_id) => {
                                     let from = engine.triples_from(sym_id);
                                     let to = engine.triples_to(sym_id);
-                                    let mut lines = Vec::new();
-                                    for t in &from {
-                                        lines.push(format!(
-                                            "  {} -> {} -> {}",
-                                            engine.resolve_label(t.subject),
-                                            engine.resolve_label(t.predicate),
-                                            engine.resolve_label(t.object),
-                                        ));
-                                    }
-                                    for t in &to {
-                                        lines.push(format!(
-                                            "  {} -> {} -> {}",
-                                            engine.resolve_label(t.subject),
-                                            engine.resolve_label(t.predicate),
-                                            engine.resolve_label(t.object),
-                                        ));
-                                    }
-                                    if lines.is_empty() {
+                                    if from.is_empty() && to.is_empty() {
                                         format!("No information found for \"{subject}\".")
                                     } else {
-                                        lines.join("\n")
+                                        let mut all_triples = from;
+                                        all_triples.extend(to);
+                                        let grammar_name = engine
+                                            .compartments()
+                                            .and_then(|mgr| mgr.psyche())
+                                            .map(|p| p.persona.grammar_preference.clone())
+                                            .unwrap_or_else(|| "narrative".to_string());
+                                        let summary =
+                                            akh_medu::agent::synthesize::synthesize_from_triples(
+                                                &subject,
+                                                &all_triples,
+                                                &engine,
+                                                &grammar_name,
+                                            );
+                                        let mut lines = Vec::new();
+                                        if !summary.overview.is_empty() {
+                                            lines.push(summary.overview);
+                                        }
+                                        for section in &summary.sections {
+                                            lines.push(format!(
+                                                "{}: {}",
+                                                section.heading, section.prose
+                                            ));
+                                        }
+                                        for gap in &summary.gaps {
+                                            lines.push(format!("(gap) {gap}"));
+                                        }
+                                        if lines.is_empty() {
+                                            format!("No information found for \"{subject}\".")
+                                        } else {
+                                            lines.join("\n")
+                                        }
                                     }
                                 }
                                 Err(_) => format!("Symbol \"{subject}\" not found."),

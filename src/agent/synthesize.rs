@@ -315,6 +315,26 @@ pub fn synthesize_from_triples(
         is_informative_section(s)
     });
 
+    // Replace the agent-oriented overview ("Explored over N cycles") with a
+    // query-appropriate one. If the grammar pipeline produced section prose,
+    // drop the overview entirely so only the narrative sections show.
+    if !summary.sections.is_empty() {
+        summary.overview = String::new();
+    } else {
+        // Sections were all filtered — fall back to a simple one-liner by
+        // flattening whatever facts we have into prose.
+        let topic_count = groups
+            .iter()
+            .filter(|g| !matches!(g.key, GroupKey::Other | GroupKey::KnowledgeGaps))
+            .count();
+        summary.overview = format!(
+            "Found {count} fact{s} about {subject} across {topic_count} topic{ts}.",
+            count = facts.len(),
+            s = if facts.len() == 1 { "" } else { "s" },
+            ts = if topic_count == 1 { "" } else { "s" },
+        );
+    }
+
     summary
 }
 

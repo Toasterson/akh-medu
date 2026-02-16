@@ -1256,28 +1256,41 @@ fn process_ws_input(input: &WsInput, agent: &mut Agent, engine: &Engine) -> Vec<
                 akh_medu::agent::UserIntent::Query { subject } => {
                     match engine.resolve_symbol(&subject) {
                         Ok(sym_id) => {
-                            let triples = engine.triples_from(sym_id);
+                            let from_triples = engine.triples_from(sym_id);
                             let to_triples = engine.triples_to(sym_id);
-                            if triples.is_empty() && to_triples.is_empty() {
+                            if from_triples.is_empty() && to_triples.is_empty() {
                                 msgs.push(AkhMessage::system(format!(
                                     "No facts found for \"{subject}\"."
                                 )));
                             } else {
-                                for t in &triples {
-                                    msgs.push(AkhMessage::fact(format!(
-                                        "{} {} {}",
-                                        engine.resolve_label(t.subject),
-                                        engine.resolve_label(t.predicate),
-                                        engine.resolve_label(t.object),
-                                    )));
+                                let mut all_triples = from_triples;
+                                all_triples.extend(to_triples);
+                                let grammar_name = engine
+                                    .compartments()
+                                    .and_then(|mgr| mgr.psyche())
+                                    .map(|p| p.persona.grammar_preference.clone())
+                                    .unwrap_or_else(|| "narrative".to_string());
+                                let summary =
+                                    akh_medu::agent::synthesize::synthesize_from_triples(
+                                        &subject,
+                                        &all_triples,
+                                        engine,
+                                        &grammar_name,
+                                    );
+                                if !summary.overview.is_empty() {
+                                    msgs.push(AkhMessage::narrative(
+                                        &summary.overview,
+                                        &grammar_name,
+                                    ));
                                 }
-                                for t in &to_triples {
-                                    msgs.push(AkhMessage::fact(format!(
-                                        "{} {} {}",
-                                        engine.resolve_label(t.subject),
-                                        engine.resolve_label(t.predicate),
-                                        engine.resolve_label(t.object),
-                                    )));
+                                for section in &summary.sections {
+                                    msgs.push(AkhMessage::narrative(
+                                        format!("## {}\n{}", section.heading, section.prose),
+                                        &grammar_name,
+                                    ));
+                                }
+                                for gap in &summary.gaps {
+                                    msgs.push(AkhMessage::gap("(unknown)", gap));
                                 }
                             }
                         }
