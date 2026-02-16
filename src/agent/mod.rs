@@ -28,6 +28,7 @@ pub mod tool;
 pub mod tool_manifest;
 pub mod tool_semantics;
 pub mod tools;
+pub mod trigger;
 #[cfg(feature = "wasm-tools")]
 pub mod wasm_runtime;
 
@@ -50,3 +51,4 @@ pub use semantic_enrichment::{EnrichmentResult, SemanticPredicates};
 pub use synthesize::NarrativeSummary;
 pub use tool::{Tool, ToolInput, ToolOutput, ToolRegistry, ToolSignature};
 pub use tool_manifest::{Capability, DangerInfo, DangerLevel, ToolManifest, ToolSource};
+pub use trigger::{Trigger, TriggerAction, TriggerCondition, TriggerStore};

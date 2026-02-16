@@ -164,6 +164,15 @@ impl Agent {
 
         // Documentation generation.
         registry.register(Box::new(tools::DocGenTool));
+
+        // Agent management (multi-agent orchestration).
+        registry.register(Box::new(tools::AgentListTool));
+        registry.register(Box::new(tools::AgentSpawnTool));
+        registry.register(Box::new(tools::AgentMessageTool));
+        registry.register(Box::new(tools::AgentRetireTool));
+
+        // Trigger management.
+        registry.register(Box::new(tools::TriggerManageTool));
     }
 
     /// Load CLI and WASM tools from active skills.

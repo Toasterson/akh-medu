@@ -10,14 +10,21 @@ use miette::Diagnostic;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use std::path::Path;
+
+use crate::agent::trigger::{Trigger, TriggerStore};
 use crate::engine::{Engine, EngineInfo};
 use crate::export::{ProvenanceExport, SymbolExport, TripleExport};
 use crate::graph::Triple;
 use crate::graph::analytics;
 use crate::graph::traverse::{TraversalConfig, TraversalResult};
 use crate::infer::{InferenceQuery, InferenceResult};
+use crate::library::{
+    ContentFormat, DocumentRecord, IngestConfig, LibraryAddRequest, LibraryAddResponse,
+    LibraryCatalog, LibrarySearchRequest, LibrarySearchResult,
+};
 use crate::paths::AkhPaths;
-use crate::skills::SkillInfo;
+use crate::skills::{SkillActivation, SkillInfo, SkillInstallPayload};
 use crate::symbol::{SymbolId, SymbolKind, SymbolMeta};
 use crate::vsa::item_memory::SearchResult;
 
@@ -122,6 +129,19 @@ pub enum ClientError {
 pub type ClientResult<T> = Result<T, ClientError>;
 
 // ---------------------------------------------------------------------------
+// Daemon status (shared between client & server)
+// ---------------------------------------------------------------------------
+
+/// Status of a workspace daemon (background agent task manager).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DaemonStatus {
+    pub running: bool,
+    pub total_cycles: usize,
+    pub started_at: u64,
+    pub trigger_count: usize,
+}
+
+// ---------------------------------------------------------------------------
 // AkhClient
 // ---------------------------------------------------------------------------
 
@@ -216,6 +236,27 @@ impl AkhClient {
         let resp = http
             .post(&url)
             .send_json(body)
+            .map_err(|e| ClientError::Request {
+                message: e.to_string(),
+            })?;
+        resp.into_json().map_err(|e| ClientError::Response {
+            message: format!("failed to parse JSON: {e}"),
+        })
+    }
+
+    fn delete_json<T: serde::de::DeserializeOwned>(&self, path: &str) -> ClientResult<T> {
+        let AkhClient::Remote {
+            base_url,
+            workspace,
+            http,
+        } = self
+        else {
+            unreachable!("delete_json called on local client");
+        };
+        let url = format!("{base_url}/workspaces/{workspace}{path}");
+        let resp = http
+            .delete(&url)
+            .call()
             .map_err(|e| ClientError::Request {
                 message: e.to_string(),
             })?;
@@ -638,6 +679,40 @@ impl AkhClient {
         }
     }
 
+    pub fn load_skill(&self, name: &str) -> ClientResult<SkillActivation> {
+        match self {
+            AkhClient::Local(e) => Ok(e.load_skill(name)?),
+            AkhClient::Remote { .. } => {
+                self.post_json(&format!("/skills/{name}/load"), &serde_json::json!({}))
+            }
+        }
+    }
+
+    pub fn unload_skill(&self, name: &str) -> ClientResult<()> {
+        match self {
+            AkhClient::Local(e) => Ok(e.unload_skill(name)?),
+            AkhClient::Remote { .. } => {
+                let _: serde_json::Value =
+                    self.post_json(&format!("/skills/{name}/unload"), &serde_json::json!({}))?;
+                Ok(())
+            }
+        }
+    }
+
+    pub fn skill_info(&self, name: &str) -> ClientResult<SkillInfo> {
+        match self {
+            AkhClient::Local(e) => Ok(e.skill_info(name)?),
+            AkhClient::Remote { .. } => self.get_json(&format!("/skills/{name}")),
+        }
+    }
+
+    pub fn install_skill(&self, payload: &SkillInstallPayload) -> ClientResult<SkillActivation> {
+        match self {
+            AkhClient::Local(e) => Ok(e.install_skill(payload)?),
+            AkhClient::Remote { .. } => self.post_json("/skills/install", payload),
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Engine info
     // -----------------------------------------------------------------------
@@ -646,6 +721,236 @@ impl AkhClient {
         match self {
             AkhClient::Local(e) => Ok(e.info()),
             AkhClient::Remote { .. } => self.get_json("/info"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Library
+    // -----------------------------------------------------------------------
+
+    /// List all documents in the library.
+    pub fn library_list(&self, library_dir: &Path) -> ClientResult<Vec<DocumentRecord>> {
+        match self {
+            AkhClient::Local(_) => {
+                let catalog = LibraryCatalog::open(library_dir).map_err(|e| {
+                    ClientError::Engine(crate::error::AkhError::Library(e))
+                })?;
+                Ok(catalog.list().to_vec())
+            }
+            AkhClient::Remote { .. } => self.get_json("/library"),
+        }
+    }
+
+    /// Add a document to the library. Returns ingestion summary.
+    pub fn library_add(
+        &self,
+        library_dir: &Path,
+        req: &LibraryAddRequest,
+    ) -> ClientResult<LibraryAddResponse> {
+        match self {
+            AkhClient::Local(engine) => {
+                let mut catalog = LibraryCatalog::open(library_dir).map_err(|e| {
+                    ClientError::Engine(crate::error::AkhError::Library(e))
+                })?;
+
+                let fmt = req.format.as_deref().and_then(|f| match f {
+                    "html" => Some(ContentFormat::Html),
+                    "pdf" => Some(ContentFormat::Pdf),
+                    "epub" => Some(ContentFormat::Epub),
+                    "text" | "txt" => Some(ContentFormat::PlainText),
+                    _ => None,
+                });
+
+                let ingest_config = IngestConfig {
+                    title: req.title.clone(),
+                    tags: req.tags.clone(),
+                    format: fmt,
+                    ..Default::default()
+                };
+
+                let result = if req.source.starts_with("http://")
+                    || req.source.starts_with("https://")
+                {
+                    crate::library::ingest_url(engine, &mut catalog, &req.source, ingest_config)
+                        .map_err(|e| ClientError::Engine(crate::error::AkhError::Library(e)))?
+                } else {
+                    let path = std::path::PathBuf::from(&req.source);
+                    crate::library::ingest_file(engine, &mut catalog, &path, ingest_config)
+                        .map_err(|e| ClientError::Engine(crate::error::AkhError::Library(e)))?
+                };
+
+                Ok(LibraryAddResponse {
+                    id: result.record.id,
+                    title: result.record.title,
+                    format: result.record.format.to_string(),
+                    chunk_count: result.chunk_count,
+                    triple_count: result.triple_count,
+                })
+            }
+            AkhClient::Remote { .. } => self.post_json("/library", req),
+        }
+    }
+
+    /// Remove a document from the library by ID.
+    pub fn library_remove(&self, library_dir: &Path, id: &str) -> ClientResult<DocumentRecord> {
+        match self {
+            AkhClient::Local(_) => {
+                let mut catalog = LibraryCatalog::open(library_dir).map_err(|e| {
+                    ClientError::Engine(crate::error::AkhError::Library(e))
+                })?;
+                catalog.remove(id).map_err(|e| {
+                    ClientError::Engine(crate::error::AkhError::Library(e))
+                })
+            }
+            AkhClient::Remote { .. } => self.delete_json(&format!("/library/{id}")),
+        }
+    }
+
+    /// Get info for a single document by ID.
+    pub fn library_info(&self, library_dir: &Path, id: &str) -> ClientResult<DocumentRecord> {
+        match self {
+            AkhClient::Local(_) => {
+                let catalog = LibraryCatalog::open(library_dir).map_err(|e| {
+                    ClientError::Engine(crate::error::AkhError::Library(e))
+                })?;
+                catalog
+                    .get(id)
+                    .cloned()
+                    .ok_or_else(|| ClientError::Response {
+                        message: format!("document not found: \"{id}\""),
+                    })
+            }
+            AkhClient::Remote { .. } => self.get_json(&format!("/library/{id}")),
+        }
+    }
+
+    /// Search library content by text similarity.
+    pub fn library_search(
+        &self,
+        query: &str,
+        top_k: usize,
+    ) -> ClientResult<Vec<LibrarySearchResult>> {
+        match self {
+            AkhClient::Local(engine) => {
+                use crate::vsa::encode::encode_label;
+
+                let query_vec = encode_label(engine.ops(), query).map_err(|e| {
+                    ClientError::Engine(e.into())
+                })?;
+                let results = engine
+                    .item_memory()
+                    .search(&query_vec, top_k)
+                    .map_err(|e| ClientError::Engine(e.into()))?;
+
+                Ok(results
+                    .into_iter()
+                    .enumerate()
+                    .map(|(rank, sr)| {
+                        let label = engine.resolve_label(sr.symbol_id);
+                        LibrarySearchResult {
+                            rank: rank + 1,
+                            symbol_label: label,
+                            similarity: sr.similarity,
+                        }
+                    })
+                    .collect())
+            }
+            AkhClient::Remote { .. } => {
+                let req = LibrarySearchRequest {
+                    query: query.to_string(),
+                    top_k,
+                };
+                self.post_json("/library/search", &req)
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Daemon (server-side only — Local returns an error)
+    // -----------------------------------------------------------------------
+
+    /// Start a workspace daemon. Requires akhomed.
+    pub fn start_daemon(
+        &self,
+        config: Option<serde_json::Value>,
+    ) -> ClientResult<DaemonStatus> {
+        match self {
+            AkhClient::Local(_) => Err(ClientError::Request {
+                message: "daemon requires akhomed — start the server first".into(),
+            }),
+            AkhClient::Remote { .. } => {
+                let body = config.unwrap_or(serde_json::json!({}));
+                self.post_json("/daemon/start", &body)
+            }
+        }
+    }
+
+    /// Stop a workspace daemon. Requires akhomed.
+    pub fn stop_daemon(&self) -> ClientResult<()> {
+        match self {
+            AkhClient::Local(_) => Err(ClientError::Request {
+                message: "daemon requires akhomed — start the server first".into(),
+            }),
+            AkhClient::Remote { .. } => {
+                let _: serde_json::Value =
+                    self.post_json("/daemon/stop", &serde_json::json!({}))?;
+                Ok(())
+            }
+        }
+    }
+
+    /// Get daemon status. Requires akhomed.
+    pub fn daemon_status(&self) -> ClientResult<DaemonStatus> {
+        match self {
+            AkhClient::Local(_) => Err(ClientError::Request {
+                message: "daemon requires akhomed — start the server first".into(),
+            }),
+            AkhClient::Remote { .. } => self.get_json("/daemon"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Triggers
+    // -----------------------------------------------------------------------
+
+    /// List all registered triggers.
+    pub fn list_triggers(&self) -> ClientResult<Vec<Trigger>> {
+        match self {
+            AkhClient::Local(engine) => {
+                let store = TriggerStore::new(engine);
+                Ok(store.list())
+            }
+            AkhClient::Remote { .. } => self.get_json("/triggers"),
+        }
+    }
+
+    /// Add a trigger.
+    pub fn add_trigger(&self, trigger: &Trigger) -> ClientResult<Trigger> {
+        match self {
+            AkhClient::Local(engine) => {
+                let store = TriggerStore::new(engine);
+                store.add(trigger.clone()).map_err(|e| {
+                    ClientError::Engine(crate::error::AkhError::Agent(e))
+                })
+            }
+            AkhClient::Remote { .. } => self.post_json("/triggers", trigger),
+        }
+    }
+
+    /// Remove a trigger by ID.
+    pub fn remove_trigger(&self, id: &str) -> ClientResult<()> {
+        match self {
+            AkhClient::Local(engine) => {
+                let store = TriggerStore::new(engine);
+                store.remove(id).map_err(|e| {
+                    ClientError::Engine(crate::error::AkhError::Agent(e))
+                })
+            }
+            AkhClient::Remote { .. } => {
+                let _: serde_json::Value =
+                    self.delete_json(&format!("/triggers/{id}"))?;
+                Ok(())
+            }
         }
     }
 }

@@ -386,6 +386,11 @@ enum SkillAction {
         /// Name for the new skillpack.
         name: String,
     },
+    /// Install a skill from a local directory into the workspace.
+    Install {
+        /// Path to skill directory containing skill.json, triples.json, rules.txt.
+        path: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -570,6 +575,10 @@ enum AgentAction {
         #[arg(long, default_value = "60")]
         persist_interval: u64,
     },
+    /// Stop a running background daemon (requires akhomed).
+    DaemonStop,
+    /// Show background daemon status (requires akhomed).
+    DaemonStatus,
 }
 
 #[derive(Subcommand)]
@@ -720,6 +729,9 @@ enum WorkspaceAction {
     Create {
         /// Workspace name.
         name: String,
+        /// Ennead role to assign (e.g. Architect, Investigator). Write-once.
+        #[arg(long)]
+        role: Option<String>,
     },
     /// Delete a workspace and all its data.
     Delete {
@@ -730,6 +742,13 @@ enum WorkspaceAction {
     Info {
         /// Workspace name (defaults to current workspace).
         name: Option<String>,
+    },
+    /// Assign an Ennead role to an existing workspace (write-once).
+    AssignRole {
+        /// Workspace name.
+        name: String,
+        /// Role to assign (e.g. Architect, Investigator, Executor).
+        role: String,
     },
 }
 
@@ -869,13 +888,26 @@ fn main() -> Result<()> {
                         }
                     }
                 }
-                WorkspaceAction::Create { name } => {
+                WorkspaceAction::Create { name, role } => {
                     let ws_config = akh_medu::workspace::WorkspaceConfig::with_name(&name);
                     let ws_paths = mgr.create(ws_config).into_diagnostic()?;
                     println!(
                         "Created workspace \"{name}\" at {}",
                         ws_paths.root.display()
                     );
+
+                    if let Some(ref role_name) = role {
+                        let engine_config = EngineConfig {
+                            dimension: Dimension(cli.dimension),
+                            data_dir: Some(ws_paths.kg_dir.clone()),
+                            language,
+                            ..Default::default()
+                        };
+                        let engine = Engine::new(engine_config).into_diagnostic()?;
+                        engine.assign_role(role_name).into_diagnostic()?;
+                        engine.persist().into_diagnostic()?;
+                        println!("Assigned role \"{role_name}\" to workspace \"{name}\".");
+                    }
                 }
                 WorkspaceAction::Delete { name } => {
                     mgr.delete(&name).into_diagnostic()?;
@@ -899,6 +931,32 @@ fn main() -> Result<()> {
                     );
                     let ws_paths = mgr.paths().workspace(ws_name);
                     println!("  Data dir: {}", ws_paths.root.display());
+
+                    // Show assigned role if any.
+                    let engine_config = EngineConfig {
+                        dimension: Dimension(cli.dimension),
+                        data_dir: Some(ws_paths.kg_dir.clone()),
+                        language,
+                        ..Default::default()
+                    };
+                    if let Ok(engine) = Engine::new(engine_config) {
+                        if let Some(role) = engine.assigned_role() {
+                            println!("  Role: {role}");
+                        }
+                    }
+                }
+                WorkspaceAction::AssignRole { name, role } => {
+                    let ws_paths = mgr.resolve(&name).into_diagnostic()?;
+                    let engine_config = EngineConfig {
+                        dimension: Dimension(cli.dimension),
+                        data_dir: Some(ws_paths.kg_dir.clone()),
+                        language,
+                        ..Default::default()
+                    };
+                    let engine = Engine::new(engine_config).into_diagnostic()?;
+                    engine.assign_role(&role).into_diagnostic()?;
+                    engine.persist().into_diagnostic()?;
+                    println!("Assigned role \"{role}\" to workspace \"{name}\".");
                 }
             }
         }
@@ -1497,45 +1555,8 @@ fn main() -> Result<()> {
         }
 
         Commands::Skill { action } => {
-            let engine = Engine::new(config).into_diagnostic()?;
-
             match action {
-                SkillAction::List => {
-                    let skills = engine.list_skills();
-                    if skills.is_empty() {
-                        println!("No skillpacks discovered.");
-                    } else {
-                        println!("Skillpacks ({}):", skills.len());
-                        for skill in &skills {
-                            println!(
-                                "  {} ({}) [{}] - {}",
-                                skill.id, skill.version, skill.state, skill.description
-                            );
-                        }
-                    }
-                }
-                SkillAction::Load { name } => {
-                    let activation = engine.load_skill(&name).into_diagnostic()?;
-                    println!("Loaded skill: {}", activation.skill_id);
-                    println!("  triples: {}", activation.triples_loaded);
-                    println!("  rules:   {}", activation.rules_loaded);
-                    println!("  memory:  {} bytes", activation.memory_bytes);
-                }
-                SkillAction::Unload { name } => {
-                    engine.unload_skill(&name).into_diagnostic()?;
-                    println!("Unloaded skill: {name}");
-                }
-                SkillAction::Info { name } => {
-                    let info = engine.skill_info(&name).into_diagnostic()?;
-                    println!("Skill: {}", info.id);
-                    println!("  name:        {}", info.name);
-                    println!("  version:     {}", info.version);
-                    println!("  description: {}", info.description);
-                    println!("  state:       {}", info.state);
-                    println!("  domains:     {}", info.domains.join(", "));
-                    println!("  triples:     {}", info.triple_count);
-                    println!("  rules:       {}", info.rule_count);
-                }
+                // Scaffold stays local-only (writes template files to user's filesystem).
                 SkillAction::Scaffold { name } => {
                     let skill_base = data_dir
                         .as_deref()
@@ -1589,6 +1610,96 @@ fn main() -> Result<()> {
                     println!("  skill.json   - manifest (edit name, domains, description)");
                     println!("  triples.json - knowledge triples (label-based format)");
                     println!("  rules.txt    - rewrite rules");
+                }
+
+                // All other skill actions route through AkhClient.
+                other => {
+                    let client =
+                        resolve_client(&cli.workspace, config, xdg_paths.as_ref())?;
+
+                    match other {
+                        SkillAction::List => {
+                            let skills = client.list_skills().into_diagnostic()?;
+                            if skills.is_empty() {
+                                println!("No skillpacks discovered.");
+                            } else {
+                                println!("Skillpacks ({}):", skills.len());
+                                for skill in &skills {
+                                    println!(
+                                        "  {} ({}) [{}] - {}",
+                                        skill.id, skill.version, skill.state, skill.description
+                                    );
+                                }
+                            }
+                        }
+                        SkillAction::Load { name } => {
+                            let activation =
+                                client.load_skill(&name).into_diagnostic()?;
+                            println!("Loaded skill: {}", activation.skill_id);
+                            println!("  triples: {}", activation.triples_loaded);
+                            println!("  rules:   {}", activation.rules_loaded);
+                            println!("  memory:  {} bytes", activation.memory_bytes);
+                        }
+                        SkillAction::Unload { name } => {
+                            client.unload_skill(&name).into_diagnostic()?;
+                            println!("Unloaded skill: {name}");
+                        }
+                        SkillAction::Info { name } => {
+                            let info =
+                                client.skill_info(&name).into_diagnostic()?;
+                            println!("Skill: {}", info.id);
+                            println!("  name:        {}", info.name);
+                            println!("  version:     {}", info.version);
+                            println!("  description: {}", info.description);
+                            println!("  state:       {}", info.state);
+                            println!("  domains:     {}", info.domains.join(", "));
+                            println!("  triples:     {}", info.triple_count);
+                            println!("  rules:       {}", info.rule_count);
+                        }
+                        SkillAction::Install { path } => {
+                            let skill_path = std::path::Path::new(&path);
+
+                            // Read skill.json (required).
+                            let manifest_path = skill_path.join("skill.json");
+                            let manifest_content = std::fs::read_to_string(&manifest_path)
+                                .into_diagnostic()?;
+                            let manifest: akh_medu::skills::SkillManifest =
+                                serde_json::from_str(&manifest_content).into_diagnostic()?;
+
+                            // Read triples.json (optional, default empty).
+                            let triples_path = skill_path.join("triples.json");
+                            let triples: Vec<akh_medu::skills::LabelTriple> =
+                                if triples_path.exists() {
+                                    let content =
+                                        std::fs::read_to_string(&triples_path).into_diagnostic()?;
+                                    serde_json::from_str(&content).into_diagnostic()?
+                                } else {
+                                    vec![]
+                                };
+
+                            // Read rules.txt (optional, default empty).
+                            let rules_path = skill_path.join("rules.txt");
+                            let rules = if rules_path.exists() {
+                                std::fs::read_to_string(&rules_path).into_diagnostic()?
+                            } else {
+                                String::new()
+                            };
+
+                            let payload = akh_medu::skills::SkillInstallPayload {
+                                manifest,
+                                triples,
+                                rules,
+                            };
+
+                            let activation =
+                                client.install_skill(&payload).into_diagnostic()?;
+                            println!("Installed skill: {}", activation.skill_id);
+                            println!("  triples: {}", activation.triples_loaded);
+                            println!("  rules:   {}", activation.rules_loaded);
+                            println!("  memory:  {} bytes", activation.memory_bytes);
+                        }
+                        SkillAction::Scaffold { .. } => unreachable!(),
+                    }
                 }
             }
         }
@@ -1862,6 +1973,35 @@ fn main() -> Result<()> {
         }
 
         Commands::Agent { action } => {
+            // Handle daemon subcommands that only need a client (no local engine).
+            match &action {
+                AgentAction::DaemonStop => {
+                    let client = resolve_client(
+                        &cli.workspace,
+                        config,
+                        xdg_paths.as_ref(),
+                    )?;
+                    client.stop_daemon().into_diagnostic()?;
+                    println!("Daemon stopped.");
+                    return Ok(());
+                }
+                AgentAction::DaemonStatus => {
+                    let client = resolve_client(
+                        &cli.workspace,
+                        config,
+                        xdg_paths.as_ref(),
+                    )?;
+                    let status = client.daemon_status().into_diagnostic()?;
+                    println!("Daemon status:");
+                    println!("  Running:    {}", status.running);
+                    println!("  Cycles:     {}", status.total_cycles);
+                    println!("  Started at: {}", status.started_at);
+                    println!("  Triggers:   {}", status.trigger_count);
+                    return Ok(());
+                }
+                _ => {}
+            }
+
             let engine = Arc::new(Engine::new(config).into_diagnostic()?);
 
             match action {
@@ -2531,6 +2671,26 @@ fn main() -> Result<()> {
                     rules_interval,
                     persist_interval,
                 } => {
+                    // Try server-mediated daemon first.
+                    if let Some(ref paths) = xdg_paths {
+                        if let Some(server) = discover_server(paths) {
+                            let client = AkhClient::remote(&server, &cli.workspace);
+                            let config = serde_json::json!({ "max_cycles": max_cycles });
+                            match client.start_daemon(Some(config)) {
+                                Ok(status) => {
+                                    println!("Daemon started via akhomed (cycles: {}, triggers: {})",
+                                        status.total_cycles, status.trigger_count);
+                                    // Block this process — it's now a noop sentinel.
+                                    // The daemon runs inside akhomed.
+                                    return Ok(());
+                                }
+                                Err(e) => {
+                                    eprintln!("warning: server daemon failed ({e}), falling back to local");
+                                }
+                            }
+                        }
+                    }
+
                     use akh_medu::agent::{AgentDaemon, DaemonConfig};
 
                     let agent_config = AgentConfig::default();
@@ -2556,6 +2716,9 @@ fn main() -> Result<()> {
                     let mut daemon = AgentDaemon::new(agent, daemon_config);
                     rt.block_on(daemon.run()).into_diagnostic()?;
                 }
+
+                // DaemonStop and DaemonStatus are handled above (early return).
+                AgentAction::DaemonStop | AgentAction::DaemonStatus => unreachable!(),
             }
         }
 
@@ -3264,7 +3427,6 @@ fn main() -> Result<()> {
             })?;
             paths.ensure_dirs().into_diagnostic()?;
             let library_dir = paths.library_dir();
-            let engine = Engine::new(config).into_diagnostic()?;
 
             match action {
                 LibraryAction::Add {
@@ -3273,50 +3435,32 @@ fn main() -> Result<()> {
                     tags,
                     format,
                 } => {
-                    let mut catalog =
-                        akh_medu::library::LibraryCatalog::open(&library_dir).into_diagnostic()?;
+                    let client = resolve_client(&cli.workspace, config, Some(&paths))?;
 
                     let tag_list: Vec<String> = tags
                         .map(|t| t.split(',').map(|s| s.trim().to_string()).collect())
                         .unwrap_or_default();
 
-                    let fmt = format.and_then(|f| match f.as_str() {
-                        "html" => Some(akh_medu::library::ContentFormat::Html),
-                        "pdf" => Some(akh_medu::library::ContentFormat::Pdf),
-                        "epub" => Some(akh_medu::library::ContentFormat::Epub),
-                        "text" | "txt" => Some(akh_medu::library::ContentFormat::PlainText),
-                        _ => None,
-                    });
-
-                    let ingest_config = akh_medu::library::IngestConfig {
+                    let req = akh_medu::library::LibraryAddRequest {
+                        source,
                         title,
                         tags: tag_list,
-                        format: fmt,
-                        ..Default::default()
+                        format,
                     };
 
-                    let result = if source.starts_with("http://") || source.starts_with("https://")
-                    {
-                        akh_medu::library::ingest_url(&engine, &mut catalog, &source, ingest_config)
-                            .into_diagnostic()?
-                    } else {
-                        let path = PathBuf::from(&source);
-                        akh_medu::library::ingest_file(&engine, &mut catalog, &path, ingest_config)
-                            .into_diagnostic()?
-                    };
-
-                    println!("Ingested: {}", result.record.title);
-                    println!("  ID:      {}", result.record.id);
-                    println!("  Format:  {}", result.record.format);
+                    let result = client.library_add(&library_dir, &req).into_diagnostic()?;
+                    println!("Ingested: {}", result.title);
+                    println!("  ID:      {}", result.id);
+                    println!("  Format:  {}", result.format);
                     println!("  Chunks:  {}", result.chunk_count);
                     println!("  Triples: {}", result.triple_count);
                 }
 
                 LibraryAction::List => {
-                    let catalog =
-                        akh_medu::library::LibraryCatalog::open(&library_dir).into_diagnostic()?;
+                    let client = resolve_client(&cli.workspace, config, Some(&paths))?;
+                    let docs = client.library_list(&library_dir).into_diagnostic()?;
 
-                    if catalog.is_empty() {
+                    if docs.is_empty() {
                         println!(
                             "Library is empty. Add a document with: akh library add <file-or-url>"
                         );
@@ -3326,7 +3470,7 @@ fn main() -> Result<()> {
                             "ID", "Title", "Format", "Chunks", "Tags"
                         );
                         println!("{}", "-".repeat(80));
-                        for doc in catalog.list() {
+                        for doc in &docs {
                             let title_short = if doc.title.len() > 18 {
                                 format!("{}...", &doc.title[..18])
                             } else {
@@ -3341,18 +3485,13 @@ fn main() -> Result<()> {
                                 doc.tags.join(", "),
                             );
                         }
-                        println!("\nTotal: {} document(s)", catalog.len());
+                        println!("\nTotal: {} document(s)", docs.len());
                     }
                 }
 
                 LibraryAction::Search { query, top_k } => {
-                    use akh_medu::vsa::encode::encode_label;
-
-                    let query_vec = encode_label(engine.ops(), &query).into_diagnostic()?;
-                    let results = engine
-                        .item_memory()
-                        .search(&query_vec, top_k)
-                        .into_diagnostic()?;
+                    let client = resolve_client(&cli.workspace, config, Some(&paths))?;
+                    let results = client.library_search(&query, top_k).into_diagnostic()?;
 
                     if results.is_empty() {
                         println!("No matching content found for: \"{query}\"");
@@ -3360,21 +3499,24 @@ fn main() -> Result<()> {
                         println!("Search results for \"{query}\":");
                         println!("{:<8} {:<10} {}", "Rank", "Sim", "Symbol");
                         println!("{}", "-".repeat(60));
-                        for (rank, result) in results.iter().enumerate() {
-                            let label = engine.resolve_label(result.symbol_id);
-                            println!("{:<8} {:<10.4} {}", rank + 1, result.similarity, label,);
+                        for result in &results {
+                            println!(
+                                "{:<8} {:<10.4} {}",
+                                result.rank, result.similarity, result.symbol_label,
+                            );
                         }
                     }
                 }
 
                 LibraryAction::Remove { id } => {
-                    let mut catalog =
-                        akh_medu::library::LibraryCatalog::open(&library_dir).into_diagnostic()?;
-                    let removed = catalog.remove(&id).into_diagnostic()?;
+                    let client = resolve_client(&cli.workspace, config, Some(&paths))?;
+                    let removed = client.library_remove(&library_dir, &id).into_diagnostic()?;
                     println!("Removed: {} (\"{}\")", removed.id, removed.title);
                 }
 
                 LibraryAction::Watch { dir } => {
+                    // Watch stays local-only — it's a long-running filesystem poller.
+                    let engine = Engine::new(config).into_diagnostic()?;
                     let inbox_dir = dir.unwrap_or_else(|| paths.library_inbox());
                     let inbox_config =
                         akh_medu::library::inbox::InboxConfig::new(inbox_dir, library_dir);
@@ -3383,11 +3525,8 @@ fn main() -> Result<()> {
                 }
 
                 LibraryAction::Info { id } => {
-                    let catalog =
-                        akh_medu::library::LibraryCatalog::open(&library_dir).into_diagnostic()?;
-                    let doc = catalog.get(&id).ok_or_else(|| {
-                        miette::miette!("Document not found: \"{id}\". Use `library list` to see available documents.")
-                    })?;
+                    let client = resolve_client(&cli.workspace, config, Some(&paths))?;
+                    let doc = client.library_info(&library_dir, &id).into_diagnostic()?;
 
                     println!("Document: {}", doc.title);
                     println!("  ID:       {}", doc.id);

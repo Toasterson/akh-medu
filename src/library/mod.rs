@@ -21,3 +21,49 @@ pub use error::{LibraryError, LibraryResult};
 pub use ingest::{IngestConfig, IngestResult, ingest_document, ingest_file, ingest_url};
 pub use model::{ContentFormat, DocumentRecord, DocumentSource};
 pub use predicates::LibraryPredicates;
+
+// ---------------------------------------------------------------------------
+// Wire types for HTTP boundary (client ↔ server serialization)
+// ---------------------------------------------------------------------------
+
+use serde::{Deserialize, Serialize};
+
+/// Request body for `POST /library` (add a document).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LibraryAddRequest {
+    pub source: String,
+    pub title: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    pub format: Option<String>,
+}
+
+/// Response body for `POST /library` (add a document).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LibraryAddResponse {
+    pub id: String,
+    pub title: String,
+    pub format: String,
+    pub chunk_count: usize,
+    pub triple_count: usize,
+}
+
+/// Request body for `POST /library/search`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LibrarySearchRequest {
+    pub query: String,
+    #[serde(default = "default_search_top_k")]
+    pub top_k: usize,
+}
+
+fn default_search_top_k() -> usize {
+    5
+}
+
+/// Single result from a library semantic search.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LibrarySearchResult {
+    pub rank: usize,
+    pub symbol_label: String,
+    pub similarity: f32,
+}

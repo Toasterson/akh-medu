@@ -38,7 +38,9 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use tower_http::cors::CorsLayer;
 
+use akh_medu::agent::trigger::{self as trigger_mod, Trigger, TriggerStore};
 use akh_medu::agent::{Agent, AgentConfig};
+use akh_medu::client::DaemonStatus;
 use akh_medu::engine::{Engine, EngineConfig};
 use akh_medu::grammar::concrete::ParseContext;
 use akh_medu::grammar::entity_resolution::{EquivalenceStats, LearnedEquivalence};
@@ -46,6 +48,10 @@ use akh_medu::grammar::preprocess::{PreProcessRequest, PreProcessResponse, prepr
 use akh_medu::graph::Triple;
 use akh_medu::graph::traverse::TraversalConfig;
 use akh_medu::infer::InferenceQuery;
+use akh_medu::library::{
+    ContentFormat, DocumentRecord, IngestConfig, LibraryAddRequest, LibraryAddResponse,
+    LibraryCatalog, LibrarySearchRequest, LibrarySearchResult,
+};
 use akh_medu::message::AkhMessage;
 use akh_medu::paths::AkhPaths;
 use akh_medu::seeds::SeedRegistry;
@@ -58,6 +64,14 @@ use akh_medu::workspace::WorkspaceManager;
 struct ServerState {
     paths: AkhPaths,
     workspaces: RwLock<HashMap<String, Arc<Engine>>>,
+    daemons: RwLock<HashMap<String, WorkspaceDaemon>>,
+}
+
+/// Background daemon state for a workspace.
+struct WorkspaceDaemon {
+    handle: tokio::task::JoinHandle<()>,
+    shutdown_tx: tokio::sync::watch::Sender<bool>,
+    status: Arc<tokio::sync::Mutex<DaemonStatus>>,
 }
 
 impl ServerState {
@@ -65,6 +79,7 @@ impl ServerState {
         Self {
             paths,
             workspaces: RwLock::new(HashMap::new()),
+            daemons: RwLock::new(HashMap::new()),
         }
     }
 
@@ -165,9 +180,15 @@ async fn list_workspaces(State(state): State<Arc<ServerState>>) -> Json<Workspac
     Json(WorkspaceListResponse { workspaces: names })
 }
 
+#[derive(Deserialize)]
+struct CreateWorkspaceReq {
+    role: Option<String>,
+}
+
 async fn create_workspace(
     State(state): State<Arc<ServerState>>,
     Path(name): Path<String>,
+    body: Option<Json<CreateWorkspaceReq>>,
 ) -> Result<Json<WorkspaceCreatedResponse>, (StatusCode, String)> {
     let manager = WorkspaceManager::new(state.paths.clone());
     let config = akh_medu::workspace::WorkspaceConfig {
@@ -175,12 +196,48 @@ async fn create_workspace(
         ..Default::default()
     };
     match manager.create(config) {
-        Ok(_) => Ok(Json(WorkspaceCreatedResponse {
-            name,
-            created: true,
-        })),
+        Ok(_) => {
+            // Assign role if provided in the request body.
+            if let Some(Json(req)) = body {
+                if let Some(ref role) = req.role {
+                    let engine = state.get_engine(&name).await?;
+                    engine.assign_role(role).map_err(|e| {
+                        (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}"))
+                    })?;
+                    engine.persist().map_err(|e| {
+                        (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}"))
+                    })?;
+                }
+            }
+            Ok(Json(WorkspaceCreatedResponse {
+                name,
+                created: true,
+            }))
+        }
         Err(e) => Err((StatusCode::BAD_REQUEST, format!("{e}"))),
     }
+}
+
+#[derive(Deserialize)]
+struct AssignRoleReq {
+    role: String,
+}
+
+async fn assign_role_handler(
+    State(state): State<Arc<ServerState>>,
+    Path(ws_name): Path<String>,
+    Json(req): Json<AssignRoleReq>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let engine = state.get_engine(&ws_name).await?;
+    engine
+        .assign_role(&req.role)
+        .map_err(|e| (StatusCode::CONFLICT, format!("{e}")))?;
+    engine
+        .persist()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?;
+    Ok(Json(
+        serde_json::json!({ "role": req.role, "assigned": true }),
+    ))
 }
 
 async fn delete_workspace(
@@ -679,6 +736,431 @@ async fn list_skills_handler(
     Ok(Json(engine.list_skills()))
 }
 
+async fn load_skill_handler(
+    State(state): State<Arc<ServerState>>,
+    Path((ws_name, skill_name)): Path<(String, String)>,
+) -> Result<Json<akh_medu::skills::SkillActivation>, (StatusCode, String)> {
+    let engine = state.get_engine(&ws_name).await?;
+    engine
+        .load_skill(&skill_name)
+        .map(Json)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))
+}
+
+async fn unload_skill_handler(
+    State(state): State<Arc<ServerState>>,
+    Path((ws_name, skill_name)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let engine = state.get_engine(&ws_name).await?;
+    engine
+        .unload_skill(&skill_name)
+        .map(|_| Json(serde_json::json!({"ok": true})))
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))
+}
+
+async fn skill_info_handler(
+    State(state): State<Arc<ServerState>>,
+    Path((ws_name, skill_name)): Path<(String, String)>,
+) -> Result<Json<akh_medu::skills::SkillInfo>, (StatusCode, String)> {
+    let engine = state.get_engine(&ws_name).await?;
+    engine
+        .skill_info(&skill_name)
+        .map(Json)
+        .map_err(|e| (StatusCode::NOT_FOUND, format!("{e}")))
+}
+
+async fn install_skill_handler(
+    State(state): State<Arc<ServerState>>,
+    Path(ws_name): Path<String>,
+    Json(payload): Json<akh_medu::skills::SkillInstallPayload>,
+) -> Result<Json<akh_medu::skills::SkillActivation>, (StatusCode, String)> {
+    let engine = state.get_engine(&ws_name).await?;
+    engine
+        .install_skill(&payload)
+        .map(Json)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))
+}
+
+// ── Library handlers ─────────────────────────────────────────────────────
+
+async fn library_list_handler(
+    State(state): State<Arc<ServerState>>,
+    Path(ws_name): Path<String>,
+) -> Result<Json<Vec<DocumentRecord>>, (StatusCode, String)> {
+    let _engine = state.get_engine(&ws_name).await?;
+    let library_dir = state.paths.library_dir();
+    let catalog = LibraryCatalog::open(&library_dir)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?;
+    Ok(Json(catalog.list().to_vec()))
+}
+
+async fn library_add_handler(
+    State(state): State<Arc<ServerState>>,
+    Path(ws_name): Path<String>,
+    Json(req): Json<LibraryAddRequest>,
+) -> Result<Json<LibraryAddResponse>, (StatusCode, String)> {
+    let engine = state.get_engine(&ws_name).await?;
+    let library_dir = state.paths.library_dir();
+    let mut catalog = LibraryCatalog::open(&library_dir)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?;
+
+    let fmt = req.format.as_deref().and_then(|f| match f {
+        "html" => Some(ContentFormat::Html),
+        "pdf" => Some(ContentFormat::Pdf),
+        "epub" => Some(ContentFormat::Epub),
+        "text" | "txt" => Some(ContentFormat::PlainText),
+        _ => None,
+    });
+
+    let ingest_config = IngestConfig {
+        title: req.title,
+        tags: req.tags,
+        format: fmt,
+        ..Default::default()
+    };
+
+    let result = if req.source.starts_with("http://") || req.source.starts_with("https://") {
+        akh_medu::library::ingest_url(&engine, &mut catalog, &req.source, ingest_config)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?
+    } else {
+        let path = std::path::PathBuf::from(&req.source);
+        akh_medu::library::ingest_file(&engine, &mut catalog, &path, ingest_config)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?
+    };
+
+    Ok(Json(LibraryAddResponse {
+        id: result.record.id,
+        title: result.record.title,
+        format: result.record.format.to_string(),
+        chunk_count: result.chunk_count,
+        triple_count: result.triple_count,
+    }))
+}
+
+async fn library_search_handler(
+    State(state): State<Arc<ServerState>>,
+    Path(ws_name): Path<String>,
+    Json(req): Json<LibrarySearchRequest>,
+) -> Result<Json<Vec<LibrarySearchResult>>, (StatusCode, String)> {
+    let engine = state.get_engine(&ws_name).await?;
+
+    let query_vec = akh_medu::vsa::encode::encode_label(engine.ops(), &req.query)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("encode: {e}")))?;
+
+    let results = engine
+        .item_memory()
+        .search(&query_vec, req.top_k)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("search: {e}")))?;
+
+    let out: Vec<LibrarySearchResult> = results
+        .into_iter()
+        .enumerate()
+        .map(|(rank, sr)| {
+            let label = engine.resolve_label(sr.symbol_id);
+            LibrarySearchResult {
+                rank: rank + 1,
+                symbol_label: label,
+                similarity: sr.similarity,
+            }
+        })
+        .collect();
+
+    Ok(Json(out))
+}
+
+async fn library_info_handler(
+    State(state): State<Arc<ServerState>>,
+    Path((ws_name, doc_id)): Path<(String, String)>,
+) -> Result<Json<DocumentRecord>, (StatusCode, String)> {
+    let _engine = state.get_engine(&ws_name).await?;
+    let library_dir = state.paths.library_dir();
+    let catalog = LibraryCatalog::open(&library_dir)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?;
+    let doc = catalog
+        .get(&doc_id)
+        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("document not found: \"{doc_id}\"")))?;
+    Ok(Json(doc.clone()))
+}
+
+async fn library_remove_handler(
+    State(state): State<Arc<ServerState>>,
+    Path((ws_name, doc_id)): Path<(String, String)>,
+) -> Result<Json<DocumentRecord>, (StatusCode, String)> {
+    let _engine = state.get_engine(&ws_name).await?;
+    let library_dir = state.paths.library_dir();
+    let mut catalog = LibraryCatalog::open(&library_dir)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?;
+    let removed = catalog
+        .remove(&doc_id)
+        .map_err(|e| (StatusCode::NOT_FOUND, format!("{e}")))?;
+    Ok(Json(removed))
+}
+
+// ── Daemon handlers ─────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct StartDaemonReq {
+    #[serde(default = "default_daemon_max_cycles")]
+    max_cycles: usize,
+}
+
+fn default_daemon_max_cycles() -> usize {
+    0
+}
+
+async fn start_daemon_handler(
+    State(state): State<Arc<ServerState>>,
+    Path(ws_name): Path<String>,
+    body: Option<Json<StartDaemonReq>>,
+) -> Result<Json<DaemonStatus>, (StatusCode, String)> {
+    // Check if already running.
+    {
+        let daemons = state.daemons.read().await;
+        if let Some(d) = daemons.get(&ws_name) {
+            if !d.handle.is_finished() {
+                let st = d.status.lock().await;
+                return Ok(Json(st.clone()));
+            }
+        }
+    }
+
+    let engine = state.get_engine(&ws_name).await?;
+    let max_cycles = body.map(|b| b.max_cycles).unwrap_or(0);
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let trigger_count = TriggerStore::new(&engine).list().len();
+
+    let status = Arc::new(tokio::sync::Mutex::new(DaemonStatus {
+        running: true,
+        total_cycles: 0,
+        started_at: now,
+        trigger_count,
+    }));
+
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
+    let daemon_status = Arc::clone(&status);
+    let daemon_engine = Arc::clone(&engine);
+    let daemon_ws_name = ws_name.clone();
+
+    let handle = tokio::task::spawn(async move {
+        run_daemon_task(daemon_engine, daemon_status, shutdown_rx, max_cycles, daemon_ws_name)
+            .await;
+    });
+
+    let daemon = WorkspaceDaemon {
+        handle,
+        shutdown_tx,
+        status: Arc::clone(&status),
+    };
+
+    let st = status.lock().await.clone();
+    state.daemons.write().await.insert(ws_name, daemon);
+    Ok(Json(st))
+}
+
+async fn stop_daemon_handler(
+    State(state): State<Arc<ServerState>>,
+    Path(ws_name): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let mut daemons = state.daemons.write().await;
+    if let Some(d) = daemons.remove(&ws_name) {
+        let _ = d.shutdown_tx.send(true);
+        // Give the task a moment to finish.
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), d.handle).await;
+        Ok(Json(serde_json::json!({"stopped": true})))
+    } else {
+        Err((
+            StatusCode::NOT_FOUND,
+            format!("no daemon running for workspace \"{ws_name}\""),
+        ))
+    }
+}
+
+async fn daemon_status_handler(
+    State(state): State<Arc<ServerState>>,
+    Path(ws_name): Path<String>,
+) -> Result<Json<DaemonStatus>, (StatusCode, String)> {
+    let daemons = state.daemons.read().await;
+    if let Some(d) = daemons.get(&ws_name) {
+        let st = d.status.lock().await;
+        Ok(Json(st.clone()))
+    } else {
+        Ok(Json(DaemonStatus {
+            running: false,
+            total_cycles: 0,
+            started_at: 0,
+            trigger_count: 0,
+        }))
+    }
+}
+
+/// Background daemon task: runs agent cycles, evaluates triggers.
+async fn run_daemon_task(
+    engine: Arc<Engine>,
+    status: Arc<tokio::sync::Mutex<DaemonStatus>>,
+    mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
+    max_cycles: usize,
+    ws_name: String,
+) {
+    use tokio::time::{interval, Duration};
+
+    let mut cycle_tick = interval(Duration::from_secs(30));
+    let mut trigger_tick = interval(Duration::from_secs(15));
+    let mut persist_tick = interval(Duration::from_secs(60));
+
+    // Create agent (heavy sync work).
+    let agent_config = AgentConfig::default();
+    let agent_result = tokio::task::spawn_blocking({
+        let engine = Arc::clone(&engine);
+        move || {
+            if Agent::has_persisted_session(&engine) {
+                Agent::resume(engine, agent_config)
+            } else {
+                Agent::new(engine, agent_config)
+            }
+        }
+    })
+    .await;
+
+    let agent = match agent_result {
+        Ok(Ok(a)) => a,
+        Ok(Err(e)) => {
+            tracing::error!(error = %e, ws = %ws_name, "daemon: failed to create agent");
+            status.lock().await.running = false;
+            return;
+        }
+        Err(e) => {
+            tracing::error!(error = %e, ws = %ws_name, "daemon: agent task panicked");
+            status.lock().await.running = false;
+            return;
+        }
+    };
+
+    let agent = Arc::new(tokio::sync::Mutex::new(agent));
+
+    loop {
+        tokio::select! {
+            _ = cycle_tick.tick() => {
+                let cycle_agent = Arc::clone(&agent);
+                let cycle_engine = Arc::clone(&engine);
+                let cycle_status = Arc::clone(&status);
+                let _ = tokio::task::spawn_blocking(move || {
+                    let mut agent = cycle_agent.blocking_lock();
+                    if akh_medu::agent::goal::active_goals(agent.goals()).is_empty() {
+                        return;
+                    }
+                    if let Ok(_result) = agent.run_cycle() {
+                        let mut st = cycle_status.blocking_lock();
+                        st.total_cycles += 1;
+                    }
+                    let _ = cycle_engine; // keep alive
+                }).await;
+
+                if max_cycles > 0 {
+                    let st = status.lock().await;
+                    if st.total_cycles >= max_cycles {
+                        tracing::info!(ws = %ws_name, "daemon: max cycles reached");
+                        break;
+                    }
+                }
+            }
+            _ = trigger_tick.tick() => {
+                let trig_agent = Arc::clone(&agent);
+                let trig_engine = Arc::clone(&engine);
+                let trig_status = Arc::clone(&status);
+                let _ = tokio::task::spawn_blocking(move || {
+                    let store = TriggerStore::new(&trig_engine);
+                    let triggers = store.list();
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+
+                    let mut agent = trig_agent.blocking_lock();
+                    for trigger in &triggers {
+                        if trigger_mod::should_fire(trigger, &agent, now) {
+                            match trigger_mod::execute_trigger(trigger, &mut agent) {
+                                Ok(msg) => tracing::info!("{msg}"),
+                                Err(e) => tracing::warn!(error = %e, "trigger execution failed"),
+                            }
+                            store.update_last_fired(&trigger.id, now);
+                        }
+                    }
+
+                    // Update trigger count in status.
+                    let mut st = trig_status.blocking_lock();
+                    st.trigger_count = triggers.len();
+                }).await;
+            }
+            _ = persist_tick.tick() => {
+                let persist_agent = Arc::clone(&agent);
+                let _ = tokio::task::spawn_blocking(move || {
+                    let agent = persist_agent.blocking_lock();
+                    let _ = agent.persist_session();
+                }).await;
+            }
+            _ = shutdown_rx.changed() => {
+                if *shutdown_rx.borrow() {
+                    tracing::info!(ws = %ws_name, "daemon: shutdown signal received");
+                    break;
+                }
+            }
+        }
+    }
+
+    // Final persist.
+    let agent = Arc::clone(&agent);
+    let _ = tokio::task::spawn_blocking(move || {
+        let agent = agent.blocking_lock();
+        let _ = agent.persist_session();
+    })
+    .await;
+
+    status.lock().await.running = false;
+    tracing::info!(ws = %ws_name, "daemon stopped");
+}
+
+// ── Trigger handlers ─────────────────────────────────────────────────────
+
+async fn list_triggers_handler(
+    State(state): State<Arc<ServerState>>,
+    Path(ws_name): Path<String>,
+) -> Result<Json<Vec<Trigger>>, (StatusCode, String)> {
+    let engine = state.get_engine(&ws_name).await?;
+    let store = TriggerStore::new(&engine);
+    Ok(Json(store.list()))
+}
+
+async fn add_trigger_handler(
+    State(state): State<Arc<ServerState>>,
+    Path(ws_name): Path<String>,
+    Json(trigger): Json<Trigger>,
+) -> Result<Json<Trigger>, (StatusCode, String)> {
+    let engine = state.get_engine(&ws_name).await?;
+    let store = TriggerStore::new(&engine);
+    store
+        .add(trigger)
+        .map(Json)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))
+}
+
+async fn remove_trigger_handler(
+    State(state): State<Arc<ServerState>>,
+    Path((ws_name, trigger_id)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let engine = state.get_engine(&ws_name).await?;
+    let store = TriggerStore::new(&engine);
+    store
+        .remove(&trigger_id)
+        .map(|_| Json(serde_json::json!({"removed": trigger_id})))
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))
+}
+
 // ── Engine info handler ─────────────────────────────────────────────────
 
 async fn engine_info(
@@ -992,6 +1474,10 @@ async fn main() {
         .route("/workspaces/{name}", post(create_workspace))
         .route("/workspaces/{name}", delete(delete_workspace))
         .route("/workspaces/{name}/status", get(workspace_status))
+        .route(
+            "/workspaces/{ws_name}/assign-role",
+            post(assign_role_handler),
+        )
         // Symbols.
         .route(
             "/workspaces/{ws_name}/symbols",
@@ -1053,10 +1539,63 @@ async fn main() {
             "/workspaces/{ws_name}/export/provenance/{sym}",
             get(export_provenance),
         )
+        // Library.
+        .route(
+            "/workspaces/{ws_name}/library",
+            get(library_list_handler).post(library_add_handler),
+        )
+        // Static /search before wildcard /{doc_id}.
+        .route(
+            "/workspaces/{ws_name}/library/search",
+            post(library_search_handler),
+        )
+        .route(
+            "/workspaces/{ws_name}/library/{doc_id}",
+            get(library_info_handler).delete(library_remove_handler),
+        )
+        // Daemon.
+        .route(
+            "/workspaces/{ws_name}/daemon/start",
+            post(start_daemon_handler),
+        )
+        .route(
+            "/workspaces/{ws_name}/daemon/stop",
+            post(stop_daemon_handler),
+        )
+        .route(
+            "/workspaces/{ws_name}/daemon",
+            get(daemon_status_handler),
+        )
+        // Triggers.
+        .route(
+            "/workspaces/{ws_name}/triggers",
+            get(list_triggers_handler).post(add_trigger_handler),
+        )
+        .route(
+            "/workspaces/{ws_name}/triggers/{trigger_id}",
+            delete(remove_trigger_handler),
+        )
         // Skills.
         .route(
             "/workspaces/{ws_name}/skills",
             get(list_skills_handler),
+        )
+        // Static /install must come before wildcard /{skill_name}.
+        .route(
+            "/workspaces/{ws_name}/skills/install",
+            post(install_skill_handler),
+        )
+        .route(
+            "/workspaces/{ws_name}/skills/{skill_name}/load",
+            post(load_skill_handler),
+        )
+        .route(
+            "/workspaces/{ws_name}/skills/{skill_name}/unload",
+            post(unload_skill_handler),
+        )
+        .route(
+            "/workspaces/{ws_name}/skills/{skill_name}",
+            get(skill_info_handler),
         )
         // Engine info.
         .route("/workspaces/{ws_name}/info", get(engine_info))

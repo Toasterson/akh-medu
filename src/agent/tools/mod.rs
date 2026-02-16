@@ -21,6 +21,8 @@ pub mod shell_exec;
 pub mod similarity_search;
 pub mod text_ingest;
 pub mod user_interact;
+pub mod agent_management;
+pub mod trigger_manage;
 
 pub use code_ingest::CodeIngestTool;
 pub use code_predicates::CodePredicates;
@@ -40,3 +42,5 @@ pub use shell_exec::ShellExecTool;
 pub use similarity_search::SimilaritySearchTool;
 pub use text_ingest::TextIngestTool;
 pub use user_interact::UserInteractTool;
+pub use agent_management::{AgentListTool, AgentMessageTool, AgentRetireTool, AgentSpawnTool};
+pub use trigger_manage::TriggerManageTool;
