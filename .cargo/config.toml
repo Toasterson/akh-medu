@@ -1,0 +1,8 @@
+[target.'cfg(target_os = "macos")']
+rustflags = []
+
+[env]
+# Workaround: macOS 26 Command Line Tools ship an incomplete c++/v1 in the
+# toolchain path.  Point cc-rs at the SDK copy so RocksDB (oxrocksdb-sys) can
+# find <string>, <algorithm>, etc.
+CPLUS_INCLUDE_PATH = { value = "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/c++/v1", force = false }
