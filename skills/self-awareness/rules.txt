@@ -1,0 +1,7 @@
+# Self-awareness rewrite rules
+# Type transitivity: self is-a akh, akh is-a agent => self is-a agent
+(is-a ?x ?y) (is-a ?y ?z) => (is-a ?x ?z)
+# Activity inheritance: any akh inherits all can-perform activities
+(is-a ?x akh) (can-perform akh ?a) => (can-perform ?x ?a)
+# State promotion: states become properties for broader queries
+(has-state ?x ?s) (is-a ?s state) => (has-property ?x ?s)

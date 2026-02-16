@@ -1,0 +1,10 @@
+{
+  "id": "discourse",
+  "name": "Discourse Primitives",
+  "version": "1.0.0",
+  "description": "Pronouns, question words, and conversational concepts for natural language grounding",
+  "domains": ["language", "conversation", "discourse"],
+  "weight_size_bytes": 0,
+  "triples_file": "triples.json",
+  "rules_file": "rules.txt"
+}

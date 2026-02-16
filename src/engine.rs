@@ -205,7 +205,7 @@ impl Engine {
             mgr
         });
 
-        Ok(Self {
+        let engine = Self {
             config,
             ops,
             item_memory,
@@ -219,7 +219,50 @@ impl Engine {
             grammar_registry,
             entity_resolver,
             compartment_manager,
-        })
+        };
+
+        // Auto-activate all discovered skills so installed == active.
+        engine.activate_installed_skills();
+
+        Ok(engine)
+    }
+
+    /// Activate all discovered (Cold) skills, making them Hot.
+    ///
+    /// Called during engine startup so that every skill present in the
+    /// workspace's `skills/` directory is immediately usable.
+    fn activate_installed_skills(&self) {
+        let skill_ids: Vec<String> = self
+            .skill_manager
+            .as_ref()
+            .map(|mgr| {
+                mgr.list()
+                    .into_iter()
+                    .filter(|s| s.state == crate::skills::SkillState::Cold)
+                    .map(|s| s.id)
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        for id in skill_ids {
+            match self.load_skill(&id) {
+                Ok(activation) => {
+                    tracing::info!(
+                        skill = id.as_str(),
+                        triples = activation.triples_loaded,
+                        rules = activation.rules_loaded,
+                        "auto-activated skill"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        skill = id.as_str(),
+                        error = %e,
+                        "failed to auto-activate skill"
+                    );
+                }
+            }
+        }
     }
 
     /// Allocate a new symbol with the given kind and label.

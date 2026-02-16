@@ -1,0 +1,7 @@
+# Discourse rewrite rules
+# Pronoun resolution: "you refers-to self, self is-a agent" => "you is-a agent"
+(refers-to ?x ?y) (is-a ?y ?z) => (is-a ?x ?z)
+# Capability inheritance: "you refers-to self, self has-capability reasoning" => "you has-capability reasoning"
+(refers-to ?x ?y) (has-capability ?y ?z) => (has-capability ?x ?z)
+# Question relevance: "who asks-about identity, akh-medu is-a identity" => "who relevant-to akh-medu"
+(asks-about ?x ?y) (is-a ?z ?y) => (relevant-to ?x ?z)

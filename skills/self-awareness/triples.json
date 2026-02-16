@@ -1,0 +1,62 @@
+[
+  {"subject": "has-name", "predicate": "is-a", "object": "relation", "confidence": 1.0},
+  {"subject": "has-state", "predicate": "is-a", "object": "relation", "confidence": 1.0},
+  {"subject": "has-capability", "predicate": "is-a", "object": "relation", "confidence": 1.0},
+  {"subject": "can-perform", "predicate": "is-a", "object": "relation", "confidence": 1.0},
+  {"subject": "has-property", "predicate": "is-a", "object": "relation", "confidence": 1.0},
+  {"subject": "powered-by", "predicate": "is-a", "object": "relation", "confidence": 1.0},
+
+  {"subject": "self", "predicate": "is-a", "object": "akh", "confidence": 1.0},
+  {"subject": "self", "predicate": "powered-by", "object": "akh-medu", "confidence": 1.0},
+
+  {"subject": "akh-medu", "predicate": "is-a", "object": "engine", "confidence": 1.0},
+  {"subject": "engine", "predicate": "is-a", "object": "software", "confidence": 1.0},
+
+  {"subject": "akh", "predicate": "is-a", "object": "agent", "confidence": 1.0},
+  {"subject": "akh", "predicate": "has-property", "object": "awareness", "confidence": 0.9},
+  {"subject": "akh", "predicate": "has-property", "object": "memory", "confidence": 0.9},
+  {"subject": "akh", "predicate": "has-property", "object": "goals", "confidence": 0.9},
+  {"subject": "akh", "predicate": "has-property", "object": "curiosity", "confidence": 0.8},
+
+  {"subject": "self", "predicate": "has-capability", "object": "reasoning", "confidence": 1.0},
+  {"subject": "self", "predicate": "has-capability", "object": "learning", "confidence": 1.0},
+  {"subject": "self", "predicate": "has-capability", "object": "memory", "confidence": 1.0},
+  {"subject": "self", "predicate": "has-capability", "object": "knowledge-management", "confidence": 1.0},
+  {"subject": "self", "predicate": "has-capability", "object": "conversation", "confidence": 0.9},
+  {"subject": "self", "predicate": "has-capability", "object": "exploration", "confidence": 0.9},
+  {"subject": "self", "predicate": "has-capability", "object": "analysis", "confidence": 0.9},
+
+  {"subject": "self", "predicate": "has-state", "object": "active", "confidence": 0.9},
+  {"subject": "self", "predicate": "has-state", "object": "ready", "confidence": 0.9},
+  {"subject": "self", "predicate": "has-state", "object": "curious", "confidence": 0.8},
+
+  {"subject": "agent", "predicate": "is-a", "object": "entity", "confidence": 1.0},
+
+  {"subject": "reading", "predicate": "is-a", "object": "activity", "confidence": 1.0},
+  {"subject": "thinking", "predicate": "is-a", "object": "activity", "confidence": 1.0},
+  {"subject": "learning", "predicate": "is-a", "object": "activity", "confidence": 1.0},
+  {"subject": "exploring", "predicate": "is-a", "object": "activity", "confidence": 1.0},
+  {"subject": "analyzing", "predicate": "is-a", "object": "activity", "confidence": 1.0},
+  {"subject": "reasoning", "predicate": "is-a", "object": "activity", "confidence": 1.0},
+  {"subject": "conversation", "predicate": "is-a", "object": "activity", "confidence": 1.0},
+
+  {"subject": "akh", "predicate": "can-perform", "object": "reading", "confidence": 0.9},
+  {"subject": "akh", "predicate": "can-perform", "object": "thinking", "confidence": 0.9},
+  {"subject": "akh", "predicate": "can-perform", "object": "learning", "confidence": 0.9},
+  {"subject": "akh", "predicate": "can-perform", "object": "exploring", "confidence": 0.9},
+  {"subject": "akh", "predicate": "can-perform", "object": "analyzing", "confidence": 0.9},
+  {"subject": "akh", "predicate": "can-perform", "object": "reasoning", "confidence": 0.9},
+  {"subject": "akh", "predicate": "can-perform", "object": "conversation", "confidence": 0.9},
+
+  {"subject": "activity", "predicate": "is-a", "object": "concept", "confidence": 1.0},
+  {"subject": "entity", "predicate": "is-a", "object": "concept", "confidence": 1.0},
+  {"subject": "software", "predicate": "is-a", "object": "concept", "confidence": 1.0},
+  {"subject": "awareness", "predicate": "is-a", "object": "property", "confidence": 1.0},
+  {"subject": "curiosity", "predicate": "is-a", "object": "property", "confidence": 1.0},
+  {"subject": "goals", "predicate": "is-a", "object": "property", "confidence": 1.0},
+  {"subject": "active", "predicate": "is-a", "object": "state", "confidence": 1.0},
+  {"subject": "ready", "predicate": "is-a", "object": "state", "confidence": 1.0},
+  {"subject": "curious", "predicate": "is-a", "object": "state", "confidence": 1.0},
+  {"subject": "state", "predicate": "is-a", "object": "concept", "confidence": 1.0},
+  {"subject": "property", "predicate": "is-a", "object": "concept", "confidence": 1.0}
+]

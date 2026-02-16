@@ -1,0 +1,10 @@
+{
+  "id": "self-awareness",
+  "name": "Agent Self-Awareness",
+  "version": "1.0.0",
+  "description": "Agent identity, capabilities, activities, and self-model for conversational interactions",
+  "domains": ["identity", "self-model", "conversation"],
+  "weight_size_bytes": 0,
+  "triples_file": "triples.json",
+  "rules_file": "rules.txt"
+}
