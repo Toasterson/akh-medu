@@ -33,7 +33,7 @@ pub enum PathError {
     #[diagnostic(
         code(akh::paths::workspace_not_found),
         help(
-            "Create it with `akh-medu workspace create {name}` or list existing workspaces with `akh-medu workspace list`."
+            "Create it with `akh workspace create {name}` or list existing workspaces with `akh workspace list`."
         )
     )]
     WorkspaceNotFound { name: String },
@@ -182,6 +182,13 @@ impl AkhPaths {
     /// Path to the library documents directory.
     pub fn library_documents_dir(&self) -> PathBuf {
         self.data_dir.join("library").join("documents")
+    }
+
+    /// Path to the akhomed PID/port file (`runtime_dir/akhomed.pid`).
+    ///
+    /// Contains JSON: `{ "pid": N, "port": P, "bind": "addr" }`.
+    pub fn pid_file(&self) -> PathBuf {
+        self.runtime_dir.join("akhomed.pid")
     }
 }
 

@@ -17,7 +17,7 @@ use crate::vsa::HyperVec;
 pub use crate::provenance::{DerivationKind, ProvenanceRecord};
 
 /// Query for the inference engine.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct InferenceQuery {
     /// Seed symbols to start inference from.
     pub seeds: Vec<SymbolId>,
@@ -88,7 +88,7 @@ impl InferenceQuery {
 }
 
 /// Result of an inference query.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct InferenceResult {
     /// Activated symbols with their confidence scores.
     pub activations: Vec<(SymbolId, f32)>,

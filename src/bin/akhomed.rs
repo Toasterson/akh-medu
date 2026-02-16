@@ -1,5 +1,6 @@
-//! akh-medu multi-workspace server.
+//! akhomed — the akh-medu daemon.
 //!
+//! Single authority over engine instances; the `akh` CLI connects here.
 //! Hosts N engine workspaces with REST and WebSocket APIs:
 //!
 //! **Workspace management:**
@@ -21,7 +22,7 @@
 //! **Health:**
 //! - `GET  /health` — server status
 //!
-//! Build and run: `cargo run --features server --bin akh-medu-server`
+//! Build and run: `cargo run --features server --bin akhomed`
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -42,9 +43,13 @@ use akh_medu::engine::{Engine, EngineConfig};
 use akh_medu::grammar::concrete::ParseContext;
 use akh_medu::grammar::entity_resolution::{EquivalenceStats, LearnedEquivalence};
 use akh_medu::grammar::preprocess::{PreProcessRequest, PreProcessResponse, preprocess_batch};
+use akh_medu::graph::Triple;
+use akh_medu::graph::traverse::TraversalConfig;
+use akh_medu::infer::InferenceQuery;
 use akh_medu::message::AkhMessage;
 use akh_medu::paths::AkhPaths;
 use akh_medu::seeds::SeedRegistry;
+use akh_medu::symbol::{SymbolId, SymbolKind};
 use akh_medu::vsa::Dimension;
 use akh_medu::workspace::WorkspaceManager;
 
@@ -255,6 +260,433 @@ async fn workspace_equivalences_stats(
 ) -> Result<Json<EquivalenceStats>, (StatusCode, String)> {
     let engine = state.get_engine(&name).await?;
     Ok(Json(engine.equivalence_stats()))
+}
+
+// ── Symbol handlers ──────────────────────────────────────────────────────
+
+async fn list_symbols(
+    State(state): State<Arc<ServerState>>,
+    Path(name): Path<String>,
+) -> Result<Json<Vec<akh_medu::symbol::SymbolMeta>>, (StatusCode, String)> {
+    let engine = state.get_engine(&name).await?;
+    Ok(Json(engine.all_symbols()))
+}
+
+async fn resolve_symbol(
+    State(state): State<Arc<ServerState>>,
+    Path((ws_name, sym)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let engine = state.get_engine(&ws_name).await?;
+    match engine.resolve_symbol(&sym) {
+        Ok(id) => {
+            let label = engine.resolve_label(id);
+            Ok(Json(serde_json::json!({ "id": id.get(), "label": label })))
+        }
+        Err(e) => Err((StatusCode::NOT_FOUND, format!("{e}"))),
+    }
+}
+
+#[derive(Deserialize)]
+struct CreateSymbolReq {
+    kind: String,
+    label: String,
+}
+
+async fn create_symbol(
+    State(state): State<Arc<ServerState>>,
+    Path(ws_name): Path<String>,
+    Json(req): Json<CreateSymbolReq>,
+) -> Result<Json<akh_medu::symbol::SymbolMeta>, (StatusCode, String)> {
+    let engine = state.get_engine(&ws_name).await?;
+    let kind = match req.kind.as_str() {
+        "entity" => SymbolKind::Entity,
+        "relation" => SymbolKind::Relation,
+        other => return Err((StatusCode::BAD_REQUEST, format!("unknown kind: {other}"))),
+    };
+    engine
+        .create_symbol(kind, &req.label)
+        .map(Json)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))
+}
+
+// ── Triple handlers ─────────────────────────────────────────────────────
+
+async fn list_triples(
+    State(state): State<Arc<ServerState>>,
+    Path(name): Path<String>,
+) -> Result<Json<Vec<Triple>>, (StatusCode, String)> {
+    let engine = state.get_engine(&name).await?;
+    Ok(Json(engine.all_triples()))
+}
+
+async fn triples_from(
+    State(state): State<Arc<ServerState>>,
+    Path((ws_name, sym_id)): Path<(String, u64)>,
+) -> Result<Json<Vec<Triple>>, (StatusCode, String)> {
+    let engine = state.get_engine(&ws_name).await?;
+    let id = SymbolId::new(sym_id)
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "invalid symbol id".to_string()))?;
+    Ok(Json(engine.triples_from(id)))
+}
+
+async fn triples_to(
+    State(state): State<Arc<ServerState>>,
+    Path((ws_name, sym_id)): Path<(String, u64)>,
+) -> Result<Json<Vec<Triple>>, (StatusCode, String)> {
+    let engine = state.get_engine(&ws_name).await?;
+    let id = SymbolId::new(sym_id)
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "invalid symbol id".to_string()))?;
+    Ok(Json(engine.triples_to(id)))
+}
+
+#[derive(Deserialize)]
+struct AddTripleReq {
+    subject: u64,
+    predicate: u64,
+    object: u64,
+    #[serde(default = "default_confidence")]
+    confidence: f32,
+}
+
+fn default_confidence() -> f32 {
+    1.0
+}
+
+async fn add_triple(
+    State(state): State<Arc<ServerState>>,
+    Path(ws_name): Path<String>,
+    Json(req): Json<AddTripleReq>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let engine = state.get_engine(&ws_name).await?;
+    let s = SymbolId::new(req.subject)
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "invalid subject id".to_string()))?;
+    let p = SymbolId::new(req.predicate)
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "invalid predicate id".to_string()))?;
+    let o = SymbolId::new(req.object)
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "invalid object id".to_string()))?;
+    let mut triple = Triple::new(s, p, o);
+    triple.confidence = req.confidence;
+    engine
+        .add_triple(&triple)
+        .map(|_| Json(serde_json::json!({"ok": true})))
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))
+}
+
+#[derive(Deserialize)]
+struct IngestReq {
+    triples: Vec<(String, String, String, f32)>,
+}
+
+async fn ingest_triples(
+    State(state): State<Arc<ServerState>>,
+    Path(ws_name): Path<String>,
+    Json(req): Json<IngestReq>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let engine = state.get_engine(&ws_name).await?;
+    match engine.ingest_label_triples(&req.triples) {
+        Ok((syms, trips)) => Ok(Json(serde_json::json!({
+            "symbols_created": syms,
+            "triples_ingested": trips,
+        }))),
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, format!("{e}"))),
+    }
+}
+
+// ── Query & reasoning handlers ──────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct SparqlReq {
+    query: String,
+}
+
+async fn sparql_query(
+    State(state): State<Arc<ServerState>>,
+    Path(ws_name): Path<String>,
+    Json(req): Json<SparqlReq>,
+) -> Result<Json<Vec<Vec<(String, String)>>>, (StatusCode, String)> {
+    let engine = state.get_engine(&ws_name).await?;
+    engine
+        .sparql_query(&req.query)
+        .map(Json)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))
+}
+
+async fn infer_handler(
+    State(state): State<Arc<ServerState>>,
+    Path(ws_name): Path<String>,
+    Json(query): Json<InferenceQuery>,
+) -> Result<Json<akh_medu::infer::InferenceResult>, (StatusCode, String)> {
+    let engine = state.get_engine(&ws_name).await?;
+    engine
+        .infer(&query)
+        .map(Json)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))
+}
+
+#[derive(Deserialize)]
+struct ReasonReq {
+    expr: String,
+}
+
+async fn reason_handler(
+    State(state): State<Arc<ServerState>>,
+    Path(ws_name): Path<String>,
+    Json(req): Json<ReasonReq>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let engine = state.get_engine(&ws_name).await?;
+    match engine.simplify_expression(&req.expr) {
+        Ok(result) => Ok(Json(serde_json::json!({ "result": result }))),
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, format!("{e}"))),
+    }
+}
+
+#[derive(Deserialize)]
+struct SearchReq {
+    symbol: u64,
+    #[serde(default = "default_top_k")]
+    top_k: usize,
+}
+
+fn default_top_k() -> usize {
+    5
+}
+
+async fn search_handler(
+    State(state): State<Arc<ServerState>>,
+    Path(ws_name): Path<String>,
+    Json(req): Json<SearchReq>,
+) -> Result<Json<Vec<akh_medu::vsa::item_memory::SearchResult>>, (StatusCode, String)> {
+    let engine = state.get_engine(&ws_name).await?;
+    let id = SymbolId::new(req.symbol)
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "invalid symbol id".to_string()))?;
+    engine
+        .search_similar_to(id, req.top_k)
+        .map(Json)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))
+}
+
+#[derive(Deserialize)]
+struct AnalogyReq {
+    a: u64,
+    b: u64,
+    c: u64,
+    #[serde(default = "default_top_k")]
+    top_k: usize,
+}
+
+async fn analogy_handler(
+    State(state): State<Arc<ServerState>>,
+    Path(ws_name): Path<String>,
+    Json(req): Json<AnalogyReq>,
+) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, String)> {
+    let engine = state.get_engine(&ws_name).await?;
+    let a = SymbolId::new(req.a)
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "invalid a".to_string()))?;
+    let b = SymbolId::new(req.b)
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "invalid b".to_string()))?;
+    let c = SymbolId::new(req.c)
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "invalid c".to_string()))?;
+    match engine.infer_analogy(a, b, c, req.top_k) {
+        Ok(results) => Ok(Json(
+            results
+                .into_iter()
+                .map(|(sym, score)| serde_json::json!({"symbol": sym.get(), "score": score}))
+                .collect(),
+        )),
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, format!("{e}"))),
+    }
+}
+
+#[derive(Deserialize)]
+struct FillerReq {
+    subject: u64,
+    predicate: u64,
+    #[serde(default = "default_top_k")]
+    top_k: usize,
+}
+
+async fn filler_handler(
+    State(state): State<Arc<ServerState>>,
+    Path(ws_name): Path<String>,
+    Json(req): Json<FillerReq>,
+) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, String)> {
+    let engine = state.get_engine(&ws_name).await?;
+    let s = SymbolId::new(req.subject)
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "invalid subject".to_string()))?;
+    let p = SymbolId::new(req.predicate)
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "invalid predicate".to_string()))?;
+    match engine.recover_filler(s, p, req.top_k) {
+        Ok(results) => Ok(Json(
+            results
+                .into_iter()
+                .map(|(sym, score)| serde_json::json!({"symbol": sym.get(), "score": score}))
+                .collect(),
+        )),
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, format!("{e}"))),
+    }
+}
+
+// ── Traversal & analytics handlers ──────────────────────────────────────
+
+#[derive(Deserialize)]
+struct TraverseReq {
+    seeds: Vec<u64>,
+    #[serde(default = "default_max_depth")]
+    max_depth: usize,
+    #[serde(default)]
+    predicate_filter: std::collections::HashSet<u64>,
+    #[serde(default)]
+    min_confidence: f32,
+    #[serde(default = "default_max_results")]
+    max_results: usize,
+}
+
+fn default_max_depth() -> usize {
+    3
+}
+fn default_max_results() -> usize {
+    1000
+}
+
+async fn traverse_handler(
+    State(state): State<Arc<ServerState>>,
+    Path(ws_name): Path<String>,
+    Json(req): Json<TraverseReq>,
+) -> Result<Json<akh_medu::graph::traverse::TraversalResult>, (StatusCode, String)> {
+    let engine = state.get_engine(&ws_name).await?;
+    let seeds: Vec<SymbolId> = req
+        .seeds
+        .iter()
+        .filter_map(|&id| SymbolId::new(id))
+        .collect();
+    let pred_filter: std::collections::HashSet<SymbolId> = req
+        .predicate_filter
+        .iter()
+        .filter_map(|&id| SymbolId::new(id))
+        .collect();
+    let config = TraversalConfig {
+        max_depth: req.max_depth,
+        predicate_filter: pred_filter,
+        min_confidence: req.min_confidence,
+        max_results: req.max_results,
+    };
+    engine
+        .traverse(&seeds, config)
+        .map(Json)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))
+}
+
+async fn degree_centrality_handler(
+    State(state): State<Arc<ServerState>>,
+    Path(ws_name): Path<String>,
+) -> Result<Json<Vec<akh_medu::graph::analytics::DegreeCentrality>>, (StatusCode, String)> {
+    let engine = state.get_engine(&ws_name).await?;
+    Ok(Json(engine.degree_centrality()))
+}
+
+async fn pagerank_handler(
+    State(state): State<Arc<ServerState>>,
+    Path(ws_name): Path<String>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> Result<Json<Vec<akh_medu::graph::analytics::PageRankScore>>, (StatusCode, String)> {
+    let engine = state.get_engine(&ws_name).await?;
+    let damping: f64 = params
+        .get("damping")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0.85);
+    let iterations: usize = params
+        .get("iterations")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(20);
+    engine
+        .pagerank(damping, iterations)
+        .map(Json)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))
+}
+
+async fn components_handler(
+    State(state): State<Arc<ServerState>>,
+    Path(ws_name): Path<String>,
+) -> Result<Json<Vec<akh_medu::graph::analytics::ConnectedComponent>>, (StatusCode, String)> {
+    let engine = state.get_engine(&ws_name).await?;
+    engine
+        .strongly_connected_components()
+        .map(Json)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))
+}
+
+#[derive(Deserialize)]
+struct ShortestPathReq {
+    from: u64,
+    to: u64,
+}
+
+async fn shortest_path_handler(
+    State(state): State<Arc<ServerState>>,
+    Path(ws_name): Path<String>,
+    Json(req): Json<ShortestPathReq>,
+) -> Result<Json<Option<Vec<u64>>>, (StatusCode, String)> {
+    let engine = state.get_engine(&ws_name).await?;
+    let from = SymbolId::new(req.from)
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "invalid from".to_string()))?;
+    let to = SymbolId::new(req.to)
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "invalid to".to_string()))?;
+    match engine.shortest_path(from, to) {
+        Ok(path) => Ok(Json(path.map(|p| p.into_iter().map(|s| s.get()).collect()))),
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, format!("{e}"))),
+    }
+}
+
+// ── Export handlers ─────────────────────────────────────────────────────
+
+async fn export_symbols(
+    State(state): State<Arc<ServerState>>,
+    Path(ws_name): Path<String>,
+) -> Result<Json<Vec<akh_medu::export::SymbolExport>>, (StatusCode, String)> {
+    let engine = state.get_engine(&ws_name).await?;
+    Ok(Json(engine.export_symbol_table()))
+}
+
+async fn export_triples(
+    State(state): State<Arc<ServerState>>,
+    Path(ws_name): Path<String>,
+) -> Result<Json<Vec<akh_medu::export::TripleExport>>, (StatusCode, String)> {
+    let engine = state.get_engine(&ws_name).await?;
+    Ok(Json(engine.export_triples()))
+}
+
+async fn export_provenance(
+    State(state): State<Arc<ServerState>>,
+    Path((ws_name, sym)): Path<(String, String)>,
+) -> Result<Json<Vec<akh_medu::export::ProvenanceExport>>, (StatusCode, String)> {
+    let engine = state.get_engine(&ws_name).await?;
+    let id = engine
+        .resolve_symbol(&sym)
+        .map_err(|e| (StatusCode::NOT_FOUND, format!("{e}")))?;
+    engine
+        .export_provenance_chain(id)
+        .map(Json)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))
+}
+
+// ── Skills handlers ─────────────────────────────────────────────────────
+
+async fn list_skills_handler(
+    State(state): State<Arc<ServerState>>,
+    Path(ws_name): Path<String>,
+) -> Result<Json<Vec<akh_medu::skills::SkillInfo>>, (StatusCode, String)> {
+    let engine = state.get_engine(&ws_name).await?;
+    Ok(Json(engine.list_skills()))
+}
+
+// ── Engine info handler ─────────────────────────────────────────────────
+
+async fn engine_info(
+    State(state): State<Arc<ServerState>>,
+    Path(ws_name): Path<String>,
+) -> Result<Json<akh_medu::engine::EngineInfo>, (StatusCode, String)> {
+    let engine = state.get_engine(&ws_name).await?;
+    Ok(Json(engine.info()))
 }
 
 // ── WebSocket handler ─────────────────────────────────────────────────────
@@ -541,9 +973,16 @@ async fn main() {
         std::process::exit(1);
     }
 
-    let state = Arc::new(ServerState::new(paths));
+    let port_num: u16 = port.parse().expect("AKH_SERVER_PORT must be a valid u16");
 
-    tracing::info!("akh-medu server initialized");
+    let state = Arc::new(ServerState::new(paths.clone()));
+
+    tracing::info!("akhomed initialized");
+
+    // Write PID file so `akh` CLI can discover this server.
+    if let Err(e) = akh_medu::client::write_pid_file(&paths, port_num, &bind) {
+        tracing::warn!("failed to write PID file: {e}");
+    }
 
     let app = Router::new()
         // Health.
@@ -553,6 +992,74 @@ async fn main() {
         .route("/workspaces/{name}", post(create_workspace))
         .route("/workspaces/{name}", delete(delete_workspace))
         .route("/workspaces/{name}/status", get(workspace_status))
+        // Symbols.
+        .route(
+            "/workspaces/{ws_name}/symbols",
+            get(list_symbols).post(create_symbol),
+        )
+        .route(
+            "/workspaces/{ws_name}/symbols/{sym}",
+            get(resolve_symbol),
+        )
+        // Triples.
+        .route(
+            "/workspaces/{ws_name}/triples",
+            get(list_triples).post(add_triple),
+        )
+        .route(
+            "/workspaces/{ws_name}/triples/from/{sym_id}",
+            get(triples_from),
+        )
+        .route(
+            "/workspaces/{ws_name}/triples/to/{sym_id}",
+            get(triples_to),
+        )
+        .route("/workspaces/{ws_name}/ingest", post(ingest_triples))
+        // Query & reasoning.
+        .route("/workspaces/{ws_name}/sparql", post(sparql_query))
+        .route("/workspaces/{ws_name}/infer", post(infer_handler))
+        .route("/workspaces/{ws_name}/reason", post(reason_handler))
+        .route("/workspaces/{ws_name}/search", post(search_handler))
+        .route("/workspaces/{ws_name}/analogy", post(analogy_handler))
+        .route("/workspaces/{ws_name}/filler", post(filler_handler))
+        // Traversal & analytics.
+        .route("/workspaces/{ws_name}/traverse", post(traverse_handler))
+        .route(
+            "/workspaces/{ws_name}/analytics/centrality",
+            get(degree_centrality_handler),
+        )
+        .route(
+            "/workspaces/{ws_name}/analytics/pagerank",
+            get(pagerank_handler),
+        )
+        .route(
+            "/workspaces/{ws_name}/analytics/components",
+            get(components_handler),
+        )
+        .route(
+            "/workspaces/{ws_name}/analytics/shortest-path",
+            post(shortest_path_handler),
+        )
+        // Export.
+        .route(
+            "/workspaces/{ws_name}/export/symbols",
+            get(export_symbols),
+        )
+        .route(
+            "/workspaces/{ws_name}/export/triples",
+            get(export_triples),
+        )
+        .route(
+            "/workspaces/{ws_name}/export/provenance/{sym}",
+            get(export_provenance),
+        )
+        // Skills.
+        .route(
+            "/workspaces/{ws_name}/skills",
+            get(list_skills_handler),
+        )
+        // Engine info.
+        .route("/workspaces/{ws_name}/info", get(engine_info))
         // Seed packs.
         .route("/workspaces/{ws_name}/seed/{pack_name}", post(apply_seed))
         // Preprocessing.
@@ -570,10 +1077,37 @@ async fn main() {
         .layer(CorsLayer::permissive())
         .with_state(state);
 
-    tracing::info!("akh-medu server listening on {addr}");
+    tracing::info!("akhomed listening on {addr}");
 
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
         .expect("failed to bind");
-    axum::serve(listener, app).await.expect("server error");
+
+    // Serve with graceful shutdown on SIGTERM/SIGINT.
+    let paths_for_shutdown = paths.clone();
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            let ctrl_c = tokio::signal::ctrl_c();
+            #[cfg(unix)]
+            {
+                let mut sigterm =
+                    tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                        .expect("failed to register SIGTERM handler");
+                tokio::select! {
+                    _ = ctrl_c => {},
+                    _ = sigterm.recv() => {},
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                ctrl_c.await.ok();
+            }
+            tracing::info!("akhomed shutting down");
+            akh_medu::client::remove_pid_file(&paths_for_shutdown);
+        })
+        .await
+        .expect("server error");
+
+    // Belt-and-suspenders: clean up PID file on normal exit too.
+    akh_medu::client::remove_pid_file(&paths);
 }

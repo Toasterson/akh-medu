@@ -81,7 +81,7 @@ pub struct LoadedSkill {
 }
 
 /// Summary info for listing skills.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SkillInfo {
     /// Skill identifier.
     pub id: String,

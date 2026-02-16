@@ -2,7 +2,12 @@
 //!
 //! The TUI provides: scrollable message output, input area, status bar,
 //! and TUI commands (e.g., `/grammar`, `/workspace`, `/goals`, `/quit`).
+//!
+//! Supports two backends:
+//! - **Local**: direct agent + engine (current behavior)
+//! - **Remote**: WebSocket connection to akhomed (feature-gated behind `daemon`)
 
+pub mod remote;
 pub mod sink;
 pub mod widgets;
 
@@ -16,23 +21,36 @@ use crate::agent::{Agent, AgentConfig, IdleScheduler};
 use crate::engine::Engine;
 use crate::message::AkhMessage;
 
+/// The chat backend: either a local agent+engine or a remote WS connection.
+enum ChatBackend {
+    /// Direct local engine and agent.
+    Local {
+        agent: Agent,
+        engine: Arc<Engine>,
+        tui_sink: Arc<sink::TuiSink>,
+        idle_scheduler: IdleScheduler,
+    },
+    /// WebSocket connection to akhomed.
+    #[cfg(feature = "daemon")]
+    Remote {
+        remote: remote::RemoteChat,
+    },
+}
+
 /// TUI application state.
 pub struct AkhTui {
     workspace: String,
     grammar: String,
-    agent: Agent,
-    engine: Arc<Engine>,
+    backend: ChatBackend,
     messages: Vec<AkhMessage>,
     input_buffer: String,
     scroll_offset: usize,
     should_quit: bool,
-    tui_sink: Arc<sink::TuiSink>,
-    idle_scheduler: IdleScheduler,
 }
 
 impl AkhTui {
-    /// Create a new TUI instance.
-    pub fn new(workspace: String, engine: Arc<Engine>, agent: Agent) -> Self {
+    /// Create a new TUI instance with a local engine backend.
+    pub fn new_local(workspace: String, engine: Arc<Engine>, agent: Agent) -> Self {
         let grammar = engine
             .compartments()
             .and_then(|cm| cm.psyche())
@@ -44,16 +62,34 @@ impl AkhTui {
         Self {
             workspace,
             grammar,
-            agent,
-            engine,
+            backend: ChatBackend::Local {
+                agent,
+                engine,
+                tui_sink,
+                idle_scheduler: IdleScheduler::default(),
+            },
             messages: vec![AkhMessage::system(
-                "Welcome to akh-medu. Type a question or command. /help for commands, /quit to exit.",
+                "Welcome to akh. Type a question or command. /help for commands, /quit to exit.",
             )],
             input_buffer: String::new(),
             scroll_offset: 0,
             should_quit: false,
-            tui_sink,
-            idle_scheduler: IdleScheduler::default(),
+        }
+    }
+
+    /// Create a new TUI instance with a remote WS backend.
+    #[cfg(feature = "daemon")]
+    pub fn new_remote(workspace: String, remote: remote::RemoteChat) -> Self {
+        Self {
+            workspace,
+            grammar: "narrative".to_string(),
+            backend: ChatBackend::Remote { remote },
+            messages: vec![AkhMessage::system(
+                "Connected to akhomed. Type a question or command. /help for commands, /quit to exit.",
+            )],
+            input_buffer: String::new(),
+            scroll_offset: 0,
+            should_quit: false,
         }
     }
 
@@ -61,23 +97,23 @@ impl AkhTui {
     pub fn run(&mut self) -> miette::Result<()> {
         let mut terminal = ratatui::init();
 
-        // Set the agent's sink to our TUI sink.
-        self.agent.set_sink(self.tui_sink.clone());
+        // Set the agent's sink (local only).
+        if let ChatBackend::Local {
+            ref mut agent,
+            ref tui_sink,
+            ..
+        } = self.backend
+        {
+            agent.set_sink(tui_sink.clone());
+        }
 
         loop {
-            // Drain any pending messages from the sink.
-            let pending = self.tui_sink.drain();
-            self.messages.extend(pending);
+            // Drain pending messages from backend.
+            self.drain_backend_messages();
 
             terminal
                 .draw(|frame| {
-                    let symbol_count = self.engine.all_symbols().len();
-                    let goal_count = self
-                        .agent
-                        .goals()
-                        .iter()
-                        .filter(|g| matches!(g.status, crate::agent::GoalStatus::Active))
-                        .count();
+                    let (cycle_count, symbol_count, goal_count) = self.status_counts();
 
                     widgets::render(
                         frame,
@@ -86,7 +122,7 @@ impl AkhTui {
                         &self.messages,
                         &self.input_buffer,
                         self.scroll_offset,
-                        self.agent.cycle_count(),
+                        cycle_count,
                         symbol_count,
                         goal_count,
                     );
@@ -106,20 +142,78 @@ impl AkhTui {
                     self.handle_key(key.code, key.modifiers);
                 }
             } else {
-                // Idle — run a background task if one is due.
-                if let Some(result) = self.idle_scheduler.tick(&mut self.agent) {
-                    self.messages.push(AkhMessage::system(format!(
-                        "[idle:{}] {}",
-                        result.task, result.summary,
-                    )));
-                }
+                self.on_idle();
             }
         }
 
-        // Persist session on exit.
-        self.agent.persist_session().into_diagnostic()?;
+        self.on_exit()?;
 
         ratatui::restore();
+        Ok(())
+    }
+
+    /// Drain pending messages from the backend.
+    fn drain_backend_messages(&mut self) {
+        match self.backend {
+            ChatBackend::Local { ref tui_sink, .. } => {
+                let pending = tui_sink.drain();
+                self.messages.extend(pending);
+            }
+            #[cfg(feature = "daemon")]
+            ChatBackend::Remote { ref mut remote } => {
+                while let Some(msg) = remote.try_recv() {
+                    self.messages.push(msg);
+                }
+            }
+        }
+    }
+
+    /// Get (cycle_count, symbol_count, goal_count) for the status bar.
+    fn status_counts(&self) -> (u64, usize, usize) {
+        match self.backend {
+            ChatBackend::Local {
+                ref agent,
+                ref engine,
+                ..
+            } => {
+                let symbol_count = engine.all_symbols().len();
+                let goal_count = agent
+                    .goals()
+                    .iter()
+                    .filter(|g| matches!(g.status, crate::agent::GoalStatus::Active))
+                    .count();
+                (agent.cycle_count(), symbol_count, goal_count)
+            }
+            #[cfg(feature = "daemon")]
+            ChatBackend::Remote { .. } => {
+                // Remote mode: status info comes from server messages.
+                (0, 0, 0)
+            }
+        }
+    }
+
+    /// Called on idle (no key events).
+    fn on_idle(&mut self) {
+        if let ChatBackend::Local {
+            ref mut agent,
+            ref mut idle_scheduler,
+            ..
+        } = self.backend
+        {
+            if let Some(result) = idle_scheduler.tick(agent) {
+                self.messages.push(AkhMessage::system(format!(
+                    "[idle:{}] {}",
+                    result.task, result.summary,
+                )));
+            }
+        }
+    }
+
+    /// Called on exit — persist session, etc.
+    fn on_exit(&mut self) -> miette::Result<()> {
+        if let ChatBackend::Local { ref mut agent, .. } = self.backend {
+            agent.persist_session().into_diagnostic()?;
+        }
         Ok(())
     }
 
@@ -171,17 +265,39 @@ impl AkhTui {
             return;
         }
 
-        // User message — show it in the messages area.
+        // Show user input in the messages area.
         self.messages.push(AkhMessage::Prompt {
             question: format!("> {input}"),
         });
 
-        // Classify intent and process.
+        match self.backend {
+            ChatBackend::Local { .. } => self.process_input_local(input),
+            #[cfg(feature = "daemon")]
+            ChatBackend::Remote { ref remote, .. } => {
+                remote.send_input(input);
+            }
+        }
+
+        // Auto-scroll to bottom.
+        self.scroll_offset = self.messages.len().saturating_sub(1);
+    }
+
+    /// Process input against the local engine/agent.
+    fn process_input_local(&mut self, input: &str) {
+        let ChatBackend::Local {
+            ref mut agent,
+            ref engine,
+            ..
+        } = self.backend
+        else {
+            return;
+        };
+
         let intent = crate::agent::classify_intent(input);
 
         match intent {
             crate::agent::UserIntent::SetGoal { description } => {
-                match self.agent.add_goal(&description, 128, "User-directed goal") {
+                match agent.add_goal(&description, 128, "User-directed goal") {
                     Ok(id) => {
                         self.messages.push(AkhMessage::system(format!(
                             "Goal added: \"{description}\" (id: {})",
@@ -189,7 +305,7 @@ impl AkhTui {
                         )));
                         // Run a few cycles.
                         for _ in 0..5 {
-                            match self.agent.run_cycle() {
+                            match agent.run_cycle() {
                                 Ok(result) => {
                                     self.messages.push(AkhMessage::tool_result(
                                         &result.decision.chosen_tool,
@@ -200,14 +316,13 @@ impl AkhTui {
                                 Err(_) => break,
                             }
                             // Stop if no more active goals.
-                            let active = crate::agent::goal::active_goals(self.agent.goals());
+                            let active = crate::agent::goal::active_goals(agent.goals());
                             if active.is_empty() {
                                 break;
                             }
                         }
                         // Synthesize findings.
-                        let summary = self
-                            .agent
+                        let summary = agent
                             .synthesize_findings_with_grammar(&description, &self.grammar);
                         if !summary.overview.is_empty() {
                             self.messages
@@ -229,11 +344,10 @@ impl AkhTui {
                 }
             }
             crate::agent::UserIntent::Query { subject } => {
-                // Direct KG lookup.
-                match self.engine.resolve_symbol(&subject) {
+                match engine.resolve_symbol(&subject) {
                     Ok(sym_id) => {
-                        let from_triples = self.engine.triples_from(sym_id);
-                        let to_triples = self.engine.triples_to(sym_id);
+                        let from_triples = engine.triples_from(sym_id);
+                        let to_triples = engine.triples_to(sym_id);
 
                         if from_triples.is_empty() && to_triples.is_empty() {
                             self.messages.push(AkhMessage::system(format!(
@@ -243,17 +357,17 @@ impl AkhTui {
                             for t in &from_triples {
                                 self.messages.push(AkhMessage::fact(format!(
                                     "{} {} {}",
-                                    self.engine.resolve_label(t.subject),
-                                    self.engine.resolve_label(t.predicate),
-                                    self.engine.resolve_label(t.object),
+                                    engine.resolve_label(t.subject),
+                                    engine.resolve_label(t.predicate),
+                                    engine.resolve_label(t.object),
                                 )));
                             }
                             for t in &to_triples {
                                 self.messages.push(AkhMessage::fact(format!(
                                     "{} {} {}",
-                                    self.engine.resolve_label(t.subject),
-                                    self.engine.resolve_label(t.predicate),
-                                    self.engine.resolve_label(t.object),
+                                    engine.resolve_label(t.subject),
+                                    engine.resolve_label(t.predicate),
+                                    engine.resolve_label(t.object),
                                 )));
                             }
                         }
@@ -268,7 +382,7 @@ impl AkhTui {
             crate::agent::UserIntent::Assert { text } => {
                 use crate::agent::tool::Tool;
                 let tool_input = crate::agent::ToolInput::new().with_param("text", &text);
-                match crate::agent::tools::TextIngestTool.execute(&self.engine, tool_input) {
+                match crate::agent::tools::TextIngestTool.execute(engine, tool_input) {
                     Ok(output) => {
                         self.messages.push(AkhMessage::tool_result(
                             "text_ingest",
@@ -285,7 +399,7 @@ impl AkhTui {
             crate::agent::UserIntent::RunAgent { cycles } => {
                 let n = cycles.unwrap_or(1);
                 for _ in 0..n {
-                    match self.agent.run_cycle() {
+                    match agent.run_cycle() {
                         Ok(result) => {
                             self.messages.push(AkhMessage::tool_result(
                                 &result.decision.chosen_tool,
@@ -302,7 +416,7 @@ impl AkhTui {
                 }
             }
             crate::agent::UserIntent::ShowStatus => {
-                let goals = self.agent.goals();
+                let goals = agent.goals();
                 if goals.is_empty() {
                     self.messages
                         .push(AkhMessage::system("No active goals.".to_string()));
@@ -316,14 +430,14 @@ impl AkhTui {
                 }
                 self.messages.push(AkhMessage::system(format!(
                     "Cycles: {}, WM entries: {}, Triples: {}",
-                    self.agent.cycle_count(),
-                    self.agent.working_memory().len(),
-                    self.engine.all_triples().len(),
+                    agent.cycle_count(),
+                    agent.working_memory().len(),
+                    engine.all_triples().len(),
                 )));
             }
             crate::agent::UserIntent::RenderHiero { entity } => {
                 let render_config = crate::glyph::RenderConfig {
-                    color: false, // TUI handles its own colors
+                    color: false,
                     notation: crate::glyph::NotationConfig {
                         use_pua: crate::glyph::catalog::font_available(),
                         show_confidence: true,
@@ -335,11 +449,11 @@ impl AkhTui {
                 };
 
                 if let Some(ref name) = entity {
-                    match self.engine.resolve_symbol(name) {
-                        Ok(sym_id) => match self.engine.extract_subgraph(&[sym_id], 1) {
+                    match engine.resolve_symbol(name) {
+                        Ok(sym_id) => match engine.extract_subgraph(&[sym_id], 1) {
                             Ok(result) if !result.triples.is_empty() => {
                                 let rendered = crate::glyph::render::render_to_terminal(
-                                    &self.engine,
+                                    engine,
                                     &result.triples,
                                     &render_config,
                                 );
@@ -357,14 +471,14 @@ impl AkhTui {
                         }
                     }
                 } else {
-                    let triples = self.engine.all_triples();
+                    let triples = engine.all_triples();
                     if triples.is_empty() {
                         self.messages.push(AkhMessage::system(
                             "No triples in knowledge graph.".to_string(),
                         ));
                     } else {
                         let rendered = crate::glyph::render::render_to_terminal(
-                            &self.engine,
+                            engine,
                             &triples,
                             &render_config,
                         );
@@ -386,9 +500,6 @@ impl AkhTui {
                 ));
             }
         }
-
-        // Auto-scroll to bottom.
-        self.scroll_offset = self.messages.len().saturating_sub(1);
     }
 
     fn handle_command(&mut self, cmd: &str) {
@@ -414,8 +525,38 @@ impl AkhTui {
                     )));
                 }
             }
+            "goals" | "status" | "seed" => {
+                match self.backend {
+                    ChatBackend::Local { .. } => self.handle_command_local(parts[0], parts.get(1).copied()),
+                    #[cfg(feature = "daemon")]
+                    ChatBackend::Remote { ref remote, .. } => {
+                        // Forward as a command to the server.
+                        remote.send_command(cmd);
+                    }
+                }
+            }
+            _ => {
+                self.messages.push(AkhMessage::system(format!(
+                    "Unknown command: /{cmd}. Type /help for commands."
+                )));
+            }
+        }
+    }
+
+    /// Handle /goals, /status, /seed locally.
+    fn handle_command_local(&mut self, cmd: &str, arg: Option<&str>) {
+        let ChatBackend::Local {
+            ref agent,
+            ref engine,
+            ..
+        } = self.backend
+        else {
+            return;
+        };
+
+        match cmd {
             "goals" => {
-                let goals = self.agent.goals();
+                let goals = agent.goals();
                 if goals.is_empty() {
                     self.messages
                         .push(AkhMessage::system("No active goals.".to_string()));
@@ -429,13 +570,13 @@ impl AkhTui {
                 }
             }
             "status" => {
-                let info = self.engine.info();
+                let info = engine.info();
                 self.messages.push(AkhMessage::system(format!("{info}")));
             }
             "seed" => {
-                if let Some(pack_name) = parts.get(1) {
+                if let Some(pack_name) = arg {
                     let registry = crate::seeds::SeedRegistry::bundled();
-                    match registry.apply(pack_name, &self.engine) {
+                    match registry.apply(pack_name, engine) {
                         Ok(report) => {
                             if report.already_applied {
                                 self.messages.push(AkhMessage::system(format!(
@@ -458,16 +599,12 @@ impl AkhTui {
                         .push(AkhMessage::system("Usage: /seed <pack-name>".to_string()));
                 }
             }
-            _ => {
-                self.messages.push(AkhMessage::system(format!(
-                    "Unknown command: /{cmd}. Type /help for commands."
-                )));
-            }
+            _ => {}
         }
     }
 }
 
-/// Launch the TUI with a given engine and workspace.
+/// Launch the TUI with a local engine and workspace.
 pub fn launch(
     workspace: &str,
     engine: Arc<Engine>,
@@ -484,6 +621,19 @@ pub fn launch(
         agent.clear_goals();
     }
 
-    let mut tui = AkhTui::new(workspace.to_string(), engine, agent);
+    let mut tui = AkhTui::new_local(workspace.to_string(), engine, agent);
+    tui.run()
+}
+
+/// Launch the TUI connected to a remote akhomed server.
+#[cfg(feature = "daemon")]
+pub fn launch_remote(
+    workspace: &str,
+    info: &crate::client::ServerInfo,
+) -> miette::Result<()> {
+    let remote = remote::RemoteChat::connect(info, workspace)
+        .map_err(|e| miette::miette!("failed to connect: {e}"))?;
+
+    let mut tui = AkhTui::new_remote(workspace.to_string(), remote);
     tui.run()
 }

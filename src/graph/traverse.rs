@@ -12,7 +12,7 @@ use super::Triple;
 use super::index::KnowledgeGraph;
 
 /// Configuration for a graph traversal.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TraversalConfig {
     /// Maximum hop depth from seed nodes.
     pub max_depth: usize,
@@ -36,7 +36,7 @@ impl Default for TraversalConfig {
 }
 
 /// Result of a multi-hop traversal.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TraversalResult {
     /// All triples discovered during traversal.
     pub triples: Vec<Triple>,

@@ -51,7 +51,10 @@ pdf-extract = "0.10"
 epub = "2"
 
 # HTTP (sync)
-ureq = "2"
+ureq = { version = "2", features = ["json"] }
+
+# Process management (Unix PID checks)
+libc = "0.2"
 
 # Unicode
 unicode-normalization = "0.1"
@@ -73,11 +76,15 @@ axum = { version = "0.8", features = ["ws"], optional = true }
 tokio = { version = "1", features = ["full"], optional = true }
 tower-http = { version = "0.6", features = ["cors"], optional = true }
 
+# WebSocket client for TUI remote mode (feature-gated)
+tokio-tungstenite = { version = "0.26", optional = true }
+futures-util = { version = "0.3", optional = true }
+
 # WASM tool runtime (feature-gated)
 wasmtime = { version = "29", features = ["component-model"], optional = true }
 
 [features]
-daemon = ["tokio"]
+daemon = ["tokio", "tokio-tungstenite", "futures-util"]
 server = ["daemon", "axum", "tower-http"]
 wasm-tools = ["wasmtime"]
 
@@ -86,8 +93,12 @@ criterion = { version = "0.5", features = ["html_reports"] }
 tempfile = "3"
 
 [[bin]]
-name = "akh-medu-server"
-path = "src/bin/akh-medu-server.rs"
+name = "akh"
+path = "src/main.rs"
+
+[[bin]]
+name = "akhomed"
+path = "src/bin/akhomed.rs"
 required-features = ["server"]
 
 [[bench]]

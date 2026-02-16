@@ -1,4 +1,4 @@
-//! akh-medu CLI: neuro-symbolic AI engine.
+//! akh CLI: neuro-symbolic AI engine.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -9,6 +9,7 @@ use miette::{IntoDiagnostic, Result};
 
 use akh_medu::agent::{Agent, AgentConfig};
 use akh_medu::autonomous::{GapAnalysisConfig, RuleEngineConfig, SchemaDiscoveryConfig};
+use akh_medu::client::{AkhClient, discover_server};
 use akh_medu::engine::{Engine, EngineConfig};
 use akh_medu::error::EngineError;
 use akh_medu::glyph;
@@ -22,7 +23,7 @@ use akh_medu::symbol::SymbolId;
 use akh_medu::vsa::Dimension;
 
 #[derive(Parser)]
-#[command(name = "akh-medu", version, about = "Neuro-symbolic AI engine")]
+#[command(name = "akh", version, about = "Neuro-symbolic AI engine")]
 struct Cli {
     /// Data directory for persistent storage (overrides XDG workspace path).
     #[arg(long, global = true)]
@@ -732,6 +733,37 @@ enum WorkspaceAction {
     },
 }
 
+/// Resolve an [`AkhClient`]: prefer a running akhomed server, fall back to local engine.
+fn resolve_client(
+    workspace: &str,
+    config: EngineConfig,
+    xdg_paths: Option<&akh_medu::paths::AkhPaths>,
+) -> Result<AkhClient> {
+    if let Some(paths) = xdg_paths {
+        if let Some(server) = discover_server(paths) {
+            return Ok(AkhClient::remote(&server, workspace));
+        }
+    }
+    eprintln!("warning: akhomed not running, using local engine");
+    let engine = Engine::new(config).into_diagnostic()?;
+    Ok(AkhClient::local(Arc::new(engine)))
+}
+
+/// Get a local [`Arc<Engine>`] from an [`AkhClient`], creating one if needed.
+///
+/// Commands that need deep engine access (Agent, TUI, etc.) call this.
+fn require_local_engine(
+    client: &AkhClient,
+    config: EngineConfig,
+) -> Result<Arc<Engine>> {
+    if let Some(engine) = client.engine() {
+        Ok(Arc::clone(engine))
+    } else {
+        eprintln!("warning: this command requires a local engine, ignoring remote server");
+        Ok(Arc::new(Engine::new(config).into_diagnostic()?))
+    }
+}
+
 fn main() -> Result<()> {
     miette::set_hook(Box::new(|_| {
         Box::new(
@@ -828,7 +860,7 @@ fn main() -> Result<()> {
                     let names = mgr.list();
                     if names.is_empty() {
                         println!(
-                            "No workspaces found. Create one with: akh-medu workspace create <name>"
+                            "No workspaces found. Create one with: akh workspace create <name>"
                         );
                     } else {
                         println!("Workspaces:");
@@ -1146,13 +1178,13 @@ fn main() -> Result<()> {
             top_k,
             max_depth,
         } => {
-            let engine = Engine::new(config).into_diagnostic()?;
+            let client = resolve_client(&cli.workspace, config.clone(), xdg_paths.as_ref())?;
 
-            let seed_ids: std::result::Result<Vec<SymbolId>, _> = seeds
+            let seed_ids: Vec<SymbolId> = seeds
                 .split(',')
-                .map(|s| engine.resolve_symbol(s.trim()))
-                .collect();
-            let seed_ids = seed_ids.into_diagnostic()?;
+                .map(|s| client.resolve_symbol(s.trim()))
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .into_diagnostic()?;
 
             if seed_ids.is_empty() {
                 miette::bail!("no valid seed symbols provided");
@@ -1165,11 +1197,11 @@ fn main() -> Result<()> {
                 ..Default::default()
             };
 
-            let result = engine.infer(&query).into_diagnostic()?;
+            let result = client.infer(&query).into_diagnostic()?;
 
             println!("Inference results (top {top_k}, depth {max_depth}):");
             for (i, (sym_id, confidence)) in result.activations.iter().enumerate() {
-                let label = engine.resolve_label(*sym_id);
+                let label = client.resolve_label(*sym_id).unwrap_or_else(|_| format!("{sym_id}"));
                 println!(
                     "  {}. \"{}\" / {} (confidence: {:.4})",
                     i + 1,
@@ -1180,6 +1212,7 @@ fn main() -> Result<()> {
             }
 
             if !result.provenance.is_empty() {
+                let engine = require_local_engine(&client, config)?;
                 println!("\nProvenance:");
                 for record in &result.provenance {
                     let derived_label = engine.resolve_label(record.derived_id);
@@ -1204,20 +1237,22 @@ fn main() -> Result<()> {
             max_results,
             format,
         } => {
-            let engine = Engine::new(config).into_diagnostic()?;
+            let client = resolve_client(&cli.workspace, config, xdg_paths.as_ref())?;
 
-            let seed_ids: std::result::Result<Vec<SymbolId>, _> = seeds
+            let seed_ids: Vec<SymbolId> = seeds
                 .split(',')
-                .map(|s| engine.resolve_symbol(s.trim()))
-                .collect();
-            let seed_ids = seed_ids.into_diagnostic()?;
+                .map(|s| client.resolve_symbol(s.trim()))
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .into_diagnostic()?;
 
             let predicate_filter: HashSet<SymbolId> = if let Some(ref preds) = predicates {
-                let ids: std::result::Result<Vec<SymbolId>, _> = preds
+                preds
                     .split(',')
-                    .map(|s| engine.resolve_symbol(s.trim()))
-                    .collect();
-                ids.into_diagnostic()?.into_iter().collect()
+                    .map(|s| client.resolve_symbol(s.trim()))
+                    .collect::<std::result::Result<Vec<_>, _>>()
+                    .into_diagnostic()?
+                    .into_iter()
+                    .collect()
             } else {
                 HashSet::new()
             };
@@ -1229,7 +1264,7 @@ fn main() -> Result<()> {
                 max_results,
             };
 
-            let result = engine
+            let result = client
                 .traverse(&seed_ids, traverse_config)
                 .into_diagnostic()?;
 
@@ -1239,9 +1274,9 @@ fn main() -> Result<()> {
                     .iter()
                     .map(|t| {
                         serde_json::json!({
-                            "subject": engine.resolve_label(t.subject),
-                            "predicate": engine.resolve_label(t.predicate),
-                            "object": engine.resolve_label(t.object),
+                            "subject": client.resolve_label(t.subject).unwrap_or_else(|_| format!("{}", t.subject)),
+                            "predicate": client.resolve_label(t.predicate).unwrap_or_else(|_| format!("{}", t.predicate)),
+                            "object": client.resolve_label(t.object).unwrap_or_else(|_| format!("{}", t.object)),
                             "confidence": t.confidence,
                         })
                     })
@@ -1258,9 +1293,9 @@ fn main() -> Result<()> {
                 for t in &result.triples {
                     println!(
                         "  \"{}\" -> {} -> \"{}\"  [{:.2}]",
-                        engine.resolve_label(t.subject),
-                        engine.resolve_label(t.predicate),
-                        engine.resolve_label(t.object),
+                        client.resolve_label(t.subject).unwrap_or_else(|_| format!("{}", t.subject)),
+                        client.resolve_label(t.predicate).unwrap_or_else(|_| format!("{}", t.predicate)),
+                        client.resolve_label(t.object).unwrap_or_else(|_| format!("{}", t.object)),
                         t.confidence,
                     );
                 }
@@ -1268,7 +1303,7 @@ fn main() -> Result<()> {
         }
 
         Commands::Sparql { query, file } => {
-            let engine = Engine::new(config).into_diagnostic()?;
+            let client = resolve_client(&cli.workspace, config, xdg_paths.as_ref())?;
 
             let sparql_str = if let Some(q) = query {
                 q
@@ -1278,12 +1313,11 @@ fn main() -> Result<()> {
                 miette::bail!("provide either --query or --file for SPARQL");
             };
 
-            let results = engine.sparql_query(&sparql_str).into_diagnostic()?;
+            let results = client.sparql_query(&sparql_str).into_diagnostic()?;
 
             if results.is_empty() {
                 println!("No results.");
             } else {
-                // Print header from first row's variable names.
                 if let Some(first_row) = results.first() {
                     let header: Vec<&str> = first_row.iter().map(|(k, _)| k.as_str()).collect();
                     println!("{}", header.join("\t"));
@@ -1296,28 +1330,29 @@ fn main() -> Result<()> {
         }
 
         Commands::Reason { expr, verbose } => {
-            let engine = Engine::new(config).into_diagnostic()?;
+            let client = resolve_client(&cli.workspace, config.clone(), xdg_paths.as_ref())?;
 
             if verbose {
+                let engine = require_local_engine(&client, config)?;
                 let rules = engine.all_rules();
                 println!("Active rules: {}", rules.len());
             }
 
             println!("Input:      {expr}");
-            let simplified = engine.simplify_expression(&expr).into_diagnostic()?;
+            let simplified = client.simplify_expression(&expr).into_diagnostic()?;
             println!("Simplified: {simplified}");
         }
 
         Commands::Search { symbol, top_k } => {
-            let engine = Engine::new(config).into_diagnostic()?;
-            let sym_id = engine.resolve_symbol(&symbol).into_diagnostic()?;
-            let label = engine.resolve_label(sym_id);
+            let client = resolve_client(&cli.workspace, config, xdg_paths.as_ref())?;
+            let sym_id = client.resolve_symbol(&symbol).into_diagnostic()?;
+            let label = client.resolve_label(sym_id).unwrap_or_else(|_| symbol.clone());
 
-            let results = engine.search_similar_to(sym_id, top_k).into_diagnostic()?;
+            let results = client.search_similar_to(sym_id, top_k).into_diagnostic()?;
 
             println!("Similar to \"{label}\" (top {top_k}):");
             for (i, sr) in results.iter().enumerate() {
-                let sr_label = engine.resolve_label(sr.symbol_id);
+                let sr_label = client.resolve_label(sr.symbol_id).unwrap_or_else(|_| format!("{}", sr.symbol_id));
                 println!(
                     "  {}. \"{}\" / {} (similarity: {:.4})",
                     i + 1,
@@ -1329,22 +1364,22 @@ fn main() -> Result<()> {
         }
 
         Commands::Analogy { a, b, c, top_k } => {
-            let engine = Engine::new(config).into_diagnostic()?;
-            let a_id = engine.resolve_symbol(&a).into_diagnostic()?;
-            let b_id = engine.resolve_symbol(&b).into_diagnostic()?;
-            let c_id = engine.resolve_symbol(&c).into_diagnostic()?;
+            let client = resolve_client(&cli.workspace, config, xdg_paths.as_ref())?;
+            let a_id = client.resolve_symbol(&a).into_diagnostic()?;
+            let b_id = client.resolve_symbol(&b).into_diagnostic()?;
+            let c_id = client.resolve_symbol(&c).into_diagnostic()?;
 
-            let a_label = engine.resolve_label(a_id);
-            let b_label = engine.resolve_label(b_id);
-            let c_label = engine.resolve_label(c_id);
+            let a_label = client.resolve_label(a_id).unwrap_or_else(|_| a.clone());
+            let b_label = client.resolve_label(b_id).unwrap_or_else(|_| b.clone());
+            let c_label = client.resolve_label(c_id).unwrap_or_else(|_| c.clone());
 
-            let results = engine
+            let results = client
                 .infer_analogy(a_id, b_id, c_id, top_k)
                 .into_diagnostic()?;
 
             println!("Analogy: \"{a_label}\" : \"{b_label}\" :: \"{c_label}\" : ?");
             for (i, (sym_id, confidence)) in results.iter().enumerate() {
-                let label = engine.resolve_label(*sym_id);
+                let label = client.resolve_label(*sym_id).unwrap_or_else(|_| format!("{sym_id}"));
                 println!(
                     "  {}. \"{}\" / {} (confidence: {:.4})",
                     i + 1,
@@ -1360,20 +1395,20 @@ fn main() -> Result<()> {
             predicate,
             top_k,
         } => {
-            let engine = Engine::new(config).into_diagnostic()?;
-            let subj_id = engine.resolve_symbol(&subject).into_diagnostic()?;
-            let pred_id = engine.resolve_symbol(&predicate).into_diagnostic()?;
+            let client = resolve_client(&cli.workspace, config, xdg_paths.as_ref())?;
+            let subj_id = client.resolve_symbol(&subject).into_diagnostic()?;
+            let pred_id = client.resolve_symbol(&predicate).into_diagnostic()?;
 
-            let subj_label = engine.resolve_label(subj_id);
-            let pred_label = engine.resolve_label(pred_id);
+            let subj_label = client.resolve_label(subj_id).unwrap_or_else(|_| subject.clone());
+            let pred_label = client.resolve_label(pred_id).unwrap_or_else(|_| predicate.clone());
 
-            let results = engine
+            let results = client
                 .recover_filler(subj_id, pred_id, top_k)
                 .into_diagnostic()?;
 
             println!("Filler for (\"{subj_label}\", \"{pred_label}\"):");
             for (i, (sym_id, similarity)) in results.iter().enumerate() {
-                let label = engine.resolve_label(*sym_id);
+                let label = client.resolve_label(*sym_id).unwrap_or_else(|_| format!("{sym_id}"));
                 println!(
                     "  {}. \"{}\" / {} (similarity: {:.4})",
                     i + 1,
@@ -1385,16 +1420,17 @@ fn main() -> Result<()> {
         }
 
         Commands::Info => {
-            let engine = Engine::new(config).into_diagnostic()?;
-            println!("{}", engine.info());
+            let client = resolve_client(&cli.workspace, config, xdg_paths.as_ref())?;
+            let info = client.info().into_diagnostic()?;
+            println!("{info}");
         }
 
         Commands::Symbols { action } => {
-            let engine = Engine::new(config).into_diagnostic()?;
+            let client = resolve_client(&cli.workspace, config.clone(), xdg_paths.as_ref())?;
 
             match action {
                 SymbolAction::List => {
-                    let symbols = engine.all_symbols();
+                    let symbols = client.all_symbols().into_diagnostic()?;
                     if symbols.is_empty() {
                         println!("No symbols registered.");
                     } else {
@@ -1405,34 +1441,32 @@ fn main() -> Result<()> {
                     }
                 }
                 SymbolAction::Show { name_or_id } => {
-                    let id = engine.resolve_symbol(&name_or_id).into_diagnostic()?;
+                    let id = client.resolve_symbol(&name_or_id).into_diagnostic()?;
+                    // For Show we need engine-level detail; use local fallback.
+                    let engine = require_local_engine(&client, config.clone())?;
                     let meta = engine.get_symbol_meta(id).into_diagnostic()?;
                     println!("Symbol: \"{}\"", meta.label);
                     println!("  id:         {}", meta.id);
                     println!("  kind:       {}", meta.kind);
                     println!("  created_at: {}", meta.created_at);
 
-                    let from = engine.triples_from(id);
+                    let from = client.triples_from(id).into_diagnostic()?;
                     if !from.is_empty() {
                         println!("  outgoing triples ({}):", from.len());
                         for t in &from {
-                            println!(
-                                "    -> {} -> \"{}\"",
-                                engine.resolve_label(t.predicate),
-                                engine.resolve_label(t.object)
-                            );
+                            let pred = client.resolve_label(t.predicate).unwrap_or_else(|_| format!("{}", t.predicate));
+                            let obj = client.resolve_label(t.object).unwrap_or_else(|_| format!("{}", t.object));
+                            println!("    -> {pred} -> \"{obj}\"");
                         }
                     }
 
-                    let to = engine.triples_to(id);
+                    let to = client.triples_to(id).into_diagnostic()?;
                     if !to.is_empty() {
                         println!("  incoming triples ({}):", to.len());
                         for t in &to {
-                            println!(
-                                "    \"{}\" -> {} ->",
-                                engine.resolve_label(t.subject),
-                                engine.resolve_label(t.predicate)
-                            );
+                            let subj = client.resolve_label(t.subject).unwrap_or_else(|_| format!("{}", t.subject));
+                            let pred = client.resolve_label(t.predicate).unwrap_or_else(|_| format!("{}", t.predicate));
+                            println!("    \"{subj}\" -> {pred} ->");
                         }
                     }
                 }
@@ -1440,22 +1474,22 @@ fn main() -> Result<()> {
         }
 
         Commands::Export { action } => {
-            let engine = Engine::new(config).into_diagnostic()?;
+            let client = resolve_client(&cli.workspace, config, xdg_paths.as_ref())?;
 
             match action {
                 ExportAction::Symbols => {
-                    let exports = engine.export_symbol_table();
+                    let exports = client.export_symbols().into_diagnostic()?;
                     let json = serde_json::to_string_pretty(&exports).into_diagnostic()?;
                     println!("{json}");
                 }
                 ExportAction::Triples => {
-                    let exports = engine.export_triples();
+                    let exports = client.export_triples().into_diagnostic()?;
                     let json = serde_json::to_string_pretty(&exports).into_diagnostic()?;
                     println!("{json}");
                 }
                 ExportAction::Provenance { name_or_id } => {
-                    let id = engine.resolve_symbol(&name_or_id).into_diagnostic()?;
-                    let exports = engine.export_provenance_chain(id).into_diagnostic()?;
+                    let id = client.resolve_symbol(&name_or_id).into_diagnostic()?;
+                    let exports = client.export_provenance(id).into_diagnostic()?;
                     let json = serde_json::to_string_pretty(&exports).into_diagnostic()?;
                     println!("{json}");
                 }
@@ -1672,17 +1706,17 @@ fn main() -> Result<()> {
         }
 
         Commands::Analytics { action } => {
-            let engine = Engine::new(config).into_diagnostic()?;
+            let client = resolve_client(&cli.workspace, config, xdg_paths.as_ref())?;
 
             match action {
                 AnalyticsAction::Degree { top_k } => {
-                    let results = engine.degree_centrality();
+                    let results = client.degree_centrality().into_diagnostic()?;
                     if results.is_empty() {
                         println!("No nodes in graph.");
                     } else {
                         println!("Degree centrality (top {top_k}):");
                         for (i, dc) in results.iter().take(top_k).enumerate() {
-                            let label = engine.resolve_label(dc.symbol);
+                            let label = client.resolve_label(dc.symbol).unwrap_or_else(|_| format!("{}", dc.symbol));
                             println!(
                                 "  {}. \"{}\" / {} — in: {}, out: {}, total: {}",
                                 i + 1,
@@ -1700,7 +1734,7 @@ fn main() -> Result<()> {
                     iterations,
                     top_k,
                 } => {
-                    let results = engine.pagerank(damping, iterations).into_diagnostic()?;
+                    let results = client.pagerank(damping, iterations).into_diagnostic()?;
                     if results.is_empty() {
                         println!("No nodes in graph.");
                     } else {
@@ -1708,7 +1742,7 @@ fn main() -> Result<()> {
                             "PageRank (damping={damping}, iterations={iterations}, top {top_k}):"
                         );
                         for (i, pr) in results.iter().take(top_k).enumerate() {
-                            let label = engine.resolve_label(pr.symbol);
+                            let label = client.resolve_label(pr.symbol).unwrap_or_else(|_| format!("{}", pr.symbol));
                             println!(
                                 "  {}. \"{}\" / {} — score: {:.6}",
                                 i + 1,
@@ -1720,7 +1754,7 @@ fn main() -> Result<()> {
                     }
                 }
                 AnalyticsAction::Components => {
-                    let components = engine.strongly_connected_components().into_diagnostic()?;
+                    let components = client.strongly_connected_components().into_diagnostic()?;
                     if components.is_empty() {
                         println!("No components found.");
                     } else {
@@ -1730,7 +1764,7 @@ fn main() -> Result<()> {
                                 .members
                                 .iter()
                                 .take(10)
-                                .map(|s| engine.resolve_label(*s))
+                                .map(|s| client.resolve_label(*s).unwrap_or_else(|_| format!("{s}")))
                                 .collect();
                             let suffix = if comp.size > 10 {
                                 format!(" ... and {} more", comp.size - 10)
@@ -1748,16 +1782,16 @@ fn main() -> Result<()> {
                     }
                 }
                 AnalyticsAction::Path { from, to } => {
-                    let from_id = engine.resolve_symbol(&from).into_diagnostic()?;
-                    let to_id = engine.resolve_symbol(&to).into_diagnostic()?;
+                    let from_id = client.resolve_symbol(&from).into_diagnostic()?;
+                    let to_id = client.resolve_symbol(&to).into_diagnostic()?;
 
-                    let from_label = engine.resolve_label(from_id);
-                    let to_label = engine.resolve_label(to_id);
+                    let from_label = client.resolve_label(from_id).unwrap_or_else(|_| from.clone());
+                    let to_label = client.resolve_label(to_id).unwrap_or_else(|_| to.clone());
 
-                    match engine.shortest_path(from_id, to_id).into_diagnostic()? {
+                    match client.shortest_path(from_id, to_id).into_diagnostic()? {
                         Some(path) => {
                             let labels: Vec<String> =
-                                path.iter().map(|s| engine.resolve_label(*s)).collect();
+                                path.iter().map(|s| client.resolve_label(*s).unwrap_or_else(|_| format!("{s}"))).collect();
                             println!(
                                 "Shortest path from \"{}\" to \"{}\" ({} hops):",
                                 from_label,
@@ -2085,7 +2119,7 @@ fn main() -> Result<()> {
 
                         let ws_name = cli.workspace.clone();
                         let mut tui =
-                            akh_medu::tui::AkhTui::new(ws_name, Arc::clone(&engine), agent);
+                            akh_medu::tui::AkhTui::new_local(ws_name, Arc::clone(&engine), agent);
                         tui.run()?;
                     } else {
                         // Headless REPL (legacy stdin/stdout mode).
@@ -2428,7 +2462,7 @@ fn main() -> Result<()> {
                             agent.clear_goals();
                         }
 
-                        println!("akh-medu agent chat (headless). Type 'quit' to exit.\n");
+                        println!("akh agent chat (headless). Type 'quit' to exit.\n");
                         use std::io::Write as _;
                         let stdin = std::io::stdin();
                         let mut input = String::new();
@@ -2526,6 +2560,20 @@ fn main() -> Result<()> {
         }
 
         Commands::Chat { skill, headless } => {
+            let ws_name = cli.workspace.clone();
+
+            // Try remote TUI via akhomed if available (non-headless only).
+            #[cfg(feature = "daemon")]
+            if !headless {
+                if let Some(ref paths) = xdg_paths {
+                    if let Some(server_info) = akh_medu::client::discover_server(paths) {
+                        eprintln!("Connecting to akhomed at {}...", server_info.base_url());
+                        return akh_medu::tui::launch_remote(&ws_name, &server_info);
+                    }
+                }
+                eprintln!("warning: akhomed not running, using local engine");
+            }
+
             let engine = Arc::new(Engine::new(config).into_diagnostic()?);
 
             // Load skill if specified.
@@ -2562,17 +2610,16 @@ fn main() -> Result<()> {
                 max_cycles: 20,
                 ..Default::default()
             };
-            let ws_name = cli.workspace.clone();
 
             if !headless {
-                // TUI mode.
+                // TUI mode (local fallback).
                 akh_medu::tui::launch(&ws_name, engine, agent_config, false)?;
             } else {
                 // Headless mode (legacy stdin/stdout).
                 let mut agent = Agent::new(Arc::clone(&engine), agent_config).into_diagnostic()?;
                 let mut conversation = akh_medu::agent::Conversation::new(100);
 
-                println!("akh-medu chat (headless). Type 'quit' to exit.\n");
+                println!("akh chat (headless). Type 'quit' to exit.\n");
 
                 loop {
                     eprint!("> ");
@@ -3271,7 +3318,7 @@ fn main() -> Result<()> {
 
                     if catalog.is_empty() {
                         println!(
-                            "Library is empty. Add a document with: akh-medu library add <file-or-url>"
+                            "Library is empty. Add a document with: akh library add <file-or-url>"
                         );
                     } else {
                         println!(

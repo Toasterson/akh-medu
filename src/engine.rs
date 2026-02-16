@@ -1198,7 +1198,7 @@ impl Engine {
 }
 
 /// Summary information about the engine state.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct EngineInfo {
     pub dimension: usize,
     pub encoding: String,

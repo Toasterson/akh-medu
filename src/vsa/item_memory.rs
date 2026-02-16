@@ -20,7 +20,7 @@ use super::ops::{VsaOps, VsaResult};
 use super::{Dimension, Encoding, HyperVec};
 
 /// Search result from item memory.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SearchResult {
     /// The matching symbol ID.
     pub symbol_id: SymbolId,

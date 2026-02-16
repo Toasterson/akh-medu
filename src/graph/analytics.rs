@@ -18,7 +18,7 @@ use super::index::{GraphResult, KnowledgeGraph};
 // ---------------------------------------------------------------------------
 
 /// Degree centrality metrics for a single node.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DegreeCentrality {
     /// The symbol this measurement belongs to.
     pub symbol: SymbolId,
@@ -55,7 +55,7 @@ pub fn degree_centrality(kg: &KnowledgeGraph) -> Vec<DegreeCentrality> {
 // ---------------------------------------------------------------------------
 
 /// PageRank score for a single node.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PageRankScore {
     /// The symbol this score belongs to.
     pub symbol: SymbolId,
@@ -102,7 +102,7 @@ pub fn pagerank(
 // ---------------------------------------------------------------------------
 
 /// A strongly connected component in the graph.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ConnectedComponent {
     /// Component identifier (arbitrary, for display).
     pub id: usize,
