@@ -1,0 +1,10 @@
+{
+  "id": "architect",
+  "name": "Architect — Multi-Agent Orchestration",
+  "version": "1.0.0",
+  "description": "Tecton Ennead: data-driven multi-agent coordination via workspaces",
+  "domains": ["orchestration", "multi-agent", "delegation"],
+  "weight_size_bytes": 0,
+  "triples_file": "triples.json",
+  "rules_file": "rules.txt"
+}

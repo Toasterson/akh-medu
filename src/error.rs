@@ -76,6 +76,10 @@ pub enum AkhError {
     #[error(transparent)]
     #[diagnostic(transparent)]
     Library(#[from] crate::library::LibraryError),
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Workspace(#[from] crate::workspace::WorkspaceError),
 }
 
 // ---------------------------------------------------------------------------

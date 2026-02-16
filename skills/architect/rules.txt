@@ -1,0 +1,3 @@
+(complements ?x ?y) => (complements ?y ?x)
+(delegates-to ?x (delegates-to ?y ?z)) => (delegates-to ?x ?z)
+(specializes-in ?x (specializes-in ?y ?z)) => (specializes-in ?x ?z)

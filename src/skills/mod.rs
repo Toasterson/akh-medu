@@ -102,7 +102,7 @@ pub struct SkillInfo {
 }
 
 /// Result of activating a skillpack.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SkillActivation {
     /// Skill identifier.
     pub skill_id: String,
@@ -112,6 +112,29 @@ pub struct SkillActivation {
     pub rules_loaded: usize,
     /// Memory used in bytes.
     pub memory_bytes: usize,
+}
+
+/// Payload for installing a skill remotely.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillInstallPayload {
+    pub manifest: SkillManifest,
+    pub triples: Vec<LabelTriple>,
+    #[serde(default)]
+    pub rules: String,
+}
+
+/// A single label-based triple for skill installation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LabelTriple {
+    pub subject: String,
+    pub predicate: String,
+    pub object: String,
+    #[serde(default = "default_label_confidence")]
+    pub confidence: f32,
+}
+
+fn default_label_confidence() -> f32 {
+    1.0
 }
 
 /// Result type alias for skill operations.

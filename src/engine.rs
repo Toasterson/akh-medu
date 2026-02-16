@@ -9,6 +9,7 @@ use std::sync::{Arc, RwLock};
 use egg::{AstSize, Extractor, Rewrite, Runner};
 
 use crate::error::{AkhResult, EngineError, ProvenanceError, ReasonError, SymbolError};
+use crate::workspace::WorkspaceError;
 use crate::export::{ProvenanceExport, SymbolExport, TripleExport};
 use crate::grammar::GrammarRegistry;
 use crate::grammar::abs::AbsTree;
@@ -530,6 +531,59 @@ impl Engine {
             .as_ref()
             .ok_or(crate::error::SkillError::NotFound { name: name.into() })?;
         Ok(mgr.get_info(name)?)
+    }
+
+    /// Install a skill from a payload: write files to disk, then load.
+    pub fn install_skill(
+        &self,
+        payload: &crate::skills::SkillInstallPayload,
+    ) -> AkhResult<crate::skills::SkillActivation> {
+        let mgr = self.skill_manager.as_ref().ok_or(EngineError::InvalidConfig {
+            message: "skill installation requires persistence (--data-dir)".into(),
+        })?;
+
+        let skill_dir = mgr.skills_dir().join(&payload.manifest.id);
+        std::fs::create_dir_all(&skill_dir).map_err(|e| EngineError::DataDir {
+            path: format!("{}: {e}", skill_dir.display()),
+        })?;
+
+        // Write skill.json (manifest).
+        let manifest_json =
+            serde_json::to_string_pretty(&payload.manifest).map_err(|e| {
+                EngineError::InvalidConfig {
+                    message: format!("failed to serialize manifest: {e}"),
+                }
+            })?;
+        std::fs::write(skill_dir.join("skill.json"), manifest_json).map_err(|e| {
+            EngineError::DataDir {
+                path: format!("{}/skill.json: {e}", skill_dir.display()),
+            }
+        })?;
+
+        // Write triples.json.
+        let triples_json =
+            serde_json::to_string_pretty(&payload.triples).map_err(|e| {
+                EngineError::InvalidConfig {
+                    message: format!("failed to serialize triples: {e}"),
+                }
+            })?;
+        std::fs::write(skill_dir.join("triples.json"), triples_json).map_err(|e| {
+            EngineError::DataDir {
+                path: format!("{}/triples.json: {e}", skill_dir.display()),
+            }
+        })?;
+
+        // Write rules.txt if non-empty.
+        if !payload.rules.is_empty() {
+            std::fs::write(skill_dir.join("rules.txt"), &payload.rules).map_err(|e| {
+                EngineError::DataDir {
+                    path: format!("{}/rules.txt: {e}", skill_dir.display()),
+                }
+            })?;
+        }
+
+        // Load via existing path (handles label detection + loading).
+        self.load_skill(&payload.manifest.id)
     }
 
     // -----------------------------------------------------------------------
@@ -1144,6 +1198,36 @@ impl Engine {
             symbols_created,
             trees: all_trees,
         })
+    }
+
+    // -----------------------------------------------------------------------
+    // Role assignment
+    // -----------------------------------------------------------------------
+
+    /// Assign a role to this workspace's agent. Write-once: errors if already assigned.
+    pub fn assign_role(&self, role: &str) -> AkhResult<()> {
+        if let Some(existing) = self
+            .store
+            .get_meta(b"ws:role")?
+            .map(|b| String::from_utf8_lossy(&b).to_string())
+        {
+            return Err(WorkspaceError::RoleAlreadyAssigned {
+                current_role: existing,
+            }
+            .into());
+        }
+        self.ingest_label_triples(&[("self".into(), "has-role".into(), role.into(), 1.0)])?;
+        self.store.put_meta(b"ws:role", role.as_bytes())?;
+        Ok(())
+    }
+
+    /// Get the assigned role, if any.
+    pub fn assigned_role(&self) -> Option<String> {
+        self.store
+            .get_meta(b"ws:role")
+            .ok()
+            .flatten()
+            .map(|b| String::from_utf8_lossy(&b).to_string())
     }
 
     // -----------------------------------------------------------------------

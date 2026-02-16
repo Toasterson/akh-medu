@@ -263,6 +263,7 @@ fn decide(
         &agent.engine,
         &agent.working_memory,
         agent.psyche.as_ref(),
+        &agent.tool_registry,
     );
 
     // Record decision in WM.
@@ -507,6 +508,7 @@ fn select_tool(
     engine: &crate::engine::Engine,
     working_memory: &WorkingMemory,
     psyche: Option<&crate::compartment::psyche::Psyche>,
+    tool_registry: &super::tool::ToolRegistry,
 ) -> (String, ToolInput, String) {
     let history = GoalToolHistory::from_working_memory(working_memory, goal.symbol_id);
     let episodic_tools = extract_episodic_tool_hints(&observation.recalled_episodes);
@@ -995,6 +997,85 @@ fn select_tool(
                     &episodic_tools,
                     pressure,
                 ));
+            }
+
+            // ── Generic VSA scoring for unscored registered tools ──
+            // Scores tools via KG-grounded vectors (from skillpack triples)
+            // or text-encoded fallback.  This makes tool selection data-driven:
+            // tools only score high when the loaded skillpack creates semantic
+            // links between tool names and goal-relevant concepts.
+            {
+                let already_scored: std::collections::HashSet<String> =
+                    candidates.iter().map(|c| c.name.clone()).collect();
+
+                for sig in tool_registry.list() {
+                    if already_scored.contains(&sig.name) {
+                        continue;
+                    }
+
+                    // Prefer KG-grounded vector (rich from skillpack triples),
+                    // fall back to text encoding (sparse, low scores).
+                    let profile_vec = if let Ok(sym_id) = engine.lookup_symbol(&sig.name) {
+                        im.get_or_create(ops, sym_id)
+                    } else {
+                        match crate::vsa::grounding::encode_text_as_vector(
+                            &format!("{} {}", sig.name, sig.description),
+                            engine,
+                            ops,
+                            im,
+                        ) {
+                            Ok(v) => v,
+                            Err(_) => continue,
+                        }
+                    };
+
+                    let semantic_score =
+                        ops.similarity(&goal_vec, &profile_vec).unwrap_or(0.5);
+                    if semantic_score <= 0.55 {
+                        continue;
+                    }
+
+                    // Build ToolInput from parameter schema (best-effort).
+                    let mut input = ToolInput::new();
+                    for param in &sig.parameters {
+                        if param.required {
+                            if param.name == "message" || param.name == "goal" {
+                                input = input.with_param(&param.name, &goal.description);
+                            } else if param.name == "name" || param.name == "workspace" {
+                                let id = orientation
+                                    .inferences
+                                    .iter()
+                                    .find_map(|(sym, _)| {
+                                        let label = engine.resolve_label(*sym);
+                                        if orientation.relevant_knowledge.iter().any(|t| {
+                                            t.subject == *sym || t.object == *sym
+                                        }) {
+                                            Some(label.to_lowercase())
+                                        } else {
+                                            None
+                                        }
+                                    })
+                                    .unwrap_or_else(|| goal_label.clone());
+                                input = input.with_param(&param.name, &id);
+                            }
+                        }
+                    }
+
+                    candidates.push(apply_modifiers(
+                        ToolCandidate::new(
+                            &sig.name,
+                            input,
+                            semantic_score * 0.75,
+                            format!(
+                                "VSA semantic match for \"{}\": {semantic_score:.3}",
+                                sig.name
+                            ),
+                        ),
+                        &history,
+                        &episodic_tools,
+                        pressure,
+                    ));
+                }
             }
         }
     }

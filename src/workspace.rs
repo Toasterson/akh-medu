@@ -67,6 +67,13 @@ pub enum WorkspaceError {
         help("Ensure no processes are using the workspace data and you have write permissions.")
     )]
     DeleteFailed { name: String, message: String },
+
+    #[error("role \"{current_role}\" already assigned to this workspace")]
+    #[diagnostic(
+        code(akh::workspace::role_already_assigned),
+        help("Workspace role is write-once and cannot be changed after assignment.")
+    )]
+    RoleAlreadyAssigned { current_role: String },
 }
 
 pub type WorkspaceResult<T> = std::result::Result<T, WorkspaceError>;
