@@ -149,8 +149,17 @@ fn extract_question_subject(input: &str) -> String {
         _ => 0,
     };
 
-    let remaining: String = words[skip..].join(" ");
-    let final_words: Vec<&str> = remaining.split_whitespace().collect();
+    let mut final_words: Vec<&str> = words[skip..].to_vec();
+
+    // Strip trailing auxiliary "do" from modal patterns.
+    // "What can you do?" → skip 2 → ["you", "do"] → strip "do" → ["you"]
+    if final_words.len() > 1 {
+        let last = final_words.last().unwrap().to_lowercase();
+        if last == "do" {
+            final_words.pop();
+        }
+    }
+
     if final_words.is_empty() {
         return s.to_string();
     }
@@ -159,7 +168,7 @@ fn extract_question_subject(input: &str) -> String {
     if ["a", "an", "the"].contains(&first_remaining.as_str()) && final_words.len() > 1 {
         final_words[1..].join(" ")
     } else {
-        remaining
+        final_words.join(" ")
     }
 }
 
@@ -475,5 +484,21 @@ mod tests {
     fn parse_complex_assertion() {
         let result = parse("The vsa module is located in the engine");
         assert!(matches!(result, ParseResult::Facts(_)));
+    }
+
+    #[test]
+    fn extract_subject_capability_question() {
+        // "What can you do?" should extract "you", not "you do".
+        let subject = extract_question_subject("What can you do?");
+        assert_eq!(subject, "you");
+    }
+
+    #[test]
+    fn parse_capability_question() {
+        let result = parse("What can you do?");
+        assert!(matches!(result, ParseResult::Query { .. }));
+        if let ParseResult::Query { subject, .. } = result {
+            assert_eq!(subject, "you");
+        }
     }
 }
