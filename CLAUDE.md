@@ -142,10 +142,15 @@ library learning cycle with e-graph anti-unification.
 
 ## Phase 11 — Autonomous Task System with Self-Goal Setting
 
-Goal generation from observation (gaps, anomalies, opportunities), intelligent
-decomposition with dependency tracking, argumentation-backed priority reasoning,
-project abstraction for cross-session continuity, world monitoring with reactive
-goals, self-evaluation with goal questioning, and resource awareness.
-7 sub-phases (11a–11g). Converges all prior phases into true autonomy.
+Drive-based goal generation (curiosity/coherence/completeness/efficiency) with
+GDA discrepancy detection, HTN-based intelligent decomposition with dependency
+DAGs, value-based argumentation for priority reasoning (Dung/VAF), project
+abstraction via microtheories with Soar/ACT-R memory integration, GDA
+expectation monitoring for reactive goals, metacognitive self-evaluation
+(Nelson-Narens monitoring/control, ZPD, AGM belief revision), VOC-based
+resource reasoning with CBR effort estimation, and Soar-inspired procedural
+learning (chunking).
+8 sub-phases (11a–11h). Converges all prior phases into true autonomy.
 
 - **Implementation plan**: `docs/ai/plans/2026-02-17-phase11-autonomous-tasks.md`
+- **Research**: `docs/ai/decisions/003-autonomous-tasks-research.md`
