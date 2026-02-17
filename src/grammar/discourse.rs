@@ -11,6 +11,8 @@
 //! → wrap in `DiscourseFrame { FirstPerson, Identity, Conjunction[...] }`
 //! → narrative grammar → "I am Akh, powered by Akh-Medu."
 
+use std::collections::HashSet;
+
 use miette::Diagnostic;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -117,7 +119,92 @@ const INFRASTRUCTURE_PREDICATES: &[&str] = &[
     "is-question-word",
     "discourse-type",
     "has-discourse-role",
+    "discourse:response-detail",
 ];
+
+/// Configurable verbosity for discourse responses.
+///
+/// Stored as a KG triple: `self discourse:response-detail normal`.
+/// Users can change at runtime by asserting a new value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ResponseDetail {
+    /// Max ~3 triples — identity only, very terse.
+    Concise,
+    /// Max ~8 triples — balanced default.
+    #[default]
+    Normal,
+    /// No cap — include everything that passes filters.
+    Full,
+}
+
+impl ResponseDetail {
+    /// Maximum number of triples to include in the response.
+    pub fn max_triples(self) -> usize {
+        match self {
+            Self::Concise => 3,
+            Self::Normal => 8,
+            Self::Full => usize::MAX,
+        }
+    }
+
+    /// Parse from a label string (case-insensitive). Unknown values default to `Normal`.
+    pub fn from_label(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "concise" => Self::Concise,
+            "normal" => Self::Normal,
+            "full" => Self::Full,
+            _ => Self::default(),
+        }
+    }
+}
+
+/// Category of a predicate, used to group related facts in responses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum PredicateCategory {
+    /// is-a, has-name, named — core identity facts.
+    Identity,
+    /// powered-by — power source / engine.
+    Power,
+    /// has-role — assigned roles.
+    Role,
+    /// has-capability — what the entity can do.
+    Capability,
+    /// Anything not in the above categories.
+    Other,
+    /// has-state, has-status — lowest priority state info.
+    State,
+}
+
+/// Classify a predicate label into a category for grouping.
+fn categorize_predicate(pred_label: &str) -> PredicateCategory {
+    match pred_label {
+        "is-a" | "has-name" | "named" => PredicateCategory::Identity,
+        "powered-by" => PredicateCategory::Power,
+        "has-role" => PredicateCategory::Role,
+        "has-capability" => PredicateCategory::Capability,
+        "has-state" | "has-status" => PredicateCategory::State,
+        _ => PredicateCategory::Other,
+    }
+}
+
+/// Resolve the `discourse:response-detail` level from the KG.
+///
+/// Looks up the triple `<subject> discourse:response-detail <value>` and
+/// parses the object label into a [`ResponseDetail`].
+fn resolve_response_detail(subject_id: SymbolId, engine: &Engine) -> ResponseDetail {
+    let pred_id = match engine.resolve_symbol("discourse:response-detail") {
+        Ok(id) => id,
+        Err(_) => return ResponseDetail::default(),
+    };
+    let objects = engine.knowledge_graph().objects_of(subject_id, pred_id);
+    objects
+        .first()
+        .map(|&obj_id| {
+            let label = engine.resolve_label(obj_id);
+            ResponseDetail::from_label(&label)
+        })
+        .unwrap_or_default()
+}
 
 /// Resolve discourse context from a query subject and question word.
 ///
@@ -229,23 +316,23 @@ pub fn build_discourse_response(
     engine: &Engine,
 ) -> Option<AbsTree> {
     let registry = engine.registry();
+    let detail = resolve_response_detail(ctx.subject_id, engine);
 
-    // Convert triples to AbsTree nodes, filtering out infrastructure and metadata.
-    let mut abs_items: Vec<(AbsTree, i32)> = Vec::new();
+    // Dedup: track unique (subject, predicate, object) tuples.
+    let mut seen = HashSet::new();
+
+    // Carry predicate label alongside each item for later grouping.
+    let mut abs_items: Vec<(AbsTree, i32, String)> = Vec::new();
 
     for triple in triples {
-        let pred_label = registry
-            .get(triple.predicate)
-            .map(|m| m.label.clone())
-            .unwrap_or_default();
-        let subj_label = registry
-            .get(triple.subject)
-            .map(|m| m.label.clone())
-            .unwrap_or_default();
-        let obj_label = registry
-            .get(triple.object)
-            .map(|m| m.label.clone())
-            .unwrap_or_default();
+        // Dedup check.
+        if !seen.insert((triple.subject, triple.predicate, triple.object)) {
+            continue;
+        }
+
+        let pred_label = registry.resolve_label(triple.predicate);
+        let subj_label = registry.resolve_label(triple.subject);
+        let obj_label = registry.resolve_label(triple.object);
 
         // Filter: skip infrastructure triples.
         if INFRASTRUCTURE_PREDICATES
@@ -268,10 +355,21 @@ pub fn build_discourse_response(
             continue;
         }
 
+        // Filter: skip triples with unresolved sym:N labels.
+        if subj_label.starts_with("sym:") || subj_label.starts_with("Sym:")
+            || pred_label.starts_with("sym:") || pred_label.starts_with("Sym:")
+            || obj_label.starts_with("sym:") || obj_label.starts_with("Sym:")
+        {
+            continue;
+        }
+
         let abs = triple_to_abs(triple, registry);
         let score = score_triple_for_focus(&pred_label, &ctx.focus);
-        abs_items.push((abs, score));
+        abs_items.push((abs, score, pred_label));
     }
+
+    // Filter: exclude negatively-scored triples.
+    abs_items.retain(|(_, score, _)| *score >= 0);
 
     if abs_items.is_empty() {
         return None;
@@ -280,7 +378,17 @@ pub fn build_discourse_response(
     // Sort by relevance score (highest first).
     abs_items.sort_by(|a, b| b.1.cmp(&a.1));
 
-    let items: Vec<AbsTree> = abs_items.into_iter().map(|(tree, _)| tree).collect();
+    // Truncate to the configured response detail level.
+    abs_items.truncate(detail.max_triples());
+
+    // Group by predicate category, preserving score order within each group.
+    abs_items.sort_by(|a, b| {
+        let cat_a = categorize_predicate(&a.2);
+        let cat_b = categorize_predicate(&b.2);
+        cat_a.cmp(&cat_b).then(b.1.cmp(&a.1))
+    });
+
+    let items: Vec<AbsTree> = abs_items.into_iter().map(|(tree, _, _)| tree).collect();
 
     let inner = if items.len() == 1 {
         items.into_iter().next().unwrap()
@@ -345,6 +453,9 @@ fn score_triple_for_focus(predicate_label: &str, focus: &QueryFocus) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::EngineConfig;
+    use crate::symbol::SymbolKind;
+    use crate::vsa::Dimension;
 
     #[test]
     fn classify_focus_who() {
@@ -390,5 +501,193 @@ mod tests {
     #[test]
     fn score_identity_deprioritized() {
         assert!(score_triple_for_focus("has-state", &QueryFocus::Identity) < 0);
+    }
+
+    // --- ResponseDetail unit tests ---
+
+    #[test]
+    fn response_detail_max_triples() {
+        assert_eq!(ResponseDetail::Concise.max_triples(), 3);
+        assert_eq!(ResponseDetail::Normal.max_triples(), 8);
+        assert_eq!(ResponseDetail::Full.max_triples(), usize::MAX);
+    }
+
+    #[test]
+    fn response_detail_from_label_case_insensitive() {
+        assert_eq!(ResponseDetail::from_label("concise"), ResponseDetail::Concise);
+        assert_eq!(ResponseDetail::from_label("NORMAL"), ResponseDetail::Normal);
+        assert_eq!(ResponseDetail::from_label("Full"), ResponseDetail::Full);
+        assert_eq!(ResponseDetail::from_label("unknown"), ResponseDetail::Normal);
+    }
+
+    #[test]
+    fn response_detail_default_is_normal() {
+        assert_eq!(ResponseDetail::default(), ResponseDetail::Normal);
+    }
+
+    // --- PredicateCategory unit tests ---
+
+    #[test]
+    fn categorize_identity_predicates() {
+        assert_eq!(categorize_predicate("is-a"), PredicateCategory::Identity);
+        assert_eq!(categorize_predicate("has-name"), PredicateCategory::Identity);
+    }
+
+    #[test]
+    fn categorize_orders_identity_before_capability() {
+        assert!(PredicateCategory::Identity < PredicateCategory::Capability);
+        assert!(PredicateCategory::Capability < PredicateCategory::State);
+    }
+
+    // --- Integration tests using Engine ---
+
+    fn test_engine() -> Engine {
+        Engine::new(EngineConfig {
+            dimension: Dimension::TEST,
+            ..Default::default()
+        })
+        .unwrap()
+    }
+
+    fn identity_ctx(subject_id: SymbolId) -> DiscourseContext {
+        DiscourseContext {
+            resolved_subject: "self".to_string(),
+            subject_id,
+            original_subject: "you".to_string(),
+            pronoun_resolved: true,
+            pov: PointOfView::FirstPerson,
+            focus: QueryFocus::Identity,
+            question_word: Some(QuestionWord::Who),
+            original_input: "Who are you?".to_string(),
+        }
+    }
+
+    #[test]
+    fn dedup_removes_duplicate_triples() {
+        let engine = test_engine();
+        let self_sym = engine.create_symbol(SymbolKind::Entity, "self").unwrap();
+        let is_a = engine.create_symbol(SymbolKind::Relation, "is-a").unwrap();
+        let akh = engine.create_symbol(SymbolKind::Entity, "Akh").unwrap();
+
+        let triple = Triple::new(self_sym.id, is_a.id, akh.id);
+        // Supply the same triple twice.
+        let triples = vec![triple.clone(), triple];
+        let ctx = identity_ctx(self_sym.id);
+
+        let result = build_discourse_response(&triples, &ctx, &engine).unwrap();
+        let labels = result.collect_labels();
+        // "is-a" should appear only once (not duplicated).
+        let is_a_count = labels.iter().filter(|&&l| l == "is-a").count();
+        assert_eq!(is_a_count, 1);
+    }
+
+    #[test]
+    fn sym_n_labels_filtered() {
+        let engine = test_engine();
+        let self_sym = engine.create_symbol(SymbolKind::Entity, "self").unwrap();
+        let is_a = engine.create_symbol(SymbolKind::Relation, "is-a").unwrap();
+        let akh = engine.create_symbol(SymbolKind::Entity, "Akh").unwrap();
+
+        // Create a triple with a good predicate and known labels.
+        let good = Triple::new(self_sym.id, is_a.id, akh.id);
+
+        // Create a SymbolId that won't resolve (simulate unresolved sym:N).
+        // Use an ID that's much higher than anything registered.
+        let bad_id = SymbolId::new(99999).unwrap();
+        let bad_triple = Triple::new(self_sym.id, is_a.id, bad_id);
+
+        let ctx = identity_ctx(self_sym.id);
+        let triples = vec![bad_triple, good];
+        let result = build_discourse_response(&triples, &ctx, &engine).unwrap();
+        let labels = result.collect_labels();
+        // The bad triple's unresolvable object should be filtered out.
+        assert!(!labels.iter().any(|l| l.starts_with("sym:")));
+    }
+
+    #[test]
+    fn negative_score_triples_excluded_for_identity() {
+        let engine = test_engine();
+        let self_sym = engine.create_symbol(SymbolKind::Entity, "self").unwrap();
+        let is_a = engine.create_symbol(SymbolKind::Relation, "is-a").unwrap();
+        let akh = engine.create_symbol(SymbolKind::Entity, "Akh").unwrap();
+        let has_state = engine.create_symbol(SymbolKind::Relation, "has-state").unwrap();
+        let active = engine.create_symbol(SymbolKind::Entity, "active").unwrap();
+
+        let good = Triple::new(self_sym.id, is_a.id, akh.id);
+        let bad = Triple::new(self_sym.id, has_state.id, active.id);
+
+        let ctx = identity_ctx(self_sym.id);
+        let triples = vec![good, bad];
+        let result = build_discourse_response(&triples, &ctx, &engine).unwrap();
+        let labels = result.collect_labels();
+        // has-state should be excluded (score < 0 for Identity focus).
+        assert!(!labels.contains(&"has-state"));
+        assert!(labels.contains(&"is-a"));
+    }
+
+    #[test]
+    fn response_detail_from_graph_truncates() {
+        let engine = test_engine();
+        let self_sym = engine.create_symbol(SymbolKind::Entity, "self").unwrap();
+        let detail_pred = engine
+            .create_symbol(SymbolKind::Relation, "discourse:response-detail")
+            .unwrap();
+        let concise_val = engine
+            .create_symbol(SymbolKind::Entity, "concise")
+            .unwrap();
+
+        // Assert the detail triple into the KG.
+        let detail_triple = Triple::new(self_sym.id, detail_pred.id, concise_val.id);
+        engine.add_triple(&detail_triple).unwrap();
+
+        // Create 5 identity triples.
+        let is_a = engine.create_symbol(SymbolKind::Relation, "is-a").unwrap();
+        let mut triples = Vec::new();
+        for i in 0..5 {
+            let obj = engine
+                .create_symbol(SymbolKind::Entity, &format!("thing-{i}"))
+                .unwrap();
+            triples.push(Triple::new(self_sym.id, is_a.id, obj.id));
+        }
+
+        let ctx = identity_ctx(self_sym.id);
+        let result = build_discourse_response(&triples, &ctx, &engine).unwrap();
+        let labels = result.collect_labels();
+        // "concise" limits to 3 triples. Each triple contributes 3 labels (subj, pred, obj).
+        // Count "is-a" occurrences as a proxy.
+        let is_a_count = labels.iter().filter(|&&l| l == "is-a").count();
+        assert!(
+            is_a_count <= 3,
+            "concise should limit to 3 triples, got {is_a_count}"
+        );
+    }
+
+    #[test]
+    fn predicate_grouping_identity_before_capability() {
+        let engine = test_engine();
+        let self_sym = engine.create_symbol(SymbolKind::Entity, "self").unwrap();
+        let is_a = engine.create_symbol(SymbolKind::Relation, "is-a").unwrap();
+        let has_cap = engine
+            .create_symbol(SymbolKind::Relation, "has-capability")
+            .unwrap();
+        let akh = engine.create_symbol(SymbolKind::Entity, "Akh").unwrap();
+        let reason = engine.create_symbol(SymbolKind::Entity, "reasoning").unwrap();
+
+        // Supply capability first, identity second — grouping should reorder.
+        let triples = vec![
+            Triple::new(self_sym.id, has_cap.id, reason.id),
+            Triple::new(self_sym.id, is_a.id, akh.id),
+        ];
+        let ctx = identity_ctx(self_sym.id);
+        let result = build_discourse_response(&triples, &ctx, &engine).unwrap();
+        let labels = result.collect_labels();
+
+        // is-a should appear before has-capability in the output.
+        let is_a_pos = labels.iter().position(|l| *l == "is-a");
+        let cap_pos = labels.iter().position(|l| *l == "has-capability");
+        assert!(
+            is_a_pos < cap_pos,
+            "is-a ({is_a_pos:?}) should come before has-capability ({cap_pos:?})"
+        );
     }
 }
