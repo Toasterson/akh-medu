@@ -166,3 +166,20 @@ explanations. Multi-agent communication with capability tokens.
 7 sub-phases (12a–12g). Gives the agent an interaction surface.
 
 - **Implementation plan**: `docs/ai/plans/2026-02-17-phase12-interaction.md`
+
+## Phase 13 — Personal Assistant
+
+Email as bidirectional CommChannel (JMAP primary, IMAP fallback). OnlineHD VSA-native
+spam/ham classification with single-pass incremental learning. Email triage with sender
+reputation KG, four-feature importance model, HEY-style screening. Structured extraction
+(dates, events, tracking numbers, action items) via rule-based NER + e-graph rules.
+Personal task management (GTD + Eisenhower + PARA) with petgraph dependency DAGs.
+Calendar integration (RFC 5545 iCalendar, Allen interval algebra, temporal e-graph rules).
+HyperRec-style VSA preference profiles with temporal decay, JITIR (Remembrance Agent),
+serendipity engine (near-miss HNSW). Structured output via JSON-LD briefings, notifications,
+SPARQL endpoints. Delegated agent spawning with scoped knowledge compartments, own
+identities, and email composition pipeline via grammar module + constraint checking.
+9 sub-phases (13a–13i). Builds on Phase 12 CommChannel and capability model.
+
+- **Implementation plan**: `docs/ai/plans/2026-02-17-phase13-personal-assistant.md`
+- **Research**: `docs/ai/decisions/004-personal-assistant-research.md`

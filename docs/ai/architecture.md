@@ -1,6 +1,6 @@
 # Akh-medu Architecture
 
-> Last updated: 2026-02-17 (Phase 11 expanded to 8 sub-phases after deep research into cognitive architectures and metareasoning)
+> Last updated: 2026-02-17 (Phase 13 added: personal assistant with email, planning, preferences, dashboards, delegated agents)
 
 ## Overview
 
@@ -111,3 +111,8 @@ Phase 11a–11h: Autonomous task system (8 sub-phases):
 Phase 12a–12g: Interaction — communication protocols and social reasoning (7 sub-phases):
 - **Core**: 12a channel abstraction (capability-secured, Chat = operator protocol), 12b grounded operator dialogue, 12c pre-communication constraint checking
 - **Social**: 12d social KG with theory of mind (microtheories), 12e ActivityPub federation via oxifed, 12f transparent reasoning / explanations, 12g multi-agent communication
+Phase 13a–13i: Personal assistant (9 sub-phases):
+- **Email**: 13a email channel (JMAP/IMAP + MIME + JWZ threading), 13b OnlineHD spam classification (VSA-native), 13c email triage & priority (sender reputation + HEY-style screening), 13d structured extraction (dates, events, action items → KG)
+- **PIM**: 13e personal task & project management (GTD + Eisenhower + PARA), 13f calendar & temporal reasoning (RFC 5545, Allen interval algebra)
+- **Intelligence**: 13g preference learning & proactive assistance (HyperRec-style VSA profiles, serendipity engine), 13h structured output & operator dashboards (JSON-LD, briefings, notifications)
+- **Delegation**: 13i delegated agent spawning (scoped knowledge, own identity, email composition pipeline)
