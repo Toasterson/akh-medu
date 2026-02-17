@@ -49,6 +49,8 @@ pub enum Cat {
     Confidence,
     /// A provenance annotation.
     Provenance,
+    /// A discourse-framed response (POV + focus wrapper).
+    DiscourseFrame,
     /// Free-form text that didn't parse into a structured category.
     Freeform,
 }
@@ -95,6 +97,7 @@ impl std::fmt::Display for Cat {
             Cat::Section => write!(f, "Section"),
             Cat::Confidence => write!(f, "Confidence"),
             Cat::Provenance => write!(f, "Provenance"),
+            Cat::DiscourseFrame => write!(f, "DiscourseFrame"),
             Cat::Freeform => write!(f, "Freeform"),
         }
     }

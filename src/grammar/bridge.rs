@@ -237,7 +237,9 @@ pub fn abs_to_fact(tree: &AbsTree, source_tool: &str, source_cycle: u64) -> Opti
             detail: kind.clone(),
         },
         AbsTree::DataFlow { .. } => return None,
-        AbsTree::WithConfidence { inner, .. } | AbsTree::WithProvenance { inner, .. } => {
+        AbsTree::WithConfidence { inner, .. }
+        | AbsTree::WithProvenance { inner, .. }
+        | AbsTree::DiscourseFrame { inner, .. } => {
             return abs_to_fact(inner, source_tool, source_cycle);
         }
         AbsTree::Freeform(text) => FactKind::Raw(text.clone()),
@@ -265,9 +267,9 @@ fn count_facts(tree: &AbsTree) -> usize {
 
         AbsTree::DataFlow { .. } => 0,
 
-        AbsTree::WithConfidence { inner, .. } | AbsTree::WithProvenance { inner, .. } => {
-            count_facts(inner)
-        }
+        AbsTree::WithConfidence { inner, .. }
+        | AbsTree::WithProvenance { inner, .. }
+        | AbsTree::DiscourseFrame { inner, .. } => count_facts(inner),
 
         AbsTree::Conjunction { items, .. } => items.iter().map(count_facts).sum(),
 

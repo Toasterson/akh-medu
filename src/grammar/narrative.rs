@@ -16,6 +16,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use super::abs::{AbsTree, ProvenanceTag};
 use super::cat::Cat;
 use super::concrete::{ConcreteGrammar, LinContext, ParseContext};
+use super::discourse::{PointOfView, QueryFocus};
 use super::error::GrammarResult;
 use super::morpho;
 use super::parser;
@@ -317,8 +318,174 @@ impl NarrativeGrammar {
 
                 Ok(out)
             }
+
+            AbsTree::DiscourseFrame { pov, focus, inner } => match pov {
+                PointOfView::FirstPerson => self.linearize_first_person(inner, focus, ctx),
+                PointOfView::SecondPerson => self.linearize_second_person(inner, ctx),
+                PointOfView::ThirdPerson => self.linearize_inner(inner, ctx),
+            },
         }
     }
+
+    /// Linearize inner content from a first-person perspective.
+    ///
+    /// Transforms each triple: "self is-a akh" → "I am an Akh"
+    fn linearize_first_person(
+        &self,
+        tree: &AbsTree,
+        focus: &QueryFocus,
+        ctx: &LinContext,
+    ) -> GrammarResult<String> {
+        match tree {
+            AbsTree::Triple {
+                predicate, object, ..
+            } => {
+                let pred_raw = self.linearize_inner(predicate, ctx)?;
+                let obj_raw = self.linearize_inner(object, ctx)?;
+                let obj_name = morpho::capitalize_entity(&obj_raw);
+
+                let pred_1p = morpho::first_person_predicate(&pred_raw);
+
+                // For "is a" predicates, insert the article if needed.
+                if pred_1p.starts_with("am a ")
+                    || pred_1p.starts_with("am an ")
+                    || pred_1p == "am"
+                {
+                    if pred_1p == "am" {
+                        Ok(format!("I am {obj_name}."))
+                    } else {
+                        // "am a" / "am an" — replace with correct article
+                        let article = morpho::article(&obj_name);
+                        Ok(format!("I am {article} {obj_name}."))
+                    }
+                } else {
+                    Ok(format!("I {pred_1p} {obj_name}."))
+                }
+            }
+
+            AbsTree::Conjunction { items, .. } => {
+                let mut sentences = Vec::new();
+                for item in items {
+                    let s = self.linearize_first_person(item, focus, ctx)?;
+                    sentences.push(s);
+                }
+                Ok(join_first_person_sentences(&sentences))
+            }
+
+            AbsTree::WithConfidence { inner, confidence } => {
+                let text = self.linearize_first_person(inner, focus, ctx)?;
+                let qualifier = if *confidence > 0.9 {
+                    "with high confidence"
+                } else if *confidence > 0.7 {
+                    "with moderate confidence"
+                } else if *confidence > 0.5 {
+                    "tentatively"
+                } else {
+                    "speculatively"
+                };
+                if let Some(stripped) = text.strip_suffix('.') {
+                    Ok(format!("{stripped}, {qualifier}."))
+                } else {
+                    Ok(format!("{text}, {qualifier}"))
+                }
+            }
+
+            AbsTree::WithProvenance { inner, .. } => {
+                self.linearize_first_person(inner, focus, ctx)
+            }
+
+            // For non-triple nodes, fall back to standard linearization.
+            _ => self.linearize_inner(tree, ctx),
+        }
+    }
+
+    /// Linearize inner content from a second-person perspective ("You are...").
+    fn linearize_second_person(&self, tree: &AbsTree, ctx: &LinContext) -> GrammarResult<String> {
+        // For now, delegate to standard linearization.
+        // Future: "You are..." transformations.
+        self.linearize_inner(tree, ctx)
+    }
+}
+
+/// Join first-person sentences into flowing prose.
+///
+/// Instead of "Furthermore, I am..." transitions, joins with commas
+/// and proper sentence structure.
+fn join_first_person_sentences(sentences: &[String]) -> String {
+    if sentences.is_empty() {
+        return String::new();
+    }
+    if sentences.len() == 1 {
+        return sentences[0].clone();
+    }
+
+    // Collect the sentences. For identity focus, merge "I am X." sentences
+    // into a flowing list: "I am X, powered by Y. I am capable of Z."
+    let mut merged = Vec::new();
+    let mut i_am_parts: Vec<String> = Vec::new();
+
+    for sentence in sentences {
+        let stripped = sentence.strip_suffix('.').unwrap_or(sentence);
+        if stripped.starts_with("I am ") || stripped.starts_with("I have ") {
+            i_am_parts.push(stripped.to_string());
+        } else {
+            // Non "I am" sentence — flush accumulated I am parts first.
+            if !i_am_parts.is_empty() {
+                merged.push(merge_i_am_clauses(&i_am_parts));
+                i_am_parts.clear();
+            }
+            merged.push(sentence.clone());
+        }
+    }
+
+    if !i_am_parts.is_empty() {
+        merged.push(merge_i_am_clauses(&i_am_parts));
+    }
+
+    merged.join(" ")
+}
+
+/// Merge multiple "I am X" clauses into flowing prose.
+///
+/// "I am Akh" + "I am powered by Akh-Medu" → "I am Akh, powered by Akh-Medu."
+fn merge_i_am_clauses(clauses: &[String]) -> String {
+    if clauses.is_empty() {
+        return String::new();
+    }
+    if clauses.len() == 1 {
+        let c = &clauses[0];
+        if c.ends_with('.') {
+            return c.clone();
+        }
+        return format!("{c}.");
+    }
+
+    // First clause stays as-is; subsequent "I am" / "I have" clauses
+    // become trailing phrases by stripping "I am " / "I have ".
+    let first = &clauses[0];
+    let mut parts = vec![first.clone()];
+
+    for clause in &clauses[1..] {
+        if let Some(rest) = clause.strip_prefix("I am ") {
+            parts.push(rest.to_string());
+        } else if let Some(rest) = clause.strip_prefix("I have ") {
+            // Keep "and have" for variety.
+            parts.push(format!("and have {rest}"));
+        } else {
+            parts.push(clause.clone());
+        }
+    }
+
+    // Join with commas.
+    let joined = if parts.len() == 2 {
+        format!("{}, {}.", parts[0], parts[1])
+    } else {
+        let last = parts.last().unwrap();
+        let rest = &parts[..parts.len() - 1];
+        format!("{}, and {last}.", rest.join(", "))
+    };
+
+    joined
 }
 
 fn format_provenance_narrative(tag: &ProvenanceTag) -> String {
@@ -374,6 +541,7 @@ impl ConcreteGrammar for NarrativeGrammar {
             Cat::Conjunction,
             Cat::Section,
             Cat::Document,
+            Cat::DiscourseFrame,
             Cat::Freeform,
         ]
     }

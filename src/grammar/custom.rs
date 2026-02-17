@@ -348,6 +348,9 @@ impl CustomGrammar {
                 }
                 Ok(out)
             }
+
+            // Discourse frames: delegate to inner content.
+            AbsTree::DiscourseFrame { inner, .. } => self.linearize_inner(inner, ctx),
         }
     }
 }

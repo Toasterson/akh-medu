@@ -343,47 +343,83 @@ impl AkhTui {
                     }
                 }
             }
-            crate::agent::UserIntent::Query { subject } => {
-                match engine.resolve_symbol(&subject) {
-                    Ok(sym_id) => {
-                        let from_triples = engine.triples_from(sym_id);
-                        let to_triples = engine.triples_to(sym_id);
-
-                        if from_triples.is_empty() && to_triples.is_empty() {
-                            self.messages.push(AkhMessage::system(format!(
-                                "No facts found for \"{subject}\"."
-                            )));
+            crate::agent::UserIntent::Query { subject, original_input, question_word } => {
+                // Try discourse-aware response first, fall back to synthesis.
+                let discourse_result = crate::grammar::discourse::resolve_discourse(
+                    &subject,
+                    question_word,
+                    &original_input,
+                    engine,
+                );
+                let handled = if let Ok(ref ctx) = discourse_result {
+                    let from_triples = engine.triples_from(ctx.subject_id);
+                    let to_triples = engine.triples_to(ctx.subject_id);
+                    let mut all_triples = from_triples;
+                    all_triples.extend(to_triples);
+                    if let Some(discourse_tree) =
+                        crate::grammar::discourse::build_discourse_response(
+                            &all_triples, ctx, engine,
+                        )
+                    {
+                        let registry = crate::grammar::GrammarRegistry::new();
+                        if let Ok(prose) = registry.linearize(&self.grammar, &discourse_tree) {
+                            if !prose.trim().is_empty() {
+                                self.messages.push(AkhMessage::narrative(&prose, &self.grammar));
+                                true
+                            } else {
+                                false
+                            }
                         } else {
-                            let mut all_triples = from_triples;
-                            all_triples.extend(to_triples);
-                            let summary =
-                                crate::agent::synthesize::synthesize_from_triples(
-                                    &subject,
-                                    &all_triples,
-                                    engine,
-                                    &self.grammar,
-                                );
-                            if !summary.overview.is_empty() {
-                                self.messages.push(AkhMessage::narrative(
-                                    &summary.overview,
-                                    &self.grammar,
-                                ));
-                            }
-                            for section in &summary.sections {
-                                self.messages.push(AkhMessage::narrative(
-                                    format!("## {}\n{}", section.heading, section.prose),
-                                    &self.grammar,
-                                ));
-                            }
-                            for gap in &summary.gaps {
-                                self.messages.push(AkhMessage::gap("(unknown)", gap));
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+                if !handled {
+                    // Fallback: existing synthesis path.
+                    match engine.resolve_symbol(&subject) {
+                        Ok(sym_id) => {
+                            let from_triples = engine.triples_from(sym_id);
+                            let to_triples = engine.triples_to(sym_id);
+                            if from_triples.is_empty() && to_triples.is_empty() {
+                                self.messages.push(AkhMessage::system(format!(
+                                    "No facts found for \"{subject}\"."
+                                )));
+                            } else {
+                                let mut all_triples = from_triples;
+                                all_triples.extend(to_triples);
+                                let summary =
+                                    crate::agent::synthesize::synthesize_from_triples(
+                                        &subject,
+                                        &all_triples,
+                                        engine,
+                                        &self.grammar,
+                                    );
+                                if !summary.overview.is_empty() {
+                                    self.messages.push(AkhMessage::narrative(
+                                        &summary.overview,
+                                        &self.grammar,
+                                    ));
+                                }
+                                for section in &summary.sections {
+                                    self.messages.push(AkhMessage::narrative(
+                                        format!("## {}\n{}", section.heading, section.prose),
+                                        &self.grammar,
+                                    ));
+                                }
+                                for gap in &summary.gaps {
+                                    self.messages.push(AkhMessage::gap("(unknown)", gap));
+                                }
                             }
                         }
-                    }
-                    Err(_) => {
-                        self.messages.push(AkhMessage::system(format!(
-                            "Symbol \"{subject}\" not found."
-                        )));
+                        Err(_) => {
+                            self.messages.push(AkhMessage::system(format!(
+                                "Symbol \"{subject}\" not found."
+                            )));
+                        }
                     }
                 }
             }

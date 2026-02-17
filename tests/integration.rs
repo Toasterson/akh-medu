@@ -2855,7 +2855,7 @@ fn intent_classify_query() {
     use akh_medu::agent::{UserIntent, classify_intent};
 
     match classify_intent("What is a dog?") {
-        UserIntent::Query { subject } => {
+        UserIntent::Query { subject, .. } => {
             assert!(
                 subject.to_lowercase().contains("dog"),
                 "subject should contain 'dog', got: {subject}"
