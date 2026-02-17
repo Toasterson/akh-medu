@@ -799,6 +799,9 @@ impl AkhClient {
                         .map_err(|e| ClientError::Engine(crate::error::AkhError::Library(e)))?
                 };
 
+                // Persist symbols, registry, and allocator state to durable store.
+                engine.persist().map_err(ClientError::Engine)?;
+
                 Ok(LibraryAddResponse {
                     id: result.record.id,
                     title: result.record.title,

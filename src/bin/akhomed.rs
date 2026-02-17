@@ -441,10 +441,13 @@ async fn ingest_triples(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let engine = state.get_engine(&ws_name).await?;
     match engine.ingest_label_triples(&req.triples) {
-        Ok((syms, trips)) => Ok(Json(serde_json::json!({
-            "symbols_created": syms,
-            "triples_ingested": trips,
-        }))),
+        Ok((syms, trips)) => {
+            let _ = engine.persist();
+            Ok(Json(serde_json::json!({
+                "symbols_created": syms,
+                "triples_ingested": trips,
+            })))
+        }
         Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, format!("{e}"))),
     }
 }
@@ -827,6 +830,11 @@ async fn library_add_handler(
         akh_medu::library::ingest_file(&engine, &mut catalog, &path, ingest_config)
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?
     };
+
+    // Persist engine state so ingested symbols survive restarts.
+    engine
+        .persist()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("persist: {e}")))?;
 
     Ok(Json(LibraryAddResponse {
         id: result.record.id,
