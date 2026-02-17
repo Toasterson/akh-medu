@@ -1,6 +1,6 @@
 # Akh-medu Architecture
 
-> Last updated: 2026-02-17 (Phase 13 added: personal assistant with email, planning, preferences, dashboards, delegated agents)
+> Last updated: 2026-02-17 (Phase 14 enhanced: identity bootstrapping from cultural references, Ritual of Awakening, 12 Jungian archetypes, OCEAN personality model)
 
 ## Overview
 
@@ -116,3 +116,9 @@ Phase 13a–13i: Personal assistant (9 sub-phases):
 - **PIM**: 13e personal task & project management (GTD + Eisenhower + PARA), 13f calendar & temporal reasoning (RFC 5545, Allen interval algebra)
 - **Intelligence**: 13g preference learning & proactive assistance (HyperRec-style VSA profiles, serendipity engine), 13h structured output & operator dashboards (JSON-LD, briefings, notifications)
 - **Delegation**: 13i delegated agent spawning (scoped knowledge, own identity, email composition pipeline)
+Phase 14a–14i: Purpose-driven bootstrapping with identity (9 sub-phases):
+- **Identity**: 14a purpose + identity parser (NL → PurposeModel + IdentityRef, character reference extraction), 14b identity resolution (Wikidata + DBpedia + Wikipedia cascade → 12 Jungian archetypes → OCEAN → Psyche construction, Ritual of Awakening: self-naming via cultural morphemes)
+- **Domain**: 14c domain expansion (Wikidata + Wikipedia + ConceptNet, VSA boundary detection), 14d prerequisite discovery + ZPD classification (Vygotsky zones, curriculum generation)
+- **Acquisition**: 14e resource discovery (Semantic Scholar + OpenAlex + Open Library, quality scoring), 14f iterative ingestion (curriculum-ordered, NELL-style multi-extractor cross-validation, personality-biased resource selection)
+- **Assessment**: 14g competence assessment (Dreyfus model, competency questions, graph completeness, VSA structural analysis)
+- **Orchestration**: 14h bootstrap orchestrator (meta-OODA loop, personality shapes exploration style, Dreyfus-adaptive exploration), 14i community recipe sharing (TOML purpose recipes with identity section, ActivityPub federation, skillpack export)

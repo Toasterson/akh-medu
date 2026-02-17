@@ -183,3 +183,26 @@ identities, and email composition pipeline via grammar module + constraint check
 
 - **Implementation plan**: `docs/ai/plans/2026-02-17-phase13-personal-assistant.md`
 - **Research**: `docs/ai/decisions/004-personal-assistant-research.md`
+
+## Phase 14 — Purpose-Driven Bootstrapping with Identity
+
+Autonomous domain knowledge acquisition AND identity construction from operator statements
+like "You are the Architect of the System based on Ptah" or "Be like Gandalf — a GCC
+compiler expert". Purpose + identity parser extracts domain, competence level, seed
+concepts, and character reference. Identity resolution via multi-source cascade
+(Wikidata SPARQL + DBpedia categories + Wikipedia extraction with Hearst patterns)
+resolves cultural references (mythology, fiction, history) into structured personality:
+12 Jungian archetypes → OCEAN Big Five → behavioral parameters → Psyche construction
+(Persona + Shadow + ArchetypeWeights). The Ritual of Awakening: self-naming via
+culture-specific morpheme composition (Egyptian, Greek, Norse, Latin patterns),
+provenance-tracked as `DerivationKind::RitualOfAwakening` — the akh's creation myth. Domain expansion, prerequisite
+discovery (Vygotsky ZPD), resource discovery (Semantic Scholar + OpenAlex + Open Library),
+curriculum-ordered ingestion, and Dreyfus competence assessment — all shaped by the
+constructed personality (Creator archetype weights building resources, Sage weights
+theoretical depth). Bootstrap orchestrator runs meta-OODA with personality-adaptive
+exploration-exploitation. Community purpose recipes (TOML with identity section) shared
+via ActivityPub/oxifed. 9 sub-phases (14a-14i). Builds on existing Psyche model in
+`compartment/psyche.rs`.
+
+- **Implementation plan**: `docs/ai/plans/2026-02-17-phase14-bootstrapping.md`
+- **Research**: `docs/ai/decisions/005-bootstrapping-research.md`, `docs/ai/decisions/006-identity-bootstrapping-research.md`
