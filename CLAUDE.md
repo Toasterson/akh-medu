@@ -126,3 +126,22 @@ second-order quantification, and NARTs.
 
 - **Gap analysis**: `docs/ai/decisions/001-cyc-paper-analysis.md`
 - **Implementation plan**: `docs/ai/plans/2026-02-17-phase9-cyc-inspired.md`
+
+## Phase 10 — Generative Functions (Rust Code Generation)
+
+`RustCodeGrammar` linearizer, `code_gen` agent tool, code-aware planning,
+iterative refinement via compiler feedback, and reusable code templates.
+5 sub-phases (10a–10e). Builds on existing `AbsTree::CodeSignature/CodeModule`,
+`code_ingest`, `doc_gen`, `file_io`, `shell_exec` tools.
+
+- **Implementation plan**: `docs/ai/plans/2026-02-17-phase10-code-generation.md`
+
+## Phase 11 — Autonomous Task System with Self-Goal Setting
+
+Goal generation from observation (gaps, anomalies, opportunities), intelligent
+decomposition with dependency tracking, argumentation-backed priority reasoning,
+project abstraction for cross-session continuity, world monitoring with reactive
+goals, self-evaluation with goal questioning, and resource awareness.
+7 sub-phases (11a–11g). Converges all prior phases into true autonomy.
+
+- **Implementation plan**: `docs/ai/plans/2026-02-17-phase11-autonomous-tasks.md`
