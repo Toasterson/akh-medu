@@ -108,3 +108,6 @@ Phase 11a–11h: Autonomous task system (8 sub-phases):
 - **Core**: 11a drive-based goal generation (CLARION/GDA/Soar), 11b HTN decomposition with dependency DAGs, 11c value-based argumentation priority (Dung/VAF)
 - **Structure**: 11d projects as microtheories with Soar/ACT-R memory, 11e GDA expectation monitoring
 - **Meta**: 11f metacognitive self-evaluation (Nelson-Narens/AGM), 11g VOC resource reasoning with CBR effort estimation, 11h procedural learning (Soar chunking)
+Phase 12a–12g: Interaction — communication protocols and social reasoning (7 sub-phases):
+- **Core**: 12a channel abstraction (capability-secured, Chat = operator protocol), 12b grounded operator dialogue, 12c pre-communication constraint checking
+- **Social**: 12d social KG with theory of mind (microtheories), 12e ActivityPub federation via oxifed, 12f transparent reasoning / explanations, 12g multi-agent communication

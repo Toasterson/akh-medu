@@ -154,3 +154,15 @@ learning (chunking).
 
 - **Implementation plan**: `docs/ai/plans/2026-02-17-phase11-autonomous-tasks.md`
 - **Research**: `docs/ai/decisions/003-autonomous-tasks-research.md`
+
+## Phase 12 — Interaction: Communication Protocols and Social Reasoning
+
+Chat-as-operator-protocol with capability-secured channel abstraction
+(Goblins/OCapN-inspired). Grounded dialogue backed by KG + provenance.
+Pre-communication constraint checking (Winter-inspired, full inference stack).
+Social knowledge graph with per-interlocutor theory of mind via microtheories.
+Federation via oxifed (akh as app inside oxifed, AMQP + REST). Transparent reasoning with provenance-to-prose
+explanations. Multi-agent communication with capability tokens.
+7 sub-phases (12a–12g). Gives the agent an interaction surface.
+
+- **Implementation plan**: `docs/ai/plans/2026-02-17-phase12-interaction.md`
