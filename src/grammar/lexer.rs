@@ -123,6 +123,21 @@ pub struct RelationalPattern {
     pub default_confidence: f32,
 }
 
+/// Structural decomposition of a question's grammatical frame.
+#[derive(Debug, Clone)]
+pub struct QuestionFrame {
+    /// Opening question word (e.g., "what", "qui").
+    pub question_word: Option<String>,
+    /// Auxiliary/modal verb after question word (e.g., "can", "est").
+    pub auxiliary: Option<String>,
+    /// Content subject tokens (between aux and trailing aux, articles stripped).
+    pub subject_tokens: Vec<String>,
+    /// Whether a trailing auxiliary was stripped.
+    pub trailing_stripped: bool,
+    /// Whether the auxiliary signals capability ("can", "peut", "может").
+    pub signals_capability: bool,
+}
+
 /// The lexicon: maps surface forms to grammatical roles.
 #[derive(Clone)]
 pub struct Lexicon {
@@ -136,6 +151,12 @@ pub struct Lexicon {
     goal_verbs: Vec<String>,
     /// Command patterns.
     commands: Vec<(String, CommandKind)>,
+    /// Auxiliary/modal verbs that follow question words (e.g., "is", "can", "does").
+    auxiliary_verbs: Vec<String>,
+    /// Trailing auxiliaries void at end of questions (e.g., "do" in "What can you do?").
+    trailing_auxiliaries: Vec<String>,
+    /// Modal verbs that signal capability/ability (subset of auxiliary_verbs).
+    capability_modals: Vec<String>,
 }
 
 /// Non-declarative commands recognized by the lexer.
@@ -234,12 +255,27 @@ impl Lexicon {
             ("list goals".into(), CommandKind::ShowStatus),
         ];
 
+        let auxiliary_verbs = vec![
+            "is".into(), "are".into(), "was".into(), "were".into(),
+            "do".into(), "does".into(), "did".into(),
+            "can".into(), "could".into(),
+            "will".into(), "would".into(),
+            "shall".into(), "should".into(),
+            "may".into(), "might".into(), "must".into(),
+            "about".into(),
+        ];
+        let trailing_auxiliaries = vec!["do".into(), "does".into()];
+        let capability_modals = vec!["can".into(), "could".into()];
+
         Self {
             void_words,
             relational_patterns,
             question_words,
             goal_verbs,
             commands,
+            auxiliary_verbs,
+            trailing_auxiliaries,
+            capability_modals,
         }
     }
 
@@ -297,12 +333,21 @@ impl Lexicon {
             ("status".into(), CommandKind::ShowStatus),
         ];
 
+        let auxiliary_verbs = vec![
+            "это".into(), "является".into(), "может".into(), "ли".into(),
+        ];
+        let trailing_auxiliaries = vec!["делать".into()];
+        let capability_modals = vec!["может".into()];
+
         Self {
             void_words,
             relational_patterns,
             question_words,
             goal_verbs,
             commands,
+            auxiliary_verbs,
+            trailing_auxiliaries,
+            capability_modals,
         }
     }
 
@@ -354,12 +399,21 @@ impl Lexicon {
             ("status".into(), CommandKind::ShowStatus),
         ];
 
+        let auxiliary_verbs = vec![
+            "هل".into(), "هو".into(), "هي".into(), "يمكن".into(),
+        ];
+        let trailing_auxiliaries = vec!["تفعل".into(), "يفعل".into()];
+        let capability_modals = vec!["يمكن".into(), "يستطيع".into()];
+
         Self {
             void_words,
             relational_patterns,
             question_words,
             goal_verbs,
             commands,
+            auxiliary_verbs,
+            trailing_auxiliaries,
+            capability_modals,
         }
     }
 
@@ -432,12 +486,23 @@ impl Lexicon {
             ("status".into(), CommandKind::ShowStatus),
         ];
 
+        let auxiliary_verbs = vec![
+            "est".into(), "sont".into(),
+            "peut".into(), "peux".into(), "pouvez".into(),
+            "fait".into(),
+        ];
+        let trailing_auxiliaries = vec!["faire".into()];
+        let capability_modals = vec!["peut".into(), "peux".into(), "pouvez".into()];
+
         Self {
             void_words,
             relational_patterns,
             question_words,
             goal_verbs,
             commands,
+            auxiliary_verbs,
+            trailing_auxiliaries,
+            capability_modals,
         }
     }
 
@@ -509,12 +574,23 @@ impl Lexicon {
             ("status".into(), CommandKind::ShowStatus),
         ];
 
+        let auxiliary_verbs = vec![
+            "es".into(), "son".into(),
+            "puede".into(), "puedes".into(),
+            "hace".into(), "hacen".into(),
+        ];
+        let trailing_auxiliaries = vec!["hacer".into()];
+        let capability_modals = vec!["puede".into(), "puedes".into(), "pueden".into()];
+
         Self {
             void_words,
             relational_patterns,
             question_words,
             goal_verbs,
             commands,
+            auxiliary_verbs,
+            trailing_auxiliaries,
+            capability_modals,
         }
     }
 
@@ -539,6 +615,101 @@ impl Lexicon {
     pub fn is_goal_verb(&self, word: &str) -> bool {
         let lower = word.to_lowercase();
         self.goal_verbs.iter().any(|g| *g == lower)
+    }
+
+    /// Whether a word is an auxiliary/modal verb.
+    pub fn is_auxiliary_verb(&self, word: &str) -> bool {
+        let lower = word.to_lowercase();
+        self.auxiliary_verbs.iter().any(|a| *a == lower)
+    }
+
+    /// Whether a word is a trailing auxiliary (strippable at end of questions).
+    pub fn is_trailing_auxiliary(&self, word: &str) -> bool {
+        let lower = word.to_lowercase();
+        self.trailing_auxiliaries.iter().any(|a| *a == lower)
+    }
+
+    /// Whether a word is a capability/ability modal verb.
+    pub fn is_capability_modal(&self, word: &str) -> bool {
+        let lower = word.to_lowercase();
+        self.capability_modals.iter().any(|m| *m == lower)
+    }
+
+    /// Parse a question into its grammatical frame.
+    ///
+    /// Decomposes the question into question word, auxiliary verb,
+    /// content subject tokens, and capability signal — all language-aware
+    /// via the lexicon's word lists.
+    pub fn parse_question_frame(&self, input: &str) -> QuestionFrame {
+        let s = input.trim().trim_end_matches('?').trim();
+        let words: Vec<&str> = s.split_whitespace().collect();
+
+        if words.is_empty() {
+            return QuestionFrame {
+                question_word: None,
+                auxiliary: None,
+                subject_tokens: Vec::new(),
+                trailing_stripped: false,
+                signals_capability: false,
+            };
+        }
+
+        let mut pos = 0;
+        let mut question_word = None;
+        let mut auxiliary = None;
+
+        // Check if first word is a question word.
+        if self.is_question_word(words[0]) {
+            question_word = Some(words[0].to_lowercase());
+            pos = 1;
+
+            // Check if second word is an auxiliary verb.
+            if pos < words.len() && self.is_auxiliary_verb(words[pos]) {
+                auxiliary = Some(words[pos].to_lowercase());
+                pos += 1;
+            }
+        } else if self.is_auxiliary_verb(words[0]) {
+            // First word IS an auxiliary (e.g., "Can you help?").
+            auxiliary = Some(words[0].to_lowercase());
+            pos = 1;
+        }
+
+        // Remaining words are content.
+        let mut content: Vec<String> = words[pos..]
+            .iter()
+            .map(|w| w.to_string())
+            .collect();
+
+        // Strip trailing auxiliary if more than one content word remains.
+        let mut trailing_stripped = false;
+        if content.len() > 1 {
+            if let Some(last) = content.last() {
+                if self.is_trailing_auxiliary(last) {
+                    content.pop();
+                    trailing_stripped = true;
+                }
+            }
+        }
+
+        // Strip leading void words (articles) from content.
+        while !content.is_empty() && self.is_void(&content[0]) && content.len() > 1 {
+            content.remove(0);
+        }
+
+        let signals_capability = auxiliary
+            .as_deref()
+            .is_some_and(|a| self.is_capability_modal(a))
+            || question_word
+                .as_deref()
+                .is_some_and(|q| self.is_capability_modal(q));
+
+        QuestionFrame {
+            question_word,
+            auxiliary,
+            subject_tokens: content,
+            trailing_stripped,
+            signals_capability,
+        }
     }
 
     /// Try to match a command from the input.
@@ -915,6 +1086,67 @@ mod tests {
             Some("contains".to_string())
         );
         assert_eq!(lexicon.surface_form("nonexistent"), None);
+    }
+
+    // ── QuestionFrame tests ─────────────────────────────────────────────
+
+    #[test]
+    fn question_frame_what_can_you_do() {
+        let lexicon = Lexicon::default_english();
+        let frame = lexicon.parse_question_frame("What can you do?");
+        assert_eq!(frame.question_word.as_deref(), Some("what"));
+        assert_eq!(frame.auxiliary.as_deref(), Some("can"));
+        assert_eq!(frame.subject_tokens, vec!["you"]);
+        assert!(frame.signals_capability);
+        assert!(frame.trailing_stripped);
+    }
+
+    #[test]
+    fn question_frame_what_is_a_dog() {
+        let lexicon = Lexicon::default_english();
+        let frame = lexicon.parse_question_frame("What is a dog?");
+        assert_eq!(frame.question_word.as_deref(), Some("what"));
+        assert_eq!(frame.auxiliary.as_deref(), Some("is"));
+        assert_eq!(frame.subject_tokens, vec!["dog"]);
+        assert!(!frame.signals_capability);
+        assert!(!frame.trailing_stripped);
+    }
+
+    #[test]
+    fn question_frame_who_are_you() {
+        let lexicon = Lexicon::default_english();
+        let frame = lexicon.parse_question_frame("Who are you?");
+        assert_eq!(frame.question_word.as_deref(), Some("who"));
+        assert_eq!(frame.auxiliary.as_deref(), Some("are"));
+        assert_eq!(frame.subject_tokens, vec!["you"]);
+        assert!(!frame.signals_capability);
+    }
+
+    #[test]
+    fn question_frame_can_you_help() {
+        // "can" is in both question_words and auxiliary_verbs.
+        // parse_question_frame checks question_word first, so "can" is the question_word.
+        // signals_capability is true because "can" is a capability modal.
+        let lexicon = Lexicon::default_english();
+        let frame = lexicon.parse_question_frame("Can you help?");
+        assert_eq!(frame.question_word.as_deref(), Some("can"));
+        assert_eq!(frame.auxiliary, None);
+        assert_eq!(frame.subject_tokens, vec!["you", "help"]);
+        assert!(frame.signals_capability);
+    }
+
+    #[test]
+    fn question_frame_auxiliary_accessors() {
+        let lexicon = Lexicon::default_english();
+        assert!(lexicon.is_auxiliary_verb("can"));
+        assert!(lexicon.is_auxiliary_verb("Is"));
+        assert!(!lexicon.is_auxiliary_verb("dog"));
+        assert!(lexicon.is_trailing_auxiliary("do"));
+        assert!(lexicon.is_trailing_auxiliary("does"));
+        assert!(!lexicon.is_trailing_auxiliary("can"));
+        assert!(lexicon.is_capability_modal("can"));
+        assert!(lexicon.is_capability_modal("could"));
+        assert!(!lexicon.is_capability_modal("is"));
     }
 
     // ── resolve_fuzzy tests ─────────────────────────────────────────────

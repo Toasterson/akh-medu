@@ -25,6 +25,8 @@ pub enum UserIntent {
         subject: String,
         original_input: String,
         question_word: Option<QuestionWord>,
+        /// Whether the question's auxiliary signals capability ("can", "peut", etc.).
+        capability_signal: bool,
     },
     /// "X is a Y" / "X has Y" — assert a fact.
     Assert { text: String },
@@ -93,23 +95,20 @@ pub fn classify_intent(input: &str) -> UserIntent {
         return UserIntent::RunAgent { cycles };
     }
 
-    // Query: starts with question word or ends with '?'.
+    // Query: starts with question word, auxiliary verb, or ends with '?'.
+    let lexicon = crate::grammar::lexer::Lexicon::for_language(
+        crate::grammar::lexer::Language::default(),
+    );
     let question_word = extract_question_word(&lower);
+    let first_word = lower.split_whitespace().next().unwrap_or("");
     if question_word.is_some()
-        || lower.starts_with("is ")
-        || lower.starts_with("does ")
-        || lower.starts_with("do ")
-        || lower.starts_with("can ")
+        || lexicon.is_auxiliary_verb(first_word)
         || trimmed.ends_with('?')
     {
-        let subject = extract_subject_from_question(trimmed);
+        let frame = lexicon.parse_question_frame(trimmed);
+        let subject = frame.subject_tokens.join(" ");
         let qw = question_word.or_else(|| {
-            // Yes/no starters: is, does, do, can
-            if lower.starts_with("is ")
-                || lower.starts_with("does ")
-                || lower.starts_with("do ")
-                || lower.starts_with("can ")
-            {
+            if frame.auxiliary.is_some() && frame.question_word.is_none() {
                 Some(QuestionWord::YesNo)
             } else {
                 None
@@ -119,6 +118,7 @@ pub fn classify_intent(input: &str) -> UserIntent {
             subject,
             original_input: trimmed.to_string(),
             question_word: qw,
+            capability_signal: frame.signals_capability,
         };
     }
 
@@ -224,63 +224,6 @@ fn extract_question_word(lower: &str) -> Option<QuestionWord> {
     }
 }
 
-/// Extract the subject from a question.
-fn extract_subject_from_question(input: &str) -> String {
-    let s = input.trim().trim_end_matches('?').trim();
-
-    // Remove leading question words.
-    let words: Vec<&str> = s.split_whitespace().collect();
-    if words.len() < 2 {
-        return s.to_string();
-    }
-
-    let first_lower = words[0].to_lowercase();
-    let skip = match first_lower.as_str() {
-        "what" | "who" | "where" | "when" | "how" | "why" | "which" => {
-            // Also skip "is", "are", "do", "does", "can" after question word.
-            if words.len() > 1 {
-                let second_lower = words[1].to_lowercase();
-                if ["is", "are", "do", "does", "can", "was", "were", "about"]
-                    .contains(&second_lower.as_str())
-                {
-                    2
-                } else {
-                    1
-                }
-            } else {
-                1
-            }
-        }
-        "is" | "does" | "do" | "can" => 1,
-        _ => 0,
-    };
-
-    let mut final_words: Vec<&str> = words[skip..].to_vec();
-
-    // Strip trailing auxiliary verbs left over from modal patterns.
-    // "What can you do?" → skip 2 → ["you", "do"] → strip "do" → ["you"]
-    // "What does the cat eat?" → skip 2 → ["the", "cat", "eat"] → strip "eat"?
-    // Only strip trailing "do" — it's the generic auxiliary, not a content verb.
-    if final_words.len() > 1 {
-        let last = final_words.last().unwrap().to_lowercase();
-        if last == "do" {
-            final_words.pop();
-        }
-    }
-
-    if final_words.is_empty() {
-        return s.to_string();
-    }
-
-    // Remove leading articles "a", "an", "the".
-    let first_remaining = final_words[0].to_lowercase();
-    if ["a", "an", "the"].contains(&first_remaining.as_str()) && final_words.len() > 1 {
-        final_words[1..].join(" ")
-    } else {
-        final_words.join(" ")
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -361,21 +304,27 @@ mod tests {
     }
 
     #[test]
-    fn extract_subject_from_question_basic() {
-        let subject = extract_subject_from_question("What is a dog?");
-        assert_eq!(subject, "dog");
+    fn question_frame_basic() {
+        let lexicon = crate::grammar::lexer::Lexicon::default_english();
+        let frame = lexicon.parse_question_frame("What is a dog?");
+        assert_eq!(frame.subject_tokens.join(" "), "dog");
     }
 
     #[test]
-    fn extract_subject_capability_question() {
+    fn question_frame_capability() {
         // "What can you do?" should extract "you", not "you do".
-        let subject = extract_subject_from_question("What can you do?");
-        assert_eq!(subject, "you");
+        let lexicon = crate::grammar::lexer::Lexicon::default_english();
+        let frame = lexicon.parse_question_frame("What can you do?");
+        assert_eq!(frame.subject_tokens.join(" "), "you");
+        assert!(frame.signals_capability);
+        assert!(frame.trailing_stripped);
     }
 
     #[test]
-    fn extract_subject_who_are_you() {
-        let subject = extract_subject_from_question("Who are you?");
-        assert_eq!(subject, "you");
+    fn question_frame_who_are_you() {
+        let lexicon = crate::grammar::lexer::Lexicon::default_english();
+        let frame = lexicon.parse_question_frame("Who are you?");
+        assert_eq!(frame.subject_tokens.join(" "), "you");
+        assert!(!frame.signals_capability);
     }
 }

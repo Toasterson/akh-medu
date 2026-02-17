@@ -2811,7 +2811,7 @@ fn main() -> Result<()> {
                                 engine.all_triples().len(),
                             )
                         }
-                        akh_medu::agent::UserIntent::Query { subject, original_input, question_word } => {
+                        akh_medu::agent::UserIntent::Query { subject, original_input, question_word, capability_signal } => {
                             let grammar_name = engine
                                 .compartments()
                                 .and_then(|mgr| mgr.psyche())
@@ -2824,6 +2824,7 @@ fn main() -> Result<()> {
                                 question_word,
                                 &original_input,
                                 &engine,
+                                capability_signal,
                             )
                             .ok()
                             .and_then(|ctx| {

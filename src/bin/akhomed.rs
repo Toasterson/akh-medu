@@ -1253,7 +1253,7 @@ fn process_ws_input(input: &WsInput, agent: &mut Agent, engine: &Engine) -> Vec<
 
             let intent = akh_medu::agent::classify_intent(text);
             match intent {
-                akh_medu::agent::UserIntent::Query { subject, original_input, question_word } => {
+                akh_medu::agent::UserIntent::Query { subject, original_input, question_word, capability_signal } => {
                     let grammar_name = engine
                         .compartments()
                         .and_then(|mgr| mgr.psyche())
@@ -1266,6 +1266,7 @@ fn process_ws_input(input: &WsInput, agent: &mut Agent, engine: &Engine) -> Vec<
                         question_word,
                         &original_input,
                         engine,
+                        capability_signal,
                     )
                     .ok()
                     .and_then(|ctx| {

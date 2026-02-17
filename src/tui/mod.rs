@@ -343,13 +343,14 @@ impl AkhTui {
                     }
                 }
             }
-            crate::agent::UserIntent::Query { subject, original_input, question_word } => {
+            crate::agent::UserIntent::Query { subject, original_input, question_word, capability_signal } => {
                 // Try discourse-aware response first, fall back to synthesis.
                 let discourse_result = crate::grammar::discourse::resolve_discourse(
                     &subject,
                     question_word,
                     &original_input,
                     engine,
+                    capability_signal,
                 );
                 let handled = if let Ok(ref ctx) = discourse_result {
                     let from_triples = engine.triples_from(ctx.subject_id);

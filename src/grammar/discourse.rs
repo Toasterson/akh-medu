@@ -53,6 +53,8 @@ pub enum QueryFocus {
     Time,
     /// "Is X a Y?" / "Does X have Y?" — yes/no confirmation.
     Confirmation,
+    /// "What can X do?" — capability, ability, affordances.
+    Capability,
     /// Catch-all for unclassified queries.
     General,
 }
@@ -216,6 +218,7 @@ pub fn resolve_discourse(
     question_word: Option<QuestionWord>,
     original_input: &str,
     engine: &Engine,
+    capability_signal: bool,
 ) -> DiscourseResult<DiscourseContext> {
     let original_subject = subject.to_string();
 
@@ -226,8 +229,8 @@ pub fn resolve_discourse(
     // Step 2: Determine POV.
     let pov = determine_pov(&resolved_label, pronoun_resolved);
 
-    // Step 3: Classify query focus from question word.
-    let focus = classify_focus(question_word);
+    // Step 3: Classify query focus from question word and capability signal.
+    let focus = classify_focus_with_modal(question_word, capability_signal);
 
     Ok(DiscourseContext {
         resolved_subject: resolved_label,
@@ -304,6 +307,18 @@ fn classify_focus(question_word: Option<QuestionWord>) -> QueryFocus {
         Some(QuestionWord::YesNo) => QueryFocus::Confirmation,
         None => QueryFocus::General,
     }
+}
+
+/// Map question word to query focus, overriding with `Capability` when a
+/// capability modal (e.g., "can", "peut") is detected.
+pub fn classify_focus_with_modal(
+    question_word: Option<QuestionWord>,
+    capability_signal: bool,
+) -> QueryFocus {
+    if capability_signal {
+        return QueryFocus::Capability;
+    }
+    classify_focus(question_word)
 }
 
 /// Build a discourse-framed `AbsTree` from triples and discourse context.
@@ -439,6 +454,20 @@ fn score_triple_for_focus(predicate_label: &str, focus: &QueryFocus) -> i32 {
                 0
             }
         }
+        QueryFocus::Capability => {
+            if predicate_label == "has-capability" {
+                10
+            } else if IDENTITY_PREDICATES.iter().any(|p| predicate_label == *p) {
+                3
+            } else if DEPRIORITIZED_PREDICATES
+                .iter()
+                .any(|p| predicate_label == *p)
+            {
+                -5
+            } else {
+                0
+            }
+        }
         _ => 0,
     };
 
@@ -481,6 +510,41 @@ mod tests {
             classify_focus(Some(QuestionWord::YesNo)),
             QueryFocus::Confirmation
         );
+    }
+
+    #[test]
+    fn classify_focus_with_modal_capability() {
+        assert_eq!(
+            classify_focus_with_modal(Some(QuestionWord::What), true),
+            QueryFocus::Capability
+        );
+    }
+
+    #[test]
+    fn classify_focus_with_modal_no_signal() {
+        assert_eq!(
+            classify_focus_with_modal(Some(QuestionWord::What), false),
+            QueryFocus::Identity
+        );
+    }
+
+    #[test]
+    fn score_capability_has_capability() {
+        assert_eq!(
+            score_triple_for_focus("has-capability", &QueryFocus::Capability),
+            10
+        );
+    }
+
+    #[test]
+    fn score_capability_identity_predicate() {
+        // Identity predicates get a moderate boost under Capability focus.
+        assert!(score_triple_for_focus("is-a", &QueryFocus::Capability) > 0);
+    }
+
+    #[test]
+    fn score_capability_deprioritized() {
+        assert!(score_triple_for_focus("has-state", &QueryFocus::Capability) < 0);
     }
 
     #[test]

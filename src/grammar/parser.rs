@@ -65,7 +65,8 @@ pub fn parse_prose(input: &str, ctx: &ParseContext) -> ParseResult {
 
     // 3. Questions
     if is_question(trimmed, &lexicon) {
-        let subject = extract_question_subject(trimmed);
+        let frame = lexicon.parse_question_frame(trimmed);
+        let subject = frame.subject_tokens.join(" ");
         let tree = AbsTree::entity(&subject);
         return ParseResult::Query { subject, tree };
     }
@@ -119,57 +120,6 @@ fn is_question(input: &str, lexicon: &Lexicon) -> bool {
     }
     let first_word = input.split_whitespace().next().unwrap_or("").to_lowercase();
     lexicon.is_question_word(&first_word)
-}
-
-/// Extract the subject from a question, stripping question words and auxiliaries.
-fn extract_question_subject(input: &str) -> String {
-    let s = input.trim().trim_end_matches('?').trim();
-    let words: Vec<&str> = s.split_whitespace().collect();
-    if words.len() < 2 {
-        return s.to_string();
-    }
-
-    let first_lower = words[0].to_lowercase();
-    let skip = match first_lower.as_str() {
-        "what" | "who" | "where" | "when" | "how" | "why" | "which" => {
-            if words.len() > 1 {
-                let second = words[1].to_lowercase();
-                if ["is", "are", "do", "does", "can", "was", "were", "about"]
-                    .contains(&second.as_str())
-                {
-                    2
-                } else {
-                    1
-                }
-            } else {
-                1
-            }
-        }
-        "is" | "does" | "do" | "can" => 1,
-        _ => 0,
-    };
-
-    let mut final_words: Vec<&str> = words[skip..].to_vec();
-
-    // Strip trailing auxiliary "do" from modal patterns.
-    // "What can you do?" → skip 2 → ["you", "do"] → strip "do" → ["you"]
-    if final_words.len() > 1 {
-        let last = final_words.last().unwrap().to_lowercase();
-        if last == "do" {
-            final_words.pop();
-        }
-    }
-
-    if final_words.is_empty() {
-        return s.to_string();
-    }
-
-    let first_remaining = final_words[0].to_lowercase();
-    if ["a", "an", "the"].contains(&first_remaining.as_str()) && final_words.len() > 1 {
-        final_words[1..].join(" ")
-    } else {
-        final_words.join(" ")
-    }
 }
 
 /// Try to parse a compound sentence (split on "and"/"or").
@@ -484,13 +434,6 @@ mod tests {
     fn parse_complex_assertion() {
         let result = parse("The vsa module is located in the engine");
         assert!(matches!(result, ParseResult::Facts(_)));
-    }
-
-    #[test]
-    fn extract_subject_capability_question() {
-        // "What can you do?" should extract "you", not "you do".
-        let subject = extract_question_subject("What can you do?");
-        assert_eq!(subject, "you");
     }
 
     #[test]
