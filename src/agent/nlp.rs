@@ -255,17 +255,29 @@ fn extract_subject_from_question(input: &str) -> String {
         _ => 0,
     };
 
-    let remaining: String = words[skip..].join(" ");
-    // Remove trailing "a", "an", "the" from start of remaining.
-    let final_words: Vec<&str> = remaining.split_whitespace().collect();
+    let mut final_words: Vec<&str> = words[skip..].to_vec();
+
+    // Strip trailing auxiliary verbs left over from modal patterns.
+    // "What can you do?" → skip 2 → ["you", "do"] → strip "do" → ["you"]
+    // "What does the cat eat?" → skip 2 → ["the", "cat", "eat"] → strip "eat"?
+    // Only strip trailing "do" — it's the generic auxiliary, not a content verb.
+    if final_words.len() > 1 {
+        let last = final_words.last().unwrap().to_lowercase();
+        if last == "do" {
+            final_words.pop();
+        }
+    }
+
     if final_words.is_empty() {
         return s.to_string();
     }
+
+    // Remove leading articles "a", "an", "the".
     let first_remaining = final_words[0].to_lowercase();
     if ["a", "an", "the"].contains(&first_remaining.as_str()) && final_words.len() > 1 {
         final_words[1..].join(" ")
     } else {
-        remaining
+        final_words.join(" ")
     }
 }
 
@@ -352,5 +364,18 @@ mod tests {
     fn extract_subject_from_question_basic() {
         let subject = extract_subject_from_question("What is a dog?");
         assert_eq!(subject, "dog");
+    }
+
+    #[test]
+    fn extract_subject_capability_question() {
+        // "What can you do?" should extract "you", not "you do".
+        let subject = extract_subject_from_question("What can you do?");
+        assert_eq!(subject, "you");
+    }
+
+    #[test]
+    fn extract_subject_who_are_you() {
+        let subject = extract_subject_from_question("Who are you?");
+        assert_eq!(subject, "you");
     }
 }
