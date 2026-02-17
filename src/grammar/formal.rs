@@ -233,6 +233,10 @@ impl FormalGrammar {
 
                 Ok(out)
             }
+
+            // Discourse frames: delegate to inner content (formal doesn't
+            // do POV transformation — that's narrative's job).
+            AbsTree::DiscourseFrame { inner, .. } => self.linearize_inner(inner, ctx),
         }
     }
 }

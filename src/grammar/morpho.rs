@@ -137,6 +137,41 @@ fn format_case(original: &str, replacement: &str) -> String {
     }
 }
 
+/// Convert a third-person predicate phrase to first person.
+///
+/// - "is a" → "am a", "is an" → "am an", "is" → "am"
+/// - "has" → "have"
+/// - other → unchanged
+pub fn first_person_predicate(pred: &str) -> String {
+    if pred.starts_with("is ") {
+        format!("am {}", &pred[3..])
+    } else if pred == "is" {
+        "am".to_string()
+    } else if pred.starts_with("has ") {
+        format!("have {}", &pred[4..])
+    } else if pred == "has" {
+        "have".to_string()
+    } else {
+        pred.to_string()
+    }
+}
+
+/// Capitalize each segment of a hyphenated or space-separated entity name.
+///
+/// "akh-medu" → "Akh-Medu", "knowledge engine" → "Knowledge Engine"
+pub fn capitalize_entity(name: &str) -> String {
+    name.split('-')
+        .map(|segment| {
+            segment
+                .split_whitespace()
+                .map(|w| capitalize(w))
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect::<Vec<_>>()
+        .join("-")
+}
+
 /// Wrap a label in backticks for code-like presentation.
 pub fn code_quote(label: &str) -> String {
     format!("`{label}`")

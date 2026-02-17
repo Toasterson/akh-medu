@@ -13,6 +13,8 @@ pub enum CompartmentKind {
     Project,
     /// Shared content library document.
     Library,
+    /// Per-person knowledge compartment (identity, preferences, history).
+    Person,
 }
 
 impl std::fmt::Display for CompartmentKind {
@@ -22,6 +24,7 @@ impl std::fmt::Display for CompartmentKind {
             Self::Skill => write!(f, "Skill"),
             Self::Project => write!(f, "Project"),
             Self::Library => write!(f, "Library"),
+            Self::Person => write!(f, "Person"),
         }
     }
 }

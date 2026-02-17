@@ -33,7 +33,7 @@ pub mod trigger;
 pub mod wasm_runtime;
 
 pub use agent::{Agent, AgentConfig, AgentPredicates};
-pub use chat::Conversation;
+pub use chat::{Conversation, Participant, ParticipantSource, discover_ssh_fingerprint};
 #[cfg(feature = "daemon")]
 pub use daemon::{AgentDaemon, DaemonConfig};
 pub use error::{AgentError, AgentResult};
@@ -43,7 +43,7 @@ pub use memory::{
     ConsolidationConfig, ConsolidationResult, EpisodicEntry, WorkingMemory, WorkingMemoryEntry,
     WorkingMemoryKind,
 };
-pub use nlp::{UserIntent, classify_intent};
+pub use nlp::{QuestionWord, UserIntent, classify_intent};
 pub use ooda::{ActionResult, Decision, GoalProgress, Observation, OodaCycleResult, Orientation};
 pub use plan::{Plan, PlanStatus, PlanStep, StepStatus};
 pub use reflect::{Adjustment, ReflectionConfig, ReflectionResult};

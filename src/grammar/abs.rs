@@ -223,6 +223,13 @@ pub enum AbsTree {
         sections: Vec<AbsTree>,
         gaps: Vec<AbsTree>,
     },
+
+    /// A discourse-framed response with point-of-view and query focus.
+    DiscourseFrame {
+        pov: super::discourse::PointOfView,
+        focus: super::discourse::QueryFocus,
+        inner: Box<AbsTree>,
+    },
 }
 
 impl AbsTree {
@@ -245,6 +252,7 @@ impl AbsTree {
             AbsTree::Conjunction { .. } => Cat::Conjunction,
             AbsTree::Section { .. } => Cat::Section,
             AbsTree::Document { .. } => Cat::Document,
+            AbsTree::DiscourseFrame { .. } => Cat::DiscourseFrame,
         }
     }
 
@@ -333,6 +341,7 @@ impl AbsTree {
                 }
                 Ok(())
             }
+            AbsTree::DiscourseFrame { inner, .. } => inner.validate(),
             // Leaves and simple nodes are always valid.
             _ => Ok(()),
         }
@@ -380,9 +389,9 @@ impl AbsTree {
 
             AbsTree::Gap { entity, .. } => 1 + entity.node_count(),
 
-            AbsTree::WithConfidence { inner, .. } | AbsTree::WithProvenance { inner, .. } => {
-                1 + inner.node_count()
-            }
+            AbsTree::WithConfidence { inner, .. }
+            | AbsTree::WithProvenance { inner, .. }
+            | AbsTree::DiscourseFrame { inner, .. } => 1 + inner.node_count(),
 
             AbsTree::Conjunction { items, .. } => {
                 1 + items.iter().map(|i| i.node_count()).sum::<usize>()
@@ -436,7 +445,9 @@ impl AbsTree {
             AbsTree::Gap { entity, .. } => {
                 entity.collect_labels_inner(out);
             }
-            AbsTree::WithConfidence { inner, .. } | AbsTree::WithProvenance { inner, .. } => {
+            AbsTree::WithConfidence { inner, .. }
+            | AbsTree::WithProvenance { inner, .. }
+            | AbsTree::DiscourseFrame { inner, .. } => {
                 inner.collect_labels_inner(out);
             }
             AbsTree::Conjunction { items, .. } => {
@@ -712,6 +723,11 @@ impl AbsTree {
                 sections: sections.iter().map(|s| s.ground(registry)).collect(),
                 gaps: gaps.iter().map(|g| g.ground(registry)).collect(),
             },
+            AbsTree::DiscourseFrame { pov, focus, inner } => AbsTree::DiscourseFrame {
+                pov: *pov,
+                focus: focus.clone(),
+                inner: Box::new(inner.ground(registry)),
+            },
         }
     }
 
@@ -737,9 +753,9 @@ impl AbsTree {
                 entity, similar_to, ..
             } => entity.unresolved_count() + similar_to.unresolved_count(),
             AbsTree::Gap { entity, .. } => entity.unresolved_count(),
-            AbsTree::WithConfidence { inner, .. } | AbsTree::WithProvenance { inner, .. } => {
-                inner.unresolved_count()
-            }
+            AbsTree::WithConfidence { inner, .. }
+            | AbsTree::WithProvenance { inner, .. }
+            | AbsTree::DiscourseFrame { inner, .. } => inner.unresolved_count(),
             AbsTree::Conjunction { items, .. } => items.iter().map(|i| i.unresolved_count()).sum(),
             AbsTree::CodeModule { children, .. } => {
                 children.iter().map(|c| c.unresolved_count()).sum()
@@ -783,9 +799,9 @@ impl AbsTree {
                 .first_unresolved()
                 .or_else(|| similar_to.first_unresolved()),
             AbsTree::Gap { entity, .. } => entity.first_unresolved(),
-            AbsTree::WithConfidence { inner, .. } | AbsTree::WithProvenance { inner, .. } => {
-                inner.first_unresolved()
-            }
+            AbsTree::WithConfidence { inner, .. }
+            | AbsTree::WithProvenance { inner, .. }
+            | AbsTree::DiscourseFrame { inner, .. } => inner.first_unresolved(),
             AbsTree::Conjunction { items, .. } => items.iter().find_map(|i| i.first_unresolved()),
             AbsTree::CodeModule { children, .. } => {
                 children.iter().find_map(|c| c.first_unresolved())
@@ -930,9 +946,9 @@ impl AbsTree {
             }
 
             // ── Modifiers (transparent) ─────────────────────────────────
-            AbsTree::WithConfidence { inner, .. } | AbsTree::WithProvenance { inner, .. } => {
-                inner.to_vsa(ops, item_memory, roles)
-            }
+            AbsTree::WithConfidence { inner, .. }
+            | AbsTree::WithProvenance { inner, .. }
+            | AbsTree::DiscourseFrame { inner, .. } => inner.to_vsa(ops, item_memory, roles),
 
             // ── Structure ───────────────────────────────────────────────
             AbsTree::Conjunction { items, .. } => {

@@ -42,6 +42,7 @@ pub mod cat;
 pub mod concrete;
 pub mod custom;
 pub mod detect;
+pub mod discourse;
 pub mod entity_resolution;
 pub mod equivalences;
 pub mod error;

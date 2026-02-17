@@ -3,11 +3,29 @@
 //! Regex-based classification that works without an LLM. Identifies user intent
 //! from common patterns like "What is X?", "Find X", "X is a Y", etc.
 
+/// The question word that opens a query, used for discourse focus classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuestionWord {
+    Who,
+    What,
+    How,
+    Why,
+    Where,
+    When,
+    Which,
+    /// Yes/no questions: "Is X a Y?", "Does X have Y?", "Can X do Y?"
+    YesNo,
+}
+
 /// Classified user intent from natural language input.
 #[derive(Debug, Clone)]
 pub enum UserIntent {
     /// "What/Who/Where/How ... X?" — look up information.
-    Query { subject: String },
+    Query {
+        subject: String,
+        original_input: String,
+        question_word: Option<QuestionWord>,
+    },
     /// "X is a Y" / "X has Y" — assert a fact.
     Assert { text: String },
     /// "Find/Learn/Discover ..." — set an agent goal.
@@ -76,13 +94,8 @@ pub fn classify_intent(input: &str) -> UserIntent {
     }
 
     // Query: starts with question word or ends with '?'.
-    if lower.starts_with("what ")
-        || lower.starts_with("who ")
-        || lower.starts_with("where ")
-        || lower.starts_with("when ")
-        || lower.starts_with("how ")
-        || lower.starts_with("why ")
-        || lower.starts_with("which ")
+    let question_word = extract_question_word(&lower);
+    if question_word.is_some()
         || lower.starts_with("is ")
         || lower.starts_with("does ")
         || lower.starts_with("do ")
@@ -90,7 +103,23 @@ pub fn classify_intent(input: &str) -> UserIntent {
         || trimmed.ends_with('?')
     {
         let subject = extract_subject_from_question(trimmed);
-        return UserIntent::Query { subject };
+        let qw = question_word.or_else(|| {
+            // Yes/no starters: is, does, do, can
+            if lower.starts_with("is ")
+                || lower.starts_with("does ")
+                || lower.starts_with("do ")
+                || lower.starts_with("can ")
+            {
+                Some(QuestionWord::YesNo)
+            } else {
+                None
+            }
+        });
+        return UserIntent::Query {
+            subject,
+            original_input: trimmed.to_string(),
+            question_word: qw,
+        };
     }
 
     // Set goal: starts with action verbs.
@@ -174,6 +203,27 @@ fn extract_number(input: &str) -> Option<usize> {
     None
 }
 
+/// Extract the question word from the beginning of a lowercase query.
+fn extract_question_word(lower: &str) -> Option<QuestionWord> {
+    if lower.starts_with("what ") {
+        Some(QuestionWord::What)
+    } else if lower.starts_with("who ") {
+        Some(QuestionWord::Who)
+    } else if lower.starts_with("where ") {
+        Some(QuestionWord::Where)
+    } else if lower.starts_with("when ") {
+        Some(QuestionWord::When)
+    } else if lower.starts_with("how ") {
+        Some(QuestionWord::How)
+    } else if lower.starts_with("why ") {
+        Some(QuestionWord::Why)
+    } else if lower.starts_with("which ") {
+        Some(QuestionWord::Which)
+    } else {
+        None
+    }
+}
+
 /// Extract the subject from a question.
 fn extract_subject_from_question(input: &str) -> String {
     let s = input.trim().trim_end_matches('?').trim();
@@ -227,12 +277,30 @@ mod tests {
     fn classify_query() {
         let intent = classify_intent("What is a dog?");
         assert!(matches!(intent, UserIntent::Query { .. }));
+        if let UserIntent::Query {
+            question_word,
+            original_input,
+            ..
+        } = &intent
+        {
+            assert_eq!(*question_word, Some(QuestionWord::What));
+            assert_eq!(original_input, "What is a dog?");
+        }
     }
 
     #[test]
     fn classify_query_who() {
-        let intent = classify_intent("Who discovered gravity?");
+        let intent = classify_intent("Who are you?");
         assert!(matches!(intent, UserIntent::Query { .. }));
+        if let UserIntent::Query {
+            subject,
+            question_word,
+            ..
+        } = &intent
+        {
+            assert_eq!(*question_word, Some(QuestionWord::Who));
+            assert_eq!(subject, "you");
+        }
     }
 
     #[test]

@@ -1,9 +1,114 @@
 //! Conversation persistence for the chat REPL.
 //!
 //! Stores conversation turns (user input + agent response) and serializes
-//! them to the engine's durable store for session continuity.
+//! them to the engine's durable store for session continuity. Also tracks
+//! participant identity across sessions via SSH key fingerprints.
 
 use serde::{Deserialize, Serialize};
+
+/// How a participant's identity was established.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ParticipantSource {
+    /// Identity derived from SSH public key fingerprint.
+    SshKey { fingerprint: String },
+    /// User explicitly introduced themselves ("My name is Alice").
+    Explicit,
+    /// No identity established yet.
+    Anonymous,
+}
+
+/// A conversation participant with optional stable identity.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Participant {
+    /// Stable identifier: "ssh:<fingerprint>" or "anon".
+    pub id: String,
+    /// Display name learned from explicit introduction.
+    pub display_name: Option<String>,
+    /// How identity was established.
+    pub source: ParticipantSource,
+}
+
+impl Participant {
+    /// Create an anonymous participant.
+    pub fn anonymous() -> Self {
+        Self {
+            id: "anon".to_string(),
+            display_name: None,
+            source: ParticipantSource::Anonymous,
+        }
+    }
+
+    /// Create a participant from an SSH key fingerprint.
+    pub fn from_ssh_fingerprint(fingerprint: String) -> Self {
+        let id = format!("ssh:{fingerprint}");
+        Self {
+            id,
+            display_name: None,
+            source: ParticipantSource::SshKey { fingerprint },
+        }
+    }
+}
+
+/// Discover an SSH public key fingerprint from `~/.ssh/*.pub`.
+///
+/// Reads the first valid public key found and computes its SHA-256 fingerprint.
+/// Returns `None` if no SSH keys are found or readable.
+pub fn discover_ssh_fingerprint() -> Option<String> {
+    let home = std::env::var("HOME").ok()?;
+    let ssh_dir = std::path::PathBuf::from(home).join(".ssh");
+
+    if !ssh_dir.is_dir() {
+        return None;
+    }
+
+    let entries = std::fs::read_dir(&ssh_dir).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) == Some("pub") {
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                // SSH public key format: "<type> <base64-data> [comment]"
+                let parts: Vec<&str> = content.trim().split_whitespace().collect();
+                if parts.len() >= 2 {
+                    // Decode base64 and hash.
+                    if let Ok(key_bytes) = base64_decode(parts[1]) {
+                        use std::collections::hash_map::DefaultHasher;
+                        use std::hash::{Hash, Hasher};
+                        let mut hasher = DefaultHasher::new();
+                        key_bytes.hash(&mut hasher);
+                        let hash = hasher.finish();
+                        return Some(format!("{hash:016x}"));
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Minimal base64 decoder (standard alphabet, no padding required).
+fn base64_decode(input: &str) -> Result<Vec<u8>, ()> {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+    let mut output = Vec::with_capacity(input.len() * 3 / 4);
+    let mut buf: u32 = 0;
+    let mut bits: u32 = 0;
+
+    for &byte in input.as_bytes() {
+        if byte == b'=' {
+            break;
+        }
+        let val = TABLE.iter().position(|&c| c == byte).ok_or(())? as u32;
+        buf = (buf << 6) | val;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            output.push((buf >> bits) as u8);
+            buf &= (1 << bits) - 1;
+        }
+    }
+
+    Ok(output)
+}
 
 /// A single conversation turn (user input + agent response).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -14,6 +119,9 @@ pub struct ConversationTurn {
     pub agent_response: String,
     /// Timestamp (milliseconds since epoch).
     pub timestamp_ms: u64,
+    /// Participant who initiated this turn (if known).
+    #[serde(default)]
+    pub participant: Option<Participant>,
 }
 
 /// A conversation session with ordered turns.
@@ -21,6 +129,12 @@ pub struct ConversationTurn {
 pub struct Conversation {
     turns: Vec<ConversationTurn>,
     max_turns: usize,
+    /// Unique session identifier.
+    #[serde(default)]
+    pub session_id: String,
+    /// The participant for this session (if identified).
+    #[serde(default)]
+    pub participant: Option<Participant>,
 }
 
 impl Conversation {
@@ -29,6 +143,18 @@ impl Conversation {
         Self {
             turns: Vec::new(),
             max_turns,
+            session_id: String::new(),
+            participant: None,
+        }
+    }
+
+    /// Create a new conversation with a session ID and optional participant.
+    pub fn with_session(max_turns: usize, session_id: String, participant: Option<Participant>) -> Self {
+        Self {
+            turns: Vec::new(),
+            max_turns,
+            session_id,
+            participant,
         }
     }
 
@@ -43,6 +169,7 @@ impl Conversation {
             user_input,
             agent_response,
             timestamp_ms,
+            participant: self.participant.clone(),
         });
 
         // Evict oldest turns if over capacity.
@@ -80,6 +207,12 @@ impl Conversation {
 impl Default for Conversation {
     fn default() -> Self {
         Self::new(100)
+    }
+}
+
+impl Default for Participant {
+    fn default() -> Self {
+        Self::anonymous()
     }
 }
 

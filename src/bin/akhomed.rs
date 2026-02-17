@@ -1253,51 +1253,80 @@ fn process_ws_input(input: &WsInput, agent: &mut Agent, engine: &Engine) -> Vec<
 
             let intent = akh_medu::agent::classify_intent(text);
             match intent {
-                akh_medu::agent::UserIntent::Query { subject } => {
-                    match engine.resolve_symbol(&subject) {
-                        Ok(sym_id) => {
-                            let from_triples = engine.triples_from(sym_id);
-                            let to_triples = engine.triples_to(sym_id);
-                            if from_triples.is_empty() && to_triples.is_empty() {
-                                msgs.push(AkhMessage::system(format!(
-                                    "No facts found for \"{subject}\"."
-                                )));
-                            } else {
-                                let mut all_triples = from_triples;
-                                all_triples.extend(to_triples);
-                                let grammar_name = engine
-                                    .compartments()
-                                    .and_then(|mgr| mgr.psyche())
-                                    .map(|p| p.persona.grammar_preference.clone())
-                                    .unwrap_or_else(|| "narrative".to_string());
-                                let summary =
-                                    akh_medu::agent::synthesize::synthesize_from_triples(
-                                        &subject,
-                                        &all_triples,
-                                        engine,
-                                        &grammar_name,
-                                    );
-                                if !summary.overview.is_empty() {
-                                    msgs.push(AkhMessage::narrative(
-                                        &summary.overview,
-                                        &grammar_name,
-                                    ));
-                                }
-                                for section in &summary.sections {
-                                    msgs.push(AkhMessage::narrative(
-                                        format!("## {}\n{}", section.heading, section.prose),
-                                        &grammar_name,
-                                    ));
-                                }
-                                for gap in &summary.gaps {
-                                    msgs.push(AkhMessage::gap("(unknown)", gap));
+                akh_medu::agent::UserIntent::Query { subject, original_input, question_word } => {
+                    let grammar_name = engine
+                        .compartments()
+                        .and_then(|mgr| mgr.psyche())
+                        .map(|p| p.persona.grammar_preference.clone())
+                        .unwrap_or_else(|| "narrative".to_string());
+
+                    // Try discourse-aware response first.
+                    let discourse_prose = akh_medu::grammar::discourse::resolve_discourse(
+                        &subject,
+                        question_word,
+                        &original_input,
+                        engine,
+                    )
+                    .ok()
+                    .and_then(|ctx| {
+                        let from = engine.triples_from(ctx.subject_id);
+                        let to = engine.triples_to(ctx.subject_id);
+                        let mut all = from;
+                        all.extend(to);
+                        akh_medu::grammar::discourse::build_discourse_response(
+                            &all, &ctx, engine,
+                        )
+                    })
+                    .and_then(|tree| {
+                        let registry = akh_medu::grammar::GrammarRegistry::new();
+                        registry.linearize(&grammar_name, &tree).ok()
+                    })
+                    .filter(|s| !s.trim().is_empty());
+
+                    if let Some(prose) = discourse_prose {
+                        msgs.push(AkhMessage::narrative(&prose, &grammar_name));
+                    } else {
+                        // Fallback: existing synthesis path.
+                        match engine.resolve_symbol(&subject) {
+                            Ok(sym_id) => {
+                                let from_triples = engine.triples_from(sym_id);
+                                let to_triples = engine.triples_to(sym_id);
+                                if from_triples.is_empty() && to_triples.is_empty() {
+                                    msgs.push(AkhMessage::system(format!(
+                                        "No facts found for \"{subject}\"."
+                                    )));
+                                } else {
+                                    let mut all_triples = from_triples;
+                                    all_triples.extend(to_triples);
+                                    let summary =
+                                        akh_medu::agent::synthesize::synthesize_from_triples(
+                                            &subject,
+                                            &all_triples,
+                                            engine,
+                                            &grammar_name,
+                                        );
+                                    if !summary.overview.is_empty() {
+                                        msgs.push(AkhMessage::narrative(
+                                            &summary.overview,
+                                            &grammar_name,
+                                        ));
+                                    }
+                                    for section in &summary.sections {
+                                        msgs.push(AkhMessage::narrative(
+                                            format!("## {}\n{}", section.heading, section.prose),
+                                            &grammar_name,
+                                        ));
+                                    }
+                                    for gap in &summary.gaps {
+                                        msgs.push(AkhMessage::gap("(unknown)", gap));
+                                    }
                                 }
                             }
-                        }
-                        Err(_) => {
-                            msgs.push(AkhMessage::system(format!(
-                                "Symbol \"{subject}\" not found."
-                            )));
+                            Err(_) => {
+                                msgs.push(AkhMessage::system(format!(
+                                    "Symbol \"{subject}\" not found."
+                                )));
+                            }
                         }
                     }
                 }
