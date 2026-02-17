@@ -121,6 +121,12 @@ pub enum DerivationKind {
         format: String,
         chunk_index: u32,
     },
+    /// Atomic concept extracted from document text during library ingestion.
+    ConceptExtracted {
+        document_id: String,
+        chunk_index: u32,
+        extraction_method: String,
+    },
 }
 
 impl DerivationKind {
@@ -148,6 +154,7 @@ impl DerivationKind {
             Self::WasmToolExecution { .. } => 18,
             Self::CliToolExecution { .. } => 19,
             Self::DocumentIngested { .. } => 20,
+            Self::ConceptExtracted { .. } => 21,
         }
     }
 }

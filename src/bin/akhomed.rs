@@ -842,6 +842,7 @@ async fn library_add_handler(
         format: result.record.format.to_string(),
         chunk_count: result.chunk_count,
         triple_count: result.triple_count,
+        concept_count: result.concept_count,
     }))
 }
 

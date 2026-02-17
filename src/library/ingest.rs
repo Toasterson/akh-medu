@@ -1,14 +1,18 @@
 //! Document ingestion pipeline.
 //!
-//! Orchestrates: parse → chunk → symbols → structural triples → NLP extraction
+//! Orchestrates: parse → chunk → symbols → structural triples → concept extraction
 //! → VSA embeddings → provenance → catalog.
 
+use std::collections::HashSet;
 use std::path::Path;
 
 use crate::engine::Engine;
 use crate::graph::Triple;
 use crate::library::catalog::{LibraryCatalog, slugify};
 use crate::library::chunker::{ChunkConfig, normalize_chunks};
+use crate::library::concepts::{
+    extract_concepts_from_chunk, extract_head_noun_phrase, extract_richer_triples, ConceptSource,
+};
 use crate::library::error::{LibraryError, LibraryResult};
 use crate::library::model::*;
 use crate::library::parser;
@@ -48,6 +52,8 @@ pub struct IngestResult {
     pub document_symbol: SymbolId,
     /// Total triples created.
     pub triple_count: usize,
+    /// Total atomic concepts extracted.
+    pub concept_count: usize,
     /// Total chunks after normalization.
     pub chunk_count: usize,
 }
@@ -159,8 +165,9 @@ pub fn ingest_document(
         }
     }
 
-    // 8. Per-chunk: create paragraph symbols, structural triples, NLP extraction, VSA.
+    // 8. Per-chunk: create paragraph symbols, structural triples, concept extraction, VSA.
     let mut prev_chunk_sym: Option<SymbolId> = None;
+    let mut total_concepts = 0usize;
 
     for chunk in &chunks {
         let para_label = format!("para:{slug}:{}", chunk.index);
@@ -189,8 +196,12 @@ pub fn ingest_document(
         add_triple(engine, para_sym, preds.chunk_index, idx_sym, &slug)?;
         triple_count += 1;
 
-        // NLP extraction: run regex-based triple extraction on chunk text.
-        triple_count += run_nlp_extraction(engine, &chunk.text, &slug)?;
+        // Concept extraction: two-phase atomic concept extraction from chunk text.
+        let (rel_triples, concepts) = run_concept_extraction(
+            engine, para_sym, &chunk.text, &preds, &slug, format, chunk.index as u32,
+        )?;
+        triple_count += rel_triples;
+        total_concepts += concepts;
 
         // VSA embedding: encode the chunk text and insert into item memory.
         if let Ok(vec) = encode_label(engine.ops(), &chunk.text) {
@@ -223,6 +234,7 @@ pub fn ingest_document(
         record,
         document_symbol: doc_sym,
         triple_count,
+        concept_count: total_concepts,
         chunk_count: chunks.len(),
     })
 }
@@ -383,29 +395,138 @@ fn add_metadata_triples(
     Ok(count)
 }
 
-/// Run regex-based NLP extraction on chunk text.
+/// Two-phase concept extraction from chunk text.
 ///
-/// Reuses the same pattern-matching approach as `text_ingest` tool.
-fn run_nlp_extraction(engine: &Engine, text: &str, slug: &str) -> LibraryResult<usize> {
-    let mut count = 0;
+/// Phase A: Relational patterns (existing `extract_triples` + new `extract_richer_triples`)
+///   with head noun phrase extraction to trim spans to atomic concepts.
+/// Phase B: Standalone concepts (capitalized terms, technical compounds, repeated terms).
+///
+/// Returns `(triple_count, concept_count)`.
+fn run_concept_extraction(
+    engine: &Engine,
+    para_sym: SymbolId,
+    text: &str,
+    preds: &LibraryPredicates,
+    slug: &str,
+    _format: ContentFormat,
+    chunk_index: u32,
+) -> LibraryResult<(usize, usize)> {
+    let mut triple_count = 0usize;
+    let mut concept_count = 0usize;
+    let mut relational_labels: HashSet<String> = HashSet::new();
+
     let sentences = split_sentences(text);
 
+    // Collect all extracted triples (existing patterns + richer patterns), dedup.
+    let mut all_triples: Vec<(String, String, String, f32)> = Vec::new();
+    let mut seen_triple_keys: HashSet<String> = HashSet::new();
+
     for sentence in &sentences {
-        for (subject, predicate, object, confidence) in extract_triples(sentence) {
-            let s = create_entity(engine, &subject, slug)?;
-            let p = engine.resolve_or_create_relation(&predicate).map_err(|e| {
+        // Phase A: existing relational patterns.
+        for t in extract_triples(sentence) {
+            let key = format!("{}|{}|{}", t.0.to_lowercase(), t.1, t.2.to_lowercase());
+            if seen_triple_keys.insert(key) {
+                all_triples.push(t);
+            }
+        }
+        // Phase A extended: richer patterns (conjunctions, bare verbs, adverb modulation).
+        for t in extract_richer_triples(sentence) {
+            let key = format!("{}|{}|{}", t.0.to_lowercase(), t.1, t.2.to_lowercase());
+            if seen_triple_keys.insert(key) {
+                all_triples.push(t);
+            }
+        }
+    }
+
+    // Process each extracted triple: apply head noun phrase extraction.
+    for (subject_span, predicate, object_span, confidence) in &all_triples {
+        let subj_words: Vec<&str> = subject_span.split_whitespace().collect();
+        let obj_words: Vec<&str> = object_span.split_whitespace().collect();
+
+        let atomic_subj = extract_head_noun_phrase(&subj_words)
+            .or_else(|| {
+                // Fallback: if original span ≤3 words after determiner stripping, use directly.
+                if subj_words.len() <= 3 {
+                    Some(capitalize(&subj_words.join(" ")))
+                } else {
+                    None
+                }
+            });
+        let atomic_obj = extract_head_noun_phrase(&obj_words)
+            .or_else(|| {
+                if obj_words.len() <= 3 {
+                    Some(capitalize(&obj_words.join(" ")))
+                } else {
+                    None
+                }
+            });
+
+        if let (Some(subj), Some(obj)) = (atomic_subj, atomic_obj) {
+            if subj.is_empty() || obj.is_empty() {
+                continue;
+            }
+
+            let s = create_entity(engine, &subj, slug)?;
+            let p = engine.resolve_or_create_relation(predicate).map_err(|e| {
                 LibraryError::IngestFailed {
                     document: slug.into(),
                     message: format!("create relation '{predicate}': {e}"),
                 }
             })?;
-            let o = create_entity(engine, &object, slug)?;
-            let triple = Triple::new(s, p, o).with_confidence(confidence);
-            let _ = engine.add_triple(&triple); // Tolerate duplicates.
-            count += 1;
+            let o = create_entity(engine, &obj, slug)?;
+            let triple = Triple::new(s, p, o).with_confidence(*confidence);
+            let _ = engine.add_triple(&triple);
+            triple_count += 1;
+
+            // Add doc:mentions triples linking paragraph to each concept.
+            add_triple(engine, para_sym, preds.mentions, s, slug)?;
+            add_triple(engine, para_sym, preds.mentions, o, slug)?;
+            triple_count += 2;
+
+            // Track for dedup with standalone concepts.
+            relational_labels.insert(subj.to_lowercase());
+            relational_labels.insert(obj.to_lowercase());
+
+            // Provenance for each concept.
+            store_concept_provenance(
+                engine, s, slug, chunk_index, ConceptSource::RelationalHead,
+            );
+            store_concept_provenance(
+                engine, o, slug, chunk_index, ConceptSource::RelationalHead,
+            );
+            concept_count += 2;
         }
     }
-    Ok(count)
+
+    // Phase B: Standalone concepts not captured by relational extraction.
+    let standalone = extract_concepts_from_chunk(text, &relational_labels);
+    for concept in &standalone {
+        let sym = create_entity(engine, &concept.label, slug)?;
+        add_triple(engine, para_sym, preds.mentions, sym, slug)?;
+        triple_count += 1;
+
+        store_concept_provenance(engine, sym, slug, chunk_index, concept.source);
+        concept_count += 1;
+    }
+
+    Ok((triple_count, concept_count))
+}
+
+/// Store a provenance record for an extracted concept.
+fn store_concept_provenance(
+    engine: &Engine,
+    symbol: SymbolId,
+    slug: &str,
+    chunk_index: u32,
+    source: ConceptSource,
+) {
+    let kind = DerivationKind::ConceptExtracted {
+        document_id: slug.to_string(),
+        chunk_index,
+        extraction_method: source.method_str().to_string(),
+    };
+    let mut record = ProvenanceRecord::new(symbol, kind).with_confidence(1.0);
+    let _ = engine.store_provenance(&mut record);
 }
 
 /// Store a provenance record for a derived chunk symbol.

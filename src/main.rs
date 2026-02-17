@@ -3486,10 +3486,11 @@ fn main() -> Result<()> {
 
                     let result = client.library_add(&library_dir, &req).into_diagnostic()?;
                     println!("Ingested: {}", result.title);
-                    println!("  ID:      {}", result.id);
-                    println!("  Format:  {}", result.format);
-                    println!("  Chunks:  {}", result.chunk_count);
-                    println!("  Triples: {}", result.triple_count);
+                    println!("  ID:       {}", result.id);
+                    println!("  Format:   {}", result.format);
+                    println!("  Chunks:   {}", result.chunk_count);
+                    println!("  Triples:  {}", result.triple_count);
+                    println!("  Concepts: {}", result.concept_count);
                 }
 
                 LibraryAction::List => {
@@ -3827,6 +3828,16 @@ fn format_derivation_kind(kind: &DerivationKind, engine: &Engine) -> String {
             format!(
                 "document ingested [{}] format={} chunk={}",
                 document_id, format, chunk_index
+            )
+        }
+        DerivationKind::ConceptExtracted {
+            document_id,
+            chunk_index,
+            extraction_method,
+        } => {
+            format!(
+                "concept extracted [{}] chunk={} method={}",
+                document_id, chunk_index, extraction_method
             )
         }
     }
