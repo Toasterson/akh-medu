@@ -1,6 +1,6 @@
 # Akh-medu Architecture
 
-> Last updated: 2026-02-17 (Phase 9 expanded to 15 sub-phases)
+> Last updated: 2026-02-17 (Phase 10 expanded to 8 sub-phases after deep research)
 
 ## Overview
 
@@ -101,5 +101,7 @@ Phase 9a–9o: Cyc-inspired HOL enhancements (15 sub-phases):
 - **High**: 9a microtheories, 9b predicate hierarchy, 9c TMS, 9d defeasibility, 9e argumentation, 9f reasoner dispatch
 - **Medium**: 9g rule macros, 9h skolem functions, 9i arg-based truth, 9j arity/types, 9k temporal projection, 9l contradiction detection
 - **Lower**: 9m circumscription/CWA, 9n second-order quantification, 9o NARTs
-Phase 10a–10e: Rust code generation (5 sub-phases — RustCodeGrammar, code_gen tool, code-aware planning, iterative refinement, templates)
+Phase 10a–10h: Rust code generation (8 sub-phases):
+- **Core**: 10a RustCodeGrammar, 10b code_gen tool, 10c code-aware planning, 10d iterative refinement, 10e templates
+- **Pattern learning**: 10f VSA code pattern encoding, 10g pattern mining from examples, 10h library learning cycle
 Phase 11a–11g: Autonomous task system (7 sub-phases — goal generation, intelligent decomposition, priority reasoning, projects, world monitoring, self-evaluation, resource awareness)

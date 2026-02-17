@@ -129,12 +129,16 @@ second-order quantification, and NARTs.
 
 ## Phase 10 — Generative Functions (Rust Code Generation)
 
-`RustCodeGrammar` linearizer, `code_gen` agent tool, code-aware planning,
-iterative refinement via compiler feedback, and reusable code templates.
-5 sub-phases (10a–10e). Builds on existing `AbsTree::CodeSignature/CodeModule`,
-`code_ingest`, `doc_gen`, `file_io`, `shell_exec` tools.
+Core generation: `RustCodeGrammar` linearizer, `code_gen` agent tool, code-aware
+planning, iterative refinement via compiler feedback, reusable code templates.
+Pattern learning: non-ML code2vec via VSA path-context encoding, frequent AST
+pattern mining from examples (blog posts/tutorials), DreamCoder/LILO-inspired
+library learning cycle with e-graph anti-unification.
+8 sub-phases (10a–10h). Builds on existing `AbsTree::CodeSignature/CodeModule`,
+`code_ingest`, `doc_gen`, `file_io`, `shell_exec`, VSA encode/grounding.
 
 - **Implementation plan**: `docs/ai/plans/2026-02-17-phase10-code-generation.md`
+- **Research**: `docs/ai/decisions/002-code-generation-research.md`
 
 ## Phase 11 — Autonomous Task System with Self-Goal Setting
 
