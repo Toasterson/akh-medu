@@ -9,7 +9,7 @@
 ## Build from Source
 
 ```bash
-git clone https://github.com/akh-medu/akh-medu.git
+git clone https://github.com/Toasterson/akh-medu.git
 cd akh-medu
 
 # Core CLI binary
