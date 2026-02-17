@@ -469,8 +469,8 @@ fn merge_i_am_clauses(clauses: &[String]) -> String {
         if let Some(rest) = clause.strip_prefix("I am ") {
             parts.push(rest.to_string());
         } else if let Some(rest) = clause.strip_prefix("I have ") {
-            // Keep "and have" for variety.
-            parts.push(format!("and have {rest}"));
+            // Oxford comma join already adds "and" before the last item.
+            parts.push(format!("have {rest}"));
         } else {
             parts.push(clause.clone());
         }
@@ -628,5 +628,24 @@ mod tests {
         let low = AbsTree::similarity(AbsTree::entity("A"), AbsTree::entity("B"), 0.4);
         let result = g.linearize(&low, &ctx).unwrap();
         assert!(result.contains("faint resemblance"));
+    }
+
+    #[test]
+    fn merge_i_am_clauses_no_double_and() {
+        let clauses = vec![
+            "I am Akh".to_string(),
+            "I am powered by Akh-Medu".to_string(),
+            "I have reasoning".to_string(),
+        ];
+        let result = merge_i_am_clauses(&clauses);
+        // Must not produce "and and have" — the Oxford comma join adds "and"
+        // before the last item, so the have-clause itself must not start with "and".
+        assert!(
+            !result.contains("and and"),
+            "double conjunction in: {result}"
+        );
+        // The final form should be: "I am Akh, powered by Akh-Medu, and have reasoning."
+        assert!(result.contains("have reasoning"), "missing have-clause in: {result}");
+        assert!(result.contains("and have reasoning"), "Oxford comma join should produce 'and have': {result}");
     }
 }
