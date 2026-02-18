@@ -3891,5 +3891,16 @@ fn format_derivation_kind(kind: &DerivationKind, engine: &Engine) -> String {
         } => {
             format!("dispatch: reasoner \"{reasoner}\" solved {problem_kind}")
         }
+        DerivationKind::ArgumentVerdict {
+            winner,
+            pro_count,
+            con_count,
+            decisive_rule,
+        } => {
+            format!(
+                "argumentation: \"{}\" wins ({pro_count} pro, {con_count} con, decisive: {decisive_rule})",
+                engine.resolve_label(*winner),
+            )
+        }
     }
 }

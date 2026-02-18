@@ -159,6 +159,13 @@ pub enum DerivationKind {
         reasoner: String,
         problem_kind: String,
     },
+    /// An argumentation verdict was reached (Phase 9e).
+    ArgumentVerdict {
+        winner: SymbolId,
+        pro_count: usize,
+        con_count: usize,
+        decisive_rule: String,
+    },
 }
 
 impl DerivationKind {
@@ -193,6 +200,7 @@ impl DerivationKind {
             Self::PredicateInverse { .. } => 25,
             Self::DefeasibleOverride { .. } => 26,
             Self::DispatchRoute { .. } => 27,
+            Self::ArgumentVerdict { .. } => 28,
         }
     }
 }

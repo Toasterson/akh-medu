@@ -30,6 +30,7 @@
 //! ```
 
 pub mod agent;
+pub mod argumentation;
 pub mod autonomous;
 pub mod client;
 pub mod compartment;

@@ -1,8 +1,8 @@
 # Phase 9 — Cyc-Inspired Enhancements
 
 - **Date**: 2026-02-17
-- **Updated**: 2026-02-18 (Wave 2 complete: 9a–9d, 9f implemented)
-- **Status**: In Progress (Waves 1–2 complete)
+- **Updated**: 2026-02-18 (Wave 3 complete: 9a–9f implemented)
+- **Status**: In Progress (Waves 1–3 complete)
 - **Motivation**: ADR-001 (Cyc paper analysis)
 - **Depends on**: Phases 1–8f (all complete)
 
@@ -177,15 +177,19 @@ MetaRule: Monotonicity | Specificity | Recency | Depth | SourceQuality | Constru
 ```
 
 **Changes**:
-- [ ] New module: `src/argumentation/` (mod.rs, argument.rs, meta_rules.rs, verdict.rs)
-- [ ] `provenance.rs` — `collect_arguments_for()` query method traversing support chains
-- [ ] `engine.rs` — `argue()` public API returning `ArgumentSet`
-- [ ] `grammar/` — linearization of `Verdict` into natural language explanation
-- [ ] Agent — `argue` tool that presents pro/con to the agent's decision-making
+- [x] `src/argumentation/mod.rs` — `Polarity` (Pro/Con), `MetaRule` (6 rules with default priority order), `MetaRuleScores` (per-rule scores with exponentially-weighted total), `Argument` (conclusion, polarity, chain, strength, monotonic, scores), `ArgumentSet` (subject, predicate, candidates map, verdict), `Verdict` (answer, confidence, pro/con lists, reasoning string, decisive rule)
+- [x] Scoring: `score_chain()` computes 6 dimensions (monotonicity, specificity via type_depth, recency via exponential decay, depth, source_quality, constructiveness), `is_monotonic_derivation()`, `is_constructive()`
+- [x] Core logic: `argue()` and `argue_with_rules()` — collects candidates via triple query, builds pro arguments from provenance chains, generates con arguments from competing candidates (attenuated 0.8x), computes net strength verdict with decisive meta-rule detection
+- [x] `src/provenance.rs` — `DerivationKind::ArgumentVerdict { winner, pro_count, con_count, decisive_rule }` (tag 28)
+- [x] `engine.rs` — `argue()`, `argue_with_rules()` APIs
+- [x] `main.rs` — `format_derivation_kind` match arm for ArgumentVerdict
+- [x] `lib.rs` — `pub mod argumentation;`
+- [x] `src/graph/defeasible.rs` — `type_depth()` made `pub` for cross-module use
+- [x] 13 tests: meta-rules, scoring, polarity, single/competing candidates, confidence winner, empty verdict, custom meta-rule order, strength positivity, reasoning strings, constructiveness
 
 **Depends on**: 9c (TMS for support chain traversal), 9d (defeasibility for specificity ranking)
 
-**Estimated scope**: ~700–1000 lines
+**Implemented scope**: ~560 lines, 13 tests
 
 ---
 

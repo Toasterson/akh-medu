@@ -111,7 +111,7 @@ pub struct DefeasibleResult {
 /// of the type hierarchy. Deeper = more specific.
 ///
 /// Uses BFS up the `is-a` chain and returns the longest path length.
-fn type_depth(engine: &Engine, symbol: SymbolId, is_a_pred: SymbolId) -> usize {
+pub fn type_depth(engine: &Engine, symbol: SymbolId, is_a_pred: SymbolId) -> usize {
     let kg = engine.knowledge_graph();
     let mut max_depth = 0;
     let mut visited = HashSet::new();

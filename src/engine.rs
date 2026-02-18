@@ -1544,6 +1544,32 @@ impl Engine {
     }
 
     // -----------------------------------------------------------------------
+    // Argumentation (Phase 9e)
+    // -----------------------------------------------------------------------
+
+    /// Collect pro/con arguments for `(subject, predicate, ?)` and produce a verdict.
+    ///
+    /// Uses meta-rules (monotonicity, specificity, recency, depth, source quality,
+    /// constructiveness) to rank competing candidate answers.
+    pub fn argue(
+        &self,
+        subject: SymbolId,
+        predicate: SymbolId,
+    ) -> AkhResult<crate::argumentation::ArgumentSet> {
+        Ok(crate::argumentation::argue(self, subject, predicate)?)
+    }
+
+    /// Like [`argue`] but with a custom meta-rule ordering.
+    pub fn argue_with_rules(
+        &self,
+        subject: SymbolId,
+        predicate: SymbolId,
+        meta_rules: &[crate::argumentation::MetaRule],
+    ) -> AkhResult<crate::argumentation::ArgumentSet> {
+        Ok(crate::argumentation::argue_with_rules(self, subject, predicate, meta_rules)?)
+    }
+
+    // -----------------------------------------------------------------------
     // Role assignment
     // -----------------------------------------------------------------------
 
