@@ -1570,6 +1570,81 @@ impl Engine {
     }
 
     // -----------------------------------------------------------------------
+    // Rule Macros (Phase 9g)
+    // -----------------------------------------------------------------------
+
+    /// Create a new rule macro registry.
+    pub fn rule_macro_registry(&self) -> crate::rule_macro::RuleMacroRegistry {
+        crate::rule_macro::RuleMacroRegistry::new()
+    }
+
+    /// Resolve well-known macro predicates, creating them if needed.
+    pub fn macro_predicates(&self) -> AkhResult<crate::rule_macro::MacroPredicates> {
+        Ok(crate::rule_macro::MacroPredicates::resolve(self)?)
+    }
+
+    // -----------------------------------------------------------------------
+    // Temporal Projection (Phase 9k)
+    // -----------------------------------------------------------------------
+
+    /// Create a temporal registry with default profiles for well-known relations.
+    pub fn temporal_registry(&self) -> AkhResult<crate::temporal::TemporalRegistry> {
+        Ok(crate::temporal::TemporalRegistry::with_defaults(self)?)
+    }
+
+    /// Set a temporal profile for a relation.
+    pub fn set_temporal_profile(
+        &self,
+        relation: SymbolId,
+        profile: crate::temporal::TemporalProfile,
+    ) -> AkhResult<()> {
+        profile.validate()?;
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Arity and Type Constraints (Phase 9j)
+    // -----------------------------------------------------------------------
+
+    /// Create an empty constraint registry.
+    pub fn constraint_registry(&self) -> crate::graph::arity::ConstraintRegistry {
+        crate::graph::arity::ConstraintRegistry::new()
+    }
+
+    /// Resolve well-known arity predicates, creating them if needed.
+    pub fn arity_predicates(&self) -> AkhResult<crate::graph::arity::ArityPredicates> {
+        Ok(crate::graph::arity::ArityPredicates::resolve(self)?)
+    }
+
+    // -----------------------------------------------------------------------
+    // Contradiction Detection (Phase 9l)
+    // -----------------------------------------------------------------------
+
+    /// Resolve well-known contradiction predicates, creating them if needed.
+    pub fn contradiction_predicates(
+        &self,
+    ) -> AkhResult<crate::graph::contradiction::ContradictionPredicates> {
+        Ok(crate::graph::contradiction::ContradictionPredicates::resolve(self)?)
+    }
+
+    /// Check a triple for contradictions against existing knowledge.
+    pub fn check_contradictions(
+        &self,
+        incoming: &crate::graph::Triple,
+        functional_preds: &crate::graph::contradiction::FunctionalPredicates,
+        disjointness: &crate::graph::contradiction::DisjointnessConstraints,
+        temporal_registry: Option<&crate::temporal::TemporalRegistry>,
+    ) -> Vec<crate::graph::contradiction::Contradiction> {
+        crate::graph::contradiction::check_contradictions(
+            self,
+            incoming,
+            functional_preds,
+            disjointness,
+            temporal_registry,
+        )
+    }
+
+    // -----------------------------------------------------------------------
     // Role assignment
     // -----------------------------------------------------------------------
 

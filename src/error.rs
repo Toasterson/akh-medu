@@ -84,6 +84,22 @@ pub enum AkhError {
     #[error(transparent)]
     #[diagnostic(transparent)]
     Workspace(#[from] crate::workspace::WorkspaceError),
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    RuleMacro(#[from] crate::rule_macro::RuleMacroError),
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Temporal(#[from] crate::temporal::TemporalError),
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Arity(#[from] crate::graph::arity::ArityError),
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Contradiction(#[from] crate::graph::contradiction::ContradictionError),
 }
 
 // ---------------------------------------------------------------------------

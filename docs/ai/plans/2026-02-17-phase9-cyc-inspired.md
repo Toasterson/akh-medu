@@ -1,8 +1,8 @@
 # Phase 9 — Cyc-Inspired Enhancements
 
 - **Date**: 2026-02-17
-- **Updated**: 2026-02-18 (Wave 3 complete: 9a–9f implemented)
-- **Status**: In Progress (Waves 1–3 complete)
+- **Updated**: 2026-02-18 (Wave 4 complete: 9a–9f, 9g, 9j, 9k, 9l implemented)
+- **Status**: In Progress (Waves 1–4 complete)
 - **Motivation**: ADR-001 (Cyc paper analysis)
 - **Depends on**: Phases 1–8f (all complete)
 
@@ -269,12 +269,14 @@ RuleMacroRegistry { macros: Vec<Box<dyn RuleMacro>> }
 ```
 
 **Changes**:
-- [ ] New module: `src/rule_macro.rs` (or `src/rule_macro/`)
-- [ ] `engine.rs` — `add_rule_macro()` for registration, rule macro expansion on ingest
-- [ ] `dispatch/` — rule macro reasoners registered as specialized `Reasoner` impls
-- [ ] Built-in macros: `RelationAllExists`, `RelationExistsAll`, `Genls`
+- [x] New module: `src/rule_macro.rs` — `RuleMacro` trait, `RuleMacroRegistry`, `MacroPredicates`, `MacroInvocation`
+- [x] `engine.rs` — `rule_macro_registry()`, `macro_predicates()` facade APIs
+- [x] Built-in macros: `GenlsMacro`, `RelationAllExistsMacro`, `RelationExistsAllMacro`
+- [x] 12 tests: matching, expansion, query answering, registry operations
+- [x] `error.rs` — `AkhError::RuleMacro` variant
+- [x] `provenance.rs` — `DerivationKind::RuleMacroExpansion` (tag 29)
 
-**Estimated scope**: ~500–700 lines
+**Estimated scope**: ~500–700 lines (actual: ~580 lines)
 
 ---
 
@@ -355,14 +357,16 @@ TypeViolation { relation: SymbolId, arg_position: usize, expected: SymbolId, act
 ```
 
 **Changes**:
-- [ ] `graph/` — `ArityConstraint` storage, lookup by relation SymbolId
-- [ ] `engine.rs` — `declare_relation(relation, arity, arg_types)` API
-- [ ] `engine.rs` — optional type checking in `add_triple()` (opt-in flag)
-- [ ] `error.rs` — `TypeViolation` diagnostic with help text
+- [x] `graph/arity.rs` — `ConstraintRegistry`, `RelationConstraint`, `ConstraintViolation`, `ArityPredicates`, `ArityError`
+- [x] `engine.rs` — `constraint_registry()`, `arity_predicates()` facade APIs
+- [x] `is_instance_of()` BFS type checker through `is-a` chains
+- [x] `check_triple()` / `check_triple_or_err()` with diagnostic errors
+- [x] `error.rs` — `AkhError::Arity` variant
+- [x] 8 tests: direct/transitive type checking, violations, arity mismatch
 
 **Depends on**: 9b (predicate hierarchy for type checking via `is-a` chains)
 
-**Estimated scope**: ~400–600 lines
+**Estimated scope**: ~400–600 lines (actual: ~500 lines)
 
 ---
 
@@ -385,12 +389,16 @@ TemporalProfile: Stable | Decaying { half_life: Duration } | Ephemeral { ttl: Du
 ```
 
 **Changes**:
-- [ ] `graph/` or `symbol.rs` — `TemporalProfile` type, association with relation symbols
-- [ ] `graph/` — `query_with_temporal()` applies decay before returning results
-- [ ] `engine.rs` — `set_temporal_profile(relation, profile)` API
-- [ ] Default profiles for well-known relations (`is-a` → Stable, `located-at` → Ephemeral)
+- [x] `src/temporal.rs` — `TemporalProfile` enum (Stable, Decaying, Ephemeral, Periodic), `TemporalRegistry`, `TemporalPredicates`, `TemporalError`
+- [x] `apply_temporal_decay()` free function with 4 decay models
+- [x] `engine.rs` — `temporal_registry()`, `set_temporal_profile()` facade APIs
+- [x] Default profiles: `is-a` → Stable, `has-part` → Stable, `located-at` → Ephemeral(24h)
+- [x] `filter_by_time()` for batch temporal filtering
+- [x] `error.rs` — `AkhError::Temporal` variant
+- [x] `provenance.rs` — `DerivationKind::TemporalDecay` (tag 30)
+- [x] 16 tests: all decay models, registry, validation, display
 
-**Estimated scope**: ~300–500 lines
+**Estimated scope**: ~300–500 lines (actual: ~430 lines)
 
 ---
 
@@ -416,10 +424,13 @@ ContradictionKind: FunctionalViolation | DisjointnessViolation | TemporalConflic
 ```
 
 **Changes**:
-- [ ] `graph/` — `check_contradiction()` method
-- [ ] `engine.rs` — optional contradiction checking in `add_triple()` (opt-in to avoid perf hit)
-- [ ] Well-known predicates: `onto:functional`, `onto:disjoint_with`
-- [ ] `provenance.rs` — `DerivationKind::ContradictionDetected`
+- [x] `graph/contradiction.rs` — `check_contradictions()`, `Contradiction`, `ContradictionKind` (4 kinds), `FunctionalPredicates`, `DisjointnessConstraints`, `ContradictionPredicates`, `ContradictionError`
+- [x] `engine.rs` — `contradiction_predicates()`, `check_contradictions()` facade APIs
+- [x] Well-known predicates: `onto:functional`, `onto:disjoint_with`, `is-a`
+- [x] Integration with temporal registry for temporal conflict detection
+- [x] `error.rs` — `AkhError::Contradiction` variant
+- [x] `provenance.rs` — `DerivationKind::ContradictionDetected` (tag 31)
+- [x] 8 tests: functional, disjointness, temporal, symmetry, clean triples
 
 **Depends on**: 9a (microtheories for intra-context checking), 9k (temporal profiles for temporal conflicts)
 

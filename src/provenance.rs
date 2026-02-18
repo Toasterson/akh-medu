@@ -166,6 +166,23 @@ pub enum DerivationKind {
         con_count: usize,
         decisive_rule: String,
     },
+    /// A rule macro expanded compact assertions into concrete triples (Phase 9g).
+    RuleMacroExpansion {
+        macro_name: String,
+        expanded_count: usize,
+    },
+    /// Confidence was adjusted via temporal decay (Phase 9k).
+    TemporalDecay {
+        profile: String,
+        original_confidence: f32,
+        decayed_confidence: f32,
+    },
+    /// A contradiction was detected between triples (Phase 9l).
+    ContradictionDetected {
+        kind: String,
+        existing_object: SymbolId,
+        incoming_object: SymbolId,
+    },
 }
 
 impl DerivationKind {
@@ -201,6 +218,9 @@ impl DerivationKind {
             Self::DefeasibleOverride { .. } => 26,
             Self::DispatchRoute { .. } => 27,
             Self::ArgumentVerdict { .. } => 28,
+            Self::RuleMacroExpansion { .. } => 29,
+            Self::TemporalDecay { .. } => 30,
+            Self::ContradictionDetected { .. } => 31,
         }
     }
 }

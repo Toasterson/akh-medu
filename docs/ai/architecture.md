@@ -1,6 +1,6 @@
 # Akh-medu Architecture
 
-> Last updated: 2026-02-18 (Phase 9 Wave 3: +pro/con argumentation)
+> Last updated: 2026-02-18 (Phase 9 Wave 4: +rule macros, temporal projection, arity constraints, contradiction detection)
 
 ## Overview
 
@@ -24,7 +24,7 @@ src/
 ├── compartment/         4 modules — knowledge isolation, Jungian psyche, microtheories (Phase 9a)
 ├── dispatch/            1 module  — competitive reasoner dispatch (Phase 9f): Reasoner trait, bid-based registry, 7 built-in reasoners
 ├── grammar/            20 modules — GF-inspired parsing/generation, entity resolution
-├── graph/               5 modules — KG (petgraph), SPARQL (oxigraph), analytics, predicate hierarchy (Phase 9b), defeasible reasoning (Phase 9d)
+├── graph/               7 modules — KG (petgraph), SPARQL (oxigraph), analytics, predicate hierarchy (Phase 9b), defeasible reasoning (Phase 9d), arity constraints (Phase 9j), contradiction detection (Phase 9l)
 ├── infer/               3 modules — spreading activation, backward chaining, superposition
 ├── library/            12 modules — document parsing, chunking, concept extraction
 ├── reason/              1 module  — e-graph language (AkhLang), rewrite rules
@@ -35,7 +35,9 @@ src/
 ├── vsa/                 4 modules — HyperVec, VsaOps, encoding, item memory (HNSW)
 ├── engine.rs                      — facade composing all subsystems
 ├── error.rs                       — miette + thiserror rich diagnostics
-├── provenance.rs                  — persistent explanation ledger (redb, multi-index, 28 derivation kinds)
+├── rule_macro.rs                  — rule macro predicates (Phase 9g): RuleMacro trait, registry, genls/relationAllExists/relationExistsAll
+├── temporal.rs                    — temporal projection (Phase 9k): TemporalProfile, decay computation, registry
+├── provenance.rs                  — persistent explanation ledger (redb, multi-index, 32 derivation kinds)
 ├── tms.rs                         — truth maintenance system (Phase 9c): support sets, retraction cascades
 ├── symbol.rs                      — SymbolId (NonZeroU64), SymbolKind, allocator
 ├── pipeline.rs                    — composable stage pipelines
@@ -79,6 +81,10 @@ src/
 | **Defeasible Reasoning** (9d) | Complete | 5 override reasons (Monotonic, Specificity, Exception, Recency, Confidence), `DefeasiblePredicates` (4 well-known), BFS specificity, conflict resolution |
 | **Pro/Con Argumentation** (9e) | Complete | 6 meta-rules (monotonicity, specificity, recency, depth, source quality, constructiveness), `Argument`/`ArgumentSet`/`Verdict` types, pro/con collection, weighted scoring, decisive rule detection |
 | **Reasoner Dispatch** (9f) | Complete | `Reasoner` trait with bid-based dispatch, 7 built-in reasoners (spreading-activation, backward-chaining, superposition, egraph, transitive-closure, type-hierarchy, predicate-hierarchy), fallback on failure |
+| **Rule Macro Predicates** (9g) | Complete | `RuleMacro` trait, `RuleMacroRegistry`, 3 built-in macros (Genls, RelationAllExists, RelationExistsAll), virtual expansion + query answering, 4 `macro:` predicates |
+| **Arity & Type Constraints** (9j) | Complete | `ConstraintRegistry` with per-relation arity/arg-type declarations, `is-a` chain type checking (BFS), 3 `onto:` predicates, opt-in enforcement with diagnostic errors |
+| **Temporal Projection** (9k) | Complete | `TemporalProfile` (Stable, Decaying, Ephemeral, Periodic), `TemporalRegistry` with default profiles, `apply_temporal_decay()`, filter-by-time, 1 `temporal:` predicate |
+| **Contradiction Detection** (9l) | Complete | 4 contradiction kinds (functional, disjointness, temporal, intra-microtheory), `FunctionalPredicates`/`DisjointnessConstraints`, `check_contradictions()`, 2 `onto:` predicates |
 
 ## Agent Architecture
 

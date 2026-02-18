@@ -3902,5 +3902,36 @@ fn format_derivation_kind(kind: &DerivationKind, engine: &Engine) -> String {
                 engine.resolve_label(*winner),
             )
         }
+        DerivationKind::RuleMacroExpansion {
+            macro_name,
+            expanded_count,
+        } => {
+            format!(
+                "rule macro expansion [{}] ({} triples)",
+                macro_name, expanded_count
+            )
+        }
+        DerivationKind::TemporalDecay {
+            profile,
+            original_confidence,
+            decayed_confidence,
+        } => {
+            format!(
+                "temporal decay [{}] ({:.4} → {:.4})",
+                profile, original_confidence, decayed_confidence
+            )
+        }
+        DerivationKind::ContradictionDetected {
+            kind,
+            existing_object,
+            incoming_object,
+        } => {
+            format!(
+                "contradiction [{}]: \"{}\" vs \"{}\"",
+                kind,
+                engine.resolve_label(*existing_object),
+                engine.resolve_label(*incoming_object)
+            )
+        }
     }
 }
