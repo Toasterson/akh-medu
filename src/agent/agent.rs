@@ -165,9 +165,10 @@ impl Agent {
         // Documentation generation.
         registry.register(Box::new(tools::DocGenTool));
 
-        // Code generation and validation.
+        // Code generation, validation, and pattern mining.
         registry.register(Box::new(tools::CodeGenTool));
         registry.register(Box::new(tools::CompileFeedbackTool));
+        registry.register(Box::new(tools::PatternMineTool));
 
         // Agent management (multi-agent orchestration).
         registry.register(Box::new(tools::AgentListTool));

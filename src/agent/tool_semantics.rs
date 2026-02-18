@@ -303,6 +303,23 @@ const TOOL_CONCEPTS: &[(&str, &[&str])] = &[
             "fix",
         ],
     ),
+    (
+        "pattern_mine",
+        &[
+            "pattern",
+            "mine",
+            "learn",
+            "example",
+            "blog",
+            "tutorial",
+            "template",
+            "structure",
+            "discover",
+            "frequent",
+            "analogy",
+            "similar",
+        ],
+    ),
 ];
 
 /// Static synonym lookup table mapping root words to related terms.

@@ -1,6 +1,6 @@
 # Akh-medu Architecture
 
-> Last updated: 2026-02-18 (Per-repo microtheory scoping for code_ingest)
+> Last updated: 2026-02-18 (Phase 10g — Pattern mining from examples)
 
 ## Overview
 
@@ -9,8 +9,8 @@ Akh-medu is a neuro-symbolic AI engine that runs entirely on CPU with no LLM dep
 - **Vector Symbolic Architecture (VSA)** — 10,000-bit binary hypervectors for distributed representation
 - **Knowledge Graphs** — dual-indexed (petgraph + oxigraph/SPARQL) for structured symbolic reasoning
 - **E-graph Reasoning** — equality saturation via `egg` for symbolic rewriting
-- **Autonomous Agent** — OODA-loop agent with 22+ tools, working/episodic memory, planning, reflection
-- **Code Generation** — KG-to-Rust pipeline: code_gen tool, RustCodeGrammar, compiler feedback loop, parameterized templates, VSA code pattern encoding
+- **Autonomous Agent** — OODA-loop agent with 23+ tools, working/episodic memory, planning, reflection
+- **Code Generation** — KG-to-Rust pipeline: code_gen tool, RustCodeGrammar, compiler feedback loop, parameterized templates, VSA code pattern encoding, pattern mining from examples
 - **Multilingual Grammar** — GF-inspired abstract/concrete syntax split for 5 languages
 - **Content Library** — document ingestion (PDF, EPUB, HTML) with chunking and semantic enrichment
 - **Tiered Storage** — hot (DashMap) → warm (mmap) → cold (redb) for scalability
@@ -19,7 +19,7 @@ Akh-medu is a neuro-symbolic AI engine that runs entirely on CPU with no LLM dep
 
 ```
 src/
-├── agent/              26 modules — OODA loop, tools (code_gen, code_ingest, compile_feedback), memory, goals, planning, psyche
+├── agent/              27 modules — OODA loop, tools (code_gen, code_ingest, compile_feedback, pattern_mine), memory, goals, planning, psyche
 ├── autonomous/          6 modules — background learning, confidence fusion, grounding
 ├── argumentation/       1 module  — pro/con argumentation (Phase 9e): meta-rules, verdicts, evidence chains
 ├── compartment/         5 modules — knowledge isolation, Jungian psyche, microtheories (Phase 9a, per-repo code scoping), CWA/circumscription (Phase 9m)
