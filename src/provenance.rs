@@ -210,6 +210,19 @@ pub enum DerivationKind {
         function: SymbolId,
         arg_count: usize,
     },
+
+    // --- Phase 10: Code Generation -------------------------------------------
+
+    /// Code was generated from KG structure (Phase 10b).
+    CodeGenerated {
+        scope: String,
+        source_count: usize,
+    },
+    /// Code was refined after compiler feedback (Phase 10d).
+    CodeRefinement {
+        attempt: u32,
+        error_count: usize,
+    },
 }
 
 impl DerivationKind {
@@ -253,6 +266,8 @@ impl DerivationKind {
             Self::CwaQuery { .. } => 34,
             Self::SecondOrderInstantiation { .. } => 35,
             Self::NartCreation { .. } => 36,
+            Self::CodeGenerated { .. } => 37,
+            Self::CodeRefinement { .. } => 38,
         }
     }
 }

@@ -44,6 +44,7 @@ oxigraph = "0.4"
 
 # Code analysis
 syn = { version = "2", features = ["full", "visit"] }
+quote = "1"
 
 # Document parsing
 scraper = "0.23"

@@ -3987,5 +3987,17 @@ fn format_derivation_kind(kind: &DerivationKind, engine: &Engine) -> String {
                 arg_count
             )
         }
+        DerivationKind::CodeGenerated {
+            scope,
+            source_count,
+        } => {
+            format!("Code generated: {scope} from {source_count} source(s)")
+        }
+        DerivationKind::CodeRefinement {
+            attempt,
+            error_count,
+        } => {
+            format!("Code refinement: attempt {attempt}, {error_count} error(s)")
+        }
     }
 }

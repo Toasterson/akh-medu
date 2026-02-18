@@ -270,6 +270,39 @@ const TOOL_CONCEPTS: &[(&str, &[&str])] = &[
             "overview",
         ],
     ),
+    (
+        "code_gen",
+        &[
+            "code",
+            "generate",
+            "implement",
+            "function",
+            "struct",
+            "enum",
+            "trait",
+            "module",
+            "rust",
+            "scaffold",
+            "create",
+            "write",
+            "boilerplate",
+        ],
+    ),
+    (
+        "compile_feedback",
+        &[
+            "compile",
+            "check",
+            "build",
+            "error",
+            "diagnostic",
+            "cargo",
+            "validate",
+            "clippy",
+            "lint",
+            "fix",
+        ],
+    ),
 ];
 
 /// Static synonym lookup table mapping root words to related terms.

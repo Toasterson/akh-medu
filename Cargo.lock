@@ -88,6 +88,7 @@ dependencies = [
  "oxigraph",
  "pdf-extract",
  "petgraph",
+ "quote",
  "rand 0.8.5",
  "ratatui",
  "rayon",

@@ -3,8 +3,10 @@
 //! user interaction, infer rules, gap analysis, CSV ingest, text ingest,
 //! code ingest, content ingest, doc gen.
 
+pub mod code_gen;
 pub mod code_ingest;
 pub mod code_predicates;
+pub mod compile_feedback;
 pub mod content_ingest;
 pub mod csv_ingest;
 pub mod doc_gen;
@@ -24,8 +26,10 @@ pub mod user_interact;
 pub mod agent_management;
 pub mod trigger_manage;
 
+pub use code_gen::CodeGenTool;
 pub use code_ingest::CodeIngestTool;
 pub use code_predicates::CodePredicates;
+pub use compile_feedback::CompileFeedbackTool;
 pub use content_ingest::ContentIngestTool;
 pub use csv_ingest::CsvIngestTool;
 pub use doc_gen::DocGenTool;

@@ -1,8 +1,8 @@
 # Phase 10 — Generative Functions (Rust Code Generation)
 
 - **Date**: 2026-02-17
-- **Updated**: 2026-02-17 (expanded from 5 to 8 sub-phases after deep research)
-- **Status**: Planned
+- **Updated**: 2026-02-18 (Wave 1 complete: 10a–10d implemented)
+- **Status**: In Progress (Wave 1 complete, Wave 2–3 pending)
 - **Depends on**: Phase 9 (partially — 9b predicate hierarchy and 9f reasoner dispatch are most useful but not blocking)
 - **Research**: `docs/ai/decisions/002-code-generation-research.md`
 
@@ -69,13 +69,14 @@ The system is ~80% ready. Key foundations already in place:
 - Register as `"rust-gen"` archetype in `GrammarRegistry`
 
 **Changes**:
-- [ ] New file: `src/grammar/rust_gen.rs`
-- [ ] `src/grammar/mod.rs` — register `RustCodeGrammar` as built-in archetype
-- [ ] Handle: derives, visibility (`pub`), generics, lifetimes, `where` clauses
-- [ ] Handle: `use` statements from `code:depends-on` triples
-- [ ] Indentation and formatting (pre-rustfmt)
+- [x] New file: `src/grammar/rust_gen.rs` (~980 lines, 14 tests)
+- [x] `src/grammar/mod.rs` — register `RustCodeGrammar` as built-in archetype
+- [x] Handle: derives, visibility (`pub`), indentation and formatting (pre-rustfmt)
+- [x] Parse via `syn` for round-trip: Rust source → `AbsTree`
+- [ ] Handle: generics, lifetimes, `where` clauses (deferred to 10e templates)
+- [ ] Handle: `use` statements from `code:depends-on` triples (deferred to 10e templates)
 
-**Estimated scope**: ~500–700 lines
+**Estimated scope**: ~500–700 lines → ~980 lines
 
 ---
 
@@ -98,12 +99,14 @@ The system is ~80% ready. Key foundations already in place:
 - Provenance: `DerivationKind::CodeGenerated` with source symbols
 
 **Changes**:
-- [ ] New file: `src/agent/tools/code_gen.rs`
-- [ ] `src/agent/mod.rs` — register `CodeGenTool` in `register_builtin_tools()`
-- [ ] `src/agent/ooda.rs` — add `code_gen` to tool scoring (keyword detection for code goals)
-- [ ] `src/provenance.rs` — `DerivationKind::CodeGenerated`
+- [x] New file: `src/agent/tools/code_gen.rs` (~560 lines, 10 tests)
+- [x] `src/agent/agent.rs` — register `CodeGenTool` in `register_builtin_tools()`
+- [x] `src/agent/tool_semantics.rs` — add `code_gen` semantic profile
+- [x] `src/provenance.rs` — `DerivationKind::CodeGenerated` (tag 37)
+- [x] KG → AbsTree pipeline: auto-detect scope, build from code:* triples, collect source symbols
+- [x] Optional `rustfmt` formatting, refinement analysis (`analyze_compiler_errors`)
 
-**Estimated scope**: ~400–600 lines
+**Estimated scope**: ~400–600 lines → ~560 lines
 
 ---
 
@@ -124,11 +127,12 @@ The system is ~80% ready. Key foundations already in place:
 - Strategy alternation: "scaffold-first" (generate skeleton, fill in) vs "bottom-up" (generate helpers first, compose)
 
 **Changes**:
-- [ ] `src/agent/plan.rs` — new `generate_code_plan()` function
-- [ ] `src/agent/plan.rs` — detect code goals in `generate_plan()` and delegate
-- [ ] `src/agent/plan.rs` — code-specific backtracking: parse compiler errors, adjust KG
+- [x] `src/agent/plan.rs` — new `generate_code_plan()` function (~200 lines)
+- [x] `src/agent/plan.rs` — `is_code_goal()` detection in `generate_plan()` with delegation
+- [x] `src/agent/plan.rs` — two code strategies: scaffold-first vs bottom-up (alternated on backtrack)
+- [x] `src/agent/plan.rs` — `extract_code_target()`, `detect_code_scope()`, `scope_to_type()` helpers
 
-**Estimated scope**: ~300–500 lines
+**Estimated scope**: ~300–500 lines → ~250 lines added
 
 ---
 
@@ -150,12 +154,14 @@ The system is ~80% ready. Key foundations already in place:
 - Implements a **CEGIS-like loop** (Counter-Example Guided Inductive Synthesis): each compiler error is a counterexample that guides the next synthesis attempt
 
 **Changes**:
-- [ ] New file: `src/agent/tools/compile_feedback.rs` — parse `cargo check` JSON output
-- [ ] `src/agent/tools/code_gen.rs` — `refine()` method that takes errors + existing code
-- [ ] `src/agent/ooda.rs` — refinement loop integration (detect compilation failure, trigger refinement)
-- [ ] `src/agent/plan.rs` — code plans include conditional refinement steps
+- [x] New file: `src/agent/tools/compile_feedback.rs` (~350 lines, 8 tests) — parse `cargo check` JSON output
+- [x] `src/agent/tools/code_gen.rs` — `analyze_compiler_errors()` for refinement guidance
+- [x] `src/provenance.rs` — `DerivationKind::CodeRefinement` (tag 38)
+- [x] `src/agent/tool_semantics.rs` — `compile_feedback` semantic profile
+- [x] `src/agent/agent.rs` — register `CompileFeedbackTool` in `register_builtin_tools()`
+- [x] Code plans include `compile_feedback` validation step
 
-**Estimated scope**: ~500–700 lines
+**Estimated scope**: ~500–700 lines → ~350 lines + integration
 
 ---
 

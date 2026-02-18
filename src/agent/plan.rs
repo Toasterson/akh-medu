@@ -162,6 +162,11 @@ pub fn generate_plan(
     let goal_lower = goal.description.to_lowercase();
     let criteria_lower = goal.success_criteria.to_lowercase();
 
+    // Check if this is a code generation goal — delegate to specialized planner.
+    if is_code_goal(&goal_lower, &criteria_lower) {
+        return generate_code_plan(goal, engine, working_memory, attempt);
+    }
+
     // Determine what the goal needs via VSA semantic similarity.
     // Encode canonical strategy patterns as hypervectors and measure
     // interference with the goal vector. Falls back to keyword matching
@@ -549,6 +554,303 @@ pub fn backtrack_plan(
     working_memory: &WorkingMemory,
 ) -> AgentResult<Plan> {
     generate_plan(goal, engine, working_memory, failed_plan.attempt + 1)
+}
+
+// ---------------------------------------------------------------------------
+// Code-aware planning (Phase 10c)
+// ---------------------------------------------------------------------------
+
+/// Code generation keywords that trigger code-aware planning.
+const CODE_KEYWORDS: &[&str] = &[
+    "generate",
+    "implement",
+    "write code",
+    "create function",
+    "create struct",
+    "create enum",
+    "create trait",
+    "create module",
+    "code_gen",
+    "write rust",
+    "generate code",
+    "implement function",
+    "implement struct",
+    "implement trait",
+    "scaffold",
+    "stub",
+    "boilerplate",
+];
+
+/// Detect whether a goal is about code generation.
+fn is_code_goal(goal_lower: &str, criteria_lower: &str) -> bool {
+    let combined = format!("{goal_lower} {criteria_lower}");
+    CODE_KEYWORDS.iter().any(|kw| combined.contains(kw))
+}
+
+/// Generate a code-aware plan with specialized steps for code generation.
+///
+/// Template:
+/// 1. `kg_query` — gather existing code structure facts
+/// 2. `code_ingest` — parse reference code if mentioned
+/// 3. `kg_mutate` — define target entity and relations
+/// 4. `code_gen` — generate code from KG
+/// 5. `file_io` — write to target path (if file output implied)
+/// 6. `compile_feedback` — validate with cargo check
+/// 7. (on failure) backtrack to step 3
+fn generate_code_plan(
+    goal: &Goal,
+    engine: &Engine,
+    _working_memory: &WorkingMemory,
+    attempt: u32,
+) -> AgentResult<Plan> {
+    let goal_lower = goal.description.to_lowercase();
+    let goal_label = engine.resolve_label(goal.symbol_id);
+    let mut steps = Vec::new();
+    let mut strategy_parts = Vec::new();
+
+    // Detect target name from goal description
+    let target_name = extract_code_target(&goal.description).unwrap_or_else(|| goal_label.clone());
+
+    // Detect scope from goal description
+    let scope = detect_code_scope(&goal_lower);
+
+    // Strategy alternation for backtracking
+    let scaffold_first = attempt % 2 == 0;
+
+    if scaffold_first {
+        // Strategy A: scaffold-first — generate skeleton, then fill in
+        strategy_parts.push("scaffold-first");
+
+        // Step 1: Query existing code structure
+        steps.push(PlanStep {
+            tool_name: "kg_query".into(),
+            tool_input: ToolInput::new()
+                .with_param("symbol", &target_name)
+                .with_param("direction", "both"),
+            rationale: "Gather existing code structure knowledge.".into(),
+            status: StepStatus::Pending,
+            index: steps.len(),
+        });
+
+        // Step 2: If goal mentions a reference file, ingest it
+        if goal_lower.contains("like") || goal_lower.contains("similar to") || goal_lower.contains("based on") {
+            steps.push(PlanStep {
+                tool_name: "code_ingest".into(),
+                tool_input: ToolInput::new().with_param("path", &target_name),
+                rationale: "Parse reference code for structure learning.".into(),
+                status: StepStatus::Pending,
+                index: steps.len(),
+            });
+            strategy_parts.push("reference ingest");
+        }
+
+        // Step 3: Define the target in KG if needed
+        let has_existing = engine.lookup_symbol(&target_name).is_ok();
+        if !has_existing {
+            steps.push(PlanStep {
+                tool_name: "kg_mutate".into(),
+                tool_input: ToolInput::new()
+                    .with_param("subject", &target_name)
+                    .with_param("predicate", "is-a")
+                    .with_param("object", scope_to_type(scope))
+                    .with_param("confidence", "0.9"),
+                rationale: format!("Define '{}' as a {} in the KG.", target_name, scope_to_type(scope)),
+                status: StepStatus::Pending,
+                index: steps.len(),
+            });
+            strategy_parts.push("define target");
+        }
+
+        // Step 4: Generate code
+        steps.push(PlanStep {
+            tool_name: "code_gen".into(),
+            tool_input: ToolInput::new()
+                .with_param("target", &target_name)
+                .with_param("scope", scope)
+                .with_param("format", "true"),
+            rationale: format!("Generate {} code for '{}'.", scope, target_name),
+            status: StepStatus::Pending,
+            index: steps.len(),
+        });
+        strategy_parts.push("generate");
+
+        // Step 5: Write to file if goal implies file output
+        if goal_lower.contains("file") || goal_lower.contains("write") || goal_lower.contains("save") {
+            let filename = format!("{}.rs", target_name.replace('-', "_").to_lowercase());
+            steps.push(PlanStep {
+                tool_name: "file_io".into(),
+                tool_input: ToolInput::new()
+                    .with_param("action", "write")
+                    .with_param("path", &filename)
+                    .with_param("content", ""), // Will be filled from code_gen output
+                rationale: format!("Write generated code to {}.", filename),
+                status: StepStatus::Pending,
+                index: steps.len(),
+            });
+            strategy_parts.push("write file");
+        }
+
+        // Step 6: Validate with compiler
+        steps.push(PlanStep {
+            tool_name: "compile_feedback".into(),
+            tool_input: ToolInput::new()
+                .with_param("command", "check"),
+            rationale: "Validate generated code compiles.".into(),
+            status: StepStatus::Pending,
+            index: steps.len(),
+        });
+        strategy_parts.push("validate");
+    } else {
+        // Strategy B: bottom-up — gather context, reason about structure, then generate
+        strategy_parts.push("bottom-up");
+
+        // Step 1: Recall past experience
+        steps.push(PlanStep {
+            tool_name: "memory_recall".into(),
+            tool_input: ToolInput::new()
+                .with_param("query_symbols", &target_name)
+                .with_param("top_k", "3"),
+            rationale: "Recall past code generation experience.".into(),
+            status: StepStatus::Pending,
+            index: steps.len(),
+        });
+
+        // Step 2: Query KG for related code patterns
+        steps.push(PlanStep {
+            tool_name: "kg_query".into(),
+            tool_input: ToolInput::new()
+                .with_param("symbol", &target_name)
+                .with_param("direction", "both"),
+            rationale: "Query existing code structure and dependencies.".into(),
+            status: StepStatus::Pending,
+            index: steps.len(),
+        });
+
+        // Step 3: Similarity search for analogous code
+        steps.push(PlanStep {
+            tool_name: "similarity_search".into(),
+            tool_input: ToolInput::new()
+                .with_param("symbol", &target_name)
+                .with_param("top_k", "3"),
+            rationale: "Find similar code structures for pattern reuse.".into(),
+            status: StepStatus::Pending,
+            index: steps.len(),
+        });
+
+        // Step 4: Define structure in KG
+        steps.push(PlanStep {
+            tool_name: "kg_mutate".into(),
+            tool_input: ToolInput::new()
+                .with_param("subject", &target_name)
+                .with_param("predicate", "is-a")
+                .with_param("object", scope_to_type(scope))
+                .with_param("confidence", "0.9"),
+            rationale: "Define the target code structure in the KG.".into(),
+            status: StepStatus::Pending,
+            index: steps.len(),
+        });
+
+        // Step 5: Generate code
+        steps.push(PlanStep {
+            tool_name: "code_gen".into(),
+            tool_input: ToolInput::new()
+                .with_param("target", &target_name)
+                .with_param("scope", scope)
+                .with_param("format", "true"),
+            rationale: format!("Generate {} code with bottom-up context.", scope),
+            status: StepStatus::Pending,
+            index: steps.len(),
+        });
+        strategy_parts.push("generate");
+
+        // Step 6: Validate
+        steps.push(PlanStep {
+            tool_name: "compile_feedback".into(),
+            tool_input: ToolInput::new()
+                .with_param("command", "check"),
+            rationale: "Validate generated code compiles.".into(),
+            status: StepStatus::Pending,
+            index: steps.len(),
+        });
+        strategy_parts.push("validate");
+    }
+
+    let strategy = format!(
+        "Code gen attempt {}: {}",
+        attempt + 1,
+        strategy_parts.join(" → ")
+    );
+
+    Ok(Plan {
+        goal_id: goal.goal_id(),
+        steps,
+        status: PlanStatus::Active,
+        attempt,
+        strategy,
+    })
+}
+
+/// Extract the code target name from goal description.
+///
+/// Looks for patterns like "implement X", "generate X", "create function X".
+fn extract_code_target(description: &str) -> Option<String> {
+    let lower = description.to_lowercase();
+
+    let prefixes = [
+        "implement ",
+        "generate ",
+        "create ",
+        "write ",
+        "scaffold ",
+    ];
+
+    for prefix in &prefixes {
+        if let Some(rest) = lower.find(prefix).map(|i| &description[i + prefix.len()..]) {
+            // Skip scope words
+            let rest = rest.trim();
+            let skip_words = ["function", "struct", "enum", "trait", "module", "a", "an", "the"];
+            let mut words: Vec<&str> = rest.split_whitespace().collect();
+            while !words.is_empty() && skip_words.contains(&words[0].to_lowercase().as_str()) {
+                words.remove(0);
+            }
+            if let Some(target) = words.first() {
+                return Some(target.to_string());
+            }
+        }
+    }
+
+    None
+}
+
+/// Detect code scope from goal description keywords.
+fn detect_code_scope(goal_lower: &str) -> &'static str {
+    if goal_lower.contains("struct") {
+        "struct"
+    } else if goal_lower.contains("enum") {
+        "enum"
+    } else if goal_lower.contains("trait") {
+        "trait"
+    } else if goal_lower.contains("impl") {
+        "impl"
+    } else if goal_lower.contains("module") || goal_lower.contains("mod ") {
+        "module"
+    } else if goal_lower.contains("file") {
+        "file"
+    } else {
+        "function"
+    }
+}
+
+/// Map scope keyword to KG type entity.
+fn scope_to_type(scope: &str) -> &str {
+    match scope {
+        "struct" => "Struct",
+        "enum" => "Enum",
+        "trait" => "Trait",
+        "impl" => "Implementation",
+        "module" | "file" => "Module",
+        _ => "Function",
+    }
 }
 
 // ---------------------------------------------------------------------------
