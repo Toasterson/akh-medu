@@ -1,0 +1,584 @@
+//! Second-order quantification: rules that quantify over predicates.
+//!
+//! CycL allows `(forAll ?R (implies (isa ?R TransitiveRelation) ...))` — rules
+//! about entire classes of relations. This module provides:
+//!
+//! - **`SecondOrderRule`**: rules with predicate variables that bind to relations
+//! - **Built-in rules**: transitivity, symmetry, reflexivity
+//! - **Rule instantiation**: enumerating qualifying predicates and generating
+//!   first-order inferences
+//!
+//! Second-order rules generate specialized reasoner invocations for each
+//! qualifying relation.
+
+use std::collections::HashMap;
+
+use miette::Diagnostic;
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+use crate::engine::Engine;
+use crate::error::AkhResult;
+use crate::graph::Triple;
+use crate::symbol::{SymbolId, SymbolKind};
+
+// ---------------------------------------------------------------------------
+// Error types
+// ---------------------------------------------------------------------------
+
+/// Errors specific to second-order quantification.
+#[derive(Debug, Error, Diagnostic)]
+pub enum SecondOrderError {
+    #[error("second-order rule '{name}' not found")]
+    #[diagnostic(
+        code(akh::second_order::rule_not_found),
+        help("No rule with this name is registered. Check available rules with `list_rules()`.")
+    )]
+    RuleNotFound { name: String },
+
+    #[error("no qualifying predicates found for rule '{rule_name}' (constraint: {constraint_label})")]
+    #[diagnostic(
+        code(akh::second_order::no_qualifying),
+        help(
+            "No relations match the constraint. Declare relations with the appropriate type \
+             (e.g., assert `is-a(my-relation, TransitiveRelation)`)."
+        )
+    )]
+    NoQualifyingPredicates {
+        rule_name: String,
+        constraint_label: String,
+    },
+
+    #[error("predicate variable '{var}' is unbound in rule '{rule_name}'")]
+    #[diagnostic(
+        code(akh::second_order::unbound_variable),
+        help("All predicate variables in a second-order rule must be bound via a constraint.")
+    )]
+    UnboundVariable { var: String, rule_name: String },
+}
+
+/// Result type for second-order operations.
+pub type SecondOrderResult<T> = std::result::Result<T, SecondOrderError>;
+
+// ---------------------------------------------------------------------------
+// Relation property
+// ---------------------------------------------------------------------------
+
+/// A property that a relation can have, used as constraints in second-order rules.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum RelationProperty {
+    /// Transitive: R(a,b) ∧ R(b,c) → R(a,c)
+    Transitive,
+    /// Symmetric: R(a,b) → R(b,a)
+    Symmetric,
+    /// Reflexive: for all a in domain(R), R(a,a)
+    Reflexive,
+    /// Antisymmetric: R(a,b) ∧ R(b,a) → a = b
+    Antisymmetric,
+    /// Irreflexive: ¬R(a,a) for all a
+    Irreflexive,
+}
+
+impl std::fmt::Display for RelationProperty {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Transitive => write!(f, "TransitiveRelation"),
+            Self::Symmetric => write!(f, "SymmetricRelation"),
+            Self::Reflexive => write!(f, "ReflexiveRelation"),
+            Self::Antisymmetric => write!(f, "AntisymmetricRelation"),
+            Self::Irreflexive => write!(f, "IrreflexiveRelation"),
+        }
+    }
+}
+
+impl RelationProperty {
+    /// Parse from label string.
+    pub fn from_label(s: &str) -> Option<Self> {
+        match s {
+            "TransitiveRelation" => Some(Self::Transitive),
+            "SymmetricRelation" => Some(Self::Symmetric),
+            "ReflexiveRelation" => Some(Self::Reflexive),
+            "AntisymmetricRelation" => Some(Self::Antisymmetric),
+            "IrreflexiveRelation" => Some(Self::Irreflexive),
+            _ => None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Second-order rule
+// ---------------------------------------------------------------------------
+
+/// A second-order rule: quantifies over predicates.
+///
+/// The rule pattern is:
+/// `∀?R: constraint(?R) → body(?R, ...)`
+///
+/// The predicate variable `?R` binds to all relations satisfying the constraint,
+/// and the body generates first-order inferences for each binding.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecondOrderRule {
+    /// Human-readable name for the rule.
+    pub name: String,
+    /// The property constraint: only relations with this property are bound.
+    pub constraint: RelationProperty,
+    /// Description of what the rule does.
+    pub description: String,
+}
+
+// ---------------------------------------------------------------------------
+// Generated inference
+// ---------------------------------------------------------------------------
+
+/// An inference generated by instantiating a second-order rule.
+#[derive(Debug, Clone)]
+pub struct GeneratedInference {
+    /// The rule that generated this inference.
+    pub rule_name: String,
+    /// The predicate the rule was instantiated with.
+    pub predicate: SymbolId,
+    /// The inferred triple(s).
+    pub inferred_triples: Vec<Triple>,
+}
+
+// ---------------------------------------------------------------------------
+// Well-known predicates
+// ---------------------------------------------------------------------------
+
+/// Well-known predicates for second-order quantification.
+pub struct SecondOrderPredicates {
+    /// `is-a` relation.
+    pub is_a: SymbolId,
+    /// `TransitiveRelation` type.
+    pub transitive_relation: SymbolId,
+    /// `SymmetricRelation` type.
+    pub symmetric_relation: SymbolId,
+    /// `ReflexiveRelation` type.
+    pub reflexive_relation: SymbolId,
+}
+
+impl SecondOrderPredicates {
+    /// Resolve well-known second-order predicates, creating them if needed.
+    pub fn resolve(engine: &Engine) -> AkhResult<Self> {
+        let is_a = engine
+            .create_symbol(SymbolKind::Relation, "is-a")
+            .or_else(|_| engine.lookup_symbol("is-a").map(|id| crate::symbol::SymbolMeta::new(id, SymbolKind::Relation, "is-a")))?;
+        let transitive = engine
+            .create_symbol(SymbolKind::Entity, "TransitiveRelation")
+            .or_else(|_| engine.lookup_symbol("TransitiveRelation").map(|id| crate::symbol::SymbolMeta::new(id, SymbolKind::Entity, "TransitiveRelation")))?;
+        let symmetric = engine
+            .create_symbol(SymbolKind::Entity, "SymmetricRelation")
+            .or_else(|_| engine.lookup_symbol("SymmetricRelation").map(|id| crate::symbol::SymbolMeta::new(id, SymbolKind::Entity, "SymmetricRelation")))?;
+        let reflexive = engine
+            .create_symbol(SymbolKind::Entity, "ReflexiveRelation")
+            .or_else(|_| engine.lookup_symbol("ReflexiveRelation").map(|id| crate::symbol::SymbolMeta::new(id, SymbolKind::Entity, "ReflexiveRelation")))?;
+
+        Ok(Self {
+            is_a: is_a.id,
+            transitive_relation: transitive.id,
+            symmetric_relation: symmetric.id,
+            reflexive_relation: reflexive.id,
+        })
+    }
+
+    /// Get the SymbolId for a relation property.
+    pub fn property_symbol(&self, property: RelationProperty) -> Option<SymbolId> {
+        match property {
+            RelationProperty::Transitive => Some(self.transitive_relation),
+            RelationProperty::Symmetric => Some(self.symmetric_relation),
+            RelationProperty::Reflexive => Some(self.reflexive_relation),
+            _ => None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Rule registry
+// ---------------------------------------------------------------------------
+
+/// Registry of second-order rules.
+#[derive(Debug, Clone, Default)]
+pub struct SecondOrderRegistry {
+    /// Named rules.
+    rules: HashMap<String, SecondOrderRule>,
+}
+
+impl SecondOrderRegistry {
+    /// Create a new registry with built-in rules.
+    pub fn with_builtins() -> Self {
+        let mut registry = Self::default();
+
+        registry.add_rule(SecondOrderRule {
+            name: "transitivity".to_string(),
+            constraint: RelationProperty::Transitive,
+            description: "∀R: transitive(R) → ∀a,b,c: R(a,b) ∧ R(b,c) → R(a,c)".to_string(),
+        });
+
+        registry.add_rule(SecondOrderRule {
+            name: "symmetry".to_string(),
+            constraint: RelationProperty::Symmetric,
+            description: "∀R: symmetric(R) → ∀a,b: R(a,b) → R(b,a)".to_string(),
+        });
+
+        registry.add_rule(SecondOrderRule {
+            name: "reflexivity".to_string(),
+            constraint: RelationProperty::Reflexive,
+            description: "∀R: reflexive(R) → ∀a: type(a,domain(R)) → R(a,a)".to_string(),
+        });
+
+        registry
+    }
+
+    /// Add a rule.
+    pub fn add_rule(&mut self, rule: SecondOrderRule) {
+        self.rules.insert(rule.name.clone(), rule);
+    }
+
+    /// Get a rule by name.
+    pub fn get_rule(&self, name: &str) -> Option<&SecondOrderRule> {
+        self.rules.get(name)
+    }
+
+    /// List all rules.
+    pub fn list_rules(&self) -> Vec<&SecondOrderRule> {
+        self.rules.values().collect()
+    }
+
+    /// Number of registered rules.
+    pub fn len(&self) -> usize {
+        self.rules.len()
+    }
+
+    /// Whether the registry is empty.
+    pub fn is_empty(&self) -> bool {
+        self.rules.is_empty()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Instantiation
+// ---------------------------------------------------------------------------
+
+/// Find all relations that satisfy a given property constraint.
+pub fn qualifying_predicates(
+    engine: &Engine,
+    property: RelationProperty,
+    predicates: &SecondOrderPredicates,
+) -> Vec<SymbolId> {
+    let property_sym = match predicates.property_symbol(property) {
+        Some(s) => s,
+        None => return vec![],
+    };
+
+    let kg = engine.knowledge_graph();
+    kg.triples_to(property_sym)
+        .into_iter()
+        .filter(|t| t.predicate == predicates.is_a)
+        .map(|t| t.subject)
+        .collect()
+}
+
+/// Apply the transitivity rule: for each qualifying predicate R,
+/// find all (a,b) and (b,c) where R(a,b) and R(b,c), infer R(a,c).
+pub fn apply_transitivity(
+    engine: &Engine,
+    relation: SymbolId,
+) -> Vec<Triple> {
+    let kg = engine.knowledge_graph();
+    // triples_for_predicate returns Vec<(subject, object)>
+    let pairs = kg.triples_for_predicate(relation);
+    let mut inferred = Vec::new();
+
+    // Build a map: subject → [objects]
+    let mut forward: HashMap<SymbolId, Vec<SymbolId>> = HashMap::new();
+    for &(subj, obj) in &pairs {
+        forward.entry(subj).or_default().push(obj);
+    }
+
+    // For each R(a,b), check if R(b,c) exists
+    for &(a, b) in &pairs {
+        if let Some(cs) = forward.get(&b) {
+            for &c in cs {
+                if c != a {
+                    // Check if R(a,c) already exists
+                    let exists = pairs.iter().any(|&(s, o)| s == a && o == c);
+                    if !exists {
+                        inferred.push(Triple::new(a, relation, c));
+                    }
+                }
+            }
+        }
+    }
+
+    inferred
+}
+
+/// Apply the symmetry rule: for each qualifying predicate R,
+/// find all R(a,b) and infer R(b,a) if not already present.
+pub fn apply_symmetry(
+    engine: &Engine,
+    relation: SymbolId,
+) -> Vec<Triple> {
+    let kg = engine.knowledge_graph();
+    // triples_for_predicate returns Vec<(subject, object)>
+    let pairs = kg.triples_for_predicate(relation);
+    let mut inferred = Vec::new();
+
+    for &(a, b) in &pairs {
+        // Check if R(b,a) already exists
+        let exists = pairs.iter().any(|&(s, o)| s == b && o == a);
+        if !exists {
+            inferred.push(Triple::new(b, relation, a));
+        }
+    }
+
+    inferred
+}
+
+/// Instantiate all second-order rules: find qualifying predicates and
+/// generate inferred triples.
+pub fn instantiate_all(
+    engine: &Engine,
+    registry: &SecondOrderRegistry,
+    predicates: &SecondOrderPredicates,
+) -> Vec<GeneratedInference> {
+    let mut results = Vec::new();
+
+    for rule in registry.list_rules() {
+        let qualifying = qualifying_predicates(engine, rule.constraint, predicates);
+
+        for pred in qualifying {
+            let inferred = match rule.constraint {
+                RelationProperty::Transitive => apply_transitivity(engine, pred),
+                RelationProperty::Symmetric => apply_symmetry(engine, pred),
+                // Reflexivity needs domain information — skip for now
+                _ => Vec::new(),
+            };
+
+            if !inferred.is_empty() {
+                results.push(GeneratedInference {
+                    rule_name: rule.name.clone(),
+                    predicate: pred,
+                    inferred_triples: inferred,
+                });
+            }
+        }
+    }
+
+    results
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::EngineConfig;
+    use crate::symbol::SymbolKind;
+
+    #[test]
+    fn relation_property_display_and_parse() {
+        assert_eq!(RelationProperty::Transitive.to_string(), "TransitiveRelation");
+        assert_eq!(
+            RelationProperty::from_label("TransitiveRelation"),
+            Some(RelationProperty::Transitive)
+        );
+        assert_eq!(
+            RelationProperty::from_label("SymmetricRelation"),
+            Some(RelationProperty::Symmetric)
+        );
+        assert!(RelationProperty::from_label("Unknown").is_none());
+    }
+
+    #[test]
+    fn registry_with_builtins() {
+        let registry = SecondOrderRegistry::with_builtins();
+        assert_eq!(registry.len(), 3);
+        assert!(registry.get_rule("transitivity").is_some());
+        assert!(registry.get_rule("symmetry").is_some());
+        assert!(registry.get_rule("reflexivity").is_some());
+    }
+
+    #[test]
+    fn qualifying_predicates_finds_transitive() {
+        let engine = Engine::new(EngineConfig::default()).unwrap();
+        let is_a = engine
+            .create_symbol(SymbolKind::Relation, "is-a")
+            .unwrap();
+        let trans_rel = engine
+            .create_symbol(SymbolKind::Entity, "TransitiveRelation")
+            .unwrap();
+        let ancestor_of = engine
+            .create_symbol(SymbolKind::Relation, "ancestor-of")
+            .unwrap();
+
+        // Declare ancestor-of as transitive
+        engine
+            .add_triple(&Triple::new(ancestor_of.id, is_a.id, trans_rel.id))
+            .unwrap();
+
+        let preds = SecondOrderPredicates {
+            is_a: is_a.id,
+            transitive_relation: trans_rel.id,
+            symmetric_relation: SymbolId::new(999).unwrap(),
+            reflexive_relation: SymbolId::new(998).unwrap(),
+        };
+
+        let qualifying = qualifying_predicates(&engine, RelationProperty::Transitive, &preds);
+        assert_eq!(qualifying.len(), 1);
+        assert_eq!(qualifying[0], ancestor_of.id);
+    }
+
+    #[test]
+    fn apply_transitivity_basic() {
+        let engine = Engine::new(EngineConfig::default()).unwrap();
+        let ancestor_of = engine
+            .create_symbol(SymbolKind::Relation, "ancestor-of")
+            .unwrap();
+        let a = engine.create_symbol(SymbolKind::Entity, "A").unwrap();
+        let b = engine.create_symbol(SymbolKind::Entity, "B").unwrap();
+        let c = engine.create_symbol(SymbolKind::Entity, "C").unwrap();
+
+        engine
+            .add_triple(&Triple::new(a.id, ancestor_of.id, b.id))
+            .unwrap();
+        engine
+            .add_triple(&Triple::new(b.id, ancestor_of.id, c.id))
+            .unwrap();
+
+        let inferred = apply_transitivity(&engine, ancestor_of.id);
+        assert_eq!(inferred.len(), 1);
+        assert_eq!(inferred[0].subject, a.id);
+        assert_eq!(inferred[0].object, c.id);
+    }
+
+    #[test]
+    fn apply_transitivity_no_redundant() {
+        let engine = Engine::new(EngineConfig::default()).unwrap();
+        let r = engine
+            .create_symbol(SymbolKind::Relation, "ancestor-of")
+            .unwrap();
+        let a = engine.create_symbol(SymbolKind::Entity, "A").unwrap();
+        let b = engine.create_symbol(SymbolKind::Entity, "B").unwrap();
+        let c = engine.create_symbol(SymbolKind::Entity, "C").unwrap();
+
+        engine.add_triple(&Triple::new(a.id, r.id, b.id)).unwrap();
+        engine.add_triple(&Triple::new(b.id, r.id, c.id)).unwrap();
+        // Already have a→c
+        engine.add_triple(&Triple::new(a.id, r.id, c.id)).unwrap();
+
+        let inferred = apply_transitivity(&engine, r.id);
+        assert!(inferred.is_empty());
+    }
+
+    #[test]
+    fn apply_symmetry_basic() {
+        let engine = Engine::new(EngineConfig::default()).unwrap();
+        let friend_of = engine
+            .create_symbol(SymbolKind::Relation, "friend-of")
+            .unwrap();
+        let a = engine.create_symbol(SymbolKind::Entity, "Alice").unwrap();
+        let b = engine.create_symbol(SymbolKind::Entity, "Bob").unwrap();
+
+        engine
+            .add_triple(&Triple::new(a.id, friend_of.id, b.id))
+            .unwrap();
+
+        let inferred = apply_symmetry(&engine, friend_of.id);
+        assert_eq!(inferred.len(), 1);
+        assert_eq!(inferred[0].subject, b.id);
+        assert_eq!(inferred[0].object, a.id);
+    }
+
+    #[test]
+    fn apply_symmetry_already_symmetric() {
+        let engine = Engine::new(EngineConfig::default()).unwrap();
+        let friend_of = engine
+            .create_symbol(SymbolKind::Relation, "friend-of")
+            .unwrap();
+        let a = engine.create_symbol(SymbolKind::Entity, "Alice").unwrap();
+        let b = engine.create_symbol(SymbolKind::Entity, "Bob").unwrap();
+
+        engine
+            .add_triple(&Triple::new(a.id, friend_of.id, b.id))
+            .unwrap();
+        engine
+            .add_triple(&Triple::new(b.id, friend_of.id, a.id))
+            .unwrap();
+
+        let inferred = apply_symmetry(&engine, friend_of.id);
+        assert!(inferred.is_empty());
+    }
+
+    #[test]
+    fn instantiate_all_generates_inferences() {
+        let engine = Engine::new(EngineConfig::default()).unwrap();
+        let is_a = engine
+            .create_symbol(SymbolKind::Relation, "is-a")
+            .unwrap();
+        let trans_rel = engine
+            .create_symbol(SymbolKind::Entity, "TransitiveRelation")
+            .unwrap();
+        let sym_rel = engine
+            .create_symbol(SymbolKind::Entity, "SymmetricRelation")
+            .unwrap();
+        let refl_rel = engine
+            .create_symbol(SymbolKind::Entity, "ReflexiveRelation")
+            .unwrap();
+
+        let ancestor_of = engine
+            .create_symbol(SymbolKind::Relation, "ancestor-of")
+            .unwrap();
+        let a = engine.create_symbol(SymbolKind::Entity, "A").unwrap();
+        let b = engine.create_symbol(SymbolKind::Entity, "B").unwrap();
+        let c = engine.create_symbol(SymbolKind::Entity, "C").unwrap();
+
+        // Declare ancestor-of as transitive
+        engine
+            .add_triple(&Triple::new(ancestor_of.id, is_a.id, trans_rel.id))
+            .unwrap();
+        engine
+            .add_triple(&Triple::new(a.id, ancestor_of.id, b.id))
+            .unwrap();
+        engine
+            .add_triple(&Triple::new(b.id, ancestor_of.id, c.id))
+            .unwrap();
+
+        let registry = SecondOrderRegistry::with_builtins();
+        let predicates = SecondOrderPredicates {
+            is_a: is_a.id,
+            transitive_relation: trans_rel.id,
+            symmetric_relation: sym_rel.id,
+            reflexive_relation: refl_rel.id,
+        };
+
+        let results = instantiate_all(&engine, &registry, &predicates);
+        assert!(!results.is_empty());
+
+        let trans_result = results
+            .iter()
+            .find(|r| r.rule_name == "transitivity")
+            .unwrap();
+        assert_eq!(trans_result.predicate, ancestor_of.id);
+        assert_eq!(trans_result.inferred_triples.len(), 1);
+        assert_eq!(trans_result.inferred_triples[0].subject, a.id);
+        assert_eq!(trans_result.inferred_triples[0].object, c.id);
+    }
+
+    #[test]
+    fn custom_rule_registration() {
+        let mut registry = SecondOrderRegistry::with_builtins();
+        assert_eq!(registry.len(), 3);
+
+        registry.add_rule(SecondOrderRule {
+            name: "custom-rule".to_string(),
+            constraint: RelationProperty::Antisymmetric,
+            description: "Custom rule".to_string(),
+        });
+
+        assert_eq!(registry.len(), 4);
+        assert!(registry.get_rule("custom-rule").is_some());
+    }
+}

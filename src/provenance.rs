@@ -183,6 +183,33 @@ pub enum DerivationKind {
         existing_object: SymbolId,
         incoming_object: SymbolId,
     },
+    /// A Skolem symbol was created as an existential witness (Phase 9h).
+    SkolemWitness {
+        existential_relation: SymbolId,
+        bound_var: SymbolId,
+    },
+    /// A Skolem symbol was grounded to a concrete entity (Phase 9h).
+    SkolemGrounding {
+        skolem: SymbolId,
+        concrete_entity: SymbolId,
+    },
+    /// A negation-as-failure query returned negative under CWA (Phase 9m).
+    CwaQuery {
+        context: SymbolId,
+        subject: SymbolId,
+        predicate: SymbolId,
+    },
+    /// A second-order rule was instantiated for a qualifying predicate (Phase 9n).
+    SecondOrderInstantiation {
+        rule_name: String,
+        predicate: SymbolId,
+        inferred_count: usize,
+    },
+    /// A NART (non-atomic reified term) was created (Phase 9o).
+    NartCreation {
+        function: SymbolId,
+        arg_count: usize,
+    },
 }
 
 impl DerivationKind {
@@ -221,6 +248,11 @@ impl DerivationKind {
             Self::RuleMacroExpansion { .. } => 29,
             Self::TemporalDecay { .. } => 30,
             Self::ContradictionDetected { .. } => 31,
+            Self::SkolemWitness { .. } => 32,
+            Self::SkolemGrounding { .. } => 33,
+            Self::CwaQuery { .. } => 34,
+            Self::SecondOrderInstantiation { .. } => 35,
+            Self::NartCreation { .. } => 36,
         }
     }
 }

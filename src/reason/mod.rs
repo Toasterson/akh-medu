@@ -3,6 +3,8 @@
 //! Defines AkhLang for the e-graph language and provides rewrite rules
 //! for symbolic reasoning over the knowledge graph. Full implementation in Phase 2.
 
+pub mod second_order;
+
 use egg::define_language;
 
 define_language! {

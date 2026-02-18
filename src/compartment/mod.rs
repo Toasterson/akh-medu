@@ -10,6 +10,7 @@
 //! disjointness (`ctx:disjoint`), and lifting rules for cross-context propagation.
 //! See [`microtheory`] module for details.
 
+pub mod cwa;
 pub mod error;
 pub mod manager;
 pub mod manifest;

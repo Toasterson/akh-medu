@@ -100,6 +100,22 @@ pub enum AkhError {
     #[error(transparent)]
     #[diagnostic(transparent)]
     Contradiction(#[from] crate::graph::contradiction::ContradictionError),
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Skolem(#[from] crate::skolem::SkolemError),
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Cwa(#[from] crate::compartment::cwa::CwaError),
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    SecondOrder(#[from] crate::reason::second_order::SecondOrderError),
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Nart(#[from] crate::graph::nart::NartError),
 }
 
 // ---------------------------------------------------------------------------

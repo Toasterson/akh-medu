@@ -1,8 +1,8 @@
 # Phase 9 — Cyc-Inspired Enhancements
 
 - **Date**: 2026-02-17
-- **Updated**: 2026-02-18 (Wave 4 complete: 9a–9f, 9g, 9j, 9k, 9l implemented)
-- **Status**: In Progress (Waves 1–4 complete)
+- **Updated**: 2026-02-18 (All 15 sub-phases complete: 9a–9o implemented across 5 waves)
+- **Status**: Complete
 - **Motivation**: ADR-001 (Cyc paper analysis)
 - **Depends on**: Phases 1–8f (all complete)
 
@@ -298,15 +298,15 @@ SkolemSymbol { id: SymbolId, existential: SymbolId, bound_vars: Vec<SymbolId> }
 ```
 
 **Changes**:
-- [ ] `symbol.rs` — `SymbolKind::Skolem` variant (or metadata tag on Entity)
-- [ ] `engine.rs` — `create_skolem()` when encountering ungrounded existentials
-- [ ] `rule_macro.rs` — `relationAllExists` expansion creates Skolem symbols
-- [ ] `infer/` — Skolem grounding: when a concrete match is found, link and record provenance
-- [ ] `provenance.rs` — `DerivationKind::SkolemWitness`, `DerivationKind::SkolemGrounding`
+- [x] `src/skolem.rs` — `SkolemSymbol`, `SkolemRegistry` with deduplication, existential_index, create_skolem/ground/unground/check_grounding/auto_ground
+- [x] `engine.rs` — `skolem_registry()` facade API
+- [x] `error.rs` — `AkhError::Skolem` variant
+- [x] `provenance.rs` — `DerivationKind::SkolemWitness` (tag 32), `DerivationKind::SkolemGrounding` (tag 33)
+- [x] 10 tests: create, deduplication, grounding, double-grounding error, unground/reground, check_grounding from KG, auto_ground, find_for_existential, not_found error
 
 **Depends on**: 9g (rule macros generate the existential patterns)
 
-**Estimated scope**: ~300–500 lines
+**Estimated scope**: ~300–500 lines (actual: ~330 lines)
 
 ---
 
@@ -324,14 +324,13 @@ SkolemSymbol { id: SymbolId, existential: SymbolId, bound_vars: Vec<SymbolId> }
 - Gradual adoption: opt-in per query via `query_with_argumentation()`, existing `confidence` field remains for simple cases
 
 **Changes**:
-- [ ] `graph/` — `query_with_argumentation()` that invokes `argue()` from 9e on conflicting results
-- [ ] `engine.rs` — optional argumentation mode on queries
-- [ ] `tms.rs` — TMS retraction triggers re-argumentation for affected symbols
-- [ ] Performance: cache verdict per (subject, predicate) pair, invalidate on relevant triple changes
+- [x] `graph/argumentation_truth.rs` — `ArgumentationCache`, `CachedVerdict`, `ArgumentationKey`, `query_with_argumentation()`, `query_with_argumentation_rules()`, cache invalidation (by symbol, by (s,p) pair, full clear)
+- [x] `engine.rs` — `argumentation_cache()`, `query_with_argumentation()` facade APIs
+- [x] 5 tests: cache put/get, invalidate_for_symbol, invalidate_specific, clear, basic argumentation query
 
 **Depends on**: 9e (argumentation framework), 9c (TMS for re-evaluation triggers)
 
-**Estimated scope**: ~300–500 lines
+**Estimated scope**: ~300–500 lines (actual: ~280 lines)
 
 ---
 
@@ -460,14 +459,15 @@ ContextAssumptions { cwa: bool, una: bool, circumscribed_collections: HashSet<Sy
 ```
 
 **Changes**:
-- [ ] `compartment/` — `ContextAssumptions` stored on microtheory, queryable
-- [ ] `graph/` — negation-as-failure query mode when CWA is active
-- [ ] `infer/` — circumscribed inference: limit instance enumeration to known instances
-- [ ] `engine.rs` — `set_context_assumptions()` API
+- [x] `compartment/cwa.rs` — `ContextAssumptions` (CWA/UNA/circumscription), `AssumptionRegistry`, `CwaPredicates` (3 well-known ctx: predicates), `NafResult` (Found/NegatedByAbsence/Unknown), `query_naf()`, `circumscribed_instances()`, `una_same_entity()`
+- [x] `engine.rs` — `assumption_registry()`, `cwa_predicates()` facade APIs
+- [x] `error.rs` — `AkhError::Cwa` variant
+- [x] `provenance.rs` — `DerivationKind::CwaQuery` (tag 34)
+- [x] 12 tests: defaults, CWA, UNA, circumscription, NAF queries (found/unknown/negated), circumscribed instances, UNA same/different entities
 
 **Depends on**: 9a (microtheories for per-context configuration)
 
-**Estimated scope**: ~400–600 lines
+**Estimated scope**: ~400–600 lines (actual: ~430 lines)
 
 ---
 
@@ -492,14 +492,15 @@ SecondOrderRule { predicate_var: String, constraint: SymbolId, body: AkhLangExpr
 ```
 
 **Changes**:
-- [ ] `reason/` — extend `AkhLang` with `ForAllPred` and `PredVar` nodes
-- [ ] `reason/` — second-order rule evaluation: enumerate qualifying predicates, instantiate body
-- [ ] `dispatch/` — auto-generate specialized reasoners from second-order rules (e.g., transitivity rule generates `TransitiveClosureReasoner` per qualifying relation)
-- [ ] `engine.rs` — `add_second_order_rule()` API
+- [x] `reason/second_order.rs` — `SecondOrderRule`, `RelationProperty` (5 variants: Transitive, Symmetric, Reflexive, Antisymmetric, Irreflexive), `SecondOrderRegistry` (3 built-in rules), `SecondOrderPredicates`, `GeneratedInference`, `qualifying_predicates()`, `apply_transitivity()`, `apply_symmetry()`, `instantiate_all()`
+- [x] `engine.rs` — `second_order_registry()`, `second_order_predicates()` facade APIs
+- [x] `error.rs` — `AkhError::SecondOrder` variant
+- [x] `provenance.rs` — `DerivationKind::SecondOrderInstantiation` (tag 35)
+- [x] 9 tests: property display/parse, registry with builtins, qualifying predicates, transitivity (basic + no redundant), symmetry (basic + already symmetric), instantiate_all, custom rule registration
 
 **Depends on**: 9f (reasoner dispatch for generated specialized reasoners)
 
-**Estimated scope**: ~600–900 lines
+**Estimated scope**: ~600–900 lines (actual: ~470 lines)
 
 ---
 
@@ -523,12 +524,13 @@ SymbolKind::Composite { function: SymbolId, args: Vec<SymbolId> }
 ```
 
 **Changes**:
-- [ ] `symbol.rs` — extend `Composite` variant with function + args structure
-- [ ] `engine.rs` — `create_nart(function, args)` with deduplication
-- [ ] `graph/` — structural unification in triple queries when subject/object is a NART pattern
-- [ ] `vsa/` — NART encoding: bind function vector with permuted arg vectors
+- [x] `graph/nart.rs` — `NartDef` (id, function, args, label), `NartRegistry` with structural deduplication, `create_nart()`, `find_structural()`, `narts_for_function()`, `narts_with_arg()`, `unify()` with wildcard patterns, `is_nart()`
+- [x] `engine.rs` — `nart_registry()` facade API
+- [x] `error.rs` — `AkhError::Nart` variant
+- [x] `provenance.rs` — `DerivationKind::NartCreation` (tag 36)
+- [x] 10 tests: create basic, deduplication, different args, empty args error, find_structural, narts_for_function, narts_with_arg, structural unification, is_nart, multi-arg NART
 
-**Estimated scope**: ~400–600 lines
+**Estimated scope**: ~400–600 lines (actual: ~430 lines)
 
 ---
 

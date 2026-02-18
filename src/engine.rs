@@ -1645,6 +1645,73 @@ impl Engine {
     }
 
     // -----------------------------------------------------------------------
+    // Skolem Functions (Phase 9h)
+    // -----------------------------------------------------------------------
+
+    /// Create a new Skolem registry.
+    pub fn skolem_registry(&self) -> crate::skolem::SkolemRegistry {
+        crate::skolem::SkolemRegistry::new()
+    }
+
+    // -----------------------------------------------------------------------
+    // Argumentation-Based Truth Values (Phase 9i)
+    // -----------------------------------------------------------------------
+
+    /// Create a new argumentation cache.
+    pub fn argumentation_cache(&self) -> crate::graph::argumentation_truth::ArgumentationCache {
+        crate::graph::argumentation_truth::ArgumentationCache::new()
+    }
+
+    /// Query with argumentation-based truth values.
+    pub fn query_with_argumentation(
+        &self,
+        subject: SymbolId,
+        predicate: SymbolId,
+        cache: &mut crate::graph::argumentation_truth::ArgumentationCache,
+    ) -> AkhResult<Vec<(crate::graph::Triple, f64)>> {
+        crate::graph::argumentation_truth::query_with_argumentation(self, subject, predicate, cache)
+    }
+
+    // -----------------------------------------------------------------------
+    // Circumscription / CWA (Phase 9m)
+    // -----------------------------------------------------------------------
+
+    /// Create a new CWA assumption registry.
+    pub fn assumption_registry(&self) -> crate::compartment::cwa::AssumptionRegistry {
+        crate::compartment::cwa::AssumptionRegistry::new()
+    }
+
+    /// Resolve well-known CWA predicates, creating them if needed.
+    pub fn cwa_predicates(&self) -> AkhResult<crate::compartment::cwa::CwaPredicates> {
+        Ok(crate::compartment::cwa::CwaPredicates::resolve(self)?)
+    }
+
+    // -----------------------------------------------------------------------
+    // Second-Order Quantification (Phase 9n)
+    // -----------------------------------------------------------------------
+
+    /// Create a second-order rule registry with built-in rules.
+    pub fn second_order_registry(&self) -> crate::reason::second_order::SecondOrderRegistry {
+        crate::reason::second_order::SecondOrderRegistry::with_builtins()
+    }
+
+    /// Resolve well-known second-order predicates, creating them if needed.
+    pub fn second_order_predicates(
+        &self,
+    ) -> AkhResult<crate::reason::second_order::SecondOrderPredicates> {
+        Ok(crate::reason::second_order::SecondOrderPredicates::resolve(self)?)
+    }
+
+    // -----------------------------------------------------------------------
+    // NARTs (Phase 9o)
+    // -----------------------------------------------------------------------
+
+    /// Create a new NART registry.
+    pub fn nart_registry(&self) -> crate::graph::nart::NartRegistry {
+        crate::graph::nart::NartRegistry::new()
+    }
+
+    // -----------------------------------------------------------------------
     // Role assignment
     // -----------------------------------------------------------------------
 

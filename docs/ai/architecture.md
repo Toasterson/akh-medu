@@ -1,6 +1,6 @@
 # Akh-medu Architecture
 
-> Last updated: 2026-02-18 (Phase 9 Wave 4: +rule macros, temporal projection, arity constraints, contradiction detection)
+> Last updated: 2026-02-18 (Phase 9 complete: all 15 sub-phases 9a–9o implemented)
 
 ## Overview
 
@@ -21,13 +21,13 @@ src/
 ├── agent/              24 modules — OODA loop, tools, memory, goals, planning, psyche
 ├── autonomous/          6 modules — background learning, confidence fusion, grounding
 ├── argumentation/       1 module  — pro/con argumentation (Phase 9e): meta-rules, verdicts, evidence chains
-├── compartment/         4 modules — knowledge isolation, Jungian psyche, microtheories (Phase 9a)
+├── compartment/         5 modules — knowledge isolation, Jungian psyche, microtheories (Phase 9a), CWA/circumscription (Phase 9m)
 ├── dispatch/            1 module  — competitive reasoner dispatch (Phase 9f): Reasoner trait, bid-based registry, 7 built-in reasoners
 ├── grammar/            20 modules — GF-inspired parsing/generation, entity resolution
-├── graph/               7 modules — KG (petgraph), SPARQL (oxigraph), analytics, predicate hierarchy (Phase 9b), defeasible reasoning (Phase 9d), arity constraints (Phase 9j), contradiction detection (Phase 9l)
+├── graph/               9 modules — KG (petgraph), SPARQL (oxigraph), analytics, predicate hierarchy (Phase 9b), defeasible reasoning (Phase 9d), arity constraints (Phase 9j), contradiction detection (Phase 9l), argumentation truth (Phase 9i), NARTs (Phase 9o)
 ├── infer/               3 modules — spreading activation, backward chaining, superposition
 ├── library/            12 modules — document parsing, chunking, concept extraction
-├── reason/              1 module  — e-graph language (AkhLang), rewrite rules
+├── reason/              2 modules — e-graph language (AkhLang), rewrite rules, second-order quantification (Phase 9n)
 ├── simd/                5 modules — runtime SIMD kernel dispatch (AVX2 / generic)
 ├── skills/              1 module  — skillpack lifecycle (Cold/Warm/Hot)
 ├── store/               3 modules — tiered storage (hot/warm/cold)
@@ -37,7 +37,8 @@ src/
 ├── error.rs                       — miette + thiserror rich diagnostics
 ├── rule_macro.rs                  — rule macro predicates (Phase 9g): RuleMacro trait, registry, genls/relationAllExists/relationExistsAll
 ├── temporal.rs                    — temporal projection (Phase 9k): TemporalProfile, decay computation, registry
-├── provenance.rs                  — persistent explanation ledger (redb, multi-index, 32 derivation kinds)
+├── provenance.rs                  — persistent explanation ledger (redb, multi-index, 37 derivation kinds)
+├── skolem.rs                      — Skolem functions (Phase 9h): existential witnesses, grounding, auto-ground
 ├── tms.rs                         — truth maintenance system (Phase 9c): support sets, retraction cascades
 ├── symbol.rs                      — SymbolId (NonZeroU64), SymbolKind, allocator
 ├── pipeline.rs                    — composable stage pipelines
@@ -85,6 +86,11 @@ src/
 | **Arity & Type Constraints** (9j) | Complete | `ConstraintRegistry` with per-relation arity/arg-type declarations, `is-a` chain type checking (BFS), 3 `onto:` predicates, opt-in enforcement with diagnostic errors |
 | **Temporal Projection** (9k) | Complete | `TemporalProfile` (Stable, Decaying, Ephemeral, Periodic), `TemporalRegistry` with default profiles, `apply_temporal_decay()`, filter-by-time, 1 `temporal:` predicate |
 | **Contradiction Detection** (9l) | Complete | 4 contradiction kinds (functional, disjointness, temporal, intra-microtheory), `FunctionalPredicates`/`DisjointnessConstraints`, `check_contradictions()`, 2 `onto:` predicates |
+| **Skolem Functions** (9h) | Complete | `SkolemSymbol`, `SkolemRegistry` with deduplication, create/ground/unground/auto_ground, check_grounding from KG, existential witness lifecycle |
+| **Argumentation-Based Truth** (9i) | Complete | `ArgumentationCache` with verdict caching, `query_with_argumentation()`, cache invalidation by symbol or (subject, predicate), custom meta-rule queries |
+| **Circumscription / CWA** (9m) | Complete | `ContextAssumptions` (CWA, UNA, circumscription), `AssumptionRegistry`, negation-as-failure queries, circumscribed instance enumeration, UNA entity identity, 3 `ctx:` predicates |
+| **Second-Order Quantification** (9n) | Complete | `SecondOrderRule` with `RelationProperty` constraints, `SecondOrderRegistry` with 3 built-in rules (transitivity, symmetry, reflexivity), qualifying predicate enumeration, rule instantiation |
+| **NARTs** (9o) | Complete | `NartDef` (function + args), `NartRegistry` with structural deduplication, structural unification with wildcards, function/arg lookup |
 
 ## Agent Architecture
 

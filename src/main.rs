@@ -3933,5 +3933,59 @@ fn format_derivation_kind(kind: &DerivationKind, engine: &Engine) -> String {
                 engine.resolve_label(*incoming_object)
             )
         }
+        DerivationKind::SkolemWitness {
+            existential_relation,
+            bound_var,
+        } => {
+            format!(
+                "skolem witness: relation \"{}\" bound to \"{}\"",
+                engine.resolve_label(*existential_relation),
+                engine.resolve_label(*bound_var)
+            )
+        }
+        DerivationKind::SkolemGrounding {
+            skolem,
+            concrete_entity,
+        } => {
+            format!(
+                "skolem grounding: \"{}\" → \"{}\"",
+                engine.resolve_label(*skolem),
+                engine.resolve_label(*concrete_entity)
+            )
+        }
+        DerivationKind::CwaQuery {
+            context,
+            subject,
+            predicate,
+        } => {
+            format!(
+                "CWA negation in \"{}\": ({}, {}) not found",
+                engine.resolve_label(*context),
+                engine.resolve_label(*subject),
+                engine.resolve_label(*predicate)
+            )
+        }
+        DerivationKind::SecondOrderInstantiation {
+            rule_name,
+            predicate,
+            inferred_count,
+        } => {
+            format!(
+                "second-order [{}] on \"{}\": {} inferred",
+                rule_name,
+                engine.resolve_label(*predicate),
+                inferred_count
+            )
+        }
+        DerivationKind::NartCreation {
+            function,
+            arg_count,
+        } => {
+            format!(
+                "NART creation: ({} ...{} args)",
+                engine.resolve_label(*function),
+                arg_count
+            )
+        }
     }
 }
