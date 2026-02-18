@@ -1,6 +1,6 @@
 # Akh-medu Architecture
 
-> Last updated: 2026-02-18 (Phase 10 Wave 1 complete: 10a–10d Rust code generation)
+> Last updated: 2026-02-18 (Phase 10 Wave 2 complete: 10e templates, 10f VSA code encoding)
 
 ## Overview
 
@@ -10,7 +10,7 @@ Akh-medu is a neuro-symbolic AI engine that runs entirely on CPU with no LLM dep
 - **Knowledge Graphs** — dual-indexed (petgraph + oxigraph/SPARQL) for structured symbolic reasoning
 - **E-graph Reasoning** — equality saturation via `egg` for symbolic rewriting
 - **Autonomous Agent** — OODA-loop agent with 22+ tools, working/episodic memory, planning, reflection
-- **Code Generation** — KG-to-Rust pipeline: code_gen tool, RustCodeGrammar, compiler feedback loop
+- **Code Generation** — KG-to-Rust pipeline: code_gen tool, RustCodeGrammar, compiler feedback loop, parameterized templates, VSA code pattern encoding
 - **Multilingual Grammar** — GF-inspired abstract/concrete syntax split for 5 languages
 - **Content Library** — document ingestion (PDF, EPUB, HTML) with chunking and semantic enrichment
 - **Tiered Storage** — hot (DashMap) → warm (mmap) → cold (redb) for scalability
@@ -24,7 +24,7 @@ src/
 ├── argumentation/       1 module  — pro/con argumentation (Phase 9e): meta-rules, verdicts, evidence chains
 ├── compartment/         5 modules — knowledge isolation, Jungian psyche, microtheories (Phase 9a), CWA/circumscription (Phase 9m)
 ├── dispatch/            1 module  — competitive reasoner dispatch (Phase 9f): Reasoner trait, bid-based registry, 7 built-in reasoners
-├── grammar/            21 modules — GF-inspired parsing/generation, entity resolution, Rust code gen (Phase 10a)
+├── grammar/            22 modules — GF-inspired parsing/generation, entity resolution, Rust code gen (Phase 10a), templates (Phase 10e)
 ├── graph/               9 modules — KG (petgraph), SPARQL (oxigraph), analytics, predicate hierarchy (Phase 9b), defeasible reasoning (Phase 9d), arity constraints (Phase 9j), contradiction detection (Phase 9l), argumentation truth (Phase 9i), NARTs (Phase 9o)
 ├── infer/               3 modules — spreading activation, backward chaining, superposition
 ├── library/            12 modules — document parsing, chunking, concept extraction
@@ -33,7 +33,7 @@ src/
 ├── skills/              1 module  — skillpack lifecycle (Cold/Warm/Hot)
 ├── store/               3 modules — tiered storage (hot/warm/cold)
 ├── tui/                 6 modules — ratatui terminal UI, WebSocket remote
-├── vsa/                 4 modules — HyperVec, VsaOps, encoding, item memory (HNSW)
+├── vsa/                 5 modules — HyperVec, VsaOps, encoding, item memory (HNSW), code pattern encoding (Phase 10f)
 ├── engine.rs                      — facade composing all subsystems
 ├── error.rs                       — miette + thiserror rich diagnostics
 ├── rule_macro.rs                  — rule macro predicates (Phase 9g): RuleMacro trait, registry, genls/relationAllExists/relationExistsAll
@@ -129,8 +129,9 @@ Phase 9a–9o: Cyc-inspired HOL enhancements (15 sub-phases):
 - **Medium**: 9g rule macros, 9h skolem functions, 9i arg-based truth, 9j arity/types, 9k temporal projection, 9l contradiction detection
 - **Lower**: 9m circumscription/CWA, 9n second-order quantification, 9o NARTs
 Phase 10a–10h: Rust code generation (8 sub-phases):
-- **Core (Wave 1 complete)**: 10a RustCodeGrammar, 10b code_gen tool, 10c code-aware planning, 10d iterative refinement, 10e templates
-- **Pattern learning**: 10f VSA code pattern encoding, 10g pattern mining from examples, 10h library learning cycle
+- **Core (Wave 1 complete)**: 10a RustCodeGrammar, 10b code_gen tool, 10c code-aware planning, 10d iterative refinement
+- **Pattern infrastructure (Wave 2 complete)**: 10e parameterized templates (7 built-in), 10f VSA code pattern encoding (path-contexts, multi-granularity)
+- **Pattern learning**: 10g pattern mining from examples, 10h library learning cycle
 Phase 11a–11h: Autonomous task system (8 sub-phases):
 - **Core**: 11a drive-based goal generation (CLARION/GDA/Soar), 11b HTN decomposition with dependency DAGs, 11c value-based argumentation priority (Dung/VAF)
 - **Structure**: 11d projects as microtheories with Soar/ACT-R memory, 11e GDA expectation monitoring

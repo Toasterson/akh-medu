@@ -1,8 +1,8 @@
 # Phase 10 — Generative Functions (Rust Code Generation)
 
 - **Date**: 2026-02-17
-- **Updated**: 2026-02-18 (Wave 1 complete: 10a–10d implemented)
-- **Status**: In Progress (Wave 1 complete, Wave 2–3 pending)
+- **Updated**: 2026-02-18 (Wave 2 complete: 10e templates, 10f VSA code encoding)
+- **Status**: In Progress (Waves 1–2 complete, Wave 3 pending)
 - **Depends on**: Phase 9 (partially — 9b predicate hierarchy and 9f reasoner dispatch are most useful but not blocking)
 - **Research**: `docs/ai/decisions/002-code-generation-research.md`
 
@@ -191,12 +191,13 @@ ParamKind: TypeName | FieldList | TraitName | ModuleName
 ```
 
 **Changes**:
-- [ ] New file: `src/grammar/templates.rs`
-- [ ] `src/grammar/rust_gen.rs` — template instantiation during linearization
-- [ ] `src/agent/tools/code_gen.rs` — template selection and parameterization
-- [ ] Built-in templates for the patterns listed above
+- [x] New file: `src/grammar/templates.rs` (~400 lines, 14 tests) — 7 built-in templates
+- [x] `src/grammar/mod.rs` — added `pub mod templates;`
+- [x] `src/agent/tools/code_gen.rs` — template path: `template` + `template_params` params, 5 new tests
+- [x] Built-in templates: error-type (thiserror+miette), trait-impl, builder, from-impl, test-module, iterator, new-constructor
+- [x] Comma-respecting parser handles angle brackets (for generic types in method signatures)
 
-**Estimated scope**: ~600–800 lines
+**Estimated scope**: ~600–800 lines → ~400 lines + 80 lines integration
 
 ---
 
@@ -236,12 +237,21 @@ PatternGranularity: Token | Ast | CallGraph | TypeSignature | Composite
 ```
 
 **Changes**:
-- [ ] New file: `src/vsa/code_encode.rs` — `encode_ast_path_context()`, `encode_ast_tree()`, `encode_code_graph()`
-- [ ] `src/agent/tools/code_ingest.rs` — extend to produce VSA encodings alongside KG triples
-- [ ] `src/vsa/item_memory.rs` — code pattern index (separate HNSW namespace or tagged entries)
-- [ ] Integration: `code_ingest` → syn parse → extract path-contexts → encode → insert into item memory
+- [x] New file: `src/vsa/code_encode.rs` (~430 lines, 13 tests) — full VSA code pattern encoding
+- [x] `src/vsa/mod.rs` — added `pub mod code_encode;`
+- [x] `encode_path_context()` — bind(start, bind(path, end)) triplet encoding
+- [x] `encode_code_vector()` — bundle multiple path-contexts into structural fingerprint
+- [x] `encode_token_level()` — bag-of-words token encoding
+- [x] `encode_type_signature()` — ordered param types + return type encoding
+- [x] `encode_call_graph()` — ordered function call sequence encoding
+- [x] `encode_composite()` — multi-granularity layer fusion with positional permutation
+- [x] `AstNodeTypes` — 23 well-known AST node type labels
+- [x] `extract_function_contexts()`, `extract_struct_contexts()`, `extract_enum_contexts()`, `extract_impl_contexts()` — KG→path-context helpers
+- [x] Test: similar functions have higher similarity than dissimilar ones
+- [ ] `src/agent/tools/code_ingest.rs` — extend to produce VSA encodings alongside KG triples (deferred to 10g integration)
+- [ ] `src/vsa/item_memory.rs` — code pattern index (deferred to 10g integration)
 
-**Estimated scope**: ~400–600 lines
+**Estimated scope**: ~400–600 lines → ~430 lines
 
 ---
 

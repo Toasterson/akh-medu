@@ -53,6 +53,7 @@ pub mod narrative;
 pub mod parser;
 pub mod preprocess;
 pub mod rust_gen;
+pub mod templates;
 pub mod terse;
 
 use std::collections::HashMap;

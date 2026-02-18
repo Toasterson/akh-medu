@@ -8,6 +8,7 @@
 //! - [`ItemMemory`] — symbol-to-vector mapping with ANN search
 //! - Encoding from symbols to vectors
 
+pub mod code_encode;
 pub mod encode;
 pub mod grounding;
 pub mod item_memory;

@@ -16,6 +16,7 @@ use crate::engine::Engine;
 use crate::grammar::abs::AbsTree;
 use crate::grammar::concrete::{ConcreteGrammar, LinContext};
 use crate::grammar::rust_gen::RustCodeGrammar;
+use crate::grammar::templates::TemplateRegistry;
 use crate::provenance::{DerivationKind, ProvenanceRecord};
 use crate::symbol::SymbolId;
 
@@ -74,9 +75,10 @@ impl Tool for CodeGenTool {
     fn signature(&self) -> ToolSignature {
         ToolSignature {
             name: "code_gen".into(),
-            description: "Generate Rust code from knowledge graph structure. \
-                          Queries code:* triples, builds AbsTree, linearizes through \
-                          RustCodeGrammar."
+            description: "Generate Rust code from knowledge graph structure or templates. \
+                          KG path: queries code:* triples, builds AbsTree, linearizes through \
+                          RustCodeGrammar. Template path: instantiates a named template with \
+                          params (supports attributes, derives, full Rust patterns)."
                 .into(),
             parameters: vec![
                 ToolParam {
@@ -97,18 +99,40 @@ impl Tool for CodeGenTool {
                         .into(),
                     required: false,
                 },
+                ToolParam {
+                    name: "template".into(),
+                    description: "Template name to use instead of KG→AbsTree pipeline. \
+                                  Available: error-type, trait-impl, builder, from-impl, \
+                                  test-module, iterator, new-constructor."
+                        .into(),
+                    required: false,
+                },
+                ToolParam {
+                    name: "template_params".into(),
+                    description: "Semicolon-separated key=value pairs for template \
+                                  instantiation. E.g., 'name=MyError;variants=NotFound(not found, \
+                                  my::err, check ID);result_alias=MyResult'."
+                        .into(),
+                    required: false,
+                },
             ],
         }
     }
 
     fn execute(&self, engine: &Engine, input: ToolInput) -> AgentResult<ToolOutput> {
         let target_str = input.require("target", "code_gen")?;
-        let scope = input.get("scope").and_then(CodeScope::parse);
         let run_format = input
             .get("format")
             .map(|s| s.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
 
+        // --- Template path ---
+        if let Some(template_name) = input.get("template") {
+            return execute_template(engine, target_str, template_name, &input, run_format);
+        }
+
+        // --- KG → AbsTree → RustCodeGrammar path ---
+        let scope = input.get("scope").and_then(CodeScope::parse);
         let preds = CodePredicates::init(engine)?;
 
         // Resolve target symbol
@@ -187,7 +211,7 @@ impl Tool for CodeGenTool {
     fn manifest(&self) -> ToolManifest {
         ToolManifest {
             name: "code_gen".into(),
-            description: "Generates Rust code from KG structure — read-only KG access, \
+            description: "Generates Rust code from KG structure or templates — read-only KG access, \
                           optional filesystem for rustfmt."
                 .into(),
             parameters: vec![
@@ -203,16 +227,119 @@ impl Tool for CodeGenTool {
                     "format",
                     "Whether to run rustfmt on output: 'true' or 'false'.",
                 ),
+                ToolParamSchema::optional(
+                    "template",
+                    "Template name: error-type, trait-impl, builder, from-impl, test-module, iterator, new-constructor.",
+                ),
+                ToolParamSchema::optional(
+                    "template_params",
+                    "Semicolon-separated key=value pairs for template instantiation.",
+                ),
             ],
             danger: DangerInfo {
                 level: DangerLevel::Safe,
                 capabilities: HashSet::from([Capability::ReadKg]),
-                description: "Generates code from KG — read-only.".into(),
+                description: "Generates code from KG or templates — read-only.".into(),
                 shadow_triggers: vec![],
             },
             source: ToolSource::Native,
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Template path
+// ---------------------------------------------------------------------------
+
+/// Execute the template code generation path.
+fn execute_template(
+    engine: &Engine,
+    target_str: &str,
+    template_name: &str,
+    input: &ToolInput,
+    run_format: bool,
+) -> AgentResult<ToolOutput> {
+    let registry = TemplateRegistry::new();
+
+    let template = match registry.get(template_name) {
+        Some(t) => t,
+        None => {
+            let available: Vec<&str> = registry.list();
+            return Ok(ToolOutput::err(format!(
+                "Unknown template '{}'. Available templates: {}",
+                template_name,
+                available.join(", ")
+            )));
+        }
+    };
+
+    // Parse template_params from semicolon-separated key=value pairs
+    let params = parse_template_params(input.get("template_params").unwrap_or(""));
+
+    let code = match template.instantiate(&params) {
+        Ok(c) => c,
+        Err(e) => {
+            // Show required params for guidance
+            let required: Vec<String> = template
+                .params
+                .iter()
+                .filter(|p| p.required)
+                .map(|p| format!("{}  ({})", p.name, p.description))
+                .collect();
+            return Ok(ToolOutput::err(format!(
+                "Template instantiation failed: {e}\n\nRequired parameters:\n  {}",
+                required.join("\n  ")
+            )));
+        }
+    };
+
+    let final_code = if run_format {
+        format_with_rustfmt(&code).unwrap_or(code)
+    } else {
+        code
+    };
+
+    // Record provenance if target exists in KG
+    if let Ok(target_id) = engine.lookup_symbol(target_str) {
+        let mut prov_record = ProvenanceRecord {
+            id: None,
+            derived_id: target_id,
+            sources: vec![],
+            kind: DerivationKind::CodeGenerated {
+                scope: format!("template:{template_name}"),
+                source_count: 0,
+            },
+            confidence: 0.9,
+            depth: 0,
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        };
+        if let Err(e) = engine.store_provenance(&mut prov_record) {
+            eprintln!("Warning: failed to record template provenance: {e}");
+        }
+    }
+
+    Ok(ToolOutput::ok(format!(
+        "Generated code from template '{}' for '{}':\n\n{}",
+        template_name, target_str, final_code
+    )))
+}
+
+/// Parse semicolon-separated `key=value` pairs into a HashMap.
+fn parse_template_params(s: &str) -> std::collections::HashMap<String, String> {
+    let mut map = std::collections::HashMap::new();
+    for pair in s.split(';') {
+        let pair = pair.trim();
+        if pair.is_empty() {
+            continue;
+        }
+        if let Some((key, value)) = pair.split_once('=') {
+            map.insert(key.trim().to_string(), value.trim().to_string());
+        }
+    }
+    map
 }
 
 // ---------------------------------------------------------------------------
@@ -863,5 +990,99 @@ mod tests {
             actions[0].kind,
             RefinementKind::MissingTraitImpl { .. }
         ));
+    }
+
+    // --- Template path tests ---
+
+    #[test]
+    fn code_gen_template_error_type() {
+        let engine = Engine::new(EngineConfig {
+            dimension: Dimension::TEST,
+            ..Default::default()
+        })
+        .unwrap();
+
+        let tool = CodeGenTool;
+        let input = ToolInput::new()
+            .with_param("target", "MyError")
+            .with_param("template", "error-type")
+            .with_param(
+                "template_params",
+                "name=MyError;variants=NotFound(item not found, my::not_found, check the ID), InvalidInput(invalid input);result_alias=MyResult",
+            );
+
+        let output = tool.execute(&engine, input).unwrap();
+        assert!(output.success, "template failed: {}", output.result);
+        assert!(output.result.contains("#[derive(Debug, thiserror::Error, miette::Diagnostic)]"));
+        assert!(output.result.contains("pub enum MyError {"));
+        assert!(output.result.contains("#[error(\"item not found\")]"));
+        assert!(output.result.contains("#[diagnostic(code(my::not_found), help(\"check the ID\"))]"));
+        assert!(output.result.contains("pub type MyResult<T>"));
+    }
+
+    #[test]
+    fn code_gen_template_builder() {
+        let engine = Engine::new(EngineConfig {
+            dimension: Dimension::TEST,
+            ..Default::default()
+        })
+        .unwrap();
+
+        let tool = CodeGenTool;
+        let input = ToolInput::new()
+            .with_param("target", "Config")
+            .with_param("template", "builder")
+            .with_param("template_params", "type_name=Config;fields=name: String, value: u64");
+
+        let output = tool.execute(&engine, input).unwrap();
+        assert!(output.success, "template failed: {}", output.result);
+        assert!(output.result.contains("pub struct ConfigBuilder {"));
+        assert!(output.result.contains("pub fn build(self) -> Config {"));
+    }
+
+    #[test]
+    fn code_gen_template_unknown() {
+        let engine = Engine::new(EngineConfig {
+            dimension: Dimension::TEST,
+            ..Default::default()
+        })
+        .unwrap();
+
+        let tool = CodeGenTool;
+        let input = ToolInput::new()
+            .with_param("target", "Foo")
+            .with_param("template", "nonexistent");
+
+        let output = tool.execute(&engine, input).unwrap();
+        assert!(!output.success);
+        assert!(output.result.contains("Unknown template"));
+        assert!(output.result.contains("error-type"));
+    }
+
+    #[test]
+    fn code_gen_template_missing_params() {
+        let engine = Engine::new(EngineConfig {
+            dimension: Dimension::TEST,
+            ..Default::default()
+        })
+        .unwrap();
+
+        let tool = CodeGenTool;
+        let input = ToolInput::new()
+            .with_param("target", "Foo")
+            .with_param("template", "error-type")
+            .with_param("template_params", "");
+
+        let output = tool.execute(&engine, input).unwrap();
+        assert!(!output.success);
+        assert!(output.result.contains("requires parameter"));
+    }
+
+    #[test]
+    fn parse_template_params_semicolons() {
+        let params = parse_template_params("name=MyError;variants=A(x), B(y);result_alias=MyResult");
+        assert_eq!(params.get("name").unwrap(), "MyError");
+        assert_eq!(params.get("variants").unwrap(), "A(x), B(y)");
+        assert_eq!(params.get("result_alias").unwrap(), "MyResult");
     }
 }
