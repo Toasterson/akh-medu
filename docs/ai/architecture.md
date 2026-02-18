@@ -1,6 +1,6 @@
 # Akh-medu Architecture
 
-> Last updated: 2026-02-17 (Phase 14 enhanced: identity bootstrapping from cultural references, Ritual of Awakening, 12 Jungian archetypes, OCEAN personality model)
+> Last updated: 2026-02-18 (Phase 9 Wave 2: +defeasible reasoning, +competitive dispatch)
 
 ## Overview
 
@@ -20,9 +20,10 @@ Akh-medu is a neuro-symbolic AI engine that runs entirely on CPU with no LLM dep
 src/
 ├── agent/              24 modules — OODA loop, tools, memory, goals, planning, psyche
 ├── autonomous/          6 modules — background learning, confidence fusion, grounding
-├── compartment/         3 modules — knowledge isolation (core/skill/project), Jungian psyche
+├── compartment/         4 modules — knowledge isolation, Jungian psyche, microtheories (Phase 9a)
+├── dispatch/            1 module  — competitive reasoner dispatch (Phase 9f): Reasoner trait, bid-based registry, 7 built-in reasoners
 ├── grammar/            20 modules — GF-inspired parsing/generation, entity resolution
-├── graph/               3 modules — KG (petgraph), SPARQL (oxigraph), analytics
+├── graph/               5 modules — KG (petgraph), SPARQL (oxigraph), analytics, predicate hierarchy (Phase 9b), defeasible reasoning (Phase 9d)
 ├── infer/               3 modules — spreading activation, backward chaining, superposition
 ├── library/            12 modules — document parsing, chunking, concept extraction
 ├── reason/              1 module  — e-graph language (AkhLang), rewrite rules
@@ -33,7 +34,8 @@ src/
 ├── vsa/                 4 modules — HyperVec, VsaOps, encoding, item memory (HNSW)
 ├── engine.rs                      — facade composing all subsystems
 ├── error.rs                       — miette + thiserror rich diagnostics
-├── provenance.rs                  — persistent explanation ledger (redb, multi-index)
+├── provenance.rs                  — persistent explanation ledger (redb, multi-index, 28 derivation kinds)
+├── tms.rs                         — truth maintenance system (Phase 9c): support sets, retraction cascades
 ├── symbol.rs                      — SymbolId (NonZeroU64), SymbolKind, allocator
 ├── pipeline.rs                    — composable stage pipelines
 └── main.rs                        — CLI (clap) with 50+ subcommands
@@ -66,6 +68,17 @@ src/
 | E-graph Rewriting | `AkhLang` + `egg` equality saturation | Symbolic simplification, equivalence |
 | Confidence Fusion | Noisy-OR and consensus across multi-source evidence | Combining evidence |
 
+### Phase 9 — Cyc-Inspired HOL Enhancements
+
+| System | Status | Description |
+|--------|--------|-------------|
+| **Microtheories** (9a) | Complete | `ist` operator, `genlMt` inheritance, lifting rules, 6 `ctx:` predicates, context-scoped queries, ancestry cache |
+| **Predicate Hierarchy** (9b) | Complete | `genlPreds` subsumption, `genlInverse`, hierarchy-aware queries, transitive closure cache, 2 `rel:` predicates |
+| **Truth Maintenance System** (9c) | Complete | Support sets with alternative justifications, BFS retraction cascade, re-evaluation, `remove_triple()` |
+| **Defeasible Reasoning** (9d) | Complete | 5 override reasons (Monotonic, Specificity, Exception, Recency, Confidence), `DefeasiblePredicates` (4 well-known), BFS specificity, conflict resolution |
+| Pro/Con Argumentation (9e) | Planned | Depends on 9c, 9d |
+| **Reasoner Dispatch** (9f) | Complete | `Reasoner` trait with bid-based dispatch, 7 built-in reasoners (spreading-activation, backward-chaining, superposition, egraph, transitive-closure, type-hierarchy, predicate-hierarchy), fallback on failure |
+
 ## Agent Architecture
 
 OODA loop (synchronous, no async runtime):
@@ -89,7 +102,7 @@ SPARQL (oxigraph)  — persistent RDF store for structured queries
 ## Provenance
 
 Every inference, agent decision, and knowledge derivation creates a `ProvenanceRecord`:
-- Derived symbol, derivation kind (20+ variants), confidence, depth, source symbols, metadata
+- Derived symbol, derivation kind (28 variants), confidence, depth, source symbols, metadata
 - Full traceback from any result to its original sources
 - Indices by derived symbol, source symbol, and kind for fast lookup
 

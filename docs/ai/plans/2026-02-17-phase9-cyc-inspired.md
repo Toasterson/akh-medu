@@ -1,8 +1,8 @@
 # Phase 9 — Cyc-Inspired Enhancements
 
 - **Date**: 2026-02-17
-- **Updated**: 2026-02-17 (expanded with full CycL HOL feature catalog)
-- **Status**: Planned
+- **Updated**: 2026-02-18 (Wave 2 complete: 9a–9d, 9f implemented)
+- **Status**: In Progress (Waves 1–2 complete)
 - **Motivation**: ADR-001 (Cyc paper analysis)
 - **Depends on**: Phases 1–8f (all complete)
 
@@ -43,14 +43,14 @@ LiftCondition: Always | IfConsistent | IfNotOverridden
 ```
 
 **Changes**:
-- [ ] `compartment/` — refactor `Compartment` to wrap a `Microtheory`; backward-compatible API
-- [ ] `graph/` — context-aware triple queries (search current + ancestor contexts via transitive `ctx:specializes`)
-- [ ] `graph/` — `ist`-aware triple storage: triples carry context ID, queryable by context scope
-- [ ] `engine.rs` — `create_context()`, `add_context_assumption()`, `query_in_context()`, `add_lifting_rule()` APIs
-- [ ] `provenance.rs` — new `DerivationKind::ContextInheritance`, `DerivationKind::ContextLifting`
+- [x] `compartment/microtheory.rs` — `Microtheory`, `ContextDomain`, `LiftingRule`, `LiftCondition`, `ContextPredicates` (6 well-known ctx: predicates), context-scoped queries, ancestry cache, 9 tests
+- [x] `compartment/error.rs` — `DisjointConflict`, `ContextCycle` error variants
+- [x] `graph/` — context-aware triple queries (triples_in_context, all_triples_in_context, objects_in_context)
+- [x] `engine.rs` — `create_context()`, `add_context_assumption()`, `query_in_context()`, `query_all_in_context()`, `add_lifting_rule()`, `context_ancestors()`, `contexts_are_disjoint()`, `apply_lifting_rules()` APIs
+- [x] `provenance.rs` — new `DerivationKind::ContextInheritance` (tag 22), `DerivationKind::ContextLifting` (tag 23)
 - [ ] Agent — goal contexts (a goal can specify which microtheory it operates in)
 
-**Estimated scope**: ~1000–1400 lines
+**Implemented scope**: ~420 lines
 
 ---
 
@@ -73,13 +73,13 @@ PredicateHierarchy { generalizes: HashMap<SymbolId, Vec<SymbolId>>, inverses: Ha
 ```
 
 **Changes**:
-- [ ] `graph/` — `PredicateHierarchy` structure, built from `rel:generalizes` and `rel:inverse` triples
-- [ ] `graph/` — predicate-aware triple queries: search up the hierarchy, check inverses
-- [ ] `engine.rs` — `add_predicate_generalization()`, `add_predicate_inverse()` APIs
+- [x] `graph/predicate_hierarchy.rs` — `PredicateHierarchy`, `HierarchyPredicates` (2 well-known `rel:` predicates), `HierarchyMatch`, `MatchVia`, hierarchy-aware queries, transitive closure cache, 7 tests
+- [x] `graph/` — predicate-aware triple queries: `objects_with_hierarchy()`, `objects_with_hierarchy_and_inverse()`, `triples_with_hierarchy()`
+- [x] `engine.rs` — `add_predicate_generalization()`, `add_predicate_inverse()`, `build_predicate_hierarchy()`, `query_with_hierarchy()` APIs
 - [ ] `infer/` — spreading activation and backward chaining use predicate hierarchy
-- [ ] `provenance.rs` — `DerivationKind::PredicateGeneralization`, `DerivationKind::PredicateInverse`
+- [x] `provenance.rs` — `DerivationKind::PredicateGeneralization` (tag 24), `DerivationKind::PredicateInverse` (tag 25)
 
-**Estimated scope**: ~500–700 lines
+**Implemented scope**: ~390 lines
 
 ---
 
@@ -108,13 +108,13 @@ RetractionResult { retracted: Vec<SymbolId>, re_evaluated: Vec<(SymbolId, f64)>,
 ```
 
 **Changes**:
-- [ ] New module: `src/tms.rs` (or `src/tms/mod.rs`)
+- [x] `src/tms.rs` — `TruthMaintenanceSystem`, `SupportSet`, `RetractionResult`, BFS retraction cascade, re-evaluation of alternative justifications, 11 tests
 - [ ] `provenance.rs` — extend to track support sets per derived symbol, index by source for fast reverse lookup
-- [ ] `graph/` — `retract_triple()` triggers TMS cascade instead of simple removal
-- [ ] `engine.rs` — `retract()` public API returning `RetractionResult`
+- [x] `graph/index.rs` — `remove_triple()` method added to `KnowledgeGraph`
+- [x] `engine.rs` — `remove_triple()` public API with TMS integration
 - [ ] `store/` — support sets persisted in durable store alongside provenance
 
-**Estimated scope**: ~600–900 lines
+**Implemented scope**: ~310 lines
 
 ---
 
@@ -138,14 +138,15 @@ OverrideReason: Monotonic | Specificity { depth: usize } | Exception | Recency |
 ```
 
 **Changes**:
-- [ ] `graph/` — `resolve_conflict()` method using `is-a` chain depth from predicate hierarchy (9b)
-- [ ] `infer/` — defeasibility check integrated into spreading activation and backward chaining
-- [ ] `engine.rs` — `add_exception()`, conflict resolution on query results
-- [ ] New well-known predicates: `defeasible:overrides`, `defeasible:except`, `defeasible:monotonic`
+- [x] `src/graph/defeasible.rs` — `DefeasiblePredicates` (4 well-known predicates), `OverrideReason` (5 variants: Monotonic, Specificity, Exception, Recency, Confidence), `DefeasibleResult`, `resolve_conflict()`, `find_conflicts()`, `find_hierarchy_conflicts()`, `query_defeasible()`, `mark_monotonic()`, `register_exception()`, `type_depth()`, BFS-based `is_subtype_of()`, 12 tests
+- [x] `src/graph/mod.rs` — added `pub mod defeasible;`
+- [x] `src/provenance.rs` — `DerivationKind::DefeasibleOverride { winner, loser, reason }` (tag 26)
+- [x] `engine.rs` — `defeasible_predicates()`, `mark_monotonic()`, `register_exception()`, `query_defeasible()`, `resolve_conflict()` APIs
+- [x] `main.rs` — `format_derivation_kind` match arm for DefeasibleOverride
 
 **Depends on**: 9b (predicate hierarchy for specificity computation)
 
-**Estimated scope**: ~500–700 lines
+**Implemented scope**: ~440 lines, 12 tests
 
 ---
 
@@ -217,14 +218,17 @@ ReasonerRegistry { reasoners: Vec<Box<dyn Reasoner>> }
 ```
 
 **Changes**:
-- [ ] New module: `src/dispatch/` (mod.rs, registry.rs, bid.rs)
-- [ ] Refactor `infer/` — wrap existing strategies (spreading, backward, superposition) as `Reasoner` impls
-- [ ] `reason/` — wrap e-graph runner as a `Reasoner` impl
-- [ ] `engine.rs` — `infer()` routes through dispatcher instead of direct strategy call
-- [ ] New reasoners: `TransitiveClosureReasoner`, `TypeHierarchyReasoner`, `PredicateHierarchyReasoner`
-- [ ] Cache layer for transitive closure results (invalidated on triple add/remove)
+- [x] `src/dispatch/mod.rs` — `DispatchError` (4 variants with miette diagnostics), `Problem` (7 kinds: ForwardInference, BackwardChaining, Superposition, EGraphSimplify, TransitiveClosure, TypeCheck, PredicateSubsumption), `Bid` (estimated_cost + confidence, score-based sorting), `Reasoner` trait (name, can_handle, solve), `ReasonerRegistry` (register, dispatch, dispatch_with_budget, fallback-on-failure), `ReasonerOutput` (Inference, BooleanAnswer, Simplified), `DispatchTrace` (reasoner_name, all bids, elapsed, attempts)
+- [x] Built-in wrappers: `SpreadingActivationReasoner`, `BackwardChainingReasoner`, `SuperpositionReasoner`, `EGraphReasoner`
+- [x] Specialized reasoners: `TransitiveClosureReasoner` (BFS chain + TypeCheck fallback), `TypeHierarchyReasoner` (ancestor-set membership), `PredicateHierarchyReasoner` (rel:generalizes BFS)
+- [x] `src/error.rs` — `AkhError::Dispatch` variant
+- [x] `src/provenance.rs` — `DerivationKind::DispatchRoute { reasoner, problem_kind }` (tag 27)
+- [x] `engine.rs` — `reasoner_registry()`, `dispatch()`, `dispatch_with_budget()` APIs
+- [x] `main.rs` — `format_derivation_kind` match arm for DispatchRoute
+- [x] `lib.rs` — `pub mod dispatch;`
+- [x] 13 tests: registry, bid scoring, e-graph simplify, forward inference, transitive closure (positive + negative), type hierarchy, predicate subsumption, backward chaining, fallback, trace
 
-**Estimated scope**: ~800–1100 lines
+**Implemented scope**: ~690 lines, 13 tests
 
 ---
 

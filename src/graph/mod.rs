@@ -8,7 +8,9 @@
 //! Both layers share the same [`Triple`] data model and can be synchronized.
 
 pub mod analytics;
+pub mod defeasible;
 pub mod index;
+pub mod predicate_hierarchy;
 pub mod sparql;
 pub mod traverse;
 

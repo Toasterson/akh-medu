@@ -71,6 +71,10 @@ pub enum AkhError {
 
     #[error(transparent)]
     #[diagnostic(transparent)]
+    Dispatch(#[from] crate::dispatch::DispatchError),
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
     Compartment(#[from] crate::compartment::CompartmentError),
 
     #[error(transparent)]

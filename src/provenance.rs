@@ -127,6 +127,38 @@ pub enum DerivationKind {
         chunk_index: u32,
         extraction_method: String,
     },
+    /// Triple inherited from an ancestor context via `ctx:specializes` chain.
+    ContextInheritance {
+        context: SymbolId,
+        ancestor: SymbolId,
+    },
+    /// Triple propagated from one context to another via a lifting rule.
+    ContextLifting {
+        from_context: SymbolId,
+        to_context: SymbolId,
+        condition: String,
+    },
+    /// Triple inferred via predicate generalization (genlPreds).
+    PredicateGeneralization {
+        specific: SymbolId,
+        general: SymbolId,
+    },
+    /// Triple inferred via predicate inverse (genlInverse).
+    PredicateInverse {
+        predicate: SymbolId,
+        inverse: SymbolId,
+    },
+    /// Triple selected via defeasible override resolution.
+    DefeasibleOverride {
+        winner: SymbolId,
+        loser: SymbolId,
+        reason: String,
+    },
+    /// Record that a reasoner was selected via competitive dispatch (Phase 9f).
+    DispatchRoute {
+        reasoner: String,
+        problem_kind: String,
+    },
 }
 
 impl DerivationKind {
@@ -155,6 +187,12 @@ impl DerivationKind {
             Self::CliToolExecution { .. } => 19,
             Self::DocumentIngested { .. } => 20,
             Self::ConceptExtracted { .. } => 21,
+            Self::ContextInheritance { .. } => 22,
+            Self::ContextLifting { .. } => 23,
+            Self::PredicateGeneralization { .. } => 24,
+            Self::PredicateInverse { .. } => 25,
+            Self::DefeasibleOverride { .. } => 26,
+            Self::DispatchRoute { .. } => 27,
         }
     }
 }

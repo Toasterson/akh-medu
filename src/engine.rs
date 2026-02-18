@@ -1201,6 +1201,349 @@ impl Engine {
     }
 
     // -----------------------------------------------------------------------
+    // Microtheories (Phase 9a)
+    // -----------------------------------------------------------------------
+
+    /// Create a new microtheory (reasoning context) as a first-class Entity.
+    ///
+    /// Registers the microtheory in the KG with `ctx:domain` metadata and optional
+    /// parent contexts via `ctx:specializes`. Returns the microtheory's SymbolId.
+    ///
+    /// # Errors
+    /// - Returns `CompartmentError::ContextCycle` if adding a parent would create a cycle.
+    pub fn create_context(
+        &self,
+        label: &str,
+        domain: crate::compartment::ContextDomain,
+        parents: &[SymbolId],
+    ) -> AkhResult<crate::compartment::Microtheory> {
+        let preds = crate::compartment::ContextPredicates::resolve(self)?;
+        let ctx = self.resolve_or_create_entity(label)?;
+        let domain_entity = self.resolve_or_create_entity(&domain.to_string())?;
+
+        // Assert ctx:domain
+        self.add_triple(&Triple::new(ctx, preds.domain, domain_entity))?;
+
+        // Assert ctx:specializes for each parent (with cycle check)
+        for &parent in parents {
+            // Check that parent doesn't eventually specialize ctx (would create a cycle)
+            let parent_ancestors =
+                crate::compartment::microtheory::resolve_ancestors(self, parent, preds.specializes);
+            if parent_ancestors.contains(&ctx) || parent == ctx {
+                let ctx_label = self.resolve_label(ctx);
+                return Err(crate::compartment::CompartmentError::ContextCycle {
+                    context: ctx_label,
+                }
+                .into());
+            }
+            self.add_triple(&Triple::new(ctx, preds.specializes, parent))?;
+        }
+
+        // Compute initial ancestor cache
+        let ancestors =
+            crate::compartment::microtheory::resolve_ancestors(self, ctx, preds.specializes);
+
+        Ok(crate::compartment::Microtheory {
+            id: ctx,
+            domain,
+            ancestors,
+        })
+    }
+
+    /// Add a domain assumption to a context.
+    ///
+    /// Domain assumptions are triples that are implicitly true within the context.
+    /// The assumption is stored as `context ctx:assumes assumption_entity`.
+    pub fn add_context_assumption(
+        &self,
+        context: SymbolId,
+        assumption: SymbolId,
+    ) -> AkhResult<()> {
+        let preds = crate::compartment::ContextPredicates::resolve(self)?;
+        self.add_triple(&Triple::new(context, preds.assumes, assumption))
+    }
+
+    /// Query triples visible in a given context, including inherited ancestors.
+    ///
+    /// Searches the current context and all ancestor contexts via `ctx:specializes`
+    /// transitive closure. Results from more specific contexts appear first.
+    pub fn query_in_context(
+        &self,
+        subject: SymbolId,
+        predicate: SymbolId,
+        context: SymbolId,
+    ) -> AkhResult<Vec<Triple>> {
+        let preds = crate::compartment::ContextPredicates::resolve(self)?;
+        Ok(crate::compartment::microtheory::triples_in_context(
+            self,
+            subject,
+            predicate,
+            context,
+            preds.specializes,
+        ))
+    }
+
+    /// Query all triples for a subject visible in a given context.
+    pub fn query_all_in_context(
+        &self,
+        subject: SymbolId,
+        context: SymbolId,
+    ) -> AkhResult<Vec<Triple>> {
+        let preds = crate::compartment::ContextPredicates::resolve(self)?;
+        Ok(crate::compartment::microtheory::all_triples_in_context(
+            self,
+            subject,
+            context,
+            preds.specializes,
+        ))
+    }
+
+    /// Add a lifting rule between two contexts.
+    ///
+    /// Lifting rules govern when entailments propagate between contexts.
+    pub fn add_lifting_rule(&self, rule: &crate::compartment::LiftingRule) -> AkhResult<()> {
+        let preds = crate::compartment::ContextPredicates::resolve(self)?;
+        let condition_entity =
+            self.resolve_or_create_entity(&rule.condition.to_string())?;
+
+        self.add_triple(&Triple::new(rule.from, preds.lifts_to, rule.to))?;
+        self.add_triple(&Triple::new(
+            rule.from,
+            preds.lifting_condition,
+            condition_entity,
+        ))
+    }
+
+    /// Get the transitive ancestor chain for a context.
+    pub fn context_ancestors(&self, context: SymbolId) -> AkhResult<Vec<SymbolId>> {
+        let preds = crate::compartment::ContextPredicates::resolve(self)?;
+        Ok(crate::compartment::microtheory::resolve_ancestors(
+            self,
+            context,
+            preds.specializes,
+        ))
+    }
+
+    /// Check if two contexts are declared disjoint.
+    pub fn contexts_are_disjoint(
+        &self,
+        ctx_a: SymbolId,
+        ctx_b: SymbolId,
+    ) -> AkhResult<bool> {
+        let preds = crate::compartment::ContextPredicates::resolve(self)?;
+        Ok(crate::compartment::microtheory::contexts_are_disjoint(
+            self, ctx_a, ctx_b, preds.disjoint,
+        ))
+    }
+
+    /// Apply all lifting rules from a source context and insert propagated triples.
+    ///
+    /// Returns the number of triples propagated.
+    pub fn apply_lifting_rules(&self, from_context: SymbolId) -> AkhResult<usize> {
+        let preds = crate::compartment::ContextPredicates::resolve(self)?;
+        let rules =
+            crate::compartment::microtheory::lifting_rules_from(self, from_context, &preds);
+
+        let mut propagated = 0;
+        for rule in &rules {
+            let triples = crate::compartment::microtheory::apply_lifting_rule(
+                self,
+                rule,
+                preds.specializes,
+            );
+            for triple in &triples {
+                self.add_triple(triple)?;
+
+                // Record provenance for lifted triples
+                if let Some(ref ledger) = self.provenance_ledger {
+                    let mut record = ProvenanceRecord::new(
+                        triple.subject,
+                        DerivationKind::ContextLifting {
+                            from_context: rule.from,
+                            to_context: rule.to,
+                            condition: rule.condition.to_string(),
+                        },
+                    )
+                    .with_sources(vec![triple.subject, triple.predicate, triple.object]);
+                    let _ = ledger.store(&mut record);
+                }
+
+                propagated += 1;
+            }
+        }
+
+        Ok(propagated)
+    }
+
+    // -----------------------------------------------------------------------
+    // Truth Maintenance System (Phase 9c)
+    // -----------------------------------------------------------------------
+
+    /// Remove a triple from the knowledge graph.
+    ///
+    /// Returns true if the triple was found and removed.
+    pub fn remove_triple(
+        &self,
+        subject: SymbolId,
+        predicate: SymbolId,
+        object: SymbolId,
+    ) -> bool {
+        self.knowledge_graph.remove_triple(subject, predicate, object)
+    }
+
+    // -----------------------------------------------------------------------
+    // Predicate Hierarchy (Phase 9b)
+    // -----------------------------------------------------------------------
+
+    /// Declare that `specific` is a specialization of `general` (genlPreds).
+    ///
+    /// After adding, `general(X, Y)` queries will also find `specific(X, Y)` triples.
+    pub fn add_predicate_generalization(
+        &self,
+        specific: SymbolId,
+        general: SymbolId,
+    ) -> AkhResult<()> {
+        let preds = crate::graph::predicate_hierarchy::HierarchyPredicates::resolve(self)?;
+        self.add_triple(&Triple::new(specific, preds.generalizes, general))
+    }
+
+    /// Declare that `predicate` has an inverse `inverse_pred` (genlInverse).
+    ///
+    /// `predicate(X, Y)` ↔ `inverse_pred(Y, X)`.
+    pub fn add_predicate_inverse(
+        &self,
+        predicate: SymbolId,
+        inverse_pred: SymbolId,
+    ) -> AkhResult<()> {
+        let preds = crate::graph::predicate_hierarchy::HierarchyPredicates::resolve(self)?;
+        self.add_triple(&Triple::new(predicate, preds.inverse, inverse_pred))
+    }
+
+    /// Build the predicate hierarchy from current KG state.
+    ///
+    /// Returns the cached hierarchy for use in hierarchy-aware queries.
+    pub fn build_predicate_hierarchy(
+        &self,
+    ) -> AkhResult<crate::graph::predicate_hierarchy::PredicateHierarchy> {
+        crate::graph::predicate_hierarchy::PredicateHierarchy::build(self)
+    }
+
+    /// Query objects using predicate hierarchy (specialization + inverse inference).
+    ///
+    /// Returns `(actual_predicate, object)` pairs. The `actual_predicate` may differ
+    /// from the queried predicate if the result was found via a specialization or inverse.
+    pub fn query_with_hierarchy(
+        &self,
+        subject: SymbolId,
+        predicate: SymbolId,
+        hierarchy: &crate::graph::predicate_hierarchy::PredicateHierarchy,
+    ) -> Vec<(SymbolId, SymbolId)> {
+        crate::graph::predicate_hierarchy::objects_with_hierarchy_and_inverse(
+            self, subject, predicate, hierarchy,
+        )
+    }
+
+    // -----------------------------------------------------------------------
+    // Defeasible Reasoning (Phase 9d)
+    // -----------------------------------------------------------------------
+
+    /// Resolve defeasible predicates from the registry.
+    pub fn defeasible_predicates(
+        &self,
+    ) -> AkhResult<crate::graph::defeasible::DefeasiblePredicates> {
+        crate::graph::defeasible::DefeasiblePredicates::resolve(self)
+    }
+
+    /// Mark a (subject, predicate) pair as monotonically true.
+    ///
+    /// Monotonic assertions are never overridden by defaults, even when
+    /// a more specific type provides a conflicting value.
+    pub fn mark_monotonic(
+        &self,
+        subject: SymbolId,
+        predicate: SymbolId,
+    ) -> AkhResult<()> {
+        let preds = crate::graph::defeasible::DefeasiblePredicates::resolve(self)?;
+        crate::graph::defeasible::mark_monotonic(self, subject, predicate, &preds)
+    }
+
+    /// Register an exception: `general` defeasible:except `specific`.
+    ///
+    /// This declares that `specific`'s assertions override `general`'s
+    /// for conflicting predicates.
+    pub fn register_exception(
+        &self,
+        general: SymbolId,
+        specific: SymbolId,
+    ) -> AkhResult<()> {
+        let preds = crate::graph::defeasible::DefeasiblePredicates::resolve(self)?;
+        crate::graph::defeasible::register_exception(self, general, specific, &preds)
+    }
+
+    /// Query with defeasible conflict resolution.
+    ///
+    /// Searches the type hierarchy for conflicting answers to `(subject, predicate, ?)`
+    /// and returns the winning answer using specificity, monotonicity, exceptions,
+    /// recency, and confidence as override criteria.
+    pub fn query_defeasible(
+        &self,
+        subject: SymbolId,
+        predicate: SymbolId,
+    ) -> AkhResult<Option<crate::graph::defeasible::DefeasibleResult>> {
+        let preds = crate::graph::defeasible::DefeasiblePredicates::resolve(self)?;
+        Ok(crate::graph::defeasible::query_defeasible(
+            self, subject, predicate, &preds,
+        ))
+    }
+
+    /// Resolve a conflict among explicitly provided competing triples.
+    pub fn resolve_conflict(
+        &self,
+        candidates: &[Triple],
+    ) -> AkhResult<Option<crate::graph::defeasible::DefeasibleResult>> {
+        let preds = crate::graph::defeasible::DefeasiblePredicates::resolve(self)?;
+        Ok(crate::graph::defeasible::resolve_conflict(
+            self, candidates, &preds,
+        ))
+    }
+
+    // -----------------------------------------------------------------------
+    // Competitive Reasoner Dispatch (Phase 9f)
+    // -----------------------------------------------------------------------
+
+    /// Create a reasoner registry pre-populated with all built-in reasoners.
+    pub fn reasoner_registry(
+        &self,
+        budget: std::time::Duration,
+    ) -> crate::dispatch::ReasonerRegistry {
+        crate::dispatch::ReasonerRegistry::with_builtins(budget)
+    }
+
+    /// Dispatch a problem through the competitive reasoner system.
+    ///
+    /// Collects bids from all registered reasoners, runs the cheapest
+    /// applicable one, and falls back to the next bidder on failure.
+    pub fn dispatch(
+        &self,
+        problem: &crate::dispatch::Problem,
+    ) -> AkhResult<(crate::dispatch::ReasonerOutput, crate::dispatch::DispatchTrace)> {
+        let registry = crate::dispatch::ReasonerRegistry::with_builtins(
+            std::time::Duration::from_secs(5),
+        );
+        Ok(registry.dispatch(problem, self)?)
+    }
+
+    /// Dispatch with a custom time budget per reasoner.
+    pub fn dispatch_with_budget(
+        &self,
+        problem: &crate::dispatch::Problem,
+        budget: std::time::Duration,
+    ) -> AkhResult<(crate::dispatch::ReasonerOutput, crate::dispatch::DispatchTrace)> {
+        let registry = crate::dispatch::ReasonerRegistry::with_builtins(budget);
+        Ok(registry.dispatch_with_budget(problem, self, budget)?)
+    }
+
+    // -----------------------------------------------------------------------
     // Role assignment
     // -----------------------------------------------------------------------
 

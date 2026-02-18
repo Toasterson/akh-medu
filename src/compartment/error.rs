@@ -63,6 +63,27 @@ pub enum CompartmentError {
     )]
     KindMismatch { expected: String, actual: String },
 
+    #[error("disjoint context conflict: {ctx_a} and {ctx_b} are declared disjoint")]
+    #[diagnostic(
+        code(akh::compartment::disjoint_conflict),
+        help(
+            "Contexts \"{ctx_a}\" and \"{ctx_b}\" are declared disjoint via `ctx:disjoint`. \
+             A triple cannot belong to both. Choose one context or remove the disjointness \
+             declaration."
+        )
+    )]
+    DisjointConflict { ctx_a: String, ctx_b: String },
+
+    #[error("context cycle detected: {context} eventually specializes itself")]
+    #[diagnostic(
+        code(akh::compartment::context_cycle),
+        help(
+            "Adding `ctx:specializes` from \"{context}\" would create a cycle in the \
+             context hierarchy. Microtheory inheritance must be acyclic."
+        )
+    )]
+    ContextCycle { context: String },
+
     #[error(transparent)]
     #[diagnostic(transparent)]
     Store(#[from] StoreError),

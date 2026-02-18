@@ -88,6 +88,50 @@ impl KnowledgeGraph {
         Ok(())
     }
 
+    /// Remove a triple from the graph.
+    ///
+    /// Removes the edge between subject and object with the matching predicate.
+    /// Returns true if a matching edge was found and removed, false otherwise.
+    /// Does NOT remove nodes (they may be referenced by other edges).
+    pub fn remove_triple(
+        &self,
+        subject: SymbolId,
+        predicate: SymbolId,
+        object: SymbolId,
+    ) -> bool {
+        let subj_idx = match self.node_index.get(&subject) {
+            Some(idx) => *idx.value(),
+            None => return false,
+        };
+        let obj_idx = match self.node_index.get(&object) {
+            Some(idx) => *idx.value(),
+            None => return false,
+        };
+
+        let mut graph = self.graph.write().expect("graph lock poisoned");
+
+        // Find the edge with matching predicate between subj and obj
+        let edge_to_remove = graph
+            .edges_directed(subj_idx, Direction::Outgoing)
+            .find(|e| e.target() == obj_idx && e.weight().predicate == predicate)
+            .map(|e| e.id());
+
+        if let Some(edge_id) = edge_to_remove {
+            graph.remove_edge(edge_id);
+
+            // Update predicate index
+            if let Some(mut pairs) = self.predicate_index.get_mut(&predicate) {
+                pairs.retain(|&(s, o)| !(s == subject && o == object));
+            }
+
+            self.triple_count
+                .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            true
+        } else {
+            false
+        }
+    }
+
     /// Get all objects for a given subject and predicate.
     pub fn objects_of(&self, subject: SymbolId, predicate: SymbolId) -> Vec<SymbolId> {
         let graph = self.graph.read().expect("graph lock poisoned");

@@ -3840,5 +3840,56 @@ fn format_derivation_kind(kind: &DerivationKind, engine: &Engine) -> String {
                 document_id, chunk_index, extraction_method
             )
         }
+        DerivationKind::ContextInheritance { context, ancestor } => {
+            format!(
+                "context inheritance: \"{}\" from ancestor \"{}\"",
+                engine.resolve_label(*context),
+                engine.resolve_label(*ancestor)
+            )
+        }
+        DerivationKind::ContextLifting {
+            from_context,
+            to_context,
+            condition,
+        } => {
+            format!(
+                "context lifting: \"{}\" → \"{}\" (condition: {})",
+                engine.resolve_label(*from_context),
+                engine.resolve_label(*to_context),
+                condition
+            )
+        }
+        DerivationKind::PredicateGeneralization { specific, general } => {
+            format!(
+                "predicate generalization: \"{}\" specializes \"{}\"",
+                engine.resolve_label(*specific),
+                engine.resolve_label(*general)
+            )
+        }
+        DerivationKind::PredicateInverse { predicate, inverse } => {
+            format!(
+                "predicate inverse: \"{}\" ↔ \"{}\"",
+                engine.resolve_label(*predicate),
+                engine.resolve_label(*inverse)
+            )
+        }
+        DerivationKind::DefeasibleOverride {
+            winner,
+            loser,
+            reason,
+        } => {
+            format!(
+                "defeasible override: \"{}\" beats \"{}\" ({})",
+                engine.resolve_label(*winner),
+                engine.resolve_label(*loser),
+                reason
+            )
+        }
+        DerivationKind::DispatchRoute {
+            reasoner,
+            problem_kind,
+        } => {
+            format!("dispatch: reasoner \"{reasoner}\" solved {problem_kind}")
+        }
     }
 }
