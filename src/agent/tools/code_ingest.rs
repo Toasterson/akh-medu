@@ -17,6 +17,7 @@ use crate::agent::tool::{Tool, ToolInput, ToolOutput, ToolParam, ToolSignature};
 use crate::agent::tool_manifest::{
     Capability, DangerInfo, DangerLevel, ToolManifest, ToolParamSchema, ToolSource,
 };
+use crate::compartment::ContextDomain;
 use crate::engine::Engine;
 use crate::graph::Triple;
 use crate::provenance::{DerivationKind, ProvenanceRecord};
@@ -57,6 +58,13 @@ impl Tool for CodeIngestTool {
                     description: "Maximum number of files to process. Default: 200.".into(),
                     required: false,
                 },
+                ToolParam {
+                    name: "repository".into(),
+                    description: "Override repository name for microtheory scoping. \
+                                  Auto-detected from .git if omitted."
+                        .into(),
+                    required: false,
+                },
             ],
         }
     }
@@ -71,6 +79,7 @@ impl Tool for CodeIngestTool {
             .get("max_files")
             .and_then(|s| s.parse().ok())
             .unwrap_or(200);
+        let repo_override = input.get("repository").map(|s| s.to_string());
 
         let path = PathBuf::from(path_str);
 
@@ -83,6 +92,36 @@ impl Tool for CodeIngestTool {
 
         let preds = CodePredicates::init(engine)?;
         let is_a = engine.resolve_or_create_relation("is-a")?;
+
+        // Detect repository and set up microtheory scoping.
+        let repo = detect_repository(&path, repo_override.as_deref());
+        let compartment_label = if let Some(ref repo) = repo {
+            let base_mt = ensure_base_code_microtheory(engine)?;
+            let repo_mt = ensure_repo_microtheory(engine, &repo.mt_label, base_mt)?;
+
+            // Clean re-ingestion: remove old triples in this repo's compartment.
+            let removed = engine.remove_triples_in_compartment(&repo.mt_label);
+            if removed > 0 {
+                tracing::info!(mt = %repo.mt_label, removed, "cleared old triples for re-ingestion");
+            }
+
+            // Store repo metadata triples (global, not compartment-scoped).
+            if let Ok(root_sym) = engine.resolve_or_create_entity(&repo.root_path) {
+                let _ = add_triple(engine, repo_mt, preds.repo_root, root_sym, 1.0, None);
+            }
+            if let Ok(name_sym) = engine.resolve_or_create_entity(&repo.name) {
+                let _ = add_triple(engine, repo_mt, preds.repo_name, name_sym, 1.0, None);
+            }
+            if let Some(ref url) = repo.remote_url {
+                if let Ok(url_sym) = engine.resolve_or_create_entity(url) {
+                    let _ = add_triple(engine, repo_mt, preds.repo_url, url_sym, 1.0, None);
+                }
+            }
+
+            Some(repo.mt_label.clone())
+        } else {
+            None
+        };
 
         let files = collect_rs_files(&path, recursive, max_files);
         if files.is_empty() {
@@ -100,7 +139,15 @@ impl Tool for CodeIngestTool {
         let mut all_symbols = Vec::new();
 
         for file_path in &files {
-            match ingest_file(engine, &preds, is_a, file_path, &base, &mut stats) {
+            match ingest_file(
+                engine,
+                &preds,
+                is_a,
+                file_path,
+                &base,
+                compartment_label.as_deref(),
+                &mut stats,
+            ) {
                 Ok(syms) => all_symbols.extend(syms),
                 Err(e) => {
                     stats.errors += 1;
@@ -109,8 +156,12 @@ impl Tool for CodeIngestTool {
             }
         }
 
+        let mt_note = compartment_label
+            .as_deref()
+            .map(|mt| format!(" [microtheory: {mt}]"))
+            .unwrap_or_default();
         let msg = format!(
-            "Code ingest: {} file(s) processed, {} triple(s) extracted, {} symbol(s) created, {} error(s).",
+            "Code ingest: {} file(s) processed, {} triple(s) extracted, {} symbol(s) created, {} error(s).{mt_note}",
             stats.files_processed, stats.triples_extracted, stats.symbols_created, stats.errors,
         );
         Ok(ToolOutput::ok_with_symbols(msg, all_symbols))
@@ -127,6 +178,10 @@ impl Tool for CodeIngestTool {
                 ToolParamSchema::optional(
                     "max_files",
                     "Maximum number of files to process (default: 200).",
+                ),
+                ToolParamSchema::optional(
+                    "repository",
+                    "Override repository name for microtheory scoping (auto-detected from .git).",
                 ),
             ],
             danger: DangerInfo {
@@ -203,6 +258,7 @@ fn ingest_file(
     is_a: SymbolId,
     file_path: &Path,
     base: &Path,
+    compartment: Option<&str>,
     stats: &mut IngestStats,
 ) -> AgentResult<Vec<SymbolId>> {
     let source = std::fs::read_to_string(file_path).map_err(|e| AgentError::ToolExecution {
@@ -226,22 +282,36 @@ fn ingest_file(
         resolve_or_create_entity_with_source(engine, &rel_path, &rel_path, 0, 0, source.len())?;
 
     let file_type = engine.resolve_or_create_entity("File")?;
-    add_triple(engine, file_sym, is_a, file_type, 1.0)?;
+    add_triple(engine, file_sym, is_a, file_type, 1.0, compartment)?;
 
     // Derive module name from file path.
     let module_label = module_label_from_path(&rel_path);
     let module_sym =
         resolve_or_create_entity_with_source(engine, &module_label, &rel_path, 0, 0, 0)?;
     let module_type = engine.resolve_or_create_entity("Module")?;
-    add_triple(engine, module_sym, is_a, module_type, 1.0)?;
-    add_triple(engine, module_sym, preds.defined_in, file_sym, 1.0)?;
+    add_triple(engine, module_sym, is_a, module_type, 1.0, compartment)?;
+    add_triple(
+        engine,
+        module_sym,
+        preds.defined_in,
+        file_sym,
+        1.0,
+        compartment,
+    )?;
 
     // Extract file-level inner doc comments (//! at the top of the file).
     // These appear as #![doc = "..."] attributes in syn::File.attrs.
     if let Some(doc) = extract_inner_doc_comments(&syntax.attrs) {
         let truncated = truncate(&doc, 256);
         if let Ok(doc_sym) = engine.resolve_or_create_entity(&truncated) {
-            add_triple(engine, module_sym, preds.has_doc, doc_sym, 1.0)?;
+            add_triple(
+                engine,
+                module_sym,
+                preds.has_doc,
+                doc_sym,
+                1.0,
+                compartment,
+            )?;
         }
     }
 
@@ -255,6 +325,7 @@ fn ingest_file(
         symbols: Vec::new(),
         triple_count: 0,
         item_index: 0,
+        compartment,
     };
 
     visitor.visit_file(&syntax);
@@ -299,6 +370,7 @@ struct CodeVisitor<'a> {
     symbols: Vec<SymbolId>,
     triple_count: usize,
     item_index: u32,
+    compartment: Option<&'a str>,
 }
 
 impl<'a> CodeVisitor<'a> {
@@ -351,7 +423,7 @@ impl<'a> CodeVisitor<'a> {
     }
 
     fn add_triple(&mut self, s: SymbolId, p: SymbolId, o: SymbolId, confidence: f32) {
-        if add_triple(self.engine, s, p, o, confidence).is_ok() {
+        if add_triple(self.engine, s, p, o, confidence, self.compartment).is_ok() {
             self.triple_count += 1;
         }
     }
@@ -818,8 +890,12 @@ fn add_triple(
     p: SymbolId,
     o: SymbolId,
     confidence: f32,
+    compartment: Option<&str>,
 ) -> AgentResult<()> {
-    let triple = Triple::new(s, p, o).with_confidence(confidence);
+    let mut triple = Triple::new(s, p, o).with_confidence(confidence);
+    if let Some(cid) = compartment {
+        triple = triple.with_compartment(cid.to_string());
+    }
     engine.add_triple(&triple)?;
     Ok(())
 }
@@ -853,6 +929,160 @@ fn truncate(s: &str, max: usize) -> String {
     } else {
         format!("{}...", &s[..max])
     }
+}
+
+// ---------------------------------------------------------------------------
+// Repository detection
+// ---------------------------------------------------------------------------
+
+/// Identity of a detected git repository.
+struct RepoIdentity {
+    /// Human-readable name (e.g. "akh-medu").
+    name: String,
+    /// Microtheory label (e.g. "mt:repo:akh-medu").
+    mt_label: String,
+    /// Canonical root path.
+    root_path: String,
+    /// Remote origin URL, if found.
+    remote_url: Option<String>,
+}
+
+/// Detect repository identity by walking up from `path` looking for `.git/`.
+///
+/// If `override_name` is given, it takes precedence over the auto-detected name.
+/// Returns `None` only if `path` resolution fails entirely.
+fn detect_repository(path: &Path, override_name: Option<&str>) -> Option<RepoIdentity> {
+    let canonical = path.canonicalize().ok()?;
+    let start = if canonical.is_file() {
+        canonical.parent()?
+    } else {
+        &canonical
+    };
+
+    // Walk up looking for .git/
+    let mut current = start.to_path_buf();
+    loop {
+        let git_dir = current.join(".git");
+        if git_dir.is_dir() {
+            let remote_url = parse_git_remote(&git_dir);
+            let auto_name = remote_url
+                .as_deref()
+                .map(extract_repo_name_from_url)
+                .unwrap_or_else(|| {
+                    current
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string()
+                });
+            let name = override_name
+                .map(|s| s.to_string())
+                .unwrap_or(auto_name);
+            let mt_label = format!("mt:repo:{name}");
+            let root_path = current.to_string_lossy().to_string();
+            return Some(RepoIdentity {
+                name,
+                mt_label,
+                root_path,
+                remote_url,
+            });
+        }
+        if !current.pop() {
+            break;
+        }
+    }
+
+    // No .git found — fall back to directory name.
+    let dir = if start.is_dir() { start } else { start };
+    let name = override_name
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| {
+            dir.file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string()
+        });
+    let mt_label = format!("mt:repo:{name}");
+    let root_path = dir.to_string_lossy().to_string();
+    Some(RepoIdentity {
+        name,
+        mt_label,
+        root_path,
+        remote_url: None,
+    })
+}
+
+/// Parse the remote origin URL from `.git/config`.
+fn parse_git_remote(git_dir: &Path) -> Option<String> {
+    let config_path = git_dir.join("config");
+    let content = std::fs::read_to_string(config_path).ok()?;
+
+    let mut in_origin = false;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            in_origin = trimmed == r#"[remote "origin"]"#;
+            continue;
+        }
+        if in_origin && trimmed.starts_with("url") {
+            if let Some((_key, val)) = trimmed.split_once('=') {
+                return Some(val.trim().to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Extract repository name from a git remote URL.
+///
+/// Handles HTTPS (`https://github.com/foo/bar.git` → `bar`)
+/// and SSH (`git@github.com:foo/bar.git` → `bar`).
+fn extract_repo_name_from_url(url: &str) -> String {
+    let stripped = url.strip_suffix(".git").unwrap_or(url);
+    // Try splitting by '/' (HTTPS) or ':' (SSH)
+    stripped
+        .rsplit('/')
+        .next()
+        .or_else(|| stripped.rsplit(':').next())
+        .unwrap_or(stripped)
+        .to_string()
+}
+
+// ---------------------------------------------------------------------------
+// Microtheory helpers
+// ---------------------------------------------------------------------------
+
+/// Ensure the base `mt:rust-code` microtheory exists (idempotent).
+fn ensure_base_code_microtheory(engine: &Engine) -> AgentResult<SymbolId> {
+    let label = "mt:rust-code";
+    if let Ok(id) = engine.lookup_symbol(label) {
+        return Ok(id);
+    }
+    let mt = engine
+        .create_context(label, ContextDomain::Code, &[])
+        .map_err(|e| AgentError::ToolExecution {
+            tool_name: "code_ingest".into(),
+            message: format!("failed to create base code microtheory: {e}"),
+        })?;
+    Ok(mt.id)
+}
+
+/// Ensure a per-repository microtheory exists, specializing the base code mt.
+fn ensure_repo_microtheory(
+    engine: &Engine,
+    mt_label: &str,
+    base_mt: SymbolId,
+) -> AgentResult<SymbolId> {
+    if let Ok(id) = engine.lookup_symbol(mt_label) {
+        return Ok(id);
+    }
+    let mt = engine
+        .create_context(mt_label, ContextDomain::Code, &[base_mt])
+        .map_err(|e| AgentError::ToolExecution {
+            tool_name: "code_ingest".into(),
+            message: format!("failed to create repo microtheory {mt_label}: {e}"),
+        })?;
+    Ok(mt.id)
 }
 
 // ---------------------------------------------------------------------------
@@ -943,6 +1173,7 @@ mod tests {
             is_a,
             Path::new("src/symbol.rs"),
             Path::new("src"),
+            None,
             &mut stats,
         );
 
@@ -966,5 +1197,106 @@ mod tests {
         let is_a = engine.lookup_symbol("is-a").unwrap();
         let enum_type = engine.lookup_symbol("Enum").unwrap();
         assert!(engine.has_triple(symbol_kind, is_a, enum_type));
+    }
+
+    #[test]
+    fn extract_repo_name_from_url_https() {
+        assert_eq!(
+            extract_repo_name_from_url("https://github.com/foo/bar.git"),
+            "bar"
+        );
+        assert_eq!(
+            extract_repo_name_from_url("https://github.com/foo/bar"),
+            "bar"
+        );
+    }
+
+    #[test]
+    fn extract_repo_name_from_url_ssh() {
+        assert_eq!(
+            extract_repo_name_from_url("git@github.com:foo/bar.git"),
+            "bar"
+        );
+    }
+
+    #[test]
+    fn detect_repository_git_dir() {
+        // This test runs inside the akh-medu repo, so .git/ should exist.
+        let repo = detect_repository(Path::new("src/engine.rs"), None);
+        assert!(repo.is_some());
+        let repo = repo.unwrap();
+        assert_eq!(repo.name, "akh-medu");
+        assert!(repo.mt_label.starts_with("mt:repo:"));
+    }
+
+    #[test]
+    fn detect_repository_override() {
+        let repo = detect_repository(Path::new("src/engine.rs"), Some("my-project"));
+        assert!(repo.is_some());
+        let repo = repo.unwrap();
+        assert_eq!(repo.name, "my-project");
+        assert_eq!(repo.mt_label, "mt:repo:my-project");
+    }
+
+    #[test]
+    fn ingest_creates_microtheory() {
+        let engine = test_engine();
+        // Ingest from the current repo directory (has .git).
+        let input = ToolInput::new()
+            .with_param("path", "src/symbol.rs")
+            .with_param("max_files", "1");
+        let tool = CodeIngestTool;
+        let output = tool.execute(&engine, input).unwrap();
+        assert!(output.success);
+        assert!(output.result.contains("[microtheory:"));
+
+        // The base code microtheory should exist.
+        assert!(engine.lookup_symbol("mt:rust-code").is_ok());
+
+        // The repo microtheory should exist.
+        assert!(engine.lookup_symbol("mt:repo:akh-medu").is_ok());
+
+        // Triples should have compartment_id set.
+        let all = engine.all_triples();
+        let compartmented = all
+            .iter()
+            .filter(|t| t.compartment_id.as_deref() == Some("mt:repo:akh-medu"))
+            .count();
+        assert!(
+            compartmented > 0,
+            "expected some triples with compartment_id mt:repo:akh-medu"
+        );
+    }
+
+    #[test]
+    fn reingest_clears_old_triples() {
+        let engine = test_engine();
+        let input = || {
+            ToolInput::new()
+                .with_param("path", "src/symbol.rs")
+                .with_param("max_files", "1")
+        };
+        let tool = CodeIngestTool;
+
+        // First ingest.
+        let _ = tool.execute(&engine, input()).unwrap();
+        let count1 = engine
+            .all_triples()
+            .iter()
+            .filter(|t| t.compartment_id.as_deref() == Some("mt:repo:akh-medu"))
+            .count();
+
+        // Second ingest should clear and re-add, so count should be the same.
+        let _ = tool.execute(&engine, input()).unwrap();
+        let count2 = engine
+            .all_triples()
+            .iter()
+            .filter(|t| t.compartment_id.as_deref() == Some("mt:repo:akh-medu"))
+            .count();
+
+        assert_eq!(
+            count1, count2,
+            "re-ingest should not accumulate triples (first: {count1}, second: {count2})"
+        );
     }
 }

@@ -1391,6 +1391,15 @@ impl Engine {
         self.knowledge_graph.remove_triple(subject, predicate, object)
     }
 
+    /// Remove all triples belonging to a compartment (microtheory).
+    ///
+    /// Useful for clean re-ingestion: remove old triples before inserting new ones.
+    /// Returns the number of triples removed.
+    pub fn remove_triples_in_compartment(&self, compartment_id: &str) -> usize {
+        self.knowledge_graph
+            .remove_triples_in_compartment(compartment_id)
+    }
+
     // -----------------------------------------------------------------------
     // Predicate Hierarchy (Phase 9b)
     // -----------------------------------------------------------------------

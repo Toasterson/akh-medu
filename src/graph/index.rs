@@ -132,6 +132,59 @@ impl KnowledgeGraph {
         }
     }
 
+    /// Remove all triples in a given compartment.
+    ///
+    /// Iterates all edges, collects those whose `compartment_id` matches, then
+    /// removes them in descending index order to avoid index invalidation from
+    /// petgraph's swap-remove.
+    ///
+    /// Returns the number of triples removed.
+    pub fn remove_triples_in_compartment(&self, compartment_id: &str) -> usize {
+        let mut graph = self.graph.write().expect("graph lock poisoned");
+
+        // Collect edge indices whose compartment_id matches.
+        let mut to_remove: Vec<_> = graph
+            .edge_indices()
+            .filter(|&ei| {
+                graph
+                    .edge_weight(ei)
+                    .is_some_and(|e| e.compartment_id.as_deref() == Some(compartment_id))
+            })
+            .collect();
+
+        // Sort descending so swap-remove doesn't invalidate earlier indices.
+        to_remove.sort_by(|a, b| b.cmp(a));
+
+        let mut removed = 0;
+        for ei in to_remove {
+            // Capture the edge data before removing so we can update the predicate index.
+            if let Some(edge) = graph.edge_weight(ei).cloned() {
+                if let Some((src, dst)) = graph.edge_endpoints(ei) {
+                    let subject = graph.node_weight(src).copied();
+                    let object = graph.node_weight(dst).copied();
+
+                    graph.remove_edge(ei);
+
+                    // Update predicate index.
+                    if let (Some(s), Some(o)) = (subject, object) {
+                        if let Some(mut pairs) = self.predicate_index.get_mut(&edge.predicate) {
+                            pairs.retain(|&(ps, po)| !(ps == s && po == o));
+                        }
+                    }
+
+                    removed += 1;
+                }
+            }
+        }
+
+        if removed > 0 {
+            self.triple_count
+                .fetch_sub(removed, std::sync::atomic::Ordering::Relaxed);
+        }
+
+        removed
+    }
+
     /// Get all objects for a given subject and predicate.
     pub fn objects_of(&self, subject: SymbolId, predicate: SymbolId) -> Vec<SymbolId> {
         let graph = self.graph.read().expect("graph lock poisoned");
@@ -446,5 +499,61 @@ mod tests {
         assert!(kg.objects_of(sym(1), sym(2)).is_empty());
         assert!(kg.subjects_of(sym(1), sym(2)).is_empty());
         assert!(kg.triples_from(sym(1)).is_empty());
+    }
+
+    #[test]
+    fn remove_triples_in_compartment_basic() {
+        let kg = KnowledgeGraph::new();
+        let a = sym(1);
+        let b = sym(2);
+        let c = sym(3);
+        let r = sym(10);
+
+        // Two triples in "repo-x", one global
+        kg.insert_triple(&Triple::new(a, r, b).with_compartment("repo-x".into()))
+            .unwrap();
+        kg.insert_triple(&Triple::new(a, r, c).with_compartment("repo-x".into()))
+            .unwrap();
+        kg.insert_triple(&Triple::new(b, r, c)).unwrap();
+
+        assert_eq!(kg.triple_count(), 3);
+
+        let removed = kg.remove_triples_in_compartment("repo-x");
+        assert_eq!(removed, 2);
+        assert_eq!(kg.triple_count(), 1);
+
+        // The global triple should still exist
+        let remaining = kg.all_triples();
+        assert_eq!(remaining.len(), 1);
+        assert!(remaining[0].compartment_id.is_none());
+    }
+
+    #[test]
+    fn remove_triples_in_compartment_empty() {
+        let kg = KnowledgeGraph::new();
+        let removed = kg.remove_triples_in_compartment("nonexistent");
+        assert_eq!(removed, 0);
+    }
+
+    #[test]
+    fn remove_triples_in_compartment_updates_predicate_index() {
+        let kg = KnowledgeGraph::new();
+        let a = sym(1);
+        let b = sym(2);
+        let c = sym(3);
+        let r = sym(10);
+
+        kg.insert_triple(&Triple::new(a, r, b).with_compartment("repo-y".into()))
+            .unwrap();
+        kg.insert_triple(&Triple::new(a, r, c)).unwrap();
+
+        assert_eq!(kg.triples_for_predicate(r).len(), 2);
+
+        kg.remove_triples_in_compartment("repo-y");
+
+        // Predicate index should only have the global triple
+        let pairs = kg.triples_for_predicate(r);
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(pairs[0], (a, c));
     }
 }

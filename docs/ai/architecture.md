@@ -1,6 +1,6 @@
 # Akh-medu Architecture
 
-> Last updated: 2026-02-18 (Phase 10 Wave 2 complete: 10e templates, 10f VSA code encoding)
+> Last updated: 2026-02-18 (Per-repo microtheory scoping for code_ingest)
 
 ## Overview
 
@@ -19,10 +19,10 @@ Akh-medu is a neuro-symbolic AI engine that runs entirely on CPU with no LLM dep
 
 ```
 src/
-├── agent/              26 modules — OODA loop, tools (code_gen, compile_feedback), memory, goals, planning, psyche
+├── agent/              26 modules — OODA loop, tools (code_gen, code_ingest, compile_feedback), memory, goals, planning, psyche
 ├── autonomous/          6 modules — background learning, confidence fusion, grounding
 ├── argumentation/       1 module  — pro/con argumentation (Phase 9e): meta-rules, verdicts, evidence chains
-├── compartment/         5 modules — knowledge isolation, Jungian psyche, microtheories (Phase 9a), CWA/circumscription (Phase 9m)
+├── compartment/         5 modules — knowledge isolation, Jungian psyche, microtheories (Phase 9a, per-repo code scoping), CWA/circumscription (Phase 9m)
 ├── dispatch/            1 module  — competitive reasoner dispatch (Phase 9f): Reasoner trait, bid-based registry, 7 built-in reasoners
 ├── grammar/            22 modules — GF-inspired parsing/generation, entity resolution, Rust code gen (Phase 10a), templates (Phase 10e)
 ├── graph/               9 modules — KG (petgraph), SPARQL (oxigraph), analytics, predicate hierarchy (Phase 9b), defeasible reasoning (Phase 9d), arity constraints (Phase 9j), contradiction detection (Phase 9l), argumentation truth (Phase 9i), NARTs (Phase 9o)
@@ -131,6 +131,7 @@ Phase 9a–9o: Cyc-inspired HOL enhancements (15 sub-phases):
 Phase 10a–10h: Rust code generation (8 sub-phases):
 - **Core (Wave 1 complete)**: 10a RustCodeGrammar, 10b code_gen tool, 10c code-aware planning, 10d iterative refinement
 - **Pattern infrastructure (Wave 2 complete)**: 10e parameterized templates (7 built-in), 10f VSA code pattern encoding (path-contexts, multi-granularity)
+- **Infra**: code_ingest per-repo microtheory scoping (mt:repo:<name> specializes mt:rust-code, ContextDomain::Code, clean re-ingestion)
 - **Pattern learning**: 10g pattern mining from examples, 10h library learning cycle
 Phase 11a–11h: Autonomous task system (8 sub-phases):
 - **Core**: 11a drive-based goal generation (CLARION/GDA/Soar), 11b HTN decomposition with dependency DAGs, 11c value-based argumentation priority (Dung/VAF)

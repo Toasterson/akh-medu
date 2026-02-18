@@ -36,6 +36,8 @@ pub enum ContextDomain {
     Task,
     /// General-purpose context.
     General,
+    /// Code context (e.g., "repository X" or "rust-code").
+    Code,
 }
 
 impl std::fmt::Display for ContextDomain {
@@ -47,6 +49,7 @@ impl std::fmt::Display for ContextDomain {
             Self::Fictional => write!(f, "fictional"),
             Self::Task => write!(f, "task"),
             Self::General => write!(f, "general"),
+            Self::Code => write!(f, "code"),
         }
     }
 }
@@ -61,6 +64,7 @@ impl ContextDomain {
             "fictional" => Some(Self::Fictional),
             "task" => Some(Self::Task),
             "general" => Some(Self::General),
+            "code" => Some(Self::Code),
             _ => None,
         }
     }
@@ -501,6 +505,7 @@ mod tests {
             ContextDomain::Fictional,
             ContextDomain::Task,
             ContextDomain::General,
+            ContextDomain::Code,
         ] {
             let label = domain.to_string();
             assert_eq!(ContextDomain::from_label(&label), Some(domain));

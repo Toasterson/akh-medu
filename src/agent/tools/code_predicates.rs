@@ -55,6 +55,14 @@ pub struct CodePredicates {
     pub has_doc: SymbolId,
     /// "code:circular-dep" — circular dependency (derived by rules)
     pub circular_dep: SymbolId,
+
+    // Repository metadata
+    /// "code:repo-root" — the root filesystem path of a repository
+    pub repo_root: SymbolId,
+    /// "code:repo-url" — the remote URL of a repository
+    pub repo_url: SymbolId,
+    /// "code:repo-name" — the human-readable name of a repository
+    pub repo_name: SymbolId,
 }
 
 impl CodePredicates {
@@ -78,6 +86,9 @@ impl CodePredicates {
             has_visibility: engine.resolve_or_create_relation("code:has-visibility")?,
             has_doc: engine.resolve_or_create_relation("code:has-doc")?,
             circular_dep: engine.resolve_or_create_relation("code:circular-dep")?,
+            repo_root: engine.resolve_or_create_relation("code:repo-root")?,
+            repo_url: engine.resolve_or_create_relation("code:repo-url")?,
+            repo_name: engine.resolve_or_create_relation("code:repo-name")?,
         })
     }
 }
@@ -117,6 +128,9 @@ mod tests {
             preds.has_visibility,
             preds.has_doc,
             preds.circular_dep,
+            preds.repo_root,
+            preds.repo_url,
+            preds.repo_name,
         ];
 
         let unique: std::collections::HashSet<_> = ids.iter().collect();
