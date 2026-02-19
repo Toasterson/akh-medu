@@ -16,6 +16,7 @@ pub mod daemon;
 pub mod error;
 pub mod goal;
 pub mod idle;
+pub mod library_learn;
 pub mod memory;
 pub mod nlp;
 pub mod ooda;
@@ -39,6 +40,7 @@ pub use daemon::{AgentDaemon, DaemonConfig};
 pub use error::{AgentError, AgentResult};
 pub use goal::{Goal, GoalStatus};
 pub use idle::{IdleScheduler, IdleTaskResult};
+pub use library_learn::{LibraryLearner, LibraryLearningResult};
 pub use memory::{
     ConsolidationConfig, ConsolidationResult, EpisodicEntry, WorkingMemory, WorkingMemoryEntry,
     WorkingMemoryKind,

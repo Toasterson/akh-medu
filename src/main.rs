@@ -3999,5 +3999,14 @@ fn format_derivation_kind(kind: &DerivationKind, engine: &Engine) -> String {
         } => {
             format!("Code refinement: attempt {attempt}, {error_count} error(s)")
         }
+        DerivationKind::LibraryLearning {
+            pattern_name,
+            occurrences,
+            compression,
+        } => {
+            format!(
+                "Library learning: pattern \"{pattern_name}\" ({occurrences} occurrences, compression {compression:.1})"
+            )
+        }
     }
 }

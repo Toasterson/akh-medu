@@ -399,6 +399,12 @@ impl Agent {
             }
         }
 
+        // Periodic library learning (4x less frequent than reflection).
+        let library_learn_interval = reflect_interval.saturating_mul(4).max(1);
+        if library_learn_interval > 0 && self.cycle_count % library_learn_interval == 0 {
+            let _ = self.run_library_learning();
+        }
+
         // Auto-decompose stalled goals.
         self.decompose_stalled_goals();
 
@@ -815,6 +821,21 @@ impl Agent {
     /// Get the most recent reflection result.
     pub fn last_reflection(&self) -> Option<&ReflectionResult> {
         self.last_reflection.as_ref()
+    }
+
+    // -----------------------------------------------------------------------
+    // Library learning
+    // -----------------------------------------------------------------------
+
+    /// Run a library learning cycle: discover reusable abstractions from recent code.
+    ///
+    /// Collects code entities from the KG, anti-unifies them, scores candidates,
+    /// and stores the top abstractions as learned templates.
+    pub fn run_library_learning(
+        &self,
+    ) -> AgentResult<super::library_learn::LibraryLearningResult> {
+        let learner = super::library_learn::LibraryLearner::with_defaults();
+        learner.run_cycle(&self.engine)
     }
 
     // -----------------------------------------------------------------------

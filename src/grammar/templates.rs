@@ -107,6 +107,9 @@ enum TemplateGenerator {
     TestModule,
     Iterator,
     NewConstructor,
+    /// Dynamically discovered template from library learning (Phase 10h).
+    /// Stores a generalized fingerprint string and uses format-string fill.
+    Learned { pattern: String },
 }
 
 impl CodeTemplate {
@@ -138,7 +141,7 @@ impl CodeTemplate {
             }
         }
 
-        match self.generator {
+        match &self.generator {
             TemplateGenerator::ErrorType => generate_error_type(&effective),
             TemplateGenerator::TraitImpl => generate_trait_impl(&effective),
             TemplateGenerator::Builder => generate_builder(&effective),
@@ -146,6 +149,7 @@ impl CodeTemplate {
             TemplateGenerator::TestModule => generate_test_module(&effective),
             TemplateGenerator::Iterator => generate_iterator(&effective),
             TemplateGenerator::NewConstructor => generate_new_constructor(&effective),
+            TemplateGenerator::Learned { pattern } => generate_learned(pattern, &effective),
         }
     }
 }
@@ -565,6 +569,120 @@ fn generate_new_constructor(params: &HashMap<String, String>) -> GrammarResult<S
     out.push_str("}\n");
 
     Ok(out)
+}
+
+/// Generate code from a learned (data-driven) template.
+///
+/// The pattern string contains a generalized fingerprint. The generator uses
+/// it to produce a scaffold comment and a `todo!()` body, which the agent
+/// can then refine through the compiler feedback loop.
+fn generate_learned(pattern: &str, params: &HashMap<String, String>) -> GrammarResult<String> {
+    let type_name = params
+        .get("type_name")
+        .map(|s| s.as_str())
+        .unwrap_or("LearnedType");
+
+    let mut out = String::new();
+    out.push_str(&format!("// Learned pattern: {pattern}\n"));
+
+    // Produce a scaffold based on the top-level pattern kind
+    if pattern.starts_with("fn(") {
+        let fn_name = params
+            .get("fn_name")
+            .map(|s| s.as_str())
+            .unwrap_or("learned_fn");
+        out.push_str(&format!("fn {fn_name}() {{\n    todo!()\n}}\n"));
+    } else if pattern.starts_with("struct(") {
+        out.push_str(&format!("struct {type_name} {{\n    // TODO: fields\n}}\n"));
+    } else if pattern.starts_with("enum(") {
+        out.push_str(&format!("enum {type_name} {{\n    // TODO: variants\n}}\n"));
+    } else if pattern.starts_with("impl(") {
+        let trait_name = params
+            .get("trait_name")
+            .map(|s| s.as_str())
+            .unwrap_or("Trait");
+        out.push_str(&format!(
+            "impl {trait_name} for {type_name} {{\n    // TODO: methods\n}}\n"
+        ));
+    } else {
+        out.push_str(&format!(
+            "// Scaffold for learned pattern\nfn {type_name}_scaffold() {{\n    todo!()\n}}\n"
+        ));
+    }
+
+    Ok(out)
+}
+
+impl CodeTemplate {
+    /// Create a `CodeTemplate` from a discovered abstraction (Phase 10h).
+    ///
+    /// Only produces templates for top-level patterns (Function, Struct, Enum, Impl).
+    /// Returns `None` for expression-level or too-generic patterns.
+    pub fn from_abstraction(
+        abs: &crate::reason::anti_unify::DiscoveredAbstraction,
+    ) -> Option<Self> {
+        use crate::reason::anti_unify::GeneralizedAst;
+
+        // Only create templates for top-level item patterns
+        let (category, description, params) = match &abs.pattern {
+            GeneralizedAst::Function { .. } => (
+                "learned-function",
+                format!(
+                    "Learned function pattern ({} occurrences, compression {:.1})",
+                    abs.occurrences, abs.compression
+                ),
+                vec![
+                    TemplateParam::optional("fn_name", ParamKind::Text, "learned_fn", "Function name"),
+                    TemplateParam::optional("type_name", ParamKind::TypeName, "T", "Return type"),
+                ],
+            ),
+            GeneralizedAst::Struct { .. } => (
+                "learned-struct",
+                format!(
+                    "Learned struct pattern ({} occurrences, compression {:.1})",
+                    abs.occurrences, abs.compression
+                ),
+                vec![
+                    TemplateParam::optional("type_name", ParamKind::TypeName, "LearnedStruct", "Struct name"),
+                ],
+            ),
+            GeneralizedAst::Enum { .. } => (
+                "learned-enum",
+                format!(
+                    "Learned enum pattern ({} occurrences, compression {:.1})",
+                    abs.occurrences, abs.compression
+                ),
+                vec![
+                    TemplateParam::optional("type_name", ParamKind::TypeName, "LearnedEnum", "Enum name"),
+                ],
+            ),
+            GeneralizedAst::Impl { .. } => (
+                "learned-impl",
+                format!(
+                    "Learned impl pattern ({} occurrences, compression {:.1})",
+                    abs.occurrences, abs.compression
+                ),
+                vec![
+                    TemplateParam::optional("type_name", ParamKind::TypeName, "LearnedType", "Type name"),
+                    TemplateParam::optional("trait_name", ParamKind::TraitName, "Trait", "Trait name"),
+                ],
+            ),
+            // Expression-level or Var/Concrete — not suitable for templates
+            _ => return None,
+        };
+
+        let name = format!("learned:{}", abs.fingerprint);
+
+        Some(CodeTemplate {
+            name,
+            description,
+            category: category.to_string(),
+            params,
+            generator: TemplateGenerator::Learned {
+                pattern: abs.fingerprint.clone(),
+            },
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------

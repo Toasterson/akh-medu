@@ -1,8 +1,8 @@
 # Phase 10 — Generative Functions (Rust Code Generation)
 
 - **Date**: 2026-02-17
-- **Updated**: 2026-02-18 (Wave 2 complete: 10e templates, 10f VSA code encoding)
-- **Status**: In Progress (Waves 1–2 complete, Wave 3 pending)
+- **Updated**: 2026-02-19 (Wave 3 complete: 10g pattern mining + 10h library learning)
+- **Status**: Complete (all 8 sub-phases done)
 - **Depends on**: Phase 9 (partially — 9b predicate hierarchy and 9f reasoner dispatch are most useful but not blocking)
 - **Research**: `docs/ai/decisions/002-code-generation-research.md`
 
@@ -299,13 +299,18 @@ PatternQuery { description: String, analogy_base: Option<SymbolId>, target_conte
 ```
 
 **Changes**:
-- [ ] New file: `src/agent/tools/pattern_mine.rs` — `PatternMineTool` implementing `Tool` trait
-- [ ] `src/library/` — extend code block extraction to feed pattern mining
-- [ ] `src/agent/ooda.rs` — pattern mining as a tool option for "learn pattern" goals
-- [ ] `src/vsa/code_encode.rs` — `encode_ast_subtree()` for partial tree encoding
-- [ ] Integration with library ingest: `ingest → extract code → mine → encode → store`
+- [x] New file: `src/agent/tools/pattern_mine.rs` (~600 lines, 17 tests) — `PatternMineTool` implementing `Tool` trait
+- [x] Code block extraction: markdown fenced blocks + HTML `<pre><code>` elements via scraper
+- [x] `SimplifiedAst` structural skeleton with `ast_fingerprint()` for frequency-based pattern discovery
+- [x] `PatternPredicates` + `mt:patterns` microtheory + `DerivationKind::SchemaDiscovered` provenance
+- [x] `extract_simplified_contexts()` in pattern_mine.rs — VSA encoding of simplified AST shapes
+- [x] Analogy search via VSA algebra: `bind(bind(pattern, source), target)`
+- [x] Mine + search modes with language filtering, min_support threshold
+- [x] `src/agent/tools/mod.rs` — added module + re-export
+- [x] `src/agent/agent.rs` — registered `PatternMineTool`
+- [x] `src/agent/tool_semantics.rs` — added `pattern_mine` semantic profile
 
-**Estimated scope**: ~600–800 lines
+**Estimated scope**: ~600–800 lines → ~600 lines
 
 ---
 
@@ -355,12 +360,13 @@ LibraryLearner {
 ```
 
 **Changes**:
-- [ ] New file: `src/reason/anti_unify.rs` — anti-unification over `AkhLang` e-classes
-- [ ] New file: `src/agent/library_learn.rs` — wake-sleep orchestration
-- [ ] `src/reason/mod.rs` — expose anti-unification as a reasoning primitive
-- [ ] `src/agent/reflect.rs` — trigger library learning during reflection (configurable frequency)
-- [ ] `src/grammar/templates.rs` — accept discovered abstractions as templates
-- [ ] `src/provenance.rs` — `DerivationKind::LibraryLearning`
+- [x] New file: `src/reason/anti_unify.rs` (~420 lines, 8 tests) — anti-unification on `SimplifiedAst` trees, `GeneralizedAst`/`AstSlot`/`AntiUnifyVar`, scoring, `DiscoveredAbstraction`
+- [x] New file: `src/agent/library_learn.rs` (~310 lines, 5 tests) — `LibraryLearner` wake-sleep orchestration, KG code collection, AST reconstruction, template storage
+- [x] `src/reason/mod.rs` — added `pub mod anti_unify;`
+- [x] `src/agent/agent.rs` — `run_library_learning()` method, periodic trigger (4x less frequent than reflection)
+- [x] `src/agent/mod.rs` — added `pub mod library_learn;` + re-exports
+- [x] `src/grammar/templates.rs` — `TemplateGenerator::Learned` variant, `CodeTemplate::from_abstraction()`, `generate_learned()`
+- [x] `src/provenance.rs` — `DerivationKind::LibraryLearning` (tag 39)
 
 **Depends on**: 10a (grammar), 10b (code_gen tool), 10e (templates), 10f (VSA encoding)
 

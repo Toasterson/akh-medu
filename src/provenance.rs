@@ -223,6 +223,12 @@ pub enum DerivationKind {
         attempt: u32,
         error_count: usize,
     },
+    /// A reusable abstraction was discovered by library learning (Phase 10h).
+    LibraryLearning {
+        pattern_name: String,
+        occurrences: u32,
+        compression: f64,
+    },
 }
 
 impl DerivationKind {
@@ -268,6 +274,7 @@ impl DerivationKind {
             Self::NartCreation { .. } => 36,
             Self::CodeGenerated { .. } => 37,
             Self::CodeRefinement { .. } => 38,
+            Self::LibraryLearning { .. } => 39,
         }
     }
 }

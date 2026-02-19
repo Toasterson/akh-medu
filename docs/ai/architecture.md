@@ -1,6 +1,6 @@
 # Akh-medu Architecture
 
-> Last updated: 2026-02-18 (Phase 10g — Pattern mining from examples)
+> Last updated: 2026-02-19 (Phase 10h — Library learning cycle)
 
 ## Overview
 
@@ -10,7 +10,7 @@ Akh-medu is a neuro-symbolic AI engine that runs entirely on CPU with no LLM dep
 - **Knowledge Graphs** — dual-indexed (petgraph + oxigraph/SPARQL) for structured symbolic reasoning
 - **E-graph Reasoning** — equality saturation via `egg` for symbolic rewriting
 - **Autonomous Agent** — OODA-loop agent with 23+ tools, working/episodic memory, planning, reflection
-- **Code Generation** — KG-to-Rust pipeline: code_gen tool, RustCodeGrammar, compiler feedback loop, parameterized templates, VSA code pattern encoding, pattern mining from examples
+- **Code Generation** — KG-to-Rust pipeline: code_gen tool, RustCodeGrammar, compiler feedback loop, parameterized templates, VSA code pattern encoding, pattern mining from examples, library learning cycle
 - **Multilingual Grammar** — GF-inspired abstract/concrete syntax split for 5 languages
 - **Content Library** — document ingestion (PDF, EPUB, HTML) with chunking and semantic enrichment
 - **Tiered Storage** — hot (DashMap) → warm (mmap) → cold (redb) for scalability
@@ -19,7 +19,7 @@ Akh-medu is a neuro-symbolic AI engine that runs entirely on CPU with no LLM dep
 
 ```
 src/
-├── agent/              27 modules — OODA loop, tools (code_gen, code_ingest, compile_feedback, pattern_mine), memory, goals, planning, psyche
+├── agent/              28 modules — OODA loop, tools (code_gen, code_ingest, compile_feedback, pattern_mine), memory, goals, planning, psyche, library learning
 ├── autonomous/          6 modules — background learning, confidence fusion, grounding
 ├── argumentation/       1 module  — pro/con argumentation (Phase 9e): meta-rules, verdicts, evidence chains
 ├── compartment/         5 modules — knowledge isolation, Jungian psyche, microtheories (Phase 9a, per-repo code scoping), CWA/circumscription (Phase 9m)
@@ -28,7 +28,7 @@ src/
 ├── graph/               9 modules — KG (petgraph), SPARQL (oxigraph), analytics, predicate hierarchy (Phase 9b), defeasible reasoning (Phase 9d), arity constraints (Phase 9j), contradiction detection (Phase 9l), argumentation truth (Phase 9i), NARTs (Phase 9o)
 ├── infer/               3 modules — spreading activation, backward chaining, superposition
 ├── library/            12 modules — document parsing, chunking, concept extraction
-├── reason/              2 modules — e-graph language (AkhLang), rewrite rules, second-order quantification (Phase 9n)
+├── reason/              3 modules — e-graph language (AkhLang), rewrite rules, second-order quantification (Phase 9n), anti-unification (Phase 10h)
 ├── simd/                5 modules — runtime SIMD kernel dispatch (AVX2 / generic)
 ├── skills/              1 module  — skillpack lifecycle (Cold/Warm/Hot)
 ├── store/               3 modules — tiered storage (hot/warm/cold)
@@ -38,7 +38,7 @@ src/
 ├── error.rs                       — miette + thiserror rich diagnostics
 ├── rule_macro.rs                  — rule macro predicates (Phase 9g): RuleMacro trait, registry, genls/relationAllExists/relationExistsAll
 ├── temporal.rs                    — temporal projection (Phase 9k): TemporalProfile, decay computation, registry
-├── provenance.rs                  — persistent explanation ledger (redb, multi-index, 39 derivation kinds)
+├── provenance.rs                  — persistent explanation ledger (redb, multi-index, 40 derivation kinds)
 ├── skolem.rs                      — Skolem functions (Phase 9h): existential witnesses, grounding, auto-ground
 ├── tms.rs                         — truth maintenance system (Phase 9c): support sets, retraction cascades
 ├── symbol.rs                      — SymbolId (NonZeroU64), SymbolKind, allocator
