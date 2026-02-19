@@ -18,6 +18,10 @@ pub enum GoalStatus {
     Completed,
     Failed { reason: String },
     Suspended,
+    /// Proposed by autonomous goal generation but not yet activated.
+    Proposed,
+    /// Dormant: low-priority or infeasible, kept for opportunity detection.
+    Dormant,
 }
 
 impl GoalStatus {
@@ -29,6 +33,8 @@ impl GoalStatus {
             Self::Completed => "completed".into(),
             Self::Failed { reason } => format!("failed:{reason}"),
             Self::Suspended => "suspended".into(),
+            Self::Proposed => "proposed".into(),
+            Self::Dormant => "dormant".into(),
         }
     }
 
@@ -44,6 +50,8 @@ impl GoalStatus {
                 "active" => Self::Active,
                 "completed" => Self::Completed,
                 "suspended" => Self::Suspended,
+                "proposed" => Self::Proposed,
+                "dormant" => Self::Dormant,
                 _ => Self::Pending,
             }
         }
@@ -58,8 +66,45 @@ impl std::fmt::Display for GoalStatus {
             Self::Completed => write!(f, "completed"),
             Self::Failed { reason } => write!(f, "failed: {reason}"),
             Self::Suspended => write!(f, "suspended"),
+            Self::Proposed => write!(f, "proposed"),
+            Self::Dormant => write!(f, "dormant"),
         }
     }
+}
+
+/// How a goal was generated (provenance for autonomous goals).
+#[derive(Debug, Clone)]
+pub enum GoalSource {
+    /// Generated from knowledge gap detection.
+    GapDetection {
+        gap_entity: SymbolId,
+        gap_kind: String,
+        severity: f32,
+    },
+    /// Generated from contradiction detection.
+    ContradictionDetected {
+        existing: Triple,
+        incoming: Triple,
+    },
+    /// Generated from opportunity detection (reactivating a dormant/failed goal).
+    OpportunityDetected {
+        reactivated_goal: SymbolId,
+        newly_satisfied: String,
+    },
+    /// Generated because a drive exceeded its threshold.
+    DriveExceeded {
+        drive: String,
+        strength: f32,
+    },
+    /// Generated because the OODA loop detected a decision impasse.
+    ImpasseDetected {
+        goal_id: SymbolId,
+        impasse_kind: String,
+    },
+    /// Generated from a reflection insight.
+    ReflectionInsight {
+        insight: String,
+    },
 }
 
 /// Default number of cycles without progress before a goal is considered stalled.
@@ -88,6 +133,8 @@ pub struct Goal {
     pub cycles_worked: u32,
     /// Last cycle where the goal made meaningful progress (Advanced or Completed).
     pub last_progress_cycle: u64,
+    /// How this goal was generated (None for externally-created goals).
+    pub source: Option<GoalSource>,
 }
 
 impl Goal {
@@ -145,6 +192,7 @@ pub fn create_goal(
         created_at: now,
         cycles_worked: 0,
         last_progress_cycle: 0,
+        source: None,
     })
 }
 
@@ -284,6 +332,7 @@ pub fn restore_goals(engine: &Engine, predicates: &AgentPredicates) -> AgentResu
             created_at: meta.created_at,
             cycles_worked: 0,
             last_progress_cycle: 0,
+            source: None,
         });
     }
 
@@ -359,6 +408,8 @@ mod tests {
                 reason: "timeout".into(),
             },
             GoalStatus::Suspended,
+            GoalStatus::Proposed,
+            GoalStatus::Dormant,
         ];
         for status in statuses {
             let label = status.as_label();
@@ -423,6 +474,7 @@ mod tests {
             created_at: 0,
             cycles_worked: 0,
             last_progress_cycle: 0,
+            source: None,
         }];
         clear_goals(&mut goals);
         assert!(goals.is_empty());
@@ -442,6 +494,7 @@ mod tests {
                 created_at: 0,
                 cycles_worked: 0,
                 last_progress_cycle: 0,
+                source: None,
             },
             Goal {
                 symbol_id: SymbolId::new(2).unwrap(),
@@ -454,6 +507,7 @@ mod tests {
                 created_at: 0,
                 cycles_worked: 0,
                 last_progress_cycle: 0,
+                source: None,
             },
             Goal {
                 symbol_id: SymbolId::new(3).unwrap(),
@@ -466,6 +520,7 @@ mod tests {
                 created_at: 0,
                 cycles_worked: 0,
                 last_progress_cycle: 0,
+                source: None,
             },
         ];
 

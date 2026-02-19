@@ -93,6 +93,34 @@ pub enum GoalProgress {
 }
 
 // ---------------------------------------------------------------------------
+// Impasse detection
+// ---------------------------------------------------------------------------
+
+/// A decision impasse: the agent couldn't choose a tool with confidence.
+#[derive(Debug, Clone)]
+pub struct DecisionImpasse {
+    /// Which goal was being targeted.
+    pub goal_id: SymbolId,
+    /// What kind of impasse occurred.
+    pub kind: ImpasseKind,
+    /// Best score among all candidates.
+    pub best_score: f32,
+}
+
+/// What kind of decision impasse occurred.
+#[derive(Debug, Clone)]
+pub enum ImpasseKind {
+    /// All tool candidates scored below the usability threshold.
+    AllBelowThreshold { threshold: f32 },
+    /// Top two candidates tied (within epsilon).
+    Tie {
+        tool_a: String,
+        tool_b: String,
+        epsilon: f32,
+    },
+}
+
+// ---------------------------------------------------------------------------
 // OODA cycle implementation
 // ---------------------------------------------------------------------------
 
@@ -256,7 +284,7 @@ fn decide(
     }
 
     // Rule-based strategy to select tool + build input.
-    let (tool_name, tool_input, reasoning) = select_tool(
+    let (tool_name, tool_input, reasoning, impasse) = select_tool(
         top_goal,
         observation,
         orientation,
@@ -265,6 +293,9 @@ fn decide(
         agent.psyche.as_ref(),
         &agent.tool_registry,
     );
+
+    // Store impasse on agent for goal generation to pick up.
+    agent.last_impasse = impasse;
 
     // Record decision in WM.
     let dec_content =
@@ -509,7 +540,7 @@ fn select_tool(
     working_memory: &WorkingMemory,
     psyche: Option<&crate::compartment::psyche::Psyche>,
     tool_registry: &super::tool::ToolRegistry,
-) -> (String, ToolInput, String) {
+) -> (String, ToolInput, String, Option<DecisionImpasse>) {
     let history = GoalToolHistory::from_working_memory(working_memory, goal.symbol_id);
     let episodic_tools = extract_episodic_tool_hints(&observation.recalled_episodes);
     let pressure = orientation.memory_pressure;
@@ -1094,6 +1125,9 @@ fn select_tool(
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
+    // Detect impasse before consuming candidates.
+    let impasse = detect_impasse(&candidates, goal.symbol_id);
+
     if let Some(best) = candidates.into_iter().next() {
         let score = best.total_score();
         let reasoning = format!(
@@ -1107,7 +1141,7 @@ fn select_tool(
             best.pressure_bonus,
             best.archetype_bonus,
         );
-        (best.name, best.input, reasoning)
+        (best.name, best.input, reasoning, impasse)
     } else {
         // Absolute fallback (no candidates at all — shouldn't happen).
         (
@@ -1116,8 +1150,54 @@ fn select_tool(
                 .with_param("symbol", &goal_label)
                 .with_param("direction", "both"),
             "No candidates scored — falling back to KG query.".into(),
+            impasse,
         )
     }
+}
+
+/// Detect whether the tool selection is in an impasse state.
+///
+/// Returns `Some(DecisionImpasse)` if:
+/// - All candidates scored below 0.15 (nothing seems useful)
+/// - Top two candidates are within 0.02 of each other (can't decide)
+fn detect_impasse(candidates: &[ToolCandidate], goal_id: SymbolId) -> Option<DecisionImpasse> {
+    if candidates.is_empty() {
+        return Some(DecisionImpasse {
+            goal_id,
+            kind: ImpasseKind::AllBelowThreshold { threshold: 0.15 },
+            best_score: 0.0,
+        });
+    }
+
+    let best_score = candidates[0].total_score();
+
+    // All below usability threshold.
+    if best_score < 0.15 {
+        return Some(DecisionImpasse {
+            goal_id,
+            kind: ImpasseKind::AllBelowThreshold { threshold: 0.15 },
+            best_score,
+        });
+    }
+
+    // Top two tied (within epsilon).
+    if candidates.len() >= 2 {
+        let second_score = candidates[1].total_score();
+        let epsilon = 0.02;
+        if (best_score - second_score).abs() < epsilon {
+            return Some(DecisionImpasse {
+                goal_id,
+                kind: ImpasseKind::Tie {
+                    tool_a: candidates[0].name.clone(),
+                    tool_b: candidates[1].name.clone(),
+                    epsilon,
+                },
+                best_score,
+            });
+        }
+    }
+
+    None
 }
 
 /// Act: execute the selected tool and update goal status.
@@ -1792,5 +1872,50 @@ fn evaluate_goal_progress_keyword_fallback(
         }
     } else {
         GoalProgress::NoChange
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::tool::ToolInput;
+
+    fn make_candidate(name: &str, base_score: f32) -> ToolCandidate {
+        ToolCandidate::new(name, ToolInput::new(), base_score, "test".into())
+    }
+
+    #[test]
+    fn detect_impasse_none_for_clear_winner() {
+        let candidates = vec![make_candidate("kg_query", 0.8), make_candidate("reason", 0.3)];
+        let impasse = detect_impasse(&candidates, SymbolId::new(1).unwrap());
+        assert!(impasse.is_none());
+    }
+
+    #[test]
+    fn detect_impasse_all_below_threshold() {
+        let candidates = vec![make_candidate("kg_query", 0.10), make_candidate("reason", 0.05)];
+        let impasse = detect_impasse(&candidates, SymbolId::new(1).unwrap());
+        assert!(impasse.is_some());
+        let imp = impasse.unwrap();
+        assert!(matches!(imp.kind, ImpasseKind::AllBelowThreshold { .. }));
+    }
+
+    #[test]
+    fn detect_impasse_tie() {
+        let candidates = vec![
+            make_candidate("kg_query", 0.50),
+            make_candidate("reason", 0.495),
+        ];
+        let impasse = detect_impasse(&candidates, SymbolId::new(1).unwrap());
+        assert!(impasse.is_some());
+        let imp = impasse.unwrap();
+        assert!(matches!(imp.kind, ImpasseKind::Tie { .. }));
+    }
+
+    #[test]
+    fn detect_impasse_empty_candidates() {
+        let candidates: Vec<ToolCandidate> = Vec::new();
+        let impasse = detect_impasse(&candidates, SymbolId::new(1).unwrap());
+        assert!(impasse.is_some());
     }
 }

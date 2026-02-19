@@ -1,8 +1,8 @@
 # Phase 11 — Autonomous Task System with Self-Goal Setting
 
 - **Date**: 2026-02-17
-- **Updated**: 2026-02-17 (expanded to 8 sub-phases after deep research into cognitive architectures, intrinsic motivation, and metareasoning)
-- **Status**: Planned
+- **Updated**: 2026-02-19 (Phase 11a complete)
+- **Status**: In Progress (11a complete)
 - **Depends on**: Phase 9 (microtheories, TMS, argumentation for reasoning quality), Phase 10 (code generation for implementation tasks)
 
 ## Goal
@@ -97,14 +97,17 @@ Drive { kind: DriveKind, strength: f32, last_computed: u64 }
 ```
 
 **Changes**:
-- [ ] New file: `src/agent/goal_generation.rs` — GoalProposal, GoalSource, three-phase pipeline
-- [ ] New file: `src/agent/drives.rs` — DriveSystem, Drive, DriveKind, strength computation
-- [ ] `src/agent/goal.rs` — add `Proposed` and `Dormant` status variants, `GoalJustification` enum
-- [ ] `src/agent/ooda.rs` — goal generation phase after Act (configurable frequency), impasse detection in Decide
-- [ ] `src/agent/reflect.rs` — reflection produces `GoalProposal`s alongside `Adjustment`s
-- [ ] Integration with gap_analysis, contradiction detection (9l), TMS (9c)
+- [x] New file: `src/agent/goal_generation.rs` — GoalProposal, GoalSource, three-phase pipeline, 12 unit tests
+- [x] New file: `src/agent/drives.rs` — DriveSystem, Drive, DriveKind, strength computation, 8 unit tests
+- [x] `src/agent/goal.rs` — add `Proposed` and `Dormant` status variants, `GoalSource` enum, `source` field on Goal
+- [x] `src/agent/ooda.rs` — `DecisionImpasse`/`ImpasseKind` types, `detect_impasse()` function, integrated into `select_tool()`, 4 unit tests
+- [x] `src/agent/reflect.rs` — `goal_proposals` field on `ReflectionResult`, `generate_reflection_proposals()` for stagnant goals/ineffective tools/high memory pressure, 3 unit tests
+- [x] `src/agent/agent.rs` — `GoalGenerationConfig` in `AgentConfig`, `DriveSystem`/`last_impasse` fields, `generate_goals()` method, integrated into `run_cycle()`, drive persistence in `persist_session()`/`resume()`
+- [x] `src/provenance.rs` — `AutonomousGoalGeneration { drive, strength }` variant (tag 40)
+- [x] `src/main.rs` — `format_derivation_kind()` arm for `AutonomousGoalGeneration`
+- [x] Integration with gap_analysis, contradiction detection (9l)
 
-**Estimated scope**: ~800–1100 lines
+**Actual scope**: ~800 lines, 27 new tests (total: 856)
 
 ---
 

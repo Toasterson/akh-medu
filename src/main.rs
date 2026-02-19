@@ -4008,5 +4008,8 @@ fn format_derivation_kind(kind: &DerivationKind, engine: &Engine) -> String {
                 "Library learning: pattern \"{pattern_name}\" ({occurrences} occurrences, compression {compression:.1})"
             )
         }
+        DerivationKind::AutonomousGoalGeneration { drive, strength } => {
+            format!("Autonomous goal generation: drive \"{drive}\" (strength {strength:.2})")
+        }
     }
 }

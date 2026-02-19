@@ -13,8 +13,10 @@ pub mod chat;
 pub mod cli_tool;
 #[cfg(feature = "daemon")]
 pub mod daemon;
+pub mod drives;
 pub mod error;
 pub mod goal;
+pub mod goal_generation;
 pub mod idle;
 pub mod library_learn;
 pub mod memory;
@@ -37,8 +39,10 @@ pub use agent::{Agent, AgentConfig, AgentPredicates};
 pub use chat::{Conversation, Participant, ParticipantSource, discover_ssh_fingerprint};
 #[cfg(feature = "daemon")]
 pub use daemon::{AgentDaemon, DaemonConfig};
+pub use drives::{DriveKind, DriveSystem};
 pub use error::{AgentError, AgentResult};
-pub use goal::{Goal, GoalStatus};
+pub use goal::{Goal, GoalSource, GoalStatus};
+pub use goal_generation::{GoalGenerationConfig, GoalGenerationResult, GoalProposal};
 pub use idle::{IdleScheduler, IdleTaskResult};
 pub use library_learn::{LibraryLearner, LibraryLearningResult};
 pub use memory::{
@@ -46,7 +50,10 @@ pub use memory::{
     WorkingMemoryKind,
 };
 pub use nlp::{QuestionWord, UserIntent, classify_intent};
-pub use ooda::{ActionResult, Decision, GoalProgress, Observation, OodaCycleResult, Orientation};
+pub use ooda::{
+    ActionResult, Decision, DecisionImpasse, GoalProgress, ImpasseKind, Observation,
+    OodaCycleResult, Orientation,
+};
 pub use plan::{Plan, PlanStatus, PlanStep, StepStatus};
 pub use reflect::{Adjustment, ReflectionConfig, ReflectionResult};
 pub use semantic_enrichment::{EnrichmentResult, SemanticPredicates};

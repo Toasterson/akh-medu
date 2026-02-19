@@ -11,13 +11,15 @@ use crate::symbol::SymbolId;
 // Re-used for session persistence serialization.
 use bincode;
 
+use super::drives::DriveSystem;
 use super::error::{AgentError, AgentResult};
 use super::goal::{self, DEFAULT_STALL_THRESHOLD, Goal, GoalStatus};
+use super::goal_generation::{self, GoalGenerationConfig, GoalGenerationResult};
 use super::memory::{
     ConsolidationConfig, ConsolidationResult, EpisodicEntry, WorkingMemory, WorkingMemoryEntry,
     WorkingMemoryKind, consolidate, recall_episodes,
 };
-use super::ooda::{self, OodaCycleResult};
+use super::ooda::{self, DecisionImpasse, OodaCycleResult};
 use super::plan::{self, Plan, PlanStatus};
 use super::reflect::{self, Adjustment, ReflectionConfig, ReflectionResult};
 use super::tool::{ToolRegistry, ToolSignature};
@@ -42,6 +44,8 @@ pub struct AgentConfig {
     pub reflection: ReflectionConfig,
     /// Maximum backtrack attempts per goal before giving up (default: 3).
     pub max_backtrack_attempts: u32,
+    /// Autonomous goal generation settings.
+    pub goal_generation: GoalGenerationConfig,
 }
 
 impl Default for AgentConfig {
@@ -53,6 +57,7 @@ impl Default for AgentConfig {
             auto_consolidate: true,
             reflection: ReflectionConfig::default(),
             max_backtrack_attempts: 3,
+            goal_generation: GoalGenerationConfig::default(),
         }
     }
 }
@@ -82,7 +87,7 @@ pub struct AgentPredicates {
 
 impl AgentPredicates {
     /// Resolve or create all well-known predicates in the engine.
-    fn init(engine: &Engine) -> AgentResult<Self> {
+    pub(crate) fn init(engine: &Engine) -> AgentResult<Self> {
         Ok(Self {
             has_status: engine.resolve_or_create_relation("agent:has_status")?,
             has_priority: engine.resolve_or_create_relation("agent:has_priority")?,
@@ -123,6 +128,10 @@ pub struct Agent {
     pub(crate) sink: Arc<dyn crate::message::MessageSink>,
     /// Optional Jungian psyche (loaded from the psyche compartment).
     pub(crate) psyche: Option<crate::compartment::psyche::Psyche>,
+    /// Motivational drive system for autonomous goal generation.
+    pub(crate) drives: DriveSystem,
+    /// Most recent decision impasse (consumed by goal generation).
+    pub(crate) last_impasse: Option<DecisionImpasse>,
     /// Optional WASM tool runtime (only when `wasm-tools` feature is enabled).
     #[cfg(feature = "wasm-tools")]
     pub(crate) wasm_runtime: Option<super::wasm_runtime::WasmToolRuntime>,
@@ -298,6 +307,8 @@ impl Agent {
         // Load psyche from compartment manager if available.
         let psyche = engine.compartments().and_then(|cm| cm.psyche());
 
+        let drives = DriveSystem::with_thresholds(config.goal_generation.drive_thresholds);
+
         let mut agent = Self {
             engine,
             config,
@@ -310,6 +321,8 @@ impl Agent {
             last_reflection: None,
             sink: Arc::new(crate::message::StdoutSink),
             psyche,
+            drives,
+            last_impasse: None,
             #[cfg(feature = "wasm-tools")]
             wasm_runtime: super::wasm_runtime::WasmToolRuntime::new().ok(),
         };
@@ -403,6 +416,12 @@ impl Agent {
         let library_learn_interval = reflect_interval.saturating_mul(4).max(1);
         if library_learn_interval > 0 && self.cycle_count % library_learn_interval == 0 {
             let _ = self.run_library_learning();
+        }
+
+        // Periodic autonomous goal generation.
+        let gen_interval = self.config.goal_generation.generate_every_n_cycles;
+        if gen_interval > 0 && self.cycle_count % gen_interval == 0 {
+            let _ = self.generate_goals();
         }
 
         // Auto-decompose stalled goals.
@@ -839,6 +858,106 @@ impl Agent {
     }
 
     // -----------------------------------------------------------------------
+    // Autonomous goal generation
+    // -----------------------------------------------------------------------
+
+    /// Run the autonomous goal generation pipeline.
+    ///
+    /// Updates drives from current engine/WM state, collects signals from
+    /// multiple sources, deduplicates, and activates the top proposals.
+    pub fn generate_goals(&mut self) -> AgentResult<GoalGenerationResult> {
+        let goal_symbols: Vec<SymbolId> = goal::active_goals(&self.goals)
+            .iter()
+            .map(|g| g.symbol_id)
+            .collect();
+
+        // Update drive strengths.
+        self.drives.update(
+            &self.engine,
+            &self.working_memory,
+            &goal_symbols,
+            self.cycle_count,
+        );
+
+        // Run the three-phase pipeline.
+        let gen_result = goal_generation::generate_goals(
+            &self.engine,
+            &self.goals,
+            &self.working_memory,
+            &self.drives,
+            &self.config.goal_generation,
+            &self.predicates,
+            self.cycle_count,
+            self.last_impasse.as_ref(),
+            self.last_reflection.as_ref(),
+        )?;
+
+        // Activate generated goals by creating them in the goals list.
+        for proposal in &gen_result.activated {
+            let mut g = goal::create_goal(
+                &self.engine,
+                &proposal.description,
+                proposal.priority_suggestion,
+                &proposal.success_criteria,
+                &self.predicates,
+            )?;
+            g.source = Some(proposal.source.clone());
+            self.goals.push(g);
+        }
+
+        // Store dormant proposals as goals with Dormant status.
+        for proposal in &gen_result.dormant {
+            let mut g = goal::create_goal(
+                &self.engine,
+                &proposal.description,
+                proposal.priority_suggestion,
+                &proposal.success_criteria,
+                &self.predicates,
+            )?;
+            g.source = Some(proposal.source.clone());
+            goal::update_goal_status(
+                &self.engine,
+                &mut g,
+                GoalStatus::Dormant,
+                &self.predicates,
+            )?;
+            self.goals.push(g);
+        }
+
+        // Log generation result to WM.
+        let _ = self.working_memory.push(WorkingMemoryEntry {
+            id: 0,
+            content: format!(
+                "Goal generation: {} activated, {} dormant, {} deduplicated, {} infeasible. Drives: curiosity={:.2} coherence={:.2} completeness={:.2} efficiency={:.2}",
+                gen_result.activated.len(),
+                gen_result.dormant.len(),
+                gen_result.deduplicated,
+                gen_result.infeasible,
+                gen_result.drive_strengths[0],
+                gen_result.drive_strengths[1],
+                gen_result.drive_strengths[2],
+                gen_result.drive_strengths[3],
+            ),
+            symbols: vec![],
+            kind: WorkingMemoryKind::Inference,
+            timestamp: 0,
+            relevance: 0.8,
+            source_cycle: self.cycle_count,
+            reference_count: 0,
+        });
+
+        // Clear impasse after it's been consumed.
+        self.last_impasse = None;
+
+        Ok(gen_result)
+    }
+
+    /// Get the current drive system state.
+    pub fn drives(&self) -> &DriveSystem {
+        &self.drives
+    }
+
+    // -----------------------------------------------------------------------
     // Session persistence
     // -----------------------------------------------------------------------
 
@@ -877,6 +996,17 @@ impl Agent {
             .put_meta(b"agent:cycle_count", &cycle_bytes)
             .map_err(|e| AgentError::ConsolidationFailed {
                 message: format!("failed to persist cycle count: {e}"),
+            })?;
+
+        // Persist drive system.
+        let drive_bytes =
+            bincode::serialize(&self.drives).map_err(|e| AgentError::ConsolidationFailed {
+                message: format!("failed to serialize drive system: {e}"),
+            })?;
+        store
+            .put_meta(b"agent:drive_system", &drive_bytes)
+            .map_err(|e| AgentError::ConsolidationFailed {
+                message: format!("failed to persist drive system: {e}"),
             })?;
 
         // Persist psyche if loaded.
@@ -947,6 +1077,14 @@ impl Agent {
             })
             .or_else(|| engine.compartments().and_then(|cm| cm.psyche()));
 
+        // Restore drive system: prefer persisted state, fall back to config defaults.
+        let drives = store
+            .get_meta(b"agent:drive_system")
+            .ok()
+            .flatten()
+            .and_then(|bytes| bincode::deserialize::<DriveSystem>(&bytes).ok())
+            .unwrap_or_else(|| DriveSystem::with_thresholds(config.goal_generation.drive_thresholds));
+
         let mut agent = Self {
             engine,
             config,
@@ -959,6 +1097,8 @@ impl Agent {
             last_reflection: None,
             sink: Arc::new(crate::message::StdoutSink),
             psyche,
+            drives,
+            last_impasse: None,
             #[cfg(feature = "wasm-tools")]
             wasm_runtime: super::wasm_runtime::WasmToolRuntime::new().ok(),
         };
@@ -990,6 +1130,7 @@ impl std::fmt::Debug for Agent {
             .field("active_plans", &self.plans.len())
             .field("has_reflection", &self.last_reflection.is_some())
             .field("has_psyche", &self.psyche.is_some())
+            .field("has_impasse", &self.last_impasse.is_some())
             .finish()
     }
 }

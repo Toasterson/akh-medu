@@ -229,6 +229,11 @@ pub enum DerivationKind {
         occurrences: u32,
         compression: f64,
     },
+
+    // --- Phase 11: Autonomous Task System -------------------------------------
+
+    /// A goal was autonomously generated from drive observation (Phase 11a).
+    AutonomousGoalGeneration { drive: String, strength: f32 },
 }
 
 impl DerivationKind {
@@ -275,6 +280,7 @@ impl DerivationKind {
             Self::CodeGenerated { .. } => 37,
             Self::CodeRefinement { .. } => 38,
             Self::LibraryLearning { .. } => 39,
+            Self::AutonomousGoalGeneration { .. } => 40,
         }
     }
 }
