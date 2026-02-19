@@ -887,6 +887,7 @@ mod tests {
             cycles_worked: 0,
             last_progress_cycle: 0,
             source: None,
+            blocked_by: Vec::new(),
         }
     }
 

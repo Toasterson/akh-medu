@@ -13,6 +13,7 @@ pub mod chat;
 pub mod cli_tool;
 #[cfg(feature = "daemon")]
 pub mod daemon;
+pub mod decomposition;
 pub mod drives;
 pub mod error;
 pub mod goal;
@@ -39,6 +40,10 @@ pub use agent::{Agent, AgentConfig, AgentPredicates};
 pub use chat::{Conversation, Participant, ParticipantSource, discover_ssh_fingerprint};
 #[cfg(feature = "daemon")]
 pub use daemon::{AgentDaemon, DaemonConfig};
+pub use decomposition::{
+    DecompositionMethod, DecompositionOutput, DecompositionStrategy, DependencyEdge, MethodRegistry,
+    TaskNode, TaskNodeKind, TaskTree,
+};
 pub use drives::{DriveKind, DriveSystem};
 pub use error::{AgentError, AgentResult};
 pub use goal::{Goal, GoalSource, GoalStatus};

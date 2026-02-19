@@ -10,7 +10,7 @@
 use crate::autonomous::gap::GapKind;
 use crate::engine::Engine;
 use crate::graph::Triple;
-use crate::provenance::{DerivationKind, ProvenanceRecord};
+use crate::provenance::DerivationKind;
 use crate::symbol::SymbolId;
 use crate::vsa::grounding::encode_text_as_vector;
 
@@ -108,11 +108,11 @@ pub struct GoalGenerationResult {
 pub fn generate_goals(
     engine: &Engine,
     goals: &[Goal],
-    working_memory: &WorkingMemory,
+    _working_memory: &WorkingMemory,
     drives: &DriveSystem,
     config: &GoalGenerationConfig,
-    predicates: &AgentPredicates,
-    cycle: u64,
+    _predicates: &AgentPredicates,
+    _cycle: u64,
     impasse: Option<&DecisionImpasse>,
     reflection: Option<&ReflectionResult>,
 ) -> AgentResult<GoalGenerationResult> {
@@ -126,9 +126,8 @@ pub fn generate_goals(
     // Phase 2: Deliberation.
     let (kept, deduplicated, infeasible) = deliberate(engine, &mut proposals, goals, config);
 
-    // Phase 3: Activation.
-    let (activated_proposals, dormant_proposals) =
-        activate_proposals(engine, kept, config, predicates, cycle)?;
+    // Phase 3: Activation (pure partitioning — no KG side effects).
+    let (activated_proposals, dormant_proposals) = activate_proposals(kept, config);
 
     let drive_strengths = [
         drives.strength(DriveKind::Curiosity),
@@ -583,73 +582,39 @@ fn assess_feasibility(proposal: &GoalProposal, engine: &Engine) -> f32 {
 // Phase 3: Activation
 // ---------------------------------------------------------------------------
 
-/// Activate top proposals as real goals, store remainder as dormant.
+/// Partition proposals into activated (top N) and dormant (remainder).
+///
+/// This is a pure partitioning function — it does **not** create goals in the KG.
+/// The caller (`Agent::generate_goals`) is responsible for creating KG entities
+/// and recording provenance.
 fn activate_proposals(
-    engine: &Engine,
     proposals: Vec<GoalProposal>,
     config: &GoalGenerationConfig,
-    predicates: &AgentPredicates,
-    cycle: u64,
-) -> AgentResult<(Vec<GoalProposal>, Vec<GoalProposal>)> {
+) -> (Vec<GoalProposal>, Vec<GoalProposal>) {
     let mut activated = Vec::new();
     let mut dormant = Vec::new();
 
     for (i, proposal) in proposals.into_iter().enumerate() {
         if i < config.max_activations {
-            // Create as active goal.
-            let mut new_goal = goal::create_goal(
-                engine,
-                &proposal.description,
-                proposal.priority_suggestion,
-                &proposal.success_criteria,
-                predicates,
-            )?;
-
-            new_goal.source = Some(proposal.source.clone());
-
-            // Record provenance.
-            let (drive_name, drive_strength) = match &proposal.source {
-                GoalSource::DriveExceeded { drive, strength } => {
-                    (drive.clone(), *strength)
-                }
-                GoalSource::GapDetection { severity, .. } => {
-                    ("completeness".to_string(), *severity)
-                }
-                GoalSource::ContradictionDetected { .. } => {
-                    ("coherence".to_string(), 0.8)
-                }
-                GoalSource::OpportunityDetected { .. } => {
-                    ("opportunity".to_string(), 0.7)
-                }
-                GoalSource::ImpasseDetected { .. } => {
-                    ("impasse".to_string(), 0.6)
-                }
-                GoalSource::ReflectionInsight { .. } => {
-                    ("reflection".to_string(), 0.5)
-                }
-            };
-
-            let mut prov = ProvenanceRecord::new(
-                new_goal.symbol_id,
-                DerivationKind::AutonomousGoalGeneration {
-                    drive: drive_name,
-                    strength: drive_strength,
-                },
-            )
-            .with_confidence(proposal.feasibility);
-            let _ = engine.store_provenance(&mut prov);
-
-            // Log the activation cycle.
-            let _ = new_goal.created_at;
-            let _cycle = cycle; // Available for WM logging by caller.
-
             activated.push(proposal);
         } else if dormant.len() < config.max_dormant {
             dormant.push(proposal);
         }
     }
 
-    Ok((activated, dormant))
+    (activated, dormant)
+}
+
+/// Extract provenance drive name and strength from a [`GoalSource`].
+pub fn provenance_from_source(source: &GoalSource) -> (String, f32) {
+    match source {
+        GoalSource::DriveExceeded { drive, strength } => (drive.clone(), *strength),
+        GoalSource::GapDetection { severity, .. } => ("completeness".to_string(), *severity),
+        GoalSource::ContradictionDetected { .. } => ("coherence".to_string(), 0.8),
+        GoalSource::OpportunityDetected { .. } => ("opportunity".to_string(), 0.7),
+        GoalSource::ImpasseDetected { .. } => ("impasse".to_string(), 0.6),
+        GoalSource::ReflectionInsight { .. } => ("reflection".to_string(), 0.5),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -754,6 +719,7 @@ mod tests {
             cycles_worked: 0,
             last_progress_cycle: 0,
             source: None,
+            blocked_by: Vec::new(),
         }];
 
         // Active goals are not candidates for opportunity detection.
@@ -894,16 +860,6 @@ mod tests {
 
     #[test]
     fn activation_respects_max_activations() {
-        use crate::engine::{Engine, EngineConfig};
-        use crate::vsa::Dimension;
-
-        let engine = Engine::new(EngineConfig {
-            dimension: Dimension(1000),
-            ..EngineConfig::default()
-        })
-        .unwrap();
-
-        let predicates = crate::agent::agent::AgentPredicates::init(&engine).unwrap();
         let mut config = GoalGenerationConfig::default();
         config.max_activations = 1;
 
@@ -934,8 +890,7 @@ mod tests {
             },
         ];
 
-        let (activated, dormant) =
-            activate_proposals(&engine, proposals, &config, &predicates, 10).unwrap();
+        let (activated, dormant) = activate_proposals(proposals, &config);
         assert_eq!(activated.len(), 1);
         assert_eq!(dormant.len(), 1);
     }

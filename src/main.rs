@@ -4011,5 +4011,14 @@ fn format_derivation_kind(kind: &DerivationKind, engine: &Engine) -> String {
         DerivationKind::AutonomousGoalGeneration { drive, strength } => {
             format!("Autonomous goal generation: drive \"{drive}\" (strength {strength:.2})")
         }
+        DerivationKind::HtnDecomposition {
+            method_name,
+            strategy,
+            subtask_count,
+        } => {
+            format!(
+                "HTN decomposition: method \"{method_name}\" (strategy: {strategy}, {subtask_count} subtasks)"
+            )
+        }
     }
 }

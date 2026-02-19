@@ -272,9 +272,13 @@ fn decide(
     orientation: &Orientation,
     cycle: u64,
 ) -> AgentResult<Decision> {
-    // Get the top-priority active goal.
+    // Get the top-priority active goal, skipping any that are blocked.
     let active = goal::active_goals(&agent.goals);
-    let top_goal = active.first().ok_or(AgentError::NoGoals)?;
+    let top_goal = active
+        .iter()
+        .find(|g| !g.is_blocked(&agent.goals))
+        .or(active.first())
+        .ok_or(AgentError::NoGoals)?;
     let goal_id = top_goal.symbol_id;
     let goal_desc = &top_goal.description;
 

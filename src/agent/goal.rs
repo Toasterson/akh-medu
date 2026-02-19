@@ -135,6 +135,8 @@ pub struct Goal {
     pub last_progress_cycle: u64,
     /// How this goal was generated (None for externally-created goals).
     pub source: Option<GoalSource>,
+    /// Goals that must complete before this goal can be worked on (HTN dependencies).
+    pub blocked_by: Vec<SymbolId>,
 }
 
 impl Goal {
@@ -143,6 +145,22 @@ impl Goal {
     pub fn is_stalled(&self, current_cycle: u64, threshold: u32) -> bool {
         self.cycles_worked >= threshold
             && current_cycle.saturating_sub(self.last_progress_cycle) >= threshold as u64
+    }
+
+    /// Whether this goal is blocked by uncompleted dependencies.
+    ///
+    /// A goal is blocked if any of its `blocked_by` entries refer to goals
+    /// that are not yet `Completed` or `Failed`.
+    pub fn is_blocked(&self, all_goals: &[Goal]) -> bool {
+        if self.blocked_by.is_empty() {
+            return false;
+        }
+        self.blocked_by.iter().any(|blocker_id| {
+            all_goals
+                .iter()
+                .find(|g| g.symbol_id == *blocker_id)
+                .is_some_and(|g| !matches!(g.status, GoalStatus::Completed | GoalStatus::Failed { .. }))
+        })
     }
 }
 
@@ -193,6 +211,7 @@ pub fn create_goal(
         cycles_worked: 0,
         last_progress_cycle: 0,
         source: None,
+        blocked_by: Vec::new(),
     })
 }
 
@@ -294,6 +313,7 @@ pub fn restore_goals(engine: &Engine, predicates: &AgentPredicates) -> AgentResu
         let mut criteria = String::new();
         let mut parent = None;
         let mut children = Vec::new();
+        let mut blocked_by = Vec::new();
 
         for triple in &triples {
             let obj_label = engine.resolve_label(triple.object);
@@ -318,6 +338,8 @@ pub fn restore_goals(engine: &Engine, predicates: &AgentPredicates) -> AgentResu
                 children.push(triple.object);
             } else if triple.predicate == predicates.parent_goal {
                 parent = Some(triple.object);
+            } else if triple.predicate == predicates.blocked_by {
+                blocked_by.push(triple.object);
             }
         }
 
@@ -333,6 +355,7 @@ pub fn restore_goals(engine: &Engine, predicates: &AgentPredicates) -> AgentResu
             cycles_worked: 0,
             last_progress_cycle: 0,
             source: None,
+            blocked_by,
         });
     }
 
@@ -475,6 +498,7 @@ mod tests {
             cycles_worked: 0,
             last_progress_cycle: 0,
             source: None,
+            blocked_by: Vec::new(),
         }];
         clear_goals(&mut goals);
         assert!(goals.is_empty());
@@ -495,6 +519,7 @@ mod tests {
                 cycles_worked: 0,
                 last_progress_cycle: 0,
                 source: None,
+                blocked_by: Vec::new(),
             },
             Goal {
                 symbol_id: SymbolId::new(2).unwrap(),
@@ -508,6 +533,7 @@ mod tests {
                 cycles_worked: 0,
                 last_progress_cycle: 0,
                 source: None,
+                blocked_by: Vec::new(),
             },
             Goal {
                 symbol_id: SymbolId::new(3).unwrap(),
@@ -521,6 +547,7 @@ mod tests {
                 cycles_worked: 0,
                 last_progress_cycle: 0,
                 source: None,
+                blocked_by: Vec::new(),
             },
         ];
 
@@ -528,5 +555,101 @@ mod tests {
         assert_eq!(active.len(), 2);
         assert_eq!(active[0].priority, 200);
         assert_eq!(active[1].priority, 10);
+    }
+
+    #[test]
+    fn is_blocked_with_active_blocker() {
+        let goals = vec![
+            Goal {
+                symbol_id: SymbolId::new(1).unwrap(),
+                description: "blocker".into(),
+                status: GoalStatus::Active,
+                priority: 200,
+                success_criteria: String::new(),
+                parent: None,
+                children: Vec::new(),
+                created_at: 0,
+                cycles_worked: 0,
+                last_progress_cycle: 0,
+                source: None,
+                blocked_by: Vec::new(),
+            },
+            Goal {
+                symbol_id: SymbolId::new(2).unwrap(),
+                description: "blocked".into(),
+                status: GoalStatus::Active,
+                priority: 100,
+                success_criteria: String::new(),
+                parent: None,
+                children: Vec::new(),
+                created_at: 0,
+                cycles_worked: 0,
+                last_progress_cycle: 0,
+                source: None,
+                blocked_by: vec![SymbolId::new(1).unwrap()],
+            },
+        ];
+
+        // Goal 2 is blocked because goal 1 is still Active.
+        assert!(goals[1].is_blocked(&goals));
+        // Goal 1 is not blocked.
+        assert!(!goals[0].is_blocked(&goals));
+    }
+
+    #[test]
+    fn is_blocked_cleared_when_blocker_completed() {
+        let goals = vec![
+            Goal {
+                symbol_id: SymbolId::new(1).unwrap(),
+                description: "blocker".into(),
+                status: GoalStatus::Completed,
+                priority: 200,
+                success_criteria: String::new(),
+                parent: None,
+                children: Vec::new(),
+                created_at: 0,
+                cycles_worked: 0,
+                last_progress_cycle: 0,
+                source: None,
+                blocked_by: Vec::new(),
+            },
+            Goal {
+                symbol_id: SymbolId::new(2).unwrap(),
+                description: "blocked".into(),
+                status: GoalStatus::Active,
+                priority: 100,
+                success_criteria: String::new(),
+                parent: None,
+                children: Vec::new(),
+                created_at: 0,
+                cycles_worked: 0,
+                last_progress_cycle: 0,
+                source: None,
+                blocked_by: vec![SymbolId::new(1).unwrap()],
+            },
+        ];
+
+        // Goal 2 is NOT blocked because goal 1 is Completed.
+        assert!(!goals[1].is_blocked(&goals));
+    }
+
+    #[test]
+    fn is_blocked_empty_blocked_by() {
+        let goals = vec![Goal {
+            symbol_id: SymbolId::new(1).unwrap(),
+            description: "free".into(),
+            status: GoalStatus::Active,
+            priority: 128,
+            success_criteria: String::new(),
+            parent: None,
+            children: Vec::new(),
+            created_at: 0,
+            cycles_worked: 0,
+            last_progress_cycle: 0,
+            source: None,
+            blocked_by: Vec::new(),
+        }];
+
+        assert!(!goals[0].is_blocked(&goals));
     }
 }

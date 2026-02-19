@@ -6,11 +6,13 @@
 use std::sync::Arc;
 
 use crate::engine::Engine;
+use crate::provenance::{DerivationKind, ProvenanceRecord};
 use crate::symbol::SymbolId;
 
 // Re-used for session persistence serialization.
 use bincode;
 
+use super::decomposition::{self, DecompositionOutput, MethodRegistry, MethodStats};
 use super::drives::DriveSystem;
 use super::error::{AgentError, AgentResult};
 use super::goal::{self, DEFAULT_STALL_THRESHOLD, Goal, GoalStatus};
@@ -83,6 +85,8 @@ pub struct AgentPredicates {
     pub consolidation_reason: SymbolId,
     pub from_cycle: SymbolId,
     pub memory_type: SymbolId,
+    /// HTN dependency: the object goal must complete before the subject goal.
+    pub blocked_by: SymbolId,
 }
 
 impl AgentPredicates {
@@ -102,6 +106,7 @@ impl AgentPredicates {
                 .resolve_or_create_relation("agent:consolidation_reason")?,
             from_cycle: engine.resolve_or_create_relation("agent:from_cycle")?,
             memory_type: engine.resolve_or_create_relation("agent:memory_type")?,
+            blocked_by: engine.resolve_or_create_relation("agent:blocked_by")?,
         })
     }
 }
@@ -130,6 +135,8 @@ pub struct Agent {
     pub(crate) psyche: Option<crate::compartment::psyche::Psyche>,
     /// Motivational drive system for autonomous goal generation.
     pub(crate) drives: DriveSystem,
+    /// HTN decomposition method registry.
+    pub(crate) method_registry_htn: MethodRegistry,
     /// Most recent decision impasse (consumed by goal generation).
     pub(crate) last_impasse: Option<DecisionImpasse>,
     /// Optional WASM tool runtime (only when `wasm-tools` feature is enabled).
@@ -309,6 +316,9 @@ impl Agent {
 
         let drives = DriveSystem::with_thresholds(config.goal_generation.drive_thresholds);
 
+        let mut htn_registry = MethodRegistry::new();
+        decomposition::register_builtin_methods(&mut htn_registry);
+
         let mut agent = Self {
             engine,
             config,
@@ -322,6 +332,7 @@ impl Agent {
             sink: Arc::new(crate::message::StdoutSink),
             psyche,
             drives,
+            method_registry_htn: htn_registry,
             last_impasse: None,
             #[cfg(feature = "wasm-tools")]
             wasm_runtime: super::wasm_runtime::WasmToolRuntime::new().ok(),
@@ -630,12 +641,14 @@ impl Agent {
         }
     }
 
-    /// Decompose a stalled goal into sub-goals.
+    /// Decompose a stalled goal into sub-goals using HTN methods.
     ///
-    /// Suspends the parent goal and creates active child goals derived from
-    /// the parent's description. Returns the new sub-goal symbol IDs.
+    /// Selects the best decomposition method from the registry, instantiates it
+    /// to produce a TaskTree DAG, creates child goals with `blocked_by` relations,
+    /// suspends the parent, and records `HtnDecomposition` provenance. Falls back
+    /// to comma/and splitting if no HTN method matches.
     pub fn decompose_stalled_goal(&mut self, goal_id: SymbolId) -> AgentResult<Vec<SymbolId>> {
-        let (description, parent_idx) = {
+        let (goal_clone, parent_idx) = {
             let (idx, goal) = self
                 .goals
                 .iter()
@@ -644,11 +657,15 @@ impl Agent {
                 .ok_or(AgentError::GoalNotFound {
                     goal_id: goal_id.get(),
                 })?;
-            (goal.description.clone(), idx)
+            (goal.clone(), idx)
         };
 
-        let sub_descs = goal::generate_sub_goal_descriptions(&description);
-        let sub_tuples: Vec<(&str, u8, &str)> = sub_descs
+        // HTN decomposition: select method, build DAG, extract sub-goals + deps.
+        let output: DecompositionOutput =
+            decomposition::decompose_goal_htn(&goal_clone, &self.engine, &self.method_registry_htn);
+
+        let sub_tuples: Vec<(&str, u8, &str)> = output
+            .sub_goals
             .iter()
             .map(|(d, p, c)| (d.as_str(), *p, c.as_str()))
             .collect();
@@ -658,6 +675,21 @@ impl Agent {
 
         let child_ids: Vec<SymbolId> = children.iter().map(|c| c.symbol_id).collect();
 
+        // Apply dependency edges: set `blocked_by` on child goals.
+        for &(blocker_idx, blocked_idx) in &output.dependencies {
+            if blocker_idx < child_ids.len() && blocked_idx < child_ids.len() {
+                let blocker_id = child_ids[blocker_idx];
+                let blocked_id = child_ids[blocked_idx];
+
+                // Persist in KG.
+                let _ = self.engine.add_triple(&crate::graph::Triple::new(
+                    blocked_id,
+                    self.predicates.blocked_by,
+                    blocker_id,
+                ));
+            }
+        }
+
         // Suspend the parent.
         goal::update_goal_status(
             &self.engine,
@@ -666,8 +698,40 @@ impl Agent {
             &self.predicates,
         )?;
 
-        // Add children to the goals list.
-        self.goals.extend(children);
+        // Add children to the goals list, attaching blocked_by info.
+        for (i, mut child) in children.into_iter().enumerate() {
+            // Gather blockers for this child from the dependency list.
+            let blockers: Vec<SymbolId> = output
+                .dependencies
+                .iter()
+                .filter(|&&(_, blocked)| blocked == i)
+                .filter_map(|&(blocker, _)| child_ids.get(blocker).copied())
+                .collect();
+            child.blocked_by = blockers;
+            self.goals.push(child);
+        }
+
+        // Record HTN provenance.
+        let mut prov = ProvenanceRecord::new(
+            goal_id,
+            crate::provenance::DerivationKind::HtnDecomposition {
+                method_name: output.tree.method_name.clone(),
+                strategy: output.tree.strategy.to_string(),
+                subtask_count: output.sub_goals.len(),
+            },
+        )
+        .with_confidence(0.9);
+        let _ = self.engine.store_provenance(&mut prov);
+
+        // Update method stats.
+        if let Some(method) = self
+            .method_registry_htn
+            .methods_mut()
+            .iter_mut()
+            .find(|m| m.name == output.tree.method_name)
+        {
+            method.usage_count += 1;
+        }
 
         Ok(child_ids)
     }
@@ -902,6 +966,20 @@ impl Agent {
                 &self.predicates,
             )?;
             g.source = Some(proposal.source.clone());
+
+            // Record provenance for autonomously generated goals.
+            let (drive_name, drive_strength) =
+                goal_generation::provenance_from_source(&proposal.source);
+            let mut prov = ProvenanceRecord::new(
+                g.symbol_id,
+                DerivationKind::AutonomousGoalGeneration {
+                    drive: drive_name,
+                    strength: drive_strength,
+                },
+            )
+            .with_confidence(proposal.feasibility);
+            let _ = self.engine.store_provenance(&mut prov);
+
             self.goals.push(g);
         }
 
@@ -1009,6 +1087,18 @@ impl Agent {
                 message: format!("failed to persist drive system: {e}"),
             })?;
 
+        // Persist HTN method stats.
+        let method_stats = self.method_registry_htn.export_stats();
+        let stats_bytes =
+            bincode::serialize(&method_stats).map_err(|e| AgentError::ConsolidationFailed {
+                message: format!("failed to serialize method stats: {e}"),
+            })?;
+        store
+            .put_meta(b"agent:method_stats", &stats_bytes)
+            .map_err(|e| AgentError::ConsolidationFailed {
+                message: format!("failed to persist method stats: {e}"),
+            })?;
+
         // Persist psyche if loaded.
         if let Some(ref psyche) = self.psyche {
             let psyche_bytes =
@@ -1085,6 +1175,15 @@ impl Agent {
             .and_then(|bytes| bincode::deserialize::<DriveSystem>(&bytes).ok())
             .unwrap_or_else(|| DriveSystem::with_thresholds(config.goal_generation.drive_thresholds));
 
+        // Initialize HTN method registry and restore persisted stats.
+        let mut htn_registry = MethodRegistry::new();
+        decomposition::register_builtin_methods(&mut htn_registry);
+        if let Some(stats_bytes) = store.get_meta(b"agent:method_stats").ok().flatten() {
+            if let Ok(stats) = bincode::deserialize::<Vec<MethodStats>>(&stats_bytes) {
+                htn_registry.import_stats(&stats);
+            }
+        }
+
         let mut agent = Self {
             engine,
             config,
@@ -1098,6 +1197,7 @@ impl Agent {
             sink: Arc::new(crate::message::StdoutSink),
             psyche,
             drives,
+            method_registry_htn: htn_registry,
             last_impasse: None,
             #[cfg(feature = "wasm-tools")]
             wasm_runtime: super::wasm_runtime::WasmToolRuntime::new().ok(),

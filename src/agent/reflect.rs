@@ -484,6 +484,7 @@ mod tests {
             cycles_worked: 10,
             last_progress_cycle: 0,
             source: None,
+            blocked_by: Vec::new(),
         }];
 
         let config = ReflectionConfig::default();
@@ -507,6 +508,7 @@ mod tests {
             cycles_worked: 10,
             last_progress_cycle: 0,
             source: None,
+            blocked_by: Vec::new(),
         }];
 
         let config = ReflectionConfig::default();

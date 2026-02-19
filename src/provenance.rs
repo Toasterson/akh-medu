@@ -234,6 +234,13 @@ pub enum DerivationKind {
 
     /// A goal was autonomously generated from drive observation (Phase 11a).
     AutonomousGoalGeneration { drive: String, strength: f32 },
+
+    /// A goal was decomposed via HTN method (Phase 11b).
+    HtnDecomposition {
+        method_name: String,
+        strategy: String,
+        subtask_count: usize,
+    },
 }
 
 impl DerivationKind {
@@ -281,6 +288,7 @@ impl DerivationKind {
             Self::CodeRefinement { .. } => 38,
             Self::LibraryLearning { .. } => 39,
             Self::AutonomousGoalGeneration { .. } => 40,
+            Self::HtnDecomposition { .. } => 41,
         }
     }
 }

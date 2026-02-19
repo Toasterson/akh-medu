@@ -1,8 +1,8 @@
 # Phase 11 — Autonomous Task System with Self-Goal Setting
 
 - **Date**: 2026-02-17
-- **Updated**: 2026-02-19 (Phase 11a complete)
-- **Status**: In Progress (11a complete)
+- **Updated**: 2026-02-19 (Phase 11b complete)
+- **Status**: In Progress (11a–11b complete)
 - **Depends on**: Phase 9 (microtheories, TMS, argumentation for reasoning quality), Phase 10 (code generation for implementation tasks)
 
 ## Goal
@@ -166,12 +166,16 @@ DependencyKind: FinishToStart | StartToStart | FinishToFinish
 ```
 
 **Changes**:
-- [ ] `src/agent/goal.rs` — `blocked_by` field on Goal, `TaskTree` type, `TaskNodeKind`
-- [ ] `src/agent/plan.rs` — HTN method registry, VSA-based method selection, dependency DAG
-- [ ] `src/agent/ooda.rs` — respect `blocked_by` when selecting next goal, topological ordering
+- [x] New file: `src/agent/decomposition.rs` — DecompositionStrategy, MethodRegistry (6 built-in methods), TaskTree DAG (petgraph), decompose_goal_htn orchestrator, VSA+keyword method selection, 12 unit tests
+- [x] `src/agent/goal.rs` — `blocked_by: Vec<SymbolId>` field on Goal, `is_blocked()` method, KG roundtrip via `agent:blocked_by` triples, 3 unit tests
+- [x] `src/agent/agent.rs` — `blocked_by` predicate in AgentPredicates, `method_registry_htn` field, HTN-based `decompose_stalled_goal()`, method stats persistence
+- [x] `src/agent/ooda.rs` — `decide()` skips blocked goals
+- [x] `src/agent/plan.rs` — `Plan::from_task_tree()` flattens TaskTree into linear Plan
+- [x] `src/provenance.rs` — `HtnDecomposition { method_name, strategy, subtask_count }` variant (tag 41)
+- [x] `src/main.rs` — `format_derivation_kind()` arm for HtnDecomposition
 - [ ] `src/agent/memory.rs` — effort estimation from episodic case retrieval (see 11g)
 
-**Estimated scope**: ~700–1000 lines
+**Actual scope**: ~600 lines new code, ~18 new tests (total: ~874)
 
 ---
 
