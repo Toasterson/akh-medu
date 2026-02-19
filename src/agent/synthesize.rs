@@ -1644,6 +1644,7 @@ mod tests {
             relevance: 1.0,
             source_cycle: cycle,
             reference_count: 0,
+            access_timestamps: Vec::new(),
         }
     }
 

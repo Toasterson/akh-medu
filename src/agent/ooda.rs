@@ -190,6 +190,7 @@ fn observe(agent: &mut Agent, cycle: u64) -> AgentResult<Observation> {
         relevance: 0.6,
         source_cycle: cycle,
         reference_count: 0,
+        access_timestamps: Vec::new(),
     });
 
     Ok(Observation {
@@ -255,6 +256,7 @@ fn orient(agent: &mut Agent, observation: &Observation) -> AgentResult<Orientati
             relevance: 0.5,
             source_cycle: agent.cycle_count,
             reference_count: 0,
+            access_timestamps: Vec::new(),
         });
     }
 
@@ -272,19 +274,36 @@ fn decide(
     orientation: &Orientation,
     cycle: u64,
 ) -> AgentResult<Decision> {
-    // Get the top-priority active goal, skipping any that are blocked.
+    // Get the top-priority active goal, scoped to the active project when available.
     let active = goal::active_goals(&agent.goals);
-    let top_goal = active
-        .iter()
-        .find(|g| !g.is_blocked(&agent.goals))
-        .or(active.first())
-        .ok_or(AgentError::NoGoals)?;
+
+    // Build the set of goals belonging to the active project (if any).
+    let project_goal_set: Option<std::collections::HashSet<SymbolId>> =
+        agent.agenda.active_project.and_then(|pid| {
+            agent
+                .projects
+                .iter()
+                .find(|p| p.id == pid)
+                .map(|p| p.goals.iter().copied().collect())
+        });
+
+    // Prefer goals in the active project, fall back to any active goal.
+    let top_goal = if let Some(ref pg) = project_goal_set {
+        active
+            .iter()
+            .find(|g| pg.contains(&g.symbol_id) && !g.is_blocked(&agent.goals))
+            .or_else(|| active.iter().find(|g| !g.is_blocked(&agent.goals)))
+    } else {
+        active.iter().find(|g| !g.is_blocked(&agent.goals))
+    }
+    .or(active.first())
+    .ok_or(AgentError::NoGoals)?;
     let goal_id = top_goal.symbol_id;
     let goal_desc = &top_goal.description;
 
     // Increment reference counts on WM entries we're consulting for this decision.
     for entry_id in &observation.recent_entries {
-        agent.working_memory.increment_reference(*entry_id);
+        agent.working_memory.increment_reference(*entry_id, cycle);
     }
 
     // Rule-based strategy to select tool + build input.
@@ -313,6 +332,7 @@ fn decide(
         relevance: 0.7,
         source_cycle: cycle,
         reference_count: 0,
+        access_timestamps: Vec::new(),
     });
 
     // Store provenance for the decision.
@@ -1270,6 +1290,7 @@ fn act(agent: &mut Agent, decision: &Decision, cycle: u64) -> AgentResult<Action
                         relevance: 0.8,
                         source_cycle: cycle,
                         reference_count: 0,
+                        access_timestamps: Vec::new(),
                     })
                     .ok();
 
@@ -1329,6 +1350,7 @@ fn act(agent: &mut Agent, decision: &Decision, cycle: u64) -> AgentResult<Action
             relevance: 0.6,
             source_cycle: cycle,
             reference_count: 0,
+            access_timestamps: Vec::new(),
         })
         .ok();
 

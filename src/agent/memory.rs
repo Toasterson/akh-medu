@@ -54,6 +54,9 @@ pub struct WorkingMemoryEntry {
     pub source_cycle: u64,
     /// How many times this entry was referenced during Decide phases.
     pub reference_count: u32,
+    /// Cycle numbers at which this entry was referenced (for ACT-R activation).
+    #[serde(default)]
+    pub access_timestamps: Vec<u64>,
 }
 
 /// Ephemeral per-session scratch memory.
@@ -122,9 +125,12 @@ impl WorkingMemory {
     }
 
     /// Increment the reference count for an entry (called when Decide consults it).
-    pub fn increment_reference(&mut self, id: u64) {
+    ///
+    /// Also records the cycle number for ACT-R activation computation.
+    pub fn increment_reference(&mut self, id: u64, current_cycle: u64) {
         if let Some(entry) = self.get_mut(id) {
             entry.reference_count += 1;
+            entry.access_timestamps.push(current_cycle);
         }
     }
 
@@ -283,12 +289,48 @@ pub struct ConsolidationResult {
     pub episodes_created: Vec<SymbolId>,
 }
 
+/// ACT-R base-level activation for a working memory entry.
+///
+/// Implements `B_i = ln(Σ t_j^{-d})` where `t_j` is the time (in cycles) since
+/// each access and `d = 0.5` (decay parameter). The result is normalized to
+/// `[0.0, 1.0]` via a sigmoid.
+///
+/// Falls back to creation-time-based activation if there are no access timestamps.
+pub fn actr_activation(entry: &WorkingMemoryEntry, current_cycle: u64) -> f32 {
+    const DECAY: f32 = 0.5;
+
+    if entry.access_timestamps.is_empty() {
+        // Fallback: use reference_count and age for a rough activation.
+        let age = current_cycle.saturating_sub(entry.source_cycle).max(1) as f32;
+        let freq_component = (entry.reference_count as f32 + 1.0).ln();
+        let recency_component = -(age.ln() * DECAY);
+        let raw = freq_component + recency_component;
+        // Sigmoid normalization to [0, 1].
+        return 1.0 / (1.0 + (-raw).exp());
+    }
+
+    let sum: f32 = entry
+        .access_timestamps
+        .iter()
+        .map(|&t| {
+            let elapsed = current_cycle.saturating_sub(t).max(1) as f32;
+            elapsed.powf(-DECAY)
+        })
+        .sum();
+
+    let raw = if sum > 0.0 { sum.ln() } else { -1.0 };
+
+    // Sigmoid normalization to [0, 1].
+    1.0 / (1.0 + (-raw).exp())
+}
+
 /// Score a working memory entry for consolidation.
 fn score_entry(
     entry: &WorkingMemoryEntry,
     goals: &[Goal],
     engine: &Engine,
     config: &ConsolidationConfig,
+    current_cycle: u64,
 ) -> f32 {
     // Goal relevance: does this entry's symbols overlap with any active goal's symbols?
     let goal_relevance = {
@@ -329,8 +371,8 @@ fn score_entry(
         }
     };
 
-    // Utility: how many times was this entry referenced during Decide phases?
-    let utility = (entry.reference_count as f32 * 0.25).clamp(0.0, 1.0);
+    // Utility: ACT-R activation-based (replaces raw reference_count * 0.25).
+    let utility = actr_activation(entry, current_cycle);
 
     config.goal_relevance_weight * goal_relevance
         + config.novelty_weight * novelty
@@ -347,6 +389,7 @@ pub fn consolidate(
     goals: &[Goal],
     config: &ConsolidationConfig,
     predicates: &AgentPredicates,
+    current_cycle: u64,
 ) -> AgentResult<ConsolidationResult> {
     let entries_scored = working_memory.len();
     let mut entries_to_persist = Vec::new();
@@ -354,7 +397,7 @@ pub fn consolidate(
 
     // Score every entry.
     for entry in working_memory.entries() {
-        let score = score_entry(entry, goals, engine, config);
+        let score = score_entry(entry, goals, engine, config, current_cycle);
         if score >= config.min_relevance {
             entries_to_persist.push((entry.clone(), score));
         } else {
@@ -568,6 +611,169 @@ fn reconstruct_episode(
     })
 }
 
+// ---------------------------------------------------------------------------
+// Session Summary
+// ---------------------------------------------------------------------------
+
+/// Compressed summary of a session for cross-session continuity.
+///
+/// Generated at session end and injected as high-relevance WM entries on resume.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionSummary {
+    /// Descriptions of goals completed during this session.
+    pub accomplished: Vec<String>,
+    /// Descriptions of goals still pending at session end.
+    pub pending: Vec<String>,
+    /// Brief KG change summary (e.g., "added 42 triples").
+    pub kg_changes: String,
+    /// Suggested next actions.
+    pub next_steps: Vec<String>,
+    /// Name of the active project at session end, if any.
+    pub active_project: Option<String>,
+    /// (start_cycle, end_cycle) range for this session.
+    pub cycle_range: (u64, u64),
+}
+
+/// Generate a session summary from current state.
+pub fn generate_session_summary(
+    wm: &WorkingMemory,
+    goals: &[Goal],
+    active_project: Option<&str>,
+    cycle_start: u64,
+    cycle_end: u64,
+) -> SessionSummary {
+    let accomplished: Vec<String> = goals
+        .iter()
+        .filter(|g| matches!(g.status, super::goal::GoalStatus::Completed))
+        .map(|g| g.description.clone())
+        .collect();
+
+    let pending: Vec<String> = goals
+        .iter()
+        .filter(|g| {
+            matches!(
+                g.status,
+                super::goal::GoalStatus::Active | super::goal::GoalStatus::Pending
+            )
+        })
+        .map(|g| g.description.clone())
+        .collect();
+
+    // Derive next steps from recent Decision entries.
+    let next_steps: Vec<String> = wm
+        .by_kind(WorkingMemoryKind::Decision)
+        .iter()
+        .rev()
+        .take(3)
+        .map(|e| {
+            // Extract tool and goal from decision content.
+            if let Some(goal_part) = e.content.split("goal=\"").nth(1) {
+                let goal_name = goal_part.split('"').next().unwrap_or("?");
+                format!("Continue work on: {goal_name}")
+            } else {
+                format!("Review: {}", &e.content[..e.content.len().min(60)])
+            }
+        })
+        .collect();
+
+    let kg_changes = format!("{} WM entries at session end", wm.len());
+
+    SessionSummary {
+        accomplished,
+        pending,
+        kg_changes,
+        next_steps,
+        active_project: active_project.map(String::from),
+        cycle_range: (cycle_start, cycle_end),
+    }
+}
+
+/// Restore session context by injecting summary as high-relevance WM entries.
+///
+/// Returns the IDs of the injected entries.
+pub fn restore_session_summary(
+    wm: &mut WorkingMemory,
+    summary: &SessionSummary,
+    current_cycle: u64,
+) -> AgentResult<Vec<u64>> {
+    let mut ids = Vec::new();
+
+    // Session overview entry.
+    let overview = format!(
+        "Previous session (cycles {}–{}): completed {} goals",
+        summary.cycle_range.0,
+        summary.cycle_range.1,
+        summary.accomplished.len()
+    );
+    let id = wm.push(WorkingMemoryEntry {
+        id: 0,
+        content: overview,
+        symbols: Vec::new(),
+        kind: WorkingMemoryKind::Observation,
+        timestamp: 0,
+        relevance: 0.9,
+        source_cycle: current_cycle,
+        reference_count: 0,
+        access_timestamps: Vec::new(),
+    })?;
+    ids.push(id);
+
+    // Pending goals entry (if any).
+    if !summary.pending.is_empty() {
+        let pending_desc = summary.pending.join("; ");
+        let content = format!("Pending from last session: {pending_desc}");
+        let id = wm.push(WorkingMemoryEntry {
+            id: 0,
+            content,
+            symbols: Vec::new(),
+            kind: WorkingMemoryKind::Observation,
+            timestamp: 0,
+            relevance: 0.85,
+            source_cycle: current_cycle,
+            reference_count: 0,
+            access_timestamps: Vec::new(),
+        })?;
+        ids.push(id);
+    }
+
+    // Next steps entry (if any).
+    if !summary.next_steps.is_empty() {
+        let steps_desc = summary.next_steps.join("; ");
+        let content = format!("Next steps: {steps_desc}");
+        let id = wm.push(WorkingMemoryEntry {
+            id: 0,
+            content,
+            symbols: Vec::new(),
+            kind: WorkingMemoryKind::Observation,
+            timestamp: 0,
+            relevance: 0.85,
+            source_cycle: current_cycle,
+            reference_count: 0,
+            access_timestamps: Vec::new(),
+        })?;
+        ids.push(id);
+    }
+
+    // Active project entry (if any).
+    if let Some(ref project_name) = summary.active_project {
+        let content = format!("Active project: {project_name}");
+        let id = wm.push(WorkingMemoryEntry {
+            id: 0,
+            content,
+            symbols: Vec::new(),
+            kind: WorkingMemoryKind::Observation,
+            timestamp: 0,
+            relevance: 0.8,
+            source_cycle: current_cycle,
+            reference_count: 0,
+            access_timestamps: Vec::new(),
+        })?;
+        ids.push(id);
+    }
+
+    Ok(ids)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -582,6 +788,7 @@ mod tests {
             relevance: 0.5,
             source_cycle: cycle,
             reference_count: 0,
+            access_timestamps: Vec::new(),
         }
     }
 
@@ -674,5 +881,208 @@ mod tests {
         wm.push(make_entry(WorkingMemoryKind::Observation, "b", 1))
             .unwrap();
         assert_eq!(wm.pressure(), 0.5);
+    }
+
+    // -- ACT-R activation tests --
+
+    #[test]
+    fn actr_single_access() {
+        let entry = WorkingMemoryEntry {
+            id: 1,
+            content: "test".into(),
+            symbols: Vec::new(),
+            kind: WorkingMemoryKind::Observation,
+            timestamp: 0,
+            relevance: 0.5,
+            source_cycle: 1,
+            reference_count: 1,
+            access_timestamps: vec![5],
+        };
+
+        // At cycle 10, single access at cycle 5 → elapsed = 5.
+        let activation = actr_activation(&entry, 10);
+        assert!(activation > 0.0 && activation < 1.0);
+    }
+
+    #[test]
+    fn actr_recency_bias() {
+        // Recent access should have higher activation than old access.
+        let recent = WorkingMemoryEntry {
+            id: 1,
+            content: "recent".into(),
+            symbols: Vec::new(),
+            kind: WorkingMemoryKind::Observation,
+            timestamp: 0,
+            relevance: 0.5,
+            source_cycle: 1,
+            reference_count: 1,
+            access_timestamps: vec![9],
+        };
+        let old = WorkingMemoryEntry {
+            id: 2,
+            content: "old".into(),
+            symbols: Vec::new(),
+            kind: WorkingMemoryKind::Observation,
+            timestamp: 0,
+            relevance: 0.5,
+            source_cycle: 1,
+            reference_count: 1,
+            access_timestamps: vec![1],
+        };
+
+        let act_recent = actr_activation(&recent, 10);
+        let act_old = actr_activation(&old, 10);
+        assert!(
+            act_recent > act_old,
+            "recent {act_recent} should > old {act_old}"
+        );
+    }
+
+    #[test]
+    fn actr_frequency_boost() {
+        // More accesses should increase activation.
+        let single = WorkingMemoryEntry {
+            id: 1,
+            content: "single".into(),
+            symbols: Vec::new(),
+            kind: WorkingMemoryKind::Observation,
+            timestamp: 0,
+            relevance: 0.5,
+            source_cycle: 1,
+            reference_count: 1,
+            access_timestamps: vec![5],
+        };
+        let multi = WorkingMemoryEntry {
+            id: 2,
+            content: "multi".into(),
+            symbols: Vec::new(),
+            kind: WorkingMemoryKind::Observation,
+            timestamp: 0,
+            relevance: 0.5,
+            source_cycle: 1,
+            reference_count: 3,
+            access_timestamps: vec![3, 5, 7],
+        };
+
+        let act_single = actr_activation(&single, 10);
+        let act_multi = actr_activation(&multi, 10);
+        assert!(
+            act_multi > act_single,
+            "multi {act_multi} should > single {act_single}"
+        );
+    }
+
+    #[test]
+    fn actr_no_accesses() {
+        // No access timestamps → fallback path.
+        let entry = WorkingMemoryEntry {
+            id: 1,
+            content: "never accessed".into(),
+            symbols: Vec::new(),
+            kind: WorkingMemoryKind::Observation,
+            timestamp: 0,
+            relevance: 0.5,
+            source_cycle: 1,
+            reference_count: 0,
+            access_timestamps: Vec::new(),
+        };
+        let activation = actr_activation(&entry, 10);
+        assert!(activation > 0.0 && activation < 1.0);
+    }
+
+    // -- Session summary tests --
+
+    #[test]
+    fn session_summary_completed() {
+        use super::super::goal::{Goal, GoalStatus};
+
+        let wm = WorkingMemory::new(10);
+        let goals = vec![
+            Goal {
+                symbol_id: crate::symbol::SymbolId::new(1).unwrap(),
+                description: "Learn Rust".into(),
+                status: GoalStatus::Completed,
+                priority: 100,
+                success_criteria: "done".into(),
+                parent: None,
+                children: vec![],
+                created_at: 0,
+                cycles_worked: 5,
+                last_progress_cycle: 5,
+                source: None,
+                blocked_by: vec![],
+                priority_rationale: None,
+            },
+            Goal {
+                symbol_id: crate::symbol::SymbolId::new(2).unwrap(),
+                description: "Build project".into(),
+                status: GoalStatus::Active,
+                priority: 80,
+                success_criteria: "working".into(),
+                parent: None,
+                children: vec![],
+                created_at: 0,
+                cycles_worked: 2,
+                last_progress_cycle: 2,
+                source: None,
+                blocked_by: vec![],
+                priority_rationale: None,
+            },
+        ];
+
+        let summary = generate_session_summary(&wm, &goals, Some("my-project"), 1, 10);
+        assert_eq!(summary.accomplished.len(), 1);
+        assert_eq!(summary.accomplished[0], "Learn Rust");
+        assert_eq!(summary.pending.len(), 1);
+        assert_eq!(summary.pending[0], "Build project");
+        assert_eq!(summary.active_project, Some("my-project".into()));
+        assert_eq!(summary.cycle_range, (1, 10));
+    }
+
+    #[test]
+    fn session_summary_pending() {
+        let wm = WorkingMemory::new(10);
+        let summary = generate_session_summary(&wm, &[], None, 0, 0);
+        assert!(summary.accomplished.is_empty());
+        assert!(summary.pending.is_empty());
+        assert!(summary.active_project.is_none());
+    }
+
+    #[test]
+    fn restore_injects_entries() {
+        let mut wm = WorkingMemory::new(20);
+        let summary = SessionSummary {
+            accomplished: vec!["done goal".into()],
+            pending: vec!["pending goal".into()],
+            kg_changes: "5 triples added".into(),
+            next_steps: vec!["continue building".into()],
+            active_project: Some("proj1".into()),
+            cycle_range: (1, 10),
+        };
+
+        let ids = restore_session_summary(&mut wm, &summary, 11).unwrap();
+        // Should inject 4 entries: overview + pending + next_steps + active_project.
+        assert_eq!(ids.len(), 4);
+        assert_eq!(wm.len(), 4);
+
+        // First entry is overview.
+        let overview = wm.get(ids[0]).unwrap();
+        assert!(overview.content.contains("completed 1 goals"));
+        assert_eq!(overview.relevance, 0.9);
+    }
+
+    #[test]
+    fn increment_reference_records_cycle() {
+        let mut wm = WorkingMemory::new(10);
+        let id = wm
+            .push(make_entry(WorkingMemoryKind::Observation, "test", 1))
+            .unwrap();
+
+        wm.increment_reference(id, 5);
+        wm.increment_reference(id, 8);
+
+        let entry = wm.get(id).unwrap();
+        assert_eq!(entry.reference_count, 2);
+        assert_eq!(entry.access_timestamps, vec![5, 8]);
     }
 }

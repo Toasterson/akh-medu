@@ -92,6 +92,13 @@ pub enum AgentError {
     )]
     CliToolError { tool_name: String, message: String },
 
+    #[error("project not found: {project_id}")]
+    #[diagnostic(
+        code(akh::agent::project_not_found),
+        help("The project symbol does not exist. Check active projects with `agent.projects()`.")
+    )]
+    ProjectNotFound { project_id: u64 },
+
     #[error("{0}")]
     #[diagnostic(
         code(akh::agent::engine),

@@ -308,6 +308,7 @@ mod tests {
             relevance: 0.6,
             source_cycle: 1,
             reference_count: 0,
+            access_timestamps: Vec::new(),
         })
         .unwrap();
         wm.push(WorkingMemoryEntry {
@@ -319,6 +320,7 @@ mod tests {
             relevance: 0.6,
             source_cycle: 2,
             reference_count: 0,
+            access_timestamps: Vec::new(),
         })
         .unwrap();
         // 1 failure out of 2 → 0.5

@@ -18,12 +18,16 @@ use super::error::{AgentError, AgentResult};
 use super::goal::{self, DEFAULT_STALL_THRESHOLD, Goal, GoalStatus};
 use super::goal_generation::{self, GoalGenerationConfig, GoalGenerationResult};
 use super::memory::{
-    ConsolidationConfig, ConsolidationResult, EpisodicEntry, WorkingMemory, WorkingMemoryEntry,
-    WorkingMemoryKind, consolidate, recall_episodes,
+    ConsolidationConfig, ConsolidationResult, EpisodicEntry, SessionSummary, WorkingMemory,
+    WorkingMemoryEntry, WorkingMemoryKind, consolidate, generate_session_summary, recall_episodes,
+    restore_session_summary,
 };
 use super::ooda::{self, DecisionImpasse, OodaCycleResult};
 use super::plan::{self, Plan, PlanStatus};
 use super::priority_reasoning::Audience;
+use super::project::{
+    self, Agenda, Project, ProjectPredicates, ProjectStatus, project_progress, update_project_status,
+};
 use super::reflect::{self, Adjustment, ReflectionConfig, ReflectionResult};
 use super::tool::{ToolRegistry, ToolSignature};
 use super::tools;
@@ -142,6 +146,14 @@ pub struct Agent {
     pub(crate) method_registry_htn: MethodRegistry,
     /// Most recent decision impasse (consumed by goal generation).
     pub(crate) last_impasse: Option<DecisionImpasse>,
+    /// Active projects (groups of related goals backed by microtheories).
+    pub(crate) projects: Vec<Project>,
+    /// Project-related KG predicates.
+    pub(crate) project_predicates: ProjectPredicates,
+    /// Ordered project list persisted across sessions.
+    pub(crate) agenda: Agenda,
+    /// Cycle count at the start of this session (for session summary).
+    pub(crate) session_start_cycle: u64,
     /// Optional WASM tool runtime (only when `wasm-tools` feature is enabled).
     #[cfg(feature = "wasm-tools")]
     pub(crate) wasm_runtime: Option<super::wasm_runtime::WasmToolRuntime>,
@@ -305,6 +317,7 @@ impl Agent {
     /// optionally restores goals from the KG.
     pub fn new(engine: Arc<Engine>, config: AgentConfig) -> AgentResult<Self> {
         let predicates = AgentPredicates::init(&engine)?;
+        let project_predicates = ProjectPredicates::init(&engine)?;
 
         let mut tool_registry = ToolRegistry::new();
         Self::register_builtin_tools(&mut tool_registry, &predicates, &engine);
@@ -338,6 +351,10 @@ impl Agent {
             audience: Audience::exploration(),
             method_registry_htn: htn_registry,
             last_impasse: None,
+            projects: Vec::new(),
+            project_predicates,
+            agenda: Agenda::new(),
+            session_start_cycle: 0,
             #[cfg(feature = "wasm-tools")]
             wasm_runtime: super::wasm_runtime::WasmToolRuntime::new().ok(),
         };
@@ -476,6 +493,50 @@ impl Agent {
         // Auto-decompose stalled goals.
         self.decompose_stalled_goals();
 
+        // Auto-project-completion: check if active project's goals are all done.
+        if let Some(active_pid) = self.agenda.active_project {
+            if let Some(proj) = self.projects.iter().find(|p| p.id == active_pid) {
+                if !proj.goals.is_empty() && project_progress(proj, &self.goals) >= 1.0 {
+                    // Mark project completed and switch to the next one.
+                    if let Some(proj_mut) = self.projects.iter_mut().find(|p| p.id == active_pid)
+                    {
+                        let _ = update_project_status(
+                            &self.engine,
+                            proj_mut,
+                            ProjectStatus::Completed,
+                            &self.project_predicates,
+                        );
+                    }
+                    self.agenda.select_active(&self.projects);
+
+                    // Log context switch in WM.
+                    let switch_msg = match self.agenda.active_project {
+                        Some(new_pid) => {
+                            let new_name = self
+                                .projects
+                                .iter()
+                                .find(|p| p.id == new_pid)
+                                .map(|p| p.name.as_str())
+                                .unwrap_or("?");
+                            format!("Project completed, switching to \"{new_name}\"")
+                        }
+                        None => "Project completed, no more projects in agenda".to_string(),
+                    };
+                    let _ = self.working_memory.push(WorkingMemoryEntry {
+                        id: 0,
+                        content: switch_msg,
+                        symbols: vec![],
+                        kind: WorkingMemoryKind::GoalUpdate,
+                        timestamp: 0,
+                        relevance: 0.9,
+                        source_cycle: self.cycle_count,
+                        reference_count: 0,
+                        access_timestamps: Vec::new(),
+                    });
+                }
+            }
+        }
+
         // Auto-consolidate if enabled and WM pressure is high.
         if self.config.auto_consolidate
             && self.working_memory.len() >= self.config.consolidation.auto_consolidate_at
@@ -527,6 +588,7 @@ impl Agent {
             &self.goals,
             &self.config.consolidation,
             &self.predicates,
+            self.cycle_count,
         )
     }
 
@@ -823,6 +885,7 @@ impl Agent {
             relevance: 0.7,
             source_cycle: self.cycle_count,
             reference_count: 0,
+            access_timestamps: Vec::new(),
         });
 
         self.plans.insert(key, new_plan);
@@ -869,6 +932,7 @@ impl Agent {
             relevance: 0.7,
             source_cycle: self.cycle_count,
             reference_count: 0,
+            access_timestamps: Vec::new(),
         });
 
         self.plans.insert(key, new_plan);
@@ -899,6 +963,7 @@ impl Agent {
             relevance: 0.8,
             source_cycle: self.cycle_count,
             reference_count: 0,
+            access_timestamps: Vec::new(),
         });
 
         self.last_reflection = Some(result.clone());
@@ -1060,6 +1125,7 @@ impl Agent {
             relevance: 0.8,
             source_cycle: self.cycle_count,
             reference_count: 0,
+            access_timestamps: Vec::new(),
         });
 
         // Clear impasse after it's been consumed.
@@ -1081,6 +1147,72 @@ impl Agent {
     /// Set the argumentation audience (operational mode).
     pub fn set_audience(&mut self, audience: Audience) {
         self.audience = audience;
+    }
+
+    // -----------------------------------------------------------------------
+    // Projects & Agenda
+    // -----------------------------------------------------------------------
+
+    /// Create a new project backed by a KG microtheory.
+    ///
+    /// Returns the project's symbol ID. The project is added to the agenda
+    /// with the given priority.
+    pub fn create_project(
+        &mut self,
+        name: &str,
+        description: &str,
+        scope_concepts: &[&str],
+        priority: u8,
+    ) -> AgentResult<SymbolId> {
+        let proj = project::create_project(
+            &self.engine,
+            name,
+            description,
+            scope_concepts,
+            &self.project_predicates,
+            &self.predicates,
+        )?;
+        let id = proj.id;
+        self.agenda.add_project(id, priority);
+        self.projects.push(proj);
+        Ok(id)
+    }
+
+    /// Get all projects (read-only).
+    pub fn projects(&self) -> &[Project] {
+        &self.projects
+    }
+
+    /// Get the agenda (read-only).
+    pub fn agenda(&self) -> &Agenda {
+        &self.agenda
+    }
+
+    /// Set the active project by ID.
+    pub fn set_active_project(&mut self, project_id: SymbolId) -> AgentResult<()> {
+        if !self.projects.iter().any(|p| p.id == project_id) {
+            return Err(AgentError::ProjectNotFound {
+                project_id: project_id.get(),
+            });
+        }
+        self.agenda.active_project = Some(project_id);
+        Ok(())
+    }
+
+    /// Add an existing goal to a project.
+    pub fn assign_goal_to_project(
+        &mut self,
+        goal_id: SymbolId,
+        project_id: SymbolId,
+    ) -> AgentResult<()> {
+        let proj = self
+            .projects
+            .iter_mut()
+            .find(|p| p.id == project_id)
+            .ok_or(AgentError::ProjectNotFound {
+                project_id: project_id.get(),
+            })?;
+        project::add_goal_to_project(&self.engine, proj, goal_id, &self.project_predicates)
     }
 
     // -----------------------------------------------------------------------
@@ -1171,6 +1303,40 @@ impl Agent {
                 })?;
         }
 
+        // Generate and persist session summary.
+        let active_project_name = self
+            .agenda
+            .active_project
+            .and_then(|pid| self.projects.iter().find(|p| p.id == pid))
+            .map(|p| p.name.as_str());
+        let summary = generate_session_summary(
+            &self.working_memory,
+            &self.goals,
+            active_project_name,
+            self.session_start_cycle,
+            self.cycle_count,
+        );
+        let summary_bytes =
+            bincode::serialize(&summary).map_err(|e| AgentError::ConsolidationFailed {
+                message: format!("failed to serialize session summary: {e}"),
+            })?;
+        store
+            .put_meta(b"agent:session_summary", &summary_bytes)
+            .map_err(|e| AgentError::ConsolidationFailed {
+                message: format!("failed to persist session summary: {e}"),
+            })?;
+
+        // Persist agenda.
+        let agenda_bytes =
+            bincode::serialize(&self.agenda).map_err(|e| AgentError::ConsolidationFailed {
+                message: format!("failed to serialize agenda: {e}"),
+            })?;
+        store
+            .put_meta(b"agent:agenda", &agenda_bytes)
+            .map_err(|e| AgentError::ConsolidationFailed {
+                message: format!("failed to persist agenda: {e}"),
+            })?;
+
         // Flush the engine's durable store.
         self.engine
             .persist()
@@ -1187,6 +1353,7 @@ impl Agent {
     /// rebuilds goals from the knowledge graph.
     pub fn resume(engine: Arc<Engine>, config: AgentConfig) -> AgentResult<Self> {
         let predicates = AgentPredicates::init(&engine)?;
+        let project_predicates = ProjectPredicates::init(&engine)?;
 
         let mut tool_registry = ToolRegistry::new();
         Self::register_builtin_tools(&mut tool_registry, &predicates, &engine);
@@ -1194,7 +1361,7 @@ impl Agent {
         let store = engine.store();
 
         // Restore working memory.
-        let working_memory = match (
+        let mut working_memory = match (
             store.get_meta(b"agent:wm_entries").ok().flatten(),
             store.get_meta(b"agent:wm_next_id").ok().flatten(),
         ) {
@@ -1251,6 +1418,27 @@ impl Agent {
             }
         }
 
+        // Restore projects from KG.
+        let projects =
+            project::restore_projects(&engine, &project_predicates, &predicates).unwrap_or_default();
+
+        // Restore agenda from durable store.
+        let agenda = store
+            .get_meta(b"agent:agenda")
+            .ok()
+            .flatten()
+            .and_then(|bytes| bincode::deserialize::<Agenda>(&bytes).ok())
+            .unwrap_or_default();
+
+        // Restore session summary and inject into WM for cross-session continuity.
+        if let Some(summary_bytes) = store.get_meta(b"agent:session_summary").ok().flatten() {
+            if let Ok(summary) = bincode::deserialize::<SessionSummary>(&summary_bytes) {
+                let _ = restore_session_summary(&mut working_memory, &summary, cycle_count);
+            }
+        }
+
+        let session_start_cycle = cycle_count;
+
         let mut agent = Self {
             engine,
             config,
@@ -1267,6 +1455,10 @@ impl Agent {
             audience,
             method_registry_htn: htn_registry,
             last_impasse: None,
+            projects,
+            project_predicates,
+            agenda,
+            session_start_cycle,
             #[cfg(feature = "wasm-tools")]
             wasm_runtime: super::wasm_runtime::WasmToolRuntime::new().ok(),
         };
@@ -1299,6 +1491,8 @@ impl std::fmt::Debug for Agent {
             .field("has_reflection", &self.last_reflection.is_some())
             .field("has_psyche", &self.psyche.is_some())
             .field("has_impasse", &self.last_impasse.is_some())
+            .field("projects", &self.projects.len())
+            .field("active_project", &self.agenda.active_project)
             .finish()
     }
 }

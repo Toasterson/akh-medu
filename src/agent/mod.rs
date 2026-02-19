@@ -25,6 +25,7 @@ pub mod nlp;
 pub mod ooda;
 pub mod plan;
 pub mod priority_reasoning;
+pub mod project;
 pub mod reflect;
 pub mod semantic_enrichment;
 pub mod synthesize;
@@ -52,8 +53,8 @@ pub use goal_generation::{GoalGenerationConfig, GoalGenerationResult, GoalPropos
 pub use idle::{IdleScheduler, IdleTaskResult};
 pub use library_learn::{LibraryLearner, LibraryLearningResult};
 pub use memory::{
-    ConsolidationConfig, ConsolidationResult, EpisodicEntry, WorkingMemory, WorkingMemoryEntry,
-    WorkingMemoryKind,
+    ConsolidationConfig, ConsolidationResult, EpisodicEntry, SessionSummary, WorkingMemory,
+    WorkingMemoryEntry, WorkingMemoryKind,
 };
 pub use nlp::{QuestionWord, UserIntent, classify_intent};
 pub use ooda::{
@@ -62,6 +63,7 @@ pub use ooda::{
 };
 pub use plan::{Plan, PlanStatus, PlanStep, StepStatus};
 pub use priority_reasoning::{Audience, PriorityArgument, PriorityVerdict, Value};
+pub use project::{Agenda, Project, ProjectAssignment, ProjectPredicates, ProjectStatus};
 pub use reflect::{Adjustment, ReflectionConfig, ReflectionResult};
 pub use semantic_enrichment::{EnrichmentResult, SemanticPredicates};
 pub use synthesize::NarrativeSummary;

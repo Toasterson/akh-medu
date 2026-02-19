@@ -4032,5 +4032,8 @@ fn format_derivation_kind(kind: &DerivationKind, engine: &Engine) -> String {
                 engine.resolve_label(*goal),
             )
         }
+        DerivationKind::ProjectCreated { name } => {
+            format!("Project created: \"{name}\"")
+        }
     }
 }

@@ -250,6 +250,9 @@ pub enum DerivationKind {
         audience: String,
         net_score: f64,
     },
+
+    /// A project was created to group related goals (Phase 11d).
+    ProjectCreated { name: String },
 }
 
 impl DerivationKind {
@@ -299,6 +302,7 @@ impl DerivationKind {
             Self::AutonomousGoalGeneration { .. } => 40,
             Self::HtnDecomposition { .. } => 41,
             Self::PriorityArgumentation { .. } => 42,
+            Self::ProjectCreated { .. } => 43,
         }
     }
 }

@@ -1,8 +1,8 @@
 # Phase 11 — Autonomous Task System with Self-Goal Setting
 
 - **Date**: 2026-02-17
-- **Updated**: 2026-02-19 (Phase 11b complete)
-- **Status**: In Progress (11a–11b complete)
+- **Updated**: 2026-02-19 (Phase 11d complete)
+- **Status**: In Progress (11a–11d complete)
 - **Depends on**: Phase 9 (microtheories, TMS, argumentation for reasoning quality), Phase 10 (code generation for implementation tasks)
 
 ## Goal
@@ -286,15 +286,19 @@ SessionSummary { accomplished: Vec<String>, pending: Vec<String>,
 ```
 
 **Changes**:
-- [ ] New file: `src/agent/project.rs` — Project, Agenda, VSA scoping, project auto-assignment
-- [ ] `src/agent/agent.rs` — Agenda field, project selection in OODA observe phase
-- [ ] `src/agent/memory.rs` — SessionSummary generation at persist time, ACT-R activation formula
-- [ ] `src/agent/ooda.rs` — project-scoped goal selection, context switching
-- [ ] `src/compartment/` — project-as-microtheory integration (9a)
+- [x] New file: `src/agent/project.rs` — Project, ProjectStatus, ProjectPredicates, Agenda, ProjectAssignment, create/restore/add_goal/progress/update_status, VSA scoping (compute_scope_vector, assign_goal_to_project), 14 unit tests
+- [x] `src/agent/agent.rs` — projects/project_predicates/agenda/session_start_cycle fields, wire into new()/resume()/persist_session(), public API (create_project, projects, agenda, set_active_project, assign_goal_to_project), auto-project-completion in run_cycle()
+- [x] `src/agent/memory.rs` — access_timestamps on WorkingMemoryEntry (#[serde(default)] for backward compat), increment_reference() takes current_cycle, actr_activation() (ACT-R base-level B_i), score_entry uses ACT-R utility, SessionSummary struct, generate_session_summary(), restore_session_summary(), consolidate() takes current_cycle, 8 new unit tests
+- [x] `src/agent/ooda.rs` — project-scoped goal selection in decide() (prefer active project goals, fall back to any)
+- [x] `src/agent/error.rs` — ProjectNotFound variant
+- [x] `src/agent/mod.rs` — pub mod project + re-exports (Agenda, Project, ProjectAssignment, ProjectPredicates, ProjectStatus, SessionSummary)
+- [x] `src/provenance.rs` — ProjectCreated { name } variant (tag 43)
+- [x] `src/main.rs` — format_derivation_kind() arm for ProjectCreated
 
 **Depends on**: 9a (microtheories for project contexts)
 
 **Estimated scope**: ~800–1100 lines
+**Actual**: ~550 lines new + ~100 lines modified. 22 new tests (914 total, up from 892).
 
 ---
 
