@@ -24,6 +24,7 @@ pub mod memory;
 pub mod nlp;
 pub mod ooda;
 pub mod plan;
+pub mod priority_reasoning;
 pub mod reflect;
 pub mod semantic_enrichment;
 pub mod synthesize;
@@ -60,6 +61,7 @@ pub use ooda::{
     OodaCycleResult, Orientation,
 };
 pub use plan::{Plan, PlanStatus, PlanStep, StepStatus};
+pub use priority_reasoning::{Audience, PriorityArgument, PriorityVerdict, Value};
 pub use reflect::{Adjustment, ReflectionConfig, ReflectionResult};
 pub use semantic_enrichment::{EnrichmentResult, SemanticPredicates};
 pub use synthesize::NarrativeSummary;

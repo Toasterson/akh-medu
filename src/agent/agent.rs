@@ -23,6 +23,7 @@ use super::memory::{
 };
 use super::ooda::{self, DecisionImpasse, OodaCycleResult};
 use super::plan::{self, Plan, PlanStatus};
+use super::priority_reasoning::Audience;
 use super::reflect::{self, Adjustment, ReflectionConfig, ReflectionResult};
 use super::tool::{ToolRegistry, ToolSignature};
 use super::tools;
@@ -135,6 +136,8 @@ pub struct Agent {
     pub(crate) psyche: Option<crate::compartment::psyche::Psyche>,
     /// Motivational drive system for autonomous goal generation.
     pub(crate) drives: DriveSystem,
+    /// Value ordering for argumentation-based priority reasoning (Phase 11c).
+    pub(crate) audience: Audience,
     /// HTN decomposition method registry.
     pub(crate) method_registry_htn: MethodRegistry,
     /// Most recent decision impasse (consumed by goal generation).
@@ -332,6 +335,7 @@ impl Agent {
             sink: Arc::new(crate::message::StdoutSink),
             psyche,
             drives,
+            audience: Audience::exploration(),
             method_registry_htn: htn_registry,
             last_impasse: None,
             #[cfg(feature = "wasm-tools")]
@@ -406,20 +410,54 @@ impl Agent {
         let reflect_interval = self.config.reflection.reflect_every_n_cycles;
         if reflect_interval > 0 && self.cycle_count % reflect_interval == 0 {
             if let Ok(reflection) = self.reflect() {
-                // Auto-apply non-destructive adjustments (priority changes only).
-                let safe_adjustments: Vec<Adjustment> = reflection
+                // Apply structural adjustments (abandon, decompose) from compute_adjustments().
+                // Priority changes are now handled by argumentation below.
+                let structural_adjustments: Vec<Adjustment> = reflection
                     .adjustments
                     .iter()
                     .filter(|a| {
                         matches!(
                             a,
-                            Adjustment::IncreasePriority { .. }
-                                | Adjustment::DecreasePriority { .. }
+                            Adjustment::SuggestAbandon { .. }
+                                | Adjustment::SuggestNewGoal { .. }
                         )
                     })
                     .cloned()
                     .collect();
-                let _ = self.apply_adjustments(&safe_adjustments);
+                let _ = self.apply_adjustments(&structural_adjustments);
+            }
+
+            // Argumentation-based reprioritization replaces raw ±30 adjustments.
+            let stall_threshold = self.config.reflection.stagnation_threshold;
+            let reprioritizations = reflect::reprioritize_goals(
+                &self.goals,
+                self.cycle_count,
+                stall_threshold,
+                &self.audience,
+            );
+            for (goal_id, old_priority, verdict) in reprioritizations {
+                if let Some(g) = self.goals.iter_mut().find(|g| g.symbol_id == goal_id) {
+                    let new_priority = verdict.computed_priority;
+                    g.priority_rationale = Some(verdict);
+
+                    // Record provenance for priority change.
+                    let mut prov = ProvenanceRecord::new(
+                        goal_id,
+                        DerivationKind::PriorityArgumentation {
+                            goal: goal_id,
+                            old_priority,
+                            new_priority,
+                            audience: self.audience.name.clone(),
+                            net_score: g
+                                .priority_rationale
+                                .as_ref()
+                                .map(|v| v.net_score)
+                                .unwrap_or(0.0),
+                        },
+                    )
+                    .with_confidence(0.9);
+                    let _ = self.engine.store_provenance(&mut prov);
+                }
             }
         }
 
@@ -1035,6 +1073,16 @@ impl Agent {
         &self.drives
     }
 
+    /// Get the current argumentation audience.
+    pub fn audience(&self) -> &Audience {
+        &self.audience
+    }
+
+    /// Set the argumentation audience (operational mode).
+    pub fn set_audience(&mut self, audience: Audience) {
+        self.audience = audience;
+    }
+
     // -----------------------------------------------------------------------
     // Session persistence
     // -----------------------------------------------------------------------
@@ -1097,6 +1145,17 @@ impl Agent {
             .put_meta(b"agent:method_stats", &stats_bytes)
             .map_err(|e| AgentError::ConsolidationFailed {
                 message: format!("failed to persist method stats: {e}"),
+            })?;
+
+        // Persist audience.
+        let audience_bytes =
+            bincode::serialize(&self.audience).map_err(|e| AgentError::ConsolidationFailed {
+                message: format!("failed to serialize audience: {e}"),
+            })?;
+        store
+            .put_meta(b"agent:audience", &audience_bytes)
+            .map_err(|e| AgentError::ConsolidationFailed {
+                message: format!("failed to persist audience: {e}"),
             })?;
 
         // Persist psyche if loaded.
@@ -1175,6 +1234,14 @@ impl Agent {
             .and_then(|bytes| bincode::deserialize::<DriveSystem>(&bytes).ok())
             .unwrap_or_else(|| DriveSystem::with_thresholds(config.goal_generation.drive_thresholds));
 
+        // Restore audience: prefer persisted state, fall back to exploration default.
+        let audience = store
+            .get_meta(b"agent:audience")
+            .ok()
+            .flatten()
+            .and_then(|bytes| bincode::deserialize::<Audience>(&bytes).ok())
+            .unwrap_or_else(Audience::exploration);
+
         // Initialize HTN method registry and restore persisted stats.
         let mut htn_registry = MethodRegistry::new();
         decomposition::register_builtin_methods(&mut htn_registry);
@@ -1197,6 +1264,7 @@ impl Agent {
             sink: Arc::new(crate::message::StdoutSink),
             psyche,
             drives,
+            audience,
             method_registry_htn: htn_registry,
             last_impasse: None,
             #[cfg(feature = "wasm-tools")]

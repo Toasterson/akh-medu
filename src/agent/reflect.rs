@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use super::error::AgentResult;
 use super::goal::{Goal, GoalStatus};
 use super::memory::{WorkingMemory, WorkingMemoryKind};
+use super::priority_reasoning::{self, Audience, PriorityVerdict};
 use crate::symbol::SymbolId;
 
 // ---------------------------------------------------------------------------
@@ -425,6 +426,28 @@ fn generate_reflection_proposals(
     proposals
 }
 
+// ---------------------------------------------------------------------------
+// Argumentation-based reprioritization
+// ---------------------------------------------------------------------------
+
+/// Reprioritize all active goals using value-based argumentation.
+///
+/// Replaces raw ±30 priority adjustments from `compute_adjustments()` with
+/// transparent argument-based verdicts. Returns adjustments for goals whose
+/// priority changed.
+pub fn reprioritize_goals(
+    goals: &[Goal],
+    current_cycle: u64,
+    stall_threshold: u32,
+    audience: &Audience,
+) -> Vec<(SymbolId, u8, PriorityVerdict)> {
+    priority_reasoning::reprioritize_all(goals, current_cycle, stall_threshold, audience)
+        .into_iter()
+        .filter(|(_, old, new, _)| old != new)
+        .map(|(id, _old, _new, verdict)| (id, _old, verdict))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -485,6 +508,7 @@ mod tests {
             last_progress_cycle: 0,
             source: None,
             blocked_by: Vec::new(),
+            priority_rationale: None,
         }];
 
         let config = ReflectionConfig::default();
@@ -509,6 +533,7 @@ mod tests {
             last_progress_cycle: 0,
             source: None,
             blocked_by: Vec::new(),
+            priority_rationale: None,
         }];
 
         let config = ReflectionConfig::default();

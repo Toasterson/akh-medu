@@ -4020,5 +4020,17 @@ fn format_derivation_kind(kind: &DerivationKind, engine: &Engine) -> String {
                 "HTN decomposition: method \"{method_name}\" (strategy: {strategy}, {subtask_count} subtasks)"
             )
         }
+        DerivationKind::PriorityArgumentation {
+            goal,
+            old_priority,
+            new_priority,
+            audience,
+            net_score,
+        } => {
+            format!(
+                "Priority argumentation: \"{}\" {old_priority}→{new_priority} (audience: {audience}, net: {net_score:.2})",
+                engine.resolve_label(*goal),
+            )
+        }
     }
 }

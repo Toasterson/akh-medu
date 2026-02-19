@@ -412,18 +412,22 @@ struct ToolCandidate {
     pressure_bonus: f32,
     /// Bonus from the Jungian psyche archetype weights.
     archetype_bonus: f32,
+    /// ACT-R utility scaling: computed_priority / 255.0 (Phase 11c).
+    goal_value_factor: f32,
     /// Why this tool was considered.
     reasoning: String,
 }
 
 impl ToolCandidate {
     fn total_score(&self) -> f32 {
-        (self.base_score - self.recency_penalty
+        let raw = (self.base_score - self.recency_penalty
             + self.novelty_bonus
             + self.episodic_bonus
             + self.pressure_bonus
             + self.archetype_bonus)
-            .max(0.0)
+            .max(0.0);
+        // ACT-R utility scaling: 0.5× at priority 0, 1.0× at priority 255.
+        raw * (0.5 + 0.5 * self.goal_value_factor)
     }
 
     fn new(name: &str, input: ToolInput, base_score: f32, reasoning: String) -> Self {
@@ -436,6 +440,7 @@ impl ToolCandidate {
             episodic_bonus: 0.0,
             pressure_bonus: 0.0,
             archetype_bonus: 0.0,
+            goal_value_factor: 1.0, // default: no scaling
             reasoning,
         }
     }
@@ -1122,6 +1127,12 @@ fn select_tool(
         }
     }
 
+    // Apply ACT-R goal-value scaling from computed priority.
+    let gvf = goal.computed_priority() as f32 / 255.0;
+    for candidate in &mut candidates {
+        candidate.goal_value_factor = gvf;
+    }
+
     // Pick the highest-scored candidate.
     candidates.sort_by(|a, b| {
         b.total_score()
@@ -1135,7 +1146,7 @@ fn select_tool(
     if let Some(best) = candidates.into_iter().next() {
         let score = best.total_score();
         let reasoning = format!(
-            "{} [score={:.2}: base={:.2} recency=-{:.2} novelty=+{:.2} episodic=+{:.2} pressure=+{:.2} archetype={:+.3}]",
+            "{} [score={:.2}: base={:.2} recency=-{:.2} novelty=+{:.2} episodic=+{:.2} pressure=+{:.2} archetype={:+.3} gvf={:.2}]",
             best.reasoning,
             score,
             best.base_score,
@@ -1144,6 +1155,7 @@ fn select_tool(
             best.episodic_bonus,
             best.pressure_bonus,
             best.archetype_bonus,
+            best.goal_value_factor,
         );
         (best.name, best.input, reasoning, impasse)
     } else {

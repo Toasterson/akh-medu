@@ -961,6 +961,7 @@ mod tests {
             last_progress_cycle: 0,
             source: None,
             blocked_by: Vec::new(),
+            priority_rationale: None,
         }
     }
 

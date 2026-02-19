@@ -241,6 +241,15 @@ pub enum DerivationKind {
         strategy: String,
         subtask_count: usize,
     },
+
+    /// A goal's priority was re-evaluated via argumentation (Phase 11c).
+    PriorityArgumentation {
+        goal: SymbolId,
+        old_priority: u8,
+        new_priority: u8,
+        audience: String,
+        net_score: f64,
+    },
 }
 
 impl DerivationKind {
@@ -289,6 +298,7 @@ impl DerivationKind {
             Self::LibraryLearning { .. } => 39,
             Self::AutonomousGoalGeneration { .. } => 40,
             Self::HtnDecomposition { .. } => 41,
+            Self::PriorityArgumentation { .. } => 42,
         }
     }
 }

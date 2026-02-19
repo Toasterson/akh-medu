@@ -9,6 +9,7 @@ use crate::symbol::SymbolId;
 
 use super::agent::AgentPredicates;
 use super::error::AgentResult;
+use super::priority_reasoning::PriorityVerdict;
 
 /// Status of a goal.
 #[derive(Debug, Clone, PartialEq)]
@@ -137,9 +138,19 @@ pub struct Goal {
     pub source: Option<GoalSource>,
     /// Goals that must complete before this goal can be worked on (HTN dependencies).
     pub blocked_by: Vec<SymbolId>,
+    /// Argumentation-based priority verdict (Phase 11c).
+    pub priority_rationale: Option<PriorityVerdict>,
 }
 
 impl Goal {
+    /// Effective priority: uses argumentation verdict if available, else raw priority.
+    pub fn computed_priority(&self) -> u8 {
+        self.priority_rationale
+            .as_ref()
+            .map(|v| v.computed_priority)
+            .unwrap_or(self.priority)
+    }
+
     /// Whether this goal is stalled: has been worked on for `threshold` cycles
     /// since it last made progress.
     pub fn is_stalled(&self, current_cycle: u64, threshold: u32) -> bool {
@@ -212,6 +223,7 @@ pub fn create_goal(
         last_progress_cycle: 0,
         source: None,
         blocked_by: Vec::new(),
+        priority_rationale: None,
     })
 }
 
@@ -263,13 +275,15 @@ pub fn update_goal_status(
     Ok(())
 }
 
-/// Filter active goals, sorted by priority (highest first).
+/// Filter active goals, sorted by computed priority (highest first).
+///
+/// Uses argumentation-based priority when available, else raw priority.
 pub fn active_goals(goals: &[Goal]) -> Vec<&Goal> {
     let mut active: Vec<&Goal> = goals
         .iter()
         .filter(|g| matches!(g.status, GoalStatus::Active))
         .collect();
-    active.sort_by(|a, b| b.priority.cmp(&a.priority));
+    active.sort_by(|a, b| b.computed_priority().cmp(&a.computed_priority()));
     active
 }
 
@@ -356,6 +370,7 @@ pub fn restore_goals(engine: &Engine, predicates: &AgentPredicates) -> AgentResu
             last_progress_cycle: 0,
             source: None,
             blocked_by,
+            priority_rationale: None,
         });
     }
 
@@ -499,6 +514,7 @@ mod tests {
             last_progress_cycle: 0,
             source: None,
             blocked_by: Vec::new(),
+            priority_rationale: None,
         }];
         clear_goals(&mut goals);
         assert!(goals.is_empty());
@@ -520,6 +536,7 @@ mod tests {
                 last_progress_cycle: 0,
                 source: None,
                 blocked_by: Vec::new(),
+                priority_rationale: None,
             },
             Goal {
                 symbol_id: SymbolId::new(2).unwrap(),
@@ -534,6 +551,7 @@ mod tests {
                 last_progress_cycle: 0,
                 source: None,
                 blocked_by: Vec::new(),
+                priority_rationale: None,
             },
             Goal {
                 symbol_id: SymbolId::new(3).unwrap(),
@@ -548,6 +566,7 @@ mod tests {
                 last_progress_cycle: 0,
                 source: None,
                 blocked_by: Vec::new(),
+                priority_rationale: None,
             },
         ];
 
@@ -573,6 +592,7 @@ mod tests {
                 last_progress_cycle: 0,
                 source: None,
                 blocked_by: Vec::new(),
+                priority_rationale: None,
             },
             Goal {
                 symbol_id: SymbolId::new(2).unwrap(),
@@ -587,6 +607,7 @@ mod tests {
                 last_progress_cycle: 0,
                 source: None,
                 blocked_by: vec![SymbolId::new(1).unwrap()],
+                priority_rationale: None,
             },
         ];
 
@@ -612,6 +633,7 @@ mod tests {
                 last_progress_cycle: 0,
                 source: None,
                 blocked_by: Vec::new(),
+                priority_rationale: None,
             },
             Goal {
                 symbol_id: SymbolId::new(2).unwrap(),
@@ -626,6 +648,7 @@ mod tests {
                 last_progress_cycle: 0,
                 source: None,
                 blocked_by: vec![SymbolId::new(1).unwrap()],
+                priority_rationale: None,
             },
         ];
 
@@ -648,6 +671,7 @@ mod tests {
             last_progress_cycle: 0,
             source: None,
             blocked_by: Vec::new(),
+            priority_rationale: None,
         }];
 
         assert!(!goals[0].is_blocked(&goals));

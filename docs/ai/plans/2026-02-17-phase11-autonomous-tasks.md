@@ -228,14 +228,19 @@ ValueOrdering { name: String, ordering: Vec<SymbolId> }  // most preferred first
 ```
 
 **Changes**:
-- [ ] `src/agent/goal.rs` — `priority_rationale: Vec<Argument>` field, `Value` type
-- [ ] `src/agent/reflect.rs` — argumentation-based re-prioritization in reflection
-- [ ] `src/argumentation/` (from 9e) — goal-comparison argument templates, VAF extension computation
-- [ ] `src/agent/ooda.rs` — priority selection explains its reasoning, ACT-R utility in tool scoring
+- [x] `src/agent/priority_reasoning.rs` — Value, Audience, PriorityArgument, PriorityVerdict, generate_arguments(), compute_priority(), reprioritize_all()
+- [x] `src/agent/goal.rs` — `priority_rationale: Option<PriorityVerdict>` field, `computed_priority()` method, active_goals() sorted by computed priority
+- [x] `src/agent/reflect.rs` — `reprioritize_goals()` using argumentation verdicts
+- [x] `src/agent/ooda.rs` — `goal_value_factor` in ToolCandidate for ACT-R utility scaling
+- [x] `src/agent/agent.rs` — `audience: Audience` field, wire reprioritize into reflection, persist/resume audience
+- [x] `src/provenance.rs` — `PriorityArgumentation` variant (tag 42)
+- [x] `src/main.rs` — format_derivation_kind arm for PriorityArgumentation
+- [x] `src/agent/mod.rs` — `pub mod priority_reasoning;` + re-exports
 
 **Depends on**: 9e (argumentation framework)
 
 **Estimated scope**: ~500–700 lines
+**Actual**: ~500 lines new + ~60 lines modified. 21 new tests (892 total, up from 871).
 
 ---
 

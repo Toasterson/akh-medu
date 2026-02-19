@@ -1,6 +1,6 @@
 # Akh-medu Architecture
 
-> Last updated: 2026-02-19 (Phase 11b — Intelligent task decomposition)
+> Last updated: 2026-02-19 (Phase 11c — Priority reasoning via argumentation)
 
 ## Overview
 
@@ -19,7 +19,7 @@ Akh-medu is a neuro-symbolic AI engine that runs entirely on CPU with no LLM dep
 
 ```
 src/
-├── agent/              31 modules — OODA loop, tools (code_gen, code_ingest, compile_feedback, pattern_mine), memory, goals, drives, goal_generation, HTN decomposition, planning, psyche, library learning
+├── agent/              32 modules — OODA loop, tools (code_gen, code_ingest, compile_feedback, pattern_mine), memory, goals, drives, goal_generation, HTN decomposition, priority reasoning (argumentation), planning, psyche, library learning
 ├── autonomous/          6 modules — background learning, confidence fusion, grounding
 ├── argumentation/       1 module  — pro/con argumentation (Phase 9e): meta-rules, verdicts, evidence chains
 ├── compartment/         5 modules — knowledge isolation, Jungian psyche, microtheories (Phase 9a, per-repo code scoping), CWA/circumscription (Phase 9m)
@@ -38,7 +38,7 @@ src/
 ├── error.rs                       — miette + thiserror rich diagnostics
 ├── rule_macro.rs                  — rule macro predicates (Phase 9g): RuleMacro trait, registry, genls/relationAllExists/relationExistsAll
 ├── temporal.rs                    — temporal projection (Phase 9k): TemporalProfile, decay computation, registry
-├── provenance.rs                  — persistent explanation ledger (redb, multi-index, 42 derivation kinds)
+├── provenance.rs                  — persistent explanation ledger (redb, multi-index, 43 derivation kinds)
 ├── skolem.rs                      — Skolem functions (Phase 9h): existential witnesses, grounding, auto-ground
 ├── tms.rs                         — truth maintenance system (Phase 9c): support sets, retraction cascades
 ├── symbol.rs                      — SymbolId (NonZeroU64), SymbolKind, allocator
