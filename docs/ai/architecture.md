@@ -1,6 +1,6 @@
 # Akh-medu Architecture
 
-> Last updated: 2026-02-19 (Phase 11d — Project abstraction and cross-session continuity)
+> Last updated: 2026-02-19 (Phase 11e — World monitoring and reactive goals)
 
 ## Overview
 
@@ -19,7 +19,7 @@ Akh-medu is a neuro-symbolic AI engine that runs entirely on CPU with no LLM dep
 
 ```
 src/
-├── agent/              33 modules — OODA loop, tools (code_gen, code_ingest, compile_feedback, pattern_mine), memory, goals, drives, goal_generation, HTN decomposition, priority reasoning (argumentation), projects (microtheory-backed), planning, psyche, library learning
+├── agent/              34 modules — OODA loop, tools (code_gen, code_ingest, compile_feedback, pattern_mine), memory, goals, drives, goal_generation, HTN decomposition, priority reasoning (argumentation), projects (microtheory-backed), planning, psyche, library learning, watch (GDA expectation monitoring)
 ├── autonomous/          6 modules — background learning, confidence fusion, grounding
 ├── argumentation/       1 module  — pro/con argumentation (Phase 9e): meta-rules, verdicts, evidence chains
 ├── compartment/         5 modules — knowledge isolation, Jungian psyche, microtheories (Phase 9a, per-repo code scoping), CWA/circumscription (Phase 9m)
@@ -38,7 +38,7 @@ src/
 ├── error.rs                       — miette + thiserror rich diagnostics
 ├── rule_macro.rs                  — rule macro predicates (Phase 9g): RuleMacro trait, registry, genls/relationAllExists/relationExistsAll
 ├── temporal.rs                    — temporal projection (Phase 9k): TemporalProfile, decay computation, registry
-├── provenance.rs                  — persistent explanation ledger (redb, multi-index, 44 derivation kinds)
+├── provenance.rs                  — persistent explanation ledger (redb, multi-index, 45 derivation kinds)
 ├── skolem.rs                      — Skolem functions (Phase 9h): existential witnesses, grounding, auto-ground
 ├── tms.rs                         — truth maintenance system (Phase 9c): support sets, retraction cascades
 ├── symbol.rs                      — SymbolId (NonZeroU64), SymbolKind, allocator
@@ -116,7 +116,7 @@ SPARQL (oxigraph)  — persistent RDF store for structured queries
 ## Provenance
 
 Every inference, agent decision, and knowledge derivation creates a `ProvenanceRecord`:
-- Derived symbol, derivation kind (42 variants), confidence, depth, source symbols, metadata
+- Derived symbol, derivation kind (45 variants), confidence, depth, source symbols, metadata
 - Full traceback from any result to its original sources
 - Indices by derived symbol, source symbol, and kind for fast lookup
 
@@ -134,8 +134,7 @@ Phase 10a–10h: Rust code generation (8 sub-phases):
 - **Infra**: code_ingest per-repo microtheory scoping (mt:repo:<name> specializes mt:rust-code, ContextDomain::Code, clean re-ingestion)
 - **Pattern learning**: 10g pattern mining from examples, 10h library learning cycle
 Phase 11a–11h: Autonomous task system (8 sub-phases):
-- **Core (Waves 1–2 complete)**: 11a drive-based goal generation with impasse detection (CLARION/GDA/Soar), 11b HTN decomposition with dependency DAGs (6 built-in methods, VSA method selection, petgraph TaskTree), 11c value-based argumentation priority (Dung/VAF)
-- **Structure**: 11d projects as microtheories with Soar/ACT-R memory, 11e GDA expectation monitoring
+- **Core (Waves 1–3 complete)**: 11a drive-based goal generation with impasse detection (CLARION/GDA/Soar), 11b HTN decomposition with dependency DAGs (6 built-in methods, VSA method selection, petgraph TaskTree), 11c value-based argumentation priority (Dung/VAF), 11d projects as microtheories with Soar/ACT-R memory, 11e GDA expectation monitoring with pattern-based KG watches, VSA semantic trigger matching, fluent-style state tracking
 - **Meta**: 11f metacognitive self-evaluation (Nelson-Narens/AGM), 11g VOC resource reasoning with CBR effort estimation, 11h procedural learning (Soar chunking)
 Phase 12a–12g: Interaction — communication protocols and social reasoning (7 sub-phases):
 - **Core**: 12a channel abstraction (capability-secured, Chat = operator protocol), 12b grounded operator dialogue, 12c pre-communication constraint checking

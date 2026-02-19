@@ -21,6 +21,7 @@ use super::goal::{self, Goal, GoalSource, GoalStatus};
 use super::memory::WorkingMemory;
 use super::ooda::DecisionImpasse;
 use super::reflect::ReflectionResult;
+use super::watch::{WatchAction, WatchFiring};
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -115,13 +116,22 @@ pub fn generate_goals(
     _cycle: u64,
     impasse: Option<&DecisionImpasse>,
     reflection: Option<&ReflectionResult>,
+    watch_firings: &[WatchFiring],
 ) -> AgentResult<GoalGenerationResult> {
     // Phase 1: Signal collection.
     let goal_symbols: Vec<SymbolId> = goal::active_goals(goals)
         .iter()
         .map(|g| g.symbol_id)
         .collect();
-    let mut proposals = collect_signals(engine, goals, drives, &goal_symbols, impasse, reflection);
+    let mut proposals = collect_signals(
+        engine,
+        goals,
+        drives,
+        &goal_symbols,
+        impasse,
+        reflection,
+        watch_firings,
+    );
 
     // Phase 2: Deliberation.
     let (kept, deduplicated, infeasible) = deliberate(engine, &mut proposals, goals, config);
@@ -156,6 +166,7 @@ fn collect_signals(
     goal_symbols: &[SymbolId],
     impasse: Option<&DecisionImpasse>,
     reflection: Option<&ReflectionResult>,
+    watch_firings: &[WatchFiring],
 ) -> Vec<GoalProposal> {
     let mut proposals = Vec::new();
 
@@ -180,6 +191,9 @@ fn collect_signals(
     if let Some(refl) = reflection {
         proposals.extend(proposals_from_reflection(refl));
     }
+
+    // 7. Watch-based proposals (world monitoring, Phase 11e).
+    proposals.extend(proposals_from_watches(watch_firings));
 
     proposals
 }
@@ -420,6 +434,35 @@ fn proposals_from_reflection(reflection: &ReflectionResult) -> Vec<GoalProposal>
         .collect()
 }
 
+/// Watch firings with `GenerateGoal` actions → goal proposals.
+fn proposals_from_watches(firings: &[WatchFiring]) -> Vec<GoalProposal> {
+    firings
+        .iter()
+        .filter_map(|firing| match &firing.watch_action {
+            WatchAction::GenerateGoal {
+                description_template,
+                priority,
+                criteria_template,
+            } => Some(GoalProposal {
+                description: description_template.clone(),
+                rationale: format!(
+                    "Watch '{}' fired: {}",
+                    firing.watch_name, firing.condition_summary
+                ),
+                source: GoalSource::WorldChange {
+                    watch_name: firing.watch_name.clone(),
+                    discrepancy: firing.condition_summary.clone(),
+                },
+                priority_suggestion: *priority,
+                success_criteria: criteria_template.clone(),
+                conflicts_with: Vec::new(),
+                feasibility: 1.0, // Watch-generated goals are always feasible.
+            }),
+            WatchAction::LogObservation { .. } => None,
+        })
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // Phase 2: Deliberation
 // ---------------------------------------------------------------------------
@@ -614,6 +657,7 @@ pub fn provenance_from_source(source: &GoalSource) -> (String, f32) {
         GoalSource::OpportunityDetected { .. } => ("opportunity".to_string(), 0.7),
         GoalSource::ImpasseDetected { .. } => ("impasse".to_string(), 0.6),
         GoalSource::ReflectionInsight { .. } => ("reflection".to_string(), 0.5),
+        GoalSource::WorldChange { .. } => ("world_change".to_string(), 0.7),
     }
 }
 
@@ -894,5 +938,83 @@ mod tests {
         let (activated, dormant) = activate_proposals(proposals, &config);
         assert_eq!(activated.len(), 1);
         assert_eq!(dormant.len(), 1);
+    }
+
+    #[test]
+    fn proposals_from_watches_generates_goals() {
+        use super::super::watch::{WatchAction, WatchFiring};
+
+        let firings = vec![WatchFiring {
+            watch_name: "triple-monitor".into(),
+            watch_action: WatchAction::GenerateGoal {
+                description_template: "Investigate new triples".into(),
+                priority: 150,
+                criteria_template: "Changes analyzed".into(),
+            },
+            condition_summary: "Triple count grew by 10".into(),
+        }];
+
+        let proposals = proposals_from_watches(&firings);
+        assert_eq!(proposals.len(), 1);
+        assert!(proposals[0].description.contains("Investigate"));
+        assert_eq!(proposals[0].priority_suggestion, 150);
+        assert!(matches!(
+            &proposals[0].source,
+            GoalSource::WorldChange { watch_name, .. } if watch_name == "triple-monitor"
+        ));
+    }
+
+    #[test]
+    fn proposals_from_watches_empty_for_log_only() {
+        use super::super::watch::{WatchAction, WatchFiring};
+
+        let firings = vec![WatchFiring {
+            watch_name: "log-only".into(),
+            watch_action: WatchAction::LogObservation {
+                message_template: "just logging".into(),
+            },
+            condition_summary: "delta observed".into(),
+        }];
+
+        let proposals = proposals_from_watches(&firings);
+        assert!(proposals.is_empty());
+    }
+
+    #[test]
+    fn world_change_provenance() {
+        let source = GoalSource::WorldChange {
+            watch_name: "test".into(),
+            discrepancy: "missing triples".into(),
+        };
+        let (drive, strength) = provenance_from_source(&source);
+        assert_eq!(drive, "world_change");
+        assert!((strength - 0.7).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn collect_signals_includes_watches() {
+        use super::super::watch::{WatchAction, WatchFiring};
+        use crate::engine::{Engine, EngineConfig};
+        use crate::vsa::Dimension;
+
+        let engine = Engine::new(EngineConfig {
+            dimension: Dimension(1000),
+            ..EngineConfig::default()
+        })
+        .unwrap();
+
+        let drives = DriveSystem::new();
+        let firings = vec![WatchFiring {
+            watch_name: "test-watch".into(),
+            watch_action: WatchAction::GenerateGoal {
+                description_template: "Watch-generated goal".into(),
+                priority: 100,
+                criteria_template: "done".into(),
+            },
+            condition_summary: "delta".into(),
+        }];
+
+        let proposals = collect_signals(&engine, &[], &drives, &[], None, None, &firings);
+        assert!(proposals.iter().any(|p| p.description.contains("Watch-generated")));
     }
 }

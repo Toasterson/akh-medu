@@ -106,6 +106,11 @@ pub enum GoalSource {
     ReflectionInsight {
         insight: String,
     },
+    /// Generated from a world-monitoring watch firing or expectation discrepancy.
+    WorldChange {
+        watch_name: String,
+        discrepancy: String,
+    },
 }
 
 /// Default number of cycles without progress before a goal is considered stalled.

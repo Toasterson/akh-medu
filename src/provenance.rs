@@ -253,6 +253,12 @@ pub enum DerivationKind {
 
     /// A project was created to group related goals (Phase 11d).
     ProjectCreated { name: String },
+
+    /// A world-monitoring watch fired (Phase 11e).
+    WatchFired {
+        watch_id: String,
+        condition_summary: String,
+    },
 }
 
 impl DerivationKind {
@@ -303,6 +309,7 @@ impl DerivationKind {
             Self::HtnDecomposition { .. } => 41,
             Self::PriorityArgumentation { .. } => 42,
             Self::ProjectCreated { .. } => 43,
+            Self::WatchFired { .. } => 44,
         }
     }
 }

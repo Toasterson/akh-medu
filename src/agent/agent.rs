@@ -17,6 +17,7 @@ use super::drives::DriveSystem;
 use super::error::{AgentError, AgentResult};
 use super::goal::{self, DEFAULT_STALL_THRESHOLD, Goal, GoalStatus};
 use super::goal_generation::{self, GoalGenerationConfig, GoalGenerationResult};
+use super::watch::{self, Watch, WatchFiring};
 use super::memory::{
     ConsolidationConfig, ConsolidationResult, EpisodicEntry, SessionSummary, WorkingMemory,
     WorkingMemoryEntry, WorkingMemoryKind, consolidate, generate_session_summary, recall_episodes,
@@ -154,6 +155,10 @@ pub struct Agent {
     pub(crate) agenda: Agenda,
     /// Cycle count at the start of this session (for session summary).
     pub(crate) session_start_cycle: u64,
+    /// World-monitoring watches (Phase 11e).
+    pub(crate) watches: Vec<Watch>,
+    /// Most recent watch firings (consumed by goal generation).
+    pub(crate) last_watch_firings: Vec<WatchFiring>,
     /// Optional WASM tool runtime (only when `wasm-tools` feature is enabled).
     #[cfg(feature = "wasm-tools")]
     pub(crate) wasm_runtime: Option<super::wasm_runtime::WasmToolRuntime>,
@@ -355,6 +360,8 @@ impl Agent {
             project_predicates,
             agenda: Agenda::new(),
             session_start_cycle: 0,
+            watches: Vec::new(),
+            last_watch_firings: Vec::new(),
             #[cfg(feature = "wasm-tools")]
             wasm_runtime: super::wasm_runtime::WasmToolRuntime::new().ok(),
         };
@@ -482,6 +489,57 @@ impl Agent {
         let library_learn_interval = reflect_interval.saturating_mul(4).max(1);
         if library_learn_interval > 0 && self.cycle_count % library_learn_interval == 0 {
             let _ = self.run_library_learning();
+        }
+
+        // Evaluate watches against world delta (Phase 11e).
+        {
+            let snap_before = watch::take_snapshot(
+                &self.engine,
+                self.cycle_count.saturating_sub(1),
+            );
+            let snap_after = watch::take_snapshot(&self.engine, self.cycle_count);
+            let firings = watch::evaluate_watches(
+                &mut self.watches,
+                &snap_before,
+                &snap_after,
+                &self.engine,
+                self.cycle_count,
+            );
+
+            // Record watch firings as WM observations + provenance.
+            for firing in &firings {
+                let _ = self.working_memory.push(WorkingMemoryEntry {
+                    id: 0,
+                    content: format!(
+                        "Watch '{}' fired: {}",
+                        firing.watch_name, firing.condition_summary
+                    ),
+                    symbols: vec![],
+                    kind: WorkingMemoryKind::Observation,
+                    timestamp: 0,
+                    relevance: 0.7,
+                    source_cycle: self.cycle_count,
+                    reference_count: 0,
+                    access_timestamps: Vec::new(),
+                });
+
+                // Store provenance for the firing.
+                let derived_id = self
+                    .engine
+                    .resolve_or_create_relation("agent:watch_event")
+                    .unwrap_or(self.predicates.has_status);
+                let mut prov = ProvenanceRecord::new(
+                    derived_id,
+                    DerivationKind::WatchFired {
+                        watch_id: firing.watch_name.clone(),
+                        condition_summary: firing.condition_summary.clone(),
+                    },
+                )
+                .with_confidence(0.8);
+                let _ = self.engine.store_provenance(&mut prov);
+            }
+
+            self.last_watch_firings = firings;
         }
 
         // Periodic autonomous goal generation.
@@ -1057,6 +1115,7 @@ impl Agent {
             self.cycle_count,
             self.last_impasse.as_ref(),
             self.last_reflection.as_ref(),
+            &self.last_watch_firings,
         )?;
 
         // Activate generated goals by creating them in the goals list.
@@ -1147,6 +1206,49 @@ impl Agent {
     /// Set the argumentation audience (operational mode).
     pub fn set_audience(&mut self, audience: Audience) {
         self.audience = audience;
+    }
+
+    // -----------------------------------------------------------------------
+    // Watches (Phase 11e)
+    // -----------------------------------------------------------------------
+
+    /// Add a new world-monitoring watch. Returns the watch ID.
+    pub fn add_watch(
+        &mut self,
+        name: &str,
+        condition: super::watch::WatchCondition,
+        action: super::watch::WatchAction,
+        cooldown_cycles: u64,
+    ) -> AgentResult<String> {
+        let id = watch::generate_watch_id();
+        self.watches.push(Watch {
+            id: id.clone(),
+            name: name.to_string(),
+            condition,
+            action,
+            enabled: true,
+            cooldown_cycles,
+            last_fired_cycle: 0,
+        });
+        Ok(id)
+    }
+
+    /// Remove a watch by ID.
+    pub fn remove_watch(&mut self, id: &str) -> AgentResult<()> {
+        let idx = self
+            .watches
+            .iter()
+            .position(|w| w.id == id)
+            .ok_or_else(|| AgentError::WatchNotFound {
+                watch_id: id.to_string(),
+            })?;
+        self.watches.remove(idx);
+        Ok(())
+    }
+
+    /// Get all registered watches.
+    pub fn watches(&self) -> &[Watch] {
+        &self.watches
     }
 
     // -----------------------------------------------------------------------
@@ -1337,6 +1439,9 @@ impl Agent {
                 message: format!("failed to persist agenda: {e}"),
             })?;
 
+        // Persist watches.
+        watch::persist_watches(&self.engine, &self.watches)?;
+
         // Flush the engine's durable store.
         self.engine
             .persist()
@@ -1437,6 +1542,9 @@ impl Agent {
             }
         }
 
+        // Restore watches from durable store.
+        let watches = watch::restore_watches(&engine).unwrap_or_default();
+
         let session_start_cycle = cycle_count;
 
         let mut agent = Self {
@@ -1459,6 +1567,8 @@ impl Agent {
             project_predicates,
             agenda,
             session_start_cycle,
+            watches,
+            last_watch_firings: Vec::new(),
             #[cfg(feature = "wasm-tools")]
             wasm_runtime: super::wasm_runtime::WasmToolRuntime::new().ok(),
         };
@@ -1493,6 +1603,7 @@ impl std::fmt::Debug for Agent {
             .field("has_impasse", &self.last_impasse.is_some())
             .field("projects", &self.projects.len())
             .field("active_project", &self.agenda.active_project)
+            .field("watches", &self.watches.len())
             .finish()
     }
 }

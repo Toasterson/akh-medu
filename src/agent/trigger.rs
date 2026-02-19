@@ -44,6 +44,14 @@ pub enum TriggerCondition {
     MemoryPressure { threshold: usize },
     /// Fire when the triple count has grown by >= min_count since last fire.
     NewTriples { min_count: usize },
+    /// Fire when a triple matching the pattern appears (Phase 11e).
+    TriplePattern {
+        subject_pattern: Option<String>,
+        predicate: Option<String>,
+        object_pattern: Option<String>,
+    },
+    /// Fire when a symbol's confidence drops below threshold (Phase 11e).
+    ConfidenceThreshold { symbol_label: String, below: f64 },
 }
 
 /// Actions to execute when a trigger fires.
@@ -190,6 +198,35 @@ pub fn should_fire(trigger: &Trigger, agent: &Agent, now: u64) -> bool {
             // Approximate: check total triple count against a threshold.
             // More precise tracking would require persisting the last-seen count.
             agent.engine().all_triples().len() >= *min_count
+        }
+        TriggerCondition::TriplePattern {
+            subject_pattern,
+            predicate,
+            object_pattern,
+        } => {
+            let pattern = super::watch::TriplePattern {
+                subject_pattern: subject_pattern.clone(),
+                predicate_pattern: predicate.clone(),
+                object_pattern: object_pattern.clone(),
+            };
+            agent
+                .engine()
+                .all_triples()
+                .iter()
+                .any(|t| super::watch::matches_pattern(&pattern, t, agent.engine()))
+        }
+        TriggerCondition::ConfidenceThreshold {
+            symbol_label,
+            below,
+        } => {
+            if let Ok(sym) = agent.engine().lookup_symbol(symbol_label) {
+                let triples = agent.engine().triples_from(sym);
+                triples
+                    .iter()
+                    .any(|t| (t.confidence as f64) < *below)
+            } else {
+                false
+            }
         }
     }
 }
@@ -345,6 +382,65 @@ mod tests {
                 now.saturating_sub(trigger.last_fired) >= *seconds
             }
             _ => false,
+        }
+    }
+
+    #[test]
+    fn should_fire_triple_pattern_serialization() {
+        let trigger = Trigger {
+            id: "tp1".into(),
+            name: "triple-pattern-test".into(),
+            condition: TriggerCondition::TriplePattern {
+                subject_pattern: Some("concept:*".into()),
+                predicate: Some("is-a".into()),
+                object_pattern: None,
+            },
+            action: TriggerAction::Reflect,
+            enabled: true,
+            last_fired: 0,
+        };
+
+        let bytes = bincode::serialize(&trigger).unwrap();
+        let decoded: Trigger = bincode::deserialize(&bytes).unwrap();
+        match decoded.condition {
+            TriggerCondition::TriplePattern {
+                subject_pattern,
+                predicate,
+                object_pattern,
+            } => {
+                assert_eq!(subject_pattern.as_deref(), Some("concept:*"));
+                assert_eq!(predicate.as_deref(), Some("is-a"));
+                assert!(object_pattern.is_none());
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn should_fire_confidence_threshold_serialization() {
+        let trigger = Trigger {
+            id: "ct1".into(),
+            name: "confidence-test".into(),
+            condition: TriggerCondition::ConfidenceThreshold {
+                symbol_label: "test-sym".into(),
+                below: 0.3,
+            },
+            action: TriggerAction::AnalyzeGaps,
+            enabled: true,
+            last_fired: 0,
+        };
+
+        let bytes = bincode::serialize(&trigger).unwrap();
+        let decoded: Trigger = bincode::deserialize(&bytes).unwrap();
+        match decoded.condition {
+            TriggerCondition::ConfidenceThreshold {
+                symbol_label,
+                below,
+            } => {
+                assert_eq!(symbol_label, "test-sym");
+                assert!((below - 0.3).abs() < f64::EPSILON);
+            }
+            _ => panic!("wrong variant"),
         }
     }
 }

@@ -35,6 +35,7 @@ pub mod tool_manifest;
 pub mod tool_semantics;
 pub mod tools;
 pub mod trigger;
+pub mod watch;
 #[cfg(feature = "wasm-tools")]
 pub mod wasm_runtime;
 
@@ -70,3 +71,7 @@ pub use synthesize::NarrativeSummary;
 pub use tool::{Tool, ToolInput, ToolOutput, ToolRegistry, ToolSignature};
 pub use tool_manifest::{Capability, DangerInfo, DangerLevel, ToolManifest, ToolSource};
 pub use trigger::{Trigger, TriggerAction, TriggerCondition, TriggerStore};
+pub use watch::{
+    Discrepancy, Expectation, TriplePattern, Watch, WatchAction, WatchCondition, WatchFiring,
+    WorldSnapshot,
+};

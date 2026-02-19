@@ -81,6 +81,8 @@ pub struct ActionResult {
     pub goal_progress: GoalProgress,
     /// WM entries created during this cycle.
     pub new_wm_entries: Vec<u64>,
+    /// Discrepancy between expected and actual effects (Phase 11e).
+    pub discrepancy: Option<super::watch::Discrepancy>,
 }
 
 /// How a goal progressed as a result of the action.
@@ -1300,6 +1302,7 @@ fn act(agent: &mut Agent, decision: &Decision, cycle: u64) -> AgentResult<Action
                         reason: format!("Shadow veto: {}", veto_name),
                     },
                     new_wm_entries: wm_id.into_iter().collect(),
+                    discrepancy: None,
                 });
             }
 
@@ -1402,6 +1405,7 @@ fn act(agent: &mut Agent, decision: &Decision, cycle: u64) -> AgentResult<Action
         tool_output,
         goal_progress,
         new_wm_entries: wm_id.into_iter().collect(),
+        discrepancy: None,
     })
 }
 

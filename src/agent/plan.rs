@@ -45,6 +45,8 @@ pub struct PlanStep {
     pub status: StepStatus,
     /// Index in the plan (0-based).
     pub index: usize,
+    /// Expected effects of this step for GDA expectation monitoring (Phase 11e).
+    pub expected_effects: Vec<String>,
 }
 
 /// Status of an entire plan.
@@ -272,6 +274,7 @@ pub fn generate_plan(
                 rationale: "Gather existing knowledge about the goal subject.".into(),
                 status: StepStatus::Pending,
                 index: steps.len(),
+                expected_effects: Vec::new(),
             });
             strategy_parts.push("explore KG");
         }
@@ -286,6 +289,7 @@ pub fn generate_plan(
                 rationale: "Find similar concepts to broaden understanding.".into(),
                 status: StepStatus::Pending,
                 index: steps.len(),
+                expected_effects: Vec::new(),
             });
             strategy_parts.push("similarity search");
         }
@@ -309,6 +313,7 @@ pub fn generate_plan(
                 rationale: "Apply symbolic reasoning to derive new insights.".into(),
                 status: StepStatus::Pending,
                 index: steps.len(),
+                expected_effects: Vec::new(),
             });
             strategy_parts.push("reason");
         }
@@ -325,6 +330,7 @@ pub fn generate_plan(
                 rationale: "Create new knowledge based on gathered insights.".into(),
                 status: StepStatus::Pending,
                 index: steps.len(),
+                expected_effects: Vec::new(),
             });
             strategy_parts.push("synthesize");
         }
@@ -340,6 +346,7 @@ pub fn generate_plan(
             rationale: "Recall past experience related to this goal.".into(),
             status: StepStatus::Pending,
             index: steps.len(),
+            expected_effects: Vec::new(),
         });
         strategy_parts.push("recall experience");
 
@@ -362,6 +369,7 @@ pub fn generate_plan(
                 rationale: "Reason about existing knowledge before exploring further.".into(),
                 status: StepStatus::Pending,
                 index: steps.len(),
+                expected_effects: Vec::new(),
             });
             strategy_parts.push("reason first");
         }
@@ -375,6 +383,7 @@ pub fn generate_plan(
             rationale: "Targeted knowledge query after reasoning.".into(),
             status: StepStatus::Pending,
             index: steps.len(),
+            expected_effects: Vec::new(),
         });
         strategy_parts.push("targeted query");
 
@@ -390,6 +399,7 @@ pub fn generate_plan(
                 rationale: "Synthesize knowledge from alternative approach.".into(),
                 status: StepStatus::Pending,
                 index: steps.len(),
+                expected_effects: Vec::new(),
             });
             strategy_parts.push("create");
         }
@@ -458,6 +468,7 @@ pub fn generate_plan(
                     rationale,
                     status: StepStatus::Pending,
                     index: steps.len(),
+                    expected_effects: Vec::new(),
                 });
                 strategy_parts.push(strategy_label);
             }
@@ -472,6 +483,7 @@ pub fn generate_plan(
                     rationale: "Access file data relevant to the goal.".into(),
                     status: StepStatus::Pending,
                     index: steps.len(),
+                    expected_effects: Vec::new(),
                 });
                 strategy_parts.push("file I/O");
             }
@@ -482,6 +494,7 @@ pub fn generate_plan(
                     rationale: "Fetch external data via HTTP.".into(),
                     status: StepStatus::Pending,
                     index: steps.len(),
+                    expected_effects: Vec::new(),
                 });
                 strategy_parts.push("HTTP fetch");
             }
@@ -494,6 +507,7 @@ pub fn generate_plan(
                     rationale: "Execute a shell command for the goal.".into(),
                     status: StepStatus::Pending,
                     index: steps.len(),
+                    expected_effects: Vec::new(),
                 });
                 strategy_parts.push("shell exec");
             }
@@ -510,6 +524,7 @@ pub fn generate_plan(
             rationale: "Fallback: query KG for any relevant knowledge.".into(),
             status: StepStatus::Pending,
             index: 0,
+            expected_effects: Vec::new(),
         });
         strategy_parts.push("fallback KG query");
     }
@@ -630,6 +645,7 @@ fn generate_code_plan(
             rationale: "Gather existing code structure knowledge.".into(),
             status: StepStatus::Pending,
             index: steps.len(),
+            expected_effects: Vec::new(),
         });
 
         // Step 2: If goal mentions a reference file, ingest it
@@ -640,6 +656,7 @@ fn generate_code_plan(
                 rationale: "Parse reference code for structure learning.".into(),
                 status: StepStatus::Pending,
                 index: steps.len(),
+                expected_effects: Vec::new(),
             });
             strategy_parts.push("reference ingest");
         }
@@ -657,6 +674,7 @@ fn generate_code_plan(
                 rationale: format!("Define '{}' as a {} in the KG.", target_name, scope_to_type(scope)),
                 status: StepStatus::Pending,
                 index: steps.len(),
+                expected_effects: Vec::new(),
             });
             strategy_parts.push("define target");
         }
@@ -671,6 +689,7 @@ fn generate_code_plan(
             rationale: format!("Generate {} code for '{}'.", scope, target_name),
             status: StepStatus::Pending,
             index: steps.len(),
+            expected_effects: Vec::new(),
         });
         strategy_parts.push("generate");
 
@@ -686,6 +705,7 @@ fn generate_code_plan(
                 rationale: format!("Write generated code to {}.", filename),
                 status: StepStatus::Pending,
                 index: steps.len(),
+                expected_effects: Vec::new(),
             });
             strategy_parts.push("write file");
         }
@@ -698,6 +718,7 @@ fn generate_code_plan(
             rationale: "Validate generated code compiles.".into(),
             status: StepStatus::Pending,
             index: steps.len(),
+            expected_effects: Vec::new(),
         });
         strategy_parts.push("validate");
     } else {
@@ -713,6 +734,7 @@ fn generate_code_plan(
             rationale: "Recall past code generation experience.".into(),
             status: StepStatus::Pending,
             index: steps.len(),
+            expected_effects: Vec::new(),
         });
 
         // Step 2: Query KG for related code patterns
@@ -724,6 +746,7 @@ fn generate_code_plan(
             rationale: "Query existing code structure and dependencies.".into(),
             status: StepStatus::Pending,
             index: steps.len(),
+            expected_effects: Vec::new(),
         });
 
         // Step 3: Similarity search for analogous code
@@ -735,6 +758,7 @@ fn generate_code_plan(
             rationale: "Find similar code structures for pattern reuse.".into(),
             status: StepStatus::Pending,
             index: steps.len(),
+            expected_effects: Vec::new(),
         });
 
         // Step 4: Define structure in KG
@@ -748,6 +772,7 @@ fn generate_code_plan(
             rationale: "Define the target code structure in the KG.".into(),
             status: StepStatus::Pending,
             index: steps.len(),
+            expected_effects: Vec::new(),
         });
 
         // Step 5: Generate code
@@ -760,6 +785,7 @@ fn generate_code_plan(
             rationale: format!("Generate {} code with bottom-up context.", scope),
             status: StepStatus::Pending,
             index: steps.len(),
+            expected_effects: Vec::new(),
         });
         strategy_parts.push("generate");
 
@@ -771,6 +797,7 @@ fn generate_code_plan(
             rationale: "Validate generated code compiles.".into(),
             status: StepStatus::Pending,
             index: steps.len(),
+            expected_effects: Vec::new(),
         });
         strategy_parts.push("validate");
     }
@@ -903,6 +930,7 @@ mod tests {
                     rationale: "first".into(),
                     status: StepStatus::Pending,
                     index: 0,
+                    expected_effects: Vec::new(),
                 },
                 PlanStep {
                     tool_name: "reason".into(),
@@ -910,6 +938,7 @@ mod tests {
                     rationale: "second".into(),
                     status: StepStatus::Pending,
                     index: 1,
+                    expected_effects: Vec::new(),
                 },
             ],
             status: PlanStatus::Active,
@@ -945,6 +974,7 @@ mod tests {
                     rationale: "".into(),
                     status: StepStatus::Pending,
                     index: 0,
+                    expected_effects: Vec::new(),
                 },
                 PlanStep {
                     tool_name: "b".into(),
@@ -952,6 +982,7 @@ mod tests {
                     rationale: "".into(),
                     status: StepStatus::Pending,
                     index: 1,
+                    expected_effects: Vec::new(),
                 },
                 PlanStep {
                     tool_name: "c".into(),
@@ -959,6 +990,7 @@ mod tests {
                     rationale: "".into(),
                     status: StepStatus::Pending,
                     index: 2,
+                    expected_effects: Vec::new(),
                 },
             ],
             status: PlanStatus::Active,

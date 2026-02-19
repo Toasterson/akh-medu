@@ -99,6 +99,13 @@ pub enum AgentError {
     )]
     ProjectNotFound { project_id: u64 },
 
+    #[error("watch not found: \"{watch_id}\"")]
+    #[diagnostic(
+        code(akh::agent::watch_not_found),
+        help("The watch ID does not exist. Check active watches with `agent.watches()`.")
+    )]
+    WatchNotFound { watch_id: String },
+
     #[error("{0}")]
     #[diagnostic(
         code(akh::agent::engine),

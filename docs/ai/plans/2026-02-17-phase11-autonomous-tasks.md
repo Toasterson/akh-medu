@@ -1,8 +1,8 @@
 # Phase 11 — Autonomous Task System with Self-Goal Setting
 
 - **Date**: 2026-02-17
-- **Updated**: 2026-02-19 (Phase 11d complete)
-- **Status**: In Progress (11a–11d complete)
+- **Updated**: 2026-02-19 (Phase 11e complete)
+- **Status**: In Progress (11a–11e complete)
 - **Depends on**: Phase 9 (microtheories, TMS, argumentation for reasoning quality), Phase 10 (code generation for implementation tasks)
 
 ## Goal
@@ -357,12 +357,12 @@ Discrepancy { missing_expected: Vec<TriplePattern>, unexpected_present: Vec<Trip
 ```
 
 **Changes**:
-- [ ] New file: `src/agent/watch.rs` — Watch, WatchCondition, evaluation
-- [ ] `src/agent/trigger.rs` — extend TriggerCondition with TriplePattern and ConfidenceThreshold
-- [ ] `src/engine.rs` — hook into `add_triple()` / `retract()` for watch evaluation
-- [ ] `src/agent/goal_generation.rs` — watches produce `GoalProposal`s
-- [ ] `src/agent/ooda.rs` — expectation tracking after Act, fluent state snapshots
-- [ ] `src/agent/agent.rs` — watch registry, evaluation in observe phase
+- [x] New file: `src/agent/watch.rs` — Watch, WatchCondition, evaluation
+- [x] `src/agent/trigger.rs` — extend TriggerCondition with TriplePattern and ConfidenceThreshold
+- [x] `src/engine.rs` — hook into `add_triple()` / `retract()` for watch evaluation
+- [x] `src/agent/goal_generation.rs` — watches produce `GoalProposal`s
+- [x] `src/agent/ooda.rs` — expectation tracking after Act, fluent state snapshots
+- [x] `src/agent/agent.rs` — watch registry, evaluation in observe phase
 
 **Estimated scope**: ~600–800 lines
 

@@ -4035,5 +4035,11 @@ fn format_derivation_kind(kind: &DerivationKind, engine: &Engine) -> String {
         DerivationKind::ProjectCreated { name } => {
             format!("Project created: \"{name}\"")
         }
+        DerivationKind::WatchFired {
+            watch_id,
+            condition_summary,
+        } => {
+            format!("Watch fired: \"{watch_id}\" — {condition_summary}")
+        }
     }
 }
