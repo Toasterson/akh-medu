@@ -21,6 +21,7 @@ pub mod goal_generation;
 pub mod idle;
 pub mod library_learn;
 pub mod memory;
+pub mod metacognition;
 pub mod nlp;
 pub mod ooda;
 pub mod plan;
@@ -49,7 +50,8 @@ pub use decomposition::{
 };
 pub use drives::{DriveKind, DriveSystem};
 pub use error::{AgentError, AgentResult};
-pub use goal::{Goal, GoalSource, GoalStatus};
+pub use goal::{Goal, GoalJustification, GoalSource, GoalStatus};
+pub use metacognition::{CompetenceModel, FailureIndex, GoalEvaluation, MetacognitionConfig, MetacognitiveControl};
 pub use goal_generation::{GoalGenerationConfig, GoalGenerationResult, GoalProposal};
 pub use idle::{IdleScheduler, IdleTaskResult};
 pub use library_learn::{LibraryLearner, LibraryLearningResult};

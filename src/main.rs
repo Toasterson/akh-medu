@@ -2414,6 +2414,15 @@ fn main() -> Result<()> {
                                 akh_medu::agent::Adjustment::SuggestAbandon { reason, .. } => {
                                     println!("  [abandon] {}", reason)
                                 }
+                                akh_medu::agent::Adjustment::ReformulateGoal { relaxed_criteria, reason, .. } => {
+                                    println!("  [reformulate] \"{}\": {}", relaxed_criteria, reason)
+                                }
+                                akh_medu::agent::Adjustment::SuspendGoal { reason, .. } => {
+                                    println!("  [suspend] {}", reason)
+                                }
+                                akh_medu::agent::Adjustment::ReviseBeliefs { retract, assert_syms, .. } => {
+                                    println!("  [revise] retract {} / assert {}", retract.len(), assert_syms.len())
+                                }
                             }
                         }
                     }
@@ -4040,6 +4049,17 @@ fn format_derivation_kind(kind: &DerivationKind, engine: &Engine) -> String {
             condition_summary,
         } => {
             format!("Watch fired: \"{watch_id}\" — {condition_summary}")
+        }
+        DerivationKind::MetacognitiveEvaluation {
+            goal,
+            signal,
+            improvement_rate,
+            competence,
+        } => {
+            format!(
+                "Metacognitive evaluation: \"{}\" signal={signal} (improvement: {improvement_rate:.2}, competence: {competence:.2})",
+                engine.resolve_label(*goal),
+            )
         }
     }
 }

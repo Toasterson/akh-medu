@@ -1012,6 +1012,8 @@ mod tests {
                 source: None,
                 blocked_by: vec![],
                 priority_rationale: None,
+                justification: None,
+                reformulated_from: None,
             },
             Goal {
                 symbol_id: crate::symbol::SymbolId::new(2).unwrap(),
@@ -1027,6 +1029,8 @@ mod tests {
                 source: None,
                 blocked_by: vec![],
                 priority_rationale: None,
+                justification: None,
+                reformulated_from: None,
             },
         ];
 

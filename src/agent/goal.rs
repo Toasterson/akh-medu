@@ -23,6 +23,8 @@ pub enum GoalStatus {
     Proposed,
     /// Dormant: low-priority or infeasible, kept for opportunity detection.
     Dormant,
+    /// Reformulated: replaced by a simpler version (Phase 11f).
+    Reformulated { replacement: SymbolId },
 }
 
 impl GoalStatus {
@@ -36,6 +38,7 @@ impl GoalStatus {
             Self::Suspended => "suspended".into(),
             Self::Proposed => "proposed".into(),
             Self::Dormant => "dormant".into(),
+            Self::Reformulated { replacement } => format!("reformulated:{}", replacement.get()),
         }
     }
 
@@ -45,6 +48,13 @@ impl GoalStatus {
             Self::Failed {
                 reason: reason.into(),
             }
+        } else if let Some(id_str) = label.strip_prefix("reformulated:") {
+            if let Ok(id) = id_str.parse::<u64>() {
+                if let Some(sym) = SymbolId::new(id) {
+                    return Self::Reformulated { replacement: sym };
+                }
+            }
+            Self::Pending
         } else {
             match label {
                 "pending" => Self::Pending,
@@ -69,6 +79,9 @@ impl std::fmt::Display for GoalStatus {
             Self::Suspended => write!(f, "suspended"),
             Self::Proposed => write!(f, "proposed"),
             Self::Dormant => write!(f, "dormant"),
+            Self::Reformulated { replacement } => {
+                write!(f, "reformulated → {replacement}")
+            }
         }
     }
 }
@@ -113,6 +126,33 @@ pub enum GoalSource {
     },
 }
 
+/// Justification for a goal's existence (Phase 11f: AGM belief revision).
+///
+/// Four variants with entrenchment levels determining retraction order.
+#[derive(Debug, Clone)]
+pub enum GoalJustification {
+    /// Explicitly requested by the user — never auto-suspended (entrenchment 3).
+    UserRequested,
+    /// Decomposed from a parent goal — cascades when parent abandoned (entrenchment 2).
+    DecomposedFrom { parent: SymbolId },
+    /// Inferred from KG state — invalidated when supporting triples retracted (entrenchment 1).
+    InferredFromKG { supporting: Vec<SymbolId> },
+    /// Default assumption — first to be retracted (entrenchment 0).
+    DefaultAssumption { rationale: String },
+}
+
+impl GoalJustification {
+    /// Entrenchment rank (higher = harder to retract).
+    pub fn entrenchment(&self) -> u8 {
+        match self {
+            Self::UserRequested => 3,
+            Self::DecomposedFrom { .. } => 2,
+            Self::InferredFromKG { .. } => 1,
+            Self::DefaultAssumption { .. } => 0,
+        }
+    }
+}
+
 /// Default number of cycles without progress before a goal is considered stalled.
 pub const DEFAULT_STALL_THRESHOLD: u32 = 5;
 
@@ -145,6 +185,11 @@ pub struct Goal {
     pub blocked_by: Vec<SymbolId>,
     /// Argumentation-based priority verdict (Phase 11c).
     pub priority_rationale: Option<PriorityVerdict>,
+    /// Why this goal exists — for AGM belief revision (Phase 11f).
+    /// `None` for legacy/restored goals.
+    pub justification: Option<GoalJustification>,
+    /// If this goal was created by reformulating another goal (Phase 11f).
+    pub reformulated_from: Option<SymbolId>,
 }
 
 impl Goal {
@@ -229,6 +274,8 @@ pub fn create_goal(
         source: None,
         blocked_by: Vec::new(),
         priority_rationale: None,
+        justification: None,
+        reformulated_from: None,
     })
 }
 
@@ -376,6 +423,8 @@ pub fn restore_goals(engine: &Engine, predicates: &AgentPredicates) -> AgentResu
             source: None,
             blocked_by,
             priority_rationale: None,
+            justification: None,
+            reformulated_from: None,
         });
     }
 
@@ -435,6 +484,39 @@ pub fn generate_sub_goal_descriptions(description: &str) -> Vec<(String, u8, Str
             format!("Apply reasoning to: {description}"),
         ),
     ]
+}
+
+/// Reformulate a goal: create a replacement with relaxed criteria.
+///
+/// The new goal inherits the original's priority and parent. The original
+/// goal's status is set to `Reformulated { replacement: new_id }`.
+/// The replacement has `reformulated_from` pointing to the original and
+/// a `DecomposedFrom` justification.
+pub fn reformulate_goal(
+    engine: &Engine,
+    original: &mut Goal,
+    relaxed_criteria: &str,
+    predicates: &AgentPredicates,
+) -> AgentResult<Goal> {
+    let desc = format!("(reformulated) {}", original.description);
+    let mut replacement = create_goal(engine, &desc, original.priority, relaxed_criteria, predicates)?;
+    replacement.parent = original.parent;
+    replacement.reformulated_from = Some(original.symbol_id);
+    replacement.justification = Some(GoalJustification::DecomposedFrom {
+        parent: original.symbol_id,
+    });
+
+    // Mark original as reformulated.
+    update_goal_status(
+        engine,
+        original,
+        GoalStatus::Reformulated {
+            replacement: replacement.symbol_id,
+        },
+        predicates,
+    )?;
+
+    Ok(replacement)
 }
 
 #[cfg(test)]
@@ -520,6 +602,8 @@ mod tests {
             source: None,
             blocked_by: Vec::new(),
             priority_rationale: None,
+            justification: None,
+            reformulated_from: None,
         }];
         clear_goals(&mut goals);
         assert!(goals.is_empty());
@@ -542,6 +626,8 @@ mod tests {
                 source: None,
                 blocked_by: Vec::new(),
                 priority_rationale: None,
+                justification: None,
+                reformulated_from: None,
             },
             Goal {
                 symbol_id: SymbolId::new(2).unwrap(),
@@ -557,6 +643,8 @@ mod tests {
                 source: None,
                 blocked_by: Vec::new(),
                 priority_rationale: None,
+                justification: None,
+                reformulated_from: None,
             },
             Goal {
                 symbol_id: SymbolId::new(3).unwrap(),
@@ -572,6 +660,8 @@ mod tests {
                 source: None,
                 blocked_by: Vec::new(),
                 priority_rationale: None,
+                justification: None,
+                reformulated_from: None,
             },
         ];
 
@@ -598,6 +688,8 @@ mod tests {
                 source: None,
                 blocked_by: Vec::new(),
                 priority_rationale: None,
+                justification: None,
+                reformulated_from: None,
             },
             Goal {
                 symbol_id: SymbolId::new(2).unwrap(),
@@ -613,6 +705,8 @@ mod tests {
                 source: None,
                 blocked_by: vec![SymbolId::new(1).unwrap()],
                 priority_rationale: None,
+                justification: None,
+                reformulated_from: None,
             },
         ];
 
@@ -639,6 +733,8 @@ mod tests {
                 source: None,
                 blocked_by: Vec::new(),
                 priority_rationale: None,
+                justification: None,
+                reformulated_from: None,
             },
             Goal {
                 symbol_id: SymbolId::new(2).unwrap(),
@@ -654,6 +750,8 @@ mod tests {
                 source: None,
                 blocked_by: vec![SymbolId::new(1).unwrap()],
                 priority_rationale: None,
+                justification: None,
+                reformulated_from: None,
             },
         ];
 
@@ -677,8 +775,37 @@ mod tests {
             source: None,
             blocked_by: Vec::new(),
             priority_rationale: None,
+            justification: None,
+            reformulated_from: None,
         }];
 
         assert!(!goals[0].is_blocked(&goals));
+    }
+
+    #[test]
+    fn status_reformulated_roundtrip() {
+        let sym = SymbolId::new(42).unwrap();
+        let status = GoalStatus::Reformulated { replacement: sym };
+        let label = status.as_label();
+        assert_eq!(label, "reformulated:42");
+        let restored = GoalStatus::from_label(&label);
+        assert_eq!(restored, status);
+    }
+
+    #[test]
+    fn justification_entrenchment_ordering() {
+        let user = GoalJustification::UserRequested;
+        let decomp = GoalJustification::DecomposedFrom {
+            parent: SymbolId::new(1).unwrap(),
+        };
+        let inferred = GoalJustification::InferredFromKG {
+            supporting: vec![],
+        };
+        let default = GoalJustification::DefaultAssumption {
+            rationale: "test".into(),
+        };
+        assert!(user.entrenchment() > decomp.entrenchment());
+        assert!(decomp.entrenchment() > inferred.entrenchment());
+        assert!(inferred.entrenchment() > default.entrenchment());
     }
 }

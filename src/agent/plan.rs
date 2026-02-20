@@ -916,6 +916,8 @@ mod tests {
             source: None,
             blocked_by: Vec::new(),
             priority_rationale: None,
+            justification: None,
+            reformulated_from: None,
         }
     }
 

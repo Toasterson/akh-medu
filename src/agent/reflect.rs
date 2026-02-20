@@ -14,7 +14,11 @@ use std::collections::HashMap;
 use super::error::AgentResult;
 use super::goal::{Goal, GoalStatus};
 use super::memory::{WorkingMemory, WorkingMemoryKind};
+use super::metacognition::{
+    self, CompetenceModel, FailureIndex, MetacognitionConfig, MetacognitiveControl,
+};
 use super::priority_reasoning::{self, Audience, PriorityVerdict};
+use crate::engine::Engine;
 use crate::symbol::SymbolId;
 
 // ---------------------------------------------------------------------------
@@ -99,6 +103,20 @@ pub enum Adjustment {
     },
     /// Suggest abandoning a stagnant goal.
     SuggestAbandon { goal_id: SymbolId, reason: String },
+    /// Suggest reformulating a goal with relaxed criteria (Phase 11f).
+    ReformulateGoal {
+        goal_id: SymbolId,
+        relaxed_criteria: String,
+        reason: String,
+    },
+    /// Suspend a goal based on metacognitive evaluation (Phase 11f).
+    SuspendGoal { goal_id: SymbolId, reason: String },
+    /// Revise beliefs: retract and assert symbols (Phase 11f AGM cascade).
+    ReviseBeliefs {
+        goal_id: SymbolId,
+        retract: Vec<SymbolId>,
+        assert_syms: Vec<SymbolId>,
+    },
 }
 
 /// The full output of a reflection cycle.
@@ -448,6 +466,132 @@ pub fn reprioritize_goals(
         .collect()
 }
 
+// ---------------------------------------------------------------------------
+// Metacognitive goal relevance evaluation (Phase 11f)
+// ---------------------------------------------------------------------------
+
+/// Evaluate goal relevance using the metacognitive monitoring layer.
+///
+/// Calls `metacognition::evaluate_goals()` and converts the resulting
+/// `MetacognitiveControl` signals to `Adjustment` variants, respecting
+/// entrenchment: `UserRequested` goals only get `ReformulateGoal`
+/// (never `SuspendGoal`); `DefaultAssumption` goals get `SuspendGoal`
+/// when questioned.
+pub fn evaluate_goal_relevance(
+    goals: &[Goal],
+    working_memory: &WorkingMemory,
+    competence: &CompetenceModel,
+    failure_index: &FailureIndex,
+    config: &MetacognitionConfig,
+    current_cycle: u64,
+    engine: &Engine,
+) -> Vec<Adjustment> {
+    let (_evaluations, signals) = metacognition::evaluate_goals(
+        goals,
+        working_memory,
+        competence,
+        failure_index,
+        engine,
+        config,
+        current_cycle,
+    );
+
+    let mut adjustments = Vec::new();
+
+    for signal in signals {
+        match signal {
+            MetacognitiveControl::SuggestReformulate {
+                goal_id,
+                relaxed_criteria,
+            } => {
+                adjustments.push(Adjustment::ReformulateGoal {
+                    goal_id,
+                    relaxed_criteria: relaxed_criteria.clone(),
+                    reason: format!(
+                        "Metacognitive evaluation suggests reformulating with: {}",
+                        relaxed_criteria
+                    ),
+                });
+            }
+            MetacognitiveControl::QuestionGoal { goal_id, reason } => {
+                // Check entrenchment to decide action.
+                let goal = goals.iter().find(|g| g.symbol_id == goal_id);
+                let entrenchment = goal
+                    .and_then(|g| g.justification.as_ref())
+                    .map(|j| j.entrenchment())
+                    .unwrap_or(0);
+
+                if entrenchment >= 3 {
+                    // UserRequested — never auto-suspend, just log.
+                    // No adjustment emitted.
+                } else if entrenchment == 0 {
+                    // DefaultAssumption — suspend immediately.
+                    adjustments.push(Adjustment::SuspendGoal {
+                        goal_id,
+                        reason: format!("Low-entrenchment goal questioned: {reason}"),
+                    });
+                } else {
+                    // Medium entrenchment — suggest reformulation if possible,
+                    // else decrease priority.
+                    if let Some(g) = goal {
+                        adjustments.push(Adjustment::DecreasePriority {
+                            goal_id,
+                            from: g.priority,
+                            to: g.priority.saturating_sub(20),
+                            reason: format!("Metacognitive questioning: {reason}"),
+                        });
+                    }
+                }
+            }
+            MetacognitiveControl::AdjustZpd { goal_id, delta } => {
+                if let Some(g) = goals.iter().find(|g| g.symbol_id == goal_id) {
+                    let new_priority = if delta > 0 {
+                        g.priority.saturating_add(delta as u8)
+                    } else {
+                        g.priority.saturating_sub((-delta) as u8)
+                    };
+                    if delta > 0 {
+                        adjustments.push(Adjustment::IncreasePriority {
+                            goal_id,
+                            from: g.priority,
+                            to: new_priority,
+                            reason: "ZPD sweet spot — goal difficulty matches competence".into(),
+                        });
+                    } else if delta < 0 {
+                        adjustments.push(Adjustment::DecreasePriority {
+                            goal_id,
+                            from: g.priority,
+                            to: new_priority,
+                            reason: "Goal difficulty exceeds current competence (beyond ZPD)".into(),
+                        });
+                    }
+                }
+            }
+            MetacognitiveControl::InvalidateJustification { goal_id, reason } => {
+                // Invalidated justification → suspend.
+                adjustments.push(Adjustment::SuspendGoal {
+                    goal_id,
+                    reason: format!("Justification invalidated: {reason}"),
+                });
+            }
+            MetacognitiveControl::ReviseBeliefs {
+                goal_id,
+                retract,
+                assert: assert_syms,
+            } => {
+                adjustments.push(Adjustment::ReviseBeliefs {
+                    goal_id,
+                    retract,
+                    assert_syms,
+                });
+            }
+            MetacognitiveControl::Continue => {}
+        }
+    }
+
+    adjustments
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -510,6 +654,8 @@ mod tests {
             source: None,
             blocked_by: Vec::new(),
             priority_rationale: None,
+            justification: None,
+            reformulated_from: None,
         }];
 
         let config = ReflectionConfig::default();
@@ -535,6 +681,8 @@ mod tests {
             source: None,
             blocked_by: Vec::new(),
             priority_rationale: None,
+            justification: None,
+            reformulated_from: None,
         }];
 
         let config = ReflectionConfig::default();

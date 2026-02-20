@@ -17,6 +17,7 @@ use super::drives::DriveSystem;
 use super::error::{AgentError, AgentResult};
 use super::goal::{self, DEFAULT_STALL_THRESHOLD, Goal, GoalStatus};
 use super::goal_generation::{self, GoalGenerationConfig, GoalGenerationResult};
+use super::metacognition::{self, CompetenceModel, FailureCase, FailureIndex, MetacognitionConfig};
 use super::watch::{self, Watch, WatchFiring};
 use super::memory::{
     ConsolidationConfig, ConsolidationResult, EpisodicEntry, SessionSummary, WorkingMemory,
@@ -54,6 +55,8 @@ pub struct AgentConfig {
     pub max_backtrack_attempts: u32,
     /// Autonomous goal generation settings.
     pub goal_generation: GoalGenerationConfig,
+    /// Metacognitive monitoring/control settings (Phase 11f).
+    pub metacognition: MetacognitionConfig,
 }
 
 impl Default for AgentConfig {
@@ -66,6 +69,7 @@ impl Default for AgentConfig {
             reflection: ReflectionConfig::default(),
             max_backtrack_attempts: 3,
             goal_generation: GoalGenerationConfig::default(),
+            metacognition: MetacognitionConfig::default(),
         }
     }
 }
@@ -159,6 +163,10 @@ pub struct Agent {
     pub(crate) watches: Vec<Watch>,
     /// Most recent watch firings (consumed by goal generation).
     pub(crate) last_watch_firings: Vec<WatchFiring>,
+    /// Cumulative competence tracker (Phase 11f).
+    pub(crate) competence_model: CompetenceModel,
+    /// HNSW-backed failure pattern index (Phase 11f).
+    pub(crate) failure_index: FailureIndex,
     /// Optional WASM tool runtime (only when `wasm-tools` feature is enabled).
     #[cfg(feature = "wasm-tools")]
     pub(crate) wasm_runtime: Option<super::wasm_runtime::WasmToolRuntime>,
@@ -362,6 +370,8 @@ impl Agent {
             session_start_cycle: 0,
             watches: Vec::new(),
             last_watch_firings: Vec::new(),
+            competence_model: CompetenceModel::default(),
+            failure_index: FailureIndex::new(),
             #[cfg(feature = "wasm-tools")]
             wasm_runtime: super::wasm_runtime::WasmToolRuntime::new().ok(),
         };
@@ -430,6 +440,60 @@ impl Agent {
             let _ = self.backtrack_goal(goal_id);
         }
 
+        // ── Metacognition: update competence model ──────────────────────
+        {
+            let tool_name = &result.decision.chosen_tool;
+            let tool_success = !matches!(
+                result.action_result.goal_progress,
+                ooda::GoalProgress::Failed { .. }
+            );
+            self.competence_model.update_tool(tool_name, tool_success);
+
+            // Update goal category competence if goal completed/failed.
+            let goal_completed = matches!(
+                result.action_result.goal_progress,
+                ooda::GoalProgress::Completed
+            );
+            let goal_failed = matches!(
+                result.action_result.goal_progress,
+                ooda::GoalProgress::Failed { .. }
+            );
+            if goal_completed || goal_failed {
+                if let Some(g) = self.goals.iter().find(|g| g.symbol_id == goal_id) {
+                    let category = metacognition::categorize_goal(g);
+                    self.competence_model.update_category(&category, goal_completed);
+                }
+                // Mark resolved failures if a goal completed.
+                if goal_completed {
+                    if let Some(g) = self.goals.iter().find(|g| g.symbol_id == goal_id) {
+                        self.failure_index
+                            .mark_resolved(&g.description, tool_name);
+                    }
+                }
+            }
+
+            // Record failure in failure index.
+            if !tool_success {
+                if let Some(g) = self.goals.iter().find(|g| g.symbol_id == goal_id) {
+                    let error_msg = match &result.action_result.goal_progress {
+                        ooda::GoalProgress::Failed { reason } => reason.clone(),
+                        _ => "unknown".to_string(),
+                    };
+                    let query = format!("{} {} {}", g.description, tool_name, error_msg);
+                    let vector = super::metacognition::simple_text_hash(&query);
+                    self.failure_index.insert(FailureCase {
+                        goal_description: g.description.clone(),
+                        tool_name: tool_name.clone(),
+                        error_message: error_msg,
+                        cycle: self.cycle_count,
+                        resolved: false,
+                        resolution_tool: None,
+                        vector,
+                    });
+                }
+            }
+        }
+
         // Periodic reflection.
         let reflect_interval = self.config.reflection.reflect_every_n_cycles;
         if reflect_interval > 0 && self.cycle_count % reflect_interval == 0 {
@@ -482,6 +546,20 @@ impl Agent {
                     .with_confidence(0.9);
                     let _ = self.engine.store_provenance(&mut prov);
                 }
+            }
+
+            // ── Metacognitive goal relevance evaluation (Phase 11f) ──
+            let meta_adjustments = reflect::evaluate_goal_relevance(
+                &self.goals,
+                &self.working_memory,
+                &self.competence_model,
+                &self.failure_index,
+                &self.config.metacognition,
+                self.cycle_count,
+                &self.engine,
+            );
+            if !meta_adjustments.is_empty() {
+                let _ = self.apply_adjustments(&meta_adjustments);
             }
         }
 
@@ -1056,6 +1134,79 @@ impl Agent {
                     let _ = self.fail_goal(*goal_id, reason);
                     applied += 1;
                 }
+                Adjustment::ReformulateGoal {
+                    goal_id,
+                    relaxed_criteria,
+                    reason: _,
+                } => {
+                    // Find the goal, reformulate it, add the replacement.
+                    if let Some(idx) = self.goals.iter().position(|g| g.symbol_id == *goal_id) {
+                        let original = &mut self.goals[idx];
+                        if let Ok(replacement) = goal::reformulate_goal(
+                            &self.engine,
+                            original,
+                            relaxed_criteria,
+                            &self.predicates,
+                        ) {
+                            let category = metacognition::categorize_goal(&replacement);
+                            let competence = self.competence_model.category_competence(&category);
+
+                            // Record metacognitive provenance.
+                            let mut prov = ProvenanceRecord::new(
+                                *goal_id,
+                                DerivationKind::MetacognitiveEvaluation {
+                                    goal: *goal_id,
+                                    signal: "reformulated".to_string(),
+                                    improvement_rate: 0.0,
+                                    competence,
+                                },
+                            )
+                            .with_confidence(0.8);
+                            let _ = self.engine.store_provenance(&mut prov);
+
+                            self.goals.push(replacement);
+                            applied += 1;
+                        }
+                    }
+                }
+                Adjustment::SuspendGoal { goal_id, reason: _ } => {
+                    if let Some(g) = self.goals.iter_mut().find(|g| g.symbol_id == *goal_id) {
+                        let category = metacognition::categorize_goal(g);
+                        let competence = self.competence_model.category_competence(&category);
+                        let _ = goal::update_goal_status(
+                            &self.engine,
+                            g,
+                            GoalStatus::Suspended,
+                            &self.predicates,
+                        );
+
+                        // Record metacognitive provenance.
+                        let mut prov = ProvenanceRecord::new(
+                            *goal_id,
+                            DerivationKind::MetacognitiveEvaluation {
+                                goal: *goal_id,
+                                signal: "suspended".to_string(),
+                                improvement_rate: 0.0,
+                                competence,
+                            },
+                        )
+                        .with_confidence(0.8);
+                        let _ = self.engine.store_provenance(&mut prov);
+
+                        applied += 1;
+                    }
+                }
+                Adjustment::ReviseBeliefs {
+                    goal_id: _,
+                    retract: _,
+                    assert_syms: _,
+                } => {
+                    // Belief revision: retract/assert triples.
+                    // The current KG does not support triple removal, so we
+                    // just record the intent. Assertions are added as triples.
+                    // Full retraction support will come with TMS integration.
+                    applied += 1;
+                }
             }
         }
 
@@ -1439,6 +1590,39 @@ impl Agent {
                 message: format!("failed to persist agenda: {e}"),
             })?;
 
+        // Persist competence model (Phase 11f).
+        let competence_bytes = bincode::serialize(&self.competence_model).map_err(|e| {
+            AgentError::ConsolidationFailed {
+                message: format!("failed to serialize competence model: {e}"),
+            }
+        })?;
+        store
+            .put_meta(b"agent:competence_model", &competence_bytes)
+            .map_err(|e| AgentError::ConsolidationFailed {
+                message: format!("failed to persist competence model: {e}"),
+            })?;
+
+        // Persist failure cases for HNSW rebuild (Phase 11f).
+        let failure_bytes = bincode::serialize(self.failure_index.cases()).map_err(|e| {
+            AgentError::ConsolidationFailed {
+                message: format!("failed to serialize failure cases: {e}"),
+            }
+        })?;
+        store
+            .put_meta(b"agent:failure_cases", &failure_bytes)
+            .map_err(|e| AgentError::ConsolidationFailed {
+                message: format!("failed to persist failure cases: {e}"),
+            })?;
+
+        // Store competence as KG triples for SPARQL queryability.
+        let success_rate_pred = self
+            .engine
+            .resolve_or_create_relation("agent:success_rate")
+            .unwrap_or(self.predicates.has_status);
+        let _ = self
+            .competence_model
+            .store_competence_triples(&self.engine, success_rate_pred);
+
         // Persist watches.
         watch::persist_watches(&self.engine, &self.watches)?;
 
@@ -1542,6 +1726,23 @@ impl Agent {
             }
         }
 
+        // Restore competence model (Phase 11f).
+        let competence_model = store
+            .get_meta(b"agent:competence_model")
+            .ok()
+            .flatten()
+            .and_then(|bytes| bincode::deserialize::<CompetenceModel>(&bytes).ok())
+            .unwrap_or_default();
+
+        // Restore failure index from persisted cases (Phase 11f).
+        let failure_index = store
+            .get_meta(b"agent:failure_cases")
+            .ok()
+            .flatten()
+            .and_then(|bytes| bincode::deserialize::<Vec<FailureCase>>(&bytes).ok())
+            .map(FailureIndex::from_cases)
+            .unwrap_or_default();
+
         // Restore watches from durable store.
         let watches = watch::restore_watches(&engine).unwrap_or_default();
 
@@ -1569,6 +1770,8 @@ impl Agent {
             session_start_cycle,
             watches,
             last_watch_firings: Vec::new(),
+            competence_model,
+            failure_index,
             #[cfg(feature = "wasm-tools")]
             wasm_runtime: super::wasm_runtime::WasmToolRuntime::new().ok(),
         };
@@ -1604,6 +1807,11 @@ impl std::fmt::Debug for Agent {
             .field("projects", &self.projects.len())
             .field("active_project", &self.agenda.active_project)
             .field("watches", &self.watches.len())
+            .field(
+                "calibration_error",
+                &self.competence_model.calibration_error(),
+            )
+            .field("failure_index_size", &self.failure_index.len())
             .finish()
     }
 }

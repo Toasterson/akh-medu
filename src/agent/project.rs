@@ -609,6 +609,8 @@ mod tests {
                 source: None,
                 blocked_by: vec![],
                 priority_rationale: None,
+                justification: None,
+                reformulated_from: None,
             },
             Goal {
                 symbol_id: sym(2),
@@ -624,6 +626,8 @@ mod tests {
                 source: None,
                 blocked_by: vec![],
                 priority_rationale: None,
+                justification: None,
+                reformulated_from: None,
             },
         ];
 
@@ -773,6 +777,8 @@ mod tests {
             source: None,
             blocked_by: vec![],
             priority_rationale: None,
+            justification: None,
+            reformulated_from: None,
         };
 
         // With a very low threshold, should match.
@@ -807,6 +813,8 @@ mod tests {
             source: None,
             blocked_by: vec![],
             priority_rationale: None,
+            justification: None,
+            reformulated_from: None,
         };
 
         let result = assign_goal_to_project(&goal, &[], &engine, 0.6);

@@ -259,6 +259,14 @@ pub enum DerivationKind {
         watch_id: String,
         condition_summary: String,
     },
+
+    /// A metacognitive evaluation was performed on a goal (Phase 11f).
+    MetacognitiveEvaluation {
+        goal: SymbolId,
+        signal: String,
+        improvement_rate: f32,
+        competence: f32,
+    },
 }
 
 impl DerivationKind {
@@ -310,6 +318,7 @@ impl DerivationKind {
             Self::PriorityArgumentation { .. } => 42,
             Self::ProjectCreated { .. } => 43,
             Self::WatchFired { .. } => 44,
+            Self::MetacognitiveEvaluation { .. } => 45,
         }
     }
 }

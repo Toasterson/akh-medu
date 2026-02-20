@@ -419,11 +419,11 @@ Use equality saturation to find equivalent but simpler goals:
 - Extract the simplest equivalent goal from the e-graph via `AstSize` cost function
 
 **Changes**:
-- [ ] New file: `src/agent/metacognition.rs` — monitoring/control layer, progress tracking, competence model
-- [ ] `src/agent/reflect.rs` — `evaluate_goal_relevance()`, autoepistemic check, ZPD scoring
-- [ ] `src/agent/goal.rs` — `GoalJustification` enum, `Reformulated` status, `reformulated_from` link
-- [ ] `src/agent/goal_generation.rs` — goal reformulation proposals
-- [ ] `src/agent/memory.rs` — competence tracking from episodic patterns, failure pattern encoding
+- [x] New file: `src/agent/metacognition.rs` — monitoring/control layer, progress tracking, competence model
+- [x] `src/agent/reflect.rs` — `evaluate_goal_relevance()`, autoepistemic check, ZPD scoring
+- [x] `src/agent/goal.rs` — `GoalJustification` enum, `Reformulated` status, `reformulated_from` link
+- [x] `src/agent/goal_generation.rs` — goal reformulation proposals
+- [x] `src/agent/memory.rs` — competence tracking from episodic patterns, failure pattern encoding
 
 **Estimated scope**: ~600–800 lines
 
