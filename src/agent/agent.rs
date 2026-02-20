@@ -18,6 +18,8 @@ use super::error::{AgentError, AgentResult};
 use super::goal::{self, DEFAULT_STALL_THRESHOLD, Goal, GoalStatus};
 use super::goal_generation::{self, GoalGenerationConfig, GoalGenerationResult};
 use super::metacognition::{self, CompetenceModel, FailureCase, FailureIndex, MetacognitionConfig};
+use super::chunking::{self, ChunkingConfig, MethodIndex};
+use super::resource::{self, EffortIndex, ImprovementHistory};
 use super::watch::{self, Watch, WatchFiring};
 use super::memory::{
     ConsolidationConfig, ConsolidationResult, EpisodicEntry, SessionSummary, WorkingMemory,
@@ -57,6 +59,8 @@ pub struct AgentConfig {
     pub goal_generation: GoalGenerationConfig,
     /// Metacognitive monitoring/control settings (Phase 11f).
     pub metacognition: MetacognitionConfig,
+    /// Procedural learning (chunking) settings (Phase 11h).
+    pub chunking: ChunkingConfig,
 }
 
 impl Default for AgentConfig {
@@ -70,6 +74,7 @@ impl Default for AgentConfig {
             max_backtrack_attempts: 3,
             goal_generation: GoalGenerationConfig::default(),
             metacognition: MetacognitionConfig::default(),
+            chunking: ChunkingConfig::default(),
         }
     }
 }
@@ -167,6 +172,14 @@ pub struct Agent {
     pub(crate) competence_model: CompetenceModel,
     /// HNSW-backed failure pattern index (Phase 11f).
     pub(crate) failure_index: FailureIndex,
+    /// CBR-backed effort estimation index (Phase 11g).
+    pub(crate) effort_index: EffortIndex,
+    /// Per-goal improvement rate history (Phase 11g).
+    pub(crate) improvement_history: ImprovementHistory,
+    /// HNSW-backed learned method index (Phase 11h).
+    pub(crate) method_index: MethodIndex,
+    /// Procedural learning configuration (Phase 11h).
+    pub(crate) chunking_config: ChunkingConfig,
     /// Optional WASM tool runtime (only when `wasm-tools` feature is enabled).
     #[cfg(feature = "wasm-tools")]
     pub(crate) wasm_runtime: Option<super::wasm_runtime::WasmToolRuntime>,
@@ -344,6 +357,7 @@ impl Agent {
         let psyche = engine.compartments().and_then(|cm| cm.psyche());
 
         let drives = DriveSystem::with_thresholds(config.goal_generation.drive_thresholds);
+        let chunking_config = config.chunking.clone();
 
         let mut htn_registry = MethodRegistry::new();
         decomposition::register_builtin_methods(&mut htn_registry);
@@ -372,6 +386,10 @@ impl Agent {
             last_watch_firings: Vec::new(),
             competence_model: CompetenceModel::default(),
             failure_index: FailureIndex::new(),
+            effort_index: EffortIndex::new(),
+            improvement_history: ImprovementHistory::default(),
+            method_index: MethodIndex::new(),
+            chunking_config,
             #[cfg(feature = "wasm-tools")]
             wasm_runtime: super::wasm_runtime::WasmToolRuntime::new().ok(),
         };
@@ -469,6 +487,65 @@ impl Agent {
                         self.failure_index
                             .mark_resolved(&g.description, tool_name);
                     }
+                }
+                // Record effort case for CBR (Phase 11g).
+                if let Some(g) = self.goals.iter().find(|g| g.symbol_id == goal_id) {
+                    let case = resource::create_effort_case(g, &self.working_memory, &self.engine);
+                    self.effort_index.insert(case);
+                }
+
+                // Procedural learning: compile successful traces into methods (Phase 11h).
+                if goal_completed {
+                    if let Some(g) = self.goals.iter().find(|g| g.symbol_id == goal_id) {
+                        let g_clone = g.clone();
+                        if let Some(learned) = chunking::chunk_completed_goal(
+                            &g_clone,
+                            &self.working_memory,
+                            &self.engine,
+                            &self.chunking_config,
+                            self.cycle_count,
+                        ) {
+                            // Register as HTN decomposition method.
+                            let dm = chunking::to_decomposition_method(&learned);
+                            self.method_registry_htn.register(dm);
+
+                            // Record provenance.
+                            let step_count = learned.steps.len();
+                            let method_name = learned.name.clone();
+                            let source_goal = learned.id;
+                            let mut prov = ProvenanceRecord::new(
+                                goal_id,
+                                DerivationKind::ProceduralLearning {
+                                    source_goal,
+                                    method_name,
+                                    step_count,
+                                },
+                            );
+                            let _ = self.engine.store_provenance(&mut prov);
+
+                            // Add to method index.
+                            self.method_index.insert(learned);
+                        }
+                    }
+                }
+            }
+
+            // Record improvement rate for all active goals (Phase 11g).
+            for g in &self.goals {
+                if matches!(g.status, GoalStatus::Active) {
+                    let rate = if g.cycles_worked == 0 {
+                        0.5
+                    } else {
+                        let cycles_since = self.cycle_count.saturating_sub(g.last_progress_cycle);
+                        if cycles_since == 0 { 1.0 } else { (1.0 / cycles_since as f32).min(1.0) }
+                    };
+                    resource::record_improvement(
+                        &mut self.improvement_history,
+                        g.symbol_id,
+                        self.cycle_count,
+                        rate,
+                        20,
+                    );
                 }
             }
 
@@ -628,6 +705,13 @@ impl Agent {
 
         // Auto-decompose stalled goals.
         self.decompose_stalled_goals();
+
+        // Consume a cycle from the active project's budget (Phase 11g).
+        if let Some(active_pid) = self.agenda.active_project {
+            if let Some(proj) = self.projects.iter_mut().find(|p| p.id == active_pid) {
+                proj.consume_cycle();
+            }
+        }
 
         // Auto-project-completion: check if active project's goals are all done.
         if let Some(active_pid) = self.agenda.active_project {
@@ -867,7 +951,12 @@ impl Agent {
             .filter(|g| {
                 matches!(g.status, GoalStatus::Active)
                     && g.children.is_empty()
-                    && g.is_stalled(self.cycle_count, DEFAULT_STALL_THRESHOLD)
+                    && g.is_stalled(
+                        self.cycle_count,
+                        resource::dynamic_stall_threshold(
+                            g.estimated_effort.as_ref(),
+                        ),
+                    )
             })
             .map(|g| g.symbol_id)
             .collect();
@@ -1403,6 +1492,48 @@ impl Agent {
     }
 
     // -----------------------------------------------------------------------
+    // Resource awareness (Phase 11g)
+    // -----------------------------------------------------------------------
+
+    /// Estimate effort for a goal using the CBR case base.
+    pub fn estimate_goal_effort(&self, goal_id: SymbolId) -> AgentResult<resource::EffortEstimate> {
+        let goal = self
+            .goals
+            .iter()
+            .find(|g| g.symbol_id == goal_id)
+            .ok_or(AgentError::GoalNotFound {
+                goal_id: goal_id.get(),
+            })?;
+        resource::estimate_effort(goal, &self.effort_index, &self.engine, 3)
+            .map_err(|e| AgentError::ConsolidationFailed {
+                message: e.to_string(),
+            })
+    }
+
+    /// Prune dormant learned methods from the method index (Phase 11h).
+    pub fn prune_methods(&mut self) -> Vec<SymbolId> {
+        let session_cycles = self.cycle_count.saturating_sub(self.session_start_cycle).max(1);
+        let mut methods: Vec<chunking::LearnedMethod> =
+            self.method_index.methods().to_vec();
+        let pruned = chunking::prune_dormant(
+            &mut methods,
+            self.cycle_count,
+            session_cycles,
+            self.chunking_config.dormant_sessions,
+        );
+        // Rebuild the index from remaining methods.
+        if !pruned.is_empty() {
+            self.method_index = MethodIndex::from_methods(methods);
+        }
+        pruned
+    }
+
+    /// Get a snapshot of all learned methods (Phase 11h).
+    pub fn learned_methods(&self) -> &[chunking::LearnedMethod] {
+        self.method_index.methods()
+    }
+
+    // -----------------------------------------------------------------------
     // Projects & Agenda
     // -----------------------------------------------------------------------
 
@@ -1614,6 +1745,44 @@ impl Agent {
                 message: format!("failed to persist failure cases: {e}"),
             })?;
 
+        // Persist effort cases for HNSW rebuild (Phase 11g).
+        let effort_bytes = bincode::serialize(self.effort_index.cases()).map_err(|e| {
+            AgentError::ConsolidationFailed {
+                message: format!("failed to serialize effort cases: {e}"),
+            }
+        })?;
+        store
+            .put_meta(b"agent:effort_cases", &effort_bytes)
+            .map_err(|e| AgentError::ConsolidationFailed {
+                message: format!("failed to persist effort cases: {e}"),
+            })?;
+
+        // Persist improvement history (Phase 11g).
+        let history_bytes =
+            bincode::serialize(&self.improvement_history).map_err(|e| {
+                AgentError::ConsolidationFailed {
+                    message: format!("failed to serialize improvement history: {e}"),
+                }
+            })?;
+        store
+            .put_meta(b"agent:improvement_history", &history_bytes)
+            .map_err(|e| AgentError::ConsolidationFailed {
+                message: format!("failed to persist improvement history: {e}"),
+            })?;
+
+        // Persist learned methods for HNSW rebuild (Phase 11h).
+        let methods_bytes =
+            bincode::serialize(self.method_index.methods()).map_err(|e| {
+                AgentError::ConsolidationFailed {
+                    message: format!("failed to serialize learned methods: {e}"),
+                }
+            })?;
+        store
+            .put_meta(b"agent:learned_methods", &methods_bytes)
+            .map_err(|e| AgentError::ConsolidationFailed {
+                message: format!("failed to persist learned methods: {e}"),
+            })?;
+
         // Store competence as KG triples for SPARQL queryability.
         let success_rate_pred = self
             .engine
@@ -1743,10 +1912,41 @@ impl Agent {
             .map(FailureIndex::from_cases)
             .unwrap_or_default();
 
+        // Restore effort index from persisted cases (Phase 11g).
+        let effort_index = store
+            .get_meta(b"agent:effort_cases")
+            .ok()
+            .flatten()
+            .and_then(|bytes| {
+                bincode::deserialize::<Vec<resource::EffortCase>>(&bytes).ok()
+            })
+            .map(EffortIndex::from_cases)
+            .unwrap_or_default();
+
+        // Restore improvement history (Phase 11g).
+        let improvement_history = store
+            .get_meta(b"agent:improvement_history")
+            .ok()
+            .flatten()
+            .and_then(|bytes| bincode::deserialize::<ImprovementHistory>(&bytes).ok())
+            .unwrap_or_default();
+
+        // Restore learned methods from persisted cases (Phase 11h).
+        let method_index = store
+            .get_meta(b"agent:learned_methods")
+            .ok()
+            .flatten()
+            .and_then(|bytes| {
+                bincode::deserialize::<Vec<chunking::LearnedMethod>>(&bytes).ok()
+            })
+            .map(MethodIndex::from_methods)
+            .unwrap_or_default();
+
         // Restore watches from durable store.
         let watches = watch::restore_watches(&engine).unwrap_or_default();
 
         let session_start_cycle = cycle_count;
+        let chunking_config = config.chunking.clone();
 
         let mut agent = Self {
             engine,
@@ -1772,6 +1972,10 @@ impl Agent {
             last_watch_firings: Vec::new(),
             competence_model,
             failure_index,
+            effort_index,
+            improvement_history,
+            method_index,
+            chunking_config,
             #[cfg(feature = "wasm-tools")]
             wasm_runtime: super::wasm_runtime::WasmToolRuntime::new().ok(),
         };
@@ -1812,6 +2016,7 @@ impl std::fmt::Debug for Agent {
                 &self.competence_model.calibration_error(),
             )
             .field("failure_index_size", &self.failure_index.len())
+            .field("learned_methods", &self.method_index.len())
             .finish()
     }
 }

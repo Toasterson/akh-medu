@@ -267,6 +267,21 @@ pub enum DerivationKind {
         improvement_rate: f32,
         competence: f32,
     },
+
+    /// A resource/effort assessment was performed on a goal (Phase 11g).
+    ResourceAssessment {
+        goal: SymbolId,
+        voc: f32,
+        opportunity_cost: f32,
+        diminishing_returns: bool,
+    },
+
+    /// A successful strategy was compiled into a reusable method (Phase 11h).
+    ProceduralLearning {
+        source_goal: SymbolId,
+        method_name: String,
+        step_count: usize,
+    },
 }
 
 impl DerivationKind {
@@ -319,6 +334,8 @@ impl DerivationKind {
             Self::ProjectCreated { .. } => 43,
             Self::WatchFired { .. } => 44,
             Self::MetacognitiveEvaluation { .. } => 45,
+            Self::ResourceAssessment { .. } => 46,
+            Self::ProceduralLearning { .. } => 47,
         }
     }
 }

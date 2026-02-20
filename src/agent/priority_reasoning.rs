@@ -571,6 +571,7 @@ mod tests {
             priority_rationale: None,
             justification: None,
             reformulated_from: None,
+            estimated_effort: None,
         }
     }
 

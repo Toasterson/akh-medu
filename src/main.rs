@@ -4061,5 +4061,26 @@ fn format_derivation_kind(kind: &DerivationKind, engine: &Engine) -> String {
                 engine.resolve_label(*goal),
             )
         }
+        DerivationKind::ResourceAssessment {
+            goal,
+            voc,
+            opportunity_cost,
+            diminishing_returns,
+        } => {
+            format!(
+                "Resource assessment: \"{}\" VOC={voc:.2}, opportunity_cost={opportunity_cost:.2}, diminishing_returns={diminishing_returns}",
+                engine.resolve_label(*goal),
+            )
+        }
+        DerivationKind::ProceduralLearning {
+            source_goal,
+            method_name,
+            step_count,
+        } => {
+            format!(
+                "Procedural learning: compiled method \"{method_name}\" ({step_count} steps) from goal \"{}\"",
+                engine.resolve_label(*source_goal),
+            )
+        }
     }
 }

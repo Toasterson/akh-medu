@@ -10,6 +10,7 @@
 
 pub mod agent;
 pub mod chat;
+pub mod chunking;
 pub mod cli_tool;
 #[cfg(feature = "daemon")]
 pub mod daemon;
@@ -28,6 +29,7 @@ pub mod plan;
 pub mod priority_reasoning;
 pub mod project;
 pub mod reflect;
+pub mod resource;
 pub mod semantic_enrichment;
 pub mod synthesize;
 pub mod synthesize_abs;
@@ -68,6 +70,8 @@ pub use plan::{Plan, PlanStatus, PlanStep, StepStatus};
 pub use priority_reasoning::{Audience, PriorityArgument, PriorityVerdict, Value};
 pub use project::{Agenda, Project, ProjectAssignment, ProjectPredicates, ProjectStatus};
 pub use reflect::{Adjustment, ReflectionConfig, ReflectionResult};
+pub use chunking::{ChunkingConfig, GeneralizedStep, LearnedMethod, MethodIndex};
+pub use resource::{EffortCase, EffortEstimate, EffortIndex, ImprovementHistory, ResourceReport};
 pub use semantic_enrichment::{EnrichmentResult, SemanticPredicates};
 pub use synthesize::NarrativeSummary;
 pub use tool::{Tool, ToolInput, ToolOutput, ToolRegistry, ToolSignature};

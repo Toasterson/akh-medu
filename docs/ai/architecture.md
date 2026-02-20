@@ -1,6 +1,6 @@
 # Akh-medu Architecture
 
-> Last updated: 2026-02-20 (Phase 9 production wiring — all 15 sub-systems integrated into engine lifecycle)
+> Last updated: 2026-02-21 (Phase 11g+11h complete — resource awareness + procedural learning)
 
 ## Overview
 
@@ -19,7 +19,7 @@ Akh-medu is a neuro-symbolic AI engine that runs entirely on CPU with no LLM dep
 
 ```
 src/
-├── agent/              35 modules — OODA loop, tools (code_gen, code_ingest, compile_feedback, pattern_mine), memory, goals, drives, goal_generation, HTN decomposition, priority reasoning (argumentation), projects (microtheory-backed), planning, psyche, library learning, watch (GDA expectation monitoring), metacognition (Nelson-Narens monitoring/control, ZPD, AGM belief revision)
+├── agent/              37 modules — OODA loop, tools (code_gen, code_ingest, compile_feedback, pattern_mine), memory, goals, drives, goal_generation, HTN decomposition, priority reasoning (argumentation), projects (microtheory-backed), planning, psyche, library learning, watch (GDA expectation monitoring), metacognition (Nelson-Narens monitoring/control, ZPD, AGM belief revision), resource awareness (VOC, CBR effort estimation), chunking (procedural learning)
 ├── autonomous/          6 modules — background learning, confidence fusion, grounding
 ├── argumentation/       1 module  — pro/con argumentation (Phase 9e): meta-rules, verdicts, evidence chains
 ├── compartment/         5 modules — knowledge isolation, Jungian psyche, microtheories (Phase 9a, per-repo code scoping), CWA/circumscription (Phase 9m)
@@ -38,7 +38,7 @@ src/
 ├── error.rs                       — miette + thiserror rich diagnostics
 ├── rule_macro.rs                  — rule macro predicates (Phase 9g): RuleMacro trait, registry, genls/relationAllExists/relationExistsAll
 ├── temporal.rs                    — temporal projection (Phase 9k): TemporalProfile, decay computation, registry
-├── provenance.rs                  — persistent explanation ledger (redb, multi-index, 46 derivation kinds)
+├── provenance.rs                  — persistent explanation ledger (redb, multi-index, 48 derivation kinds)
 ├── skolem.rs                      — Skolem functions (Phase 9h): existential witnesses, grounding, auto-ground
 ├── tms.rs                         — truth maintenance system (Phase 9c): support sets, retraction cascades
 ├── symbol.rs                      — SymbolId (NonZeroU64), SymbolKind, allocator
@@ -124,7 +124,7 @@ OODA loop (synchronous, no async runtime):
 3. **Decide** — utility-based tool scoring with recency penalty, novelty bonus, episodic hints
 4. **Act** — execute selected tool, evaluate goal progress
 
-Supporting infrastructure: working memory (ephemeral), episodic memory (consolidated), goal management with HTN decomposition (6 built-in methods, dependency DAGs, VSA-based method selection), multi-step planning with backtracking, periodic reflection, Jungian psyche model, autonomous goal generation (CLARION-inspired drives: curiosity, coherence, completeness, efficiency), metacognitive self-evaluation (Nelson-Narens monitoring/control, ZPD, competence tracking, AGM belief revision, e-graph goal reformulation).
+Supporting infrastructure: working memory (ephemeral), episodic memory (consolidated), goal management with HTN decomposition (6+ built-in + learned methods, dependency DAGs, VSA-based method selection), multi-step planning with backtracking, periodic reflection, Jungian psyche model, autonomous goal generation (CLARION-inspired drives: curiosity, coherence, completeness, efficiency), metacognitive self-evaluation (Nelson-Narens monitoring/control, ZPD, competence tracking, AGM belief revision, e-graph goal reformulation), resource awareness (VOC-based goal switching, CBR effort estimation, dynamic stall thresholds, diminishing returns detection, opportunity cost recording), procedural learning (Soar-inspired chunking: trace extraction → generalization → method compilation, success/failure tracking, dormancy pruning).
 
 ## Storage Architecture
 
@@ -139,7 +139,7 @@ SPARQL (oxigraph)  — persistent RDF store for structured queries
 ## Provenance
 
 Every inference, agent decision, and knowledge derivation creates a `ProvenanceRecord`:
-- Derived symbol, derivation kind (46 variants), confidence, depth, source symbols, metadata
+- Derived symbol, derivation kind (48 variants), confidence, depth, source symbols, metadata
 - Full traceback from any result to its original sources
 - Indices by derived symbol, source symbol, and kind for fast lookup
 
@@ -156,10 +156,10 @@ Phase 10a–10h: Rust code generation (8 sub-phases):
 - **Pattern infrastructure (Wave 2 complete)**: 10e parameterized templates (7 built-in), 10f VSA code pattern encoding (path-contexts, multi-granularity)
 - **Infra**: code_ingest per-repo microtheory scoping (mt:repo:<name> specializes mt:rust-code, ContextDomain::Code, clean re-ingestion)
 - **Pattern learning**: 10g pattern mining from examples, 10h library learning cycle
-Phase 11a–11h: Autonomous task system (8 sub-phases):
-- **Core (Waves 1–3 complete)**: 11a drive-based goal generation with impasse detection (CLARION/GDA/Soar), 11b HTN decomposition with dependency DAGs (6 built-in methods, VSA method selection, petgraph TaskTree), 11c value-based argumentation priority (Dung/VAF), 11d projects as microtheories with Soar/ACT-R memory, 11e GDA expectation monitoring with pattern-based KG watches, VSA semantic trigger matching, fluent-style state tracking
-- **Meta (Wave 4 complete)**: 11f metacognitive self-evaluation (Nelson-Narens monitoring/control, CompetenceModel, HNSW failure patterns, ZPD scoring, autoepistemic goal questioning, AGM belief revision with entrenchment cascade, e-graph goal reformulation)
-- **Remaining**: 11g VOC resource reasoning with CBR effort estimation, 11h procedural learning (Soar chunking)
+Phase 11a–11h: Autonomous task system (8 sub-phases, all complete):
+- **Core (Waves 1–3)**: 11a drive-based goal generation with impasse detection (CLARION/GDA/Soar), 11b HTN decomposition with dependency DAGs (6 built-in methods, VSA method selection, petgraph TaskTree), 11c value-based argumentation priority (Dung/VAF), 11d projects as microtheories with Soar/ACT-R memory, 11e GDA expectation monitoring with pattern-based KG watches, VSA semantic trigger matching, fluent-style state tracking
+- **Meta (Wave 4)**: 11f metacognitive self-evaluation (Nelson-Narens monitoring/control, CompetenceModel, HNSW failure patterns, ZPD scoring, autoepistemic goal questioning, AGM belief revision with entrenchment cascade, e-graph goal reformulation)
+- **Economic (Wave 5)**: 11g VOC resource reasoning (CBR effort estimation via HNSW EffortIndex, compute_voc, dynamic stall thresholds, diminishing returns detection, marginal-value goal ranking, opportunity cost recording, project budget tracking), 11h procedural learning/chunking (Soar-inspired trace extraction → generalization → method compilation, HNSW MethodIndex, success/failure tracking with retraction, HTN registry integration, dormancy pruning, compilation opportunity detection)
 Phase 12a–12g: Interaction — communication protocols and social reasoning (7 sub-phases):
 - **Core**: 12a channel abstraction (capability-secured, Chat = operator protocol), 12b grounded operator dialogue, 12c pre-communication constraint checking
 - **Social**: 12d social KG with theory of mind (microtheories), 12e ActivityPub federation via oxifed, 12f transparent reasoning / explanations, 12g multi-agent communication

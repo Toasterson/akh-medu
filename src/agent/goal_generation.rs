@@ -767,6 +767,7 @@ mod tests {
             priority_rationale: None,
             justification: None,
             reformulated_from: None,
+            estimated_effort: None,
         }];
 
         // Active goals are not candidates for opportunity detection.
@@ -873,6 +874,8 @@ mod tests {
             adjustments: Vec::new(),
             summary: String::new(),
             goal_proposals: Vec::new(),
+            resource_reports: Vec::new(),
+            compilation_opportunities: Vec::new(),
         };
         let proposals = proposals_from_reflection(&reflection);
         assert!(proposals.is_empty());
@@ -899,6 +902,8 @@ mod tests {
                 conflicts_with: Vec::new(),
                 feasibility: 0.8,
             }],
+            resource_reports: Vec::new(),
+            compilation_opportunities: Vec::new(),
         };
         let proposals = proposals_from_reflection(&reflection);
         assert_eq!(proposals.len(), 1);

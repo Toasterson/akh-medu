@@ -190,6 +190,8 @@ pub struct Goal {
     pub justification: Option<GoalJustification>,
     /// If this goal was created by reformulating another goal (Phase 11f).
     pub reformulated_from: Option<SymbolId>,
+    /// Estimated effort from CBR (Phase 11g).
+    pub estimated_effort: Option<super::resource::EffortEstimate>,
 }
 
 impl Goal {
@@ -276,6 +278,7 @@ pub fn create_goal(
         priority_rationale: None,
         justification: None,
         reformulated_from: None,
+        estimated_effort: None,
     })
 }
 
@@ -425,6 +428,7 @@ pub fn restore_goals(engine: &Engine, predicates: &AgentPredicates) -> AgentResu
             priority_rationale: None,
             justification: None,
             reformulated_from: None,
+            estimated_effort: None,
         });
     }
 
@@ -604,6 +608,7 @@ mod tests {
             priority_rationale: None,
             justification: None,
             reformulated_from: None,
+            estimated_effort: None,
         }];
         clear_goals(&mut goals);
         assert!(goals.is_empty());
@@ -628,6 +633,7 @@ mod tests {
                 priority_rationale: None,
                 justification: None,
                 reformulated_from: None,
+            estimated_effort: None,
             },
             Goal {
                 symbol_id: SymbolId::new(2).unwrap(),
@@ -645,6 +651,7 @@ mod tests {
                 priority_rationale: None,
                 justification: None,
                 reformulated_from: None,
+            estimated_effort: None,
             },
             Goal {
                 symbol_id: SymbolId::new(3).unwrap(),
@@ -662,6 +669,7 @@ mod tests {
                 priority_rationale: None,
                 justification: None,
                 reformulated_from: None,
+            estimated_effort: None,
             },
         ];
 
@@ -690,6 +698,7 @@ mod tests {
                 priority_rationale: None,
                 justification: None,
                 reformulated_from: None,
+            estimated_effort: None,
             },
             Goal {
                 symbol_id: SymbolId::new(2).unwrap(),
@@ -707,6 +716,7 @@ mod tests {
                 priority_rationale: None,
                 justification: None,
                 reformulated_from: None,
+            estimated_effort: None,
             },
         ];
 
@@ -735,6 +745,7 @@ mod tests {
                 priority_rationale: None,
                 justification: None,
                 reformulated_from: None,
+            estimated_effort: None,
             },
             Goal {
                 symbol_id: SymbolId::new(2).unwrap(),
@@ -752,6 +763,7 @@ mod tests {
                 priority_rationale: None,
                 justification: None,
                 reformulated_from: None,
+            estimated_effort: None,
             },
         ];
 
@@ -777,6 +789,7 @@ mod tests {
             priority_rationale: None,
             justification: None,
             reformulated_from: None,
+            estimated_effort: None,
         }];
 
         assert!(!goals[0].is_blocked(&goals));

@@ -83,6 +83,31 @@ pub struct Project {
     pub created_at: u64,
 }
 
+impl Project {
+    /// Whether the project's budget is more than 80% consumed.
+    pub fn budget_warning(&self) -> bool {
+        match self.cycle_budget {
+            Some(budget) if budget > 0 => {
+                self.cycles_consumed as f32 / budget as f32 > 0.8
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether the project's budget has been fully consumed.
+    pub fn budget_exceeded(&self) -> bool {
+        match self.cycle_budget {
+            Some(budget) => self.cycles_consumed >= budget,
+            None => false,
+        }
+    }
+
+    /// Consume one cycle from this project's budget.
+    pub fn consume_cycle(&mut self) {
+        self.cycles_consumed = self.cycles_consumed.saturating_add(1);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // ProjectPredicates
 // ---------------------------------------------------------------------------
@@ -611,6 +636,7 @@ mod tests {
                 priority_rationale: None,
                 justification: None,
                 reformulated_from: None,
+            estimated_effort: None,
             },
             Goal {
                 symbol_id: sym(2),
@@ -628,6 +654,7 @@ mod tests {
                 priority_rationale: None,
                 justification: None,
                 reformulated_from: None,
+            estimated_effort: None,
             },
         ];
 
@@ -779,6 +806,7 @@ mod tests {
             priority_rationale: None,
             justification: None,
             reformulated_from: None,
+            estimated_effort: None,
         };
 
         // With a very low threshold, should match.
@@ -815,6 +843,7 @@ mod tests {
             priority_rationale: None,
             justification: None,
             reformulated_from: None,
+            estimated_effort: None,
         };
 
         let result = assign_goal_to_project(&goal, &[], &engine, 0.6);

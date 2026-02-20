@@ -1,8 +1,8 @@
 # Phase 11 — Autonomous Task System with Self-Goal Setting
 
 - **Date**: 2026-02-17
-- **Updated**: 2026-02-19 (Phase 11e complete)
-- **Status**: In Progress (11a–11e complete)
+- **Updated**: 2026-02-21 (Phase 11g+11h complete)
+- **Status**: Complete (11a–11h complete)
 - **Depends on**: Phase 9 (microtheories, TMS, argumentation for reasoning quality), Phase 10 (code generation for implementation tasks)
 
 ## Goal
@@ -493,13 +493,17 @@ ResourceReport { goal: SymbolId, cycles_consumed: u32, budget_remaining: Option<
 ```
 
 **Changes**:
-- [ ] New file: `src/agent/resource.rs` — VOC computation, effort estimation, opportunity cost
-- [ ] `src/agent/goal.rs` — `estimated_effort` field, `EffortEstimate` type, dynamic stall threshold
-- [ ] `src/agent/reflect.rs` — diminishing returns detection, resource reporting
-- [ ] `src/agent/project.rs` — cycle budgets per project, budget escalation
-- [ ] `src/agent/ooda.rs` — VOC-based goal selection, opportunity cost in scoring
+- [x] New file: `src/agent/resource.rs` — ResourceError, EffortCase, EffortEstimate, ResourceReport, ImprovementHistory, EffortIndex (HNSW-backed), estimate_effort (CBR), compute_voc, dynamic_stall_threshold, detect_diminishing_returns, record_improvement, rank_goals_by_marginal_value, record_opportunity_cost, create_effort_case, assess_goal_resources, 20 unit tests
+- [x] `src/agent/goal.rs` — `estimated_effort: Option<EffortEstimate>` field on Goal
+- [x] `src/agent/agent.rs` — effort_index/improvement_history fields, new/resume/persist hooks, run_cycle effort case recording + improvement tracking, dynamic stall threshold in decompose_stalled_goals, estimate_goal_effort() public API
+- [x] `src/agent/ooda.rs` — VOC-based goal switching in decide(), opportunity cost recording
+- [x] `src/agent/project.rs` — budget_warning(), budget_exceeded(), consume_cycle() methods
+- [x] `src/agent/reflect.rs` — resource_reports field on ReflectionResult
+- [x] `src/provenance.rs` — ResourceAssessment variant (tag 46)
+- [x] `src/main.rs` — format_derivation_kind() arm for ResourceAssessment
 
 **Estimated scope**: ~500–700 lines
+**Actual**: ~530 lines new (resource.rs) + ~120 lines modified. 20 new tests (1002 total).
 
 ---
 
@@ -550,14 +554,17 @@ GeneralizedStep { tool: String, arg_pattern: String, expected_outcome: String }
 ```
 
 **Changes**:
-- [ ] New file: `src/agent/chunking.rs` — trace extraction, generalization, method compilation
-- [ ] `src/agent/plan.rs` — method library integration, learned method preference in selection
-- [ ] `src/agent/ooda.rs` — trigger chunking on goal completion
-- [ ] `src/agent/memory.rs` — pattern detection across multiple goal completions
+- [x] New file: `src/agent/chunking.rs` — ChunkingError, GeneralizedStep, LearnedMethod, ChunkingConfig, MethodIndex (HNSW-backed), extract_trace, generalize_trace, compile_method, chunk_completed_goal, record_success/failure, to_decomposition_method, prune_dormant, traces_similar, detect_compilation_opportunity, 21 unit tests
+- [x] `src/agent/agent.rs` — method_index/chunking_config fields, ChunkingConfig in AgentConfig, new/resume/persist hooks, run_cycle chunking on goal completion + HTN registration + provenance recording, prune_methods()/learned_methods() public API
+- [x] `src/agent/reflect.rs` — compilation_opportunities field on ReflectionResult
+- [x] `src/provenance.rs` — ProceduralLearning variant (tag 47)
+- [x] `src/main.rs` — format_derivation_kind() arm for ProceduralLearning
+- [x] `src/agent/mod.rs` — pub mod chunking + re-exports (ChunkingConfig, GeneralizedStep, LearnedMethod, MethodIndex)
 
 **Depends on**: 11b (HTN method registry), 11d (session persistence)
 
 **Estimated scope**: ~500–700 lines
+**Actual**: ~520 lines new (chunking.rs) + ~80 lines modified. 21 new tests (1002 total, includes 11g).
 
 ---
 

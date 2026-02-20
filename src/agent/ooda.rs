@@ -300,6 +300,52 @@ fn decide(
     }
     .or(active.first())
     .ok_or(AgentError::NoGoals)?;
+
+    // VOC-based goal switching (Phase 11g): if the top goal has negative VOC,
+    // see if a higher-marginal-value alternative exists.
+    let top_goal = {
+        let voc = super::resource::compute_voc(
+            top_goal,
+            &agent.goals,
+            &agent.competence_model,
+            &agent.improvement_history,
+            cycle,
+            5,
+        );
+        if voc <= 0.0 {
+            let ranked = super::resource::rank_goals_by_marginal_value(
+                &agent.goals,
+                &agent.competence_model,
+                &agent.improvement_history,
+                cycle,
+                5,
+            );
+            if let Some((better_id, _, better_voc)) = ranked.first() {
+                if *better_voc > voc {
+                    let alternative = Some(top_goal.symbol_id);
+                    super::resource::record_opportunity_cost(
+                        &agent.engine,
+                        cycle,
+                        *better_id,
+                        voc.abs(),
+                        alternative,
+                    );
+                    // Switch to the better goal.
+                    active
+                        .iter()
+                        .find(|g| g.symbol_id == *better_id)
+                        .unwrap_or(top_goal)
+                } else {
+                    top_goal
+                }
+            } else {
+                top_goal
+            }
+        } else {
+            top_goal
+        }
+    };
+
     let goal_id = top_goal.symbol_id;
     let goal_desc = &top_goal.description;
 
