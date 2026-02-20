@@ -1,6 +1,6 @@
 # Akh-medu Architecture
 
-> Last updated: 2026-02-20 (Phase 11f — Self-evaluation and goal questioning)
+> Last updated: 2026-02-20 (Phase 9 production wiring — all 15 sub-systems integrated into engine lifecycle)
 
 ## Overview
 
@@ -26,7 +26,7 @@ src/
 ├── dispatch/            1 module  — competitive reasoner dispatch (Phase 9f): Reasoner trait, bid-based registry, 7 built-in reasoners
 ├── grammar/            22 modules — GF-inspired parsing/generation, entity resolution, Rust code gen (Phase 10a), templates (Phase 10e)
 ├── graph/               9 modules — KG (petgraph), SPARQL (oxigraph), analytics, predicate hierarchy (Phase 9b), defeasible reasoning (Phase 9d), arity constraints (Phase 9j), contradiction detection (Phase 9l), argumentation truth (Phase 9i), NARTs (Phase 9o)
-├── infer/               3 modules — spreading activation, backward chaining, superposition
+├── infer/               3 modules — spreading activation (with Phase 9 hierarchy + temporal context), backward chaining, superposition
 ├── library/            12 modules — document parsing, chunking, concept extraction
 ├── reason/              3 modules — e-graph language (AkhLang), rewrite rules, second-order quantification (Phase 9n), anti-unification (Phase 10h)
 ├── simd/                5 modules — runtime SIMD kernel dispatch (AVX2 / generic)
@@ -34,7 +34,7 @@ src/
 ├── store/               3 modules — tiered storage (hot/warm/cold)
 ├── tui/                 6 modules — ratatui terminal UI, WebSocket remote
 ├── vsa/                 5 modules — HyperVec, VsaOps, encoding, item memory (HNSW), code pattern encoding (Phase 10f)
-├── engine.rs                      — facade composing all subsystems
+├── engine.rs                      — facade composing all subsystems (Phase9Config, 9 stored registries, wired add_triple/remove_triple pipeline)
 ├── error.rs                       — miette + thiserror rich diagnostics
 ├── rule_macro.rs                  — rule macro predicates (Phase 9g): RuleMacro trait, registry, genls/relationAllExists/relationExistsAll
 ├── temporal.rs                    — temporal projection (Phase 9k): TemporalProfile, decay computation, registry
@@ -73,7 +73,30 @@ src/
 | E-graph Rewriting | `AkhLang` + `egg` equality saturation | Symbolic simplification, equivalence |
 | Confidence Fusion | Noisy-OR and consensus across multi-source evidence | Combining evidence |
 
-### Phase 9 — Cyc-Inspired HOL Enhancements
+### Phase 9 — Production Pipeline (Wired into Engine Lifecycle)
+
+All Phase 9 systems are wired into the engine's `add_triple()` and `remove_triple()` paths, controlled by `Phase9Config` flags (all enabled by default):
+
+**`add_triple()` pipeline** (pre/post hooks):
+1. **Constraint check** — `ConstraintRegistry::check_triple()` rejects arity/type violations
+2. **Contradiction detection** — `check_contradictions()` with configurable policy (Warn/Reject/Replace)
+3. Core KG + SPARQL insertion
+4. **Hierarchy invalidation** — `rel:generalizes`/`rel:inverse` triples mark hierarchy dirty for lazy rebuild
+5. **Skolem auto-grounding** — `SkolemRegistry::auto_ground()` checks newly satisfiable existentials
+
+**`remove_triple()` with TMS cascade**:
+1. Core KG + SPARQL removal
+2. **TMS retraction** — `TruthMaintenanceSystem::retract()` cascades to derived symbols
+3. Cascaded triples removed from KG + SPARQL
+
+**Inference integration** — `Engine::infer()` builds `InferPhase9Context`:
+- Hierarchy-aware spreading activation (specialization + inverse predicates)
+- Temporal decay of triple confidences based on `TemporalRegistry` profiles
+
+**Persistence** — 7 registries serialized via bincode to `TieredStore::put_meta()`:
+TMS, TemporalRegistry, ConstraintRegistry, FunctionalPredicates, DisjointnessConstraints, SkolemRegistry, NartRegistry. PredicateHierarchy rebuilt from KG on startup.
+
+### Phase 9 — Cyc-Inspired HOL Enhancements (Module Status)
 
 | System | Status | Description |
 |--------|--------|-------------|

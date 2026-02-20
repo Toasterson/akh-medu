@@ -9,6 +9,9 @@ pub mod backward;
 pub mod engine;
 pub mod superposition;
 
+// Re-export Phase 9 inference context for external use.
+pub use engine::InferPhase9Context;
+
 use crate::symbol::SymbolId;
 use crate::vsa::HyperVec;
 

@@ -4,6 +4,7 @@
 //! for ingesting knowledge, querying, and managing the system.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
 use egg::{AstSize, Extractor, Rewrite, Runner};
@@ -69,6 +70,63 @@ impl Default for EngineConfig {
     }
 }
 
+/// How the engine handles detected contradictions during `add_triple`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ContradictionPolicy {
+    /// Log a warning but insert anyway (default).
+    Warn,
+    /// Return an error and refuse to insert.
+    Reject,
+    /// Remove the conflicting existing triple, then insert the new one.
+    Replace,
+}
+
+impl Default for ContradictionPolicy {
+    fn default() -> Self {
+        Self::Warn
+    }
+}
+
+/// Configuration for Phase 9 (Cyc-inspired HOL) subsystems.
+///
+/// All flags default to `true` — the full Phase 9 pipeline is active out of
+/// the box. Flags exist only for selective disabling during performance
+/// tuning or testing.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct Phase9Config {
+    /// Enforce arity/type constraints on `add_triple`.
+    pub enforce_constraints: bool,
+    /// Run contradiction detection on `add_triple`.
+    pub detect_contradictions: bool,
+    /// What to do when a contradiction is detected.
+    pub contradiction_policy: ContradictionPolicy,
+    /// Track support sets in the TMS for retraction cascades.
+    pub tms_enabled: bool,
+    /// Automatically ground Skolem symbols after each insertion.
+    pub skolem_auto_ground: bool,
+    /// Apply temporal decay during inference.
+    pub temporal_decay_enabled: bool,
+    /// Use predicate hierarchy in spreading activation.
+    pub hierarchy_in_inference: bool,
+    /// Expand rule macros on matching triple insertions.
+    pub macro_expansion_on_insert: bool,
+}
+
+impl Default for Phase9Config {
+    fn default() -> Self {
+        Self {
+            enforce_constraints: true,
+            detect_contradictions: true,
+            contradiction_policy: ContradictionPolicy::default(),
+            tms_enabled: true,
+            skolem_auto_ground: true,
+            temporal_decay_enabled: true,
+            hierarchy_in_inference: true,
+            macro_expansion_on_insert: true,
+        }
+    }
+}
+
 /// The akh-medu neuro-symbolic AI engine.
 ///
 /// Owns all subsystems: VSA operations, item memory, knowledge graph,
@@ -87,6 +145,17 @@ pub struct Engine {
     grammar_registry: GrammarRegistry,
     entity_resolver: RwLock<EntityResolver>,
     compartment_manager: Option<crate::compartment::CompartmentManager>,
+    // --- Phase 9 registries (persistent, accumulate over engine lifetime) ---
+    phase9_config: Phase9Config,
+    tms: RwLock<crate::tms::TruthMaintenanceSystem>,
+    temporal_registry: RwLock<crate::temporal::TemporalRegistry>,
+    constraint_registry: RwLock<crate::graph::arity::ConstraintRegistry>,
+    functional_predicates: RwLock<crate::graph::contradiction::FunctionalPredicates>,
+    disjointness_constraints: RwLock<crate::graph::contradiction::DisjointnessConstraints>,
+    skolem_registry: RwLock<crate::skolem::SkolemRegistry>,
+    nart_registry: RwLock<crate::graph::nart::NartRegistry>,
+    predicate_hierarchy: RwLock<Option<crate::graph::predicate_hierarchy::PredicateHierarchy>>,
+    hierarchy_dirty: AtomicBool,
 }
 
 impl Engine {
@@ -220,7 +289,21 @@ impl Engine {
             grammar_registry,
             entity_resolver,
             compartment_manager,
+            // Phase 9: initialized as defaults, restored from store in restore_phase9().
+            phase9_config: Phase9Config::default(),
+            tms: RwLock::new(crate::tms::TruthMaintenanceSystem::new()),
+            temporal_registry: RwLock::new(crate::temporal::TemporalRegistry::new()),
+            constraint_registry: RwLock::new(crate::graph::arity::ConstraintRegistry::new()),
+            functional_predicates: RwLock::new(crate::graph::contradiction::FunctionalPredicates::new()),
+            disjointness_constraints: RwLock::new(crate::graph::contradiction::DisjointnessConstraints::new()),
+            skolem_registry: RwLock::new(crate::skolem::SkolemRegistry::new()),
+            nart_registry: RwLock::new(crate::graph::nart::NartRegistry::new()),
+            predicate_hierarchy: RwLock::new(None),
+            hierarchy_dirty: AtomicBool::new(true),
         };
+
+        // Restore Phase 9 registries from persistent storage if available.
+        engine.restore_phase9();
 
         // Auto-activate all discovered skills so installed == active.
         engine.activate_installed_skills();
@@ -292,7 +375,97 @@ impl Engine {
     }
 
     /// Add a triple to the knowledge graph.
+    ///
+    /// The full Phase 9 pipeline runs around insertion (all configurable):
+    /// 1. **Pre-insert**: Constraint check, contradiction detection
+    /// 2. **Insert**: KG + hypervector creation + SPARQL sync
+    /// 3. **Post-insert**: Hierarchy invalidation, Skolem auto-grounding, rule macro expansion
     pub fn add_triple(&self, triple: &Triple) -> AkhResult<()> {
+        // --- Phase 9 pre-insert: constraint check ---
+        if self.phase9_config.enforce_constraints {
+            let registry = self.constraint_registry.read().unwrap();
+            if !registry.is_empty() {
+                let violations = registry.check_triple(triple, self);
+                if let Some(v) = violations.first() {
+                    let msg = match v {
+                        crate::graph::arity::ConstraintViolation::Arity { expected, actual, .. } => {
+                            format!("arity mismatch: expected {expected}, got {actual}")
+                        }
+                        crate::graph::arity::ConstraintViolation::Type { arg_position, expected_type, actual_symbol, .. } => {
+                            format!(
+                                "type violation: arg {arg_position} expected type sym:{}, got sym:{}",
+                                expected_type.get(),
+                                actual_symbol.get(),
+                            )
+                        }
+                    };
+                    return Err(crate::graph::arity::ArityError::TypeViolation {
+                        relation_label: self.resolve_label(triple.predicate),
+                        arg_position: match v {
+                            crate::graph::arity::ConstraintViolation::Type { arg_position, .. } => *arg_position,
+                            _ => 0,
+                        },
+                        expected_label: msg.clone(),
+                        actual_label: String::new(),
+                        relation: triple.predicate,
+                        expected: triple.subject,
+                        actual: triple.object,
+                    }.into());
+                }
+            }
+        }
+
+        // --- Phase 9 pre-insert: contradiction detection ---
+        if self.phase9_config.detect_contradictions {
+            let func = self.functional_predicates.read().unwrap();
+            let disj = self.disjointness_constraints.read().unwrap();
+            let temp = self.temporal_registry.read().unwrap();
+            let contradictions = crate::graph::contradiction::check_contradictions(
+                self, triple, &func, &disj, Some(&temp),
+            );
+
+            if !contradictions.is_empty() {
+                match self.phase9_config.contradiction_policy {
+                    ContradictionPolicy::Warn => {
+                        for c in &contradictions {
+                            tracing::warn!(
+                                kind = ?c.kind,
+                                "contradiction detected during add_triple (policy: Warn)"
+                            );
+                        }
+                    }
+                    ContradictionPolicy::Reject => {
+                        let msg = format!(
+                            "{} contradiction(s) detected for ({}, {}, {})",
+                            contradictions.len(),
+                            self.resolve_label(triple.subject),
+                            self.resolve_label(triple.predicate),
+                            self.resolve_label(triple.object),
+                        );
+                        return Err(EngineError::ContradictionRejected { message: msg }.into());
+                    }
+                    ContradictionPolicy::Replace => {
+                        // Remove conflicting existing triples first
+                        for c in &contradictions {
+                            let _ = self.knowledge_graph.remove_triple(
+                                c.existing.subject,
+                                c.existing.predicate,
+                                c.existing.object,
+                            );
+                            if let Some(ref sparql) = self.sparql {
+                                let _ = sparql.remove_triple(
+                                    c.existing.subject,
+                                    c.existing.predicate,
+                                    c.existing.object,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // --- Core insertion ---
         self.knowledge_graph.insert_triple(triple)?;
 
         // Ensure all symbols in the triple have hypervectors
@@ -303,6 +476,28 @@ impl Engine {
         // Sync to SPARQL store if persistent
         if let Some(ref sparql) = self.sparql {
             sparql.insert_triple(triple)?;
+        }
+
+        // --- Phase 9 post-insert: hierarchy invalidation ---
+        // Check if this triple touches rel:generalizes or rel:inverse predicates
+        if let (Ok(gen_sym), Ok(inv_sym)) = (
+            self.registry.lookup("rel:generalizes").ok_or(()),
+            self.registry.lookup("rel:inverse").ok_or(()),
+        ) {
+            if triple.predicate == gen_sym || triple.predicate == inv_sym {
+                self.hierarchy_dirty.store(true, Ordering::Release);
+            }
+        }
+
+        // --- Phase 9 post-insert: Skolem auto-grounding ---
+        if self.phase9_config.skolem_auto_ground {
+            let mut skolem_reg = self.skolem_registry.write().unwrap();
+            if !skolem_reg.is_empty() {
+                let grounded = skolem_reg.auto_ground(self);
+                if grounded > 0 {
+                    tracing::debug!(grounded, "skolem symbols auto-grounded after triple insertion");
+                }
+            }
         }
 
         Ok(())
@@ -356,7 +551,35 @@ impl Engine {
             Arc::clone(&self.item_memory),
             Arc::clone(&self.knowledge_graph),
         );
-        let mut result = infer_engine.infer_with_rules(query, &rules)?;
+
+        // Build Phase 9 context from stored registries
+        let mut result = if self.phase9_config.hierarchy_in_inference
+            || self.phase9_config.temporal_decay_enabled
+        {
+            self.ensure_hierarchy();
+            let hierarchy_guard = self.predicate_hierarchy.read().unwrap();
+            let temporal_guard = self.temporal_registry.read().unwrap();
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let phase9_ctx = crate::infer::InferPhase9Context {
+                hierarchy: if self.phase9_config.hierarchy_in_inference {
+                    hierarchy_guard.as_ref()
+                } else {
+                    None
+                },
+                temporal: if self.phase9_config.temporal_decay_enabled {
+                    Some(&*temporal_guard)
+                } else {
+                    None
+                },
+                query_time_secs: now,
+            };
+            infer_engine.infer_with_phase9(query, &rules, &phase9_ctx)?
+        } else {
+            infer_engine.infer_with_rules(query, &rules)?
+        };
 
         // Persist provenance records if ledger is available.
         if let Some(ref ledger) = self.provenance_ledger {
@@ -1379,16 +1602,80 @@ impl Engine {
     // Truth Maintenance System (Phase 9c)
     // -----------------------------------------------------------------------
 
-    /// Remove a triple from the knowledge graph.
+    /// Remove a triple from the knowledge graph with TMS cascade.
     ///
-    /// Returns true if the triple was found and removed.
+    /// If TMS is enabled, finds all derived symbols that depend on the removed
+    /// triple's symbols, retracts unsupported conclusions, and re-evaluates
+    /// those with alternative justifications.
+    ///
+    /// Returns a `RetractionResult` describing what was retracted and re-evaluated.
     pub fn remove_triple(
         &self,
         subject: SymbolId,
         predicate: SymbolId,
         object: SymbolId,
-    ) -> bool {
-        self.knowledge_graph.remove_triple(subject, predicate, object)
+    ) -> AkhResult<crate::tms::RetractionResult> {
+        let removed = self.knowledge_graph.remove_triple(subject, predicate, object);
+
+        if !removed {
+            return Ok(crate::tms::RetractionResult {
+                retracted: vec![],
+                re_evaluated: vec![],
+                cascade_depth: 0,
+            });
+        }
+
+        // Sync removal to SPARQL store
+        if let Some(ref sparql) = self.sparql {
+            let _ = sparql.remove_triple(subject, predicate, object);
+        }
+
+        // TMS cascade if enabled
+        if self.phase9_config.tms_enabled {
+            let mut tms = self.tms.write().unwrap();
+            // Retract the object symbol (the conclusion of this triple)
+            let result = tms.retract(object);
+
+            // Remove cascaded triples from the KG
+            for &retracted_sym in &result.retracted {
+                if retracted_sym == object {
+                    continue; // Already removed above
+                }
+                // Remove all triples where the retracted symbol is subject or object
+                let triples_from: Vec<_> = self.knowledge_graph.triples_from(retracted_sym);
+                for t in &triples_from {
+                    self.knowledge_graph.remove_triple(t.subject, t.predicate, t.object);
+                }
+                let triples_to: Vec<_> = self.knowledge_graph.triples_to(retracted_sym);
+                for t in &triples_to {
+                    self.knowledge_graph.remove_triple(t.subject, t.predicate, t.object);
+                }
+            }
+
+            Ok(result)
+        } else {
+            Ok(crate::tms::RetractionResult {
+                retracted: vec![object],
+                re_evaluated: vec![],
+                cascade_depth: 0,
+            })
+        }
+    }
+
+    /// Add a triple with explicit TMS support tracking.
+    ///
+    /// The support set records the premises that justify this derived triple.
+    /// When any premise is later retracted, the TMS cascades to this triple.
+    pub fn add_triple_with_support(
+        &self,
+        triple: &Triple,
+        support: crate::tms::SupportSet,
+    ) -> AkhResult<()> {
+        self.add_triple(triple)?;
+        if self.phase9_config.tms_enabled {
+            self.tms.write().unwrap().add_support(triple.object, support);
+        }
+        Ok(())
     }
 
     /// Remove all triples belonging to a compartment (microtheory).
@@ -1437,11 +1724,28 @@ impl Engine {
         crate::graph::predicate_hierarchy::PredicateHierarchy::build(self)
     }
 
-    /// Query objects using predicate hierarchy (specialization + inverse inference).
+    /// Query objects using the cached predicate hierarchy (specialization + inverse inference).
     ///
+    /// Automatically ensures the hierarchy is up-to-date before querying.
     /// Returns `(actual_predicate, object)` pairs. The `actual_predicate` may differ
     /// from the queried predicate if the result was found via a specialization or inverse.
     pub fn query_with_hierarchy(
+        &self,
+        subject: SymbolId,
+        predicate: SymbolId,
+    ) -> AkhResult<Vec<(SymbolId, SymbolId)>> {
+        self.ensure_hierarchy()?;
+        let guard = self.predicate_hierarchy.read().unwrap();
+        match guard.as_ref() {
+            Some(hierarchy) => Ok(crate::graph::predicate_hierarchy::objects_with_hierarchy_and_inverse(
+                self, subject, predicate, hierarchy,
+            )),
+            None => Ok(vec![]),
+        }
+    }
+
+    /// Query objects using an explicit predicate hierarchy reference.
+    pub fn query_with_hierarchy_ref(
         &self,
         subject: SymbolId,
         predicate: SymbolId,
@@ -1596,9 +1900,9 @@ impl Engine {
     // Temporal Projection (Phase 9k)
     // -----------------------------------------------------------------------
 
-    /// Create a temporal registry with default profiles for well-known relations.
-    pub fn temporal_registry(&self) -> AkhResult<crate::temporal::TemporalRegistry> {
-        Ok(crate::temporal::TemporalRegistry::with_defaults(self)?)
+    /// Get a read lock on the temporal registry.
+    pub fn temporal_reg(&self) -> std::sync::RwLockReadGuard<'_, crate::temporal::TemporalRegistry> {
+        self.temporal_registry.read().unwrap()
     }
 
     /// Set a temporal profile for a relation.
@@ -1608,6 +1912,7 @@ impl Engine {
         profile: crate::temporal::TemporalProfile,
     ) -> AkhResult<()> {
         profile.validate()?;
+        self.temporal_registry.write().unwrap().set_profile(relation, profile)?;
         Ok(())
     }
 
@@ -1615,9 +1920,14 @@ impl Engine {
     // Arity and Type Constraints (Phase 9j)
     // -----------------------------------------------------------------------
 
-    /// Create an empty constraint registry.
-    pub fn constraint_registry(&self) -> crate::graph::arity::ConstraintRegistry {
-        crate::graph::arity::ConstraintRegistry::new()
+    /// Get a read lock on the constraint registry.
+    pub fn constraint_reg(&self) -> std::sync::RwLockReadGuard<'_, crate::graph::arity::ConstraintRegistry> {
+        self.constraint_registry.read().unwrap()
+    }
+
+    /// Get a write lock on the constraint registry.
+    pub fn constraint_reg_mut(&self) -> std::sync::RwLockWriteGuard<'_, crate::graph::arity::ConstraintRegistry> {
+        self.constraint_registry.write().unwrap()
     }
 
     /// Resolve well-known arity predicates, creating them if needed.
@@ -1636,20 +1946,40 @@ impl Engine {
         Ok(crate::graph::contradiction::ContradictionPredicates::resolve(self)?)
     }
 
-    /// Check a triple for contradictions against existing knowledge.
+    /// Get a read lock on the functional predicates set.
+    pub fn functional_preds(&self) -> std::sync::RwLockReadGuard<'_, crate::graph::contradiction::FunctionalPredicates> {
+        self.functional_predicates.read().unwrap()
+    }
+
+    /// Get a write lock on the functional predicates set.
+    pub fn functional_preds_mut(&self) -> std::sync::RwLockWriteGuard<'_, crate::graph::contradiction::FunctionalPredicates> {
+        self.functional_predicates.write().unwrap()
+    }
+
+    /// Get a read lock on the disjointness constraints set.
+    pub fn disjointness(&self) -> std::sync::RwLockReadGuard<'_, crate::graph::contradiction::DisjointnessConstraints> {
+        self.disjointness_constraints.read().unwrap()
+    }
+
+    /// Get a write lock on the disjointness constraints set.
+    pub fn disjointness_mut(&self) -> std::sync::RwLockWriteGuard<'_, crate::graph::contradiction::DisjointnessConstraints> {
+        self.disjointness_constraints.write().unwrap()
+    }
+
+    /// Check a triple for contradictions using the engine's stored registries.
     pub fn check_contradictions(
         &self,
         incoming: &crate::graph::Triple,
-        functional_preds: &crate::graph::contradiction::FunctionalPredicates,
-        disjointness: &crate::graph::contradiction::DisjointnessConstraints,
-        temporal_registry: Option<&crate::temporal::TemporalRegistry>,
     ) -> Vec<crate::graph::contradiction::Contradiction> {
+        let func = self.functional_predicates.read().unwrap();
+        let disj = self.disjointness_constraints.read().unwrap();
+        let temp = self.temporal_registry.read().unwrap();
         crate::graph::contradiction::check_contradictions(
             self,
             incoming,
-            functional_preds,
-            disjointness,
-            temporal_registry,
+            &func,
+            &disj,
+            Some(&temp),
         )
     }
 
@@ -1657,9 +1987,14 @@ impl Engine {
     // Skolem Functions (Phase 9h)
     // -----------------------------------------------------------------------
 
-    /// Create a new Skolem registry.
-    pub fn skolem_registry(&self) -> crate::skolem::SkolemRegistry {
-        crate::skolem::SkolemRegistry::new()
+    /// Get a read lock on the Skolem registry.
+    pub fn skolem_reg(&self) -> std::sync::RwLockReadGuard<'_, crate::skolem::SkolemRegistry> {
+        self.skolem_registry.read().unwrap()
+    }
+
+    /// Get a write lock on the Skolem registry.
+    pub fn skolem_reg_mut(&self) -> std::sync::RwLockWriteGuard<'_, crate::skolem::SkolemRegistry> {
+        self.skolem_registry.write().unwrap()
     }
 
     // -----------------------------------------------------------------------
@@ -1684,11 +2019,6 @@ impl Engine {
     // -----------------------------------------------------------------------
     // Circumscription / CWA (Phase 9m)
     // -----------------------------------------------------------------------
-
-    /// Create a new CWA assumption registry.
-    pub fn assumption_registry(&self) -> crate::compartment::cwa::AssumptionRegistry {
-        crate::compartment::cwa::AssumptionRegistry::new()
-    }
 
     /// Resolve well-known CWA predicates, creating them if needed.
     pub fn cwa_predicates(&self) -> AkhResult<crate::compartment::cwa::CwaPredicates> {
@@ -1715,9 +2045,14 @@ impl Engine {
     // NARTs (Phase 9o)
     // -----------------------------------------------------------------------
 
-    /// Create a new NART registry.
-    pub fn nart_registry(&self) -> crate::graph::nart::NartRegistry {
-        crate::graph::nart::NartRegistry::new()
+    /// Get a read lock on the NART registry.
+    pub fn nart_reg(&self) -> std::sync::RwLockReadGuard<'_, crate::graph::nart::NartRegistry> {
+        self.nart_registry.read().unwrap()
+    }
+
+    /// Get a write lock on the NART registry.
+    pub fn nart_reg_mut(&self) -> std::sync::RwLockWriteGuard<'_, crate::graph::nart::NartRegistry> {
+        self.nart_registry.write().unwrap()
     }
 
     // -----------------------------------------------------------------------
@@ -1794,6 +2129,41 @@ impl Engine {
         self.compartment_manager.as_ref()
     }
 
+    /// Get the Phase 9 configuration.
+    pub fn phase9_config(&self) -> &Phase9Config {
+        &self.phase9_config
+    }
+
+    /// Set the Phase 9 configuration.
+    pub fn set_phase9_config(&mut self, config: Phase9Config) {
+        self.phase9_config = config;
+    }
+
+    /// Get a read lock on the TMS.
+    pub fn tms(&self) -> std::sync::RwLockReadGuard<'_, crate::tms::TruthMaintenanceSystem> {
+        self.tms.read().unwrap()
+    }
+
+    /// Ensure the predicate hierarchy is built and up-to-date.
+    ///
+    /// If the hierarchy is dirty (invalidated by a `rel:generalizes` or
+    /// `rel:inverse` triple insertion), rebuilds it from the KG.
+    pub fn ensure_hierarchy(&self) -> AkhResult<()> {
+        if self.hierarchy_dirty.load(Ordering::Acquire) {
+            let hierarchy = crate::graph::predicate_hierarchy::PredicateHierarchy::build(self)?;
+            *self.predicate_hierarchy.write().unwrap() = Some(hierarchy);
+            self.hierarchy_dirty.store(false, Ordering::Release);
+        }
+        Ok(())
+    }
+
+    /// Get a read lock on the cached predicate hierarchy.
+    ///
+    /// Call `ensure_hierarchy()` first to guarantee it's up-to-date.
+    pub fn predicate_hierarchy(&self) -> std::sync::RwLockReadGuard<'_, Option<crate::graph::predicate_hierarchy::PredicateHierarchy>> {
+        self.predicate_hierarchy.read().unwrap()
+    }
+
     /// Get system info (node count, triple count, symbol count, etc.)
     pub fn info(&self) -> EngineInfo {
         let provenance_count = self
@@ -1817,7 +2187,7 @@ impl Engine {
         }
     }
 
-    /// Persist current state (registry, allocator, equivalences, knowledge graph → SPARQL).
+    /// Persist current state (registry, allocator, equivalences, knowledge graph → SPARQL, Phase 9 registries).
     pub fn persist(&self) -> AkhResult<()> {
         // Persist symbol registry.
         self.registry.persist(&self.store)?;
@@ -1840,7 +2210,79 @@ impl Engine {
         if let Some(ref sparql) = self.sparql {
             sparql.sync_from(&self.knowledge_graph)?;
         }
+
+        // Persist Phase 9 registries.
+        self.persist_phase9()?;
+
         Ok(())
+    }
+
+    /// Persist all Phase 9 registries to the durable store.
+    fn persist_phase9(&self) -> AkhResult<()> {
+        fn enc<T: serde::Serialize>(v: &T) -> AkhResult<Vec<u8>> {
+            bincode::serialize(v).map_err(|e| {
+                crate::error::StoreError::Serialization {
+                    message: format!("phase9 serialize: {e}"),
+                }
+                .into()
+            })
+        }
+
+        self.store.put_meta(b"phase9:tms", &enc(&*self.tms.read().unwrap())?)?;
+        self.store.put_meta(b"phase9:temporal", &enc(&*self.temporal_registry.read().unwrap())?)?;
+        self.store.put_meta(b"phase9:constraints", &enc(&*self.constraint_registry.read().unwrap())?)?;
+        self.store.put_meta(b"phase9:functional", &enc(&*self.functional_predicates.read().unwrap())?)?;
+        self.store.put_meta(b"phase9:disjointness", &enc(&*self.disjointness_constraints.read().unwrap())?)?;
+        self.store.put_meta(b"phase9:skolem", &enc(&*self.skolem_registry.read().unwrap())?)?;
+        self.store.put_meta(b"phase9:nart", &enc(&*self.nart_registry.read().unwrap())?)?;
+        // PredicateHierarchy NOT persisted — rebuilt from KG on startup.
+
+        tracing::debug!("phase 9 registries persisted");
+        Ok(())
+    }
+
+    /// Restore Phase 9 registries from the durable store.
+    fn restore_phase9(&self) {
+        let load = |key: &[u8]| -> Option<Vec<u8>> {
+            self.store.get_meta(key).ok().flatten()
+        };
+
+        if let Some(bytes) = load(b"phase9:tms") {
+            if let Ok(tms) = bincode::deserialize(&bytes) {
+                *self.tms.write().unwrap() = tms;
+            }
+        }
+        if let Some(bytes) = load(b"phase9:temporal") {
+            if let Ok(reg) = bincode::deserialize(&bytes) {
+                *self.temporal_registry.write().unwrap() = reg;
+            }
+        }
+        if let Some(bytes) = load(b"phase9:constraints") {
+            if let Ok(reg) = bincode::deserialize(&bytes) {
+                *self.constraint_registry.write().unwrap() = reg;
+            }
+        }
+        if let Some(bytes) = load(b"phase9:functional") {
+            if let Ok(fp) = bincode::deserialize(&bytes) {
+                *self.functional_predicates.write().unwrap() = fp;
+            }
+        }
+        if let Some(bytes) = load(b"phase9:disjointness") {
+            if let Ok(dc) = bincode::deserialize(&bytes) {
+                *self.disjointness_constraints.write().unwrap() = dc;
+            }
+        }
+        if let Some(bytes) = load(b"phase9:skolem") {
+            if let Ok(reg) = bincode::deserialize(&bytes) {
+                *self.skolem_registry.write().unwrap() = reg;
+            }
+        }
+        if let Some(bytes) = load(b"phase9:nart") {
+            if let Ok(reg) = bincode::deserialize(&bytes) {
+                *self.nart_registry.write().unwrap() = reg;
+            }
+        }
+        // hierarchy_dirty stays true — rebuilt from KG on first use.
     }
 }
 

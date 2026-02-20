@@ -1,8 +1,8 @@
 # Phase 9 — Cyc-Inspired Enhancements
 
 - **Date**: 2026-02-17
-- **Updated**: 2026-02-18 (All 15 sub-phases complete: 9a–9o implemented across 5 waves)
-- **Status**: Complete
+- **Updated**: 2026-02-20 (Production wiring: all 15 sub-systems integrated into engine lifecycle)
+- **Status**: Complete (including production wiring — see ADR-007)
 - **Motivation**: ADR-001 (Cyc paper analysis)
 - **Depends on**: Phases 1–8f (all complete)
 

@@ -313,6 +313,73 @@ pub fn apply_transitivity(
     inferred
 }
 
+/// Apply the reflexivity rule: for each qualifying predicate R,
+/// find domain entities via the constraint registry's `arg1_type` and
+/// generate R(a,a) for each entity `a` in domain(R) not already in KG.
+///
+/// If no constraint registry is provided, or the relation has no `arg1_type`
+/// constraint, this is a no-op (reflexivity needs domain information).
+pub fn apply_reflexivity(
+    engine: &Engine,
+    relation: SymbolId,
+    constraints: Option<&crate::graph::arity::ConstraintRegistry>,
+) -> Vec<Triple> {
+    let constraint_reg = match constraints {
+        Some(c) => c,
+        None => return vec![],
+    };
+
+    // Look up the arg1_type (domain type) for this relation
+    let domain_type = match constraint_reg.get(relation) {
+        Some(c) => match c.arg1_type {
+            Some(t) => t,
+            None => return vec![],
+        },
+        None => return vec![],
+    };
+
+    // Find all entities that are instances of the domain type via `is-a` BFS
+    let kg = engine.knowledge_graph();
+    let is_a_sym = match engine.lookup_symbol("is-a") {
+        Ok(id) => id,
+        Err(_) => return vec![],
+    };
+
+    // Collect all entities where `is-a(entity, domain_type)` transitively
+    let mut domain_entities = Vec::new();
+    let mut visited = std::collections::HashSet::new();
+    let mut type_queue = std::collections::VecDeque::new();
+    type_queue.push_back(domain_type);
+    visited.insert(domain_type);
+
+    while let Some(current_type) = type_queue.pop_front() {
+        // Find all entities that are directly `is-a current_type`
+        let incoming = kg.triples_to(current_type);
+        for t in &incoming {
+            if t.predicate == is_a_sym {
+                domain_entities.push(t.subject);
+                // Also follow subtypes: if X is-a current_type and X is itself a type,
+                // entities is-a X should also be included
+                if visited.insert(t.subject) {
+                    type_queue.push_back(t.subject);
+                }
+            }
+        }
+    }
+
+    // Generate R(a,a) for domain entities not already present
+    let existing_pairs = kg.triples_for_predicate(relation);
+    let mut inferred = Vec::new();
+    for entity in domain_entities {
+        let already_exists = existing_pairs.iter().any(|&(s, o)| s == entity && o == entity);
+        if !already_exists {
+            inferred.push(Triple::new(entity, relation, entity));
+        }
+    }
+
+    inferred
+}
+
 /// Apply the symmetry rule: for each qualifying predicate R,
 /// find all R(a,b) and infer R(b,a) if not already present.
 pub fn apply_symmetry(
@@ -337,10 +404,15 @@ pub fn apply_symmetry(
 
 /// Instantiate all second-order rules: find qualifying predicates and
 /// generate inferred triples.
+///
+/// If `constraints` is provided, the reflexivity rule uses the constraint
+/// registry's `arg1_type` (domain) information to determine which entities
+/// should receive self-triples. Without it, reflexivity is a no-op.
 pub fn instantiate_all(
     engine: &Engine,
     registry: &SecondOrderRegistry,
     predicates: &SecondOrderPredicates,
+    constraints: Option<&crate::graph::arity::ConstraintRegistry>,
 ) -> Vec<GeneratedInference> {
     let mut results = Vec::new();
 
@@ -351,7 +423,7 @@ pub fn instantiate_all(
             let inferred = match rule.constraint {
                 RelationProperty::Transitive => apply_transitivity(engine, pred),
                 RelationProperty::Symmetric => apply_symmetry(engine, pred),
-                // Reflexivity needs domain information — skip for now
+                RelationProperty::Reflexive => apply_reflexivity(engine, pred, constraints),
                 _ => Vec::new(),
             };
 
@@ -554,7 +626,7 @@ mod tests {
             reflexive_relation: refl_rel.id,
         };
 
-        let results = instantiate_all(&engine, &registry, &predicates);
+        let results = instantiate_all(&engine, &registry, &predicates, None);
         assert!(!results.is_empty());
 
         let trans_result = results
@@ -565,6 +637,59 @@ mod tests {
         assert_eq!(trans_result.inferred_triples.len(), 1);
         assert_eq!(trans_result.inferred_triples[0].subject, a.id);
         assert_eq!(trans_result.inferred_triples[0].object, c.id);
+    }
+
+    #[test]
+    fn apply_reflexivity_with_domain() {
+        use crate::graph::arity::ConstraintRegistry;
+
+        let engine = Engine::new(EngineConfig::default()).unwrap();
+        let is_a = engine
+            .create_symbol(SymbolKind::Relation, "is-a")
+            .unwrap();
+        let equal = engine
+            .create_symbol(SymbolKind::Relation, "equal")
+            .unwrap();
+        let number_type = engine
+            .create_symbol(SymbolKind::Entity, "Number")
+            .unwrap();
+        let n1 = engine.create_symbol(SymbolKind::Entity, "1").unwrap();
+        let n2 = engine.create_symbol(SymbolKind::Entity, "2").unwrap();
+
+        // Declare n1 and n2 as Numbers
+        engine
+            .add_triple(&Triple::new(n1.id, is_a.id, number_type.id))
+            .unwrap();
+        engine
+            .add_triple(&Triple::new(n2.id, is_a.id, number_type.id))
+            .unwrap();
+
+        // Declare constraints: equal has arg1_type = Number
+        let mut constraints = ConstraintRegistry::new();
+        constraints.declare(equal.id, 2, Some(number_type.id), Some(number_type.id));
+
+        let inferred = apply_reflexivity(&engine, equal.id, Some(&constraints));
+        assert_eq!(inferred.len(), 2, "Should infer equal(1,1) and equal(2,2)");
+        assert!(inferred.iter().all(|t| t.subject == t.object));
+        assert!(inferred.iter().any(|t| t.subject == n1.id));
+        assert!(inferred.iter().any(|t| t.subject == n2.id));
+    }
+
+    #[test]
+    fn apply_reflexivity_no_domain_is_noop() {
+        let engine = Engine::new(EngineConfig::default()).unwrap();
+        let equal = engine
+            .create_symbol(SymbolKind::Relation, "equal")
+            .unwrap();
+
+        // No constraint registry → no-op
+        let inferred = apply_reflexivity(&engine, equal.id, None);
+        assert!(inferred.is_empty());
+
+        // Empty constraint registry → no-op (relation not registered)
+        let constraints = crate::graph::arity::ConstraintRegistry::new();
+        let inferred = apply_reflexivity(&engine, equal.id, Some(&constraints));
+        assert!(inferred.is_empty());
     }
 
     #[test]

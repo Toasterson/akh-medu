@@ -111,6 +111,23 @@ impl SparqlStore {
         self.query_select(&scoped)
     }
 
+    /// Remove a single triple from the default graph.
+    pub fn remove_triple(
+        &self,
+        subject: SymbolId,
+        predicate: SymbolId,
+        object: SymbolId,
+    ) -> GraphResult<()> {
+        let s = Self::symbol_to_iri(subject);
+        let p = Self::symbol_to_iri(predicate);
+        let o = Self::symbol_to_iri(object);
+        let quad = Quad::new(s, p, o, GraphNameRef::DefaultGraph);
+        self.store.remove(&quad).map_err(|e| GraphError::Sparql {
+            message: format!("remove triple failed: {e}"),
+        })?;
+        Ok(())
+    }
+
     /// Remove all triples in a named compartment graph.
     pub fn remove_graph(&self, compartment_id: &str) -> GraphResult<()> {
         let graph_iri = format!("{COMPARTMENT_NS}{compartment_id}");

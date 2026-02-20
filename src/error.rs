@@ -665,6 +665,18 @@ pub enum EngineError {
         )
     )]
     IngestFormat { message: String },
+
+    #[error("contradiction detected: {message}")]
+    #[diagnostic(
+        code(akh::engine::contradiction_rejected),
+        help(
+            "The triple was rejected because it contradicts existing knowledge \
+             and the engine's contradiction policy is set to Reject. \
+             Use ContradictionPolicy::Warn to insert anyway, or \
+             ContradictionPolicy::Replace to overwrite the existing triple."
+        )
+    )]
+    ContradictionRejected { message: String },
 }
 
 /// Convenience alias for functions returning akh-medu results.
