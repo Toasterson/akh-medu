@@ -229,6 +229,22 @@ explanations. Multi-agent communication with capability tokens.
 - [x] `AgentError::Oxifed` transparent variant (cfg-gated)
 - [x] 16 new unit tests (bridge functions, serde round-trip, channel FIFO, handle push/receive)
 
+### Phase 12f — Transparent Reasoning and Explanations ✓
+- [x] `ExplanationQuery` enum: Why, How, WhatKnown, HowConfident, WhatChanged — with `parse()` for natural language recognition
+- [x] `DerivationNode` tree built by recursive provenance walk with cycle detection and max_depth
+- [x] `render_derivation_tree()` — indented hierarchy with box-drawing connectors
+- [x] `render_derivation_prose()` — concise comma-separated prose format
+- [x] `derivation_kind_prose()` — human-readable strings for all 48 DerivationKind variants
+- [x] `explain_entity()` — derivation tree + known facts with provenance tags
+- [x] `explain_known()` — enumerate all non-metadata triples with confidence and provenance
+- [x] `explain_confidence()` — aggregate confidence, range, assessment, evidence source breakdown
+- [x] `explain_changes()` — KG diff since timestamp (filters metadata)
+- [x] `execute_query()` — dispatch ExplanationQuery to appropriate explain function
+- [x] `UserIntent::Explain` variant in NLP classifier (checked before Query to intercept "why"/"explain")
+- [x] Wired into TUI `process_input_local()` and headless chat in `main.rs`
+- [x] `AgentError::Explain` transparent variant
+- [x] 18 new unit tests (parsing, rendering, derivation prose, helpers)
+
 ## Phase 13 — Personal Assistant
 
 Email as bidirectional CommChannel (JMAP primary, IMAP fallback). OnlineHD VSA-native

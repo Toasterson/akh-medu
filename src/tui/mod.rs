@@ -612,6 +612,18 @@ impl AkhTui {
                         .to_string(),
                 ));
             }
+            crate::agent::UserIntent::Explain { ref query } => {
+                match crate::agent::explain::execute_query(
+                    engine, query, None,
+                ) {
+                    Ok(explanation) => {
+                        self.messages.push(AkhMessage::system(explanation));
+                    }
+                    Err(e) => {
+                        self.messages.push(AkhMessage::system(format!("{e}")));
+                    }
+                }
+            }
             crate::agent::UserIntent::Freeform { text: _ } => {
                 self.messages.push(AkhMessage::system(
                     "I don't understand that. Type /help for commands.".to_string(),

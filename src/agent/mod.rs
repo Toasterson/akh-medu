@@ -16,6 +16,7 @@ pub mod constraint_check;
 pub mod conversation;
 pub mod chunking;
 pub mod cli_tool;
+pub mod explain;
 #[cfg(feature = "daemon")]
 pub mod daemon;
 pub mod decomposition;
@@ -73,6 +74,11 @@ pub use decomposition::{
 };
 pub use drives::{DriveKind, DriveSystem};
 pub use error::{AgentError, AgentResult};
+pub use explain::{
+    DerivationNode, ExplainError, ExplainResult, ExplanationQuery, build_derivation_tree,
+    derivation_kind_prose, execute_query, explain_changes, explain_confidence, explain_entity,
+    explain_known, render_derivation_prose, render_derivation_tree,
+};
 pub use operator_channel::{InboundHandle, OperatorChannel};
 pub use goal::{Goal, GoalJustification, GoalSource, GoalStatus};
 pub use metacognition::{CompetenceModel, FailureIndex, GoalEvaluation, MetacognitionConfig, MetacognitiveControl};

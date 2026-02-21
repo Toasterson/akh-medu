@@ -2970,6 +2970,14 @@ fn main() -> Result<()> {
                                 }
                             }
                         }
+                        akh_medu::agent::UserIntent::Explain { ref query } => {
+                            match akh_medu::agent::explain::execute_query(
+                                &engine, query, None,
+                            ) {
+                                Ok(explanation) => explanation,
+                                Err(e) => format!("{e}"),
+                            }
+                        }
                         akh_medu::agent::UserIntent::Freeform { .. } => {
                             "I don't understand that. Type 'help' for commands.".to_string()
                         }

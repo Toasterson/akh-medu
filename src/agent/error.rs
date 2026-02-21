@@ -116,6 +116,10 @@ pub enum AgentError {
 
     #[error(transparent)]
     #[diagnostic(transparent)]
+    Explain(#[from] super::explain::ExplainError),
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
     Interlocutor(#[from] super::interlocutor::InterlocutorError),
 
     #[cfg(feature = "oxifed")]

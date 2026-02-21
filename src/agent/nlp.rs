@@ -42,6 +42,10 @@ pub enum UserIntent {
     Help,
     /// "Set detail concise/normal/full" — change response detail level.
     SetDetail { level: String },
+    /// "Why X?" / "How confident?" / "What do you know about X?" / "Explain X"
+    Explain {
+        query: super::explain::ExplanationQuery,
+    },
     /// Unrecognized input — pass through.
     Freeform { text: String },
 }
@@ -72,6 +76,11 @@ pub fn classify_intent(input: &str) -> UserIntent {
         || lower.starts_with("list goals")
     {
         return UserIntent::ShowStatus;
+    }
+
+    // Explanation queries (Phase 12f): "why X?", "explain X", "how confident", etc.
+    if let Some(query) = super::explain::ExplanationQuery::parse(trimmed) {
+        return UserIntent::Explain { query };
     }
 
     // Set detail level.
