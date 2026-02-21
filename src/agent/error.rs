@@ -110,6 +110,10 @@ pub enum AgentError {
     #[diagnostic(transparent)]
     Channel(#[from] super::channel::ChannelError),
 
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    ConstraintCheck(#[from] super::constraint_check::ConstraintCheckError),
+
     #[error("{0}")]
     #[diagnostic(
         code(akh::agent::engine),

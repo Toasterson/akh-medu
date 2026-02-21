@@ -193,6 +193,18 @@ explanations. Multi-agent communication with capability tokens.
 - [x] Headless grounded-first query path + SetDetail handler
 - [x] 17 new unit tests
 
+### Phase 12c — Pre-communication constraint checking ✓
+- [x] `ConstraintChecker` with configurable `ConstraintConfig` and per-channel-kind `ConfidenceThresholds`
+- [x] 6-check pipeline: consistency (contradiction detection), confidence (per-kind threshold), rate (CommunicationBudget with sliding window + cooldown), relevance (placeholder), sensitivity (SensitivityLevel + channel kind gating), provenance (ungrounded claim warnings)
+- [x] `CheckOutcome` with violations + warnings; `EmissionDecision` enum (Emit/Suppress)
+- [x] Per-channel-kind emission behavior: operator=annotate, trusted=suppress violations, social/public=suppress entirely
+- [x] `ConstraintCheckStatus` evolved: Unchecked / Passed { warning_count } / Failed { violation_count, warning_count }
+- [x] `GroundedTriple` enriched with subject_id/predicate_id/object_id for consistency checking
+- [x] `Agent::check_and_wrap_grounded()` — full constraint check + outbound message construction
+- [x] TUI + headless wired through constraint pipeline
+- [x] `AgentError::ConstraintCheck` transparent variant
+- [x] 17 new unit tests
+
 ## Phase 13 — Personal Assistant
 
 Email as bidirectional CommChannel (JMAP primary, IMAP fallback). OnlineHD VSA-native

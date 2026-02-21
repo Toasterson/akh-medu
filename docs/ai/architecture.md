@@ -1,6 +1,6 @@
 # Akh-medu Architecture
 
-> Last updated: 2026-02-21 (Phase 12b complete — grounded operator dialogue)
+> Last updated: 2026-02-21 (Phase 12c complete — pre-communication constraint checking)
 
 ## Overview
 
@@ -19,7 +19,7 @@ Akh-medu is a neuro-symbolic AI engine that runs entirely on CPU with no LLM dep
 
 ```
 src/
-├── agent/              41 modules — OODA loop, tools (code_gen, code_ingest, compile_feedback, pattern_mine), memory, goals, drives, goal_generation, HTN decomposition, priority reasoning (argumentation), projects (microtheory-backed), planning, psyche, library learning, watch (GDA expectation monitoring), metacognition (Nelson-Narens monitoring/control, ZPD, AGM belief revision), resource awareness (VOC, CBR effort estimation), chunking (procedural learning), channel abstraction (CommChannel trait, ChannelRegistry, OperatorChannel), conversation (grounded dialogue, ConversationState, GroundedResponse)
+├── agent/              42 modules — OODA loop, tools (code_gen, code_ingest, compile_feedback, pattern_mine), memory, goals, drives, goal_generation, HTN decomposition, priority reasoning (argumentation), projects (microtheory-backed), planning, psyche, library learning, watch (GDA expectation monitoring), metacognition (Nelson-Narens monitoring/control, ZPD, AGM belief revision), resource awareness (VOC, CBR effort estimation), chunking (procedural learning), channel abstraction (CommChannel trait, ChannelRegistry, OperatorChannel), conversation (grounded dialogue, ConversationState, GroundedResponse), constraint_check (pre-communication constraint pipeline)
 ├── autonomous/          6 modules — background learning, confidence fusion, grounding
 ├── argumentation/       1 module  — pro/con argumentation (Phase 9e): meta-rules, verdicts, evidence chains
 ├── compartment/         5 modules — knowledge isolation, Jungian psyche, microtheories (Phase 9a, per-repo code scoping), CWA/circumscription (Phase 9m)
@@ -161,7 +161,7 @@ Phase 11a–11h: Autonomous task system (8 sub-phases, all complete):
 - **Meta (Wave 4)**: 11f metacognitive self-evaluation (Nelson-Narens monitoring/control, CompetenceModel, HNSW failure patterns, ZPD scoring, autoepistemic goal questioning, AGM belief revision with entrenchment cascade, e-graph goal reformulation)
 - **Economic (Wave 5)**: 11g VOC resource reasoning (CBR effort estimation via HNSW EffortIndex, compute_voc, dynamic stall thresholds, diminishing returns detection, marginal-value goal ranking, opportunity cost recording, project budget tracking), 11h procedural learning/chunking (Soar-inspired trace extraction → generalization → method compilation, HNSW MethodIndex, success/failure tracking with retraction, HTN registry integration, dormancy pruning, compilation opportunity detection)
 Phase 12a–12g: Interaction — communication protocols and social reasoning (7 sub-phases):
-- **Core (12a–12b complete)**: 12a channel abstraction (CommChannel trait, ChannelRegistry with operator invariant, OCapN-inspired ChannelCapabilities per ChannelKind, OperatorChannel wrapping MessageSink with InboundHandle, TUI+headless wired transparently), 12b grounded operator dialogue (ConversationState with bounded turn history, ResponseDetail levels, GroundedResponse with provenance + confidence, ground_query pipeline, grounded-first query path in TUI+headless, SetDetail intent), 12c pre-communication constraint checking
+- **Core (12a–12c complete)**: 12a channel abstraction (CommChannel trait, ChannelRegistry with operator invariant, OCapN-inspired ChannelCapabilities per ChannelKind, OperatorChannel wrapping MessageSink with InboundHandle, TUI+headless wired transparently), 12b grounded operator dialogue (ConversationState with bounded turn history, ResponseDetail levels, GroundedResponse with provenance + confidence, ground_query pipeline, grounded-first query path in TUI+headless, SetDetail intent), 12c pre-communication constraint checking (6-check pipeline: consistency/confidence/rate/relevance/sensitivity/provenance, ConstraintChecker with CommunicationBudget, per-channel-kind emission decisions, SensitivityLevel, CheckOutcome, ConstraintCheckStatus evolution)
 - **Social**: 12d social KG with theory of mind (microtheories), 12e ActivityPub federation via oxifed, 12f transparent reasoning / explanations, 12g multi-agent communication
 Phase 13a–13i: Personal assistant (9 sub-phases):
 - **Email**: 13a email channel (JMAP/IMAP + MIME + JWZ threading), 13b OnlineHD spam classification (VSA-native), 13c email triage & priority (sender reputation + HEY-style screening), 13d structured extraction (dates, events, action items → KG)

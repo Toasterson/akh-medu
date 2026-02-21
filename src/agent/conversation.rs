@@ -229,15 +229,21 @@ pub struct GroundedResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GroundedTriple {
     /// Subject label.
-    pub subject: String,
+    pub subject_label: String,
     /// Predicate label.
-    pub predicate: String,
+    pub predicate_label: String,
     /// Object label.
-    pub object: String,
-    /// Confidence score [0.0, 1.0].
-    pub confidence: f32,
-    /// How this triple was derived (human-readable tag).
-    pub derivation: String,
+    pub object_label: String,
+    /// Subject SymbolId (if resolved).
+    pub subject_id: Option<SymbolId>,
+    /// Predicate SymbolId (if resolved).
+    pub predicate_id: Option<SymbolId>,
+    /// Object SymbolId (if resolved).
+    pub object_id: Option<SymbolId>,
+    /// Confidence score [0.0, 1.0] (None if unknown).
+    pub confidence: Option<f32>,
+    /// How this triple was derived (human-readable tag, None if seed data).
+    pub derivation_tag: Option<String>,
 }
 
 impl GroundedResponse {
@@ -273,9 +279,11 @@ impl GroundedResponse {
                     lines.push(String::new());
                     lines.push("Supporting facts:".to_string());
                     for gt in &self.supporting_triples {
+                        let conf = gt.confidence.unwrap_or(1.0);
+                        let deriv = gt.derivation_tag.as_deref().unwrap_or("seed");
                         lines.push(format!(
-                            "  - {} {} {} [confidence: {:.2}] ({})",
-                            gt.subject, gt.predicate, gt.object, gt.confidence, gt.derivation,
+                            "  - {} {} {} [confidence: {conf:.2}] ({deriv})",
+                            gt.subject_label, gt.predicate_label, gt.object_label,
                         ));
                     }
                 }
@@ -356,11 +364,14 @@ pub fn ground_query(
         }
 
         grounded.push(GroundedTriple {
-            subject: subj_label,
-            predicate: pred_label,
-            object: obj_label,
-            confidence: triple.confidence,
-            derivation,
+            subject_label: subj_label,
+            predicate_label: pred_label,
+            object_label: obj_label,
+            subject_id: Some(triple.subject),
+            predicate_id: Some(triple.predicate),
+            object_id: Some(triple.object),
+            confidence: Some(triple.confidence),
+            derivation_tag: if derivation.is_empty() { None } else { Some(derivation) },
         });
     }
 
@@ -372,7 +383,7 @@ pub fn ground_query(
     let confidence = if grounded.is_empty() {
         None
     } else {
-        let sum: f32 = grounded.iter().map(|g| g.confidence).sum();
+        let sum: f32 = grounded.iter().map(|g| g.confidence.unwrap_or(1.0)).sum();
         Some(sum / grounded.len() as f32)
     };
 
@@ -389,7 +400,7 @@ pub fn ground_query(
         // Fallback: manual composition.
         grounded
             .iter()
-            .map(|g| format!("{} {} {}", g.subject, g.predicate, g.object))
+            .map(|g| format!("{} {} {}", g.subject_label, g.predicate_label, g.object_label))
             .collect::<Vec<_>>()
             .join(". ")
     } else {
@@ -580,17 +591,24 @@ mod tests {
         assert_eq!(ResponseDetail::from_str_loose("bogus"), None);
     }
 
+    fn test_grounded_triple(subj: &str, pred: &str, obj: &str, conf: f32, deriv: &str) -> GroundedTriple {
+        GroundedTriple {
+            subject_label: subj.to_string(),
+            predicate_label: pred.to_string(),
+            object_label: obj.to_string(),
+            subject_id: None,
+            predicate_id: None,
+            object_id: None,
+            confidence: Some(conf),
+            derivation_tag: if deriv.is_empty() { None } else { Some(deriv.to_string()) },
+        }
+    }
+
     #[test]
     fn grounded_response_render_concise() {
         let resp = GroundedResponse {
             prose: "Dogs are mammals.\nThey are canine.".to_string(),
-            supporting_triples: vec![GroundedTriple {
-                subject: "dog".to_string(),
-                predicate: "is-a".to_string(),
-                object: "mammal".to_string(),
-                confidence: 0.95,
-                derivation: "asserted".to_string(),
-            }],
+            supporting_triples: vec![test_grounded_triple("dog", "is-a", "mammal", 0.95, "asserted")],
             confidence: Some(0.95),
             provenance_ids: vec![],
             gaps: vec![],
@@ -603,13 +621,7 @@ mod tests {
     fn grounded_response_render_normal() {
         let resp = GroundedResponse {
             prose: "Dogs are mammals.".to_string(),
-            supporting_triples: vec![GroundedTriple {
-                subject: "dog".to_string(),
-                predicate: "is-a".to_string(),
-                object: "mammal".to_string(),
-                confidence: 0.95,
-                derivation: "asserted".to_string(),
-            }],
+            supporting_triples: vec![test_grounded_triple("dog", "is-a", "mammal", 0.95, "asserted")],
             confidence: Some(0.95),
             provenance_ids: vec![],
             gaps: vec![],
@@ -624,13 +636,7 @@ mod tests {
     fn grounded_response_render_full() {
         let resp = GroundedResponse {
             prose: "Dogs are mammals.".to_string(),
-            supporting_triples: vec![GroundedTriple {
-                subject: "dog".to_string(),
-                predicate: "is-a".to_string(),
-                object: "mammal".to_string(),
-                confidence: 0.95,
-                derivation: "extracted".to_string(),
-            }],
+            supporting_triples: vec![test_grounded_triple("dog", "is-a", "mammal", 0.95, "extracted")],
             confidence: Some(0.95),
             provenance_ids: vec![sym(42)],
             gaps: vec!["diet unknown".to_string()],

@@ -151,13 +151,44 @@ impl InboundMessage {
 // ── ConstraintCheckStatus ────────────────────────────────────────────────
 
 /// Status of pre-communication constraint checking (Phase 12c).
-///
-/// Currently a placeholder; will be extended with `Passed`, `Failed`, etc.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub enum ConstraintCheckStatus {
     /// No constraint checking has been performed.
     #[default]
     Unchecked,
+    /// All constraints passed (may still have warnings).
+    Passed {
+        /// Number of warnings generated.
+        warning_count: usize,
+    },
+    /// One or more hard constraints were violated.
+    Failed {
+        /// Number of violations.
+        violation_count: usize,
+        /// Number of warnings.
+        warning_count: usize,
+    },
+}
+
+impl ConstraintCheckStatus {
+    /// Create from a `CheckOutcome`.
+    pub fn from_outcome(outcome: &super::constraint_check::CheckOutcome) -> Self {
+        if outcome.passed {
+            Self::Passed {
+                warning_count: outcome.warnings.len(),
+            }
+        } else {
+            Self::Failed {
+                violation_count: outcome.violations.len(),
+                warning_count: outcome.warnings.len(),
+            }
+        }
+    }
+
+    /// Whether this status represents a passing check.
+    pub fn is_passed(&self) -> bool {
+        matches!(self, Self::Unchecked | Self::Passed { .. })
+    }
 }
 
 // ── ResponseContent ──────────────────────────────────────────────────────
@@ -386,5 +417,21 @@ mod tests {
     fn constraint_check_defaults_to_unchecked() {
         let msg = OutboundMessage::single(AkhMessage::system("test"));
         assert!(matches!(msg.constraint_check, ConstraintCheckStatus::Unchecked));
+        assert!(msg.constraint_check.is_passed());
+    }
+
+    #[test]
+    fn constraint_check_passed() {
+        let status = ConstraintCheckStatus::Passed { warning_count: 2 };
+        assert!(status.is_passed());
+    }
+
+    #[test]
+    fn constraint_check_failed() {
+        let status = ConstraintCheckStatus::Failed {
+            violation_count: 1,
+            warning_count: 0,
+        };
+        assert!(!status.is_passed());
     }
 }

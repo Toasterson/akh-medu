@@ -359,21 +359,28 @@ impl AkhTui {
                 }
             }
             crate::agent::UserIntent::Query { subject, original_input, question_word, capability_signal } => {
-                // Phase 12b: Try grounded dialogue first.
-                let detail = agent.conversation_state().response_detail;
+                // Phase 12b+12c: Try grounded dialogue with constraint checking.
                 let grounded = crate::agent::conversation::ground_query(
                     &subject, engine, &self.grammar,
                 );
                 if let Some(ref gr) = grounded {
-                    let rendered = gr.render(detail);
-                    if !rendered.trim().is_empty() {
-                        // Record turn in conversation state.
+                    let (out_msg, decision) = agent.check_and_wrap_grounded(
+                        gr, "operator", crate::agent::ChannelKind::Operator,
+                    );
+                    // Operator always emits (may annotate with warnings).
+                    if decision == crate::agent::EmissionDecision::Emit {
+                        let detail = agent.conversation_state().response_detail;
+                        let rendered = gr.render(detail);
                         agent.conversation_state_mut().record_agent_turn(&rendered);
                         agent.conversation_state_mut().track_referent(subject.clone());
-                        // Emit as grounded outbound message.
-                        let out_msg = crate::agent::OutboundMessage::grounded(gr, detail, &self.grammar);
                         for akh_msg in out_msg.to_akh_messages() {
                             self.messages.push(akh_msg);
+                        }
+                        // Show constraint warnings to operator.
+                        if !out_msg.constraint_check.is_passed() {
+                            self.messages.push(AkhMessage::system(
+                                "[constraint check: some violations detected]".to_string(),
+                            ));
                         }
                     }
                 }

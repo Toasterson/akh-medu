@@ -12,6 +12,7 @@ pub mod agent;
 pub mod channel;
 pub mod channel_message;
 pub mod chat;
+pub mod constraint_check;
 pub mod conversation;
 pub mod chunking;
 pub mod cli_tool;
@@ -53,6 +54,10 @@ pub use channel_message::{
     ResponseContent,
 };
 pub use chat::{Conversation, Participant, ParticipantSource, discover_ssh_fingerprint};
+pub use constraint_check::{
+    CheckOutcome, CommunicationBudget, ConstraintChecker, ConstraintConfig, ConstraintViolation,
+    ConstraintWarning, EmissionDecision, SensitivityLevel, emission_decision,
+};
 pub use conversation::{ConversationState, ConversationTurn, GroundedResponse, GroundedTriple, ResponseDetail, Speaker};
 #[cfg(feature = "daemon")]
 pub use daemon::{AgentDaemon, DaemonConfig};

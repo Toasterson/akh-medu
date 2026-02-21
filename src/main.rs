@@ -2834,16 +2834,19 @@ fn main() -> Result<()> {
                                 .map(|p| p.persona.grammar_preference.clone())
                                 .unwrap_or_else(|| "narrative".to_string());
 
-                            // Phase 12b: Try grounded dialogue first.
-                            let detail = agent.conversation_state().response_detail;
+                            // Phase 12b+12c: Try grounded dialogue with constraint checking.
                             let grounded = akh_medu::agent::conversation::ground_query(
                                 &subject, &engine, &grammar_name,
                             );
                             if let Some(ref gr) = grounded {
-                                let rendered = gr.render(detail);
-                                if !rendered.trim().is_empty() {
+                                let (out_msg, decision) = agent.check_and_wrap_grounded(
+                                    gr, "operator", akh_medu::agent::ChannelKind::Operator,
+                                );
+                                if decision == akh_medu::agent::EmissionDecision::Emit {
+                                    let rendered = gr.render(agent.conversation_state().response_detail);
                                     agent.conversation_state_mut().record_agent_turn(&rendered);
                                     agent.conversation_state_mut().track_referent(subject.clone());
+                                    let _ = out_msg; // constraint status logged on message
                                     rendered
                                 } else {
                                     format!("No information found for \"{subject}\".")

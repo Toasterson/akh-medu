@@ -13,7 +13,8 @@ use crate::symbol::SymbolId;
 use bincode;
 
 use super::channel::{ChannelRegistry, ChannelResult};
-use super::channel_message::InboundMessage;
+use super::channel_message::{ConstraintCheckStatus, InboundMessage};
+use super::constraint_check::{CheckOutcome, ConstraintChecker, EmissionDecision, emission_decision};
 use super::conversation::{ConversationState, ResponseDetail};
 use super::operator_channel::InboundHandle;
 use super::decomposition::{self, DecompositionOutput, MethodRegistry, MethodStats};
@@ -188,6 +189,8 @@ pub struct Agent {
     pub(crate) channel_registry: ChannelRegistry,
     /// Conversation state for grounded dialogue (Phase 12b).
     pub(crate) conversation_state: ConversationState,
+    /// Pre-communication constraint checker (Phase 12c).
+    pub(crate) constraint_checker: ConstraintChecker,
     /// Optional WASM tool runtime (only when `wasm-tools` feature is enabled).
     #[cfg(feature = "wasm-tools")]
     pub(crate) wasm_runtime: Option<super::wasm_runtime::WasmToolRuntime>,
@@ -400,6 +403,7 @@ impl Agent {
             chunking_config,
             channel_registry: ChannelRegistry::new(),
             conversation_state: ConversationState::default(),
+            constraint_checker: ConstraintChecker::new(),
             #[cfg(feature = "wasm-tools")]
             wasm_runtime: super::wasm_runtime::WasmToolRuntime::new().ok(),
         };
@@ -936,6 +940,51 @@ impl Agent {
     /// Set the response detail level for grounded dialogue.
     pub fn set_response_detail(&mut self, detail: ResponseDetail) {
         self.conversation_state.response_detail = detail;
+    }
+
+    // ── Constraint checking (Phase 12c) ────────────────────────────────
+
+    /// Get a shared reference to the constraint checker.
+    pub fn constraint_checker(&self) -> &ConstraintChecker {
+        &self.constraint_checker
+    }
+
+    /// Get a mutable reference to the constraint checker.
+    pub fn constraint_checker_mut(&mut self) -> &mut ConstraintChecker {
+        &mut self.constraint_checker
+    }
+
+    /// Run constraint checks on a grounded response and produce an
+    /// `OutboundMessage` with the check status populated.
+    ///
+    /// Returns `(OutboundMessage, EmissionDecision)` — the caller should
+    /// respect the decision (emit or suppress) based on channel kind.
+    pub fn check_and_wrap_grounded(
+        &mut self,
+        response: &super::conversation::GroundedResponse,
+        channel_id: &str,
+        channel_kind: super::channel::ChannelKind,
+    ) -> (super::channel_message::OutboundMessage, EmissionDecision) {
+        let detail = self.conversation_state.response_detail;
+        let grammar = self.conversation_state.grammar.clone();
+
+        // Run the constraint pipeline.
+        let outcome = self.constraint_checker.check_grounded(
+            response, channel_id, channel_kind, &self.engine,
+        );
+
+        let decision = emission_decision(channel_kind, &outcome);
+
+        // Build the outbound message with constraint status.
+        let mut msg = super::channel_message::OutboundMessage::grounded(response, detail, grammar);
+        msg.constraint_check = ConstraintCheckStatus::from_outcome(&outcome);
+
+        // Record emission in the budget.
+        if decision == EmissionDecision::Emit {
+            self.constraint_checker.record_emission(channel_id);
+        }
+
+        (msg, decision)
     }
 
     /// Synthesize human-readable narrative from the agent's working memory findings.
@@ -2044,6 +2093,7 @@ impl Agent {
             chunking_config,
             channel_registry: ChannelRegistry::new(),
             conversation_state: ConversationState::default(),
+            constraint_checker: ConstraintChecker::new(),
             #[cfg(feature = "wasm-tools")]
             wasm_runtime: super::wasm_runtime::WasmToolRuntime::new().ok(),
         };
@@ -2087,6 +2137,7 @@ impl std::fmt::Debug for Agent {
             .field("learned_methods", &self.method_index.len())
             .field("channels", &self.channel_registry)
             .field("response_detail", &self.conversation_state.response_detail)
+            .field("constraint_checker", &self.constraint_checker)
             .finish()
     }
 }
