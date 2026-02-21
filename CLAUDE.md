@@ -217,6 +217,18 @@ explanations. Multi-agent communication with capability tokens.
 - [x] `AgentError::Interlocutor` transparent variant
 - [x] 10 new unit tests
 
+### Phase 12e — Federation via oxifed ✓
+- [x] `OxifedChannel` implementing `CommChannel` with `ChannelKind::Social` — AMQP consumer/publisher via background tokio tasks
+- [x] `OxifedConfig` — AMQP URL, admin API URL, domain, actor username, API token, custom inbox queue
+- [x] Serde-compatible oxifed message types: `OxifedMessage` enum, `NoteCreate`, `NoteUpdate`, `NoteDelete`, `ProfileCreate`, `ProfileUpdate`, `FollowActivity`, `LikeActivity`, `AnnounceActivity`, `IncomingObject`, `IncomingActivity`
+- [x] AMQP exchange/queue constants matching oxifed (`EXCHANGE_INTERNAL_PUBLISH`, `EXCHANGE_ACTIVITYPUB_PUBLISH`, `EXCHANGE_INCOMING_PROCESS`, `QUEUE_ACTIVITIES`)
+- [x] Activity → InboundMessage bridge: `incoming_object_to_inbound()` (Note/Article content extraction with HTML stripping), `incoming_activity_to_inbound()` (Create/Follow/Like/Announce/Undo mapping)
+- [x] OutboundMessage → NoteCreate bridge: `outbound_to_note()` with prose linearization, constraint-check gating in `send()`
+- [x] `OxifedInboundHandle` for test injection
+- [x] Feature-gated: `--features oxifed` (depends on `daemon`, adds `lapin`, `deadpool-lapin`, `reqwest`)
+- [x] `AgentError::Oxifed` transparent variant (cfg-gated)
+- [x] 16 new unit tests (bridge functions, serde round-trip, channel FIFO, handle push/receive)
+
 ## Phase 13 — Personal Assistant
 
 Email as bidirectional CommChannel (JMAP primary, IMAP fallback). OnlineHD VSA-native

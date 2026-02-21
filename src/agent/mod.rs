@@ -24,6 +24,8 @@ pub mod error;
 pub mod goal;
 pub mod interlocutor;
 pub mod operator_channel;
+#[cfg(feature = "oxifed")]
+pub mod oxifed;
 pub mod goal_generation;
 pub mod idle;
 pub mod library_learn;
@@ -61,6 +63,8 @@ pub use constraint_check::{
 };
 pub use conversation::{ConversationState, ConversationTurn, GroundedResponse, GroundedTriple, ResponseDetail, Speaker};
 pub use interlocutor::{InterlocutorPredicates, InterlocutorProfile, InterlocutorRegistry, InterlocutorError, InterlocutorResult, interest_overlap};
+#[cfg(feature = "oxifed")]
+pub use oxifed::{OxifedChannel, OxifedConfig, OxifedError, OxifedInboundHandle, OxifedResult};
 #[cfg(feature = "daemon")]
 pub use daemon::{AgentDaemon, DaemonConfig};
 pub use decomposition::{

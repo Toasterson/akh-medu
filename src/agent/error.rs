@@ -118,6 +118,11 @@ pub enum AgentError {
     #[diagnostic(transparent)]
     Interlocutor(#[from] super::interlocutor::InterlocutorError),
 
+    #[cfg(feature = "oxifed")]
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Oxifed(#[from] super::oxifed::OxifedError),
+
     #[error("{0}")]
     #[diagnostic(
         code(akh::agent::engine),
