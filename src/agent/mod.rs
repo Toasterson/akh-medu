@@ -9,6 +9,8 @@
 //! - **Consolidation** (deliberate reasoning about what to remember)
 
 pub mod agent;
+pub mod channel;
+pub mod channel_message;
 pub mod chat;
 pub mod chunking;
 pub mod cli_tool;
@@ -18,6 +20,7 @@ pub mod decomposition;
 pub mod drives;
 pub mod error;
 pub mod goal;
+pub mod operator_channel;
 pub mod goal_generation;
 pub mod idle;
 pub mod library_learn;
@@ -43,6 +46,11 @@ pub mod watch;
 pub mod wasm_runtime;
 
 pub use agent::{Agent, AgentConfig, AgentPredicates};
+pub use channel::{ChannelCapabilities, ChannelError, ChannelKind, ChannelRegistry, ChannelResult, CommChannel};
+pub use channel_message::{
+    ConstraintCheckStatus, InboundMessage, InterlocutorId, MessageContent, OutboundMessage,
+    ResponseContent,
+};
 pub use chat::{Conversation, Participant, ParticipantSource, discover_ssh_fingerprint};
 #[cfg(feature = "daemon")]
 pub use daemon::{AgentDaemon, DaemonConfig};
@@ -52,6 +60,7 @@ pub use decomposition::{
 };
 pub use drives::{DriveKind, DriveSystem};
 pub use error::{AgentError, AgentResult};
+pub use operator_channel::{InboundHandle, OperatorChannel};
 pub use goal::{Goal, GoalJustification, GoalSource, GoalStatus};
 pub use metacognition::{CompetenceModel, FailureIndex, GoalEvaluation, MetacognitionConfig, MetacognitiveControl};
 pub use goal_generation::{GoalGenerationConfig, GoalGenerationResult, GoalProposal};

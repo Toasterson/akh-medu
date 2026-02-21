@@ -255,6 +255,11 @@ impl AkhMessage {
             description: description.into(),
         }
     }
+
+    /// Wrap this message in an `OutboundMessage` for the channel protocol.
+    pub fn into_outbound(self) -> crate::agent::channel_message::OutboundMessage {
+        crate::agent::channel_message::OutboundMessage::single(self)
+    }
 }
 
 #[cfg(test)]

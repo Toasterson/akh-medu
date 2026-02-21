@@ -12,6 +12,9 @@ use crate::symbol::SymbolId;
 // Re-used for session persistence serialization.
 use bincode;
 
+use super::channel::{ChannelRegistry, ChannelResult};
+use super::channel_message::InboundMessage;
+use super::operator_channel::InboundHandle;
 use super::decomposition::{self, DecompositionOutput, MethodRegistry, MethodStats};
 use super::drives::DriveSystem;
 use super::error::{AgentError, AgentResult};
@@ -180,6 +183,8 @@ pub struct Agent {
     pub(crate) method_index: MethodIndex,
     /// Procedural learning configuration (Phase 11h).
     pub(crate) chunking_config: ChunkingConfig,
+    /// Communication channel registry (Phase 12a).
+    pub(crate) channel_registry: ChannelRegistry,
     /// Optional WASM tool runtime (only when `wasm-tools` feature is enabled).
     #[cfg(feature = "wasm-tools")]
     pub(crate) wasm_runtime: Option<super::wasm_runtime::WasmToolRuntime>,
@@ -390,6 +395,7 @@ impl Agent {
             improvement_history: ImprovementHistory::default(),
             method_index: MethodIndex::new(),
             chunking_config,
+            channel_registry: ChannelRegistry::new(),
             #[cfg(feature = "wasm-tools")]
             wasm_runtime: super::wasm_runtime::WasmToolRuntime::new().ok(),
         };
@@ -870,6 +876,45 @@ impl Agent {
     /// Set or replace the agent's psyche.
     pub fn set_psyche(&mut self, psyche: crate::compartment::psyche::Psyche) {
         self.psyche = Some(psyche);
+    }
+
+    // ── Channel registry (Phase 12a) ────────────────────────────────────
+
+    /// Get a shared reference to the channel registry.
+    pub fn channel_registry(&self) -> &ChannelRegistry {
+        &self.channel_registry
+    }
+
+    /// Get a mutable reference to the channel registry.
+    pub fn channel_registry_mut(&mut self) -> &mut ChannelRegistry {
+        &mut self.channel_registry
+    }
+
+    /// Register a communication channel.
+    pub fn register_channel(
+        &mut self,
+        channel: Box<dyn super::channel::CommChannel>,
+    ) -> ChannelResult<()> {
+        self.channel_registry.register(channel)
+    }
+
+    /// Create and register an operator channel wrapping the current sink,
+    /// and return an `InboundHandle` for the UI event loop.
+    pub fn setup_operator_channel(&mut self) -> InboundHandle {
+        let op = super::operator_channel::OperatorChannel::new(Arc::clone(&self.sink));
+        let handle = op.inbound_handle();
+        // Registration cannot fail here: we are creating the first operator channel.
+        let _ = self.channel_registry.register(Box::new(op));
+        handle
+    }
+
+    /// Drain all pending inbound messages from all registered channels.
+    pub fn drain_inbound(&mut self) -> Vec<InboundMessage> {
+        self.channel_registry
+            .drain_all()
+            .into_iter()
+            .map(|(_id, msg)| msg)
+            .collect()
     }
 
     /// Synthesize human-readable narrative from the agent's working memory findings.
@@ -1976,6 +2021,7 @@ impl Agent {
             improvement_history,
             method_index,
             chunking_config,
+            channel_registry: ChannelRegistry::new(),
             #[cfg(feature = "wasm-tools")]
             wasm_runtime: super::wasm_runtime::WasmToolRuntime::new().ok(),
         };
@@ -2017,6 +2063,7 @@ impl std::fmt::Debug for Agent {
             )
             .field("failure_index_size", &self.failure_index.len())
             .field("learned_methods", &self.method_index.len())
+            .field("channels", &self.channel_registry)
             .finish()
     }
 }

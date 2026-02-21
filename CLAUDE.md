@@ -167,6 +167,20 @@ explanations. Multi-agent communication with capability tokens.
 
 - **Implementation plan**: `docs/ai/plans/2026-02-17-phase12-interaction.md`
 
+### Phase 12a — Communication channel abstraction ✓
+- [x] `CommChannel` trait (Send, not Sync): channel_id, channel_kind, capabilities, try_receive, send, is_connected
+- [x] `ChannelKind` enum: Operator (singleton), Trusted, Social, Public — with Display, Serialize/Deserialize
+- [x] `ChannelCapabilities` — 10 boolean flags + rate limit, factory methods per kind, `require()` gating
+- [x] `ChannelRegistry` — HashMap-based, exactly-one-operator invariant, drain_all
+- [x] `OperatorChannel` — wraps MessageSink + InboundHandle (Arc<Mutex<VecDeque>>)
+- [x] Protocol messages: InboundMessage (InterlocutorId, MessageContent::Text/Command), OutboundMessage (ResponseContent::Messages, provenance, confidence, ConstraintCheckStatus)
+- [x] `Agent::setup_operator_channel()` → InboundHandle; `Agent::drain_inbound()`
+- [x] TUI wired: operator_handle in ChatBackend::Local, process_inbound_local drains channel
+- [x] Headless chat wired: push_text → drain_inbound → classify
+- [x] `AkhMessage::into_outbound()` bridge method
+- [x] `AgentError::Channel` transparent variant
+- [x] 35 unit tests across 3 new modules
+
 ## Phase 13 — Personal Assistant
 
 Email as bidirectional CommChannel (JMAP primary, IMAP fallback). OnlineHD VSA-native

@@ -17,7 +17,7 @@ use std::time::Duration;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use miette::IntoDiagnostic;
 
-use crate::agent::{Agent, AgentConfig, IdleScheduler};
+use crate::agent::{Agent, AgentConfig, IdleScheduler, InboundHandle};
 use crate::engine::Engine;
 use crate::message::AkhMessage;
 
@@ -29,6 +29,7 @@ enum ChatBackend {
         engine: Arc<Engine>,
         tui_sink: Arc<sink::TuiSink>,
         idle_scheduler: IdleScheduler,
+        operator_handle: InboundHandle,
     },
     /// WebSocket connection to akhomed.
     #[cfg(feature = "daemon")]
@@ -50,7 +51,7 @@ pub struct AkhTui {
 
 impl AkhTui {
     /// Create a new TUI instance with a local engine backend.
-    pub fn new_local(workspace: String, engine: Arc<Engine>, agent: Agent) -> Self {
+    pub fn new_local(workspace: String, engine: Arc<Engine>, mut agent: Agent) -> Self {
         let grammar = engine
             .compartments()
             .and_then(|cm| cm.psyche())
@@ -58,6 +59,10 @@ impl AkhTui {
             .unwrap_or_else(|| "narrative".to_string());
 
         let tui_sink = Arc::new(sink::TuiSink::new());
+
+        // Set up the operator channel so input flows through the channel abstraction.
+        agent.set_sink(tui_sink.clone());
+        let operator_handle = agent.setup_operator_channel();
 
         Self {
             workspace,
@@ -67,6 +72,7 @@ impl AkhTui {
                 engine,
                 tui_sink,
                 idle_scheduler: IdleScheduler::default(),
+                operator_handle,
             },
             messages: vec![AkhMessage::system(
                 "Welcome to akh. Type a question or command. /help for commands, /quit to exit.",
@@ -96,16 +102,6 @@ impl AkhTui {
     /// Run the TUI event loop.
     pub fn run(&mut self) -> miette::Result<()> {
         let mut terminal = ratatui::init();
-
-        // Set the agent's sink (local only).
-        if let ChatBackend::Local {
-            ref mut agent,
-            ref tui_sink,
-            ..
-        } = self.backend
-        {
-            agent.set_sink(tui_sink.clone());
-        }
 
         loop {
             // Drain pending messages from backend.
@@ -271,7 +267,11 @@ impl AkhTui {
         });
 
         match self.backend {
-            ChatBackend::Local { .. } => self.process_input_local(input),
+            ChatBackend::Local { ref operator_handle, .. } => {
+                // Push through the operator channel, then process locally.
+                operator_handle.push_text(input);
+                self.process_inbound_local();
+            }
             #[cfg(feature = "daemon")]
             ChatBackend::Remote { ref remote, .. } => {
                 remote.send_input(input);
@@ -280,6 +280,21 @@ impl AkhTui {
 
         // Auto-scroll to bottom.
         self.scroll_offset = self.messages.len().saturating_sub(1);
+    }
+
+    /// Drain all pending inbound messages from the agent's channel registry
+    /// and dispatch each one through intent classification.
+    fn process_inbound_local(&mut self) {
+        let ChatBackend::Local { ref mut agent, .. } = self.backend else {
+            return;
+        };
+
+        let inbound = agent.drain_inbound();
+        for msg in inbound {
+            if let Some(text) = msg.text() {
+                self.process_input_local(text);
+            }
+        }
     }
 
     /// Process input against the local engine/agent.

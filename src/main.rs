@@ -2781,6 +2781,7 @@ fn main() -> Result<()> {
             } else {
                 // Headless mode (legacy stdin/stdout).
                 let mut agent = Agent::new(Arc::clone(&engine), agent_config).into_diagnostic()?;
+                let operator_handle = agent.setup_operator_channel();
                 let mut conversation = akh_medu::agent::Conversation::new(100);
 
                 println!("akh chat (headless). Type 'quit' to exit.\n");
@@ -2805,7 +2806,13 @@ fn main() -> Result<()> {
                         break;
                     }
 
-                    let intent = akh_medu::agent::classify_intent(trimmed);
+                    // Push through the operator channel and drain for classification.
+                    operator_handle.push_text(trimmed);
+                    let inbound = agent.drain_inbound();
+                    let intent = inbound
+                        .first()
+                        .map(|msg| msg.classify())
+                        .unwrap_or_else(|| akh_medu::agent::classify_intent(trimmed));
                     let response = match intent {
                         akh_medu::agent::UserIntent::Help => {
                             "Commands: <question>? query, <fact> assert, find <topic> goal, status, help, quit"

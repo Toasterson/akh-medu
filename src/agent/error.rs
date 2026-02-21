@@ -106,6 +106,10 @@ pub enum AgentError {
     )]
     WatchNotFound { watch_id: String },
 
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Channel(#[from] super::channel::ChannelError),
+
     #[error("{0}")]
     #[diagnostic(
         code(akh::agent::engine),
