@@ -14,6 +14,7 @@ use bincode;
 
 use super::channel::{ChannelRegistry, ChannelResult};
 use super::channel_message::InboundMessage;
+use super::conversation::{ConversationState, ResponseDetail};
 use super::operator_channel::InboundHandle;
 use super::decomposition::{self, DecompositionOutput, MethodRegistry, MethodStats};
 use super::drives::DriveSystem;
@@ -185,6 +186,8 @@ pub struct Agent {
     pub(crate) chunking_config: ChunkingConfig,
     /// Communication channel registry (Phase 12a).
     pub(crate) channel_registry: ChannelRegistry,
+    /// Conversation state for grounded dialogue (Phase 12b).
+    pub(crate) conversation_state: ConversationState,
     /// Optional WASM tool runtime (only when `wasm-tools` feature is enabled).
     #[cfg(feature = "wasm-tools")]
     pub(crate) wasm_runtime: Option<super::wasm_runtime::WasmToolRuntime>,
@@ -396,6 +399,7 @@ impl Agent {
             method_index: MethodIndex::new(),
             chunking_config,
             channel_registry: ChannelRegistry::new(),
+            conversation_state: ConversationState::default(),
             #[cfg(feature = "wasm-tools")]
             wasm_runtime: super::wasm_runtime::WasmToolRuntime::new().ok(),
         };
@@ -915,6 +919,23 @@ impl Agent {
             .into_iter()
             .map(|(_id, msg)| msg)
             .collect()
+    }
+
+    // ── Conversation state (Phase 12b) ─────────────────────────────────
+
+    /// Get a shared reference to the conversation state.
+    pub fn conversation_state(&self) -> &ConversationState {
+        &self.conversation_state
+    }
+
+    /// Get a mutable reference to the conversation state.
+    pub fn conversation_state_mut(&mut self) -> &mut ConversationState {
+        &mut self.conversation_state
+    }
+
+    /// Set the response detail level for grounded dialogue.
+    pub fn set_response_detail(&mut self, detail: ResponseDetail) {
+        self.conversation_state.response_detail = detail;
     }
 
     /// Synthesize human-readable narrative from the agent's working memory findings.
@@ -2022,6 +2043,7 @@ impl Agent {
             method_index,
             chunking_config,
             channel_registry: ChannelRegistry::new(),
+            conversation_state: ConversationState::default(),
             #[cfg(feature = "wasm-tools")]
             wasm_runtime: super::wasm_runtime::WasmToolRuntime::new().ok(),
         };
@@ -2064,6 +2086,7 @@ impl std::fmt::Debug for Agent {
             .field("failure_index_size", &self.failure_index.len())
             .field("learned_methods", &self.method_index.len())
             .field("channels", &self.channel_registry)
+            .field("response_detail", &self.conversation_state.response_detail)
             .finish()
     }
 }

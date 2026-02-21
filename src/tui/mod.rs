@@ -359,29 +359,52 @@ impl AkhTui {
                 }
             }
             crate::agent::UserIntent::Query { subject, original_input, question_word, capability_signal } => {
-                // Try discourse-aware response first, fall back to synthesis.
-                let discourse_result = crate::grammar::discourse::resolve_discourse(
-                    &subject,
-                    question_word,
-                    &original_input,
-                    engine,
-                    capability_signal,
+                // Phase 12b: Try grounded dialogue first.
+                let detail = agent.conversation_state().response_detail;
+                let grounded = crate::agent::conversation::ground_query(
+                    &subject, engine, &self.grammar,
                 );
-                let handled = if let Ok(ref ctx) = discourse_result {
-                    let from_triples = engine.triples_from(ctx.subject_id);
-                    let to_triples = engine.triples_to(ctx.subject_id);
-                    let mut all_triples = from_triples;
-                    all_triples.extend(to_triples);
-                    if let Some(discourse_tree) =
-                        crate::grammar::discourse::build_discourse_response(
-                            &all_triples, ctx, engine,
-                        )
-                    {
-                        let registry = crate::grammar::GrammarRegistry::new();
-                        if let Ok(prose) = registry.linearize(&self.grammar, &discourse_tree) {
-                            if !prose.trim().is_empty() {
-                                self.messages.push(AkhMessage::narrative(&prose, &self.grammar));
-                                true
+                if let Some(ref gr) = grounded {
+                    let rendered = gr.render(detail);
+                    if !rendered.trim().is_empty() {
+                        // Record turn in conversation state.
+                        agent.conversation_state_mut().record_agent_turn(&rendered);
+                        agent.conversation_state_mut().track_referent(subject.clone());
+                        // Emit as grounded outbound message.
+                        let out_msg = crate::agent::OutboundMessage::grounded(gr, detail, &self.grammar);
+                        for akh_msg in out_msg.to_akh_messages() {
+                            self.messages.push(akh_msg);
+                        }
+                    }
+                }
+
+                if grounded.is_none() {
+                    // Fallback: discourse-aware response, then synthesis.
+                    let discourse_result = crate::grammar::discourse::resolve_discourse(
+                        &subject,
+                        question_word,
+                        &original_input,
+                        engine,
+                        capability_signal,
+                    );
+                    let handled = if let Ok(ref ctx) = discourse_result {
+                        let from_triples = engine.triples_from(ctx.subject_id);
+                        let to_triples = engine.triples_to(ctx.subject_id);
+                        let mut all_triples = from_triples;
+                        all_triples.extend(to_triples);
+                        if let Some(discourse_tree) =
+                            crate::grammar::discourse::build_discourse_response(
+                                &all_triples, ctx, engine,
+                            )
+                        {
+                            let registry = crate::grammar::GrammarRegistry::new();
+                            if let Ok(prose) = registry.linearize(&self.grammar, &discourse_tree) {
+                                if !prose.trim().is_empty() {
+                                    self.messages.push(AkhMessage::narrative(&prose, &self.grammar));
+                                    true
+                                } else {
+                                    false
+                                }
                             } else {
                                 false
                             }
@@ -390,51 +413,49 @@ impl AkhTui {
                         }
                     } else {
                         false
-                    }
-                } else {
-                    false
-                };
-                if !handled {
-                    // Fallback: existing synthesis path.
-                    match engine.resolve_symbol(&subject) {
-                        Ok(sym_id) => {
-                            let from_triples = engine.triples_from(sym_id);
-                            let to_triples = engine.triples_to(sym_id);
-                            if from_triples.is_empty() && to_triples.is_empty() {
-                                self.messages.push(AkhMessage::system(format!(
-                                    "No facts found for \"{subject}\"."
-                                )));
-                            } else {
-                                let mut all_triples = from_triples;
-                                all_triples.extend(to_triples);
-                                let summary =
-                                    crate::agent::synthesize::synthesize_from_triples(
-                                        &subject,
-                                        &all_triples,
-                                        engine,
-                                        &self.grammar,
-                                    );
-                                if !summary.overview.is_empty() {
-                                    self.messages.push(AkhMessage::narrative(
-                                        &summary.overview,
-                                        &self.grammar,
-                                    ));
-                                }
-                                for section in &summary.sections {
-                                    self.messages.push(AkhMessage::narrative(
-                                        format!("## {}\n{}", section.heading, section.prose),
-                                        &self.grammar,
-                                    ));
-                                }
-                                for gap in &summary.gaps {
-                                    self.messages.push(AkhMessage::gap("(unknown)", gap));
+                    };
+                    if !handled {
+                        // Fallback: existing synthesis path.
+                        match engine.resolve_symbol(&subject) {
+                            Ok(sym_id) => {
+                                let from_triples = engine.triples_from(sym_id);
+                                let to_triples = engine.triples_to(sym_id);
+                                if from_triples.is_empty() && to_triples.is_empty() {
+                                    self.messages.push(AkhMessage::system(format!(
+                                        "No facts found for \"{subject}\"."
+                                    )));
+                                } else {
+                                    let mut all_triples = from_triples;
+                                    all_triples.extend(to_triples);
+                                    let summary =
+                                        crate::agent::synthesize::synthesize_from_triples(
+                                            &subject,
+                                            &all_triples,
+                                            engine,
+                                            &self.grammar,
+                                        );
+                                    if !summary.overview.is_empty() {
+                                        self.messages.push(AkhMessage::narrative(
+                                            &summary.overview,
+                                            &self.grammar,
+                                        ));
+                                    }
+                                    for section in &summary.sections {
+                                        self.messages.push(AkhMessage::narrative(
+                                            format!("## {}\n{}", section.heading, section.prose),
+                                            &self.grammar,
+                                        ));
+                                    }
+                                    for gap in &summary.gaps {
+                                        self.messages.push(AkhMessage::gap("(unknown)", gap));
+                                    }
                                 }
                             }
-                        }
-                        Err(_) => {
-                            self.messages.push(AkhMessage::system(format!(
-                                "Symbol \"{subject}\" not found."
-                            )));
+                            Err(_) => {
+                                self.messages.push(AkhMessage::system(format!(
+                                    "Symbol \"{subject}\" not found."
+                                )));
+                            }
                         }
                     }
                 }
@@ -546,11 +567,26 @@ impl AkhTui {
                     }
                 }
             }
+            crate::agent::UserIntent::SetDetail { level } => {
+                match crate::agent::conversation::ResponseDetail::from_str_loose(&level) {
+                    Some(detail) => {
+                        agent.set_response_detail(detail);
+                        self.messages.push(AkhMessage::system(format!(
+                            "Response detail set to: {detail:?}"
+                        )));
+                    }
+                    None => {
+                        self.messages.push(AkhMessage::system(
+                            "Unknown detail level. Use: concise, normal, or full.".to_string(),
+                        ));
+                    }
+                }
+            }
             crate::agent::UserIntent::Help => {
                 self.messages.push(AkhMessage::system(
                     "Type a question (\"What is X?\"), assert a fact (\"X is a Y\"), \
                      or set a goal (\"find X\"). Commands: /help, /grammar, /goals, \
-                     /status, /seed, /quit"
+                     /status, /seed, /quit, detail <level>"
                         .to_string(),
                 ));
             }

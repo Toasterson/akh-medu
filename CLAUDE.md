@@ -181,6 +181,18 @@ explanations. Multi-agent communication with capability tokens.
 - [x] `AgentError::Channel` transparent variant
 - [x] 35 unit tests across 3 new modules
 
+### Phase 12b — Grounded operator dialogue ✓
+- [x] `ConversationState` — bounded turn ring buffer (VecDeque), active referents, active topic, grammar, ResponseDetail
+- [x] `ResponseDetail` enum: Concise / Normal / Full with `from_str_loose` parser
+- [x] `GroundedResponse` — prose + GroundedTriple entries + confidence + provenance IDs + grammar, `render(detail)` method
+- [x] `ground_query(subject, engine, grammar)` pipeline: resolve → collect triples → filter metadata → provenance → synthesize → GroundedResponse
+- [x] `ResponseContent::Grounded` variant on OutboundMessage, `OutboundMessage::grounded()` constructor
+- [x] `UserIntent::SetDetail` variant in NLP + channel message classifier
+- [x] `Agent::conversation_state()` / `set_response_detail()` API
+- [x] TUI grounded-first query path + SetDetail handler
+- [x] Headless grounded-first query path + SetDetail handler
+- [x] 17 new unit tests
+
 ## Phase 13 — Personal Assistant
 
 Email as bidirectional CommChannel (JMAP primary, IMAP fallback). OnlineHD VSA-native

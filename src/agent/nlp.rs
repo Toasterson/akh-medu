@@ -40,6 +40,8 @@ pub enum UserIntent {
     RenderHiero { entity: Option<String> },
     /// "Help" — show help information.
     Help,
+    /// "Set detail concise/normal/full" — change response detail level.
+    SetDetail { level: String },
     /// Unrecognized input — pass through.
     Freeform { text: String },
 }
@@ -70,6 +72,18 @@ pub fn classify_intent(input: &str) -> UserIntent {
         || lower.starts_with("list goals")
     {
         return UserIntent::ShowStatus;
+    }
+
+    // Set detail level.
+    if lower.starts_with("set detail ") || lower.starts_with("detail ") {
+        let rest = if lower.starts_with("set detail ") {
+            trimmed[11..].trim()
+        } else {
+            trimmed[7..].trim()
+        };
+        return UserIntent::SetDetail {
+            level: rest.to_lowercase(),
+        };
     }
 
     // Render hieroglyphic notation.
@@ -301,6 +315,18 @@ mod tests {
     fn classify_freeform() {
         let intent = classify_intent("hello world");
         assert!(matches!(intent, UserIntent::Freeform { .. }));
+    }
+
+    #[test]
+    fn classify_set_detail() {
+        let intent = classify_intent("set detail concise");
+        assert!(matches!(intent, UserIntent::SetDetail { level } if level == "concise"));
+
+        let intent = classify_intent("detail full");
+        assert!(matches!(intent, UserIntent::SetDetail { level } if level == "full"));
+
+        let intent = classify_intent("set detail Normal");
+        assert!(matches!(intent, UserIntent::SetDetail { level } if level == "normal"));
     }
 
     #[test]

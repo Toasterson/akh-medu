@@ -127,6 +127,10 @@ impl InboundMessage {
                         let entity = args.as_ref().map(|a| a.trim().to_string()).filter(|s| !s.is_empty());
                         crate::agent::nlp::UserIntent::RenderHiero { entity }
                     }
+                    "detail" | "set-detail" => {
+                        let level = args.as_ref().map(|a| a.trim().to_lowercase()).unwrap_or_default();
+                        crate::agent::nlp::UserIntent::SetDetail { level }
+                    }
                     _ => crate::agent::nlp::UserIntent::Freeform {
                         text: format!("/{name}{}", args.as_deref().map(|a| format!(" {a}")).unwrap_or_default()),
                     },
@@ -159,14 +163,19 @@ pub enum ConstraintCheckStatus {
 // ── ResponseContent ──────────────────────────────────────────────────────
 
 /// The content of an outbound response.
-///
-/// Currently wraps existing `AkhMessage` types for backward compatibility.
-/// A `Grounded` variant (response backed by KG provenance) will be added in
-/// Phase 12b.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ResponseContent {
     /// One or more existing AkhMessage values (backward-compatible wrapper).
     Messages(Vec<AkhMessage>),
+    /// A KG-grounded response with provenance and detail-level rendering (Phase 12b).
+    Grounded {
+        /// Pre-rendered prose at the requested detail level.
+        rendered: String,
+        /// Grammar archetype used for linearization.
+        grammar: String,
+        /// Number of supporting triples.
+        triple_count: usize,
+    },
 }
 
 // ── OutboundMessage ──────────────────────────────────────────────────────
@@ -204,6 +213,29 @@ impl OutboundMessage {
     pub fn to_akh_messages(&self) -> Vec<AkhMessage> {
         match &self.content {
             ResponseContent::Messages(msgs) => msgs.clone(),
+            ResponseContent::Grounded {
+                rendered, grammar, ..
+            } => vec![AkhMessage::narrative(rendered, grammar)],
+        }
+    }
+
+    /// Create a grounded outbound message from a `GroundedResponse`.
+    pub fn grounded(
+        response: &super::conversation::GroundedResponse,
+        detail: super::conversation::ResponseDetail,
+        grammar: impl Into<String>,
+    ) -> Self {
+        let rendered = response.render(detail);
+        let grammar_str = grammar.into();
+        Self {
+            content: ResponseContent::Grounded {
+                rendered,
+                grammar: grammar_str,
+                triple_count: response.supporting_triples.len(),
+            },
+            provenance: response.provenance_ids.clone(),
+            confidence: response.confidence,
+            constraint_check: ConstraintCheckStatus::Unchecked,
         }
     }
 

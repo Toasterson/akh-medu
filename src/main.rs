@@ -2834,71 +2834,87 @@ fn main() -> Result<()> {
                                 .map(|p| p.persona.grammar_preference.clone())
                                 .unwrap_or_else(|| "narrative".to_string());
 
-                            // Try discourse-aware response first.
-                            let discourse_prose = akh_medu::grammar::discourse::resolve_discourse(
-                                &subject,
-                                question_word,
-                                &original_input,
-                                &engine,
-                                capability_signal,
-                            )
-                            .ok()
-                            .and_then(|ctx| {
-                                let from = engine.triples_from(ctx.subject_id);
-                                let to = engine.triples_to(ctx.subject_id);
-                                let mut all = from;
-                                all.extend(to);
-                                akh_medu::grammar::discourse::build_discourse_response(
-                                    &all, &ctx, &engine,
-                                )
-                            })
-                            .and_then(|tree| {
-                                let registry = akh_medu::grammar::GrammarRegistry::new();
-                                registry.linearize(&grammar_name, &tree).ok()
-                            })
-                            .filter(|s| !s.trim().is_empty());
-
-                            if let Some(prose) = discourse_prose {
-                                prose
+                            // Phase 12b: Try grounded dialogue first.
+                            let detail = agent.conversation_state().response_detail;
+                            let grounded = akh_medu::agent::conversation::ground_query(
+                                &subject, &engine, &grammar_name,
+                            );
+                            if let Some(ref gr) = grounded {
+                                let rendered = gr.render(detail);
+                                if !rendered.trim().is_empty() {
+                                    agent.conversation_state_mut().record_agent_turn(&rendered);
+                                    agent.conversation_state_mut().track_referent(subject.clone());
+                                    rendered
+                                } else {
+                                    format!("No information found for \"{subject}\".")
+                                }
                             } else {
-                                // Fallback: existing synthesis path.
-                                match engine.resolve_symbol(&subject) {
-                                    Ok(sym_id) => {
-                                        let from = engine.triples_from(sym_id);
-                                        let to = engine.triples_to(sym_id);
-                                        if from.is_empty() && to.is_empty() {
-                                            format!("No information found for \"{subject}\".")
-                                        } else {
-                                            let mut all_triples = from;
-                                            all_triples.extend(to);
-                                            let summary =
-                                                akh_medu::agent::synthesize::synthesize_from_triples(
-                                                    &subject,
-                                                    &all_triples,
-                                                    &engine,
-                                                    &grammar_name,
-                                                );
-                                            let mut lines = Vec::new();
-                                            if !summary.overview.is_empty() {
-                                                lines.push(summary.overview);
-                                            }
-                                            for section in &summary.sections {
-                                                lines.push(format!(
-                                                    "{}: {}",
-                                                    section.heading, section.prose
-                                                ));
-                                            }
-                                            for gap in &summary.gaps {
-                                                lines.push(format!("(gap) {gap}"));
-                                            }
-                                            if lines.is_empty() {
+                                // Fallback: discourse-aware response first.
+                                let discourse_prose = akh_medu::grammar::discourse::resolve_discourse(
+                                    &subject,
+                                    question_word,
+                                    &original_input,
+                                    &engine,
+                                    capability_signal,
+                                )
+                                .ok()
+                                .and_then(|ctx| {
+                                    let from = engine.triples_from(ctx.subject_id);
+                                    let to = engine.triples_to(ctx.subject_id);
+                                    let mut all = from;
+                                    all.extend(to);
+                                    akh_medu::grammar::discourse::build_discourse_response(
+                                        &all, &ctx, &engine,
+                                    )
+                                })
+                                .and_then(|tree| {
+                                    let registry = akh_medu::grammar::GrammarRegistry::new();
+                                    registry.linearize(&grammar_name, &tree).ok()
+                                })
+                                .filter(|s| !s.trim().is_empty());
+
+                                if let Some(prose) = discourse_prose {
+                                    prose
+                                } else {
+                                    // Fallback: existing synthesis path.
+                                    match engine.resolve_symbol(&subject) {
+                                        Ok(sym_id) => {
+                                            let from = engine.triples_from(sym_id);
+                                            let to = engine.triples_to(sym_id);
+                                            if from.is_empty() && to.is_empty() {
                                                 format!("No information found for \"{subject}\".")
                                             } else {
-                                                lines.join("\n")
+                                                let mut all_triples = from;
+                                                all_triples.extend(to);
+                                                let summary =
+                                                    akh_medu::agent::synthesize::synthesize_from_triples(
+                                                        &subject,
+                                                        &all_triples,
+                                                        &engine,
+                                                        &grammar_name,
+                                                    );
+                                                let mut lines = Vec::new();
+                                                if !summary.overview.is_empty() {
+                                                    lines.push(summary.overview);
+                                                }
+                                                for section in &summary.sections {
+                                                    lines.push(format!(
+                                                        "{}: {}",
+                                                        section.heading, section.prose
+                                                    ));
+                                                }
+                                                for gap in &summary.gaps {
+                                                    lines.push(format!("(gap) {gap}"));
+                                                }
+                                                if lines.is_empty() {
+                                                    format!("No information found for \"{subject}\".")
+                                                } else {
+                                                    lines.join("\n")
+                                                }
                                             }
                                         }
+                                        Err(_) => format!("Symbol \"{subject}\" not found."),
                                     }
-                                    Err(_) => format!("Symbol \"{subject}\" not found."),
                                 }
                             }
                         }
@@ -2929,6 +2945,17 @@ fn main() -> Result<()> {
                         }
                         akh_medu::agent::UserIntent::RenderHiero { .. } => {
                             "Hieroglyphic rendering not available in headless mode. Use the TUI.".to_string()
+                        }
+                        akh_medu::agent::UserIntent::SetDetail { level } => {
+                            match akh_medu::agent::conversation::ResponseDetail::from_str_loose(&level) {
+                                Some(detail) => {
+                                    agent.set_response_detail(detail);
+                                    format!("Response detail set to: {detail:?}")
+                                }
+                                None => {
+                                    "Unknown detail level. Use: concise, normal, or full.".to_string()
+                                }
+                            }
                         }
                         akh_medu::agent::UserIntent::Freeform { .. } => {
                             "I don't understand that. Type 'help' for commands.".to_string()
