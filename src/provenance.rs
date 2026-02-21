@@ -282,6 +282,20 @@ pub enum DerivationKind {
         method_name: String,
         step_count: usize,
     },
+
+    // --- Phase 13: Personal Assistant ------------------------------------------
+
+    /// An email was ingested and parsed via the email channel (Phase 13a).
+    EmailIngested {
+        message_id: String,
+        channel_id: String,
+    },
+
+    /// An email thread was constructed or updated via JWZ (Phase 13a).
+    EmailThreaded {
+        thread_root_id: String,
+        message_count: usize,
+    },
 }
 
 impl DerivationKind {
@@ -336,6 +350,8 @@ impl DerivationKind {
             Self::MetacognitiveEvaluation { .. } => 45,
             Self::ResourceAssessment { .. } => 46,
             Self::ProceduralLearning { .. } => 47,
+            Self::EmailIngested { .. } => 48,
+            Self::EmailThreaded { .. } => 49,
         }
     }
 }

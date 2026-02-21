@@ -4140,5 +4140,17 @@ fn format_derivation_kind(kind: &DerivationKind, engine: &Engine) -> String {
                 engine.resolve_label(*source_goal),
             )
         }
+        DerivationKind::EmailIngested {
+            message_id,
+            channel_id,
+        } => {
+            format!("email ingested: {message_id} via channel {channel_id}")
+        }
+        DerivationKind::EmailThreaded {
+            thread_root_id,
+            message_count,
+        } => {
+            format!("email threaded: {thread_root_id} ({message_count} messages)")
+        }
     }
 }

@@ -131,6 +131,11 @@ pub enum AgentError {
     #[diagnostic(transparent)]
     Oxifed(#[from] super::oxifed::OxifedError),
 
+    #[cfg(feature = "email")]
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Email(#[from] crate::email::EmailError),
+
     #[error("{0}")]
     #[diagnostic(
         code(akh::agent::engine),

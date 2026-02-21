@@ -727,6 +727,15 @@ pub fn derivation_kind_prose(kind: &DerivationKind) -> String {
         DerivationKind::ProceduralLearning { method_name, .. } => {
             format!("procedural learning: {method_name}")
         }
+        DerivationKind::EmailIngested { message_id, .. } => {
+            format!("email ingested: {message_id}")
+        }
+        DerivationKind::EmailThreaded {
+            thread_root_id,
+            message_count,
+        } => {
+            format!("email threaded: {thread_root_id} ({message_count} messages)")
+        }
     }
 }
 

@@ -1,6 +1,6 @@
 # Akh-medu Architecture
 
-> Last updated: 2026-02-21 (Phase 12g complete — multi-agent communication)
+> Last updated: 2026-02-21 (Phase 13a complete — email channel)
 
 ## Overview
 
@@ -20,6 +20,7 @@ Akh-medu is a neuro-symbolic AI engine that runs entirely on CPU with no LLM dep
 ```
 src/
 ├── agent/              46 modules — OODA loop, tools (code_gen, code_ingest, compile_feedback, pattern_mine), memory, goals, drives, goal_generation, HTN decomposition, priority reasoning (argumentation), projects (microtheory-backed), planning, psyche, library learning, watch (GDA expectation monitoring), metacognition (Nelson-Narens monitoring/control, ZPD, AGM belief revision), resource awareness (VOC, CBR effort estimation), chunking (procedural learning), channel abstraction (CommChannel trait, ChannelRegistry, OperatorChannel), conversation (grounded dialogue, ConversationState, GroundedResponse), constraint_check (pre-communication constraint pipeline), interlocutor (social KG, InterlocutorRegistry, theory-of-mind microtheories, VSA interest vectors), oxifed (ActivityPub federation via AMQP bridge, feature-gated), explain (provenance-to-prose pipeline, DerivationNode trees, 5 query types), multi_agent (capability tokens, AgentProtocolMessage, TokenRegistry, trust bootstrap)
+├── email/              6 modules — email channel (feature-gated): EmailConnector trait (JMAP/IMAP/Mock), MIME parsing (mail-parser), JWZ threading (RFC 5256), email composition (lettre), EmailChannel implementing CommChannel, EmailPredicates (14 well-known relations)
 ├── autonomous/          6 modules — background learning, confidence fusion, grounding
 ├── argumentation/       1 module  — pro/con argumentation (Phase 9e): meta-rules, verdicts, evidence chains
 ├── compartment/         5 modules — knowledge isolation, Jungian psyche, microtheories (Phase 9a, per-repo code scoping), CWA/circumscription (Phase 9m)
@@ -38,7 +39,7 @@ src/
 ├── error.rs                       — miette + thiserror rich diagnostics
 ├── rule_macro.rs                  — rule macro predicates (Phase 9g): RuleMacro trait, registry, genls/relationAllExists/relationExistsAll
 ├── temporal.rs                    — temporal projection (Phase 9k): TemporalProfile, decay computation, registry
-├── provenance.rs                  — persistent explanation ledger (redb, multi-index, 48 derivation kinds)
+├── provenance.rs                  — persistent explanation ledger (redb, multi-index, 50 derivation kinds)
 ├── skolem.rs                      — Skolem functions (Phase 9h): existential witnesses, grounding, auto-ground
 ├── tms.rs                         — truth maintenance system (Phase 9c): support sets, retraction cascades
 ├── symbol.rs                      — SymbolId (NonZeroU64), SymbolKind, allocator
@@ -139,7 +140,7 @@ SPARQL (oxigraph)  — persistent RDF store for structured queries
 ## Provenance
 
 Every inference, agent decision, and knowledge derivation creates a `ProvenanceRecord`:
-- Derived symbol, derivation kind (48 variants), confidence, depth, source symbols, metadata
+- Derived symbol, derivation kind (50 variants), confidence, depth, source symbols, metadata
 - Full traceback from any result to its original sources
 - Indices by derived symbol, source symbol, and kind for fast lookup
 
@@ -163,13 +164,32 @@ Phase 11a–11h: Autonomous task system (8 sub-phases, all complete):
 Phase 12a–12g: Interaction — communication protocols and social reasoning (7 sub-phases):
 - **Core (12a–12d complete)**: 12a channel abstraction (CommChannel trait, ChannelRegistry with operator invariant, OCapN-inspired ChannelCapabilities per ChannelKind, OperatorChannel wrapping MessageSink with InboundHandle, TUI+headless wired transparently), 12b grounded operator dialogue (ConversationState with bounded turn history, ResponseDetail levels, GroundedResponse with provenance + confidence, ground_query pipeline, grounded-first query path in TUI+headless, SetDetail intent), 12c pre-communication constraint checking (6-check pipeline: consistency/confidence/rate/relevance/sensitivity/provenance, ConstraintChecker with CommunicationBudget, per-channel-kind emission decisions, SensitivityLevel, CheckOutcome, ConstraintCheckStatus evolution), 12d social KG with theory of mind (InterlocutorRegistry, per-interlocutor microtheories via Phase 9a, InterlocutorPredicates with 6 well-known relations, VSA interest bundling, Hamming-based similarity search, trust-level management with operator immutability, auto-registration in TUI+headless)
 - **Federation (12e complete)**: 12e ActivityPub federation via oxifed (OxifedChannel implementing CommChannel with ChannelKind::Social, AMQP consumer/publisher background tasks via lapin, serde-compatible oxifed message types, activity↔InboundMessage bridge, constraint-checked outbound Notes, OxifedConfig, feature-gated under `oxifed`)
-- **Transparency (12f complete)**: 12f transparent reasoning and explanations (ExplanationQuery with 5 query types: Why/How/WhatKnown/HowConfident/WhatChanged, DerivationNode tree built by recursive provenance walk, render_derivation_tree for indented hierarchy rendering, render_derivation_prose for concise output, derivation_kind_prose covering all 48 DerivationKind variants, explain_entity/explain_known/explain_confidence/explain_changes, ExplanationQuery::parse for NL recognition, Explain UserIntent variant, wired into TUI+headless chat)
+- **Transparency (12f complete)**: 12f transparent reasoning and explanations (ExplanationQuery with 5 query types: Why/How/WhatKnown/HowConfident/WhatChanged, DerivationNode tree built by recursive provenance walk, render_derivation_tree for indented hierarchy rendering, render_derivation_prose for concise output, derivation_kind_prose covering all 50 DerivationKind variants, explain_entity/explain_known/explain_confidence/explain_changes, ExplanationQuery::parse for NL recognition, Explain UserIntent variant, wired into TUI+headless chat)
 - **Multi-Agent (12g complete)**: 12g multi-agent communication with OCapN-inspired capability tokens (CapabilityToken with scoped permissions, expiry, revocation; 6 CapabilityScope variants; TokenRegistry with pair indexing and validation; AgentProtocolMessage with 10 structured message types: Query/QueryResponse/Assert/ProposeGoal/Subscribe/Unsubscribe/GrantCapability/RevokeCapability/Ack/Error; InterlocutorKind Human/Agent on InterlocutorProfile; MessageContent::AgentMessage variant bypassing NLP; UserIntent::AgentProtocol; can_propose_goals capability flag; trust bootstrap via operator introduction)
 Phase 13a–13i: Personal assistant (9 sub-phases):
-- **Email**: 13a email channel (JMAP/IMAP + MIME + JWZ threading), 13b OnlineHD spam classification (VSA-native), 13c email triage & priority (sender reputation + HEY-style screening), 13d structured extraction (dates, events, action items → KG)
+- **Email (13a complete)**: 13a email channel (JMAP/IMAP + MIME + JWZ threading), 13b OnlineHD spam classification (VSA-native), 13c email triage & priority (sender reputation + HEY-style screening), 13d structured extraction (dates, events, action items → KG)
 - **PIM**: 13e personal task & project management (GTD + Eisenhower + PARA), 13f calendar & temporal reasoning (RFC 5545, Allen interval algebra)
 - **Intelligence**: 13g preference learning & proactive assistance (HyperRec-style VSA profiles, serendipity engine), 13h structured output & operator dashboards (JSON-LD, briefings, notifications)
 - **Delegation**: 13i delegated agent spawning (scoped knowledge, own identity, email composition pipeline)
+
+### Phase 13a — Email Channel (JMAP/IMAP + MIME) ✓
+- [x] `EmailError` miette diagnostic enum (7 variants: Connection, Authentication, Parse, Send, Threading, Config, Engine) with `EmailResult<T>` alias
+- [x] `EmailConnector` trait: `fetch_new()`, `fetch_by_id()`, `send_email()`, `sync_state()` — with RawEmail, EmailConfig, EmailCredentials
+- [x] `JmapConnector` — JMAP over ureq (sync HTTP), session discovery, Email/query + Email/get, delta sync via Email/changes
+- [x] `ImapConnector` — sync IMAP via `imap` crate with `native-tls`, TLS connection, UID-based delta sync
+- [x] `MockConnector` — in-memory queue for testing (`push_raw()`, `mock_send()`)
+- [x] `ParsedEmail` struct (15 fields) with `parse_raw()` via `mail-parser` — multipart/alternative, multipart/mixed, nested MIME, 4KB text / 8KB HTML truncation
+- [x] `extract_domain()` utility for email address domain extraction
+- [x] JWZ threading (RFC 5256): `ThreadNode`, `ThreadTree`, `build_threads()` — 5-step algorithm with cycle protection, phantom parent nodes
+- [x] `ComposedEmail` with `compose_reply()` (In-Reply-To, References chain, Re: prefix, quoted body), `compose_new()`, `to_mime()` via lettre
+- [x] `EmailPredicates` — 14 well-known relation SymbolIds (message-id, from, to, cc, subject, date, thread-id, in-reply-to, has-attachment, content-type, body-text, list-id, dkim-pass, spf-pass)
+- [x] `EmailInboundHandle` — cloneable `Arc<Mutex<VecDeque<InboundMessage>>>` with `push_email()` converting ParsedEmail → InboundMessage
+- [x] `EmailChannel` implementing `CommChannel` — ChannelKind::Social, background std::thread polling, AtomicBool connected/shutdown, Drop cleanup
+- [x] `DerivationKind::EmailIngested` (tag 48) and `DerivationKind::EmailThreaded` (tag 49) provenance variants
+- [x] Feature-gated: `--features email` (adds `mail-parser`, `imap`, `native-tls`, `lettre`)
+- [x] `AgentError::Email` transparent variant (cfg-gated)
+- [x] 62 new unit tests across 6 modules
+
 Phase 14a–14i: Purpose-driven bootstrapping with identity (9 sub-phases):
 - **Identity**: 14a purpose + identity parser (NL → PurposeModel + IdentityRef, character reference extraction), 14b identity resolution (Wikidata + DBpedia + Wikipedia cascade → 12 Jungian archetypes → OCEAN → Psyche construction, Ritual of Awakening: self-naming via cultural morphemes)
 - **Domain**: 14c domain expansion (Wikidata + Wikipedia + ConceptNet, VSA boundary detection), 14d prerequisite discovery + ZPD classification (Vygotsky zones, curriculum generation)

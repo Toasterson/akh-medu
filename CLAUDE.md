@@ -278,6 +278,23 @@ identities, and email composition pipeline via grammar module + constraint check
 - **Implementation plan**: `docs/ai/plans/2026-02-17-phase13-personal-assistant.md`
 - **Research**: `docs/ai/decisions/004-personal-assistant-research.md`
 
+### Phase 13a — Email Channel (JMAP/IMAP + MIME) ✓
+- [x] `EmailError` miette diagnostic enum (7 variants: Connection, Authentication, Parse, Send, Threading, Config, Engine) with `EmailResult<T>`
+- [x] `EmailConnector` trait: `fetch_new()`, `fetch_by_id()`, `send_email()`, `sync_state()` — RawEmail, EmailConfig, EmailCredentials
+- [x] `JmapConnector` — JMAP over ureq (sync HTTP), session discovery, delta sync via Email/changes
+- [x] `ImapConnector` — sync IMAP via `imap` + `native-tls`, TLS, UID-based delta sync
+- [x] `MockConnector` — in-memory queue for testing
+- [x] `ParsedEmail` (15 fields) with `parse_raw()` via `mail-parser` — multipart/alternative, multipart/mixed, nested MIME
+- [x] JWZ threading (RFC 5256): `ThreadNode`, `ThreadTree`, `build_threads()` — 5-step algorithm with cycle protection
+- [x] `ComposedEmail` with `compose_reply()`, `compose_new()`, `to_mime()` via lettre
+- [x] `EmailPredicates` — 14 well-known relation SymbolIds (email: namespace)
+- [x] `EmailInboundHandle` — Arc<Mutex<VecDeque<InboundMessage>>> with `push_email()`
+- [x] `EmailChannel` implementing `CommChannel` — ChannelKind::Social, background std::thread polling
+- [x] `DerivationKind::EmailIngested` (tag 48) and `DerivationKind::EmailThreaded` (tag 49)
+- [x] Feature-gated: `--features email` (mail-parser, imap, native-tls, lettre)
+- [x] `AgentError::Email` transparent variant (cfg-gated)
+- [x] 62 new unit tests across 6 modules
+
 ## Phase 14 — Purpose-Driven Bootstrapping with Identity
 
 Autonomous domain knowledge acquisition AND identity construction from operator statements

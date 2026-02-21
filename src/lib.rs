@@ -31,6 +31,8 @@
 
 pub mod agent;
 pub mod argumentation;
+#[cfg(feature = "email")]
+pub mod email;
 pub mod autonomous;
 pub mod client;
 pub mod compartment;
