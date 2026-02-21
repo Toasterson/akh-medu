@@ -296,6 +296,14 @@ pub enum DerivationKind {
         thread_root_id: String,
         message_count: usize,
     },
+
+    /// Email classified as spam/ham via OnlineHD (Phase 13b).
+    SpamClassification {
+        email_message_id: String,
+        decision: String,
+        vsa_confidence: f32,
+        bayesian_score: f32,
+    },
 }
 
 impl DerivationKind {
@@ -352,6 +360,7 @@ impl DerivationKind {
             Self::ProceduralLearning { .. } => 47,
             Self::EmailIngested { .. } => 48,
             Self::EmailThreaded { .. } => 49,
+            Self::SpamClassification { .. } => 50,
         }
     }
 }

@@ -4152,5 +4152,16 @@ fn format_derivation_kind(kind: &DerivationKind, engine: &Engine) -> String {
         } => {
             format!("email threaded: {thread_root_id} ({message_count} messages)")
         }
+        DerivationKind::SpamClassification {
+            email_message_id,
+            decision,
+            vsa_confidence,
+            bayesian_score,
+        } => {
+            format!(
+                "spam classification: {email_message_id} → {decision} \
+                 (VSA: {vsa_confidence:.2}, Bayesian: {bayesian_score:.2})"
+            )
+        }
     }
 }

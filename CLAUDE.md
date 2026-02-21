@@ -295,6 +295,20 @@ identities, and email composition pipeline via grammar module + constraint check
 - [x] `AgentError::Email` transparent variant (cfg-gated)
 - [x] 62 new unit tests across 6 modules
 
+### Phase 13b — OnlineHD Spam & Relevance Classification ✓
+- [x] `SpamDecision` enum: Spam, Ham, Uncertain — with Display, Serialize/Deserialize
+- [x] `ClassificationResult` — decision + vsa_spam_similarity + vsa_ham_similarity + bayesian_score + confidence + rule_override + reasoning
+- [x] `SpamRoleVectors` — 7 deterministic role HyperVecs via `encode_token(ops, "email-role:X")`
+- [x] `TokenProbabilityTable` — per-token spam/ham counts, Robinson chi-square combination, MAX_TOKEN_TABLE_SIZE eviction
+- [x] `SpamClassifier` — OnlineHD prototype vectors + Bayesian supplement + whitelist/blacklist + persistence
+- [x] `encode_email()` — 6-feature role-filler binding → bundle
+- [x] `classify()` — deterministic rules → VSA similarity → Robinson chi-square → combined score (0.7/0.3) → threshold
+- [x] `train()` — OnlineHD adaptive update via majority-vote bundling + token table training
+- [x] Whitelist/blacklist domain management (case-insensitive, dedup)
+- [x] `persist()`/`restore()` via bincode + `put_meta`/`get_meta`
+- [x] `record_classification_provenance()` — `DerivationKind::SpamClassification` (tag 50)
+- [x] 24 new unit tests
+
 ## Phase 14 — Purpose-Driven Bootstrapping with Identity
 
 Autonomous domain knowledge acquisition AND identity construction from operator statements

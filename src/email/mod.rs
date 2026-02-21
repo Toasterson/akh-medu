@@ -4,12 +4,14 @@
 //! Feature-gated under `email`. Provides `EmailChannel` (implementing the
 //! `CommChannel` trait from Phase 12a) with background polling via `std::thread`.
 
+pub mod classify;
 pub mod compose;
 pub mod connector;
 pub mod error;
 pub mod parser;
 pub mod threading;
 
+pub use classify::{ClassificationResult, SpamClassifier, SpamDecision};
 pub use compose::{ComposedEmail, compose_new, compose_reply, to_mime};
 pub use connector::{
     ConnectionType, EmailConfig, EmailConnector, EmailCredentials, ImapConnector, JmapConnector,

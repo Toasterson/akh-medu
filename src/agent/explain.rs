@@ -736,6 +736,13 @@ pub fn derivation_kind_prose(kind: &DerivationKind) -> String {
         } => {
             format!("email threaded: {thread_root_id} ({message_count} messages)")
         }
+        DerivationKind::SpamClassification {
+            decision,
+            vsa_confidence,
+            ..
+        } => {
+            format!("spam classification: {decision} (VSA confidence: {vsa_confidence:.2})")
+        }
     }
 }
 
