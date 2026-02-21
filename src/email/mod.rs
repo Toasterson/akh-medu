@@ -8,6 +8,7 @@ pub mod classify;
 pub mod compose;
 pub mod connector;
 pub mod error;
+pub mod extract;
 pub mod parser;
 pub mod threading;
 pub mod triage;
@@ -21,6 +22,10 @@ pub use connector::{
 pub use error::{EmailError, EmailResult};
 pub use parser::{ParsedEmail, extract_domain, parse_raw};
 pub use threading::{ThreadNode, ThreadTree, build_threads};
+pub use extract::{
+    ActionItemGoalSpec, ExtractionPredicates, ExtractionResult, ExtractionScope, ExtractedItem,
+    ExtractedItemKind, SourceField,
+};
 pub use triage::{EmailRoute, SenderStats, TriageEngine, TriagePredicates, TriageResult};
 
 use std::collections::VecDeque;

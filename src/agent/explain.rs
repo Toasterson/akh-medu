@@ -750,6 +750,13 @@ pub fn derivation_kind_prose(kind: &DerivationKind) -> String {
         } => {
             format!("email triaged: routed to {route} (importance: {importance_score:.2})")
         }
+        DerivationKind::EmailExtracted {
+            kinds_found,
+            item_count,
+            ..
+        } => {
+            format!("email extraction: found {item_count} items ({kinds_found})")
+        }
     }
 }
 

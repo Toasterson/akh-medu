@@ -311,6 +311,13 @@ pub enum DerivationKind {
         route: String,
         importance_score: f32,
     },
+
+    /// Structured information extracted from email message (Phase 13d).
+    EmailExtracted {
+        email_message_id: String,
+        item_count: usize,
+        kinds_found: String,
+    },
 }
 
 impl DerivationKind {
@@ -369,6 +376,7 @@ impl DerivationKind {
             Self::EmailThreaded { .. } => 49,
             Self::SpamClassification { .. } => 50,
             Self::EmailTriaged { .. } => 51,
+            Self::EmailExtracted { .. } => 52,
         }
     }
 }

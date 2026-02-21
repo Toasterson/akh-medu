@@ -94,12 +94,13 @@ mail-parser = { version = "0.11", optional = true }
 imap = { version = "2", optional = true }
 native-tls = { version = "0.2", optional = true }
 lettre = { version = "0.11", optional = true, default-features = false, features = ["builder", "smtp-transport", "rustls-tls"] }
+regex = { version = "1", optional = true }
 
 [features]
 daemon = ["tokio", "tokio-tungstenite", "futures-util"]
 server = ["daemon", "axum", "tower-http"]
 oxifed = ["daemon", "lapin", "deadpool-lapin", "reqwest"]
-email = ["mail-parser", "imap", "native-tls", "lettre"]
+email = ["mail-parser", "imap", "native-tls", "lettre", "regex"]
 wasm-tools = ["wasmtime"]
 
 [dev-dependencies]

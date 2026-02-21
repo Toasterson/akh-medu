@@ -326,6 +326,26 @@ identities, and email composition pipeline via grammar module + constraint check
 - [x] `sync_sender_to_kg()` — KG triple sync for SPARQL queryability
 - [x] 26 new unit tests
 
+### Phase 13d — Structured Email Extraction ✓
+- [x] `ExtractedItemKind` enum: Date, RelativeDate, TrackingNumber, Url, PhoneNumber, ActionItem, EmailAddress — with Display, Serialize/Deserialize
+- [x] `SourceField` enum: Subject, BodyText — with Display, Serialize/Deserialize
+- [x] `ExtractedItem` — kind + raw_text + normalized + symbol_id + offset + confidence + source_field + language
+- [x] `ExtractionResult` — items + counts + reasoning + detected_language
+- [x] `ExtractionPredicates` — 8 well-known KG relations (extract: namespace)
+- [x] `ExtractionScope` — compartment-scoped microtheories (account + correspondent)
+- [x] `ActionItemGoalSpec` — goal specification from action items (caller decides whether to create goals)
+- [x] 10 regex patterns (LazyLock): ISO/US/EU/written dates, UPS/FedEx/USPS tracking, URLs, phones, emails
+- [x] FedEx false-positive mitigation: context keyword gating within 100-char window
+- [x] `extract_temporal_via_grammar()` — multi-language relative dates (EN/RU/FR/ES/AR) + "in N days/weeks"
+- [x] `extract_actions_via_grammar()` — multi-language action items (EN/RU/FR/ES/AR) with urgency boost
+- [x] `extract_all()` — full pipeline: regex + grammar on subject + body, deduplicate by (kind, normalized)
+- [x] `ensure_extraction_scope()` — create account + correspondent microtheories via `engine.create_context()`
+- [x] `store_extractions()` — compartment-scoped KG triples + carrier triples for tracking numbers
+- [x] `record_extraction_provenance()` — `DerivationKind::EmailExtracted` (tag 52)
+- [x] `action_items_to_goals()` — goal specs with multi-language urgency detection
+- [x] Quick predicates: `has_action_items()`, `has_calendar_event()`, `has_shipment_info()`
+- [x] ~26 new unit tests
+
 ## Phase 14 — Purpose-Driven Bootstrapping with Identity
 
 Autonomous domain knowledge acquisition AND identity construction from operator statements

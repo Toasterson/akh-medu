@@ -99,6 +99,7 @@ dependencies = [
  "ratatui",
  "rayon",
  "redb",
+ "regex",
  "reqwest",
  "scraper",
  "serde",

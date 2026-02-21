@@ -4173,5 +4173,12 @@ fn format_derivation_kind(kind: &DerivationKind, engine: &Engine) -> String {
                  (importance: {importance_score:.2})"
             )
         }
+        DerivationKind::EmailExtracted {
+            email_message_id,
+            item_count,
+            kinds_found,
+        } => {
+            format!("email extracted: {email_message_id} → {item_count} items ({kinds_found})")
+        }
     }
 }
