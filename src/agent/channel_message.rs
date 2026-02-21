@@ -63,8 +63,8 @@ impl fmt::Display for InterlocutorId {
 
 /// The content of an inbound message.
 ///
-/// Currently supports text and structured commands. GoalProposal, Activity,
-/// and Reaction variants will be added in Phases 12d/12e.
+/// Currently supports text, structured commands, and agent protocol messages.
+/// GoalProposal, Activity, and Reaction variants will be added in Phases 12d/12e.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum MessageContent {
     /// Free-form text input.
@@ -74,6 +74,11 @@ pub enum MessageContent {
         name: String,
         args: Option<String>,
     },
+    /// A structured agent-to-agent protocol message (Phase 12g).
+    ///
+    /// Bypasses the NLP classifier and is dispatched directly to the
+    /// multi-agent handler for capability validation and processing.
+    AgentMessage(super::multi_agent::AgentProtocolMessage),
 }
 
 // ── InboundMessage ───────────────────────────────────────────────────────
@@ -110,6 +115,7 @@ impl InboundMessage {
     ///
     /// For `Text` content, delegates to `nlp::classify_intent()`.
     /// For `Command` content, maps to the corresponding `UserIntent` directly.
+    /// For `AgentMessage` content, returns `UserIntent::AgentProtocol`.
     pub fn classify(&self) -> crate::agent::nlp::UserIntent {
         match &self.content {
             MessageContent::Text(text) => crate::agent::nlp::classify_intent(text),
@@ -136,6 +142,9 @@ impl InboundMessage {
                     },
                 }
             }
+            MessageContent::AgentMessage(msg) => {
+                crate::agent::nlp::UserIntent::AgentProtocol { message: msg.clone() }
+            }
         }
     }
 
@@ -143,7 +152,7 @@ impl InboundMessage {
     pub fn text(&self) -> Option<&str> {
         match &self.content {
             MessageContent::Text(t) => Some(t),
-            MessageContent::Command { .. } => None,
+            MessageContent::Command { .. } | MessageContent::AgentMessage(_) => None,
         }
     }
 }

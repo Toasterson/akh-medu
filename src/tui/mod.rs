@@ -624,6 +624,14 @@ impl AkhTui {
                     }
                 }
             }
+            crate::agent::UserIntent::AgentProtocol { ref message } => {
+                // Agent protocol messages arrive from agent channels, not the operator TUI.
+                // Display a summary for operator visibility.
+                self.messages.push(AkhMessage::system(format!(
+                    "[agent protocol] received: {:?}",
+                    std::mem::discriminant(message),
+                )));
+            }
             crate::agent::UserIntent::Freeform { text: _ } => {
                 self.messages.push(AkhMessage::system(
                     "I don't understand that. Type /help for commands.".to_string(),

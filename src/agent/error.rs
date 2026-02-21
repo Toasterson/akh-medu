@@ -122,6 +122,10 @@ pub enum AgentError {
     #[diagnostic(transparent)]
     Interlocutor(#[from] super::interlocutor::InterlocutorError),
 
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    MultiAgent(#[from] super::multi_agent::MultiAgentError),
+
     #[cfg(feature = "oxifed")]
     #[error(transparent)]
     #[diagnostic(transparent)]

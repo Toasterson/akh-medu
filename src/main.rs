@@ -2978,6 +2978,9 @@ fn main() -> Result<()> {
                                 Err(e) => format!("{e}"),
                             }
                         }
+                        akh_medu::agent::UserIntent::AgentProtocol { .. } => {
+                            "[agent protocol] agent-to-agent messages are not supported in headless mode".to_string()
+                        }
                         akh_medu::agent::UserIntent::Freeform { .. } => {
                             "I don't understand that. Type 'help' for commands.".to_string()
                         }

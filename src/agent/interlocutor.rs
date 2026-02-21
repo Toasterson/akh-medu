@@ -18,6 +18,7 @@ use crate::vsa::HyperVec;
 
 use super::channel::ChannelKind;
 use super::channel_message::InterlocutorId;
+use super::multi_agent::InterlocutorKind;
 
 // ── Error types ─────────────────────────────────────────────────────────
 
@@ -86,6 +87,8 @@ pub struct InterlocutorProfile {
     pub interlocutor_id: String,
     /// KG entity SymbolId representing this interlocutor.
     pub symbol_id: SymbolId,
+    /// Whether this interlocutor is a human or another agent (Phase 12g).
+    pub kind: InterlocutorKind,
     /// Channel IDs this interlocutor uses.
     pub channel_ids: Vec<String>,
     /// Trust level determining capability preset.
@@ -104,6 +107,11 @@ impl InterlocutorProfile {
     /// Whether this is the operator profile.
     pub fn is_operator(&self) -> bool {
         self.interlocutor_id == "operator"
+    }
+
+    /// Whether this interlocutor is another agent (not human).
+    pub fn is_agent(&self) -> bool {
+        self.kind == InterlocutorKind::Agent
     }
 }
 
@@ -239,6 +247,7 @@ impl InterlocutorRegistry {
         let profile = InterlocutorProfile {
             interlocutor_id: id_str.clone(),
             symbol_id: sym_id,
+            kind: InterlocutorKind::default(),
             channel_ids: vec![channel_id.to_string()],
             trust_level,
             knowledge_mt,
@@ -451,6 +460,7 @@ mod tests {
         let profile = InterlocutorProfile {
             interlocutor_id: "operator".to_string(),
             symbol_id: SymbolId::new(1).unwrap(),
+            kind: InterlocutorKind::Human,
             channel_ids: vec!["op-ch".to_string()],
             trust_level: ChannelKind::Operator,
             knowledge_mt: None,
@@ -459,6 +469,7 @@ mod tests {
             last_interaction: 0,
         };
         assert!(profile.is_operator());
+        assert!(!profile.is_agent());
     }
 
     #[test]
@@ -466,6 +477,7 @@ mod tests {
         let profile = InterlocutorProfile {
             interlocutor_id: "alice".to_string(),
             symbol_id: SymbolId::new(2).unwrap(),
+            kind: InterlocutorKind::Human,
             channel_ids: vec![],
             trust_level: ChannelKind::Social,
             knowledge_mt: None,
@@ -477,6 +489,23 @@ mod tests {
     }
 
     #[test]
+    fn interlocutor_profile_is_agent() {
+        let profile = InterlocutorProfile {
+            interlocutor_id: "peer-akh".to_string(),
+            symbol_id: SymbolId::new(3).unwrap(),
+            kind: InterlocutorKind::Agent,
+            channel_ids: vec![],
+            trust_level: ChannelKind::Trusted,
+            knowledge_mt: None,
+            interests: Vec::new(),
+            interaction_count: 0,
+            last_interaction: 0,
+        };
+        assert!(profile.is_agent());
+        assert!(!profile.is_operator());
+    }
+
+    #[test]
     fn set_trust_level_operator_immutable() {
         let mut reg = InterlocutorRegistry::new();
         reg.profiles.insert(
@@ -484,6 +513,7 @@ mod tests {
             InterlocutorProfile {
                 interlocutor_id: "operator".to_string(),
                 symbol_id: SymbolId::new(1).unwrap(),
+                kind: InterlocutorKind::Human,
                 channel_ids: vec![],
                 trust_level: ChannelKind::Operator,
                 knowledge_mt: None,
@@ -505,6 +535,7 @@ mod tests {
             InterlocutorProfile {
                 interlocutor_id: "alice".to_string(),
                 symbol_id: SymbolId::new(2).unwrap(),
+                kind: InterlocutorKind::Human,
                 channel_ids: vec![],
                 trust_level: ChannelKind::Social,
                 knowledge_mt: None,

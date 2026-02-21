@@ -125,6 +125,8 @@ pub struct ChannelCapabilities {
     pub can_manage_channels: bool,
     /// Can view provenance and reasoning traces.
     pub can_view_provenance: bool,
+    /// Can propose goals to the agent via agent protocol messages (Phase 12g).
+    pub can_propose_goals: bool,
     /// Optional rate limit (messages per minute). None = unlimited.
     pub rate_limit: Option<u32>,
 }
@@ -143,6 +145,7 @@ impl ChannelCapabilities {
             can_persist: true,
             can_manage_channels: true,
             can_view_provenance: true,
+            can_propose_goals: true,
             rate_limit: None,
         }
     }
@@ -160,6 +163,7 @@ impl ChannelCapabilities {
             can_persist: false,
             can_manage_channels: false,
             can_view_provenance: true,
+            can_propose_goals: true,
             rate_limit: None,
         }
     }
@@ -177,6 +181,7 @@ impl ChannelCapabilities {
             can_persist: false,
             can_manage_channels: false,
             can_view_provenance: false,
+            can_propose_goals: false,
             rate_limit: Some(30),
         }
     }
@@ -194,6 +199,7 @@ impl ChannelCapabilities {
             can_persist: false,
             can_manage_channels: false,
             can_view_provenance: false,
+            can_propose_goals: false,
             rate_limit: Some(10),
         }
     }
@@ -229,6 +235,7 @@ impl ChannelCapabilities {
             "persist" => self.can_persist,
             "manage_channels" => self.can_manage_channels,
             "view_provenance" => self.can_view_provenance,
+            "propose_goals" => self.can_propose_goals,
             _ => false,
         };
 

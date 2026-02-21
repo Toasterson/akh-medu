@@ -245,6 +245,22 @@ explanations. Multi-agent communication with capability tokens.
 - [x] `AgentError::Explain` transparent variant
 - [x] 18 new unit tests (parsing, rendering, derivation prose, helpers)
 
+### Phase 12g — Multi-Agent Communication ✓
+- [x] `CapabilityScope` enum: QueryAll, QueryTopics, AssertTopics, ProposeGoals, Subscribe, ViewProvenance
+- [x] `CapabilityToken` struct with scoped permissions, expiry, revocation — `is_valid()`, `permits()`, `revoke()`
+- [x] `AgentProtocolMessage` enum: Query, QueryResponse, Assert, ProposeGoal, Subscribe, Unsubscribe, GrantCapability, RevokeCapability, Ack, Error — `requires_token()`, `token_id()`
+- [x] `InterlocutorKind` enum: Human, Agent — with Default, Display, serde
+- [x] `TokenRegistry` — grant/revoke/get/tokens_for_pair/validate_message with pair indexing
+- [x] Trust bootstrap: `initial_trust_for_agent()`, `should_promote_trust()`
+- [x] `MessageContent::AgentMessage` variant in channel_message.rs, bypasses NLP classifier
+- [x] `UserIntent::AgentProtocol` variant in nlp.rs
+- [x] `InterlocutorProfile.kind: InterlocutorKind` field, `is_agent()` method
+- [x] `can_propose_goals` capability flag on `ChannelCapabilities` (Operator/Trusted: true, Social/Public: false)
+- [x] `Agent.token_registry` field with `token_registry()` / `token_registry_mut()` accessors
+- [x] `AgentError::MultiAgent` transparent variant
+- [x] Wired into TUI `process_input_local()` and headless chat in `main.rs`
+- [x] 22 new unit tests (tokens, registry, protocol messages, interlocutor kind, trust bootstrap)
+
 ## Phase 13 — Personal Assistant
 
 Email as bidirectional CommChannel (JMAP primary, IMAP fallback). OnlineHD VSA-native

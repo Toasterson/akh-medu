@@ -46,6 +46,14 @@ pub enum UserIntent {
     Explain {
         query: super::explain::ExplanationQuery,
     },
+    /// A structured agent-to-agent protocol message (Phase 12g).
+    ///
+    /// These bypass the NLP classifier entirely — they arrive as
+    /// `MessageContent::AgentMessage` and are dispatched to the
+    /// multi-agent handler for capability validation and processing.
+    AgentProtocol {
+        message: super::multi_agent::AgentProtocolMessage,
+    },
     /// Unrecognized input — pass through.
     Freeform { text: String },
 }

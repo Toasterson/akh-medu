@@ -194,6 +194,8 @@ pub struct Agent {
     pub(crate) constraint_checker: ConstraintChecker,
     /// Interlocutor registry — social KG and theory of mind (Phase 12d).
     pub(crate) interlocutor_registry: InterlocutorRegistry,
+    /// Capability token registry for multi-agent communication (Phase 12g).
+    pub(crate) token_registry: super::multi_agent::TokenRegistry,
     /// Optional WASM tool runtime (only when `wasm-tools` feature is enabled).
     #[cfg(feature = "wasm-tools")]
     pub(crate) wasm_runtime: Option<super::wasm_runtime::WasmToolRuntime>,
@@ -408,6 +410,7 @@ impl Agent {
             conversation_state: ConversationState::default(),
             constraint_checker: ConstraintChecker::new(),
             interlocutor_registry: InterlocutorRegistry::new(),
+            token_registry: super::multi_agent::TokenRegistry::new(),
             #[cfg(feature = "wasm-tools")]
             wasm_runtime: super::wasm_runtime::WasmToolRuntime::new().ok(),
         };
@@ -969,6 +972,16 @@ impl Agent {
     /// Get a mutable reference to the interlocutor registry.
     pub fn interlocutor_registry_mut(&mut self) -> &mut InterlocutorRegistry {
         &mut self.interlocutor_registry
+    }
+
+    /// Get a reference to the capability token registry.
+    pub fn token_registry(&self) -> &super::multi_agent::TokenRegistry {
+        &self.token_registry
+    }
+
+    /// Get a mutable reference to the capability token registry.
+    pub fn token_registry_mut(&mut self) -> &mut super::multi_agent::TokenRegistry {
+        &mut self.token_registry
     }
 
     /// Ensure an interlocutor is registered, auto-creating on first interaction.
@@ -2127,6 +2140,7 @@ impl Agent {
             conversation_state: ConversationState::default(),
             constraint_checker: ConstraintChecker::new(),
             interlocutor_registry: InterlocutorRegistry::new(),
+            token_registry: super::multi_agent::TokenRegistry::new(),
             #[cfg(feature = "wasm-tools")]
             wasm_runtime: super::wasm_runtime::WasmToolRuntime::new().ok(),
         };

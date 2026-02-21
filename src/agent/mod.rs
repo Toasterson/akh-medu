@@ -32,6 +32,7 @@ pub mod idle;
 pub mod library_learn;
 pub mod memory;
 pub mod metacognition;
+pub mod multi_agent;
 pub mod nlp;
 pub mod ooda;
 pub mod plan;
@@ -64,6 +65,10 @@ pub use constraint_check::{
 };
 pub use conversation::{ConversationState, ConversationTurn, GroundedResponse, GroundedTriple, ResponseDetail, Speaker};
 pub use interlocutor::{InterlocutorPredicates, InterlocutorProfile, InterlocutorRegistry, InterlocutorError, InterlocutorResult, interest_overlap};
+pub use multi_agent::{
+    AgentProtocolMessage, CapabilityScope, CapabilityToken, InterlocutorKind, MultiAgentError,
+    MultiAgentResult, TokenRegistry, initial_trust_for_agent, should_promote_trust,
+};
 #[cfg(feature = "oxifed")]
 pub use oxifed::{OxifedChannel, OxifedConfig, OxifedError, OxifedInboundHandle, OxifedResult};
 #[cfg(feature = "daemon")]
