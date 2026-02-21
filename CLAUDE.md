@@ -205,6 +205,18 @@ explanations. Multi-agent communication with capability tokens.
 - [x] `AgentError::ConstraintCheck` transparent variant
 - [x] 17 new unit tests
 
+### Phase 12d — Social KG with theory of mind ✓
+- [x] `InterlocutorProfile` with symbol_id, channel_ids, trust_level, knowledge_mt, interests, interaction tracking
+- [x] `InterlocutorPredicates` — 6 well-known KG relations (has-channel, has-trust-level, has-interest, last-interaction, interaction-count, has-knowledge-mt)
+- [x] `InterlocutorRegistry` — HashMap-based profile store with lazy predicate initialization
+- [x] Per-interlocutor microtheory creation via `engine.create_context()` (ContextDomain::Belief) for theory of mind
+- [x] VSA interest bundling: rebuild interest vectors on `add_interest()`, Hamming-based `find_similar()` and `interest_overlap()`
+- [x] Trust level management with operator immutability enforcement
+- [x] `record_knowledge()` — compartment-scoped "knows" triples in personal microtheory
+- [x] Auto-registration in TUI `process_inbound_local()` and headless chat via `agent.ensure_interlocutor()`
+- [x] `AgentError::Interlocutor` transparent variant
+- [x] 10 new unit tests
+
 ## Phase 13 — Personal Assistant
 
 Email as bidirectional CommChannel (JMAP primary, IMAP fallback). OnlineHD VSA-native

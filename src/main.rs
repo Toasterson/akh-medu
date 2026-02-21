@@ -2809,6 +2809,16 @@ fn main() -> Result<()> {
                     // Push through the operator channel and drain for classification.
                     operator_handle.push_text(trimmed);
                     let inbound = agent.drain_inbound();
+
+                    // Auto-register interlocutor on first interaction.
+                    if let Some(msg) = inbound.first() {
+                        let _ = agent.ensure_interlocutor(
+                            &msg.sender,
+                            &msg.channel_id,
+                            akh_medu::agent::ChannelKind::Operator,
+                        );
+                    }
+
                     let intent = inbound
                         .first()
                         .map(|msg| msg.classify())

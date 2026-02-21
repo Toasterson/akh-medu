@@ -16,6 +16,7 @@ use super::channel::{ChannelRegistry, ChannelResult};
 use super::channel_message::{ConstraintCheckStatus, InboundMessage};
 use super::constraint_check::{CheckOutcome, ConstraintChecker, EmissionDecision, emission_decision};
 use super::conversation::{ConversationState, ResponseDetail};
+use super::interlocutor::InterlocutorRegistry;
 use super::operator_channel::InboundHandle;
 use super::decomposition::{self, DecompositionOutput, MethodRegistry, MethodStats};
 use super::drives::DriveSystem;
@@ -191,6 +192,8 @@ pub struct Agent {
     pub(crate) conversation_state: ConversationState,
     /// Pre-communication constraint checker (Phase 12c).
     pub(crate) constraint_checker: ConstraintChecker,
+    /// Interlocutor registry — social KG and theory of mind (Phase 12d).
+    pub(crate) interlocutor_registry: InterlocutorRegistry,
     /// Optional WASM tool runtime (only when `wasm-tools` feature is enabled).
     #[cfg(feature = "wasm-tools")]
     pub(crate) wasm_runtime: Option<super::wasm_runtime::WasmToolRuntime>,
@@ -404,9 +407,13 @@ impl Agent {
             channel_registry: ChannelRegistry::new(),
             conversation_state: ConversationState::default(),
             constraint_checker: ConstraintChecker::new(),
+            interlocutor_registry: InterlocutorRegistry::new(),
             #[cfg(feature = "wasm-tools")]
             wasm_runtime: super::wasm_runtime::WasmToolRuntime::new().ok(),
         };
+
+        // Initialize interlocutor predicates.
+        let _ = agent.interlocutor_registry.init_predicates(&agent.engine);
 
         // Load tools from active skills.
         agent.load_skill_tools();
@@ -952,6 +959,31 @@ impl Agent {
     /// Get a mutable reference to the constraint checker.
     pub fn constraint_checker_mut(&mut self) -> &mut ConstraintChecker {
         &mut self.constraint_checker
+    }
+
+    /// Get a reference to the interlocutor registry.
+    pub fn interlocutor_registry(&self) -> &InterlocutorRegistry {
+        &self.interlocutor_registry
+    }
+
+    /// Get a mutable reference to the interlocutor registry.
+    pub fn interlocutor_registry_mut(&mut self) -> &mut InterlocutorRegistry {
+        &mut self.interlocutor_registry
+    }
+
+    /// Ensure an interlocutor is registered, auto-creating on first interaction.
+    ///
+    /// Returns a reference to their profile. If the interlocutor already exists,
+    /// updates their channel list and interaction count.
+    pub fn ensure_interlocutor(
+        &mut self,
+        interlocutor_id: &super::channel_message::InterlocutorId,
+        channel_id: &str,
+        channel_kind: super::channel::ChannelKind,
+    ) -> AgentResult<()> {
+        self.interlocutor_registry
+            .register(interlocutor_id, channel_id, channel_kind, &self.engine)?;
+        Ok(())
     }
 
     /// Run constraint checks on a grounded response and produce an
@@ -2094,9 +2126,13 @@ impl Agent {
             channel_registry: ChannelRegistry::new(),
             conversation_state: ConversationState::default(),
             constraint_checker: ConstraintChecker::new(),
+            interlocutor_registry: InterlocutorRegistry::new(),
             #[cfg(feature = "wasm-tools")]
             wasm_runtime: super::wasm_runtime::WasmToolRuntime::new().ok(),
         };
+
+        // Initialize interlocutor predicates.
+        let _ = agent.interlocutor_registry.init_predicates(&agent.engine);
 
         // Load tools from active skills.
         agent.load_skill_tools();
@@ -2138,6 +2174,7 @@ impl std::fmt::Debug for Agent {
             .field("channels", &self.channel_registry)
             .field("response_detail", &self.conversation_state.response_detail)
             .field("constraint_checker", &self.constraint_checker)
+            .field("interlocutors", &self.interlocutor_registry.len())
             .finish()
     }
 }

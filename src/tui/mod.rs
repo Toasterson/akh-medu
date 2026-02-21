@@ -285,15 +285,30 @@ impl AkhTui {
     /// Drain all pending inbound messages from the agent's channel registry
     /// and dispatch each one through intent classification.
     fn process_inbound_local(&mut self) {
-        let ChatBackend::Local { ref mut agent, .. } = self.backend else {
-            return;
+        // Drain and process inbound messages in two passes to avoid borrow conflicts.
+        let texts: Vec<String> = {
+            let ChatBackend::Local { ref mut agent, .. } = self.backend else {
+                return;
+            };
+
+            let inbound = agent.drain_inbound();
+            let mut texts = Vec::new();
+            for msg in &inbound {
+                // Auto-register interlocutor on first interaction.
+                let _ = agent.ensure_interlocutor(
+                    &msg.sender,
+                    &msg.channel_id,
+                    crate::agent::ChannelKind::Operator,
+                );
+                if let Some(text) = msg.text() {
+                    texts.push(text.to_string());
+                }
+            }
+            texts
         };
 
-        let inbound = agent.drain_inbound();
-        for msg in inbound {
-            if let Some(text) = msg.text() {
-                self.process_input_local(text);
-            }
+        for text in &texts {
+            self.process_input_local(text);
         }
     }
 

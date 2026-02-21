@@ -114,6 +114,10 @@ pub enum AgentError {
     #[diagnostic(transparent)]
     ConstraintCheck(#[from] super::constraint_check::ConstraintCheckError),
 
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Interlocutor(#[from] super::interlocutor::InterlocutorError),
+
     #[error("{0}")]
     #[diagnostic(
         code(akh::agent::engine),

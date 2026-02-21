@@ -22,6 +22,7 @@ pub mod decomposition;
 pub mod drives;
 pub mod error;
 pub mod goal;
+pub mod interlocutor;
 pub mod operator_channel;
 pub mod goal_generation;
 pub mod idle;
@@ -59,6 +60,7 @@ pub use constraint_check::{
     ConstraintWarning, EmissionDecision, SensitivityLevel, emission_decision,
 };
 pub use conversation::{ConversationState, ConversationTurn, GroundedResponse, GroundedTriple, ResponseDetail, Speaker};
+pub use interlocutor::{InterlocutorPredicates, InterlocutorProfile, InterlocutorRegistry, InterlocutorError, InterlocutorResult, interest_overlap};
 #[cfg(feature = "daemon")]
 pub use daemon::{AgentDaemon, DaemonConfig};
 pub use decomposition::{
