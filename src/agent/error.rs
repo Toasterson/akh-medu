@@ -136,6 +136,10 @@ pub enum AgentError {
     #[diagnostic(transparent)]
     Email(#[from] crate::email::EmailError),
 
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Pim(#[from] super::pim::PimError),
+
     #[error("{0}")]
     #[diagnostic(
         code(akh::agent::engine),

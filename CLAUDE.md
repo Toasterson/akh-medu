@@ -346,6 +346,28 @@ identities, and email composition pipeline via grammar module + constraint check
 - [x] Quick predicates: `has_action_items()`, `has_calendar_event()`, `has_shipment_info()`
 - [x] ~26 new unit tests
 
+### Phase 13e — Personal Task & Project Management ✓
+- [x] `PimError` miette diagnostic enum (5 variants: TaskNotFound, InvalidTransition, CycleDetected, RecurrenceParse, Engine) with `PimResult<T>`
+- [x] `GtdState` enum (Inbox/Next/Waiting/Someday/Reference/Done) with validated transitions via `can_transition_to()`
+- [x] `EisenhowerQuadrant` enum (Do/Schedule/Delegate/Eliminate) with `classify(urgency, importance)` and `priority_bonus()`
+- [x] `ParaCategory`, `PimContext`, `EnergyLevel`, `Recurrence` enums — all with as_label/from_label, Display, Serialize
+- [x] `PimMetadata` struct (14 fields) — per-goal overlay with GTD state, urgency/importance, quadrant, PARA, contexts, energy, deadline, recurrence
+- [x] `PimPredicates` — 14 well-known KG relations in `pim:` namespace
+- [x] `PimRoleVectors` — 6 deterministic VSA role vectors for priority encoding
+- [x] `PimManager` — HashMap metadata + petgraph DiGraph DAG + predicates + roles; add_task, transition_gtd, update_eisenhower, set_para/context/energy/recurrence, available_tasks, add/remove_dependency, topological_order, critical_path, ready_tasks, process_recurring_completions, overdue_tasks, encode_priority, find_similar_priority
+- [x] `SerializableDag` — custom Serialize/Deserialize for petgraph DiGraph
+- [x] `GtdReviewResult` + `gtd_weekly_review()` — weekly review analysis
+- [x] `action_items_to_pim_tasks()` — bridge from Phase 13d ActionItemGoalSpec
+- [x] `persist()`/`restore()` via bincode + `put_meta`/`get_meta`
+- [x] `DerivationKind::PimTaskManaged` (tag 53) provenance variant
+- [x] `pim_rules()` — 2 e-graph rewrite rules (pim-unblock, pim-deadline-chain)
+- [x] `Agent.pim_manager` field with init/resume/persist lifecycle
+- [x] `reflect()` extended with pim/projects params, `gtd_review` on ReflectionResult
+- [x] `UserIntent::PimCommand` in NLP, wired into TUI + headless
+- [x] CLI: `Commands::Pim` with 9 subcommands (Inbox, Next, Review, Project, Add, Transition, Matrix, Deps, Overdue)
+- [x] `AgentError::Pim` transparent variant
+- [x] ~30 new unit tests
+
 ## Phase 14 — Purpose-Driven Bootstrapping with Identity
 
 Autonomous domain knowledge acquisition AND identity construction from operator statements

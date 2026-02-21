@@ -757,6 +757,13 @@ pub fn derivation_kind_prose(kind: &DerivationKind) -> String {
         } => {
             format!("email extraction: found {item_count} items ({kinds_found})")
         }
+        DerivationKind::PimTaskManaged {
+            gtd_state,
+            quadrant,
+            ..
+        } => {
+            format!("PIM task managed: GTD '{gtd_state}', quadrant '{quadrant}'")
+        }
     }
 }
 

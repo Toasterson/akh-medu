@@ -632,6 +632,11 @@ impl AkhTui {
                     std::mem::discriminant(message),
                 )));
             }
+            crate::agent::UserIntent::PimCommand { subcommand, args } => {
+                self.messages.push(AkhMessage::system(format!(
+                    "PIM commands are available via the CLI: akh-medu pim {subcommand} {args}",
+                )));
+            }
             crate::agent::UserIntent::Freeform { text: _ } => {
                 self.messages.push(AkhMessage::system(
                     "I don't understand that. Type /help for commands.".to_string(),

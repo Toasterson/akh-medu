@@ -59,6 +59,27 @@ pub fn builtin_rules() -> Vec<egg::Rewrite<AkhLang, ()>> {
     ]
 }
 
+/// PIM-specific rewrite rules (Phase 13e).
+///
+/// - `pim-unblock`: when a blocker is done, the blocked task becomes next.
+/// - `pim-deadline-chain`: earliest-start constraint from blocker's deadline.
+pub fn pim_rules() -> Vec<egg::Rewrite<AkhLang, ()>> {
+    vec![
+        // If triple(blocked, blocked-by, blocker) and triple(blocker, gtd-state, done)
+        // then triple(blocked, gtd-state, next).
+        egg::rewrite!("pim-unblock";
+            "(and (triple ?blocked ?blocked_by ?blocker) (triple ?blocker ?gtd_state ?done))"
+            => "(triple ?blocked ?gtd_state ?done)"
+        ),
+        // Deadline chain: triple(A, deadline, D) and triple(B, blocked-by, A) implies
+        // triple(B, deadline, D) as earliest-start.
+        egg::rewrite!("pim-deadline-chain";
+            "(and (triple ?a ?deadline ?d) (triple ?b ?blocked_by ?a))"
+            => "(and (triple ?a ?deadline ?d) (and (triple ?b ?blocked_by ?a) (triple ?b ?deadline ?d)))"
+        ),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

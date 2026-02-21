@@ -245,6 +245,12 @@ enum Commands {
         action: AgentAction,
     },
 
+    /// Personal information management (Phase 13e).
+    Pim {
+        #[command(subcommand)]
+        action: PimAction,
+    },
+
     /// Manage seed packs (knowledge bootstrapping).
     Seed {
         #[command(subcommand)]
@@ -579,6 +585,70 @@ enum AgentAction {
     DaemonStop,
     /// Show background daemon status (requires akhomed).
     DaemonStatus,
+}
+
+#[derive(Subcommand)]
+enum PimAction {
+    /// Show all inbox items.
+    Inbox,
+    /// Show next actions (optionally filtered by context and energy).
+    Next {
+        /// Filter by GTD context (e.g. "computer", "office").
+        #[arg(long)]
+        context: Option<String>,
+        /// Filter by energy level (low, medium, high).
+        #[arg(long)]
+        energy: Option<String>,
+    },
+    /// Run a GTD weekly review.
+    Review,
+    /// Show tasks for a PARA project.
+    Project {
+        /// Project name.
+        name: String,
+    },
+    /// Add PIM metadata to an existing goal (by numeric ID).
+    Add {
+        /// Goal symbol ID.
+        #[arg(long)]
+        goal: u64,
+        /// Initial GTD state (inbox, next, waiting, someday, reference).
+        #[arg(long, default_value = "inbox")]
+        gtd: String,
+        /// Urgency (0.0–1.0).
+        #[arg(long, default_value = "0.5")]
+        urgency: f32,
+        /// Importance (0.0–1.0).
+        #[arg(long, default_value = "0.5")]
+        importance: f32,
+        /// PARA category (project, area, resource, archive).
+        #[arg(long)]
+        para: Option<String>,
+        /// GTD contexts (comma-separated, e.g. "computer,office").
+        #[arg(long)]
+        contexts: Option<String>,
+        /// Recurrence pattern (e.g. "daily", "weekly:mon,fri", "every:3d").
+        #[arg(long)]
+        recur: Option<String>,
+        /// Deadline (unix timestamp).
+        #[arg(long)]
+        deadline: Option<u64>,
+    },
+    /// Transition a task's GTD state.
+    Transition {
+        /// Goal symbol ID.
+        #[arg(long)]
+        goal: u64,
+        /// Target GTD state.
+        #[arg(long)]
+        to: String,
+    },
+    /// Show Eisenhower matrix.
+    Matrix,
+    /// Show dependency graph.
+    Deps,
+    /// Show overdue tasks.
+    Overdue,
 }
 
 #[derive(Subcommand)]
@@ -2723,6 +2793,269 @@ fn main() -> Result<()> {
             }
         }
 
+        Commands::Pim { action } => {
+            let engine = Arc::new(Engine::new(config).into_diagnostic()?);
+            let agent_config = akh_medu::agent::AgentConfig::default();
+            let mut agent = if akh_medu::agent::Agent::has_persisted_session(&engine) {
+                akh_medu::agent::Agent::resume(Arc::clone(&engine), agent_config)
+                    .into_diagnostic()?
+            } else {
+                akh_medu::agent::Agent::new(Arc::clone(&engine), agent_config)
+                    .into_diagnostic()?
+            };
+
+            match action {
+                PimAction::Inbox => {
+                    let ids = agent.pim_manager().tasks_by_gtd_state(
+                        akh_medu::agent::GtdState::Inbox,
+                    );
+                    if ids.is_empty() {
+                        println!("Inbox is empty.");
+                    } else {
+                        println!("Inbox ({} items):", ids.len());
+                        for id in &ids {
+                            let label = engine.resolve_label(*id);
+                            let quadrant = agent
+                                .pim_manager()
+                                .get_metadata(id.get())
+                                .map(|m| m.quadrant.to_string())
+                                .unwrap_or_default();
+                            println!("  [{:>5}] {} ({})", id.get(), label, quadrant);
+                        }
+                    }
+                }
+                PimAction::Next { context, energy } => {
+                    let ctx = context.map(akh_medu::agent::PimContext);
+                    let nrg = energy.and_then(|e| akh_medu::agent::EnergyLevel::from_label(&e));
+                    let ids = agent.pim_manager().available_tasks(
+                        ctx.as_ref(),
+                        nrg,
+                        agent.goals(),
+                    );
+                    if ids.is_empty() {
+                        println!("No next actions available.");
+                    } else {
+                        println!("Next actions ({} tasks):", ids.len());
+                        for id in &ids {
+                            let label = engine.resolve_label(*id);
+                            let meta = agent.pim_manager().get_metadata(id.get());
+                            let quadrant = meta
+                                .map(|m| m.quadrant.to_string())
+                                .unwrap_or_default();
+                            let energy_str = meta
+                                .and_then(|m| m.energy)
+                                .map(|e| format!(" [{}]", e))
+                                .unwrap_or_default();
+                            println!(
+                                "  [{:>5}] {} ({}){}",
+                                id.get(),
+                                label,
+                                quadrant,
+                                energy_str
+                            );
+                        }
+                    }
+                }
+                PimAction::Review => {
+                    let review = akh_medu::agent::pim::gtd_weekly_review(
+                        agent.pim_manager(),
+                        agent.goals(),
+                        agent.projects(),
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs(),
+                    );
+                    println!("{}", review.summary);
+                    if !review.overdue.is_empty() {
+                        println!("\nOverdue:");
+                        for id in &review.overdue {
+                            println!("  [{:>5}] {}", id.get(), engine.resolve_label(*id));
+                        }
+                    }
+                    if !review.stale_inbox.is_empty() {
+                        println!("\nStale inbox (>7 days):");
+                        for id in &review.stale_inbox {
+                            println!("  [{:>5}] {}", id.get(), engine.resolve_label(*id));
+                        }
+                    }
+                    if !review.stalled_projects.is_empty() {
+                        println!("\nStalled projects (no Next actions):");
+                        for id in &review.stalled_projects {
+                            println!("  [{:>5}] {}", id.get(), engine.resolve_label(*id));
+                        }
+                    }
+                    if !review.adjustments.is_empty() {
+                        println!("\nRecommended adjustments: {}", review.adjustments.len());
+                    }
+                }
+                PimAction::Project { name } => {
+                    let project = agent
+                        .projects()
+                        .iter()
+                        .find(|p| p.name == name);
+                    match project {
+                        Some(p) => {
+                            println!("Project: {} ({:?})", p.name, p.status);
+                            for gid in &p.goals {
+                                let label = engine.resolve_label(*gid);
+                                let gtd = agent
+                                    .pim_manager()
+                                    .get_metadata(gid.get())
+                                    .map(|m| m.gtd_state.to_string())
+                                    .unwrap_or_else(|| "no-pim".into());
+                                println!("  [{:>5}] {} (GTD: {})", gid.get(), label, gtd);
+                            }
+                        }
+                        None => println!("Project '{}' not found.", name),
+                    }
+                }
+                PimAction::Add {
+                    goal,
+                    gtd,
+                    urgency,
+                    importance,
+                    para,
+                    contexts,
+                    recur,
+                    deadline,
+                } => {
+                    let gtd_state = akh_medu::agent::GtdState::from_label(&gtd)
+                        .ok_or_else(|| miette::miette!("unknown GTD state: {gtd}"))?;
+                    let goal_sym = akh_medu::symbol::SymbolId::new(goal)
+                        .ok_or_else(|| miette::miette!("invalid goal ID: {goal}"))?;
+
+                    agent
+                        .pim_manager_mut()
+                        .add_task(&engine, goal_sym, gtd_state, urgency, importance)
+                        .into_diagnostic()?;
+
+                    if let Some(ref para_str) = para {
+                        if let Some(cat) = akh_medu::agent::ParaCategory::from_label(para_str) {
+                            agent
+                                .pim_manager_mut()
+                                .set_para(&engine, goal_sym, cat)
+                                .into_diagnostic()?;
+                        }
+                    }
+
+                    if let Some(ref ctx_str) = contexts {
+                        for ctx in ctx_str.split(',') {
+                            agent
+                                .pim_manager_mut()
+                                .add_context(
+                                    &engine,
+                                    goal_sym,
+                                    akh_medu::agent::PimContext(ctx.trim().to_string()),
+                                )
+                                .into_diagnostic()?;
+                        }
+                    }
+
+                    if let Some(ref recur_str) = recur {
+                        let recurrence = akh_medu::agent::Recurrence::parse(recur_str)
+                            .into_diagnostic()?;
+                        agent
+                            .pim_manager_mut()
+                            .set_recurrence(&engine, goal_sym, recurrence)
+                            .into_diagnostic()?;
+                    }
+
+                    if let Some(dl) = deadline {
+                        if let Some(meta) =
+                            agent.pim_manager_mut().get_metadata_mut(goal_sym.get())
+                        {
+                            meta.deadline = Some(dl);
+                        }
+                    }
+
+                    println!(
+                        "Added PIM metadata to goal {} (GTD: {}, quadrant: {})",
+                        goal,
+                        gtd_state,
+                        akh_medu::agent::EisenhowerQuadrant::classify(urgency, importance),
+                    );
+                }
+                PimAction::Transition { goal, to } => {
+                    let new_state = akh_medu::agent::GtdState::from_label(&to)
+                        .ok_or_else(|| miette::miette!("unknown GTD state: {to}"))?;
+                    let goal_sym = akh_medu::symbol::SymbolId::new(goal)
+                        .ok_or_else(|| miette::miette!("invalid goal ID: {goal}"))?;
+                    agent
+                        .pim_manager_mut()
+                        .transition_gtd(&engine, goal_sym, new_state)
+                        .into_diagnostic()?;
+                    println!("Transitioned goal {} to GTD state: {}", goal, new_state);
+                }
+                PimAction::Matrix => {
+                    for quad in [
+                        akh_medu::agent::EisenhowerQuadrant::Do,
+                        akh_medu::agent::EisenhowerQuadrant::Schedule,
+                        akh_medu::agent::EisenhowerQuadrant::Delegate,
+                        akh_medu::agent::EisenhowerQuadrant::Eliminate,
+                    ] {
+                        let ids = agent.pim_manager().tasks_by_quadrant(quad);
+                        println!(
+                            "{} ({} tasks):",
+                            quad.as_label().to_uppercase(),
+                            ids.len()
+                        );
+                        for id in &ids {
+                            let label = engine.resolve_label(*id);
+                            let gtd = agent
+                                .pim_manager()
+                                .get_metadata(id.get())
+                                .map(|m| m.gtd_state.to_string())
+                                .unwrap_or_default();
+                            println!("  [{:>5}] {} (GTD: {})", id.get(), label, gtd);
+                        }
+                    }
+                }
+                PimAction::Deps => {
+                    match agent.pim_manager().topological_order() {
+                        Ok(topo) => {
+                            println!("Dependency order ({} tasks):", topo.len());
+                            for (i, id) in topo.iter().enumerate() {
+                                let label = engine.resolve_label(*id);
+                                println!("  {}. [{:>5}] {}", i + 1, id.get(), label);
+                            }
+                        }
+                        Err(e) => println!("Dependency cycle detected: {e}"),
+                    }
+                }
+                PimAction::Overdue => {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    let ids = agent.pim_manager().overdue_tasks(now);
+                    if ids.is_empty() {
+                        println!("No overdue tasks.");
+                    } else {
+                        println!("Overdue ({} tasks):", ids.len());
+                        for id in &ids {
+                            let label = engine.resolve_label(*id);
+                            let due = agent
+                                .pim_manager()
+                                .get_metadata(id.get())
+                                .and_then(|m| m.next_due)
+                                .unwrap_or(0);
+                            let overdue_secs = now.saturating_sub(due);
+                            let overdue_days = overdue_secs / 86_400;
+                            println!(
+                                "  [{:>5}] {} (overdue by {} days)",
+                                id.get(),
+                                label,
+                                overdue_days
+                            );
+                        }
+                    }
+                }
+            }
+
+            agent.persist_session().into_diagnostic()?;
+        }
+
         Commands::Chat { skill, headless } => {
             let ws_name = cli.workspace.clone();
 
@@ -2980,6 +3313,9 @@ fn main() -> Result<()> {
                         }
                         akh_medu::agent::UserIntent::AgentProtocol { .. } => {
                             "[agent protocol] agent-to-agent messages are not supported in headless mode".to_string()
+                        }
+                        akh_medu::agent::UserIntent::PimCommand { subcommand, args } => {
+                            format!("PIM commands are available via the CLI: akh-medu pim {subcommand} {args}")
                         }
                         akh_medu::agent::UserIntent::Freeform { .. } => {
                             "I don't understand that. Type 'help' for commands.".to_string()
@@ -4179,6 +4515,16 @@ fn format_derivation_kind(kind: &DerivationKind, engine: &Engine) -> String {
             kinds_found,
         } => {
             format!("email extracted: {email_message_id} → {item_count} items ({kinds_found})")
+        }
+        DerivationKind::PimTaskManaged {
+            goal_id_raw,
+            gtd_state,
+            quadrant,
+        } => {
+            format!(
+                "PIM task managed: goal {} (GTD: {}, quadrant: {})",
+                goal_id_raw, gtd_state, quadrant
+            )
         }
     }
 }

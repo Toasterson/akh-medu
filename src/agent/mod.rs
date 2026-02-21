@@ -35,6 +35,7 @@ pub mod metacognition;
 pub mod multi_agent;
 pub mod nlp;
 pub mod ooda;
+pub mod pim;
 pub mod plan;
 pub mod priority_reasoning;
 pub mod project;
@@ -98,6 +99,11 @@ pub use nlp::{QuestionWord, UserIntent, classify_intent};
 pub use ooda::{
     ActionResult, Decision, DecisionImpasse, GoalProgress, ImpasseKind, Observation,
     OodaCycleResult, Orientation,
+};
+pub use pim::{
+    DependencyEdge as PimDependencyEdge, EisenhowerQuadrant, EnergyLevel, GtdReviewResult,
+    GtdState, ParaCategory, PimContext, PimError, PimManager, PimMetadata, PimPredicates,
+    PimResult, Recurrence,
 };
 pub use plan::{Plan, PlanStatus, PlanStep, StepStatus};
 pub use priority_reasoning::{Audience, PriorityArgument, PriorityVerdict, Value};

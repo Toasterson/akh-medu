@@ -196,6 +196,8 @@ pub struct Agent {
     pub(crate) interlocutor_registry: InterlocutorRegistry,
     /// Capability token registry for multi-agent communication (Phase 12g).
     pub(crate) token_registry: super::multi_agent::TokenRegistry,
+    /// Personal information manager (Phase 13e).
+    pub(crate) pim_manager: super::pim::PimManager,
     /// Optional WASM tool runtime (only when `wasm-tools` feature is enabled).
     #[cfg(feature = "wasm-tools")]
     pub(crate) wasm_runtime: Option<super::wasm_runtime::WasmToolRuntime>,
@@ -411,12 +413,16 @@ impl Agent {
             constraint_checker: ConstraintChecker::new(),
             interlocutor_registry: InterlocutorRegistry::new(),
             token_registry: super::multi_agent::TokenRegistry::new(),
+            pim_manager: super::pim::PimManager::default(),
             #[cfg(feature = "wasm-tools")]
             wasm_runtime: super::wasm_runtime::WasmToolRuntime::new().ok(),
         };
 
         // Initialize interlocutor predicates.
         let _ = agent.interlocutor_registry.init_predicates(&agent.engine);
+
+        // Initialize PIM predicates.
+        let _ = agent.pim_manager.ensure_init(&agent.engine);
 
         // Load tools from active skills.
         agent.load_skill_tools();
@@ -984,6 +990,16 @@ impl Agent {
         &mut self.token_registry
     }
 
+    /// Get a reference to the PIM manager.
+    pub fn pim_manager(&self) -> &super::pim::PimManager {
+        &self.pim_manager
+    }
+
+    /// Get a mutable reference to the PIM manager.
+    pub fn pim_manager_mut(&mut self) -> &mut super::pim::PimManager {
+        &mut self.pim_manager
+    }
+
     /// Ensure an interlocutor is registered, auto-creating on first interaction.
     ///
     /// Returns a reference to their profile. If the interlocutor already exists,
@@ -1336,6 +1352,8 @@ impl Agent {
             self.cycle_count,
             &self.config.reflection,
             self.psyche.as_mut(),
+            Some(&self.pim_manager),
+            Some(&self.projects),
         )?;
 
         // Record reflection in WM.
@@ -1955,6 +1973,18 @@ impl Agent {
         // Persist watches.
         watch::persist_watches(&self.engine, &self.watches)?;
 
+        // Persist PIM manager (Phase 13e).
+        let pim_bytes = bincode::serialize(&self.pim_manager).map_err(|e| {
+            AgentError::ConsolidationFailed {
+                message: format!("failed to serialize PIM manager: {e}"),
+            }
+        })?;
+        store
+            .put_meta(b"agent:pim_manager", &pim_bytes)
+            .map_err(|e| AgentError::ConsolidationFailed {
+                message: format!("failed to persist PIM manager: {e}"),
+            })?;
+
         // Flush the engine's durable store.
         self.engine
             .persist()
@@ -2105,6 +2135,12 @@ impl Agent {
         // Restore watches from durable store.
         let watches = watch::restore_watches(&engine).unwrap_or_default();
 
+        // Restore PIM manager (Phase 13e).
+        let pim_manager = super::pim::PimManager::restore(&engine)
+            .unwrap_or_else(|_| {
+                super::pim::PimManager::new(&engine).unwrap_or_default()
+            });
+
         let session_start_cycle = cycle_count;
         let chunking_config = config.chunking.clone();
 
@@ -2141,6 +2177,7 @@ impl Agent {
             constraint_checker: ConstraintChecker::new(),
             interlocutor_registry: InterlocutorRegistry::new(),
             token_registry: super::multi_agent::TokenRegistry::new(),
+            pim_manager,
             #[cfg(feature = "wasm-tools")]
             wasm_runtime: super::wasm_runtime::WasmToolRuntime::new().ok(),
         };

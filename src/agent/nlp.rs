@@ -54,6 +54,8 @@ pub enum UserIntent {
     AgentProtocol {
         message: super::multi_agent::AgentProtocolMessage,
     },
+    /// PIM command (Phase 13e): "pim inbox", "pim next", etc.
+    PimCommand { subcommand: String, args: String },
     /// Unrecognized input — pass through.
     Freeform { text: String },
 }
@@ -70,6 +72,19 @@ pub fn classify_intent(input: &str) -> UserIntent {
     }
 
     let lower = trimmed.to_lowercase();
+
+    // PIM commands (Phase 13e).
+    if lower == "pim" || lower.starts_with("pim ") {
+        let rest = if lower == "pim" {
+            ""
+        } else {
+            trimmed[4..].trim()
+        };
+        let mut parts = rest.splitn(2, char::is_whitespace);
+        let subcommand = parts.next().unwrap_or("").to_string();
+        let args = parts.next().unwrap_or("").to_string();
+        return UserIntent::PimCommand { subcommand, args };
+    }
 
     // Help.
     if lower == "help" || lower == "?" || lower.starts_with("help ") {

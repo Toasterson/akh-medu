@@ -318,6 +318,13 @@ pub enum DerivationKind {
         item_count: usize,
         kinds_found: String,
     },
+
+    /// PIM task managed (Phase 13e).
+    PimTaskManaged {
+        goal_id_raw: u64,
+        gtd_state: String,
+        quadrant: String,
+    },
 }
 
 impl DerivationKind {
@@ -377,6 +384,7 @@ impl DerivationKind {
             Self::SpamClassification { .. } => 50,
             Self::EmailTriaged { .. } => 51,
             Self::EmailExtracted { .. } => 52,
+            Self::PimTaskManaged { .. } => 53,
         }
     }
 }

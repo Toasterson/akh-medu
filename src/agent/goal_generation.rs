@@ -876,6 +876,7 @@ mod tests {
             goal_proposals: Vec::new(),
             resource_reports: Vec::new(),
             compilation_opportunities: Vec::new(),
+            gtd_review: None,
         };
         let proposals = proposals_from_reflection(&reflection);
         assert!(proposals.is_empty());
@@ -904,6 +905,7 @@ mod tests {
             }],
             resource_reports: Vec::new(),
             compilation_opportunities: Vec::new(),
+            gtd_review: None,
         };
         let proposals = proposals_from_reflection(&reflection);
         assert_eq!(proposals.len(), 1);

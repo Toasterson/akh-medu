@@ -142,6 +142,8 @@ pub struct ReflectionResult {
     pub resource_reports: Vec<super::resource::ResourceReport>,
     /// Goal IDs that are candidates for procedural compilation (Phase 11h).
     pub compilation_opportunities: Vec<crate::symbol::SymbolId>,
+    /// GTD weekly review result (Phase 13e), if PIM is active.
+    pub gtd_review: Option<super::pim::GtdReviewResult>,
 }
 
 // ---------------------------------------------------------------------------
@@ -158,6 +160,8 @@ pub fn reflect(
     current_cycle: u64,
     config: &ReflectionConfig,
     psyche: Option<&mut crate::compartment::psyche::Psyche>,
+    pim: Option<&super::pim::PimManager>,
+    projects: Option<&[super::project::Project]>,
 ) -> AgentResult<ReflectionResult> {
     // ── Tool effectiveness ────────────────────────────────────────────
 
@@ -174,7 +178,7 @@ pub fn reflect(
 
     // ── Meta-reasoning: compute adjustments ──────────────────────────
 
-    let adjustments = compute_adjustments(goals, &tool_insights, &goal_insights, config);
+    let mut adjustments = compute_adjustments(goals, &tool_insights, &goal_insights, config);
 
     // ── Summary ──────────────────────────────────────────────────────
 
@@ -204,6 +208,21 @@ pub fn reflect(
 
     let goal_proposals = generate_reflection_proposals(&goal_insights, &tool_insights, memory_pressure);
 
+    // GTD weekly review (Phase 13e).
+    let gtd_review = match (pim, projects) {
+        (Some(pim_mgr), Some(projs)) => {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let review = super::pim::gtd_weekly_review(pim_mgr, goals, projs, now);
+            // Merge review adjustments into the main adjustments list.
+            adjustments.extend(review.adjustments.clone());
+            Some(review)
+        }
+        _ => None,
+    };
+
     let result = ReflectionResult {
         at_cycle: current_cycle,
         tool_insights,
@@ -215,6 +234,7 @@ pub fn reflect(
         goal_proposals,
         resource_reports: Vec::new(),
         compilation_opportunities: Vec::new(),
+        gtd_review,
     };
 
     // Psyche evolution (if loaded).
