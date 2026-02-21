@@ -743,6 +743,13 @@ pub fn derivation_kind_prose(kind: &DerivationKind) -> String {
         } => {
             format!("spam classification: {decision} (VSA confidence: {vsa_confidence:.2})")
         }
+        DerivationKind::EmailTriaged {
+            route,
+            importance_score,
+            ..
+        } => {
+            format!("email triaged: routed to {route} (importance: {importance_score:.2})")
+        }
     }
 }
 

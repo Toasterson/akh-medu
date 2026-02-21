@@ -1,6 +1,6 @@
 # Akh-medu Architecture
 
-> Last updated: 2026-02-21 (Phase 13b complete — spam classification)
+> Last updated: 2026-02-21 (Phase 13c complete — email triage & priority)
 
 ## Overview
 
@@ -20,7 +20,7 @@ Akh-medu is a neuro-symbolic AI engine that runs entirely on CPU with no LLM dep
 ```
 src/
 ├── agent/              46 modules — OODA loop, tools (code_gen, code_ingest, compile_feedback, pattern_mine), memory, goals, drives, goal_generation, HTN decomposition, priority reasoning (argumentation), projects (microtheory-backed), planning, psyche, library learning, watch (GDA expectation monitoring), metacognition (Nelson-Narens monitoring/control, ZPD, AGM belief revision), resource awareness (VOC, CBR effort estimation), chunking (procedural learning), channel abstraction (CommChannel trait, ChannelRegistry, OperatorChannel), conversation (grounded dialogue, ConversationState, GroundedResponse), constraint_check (pre-communication constraint pipeline), interlocutor (social KG, InterlocutorRegistry, theory-of-mind microtheories, VSA interest vectors), oxifed (ActivityPub federation via AMQP bridge, feature-gated), explain (provenance-to-prose pipeline, DerivationNode trees, 5 query types), multi_agent (capability tokens, AgentProtocolMessage, TokenRegistry, trust bootstrap)
-├── email/              7 modules — email channel (feature-gated): EmailConnector trait (JMAP/IMAP/Mock), MIME parsing (mail-parser), JWZ threading (RFC 5256), email composition (lettre), EmailChannel implementing CommChannel, EmailPredicates (14 well-known relations), OnlineHD spam classifier (VSA + Bayesian + deterministic rules)
+├── email/              8 modules — email channel (feature-gated): EmailConnector trait (JMAP/IMAP/Mock), MIME parsing (mail-parser), JWZ threading (RFC 5256), email composition (lettre), EmailChannel implementing CommChannel, EmailPredicates (14 well-known relations), OnlineHD spam classifier (VSA + Bayesian + deterministic rules), email triage & priority (sender reputation, four-feature importance scoring, VSA prototypes, HEY-style screening)
 ├── autonomous/          6 modules — background learning, confidence fusion, grounding
 ├── argumentation/       1 module  — pro/con argumentation (Phase 9e): meta-rules, verdicts, evidence chains
 ├── compartment/         5 modules — knowledge isolation, Jungian psyche, microtheories (Phase 9a, per-repo code scoping), CWA/circumscription (Phase 9m)
@@ -39,7 +39,7 @@ src/
 ├── error.rs                       — miette + thiserror rich diagnostics
 ├── rule_macro.rs                  — rule macro predicates (Phase 9g): RuleMacro trait, registry, genls/relationAllExists/relationExistsAll
 ├── temporal.rs                    — temporal projection (Phase 9k): TemporalProfile, decay computation, registry
-├── provenance.rs                  — persistent explanation ledger (redb, multi-index, 51 derivation kinds)
+├── provenance.rs                  — persistent explanation ledger (redb, multi-index, 52 derivation kinds)
 ├── skolem.rs                      — Skolem functions (Phase 9h): existential witnesses, grounding, auto-ground
 ├── tms.rs                         — truth maintenance system (Phase 9c): support sets, retraction cascades
 ├── symbol.rs                      — SymbolId (NonZeroU64), SymbolKind, allocator
@@ -203,6 +203,23 @@ Phase 13a–13i: Personal assistant (9 sub-phases):
 - [x] `persist()`/`restore()` via bincode + `put_meta`/`get_meta` on engine's durable store
 - [x] `record_classification_provenance()` — `DerivationKind::SpamClassification` (tag 50)
 - [x] 24 new unit tests
+
+### Phase 13c — Email Triage & Priority ✓
+- [x] `EmailRoute` enum: Important, Feed, PaperTrail, ScreeningQueue, Spam — with Display, Serialize/Deserialize
+- [x] `SenderRelationship` enum: Colleague, Friend, Service, Newsletter, Unknown — with Display, Serialize/Deserialize, weight()
+- [x] `SenderStats` — per-sender reputation: address, message_count, reply_count, reply_rate (EMA), avg_reply_time_secs (EMA), relationship, routing, symbol_id
+- [x] `TriageRoleVectors` — 8 deterministic role HyperVecs via `encode_token(ops, "triage-role:X")`
+- [x] `ImportanceWeights` — configurable social/content/thread/label weights (default 0.35/0.25/0.20/0.20)
+- [x] `TriagePredicates` — 7 well-known KG relations (sender: namespace)
+- [x] `TriageEngine` — sender stats HashMap + OnlineHD important/low-priority prototypes + role vectors + weights
+- [x] Four-feature importance scoring: social (reply_rate, frequency, recency, relationship), content (VSA prototype similarity), thread (in_reply_to, references depth), label (operator-assigned route)
+- [x] HEY-style screening: `needs_screening()` → ScreeningQueue for first-time unrouted senders
+- [x] `encode_email()` — 7-feature triage-oriented role-filler binding → bundle
+- [x] `train_important()`/`train_low_priority()` — OnlineHD adaptive update via majority-vote bundling
+- [x] `persist()`/`restore()` via bincode + `put_meta`/`get_meta`
+- [x] `record_triage_provenance()` — `DerivationKind::EmailTriaged` (tag 51)
+- [x] `sync_sender_to_kg()` — KG triple sync for SPARQL queryability
+- [x] 26 new unit tests
 
 Phase 14a–14i: Purpose-driven bootstrapping with identity (9 sub-phases):
 - **Identity**: 14a purpose + identity parser (NL → PurposeModel + IdentityRef, character reference extraction), 14b identity resolution (Wikidata + DBpedia + Wikipedia cascade → 12 Jungian archetypes → OCEAN → Psyche construction, Ritual of Awakening: self-naming via cultural morphemes)

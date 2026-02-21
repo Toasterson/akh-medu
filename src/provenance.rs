@@ -304,6 +304,13 @@ pub enum DerivationKind {
         vsa_confidence: f32,
         bayesian_score: f32,
     },
+
+    /// Email triaged and routed (Phase 13c).
+    EmailTriaged {
+        email_message_id: String,
+        route: String,
+        importance_score: f32,
+    },
 }
 
 impl DerivationKind {
@@ -361,6 +368,7 @@ impl DerivationKind {
             Self::EmailIngested { .. } => 48,
             Self::EmailThreaded { .. } => 49,
             Self::SpamClassification { .. } => 50,
+            Self::EmailTriaged { .. } => 51,
         }
     }
 }

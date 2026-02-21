@@ -309,6 +309,23 @@ identities, and email composition pipeline via grammar module + constraint check
 - [x] `record_classification_provenance()` — `DerivationKind::SpamClassification` (tag 50)
 - [x] 24 new unit tests
 
+### Phase 13c — Email Triage & Priority ✓
+- [x] `EmailRoute` enum: Important, Feed, PaperTrail, ScreeningQueue, Spam — with Display, Serialize/Deserialize
+- [x] `SenderRelationship` enum: Colleague, Friend, Service, Newsletter, Unknown — with Display, Serialize/Deserialize, weight()
+- [x] `SenderStats` — per-sender reputation: address, message_count, reply_count, reply_rate (EMA), avg_reply_time_secs (EMA), relationship, routing, symbol_id, needs_screening(), record_message(), record_reply()
+- [x] `TriageRoleVectors` — 8 deterministic role HyperVecs via `encode_token(ops, "triage-role:X")`
+- [x] `ImportanceWeights` — configurable social/content/thread/label weights (default 0.35/0.25/0.20/0.20)
+- [x] `TriagePredicates` — 7 well-known KG relations (sender: namespace)
+- [x] `TriageEngine` — sender stats HashMap + OnlineHD important/low-priority prototypes + role vectors + weights
+- [x] Four-feature importance scoring: social (reply_rate, frequency, recency, relationship), content (VSA prototype similarity), thread (in_reply_to, references depth), label (operator-assigned route)
+- [x] HEY-style screening: `needs_screening()` → ScreeningQueue for first-time unrouted senders
+- [x] `encode_email()` — 7-feature triage-oriented role-filler binding → bundle
+- [x] `train_important()`/`train_low_priority()` — OnlineHD adaptive update via majority-vote bundling
+- [x] `persist()`/`restore()` via bincode + `put_meta`/`get_meta`
+- [x] `record_triage_provenance()` — `DerivationKind::EmailTriaged` (tag 51)
+- [x] `sync_sender_to_kg()` — KG triple sync for SPARQL queryability
+- [x] 26 new unit tests
+
 ## Phase 14 — Purpose-Driven Bootstrapping with Identity
 
 Autonomous domain knowledge acquisition AND identity construction from operator statements

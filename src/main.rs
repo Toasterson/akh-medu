@@ -4163,5 +4163,15 @@ fn format_derivation_kind(kind: &DerivationKind, engine: &Engine) -> String {
                  (VSA: {vsa_confidence:.2}, Bayesian: {bayesian_score:.2})"
             )
         }
+        DerivationKind::EmailTriaged {
+            email_message_id,
+            route,
+            importance_score,
+        } => {
+            format!(
+                "email triaged: {email_message_id} → {route} \
+                 (importance: {importance_score:.2})"
+            )
+        }
     }
 }

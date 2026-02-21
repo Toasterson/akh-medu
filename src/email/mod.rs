@@ -10,6 +10,7 @@ pub mod connector;
 pub mod error;
 pub mod parser;
 pub mod threading;
+pub mod triage;
 
 pub use classify::{ClassificationResult, SpamClassifier, SpamDecision};
 pub use compose::{ComposedEmail, compose_new, compose_reply, to_mime};
@@ -20,6 +21,7 @@ pub use connector::{
 pub use error::{EmailError, EmailResult};
 pub use parser::{ParsedEmail, extract_domain, parse_raw};
 pub use threading::{ThreadNode, ThreadTree, build_threads};
+pub use triage::{EmailRoute, SenderStats, TriageEngine, TriagePredicates, TriageResult};
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
