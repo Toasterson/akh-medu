@@ -38,6 +38,7 @@ pub mod nlp;
 pub mod ooda;
 pub mod pim;
 pub mod plan;
+pub mod preference;
 pub mod priority_reasoning;
 pub mod project;
 pub mod reflect;
@@ -111,6 +112,10 @@ pub use pim::{
     PimResult, Recurrence,
 };
 pub use plan::{Plan, PlanStatus, PlanStep, StepStatus};
+pub use preference::{
+    FeedbackSignal, JitirResult, PreferenceError, PreferenceManager, PreferencePredicates,
+    PreferenceResult, PreferenceReview, PreferenceRoleVectors, ProactivityLevel, Suggestion,
+};
 pub use priority_reasoning::{Audience, PriorityArgument, PriorityVerdict, Value};
 pub use project::{Agenda, Project, ProjectAssignment, ProjectPredicates, ProjectStatus};
 pub use reflect::{Adjustment, ReflectionConfig, ReflectionResult};

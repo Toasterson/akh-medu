@@ -257,6 +257,12 @@ enum Commands {
         action: CalAction,
     },
 
+    /// Preference learning & proactive assistance (Phase 13g).
+    Pref {
+        #[command(subcommand)]
+        action: PrefAction,
+    },
+
     /// Manage seed packs (knowledge bootstrapping).
     Seed {
         #[command(subcommand)]
@@ -698,6 +704,34 @@ enum CalAction {
         #[arg(long)]
         pass: String,
     },
+}
+
+#[derive(Subcommand)]
+enum PrefAction {
+    /// Show current preference profile status.
+    Status,
+    /// Train preference profile with explicit feedback on an entity.
+    Train {
+        /// Entity symbol ID.
+        #[arg(long)]
+        entity: u64,
+        /// Weight [-1.0, 1.0]. Positive = interest, negative = disinterest.
+        #[arg(long, default_value = "1.0")]
+        weight: f32,
+    },
+    /// Set proactivity level.
+    Level {
+        /// Level: ambient, nudge, offer, scheduled, autonomous.
+        level: String,
+    },
+    /// Show top interest topics.
+    Interests {
+        /// Number of interests to show.
+        #[arg(long, default_value = "10")]
+        count: usize,
+    },
+    /// Run JITIR and show suggestions.
+    Suggest,
 }
 
 #[derive(Subcommand)]
@@ -3253,6 +3287,126 @@ fn main() -> Result<()> {
             agent.persist_session().into_diagnostic()?;
         }
 
+        Commands::Pref { action } => {
+            let engine = Arc::new(Engine::new(config).into_diagnostic()?);
+            let agent_config = akh_medu::agent::AgentConfig::default();
+            let mut agent = if akh_medu::agent::Agent::has_persisted_session(&engine) {
+                akh_medu::agent::Agent::resume(Arc::clone(&engine), agent_config)
+                    .into_diagnostic()?
+            } else {
+                akh_medu::agent::Agent::new(Arc::clone(&engine), agent_config)
+                    .into_diagnostic()?
+            };
+
+            match action {
+                PrefAction::Status => {
+                    let pref = agent.preference_manager();
+                    println!("Preference Profile:");
+                    println!("  Interactions: {}", pref.profile.interaction_count);
+                    println!("  Proactivity:  {}", pref.profile.proactivity_level);
+                    println!("  Decay rate:   {}", pref.profile.decay_rate);
+                    println!(
+                        "  Suggestions:  {} offered, {} accepted ({:.0}%)",
+                        pref.profile.suggestions_offered,
+                        pref.profile.suggestions_accepted,
+                        pref.suggestion_acceptance_rate() * 100.0,
+                    );
+                    let prototype_empty = pref.profile.interest_prototype.is_none();
+                    println!(
+                        "  Prototype:    {}",
+                        if prototype_empty { "empty" } else { "active" }
+                    );
+                }
+                PrefAction::Train { entity, weight } => {
+                    let sym = akh_medu::symbol::SymbolId::new(entity).ok_or_else(|| {
+                        miette::miette!("invalid symbol ID: {entity}")
+                    })?;
+                    let signal = akh_medu::agent::FeedbackSignal::ExplicitPreference {
+                        topic: sym,
+                        weight,
+                    };
+                    agent
+                        .preference_manager_mut()
+                        .record_feedback(&signal, &engine)
+                        .into_diagnostic()?;
+                    let label = engine.resolve_label(sym);
+                    println!(
+                        "Recorded preference: '{label}' (weight: {weight:.2}, total interactions: {})",
+                        agent.preference_manager().profile.interaction_count
+                    );
+                }
+                PrefAction::Level { level } => {
+                    match akh_medu::agent::ProactivityLevel::from_label(&level) {
+                        Some(lvl) => {
+                            agent.preference_manager_mut().set_proactivity_level(lvl);
+                            println!("Proactivity level set to: {lvl}");
+                        }
+                        None => {
+                            println!(
+                                "Unknown level: '{level}'. Valid: ambient, nudge, offer, scheduled, autonomous"
+                            );
+                        }
+                    }
+                }
+                PrefAction::Interests { count } => {
+                    let interests = agent.preference_manager().top_interests(&engine, count);
+                    if interests.is_empty() {
+                        println!("No interests recorded yet. Use `akh pref train` to add feedback.");
+                    } else {
+                        println!("Top interests ({}):", interests.len());
+                        for (label, sim) in &interests {
+                            println!("  {label:<30} (similarity: {sim:.3})");
+                        }
+                    }
+                }
+                PrefAction::Suggest => {
+                    match agent.preference_manager().jitir_query(
+                        agent.working_memory(),
+                        agent.goals(),
+                        &engine,
+                    ) {
+                        Ok(jitir) => {
+                            if jitir.direct_matches.is_empty()
+                                && jitir.serendipity_matches.is_empty()
+                            {
+                                println!("No suggestions at this time.");
+                            } else {
+                                if !jitir.direct_matches.is_empty() {
+                                    println!("Direct matches:");
+                                    for s in &jitir.direct_matches {
+                                        println!(
+                                            "  [{:>5}] {} (relevance: {:.2})",
+                                            s.entity.get(),
+                                            s.label,
+                                            s.relevance
+                                        );
+                                    }
+                                }
+                                if !jitir.serendipity_matches.is_empty() {
+                                    println!("Serendipity:");
+                                    for s in &jitir.serendipity_matches {
+                                        println!(
+                                            "  [{:>5}] {} — {} (relevance: {:.2})",
+                                            s.entity.get(),
+                                            s.label,
+                                            s.reasoning,
+                                            s.relevance
+                                        );
+                                    }
+                                }
+                            }
+                            println!("Context: {}", jitir.context_summary);
+                        }
+                        Err(e) => {
+                            println!("JITIR query failed: {e}");
+                        }
+                    }
+                }
+            }
+
+            agent.persist_session().into_diagnostic()?;
+        }
+
         Commands::Chat { skill, headless } => {
             let ws_name = cli.workspace.clone();
 
@@ -3516,6 +3670,9 @@ fn main() -> Result<()> {
                         }
                         akh_medu::agent::UserIntent::CalCommand { subcommand, args } => {
                             format!("Calendar commands are available via the CLI: akh cal {subcommand} {args}")
+                        }
+                        akh_medu::agent::UserIntent::PrefCommand { subcommand, args } => {
+                            format!("Preference commands are available via the CLI: akh pref {subcommand} {args}")
                         }
                         akh_medu::agent::UserIntent::Freeform { .. } => {
                             "I don't understand that. Type 'help' for commands.".to_string()
@@ -4735,6 +4892,43 @@ fn format_derivation_kind(kind: &DerivationKind, engine: &Engine) -> String {
             format!(
                 "calendar event managed: '{}' ({} min)",
                 event_summary, dur_min
+            )
+        }
+        DerivationKind::PreferenceLearned {
+            signal_kind,
+            entity_id_raw,
+            weight,
+        } => {
+            format!(
+                "preference learned: {} signal for entity {} (weight {:.2})",
+                signal_kind, entity_id_raw, weight
+            )
+        }
+        DerivationKind::JitirSuggestion {
+            entity_id_raw,
+            relevance,
+            serendipitous,
+        } => {
+            let kind = if *serendipitous {
+                "serendipitous"
+            } else {
+                "direct"
+            };
+            format!(
+                "JITIR {} suggestion: entity {} (relevance {:.2})",
+                kind, entity_id_raw, relevance
+            )
+        }
+        DerivationKind::ProactiveAssistance {
+            level,
+            suggestion_count,
+            acceptance_rate,
+        } => {
+            format!(
+                "proactive assistance ({}): {} suggestions, {:.0}% accepted",
+                level,
+                suggestion_count,
+                acceptance_rate * 100.0
             )
         }
     }

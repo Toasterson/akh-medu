@@ -58,6 +58,8 @@ pub enum UserIntent {
     PimCommand { subcommand: String, args: String },
     /// Calendar command (Phase 13f): "cal today", "cal add ...", etc.
     CalCommand { subcommand: String, args: String },
+    /// Preference command (Phase 13g): "pref status", "pref train ...", etc.
+    PrefCommand { subcommand: String, args: String },
     /// Unrecognized input — pass through.
     Freeform { text: String },
 }
@@ -74,6 +76,19 @@ pub fn classify_intent(input: &str) -> UserIntent {
     }
 
     let lower = trimmed.to_lowercase();
+
+    // Preference commands (Phase 13g) — checked before PIM.
+    if lower == "pref" || lower.starts_with("pref ") {
+        let rest = if lower == "pref" {
+            ""
+        } else {
+            trimmed[5..].trim()
+        };
+        let mut parts = rest.splitn(2, char::is_whitespace);
+        let subcommand = parts.next().unwrap_or("").to_string();
+        let args = parts.next().unwrap_or("").to_string();
+        return UserIntent::PrefCommand { subcommand, args };
+    }
 
     // PIM commands (Phase 13e).
     if lower == "pim" || lower.starts_with("pim ") {

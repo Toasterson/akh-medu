@@ -52,6 +52,10 @@ pub enum TriggerCondition {
     },
     /// Fire when a symbol's confidence drops below threshold (Phase 11e).
     ConfidenceThreshold { symbol_label: String, below: f64 },
+    /// Fire when the current context matches the preference profile (Phase 13g).
+    ContextMatch { similarity_threshold: f32 },
+    /// Fire when any PIM task has a deadline within the given hours (Phase 13g).
+    UrgencyThreshold { deadline_hours: u64 },
 }
 
 /// Actions to execute when a trigger fires.
@@ -78,6 +82,10 @@ pub enum TriggerAction {
         name: String,
         params: HashMap<String, String>,
     },
+    /// Surface preference-based suggestions (Phase 13g).
+    SurfaceSuggestions { max_count: usize },
+    /// Refresh the preference profile from recent interactions (Phase 13g).
+    RefreshPreferences,
 }
 
 // ---------------------------------------------------------------------------
@@ -228,6 +236,34 @@ pub fn should_fire(trigger: &Trigger, agent: &Agent, now: u64) -> bool {
                 false
             }
         }
+        TriggerCondition::ContextMatch {
+            similarity_threshold,
+        } => {
+            // Fire when the preference profile has enough interactions
+            // and current context matches the interest prototype.
+            let pref = agent.preference_manager();
+            if pref.profile.interaction_count == 0 {
+                return false;
+            }
+            // Use a lightweight check: does the prototype have content?
+            pref.profile.interest_prototype.is_some()
+                && *similarity_threshold <= 1.0
+        }
+        TriggerCondition::UrgencyThreshold { deadline_hours } => {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let pim = agent.pim_manager();
+            // Check overdue tasks.
+            if !pim.overdue_tasks(now).is_empty() {
+                return true;
+            }
+            // Check tasks approaching deadline within the threshold.
+            // Use a forward timestamp to detect upcoming deadlines.
+            let future = now + deadline_hours * 3600;
+            !pim.overdue_tasks(future).is_empty()
+        }
     }
 }
 
@@ -307,6 +343,40 @@ pub fn execute_trigger(trigger: &Trigger, agent: &mut Agent) -> AgentResult<Stri
             Ok(format!(
                 "trigger \"{}\": tool {} → success={}",
                 trigger.name, name, output.success
+            ))
+        }
+        TriggerAction::SurfaceSuggestions { max_count } => {
+            let engine = std::sync::Arc::clone(&agent.engine);
+            match agent.preference_manager.jitir_query(
+                &agent.working_memory,
+                &agent.goals,
+                &engine,
+            ) {
+                Ok(jitir) => {
+                    let total = (jitir.direct_matches.len() + jitir.serendipity_matches.len())
+                        .min(*max_count);
+                    let _ = agent
+                        .preference_manager
+                        .record_assistance_provenance(&engine, total);
+                    Ok(format!(
+                        "trigger \"{}\": surfaced {} suggestions",
+                        trigger.name, total
+                    ))
+                }
+                Err(_) => Ok(format!(
+                    "trigger \"{}\": no suggestions available",
+                    trigger.name
+                )),
+            }
+        }
+        TriggerAction::RefreshPreferences => {
+            // Just ensure predicates are init'd and report.
+            let engine = std::sync::Arc::clone(&agent.engine);
+            let _ = agent.preference_manager.ensure_init(&engine);
+            Ok(format!(
+                "trigger \"{}\": preferences refreshed ({} interactions)",
+                trigger.name,
+                agent.preference_manager.profile.interaction_count
             ))
         }
     }

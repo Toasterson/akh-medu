@@ -773,6 +773,33 @@ pub fn derivation_kind_prose(kind: &DerivationKind) -> String {
             let dur_min = dur_secs / 60;
             format!("calendar event managed: '{event_summary}' ({dur_min} min)")
         }
+        DerivationKind::PreferenceLearned {
+            signal_kind, weight, ..
+        } => {
+            format!("preference learned from {signal_kind} signal (weight: {weight:.2})")
+        }
+        DerivationKind::JitirSuggestion {
+            relevance,
+            serendipitous,
+            ..
+        } => {
+            let kind = if *serendipitous {
+                "serendipity"
+            } else {
+                "direct"
+            };
+            format!("JITIR {kind} suggestion (relevance: {relevance:.2})")
+        }
+        DerivationKind::ProactiveAssistance {
+            level,
+            suggestion_count,
+            acceptance_rate,
+        } => {
+            format!(
+                "proactive assistance ({level}): {suggestion_count} suggestions, {:.0}% acceptance",
+                acceptance_rate * 100.0
+            )
+        }
     }
 }
 

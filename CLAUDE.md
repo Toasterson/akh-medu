@@ -386,6 +386,26 @@ identities, and email composition pipeline via grammar module + constraint check
 - [x] Feature: `calendar = ["icalendar", "chrono"]`
 - [x] 32 new unit tests
 
+### Phase 13g — Preference Learning & Proactive Assistance ✓
+- [x] `PreferenceError` miette diagnostic enum (4 variants: ProfileNotFound, EmptyContext, SerendipityFailed, Engine) with `PreferenceResult<T>`
+- [x] `ProactivityLevel` enum: Ambient, Nudge, Offer, Scheduled, Autonomous — with as_label/from_label, Display, Default(Ambient)
+- [x] `FeedbackSignal` enum: Replied, ReadTime, ArchivedUnread, Starred, GoalCompleted, ExplicitPreference, SuggestionDismissed — with entity(), strength()
+- [x] `PreferencePredicates` — 8 well-known KG relations in `pref:` namespace
+- [x] `PreferenceRoleVectors` — 6 deterministic VSA role vectors (topic, interaction_type, recency, frequency, source_channel, entity_kind)
+- [x] `PreferenceProfile` — interest_prototype (Option<HyperVec>), decay_rate, interaction_count, interaction_history, proactivity_level, suggestions stats
+- [x] `Suggestion`, `JitirResult`, `PreferenceReview` types
+- [x] `PreferenceManager` — record_feedback (OnlineHD adaptive update), encode_interaction (6-feature role-filler), apply_temporal_decay (exponential), jitir_query (direct+serendipity+KG multi-hop), interest_similarity, top_interests, review
+- [x] JITIR: encode context from goals+WM → direct HNSW search (k=5) + serendipity search (k=50, filter [0.3,0.6]) + KG BFS (depth 3)
+- [x] `DerivationKind::PreferenceLearned` (tag 55), `JitirSuggestion` (tag 56), `ProactiveAssistance` (tag 57)
+- [x] Agent integration: preference_manager field, init/resume/persist lifecycle, accessors
+- [x] OODA integration: JITIR query in observe() guarded by interaction_count > 0
+- [x] Trigger extensions: ContextMatch, UrgencyThreshold conditions; SurfaceSuggestions, RefreshPreferences actions
+- [x] Reflection: preference parameter, preference_review field on ReflectionResult
+- [x] `UserIntent::PrefCommand` in NLP, wired into TUI + headless
+- [x] CLI: `Commands::Pref` with 5 subcommands (Status, Train, Level, Interests, Suggest)
+- [x] `AgentError::Preference` transparent variant
+- [x] 22 new unit tests
+
 ## Phase 14 — Purpose-Driven Bootstrapping with Identity
 
 Autonomous domain knowledge acquisition AND identity construction from operator statements
@@ -408,3 +428,90 @@ via ActivityPub/oxifed. 9 sub-phases (14a-14i). Builds on existing Psyche model 
 
 - **Implementation plan**: `docs/ai/plans/2026-02-17-phase14-bootstrapping.md`
 - **Research**: `docs/ai/decisions/005-bootstrapping-research.md`, `docs/ai/decisions/006-identity-bootstrapping-research.md`
+
+## Phase 15 — Causal World Model & Event Calculus
+
+Explicit causal model of the world: cause-and-effect predicates (causes, enables, prevents),
+action schemas with preconditions and effects, event calculus engine (Initiates/Terminates/
+HoldsAt/Clipped), temporal fluent reasoning and state projection, counterfactual reasoning
+("what if I had done Y?"), prediction-outcome tracking with model refinement. E-graph rules
+for causal transitivity and do-calculus. VSA encoding for state-action similarity lookup.
+3 sub-phases (15a–15c). Foundation for all subsequent planning and epistemic reasoning.
+
+- **Implementation plan**: `docs/ai/plans/2026-02-22-phase15-causal-world-model.md`
+- **Research**: `docs/ai/decisions/020-predictive-planning-epistemic-research.md`
+
+## Phase 16 — Predictive Multi-Step Planning (MCTS + TD Learning)
+
+Replace single-step utility scoring with MCTS-based multi-step look-ahead planning.
+State encoding with VSA fingerprints, TD-learned value function for goal states, UCT
+selection with causal world model for rollouts, R-MCTS reflection from episodic memory.
+Plan monitoring with GDA expectation checking, dynamic re-planning on prediction failures.
+3 sub-phases (16a–16c). Builds on Phase 15 causal model.
+
+- **Implementation plan**: `docs/ai/plans/2026-02-22-phase16-predictive-planning.md`
+- **Research**: `docs/ai/decisions/020-predictive-planning-epistemic-research.md`
+
+## Phase 17 — Dempster-Shafer Evidence Theory & Belief Intervals
+
+Replace single-valued confidence with Dempster-Shafer belief intervals (Belief, Plausibility)
+that explicitly represent ignorance. Mass functions on {True, False} per claim, Dempster's
+rule for combining independent evidence sources, reliability-weighted discounting, conflict
+detection and alerting, ignorance-aware confidence propagation through derivation chains.
+Evidence fusion pipeline with automatic collection from all sources.
+2 sub-phases (17a–17b). Extends existing confidence system.
+
+- **Implementation plan**: `docs/ai/plans/2026-02-22-phase17-evidence-theory.md`
+- **Research**: `docs/ai/decisions/020-predictive-planning-epistemic-research.md`
+
+## Phase 18 — Source Reliability, ACH & Credibility Assessment
+
+NATO Admiralty Code ratings (source reliability A-F, information credibility 1-6), Bayesian
+trust model with competence/benevolence/integrity dimensions, Analysis of Competing
+Hypotheses (evidence-hypothesis matrix, diagnosticity, disconfirmation-focused ranking),
+credibility signal extraction (factual support, bias, self-consistency, cross-source
+consistency), deception detection (contradiction checking, causal plausibility, manipulation
+markers), adversarial intent modeling (what does the source want us to believe/do?).
+3 sub-phases (18a–18c). Builds on Phase 17 evidence intervals and Phase 12d interlocutor profiles.
+
+- **Implementation plan**: `docs/ai/plans/2026-02-22-phase18-source-reliability.md`
+- **Research**: `docs/ai/decisions/020-predictive-planning-epistemic-research.md`
+
+## Phase 19 — Epistemic Logic & Theory of Mind
+
+Formal epistemic reasoning: Knows/Believes/ConsidersPossible/IgnorantAbout modalities,
+possible-worlds semantics via per-interlocutor microtheories, Dynamic Epistemic Logic
+operations (public announcement, private message, observation, deceptive announcement,
+retraction), e-graph epistemic rules (K-axiom, positive/negative introspection, announcement).
+Theory of Mind engine with Level-k recursive belief modeling, behavior prediction from
+modeled beliefs, information advantage assessment, strategic communication planning.
+3 sub-phases (19a–19c). Builds on Phase 17–18 and Phase 12d.
+
+- **Implementation plan**: `docs/ai/plans/2026-02-22-phase19-epistemic-reasoning.md`
+- **Research**: `docs/ai/decisions/020-predictive-planning-epistemic-research.md`
+
+## Phase 20 — Active Inference OODA Enhancement
+
+Reframe OODA as active inference cycle minimizing expected free energy. Generative model
+predicts observations, computes surprise (prediction error), precision-weighted belief
+updating. Expected Free Energy decomposition: pragmatic value (goal progress) + epistemic
+value (uncertainty reduction). Policy selection via softmax over EFE-ranked multi-step
+action sequences. MCTS as tree policy search within EFE framework. Gradual transition
+from utility scoring to active inference as causal model learns.
+2 sub-phases (20a–20b). Builds on Phases 15–17.
+
+- **Implementation plan**: `docs/ai/plans/2026-02-22-phase20-active-inference.md`
+- **Research**: `docs/ai/decisions/020-predictive-planning-epistemic-research.md`
+
+## Phase 21 — Game-Theoretic Social Reasoning
+
+Model interactions as games: cooperative, zero-sum, mixed-motive, signaling, Stackelberg.
+Payoff matrices from goals + ToM, Nash equilibria detection, dominant strategy identification.
+Signaling games: cheap talk analysis, deception incentive detection, costly vs verifiable
+signals. Level-k bounded-rational opponent modeling from interaction history. Strategic
+action planning with predicted agent responses, social-aware MCTS rollouts, coalition
+formation for multi-agent cooperation, cooperation/competition dynamic detection.
+3 sub-phases (21a–21c). Builds on Phases 19–20. Capstone of the intelligence architecture.
+
+- **Implementation plan**: `docs/ai/plans/2026-02-22-phase21-game-theoretic-reasoning.md`
+- **Research**: `docs/ai/decisions/020-predictive-planning-epistemic-research.md`

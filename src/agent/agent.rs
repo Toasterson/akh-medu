@@ -200,6 +200,8 @@ pub struct Agent {
     pub(crate) pim_manager: super::pim::PimManager,
     /// Calendar & temporal reasoning manager (Phase 13f).
     pub(crate) calendar_manager: super::calendar::CalendarManager,
+    /// Preference learning & proactive assistance manager (Phase 13g).
+    pub(crate) preference_manager: super::preference::PreferenceManager,
     /// Optional WASM tool runtime (only when `wasm-tools` feature is enabled).
     #[cfg(feature = "wasm-tools")]
     pub(crate) wasm_runtime: Option<super::wasm_runtime::WasmToolRuntime>,
@@ -417,6 +419,7 @@ impl Agent {
             token_registry: super::multi_agent::TokenRegistry::new(),
             pim_manager: super::pim::PimManager::default(),
             calendar_manager: super::calendar::CalendarManager::default(),
+            preference_manager: super::preference::PreferenceManager::default(),
             #[cfg(feature = "wasm-tools")]
             wasm_runtime: super::wasm_runtime::WasmToolRuntime::new().ok(),
         };
@@ -429,6 +432,9 @@ impl Agent {
 
         // Initialize calendar predicates (Phase 13f).
         let _ = agent.calendar_manager.ensure_init(&agent.engine);
+
+        // Initialize preference predicates (Phase 13g).
+        let _ = agent.preference_manager.ensure_init(&agent.engine);
 
         // Load tools from active skills.
         agent.load_skill_tools();
@@ -1016,6 +1022,16 @@ impl Agent {
         &mut self.calendar_manager
     }
 
+    /// Get a reference to the preference manager.
+    pub fn preference_manager(&self) -> &super::preference::PreferenceManager {
+        &self.preference_manager
+    }
+
+    /// Get a mutable reference to the preference manager.
+    pub fn preference_manager_mut(&mut self) -> &mut super::preference::PreferenceManager {
+        &mut self.preference_manager
+    }
+
     /// Ensure an interlocutor is registered, auto-creating on first interaction.
     ///
     /// Returns a reference to their profile. If the interlocutor already exists,
@@ -1370,6 +1386,7 @@ impl Agent {
             self.psyche.as_mut(),
             Some(&self.pim_manager),
             Some(&self.projects),
+            Some((&self.preference_manager, &self.engine)),
         )?;
 
         // Record reflection in WM.
@@ -2013,6 +2030,18 @@ impl Agent {
                 message: format!("failed to persist calendar manager: {e}"),
             })?;
 
+        // Persist preference manager (Phase 13g).
+        let pref_bytes = bincode::serialize(&self.preference_manager).map_err(|e| {
+            AgentError::ConsolidationFailed {
+                message: format!("failed to serialize preference manager: {e}"),
+            }
+        })?;
+        store
+            .put_meta(b"agent:preference_manager", &pref_bytes)
+            .map_err(|e| AgentError::ConsolidationFailed {
+                message: format!("failed to persist preference manager: {e}"),
+            })?;
+
         // Flush the engine's durable store.
         self.engine
             .persist()
@@ -2175,6 +2204,12 @@ impl Agent {
                 super::calendar::CalendarManager::new(&engine).unwrap_or_default()
             });
 
+        // Restore preference manager (Phase 13g).
+        let preference_manager = super::preference::PreferenceManager::restore(&engine)
+            .unwrap_or_else(|_| {
+                super::preference::PreferenceManager::new(&engine).unwrap_or_default()
+            });
+
         let session_start_cycle = cycle_count;
         let chunking_config = config.chunking.clone();
 
@@ -2213,6 +2248,7 @@ impl Agent {
             token_registry: super::multi_agent::TokenRegistry::new(),
             pim_manager,
             calendar_manager,
+            preference_manager,
             #[cfg(feature = "wasm-tools")]
             wasm_runtime: super::wasm_runtime::WasmToolRuntime::new().ok(),
         };

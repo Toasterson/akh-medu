@@ -144,6 +144,8 @@ pub struct ReflectionResult {
     pub compilation_opportunities: Vec<crate::symbol::SymbolId>,
     /// GTD weekly review result (Phase 13e), if PIM is active.
     pub gtd_review: Option<super::pim::GtdReviewResult>,
+    /// Preference learning review (Phase 13g), if preference manager has data.
+    pub preference_review: Option<super::preference::PreferenceReview>,
 }
 
 // ---------------------------------------------------------------------------
@@ -162,6 +164,7 @@ pub fn reflect(
     psyche: Option<&mut crate::compartment::psyche::Psyche>,
     pim: Option<&super::pim::PimManager>,
     projects: Option<&[super::project::Project]>,
+    preference: Option<(&super::preference::PreferenceManager, &Engine)>,
 ) -> AgentResult<ReflectionResult> {
     // ── Tool effectiveness ────────────────────────────────────────────
 
@@ -223,6 +226,9 @@ pub fn reflect(
         _ => None,
     };
 
+    // Preference review (Phase 13g).
+    let preference_review = preference.map(|(pref_mgr, eng)| pref_mgr.review(eng));
+
     let result = ReflectionResult {
         at_cycle: current_cycle,
         tool_insights,
@@ -235,6 +241,7 @@ pub fn reflect(
         resource_reports: Vec::new(),
         compilation_opportunities: Vec::new(),
         gtd_review,
+        preference_review,
     };
 
     // Psyche evolution (if loaded).

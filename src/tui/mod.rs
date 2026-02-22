@@ -642,6 +642,11 @@ impl AkhTui {
                     "Calendar commands are available via the CLI: akh cal {subcommand} {args}",
                 )));
             }
+            crate::agent::UserIntent::PrefCommand { subcommand, args } => {
+                self.messages.push(AkhMessage::system(format!(
+                    "Preference commands are available via the CLI: akh pref {subcommand} {args}",
+                )));
+            }
             crate::agent::UserIntent::Freeform { text: _ } => {
                 self.messages.push(AkhMessage::system(
                     "I don't understand that. Type /help for commands.".to_string(),

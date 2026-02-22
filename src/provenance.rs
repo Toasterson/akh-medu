@@ -332,6 +332,29 @@ pub enum DerivationKind {
         dtstart: u64,
         dtend: u64,
     },
+
+    // --- Phase 13g: Preference Learning & Proactive Assistance ----------
+
+    /// Preference profile updated from feedback signal (Phase 13g).
+    PreferenceLearned {
+        signal_kind: String,
+        entity_id_raw: u64,
+        weight: f32,
+    },
+
+    /// JITIR suggestion surfaced (Phase 13g).
+    JitirSuggestion {
+        entity_id_raw: u64,
+        relevance: f32,
+        serendipitous: bool,
+    },
+
+    /// Proactive assistance event (Phase 13g).
+    ProactiveAssistance {
+        level: String,
+        suggestion_count: u32,
+        acceptance_rate: f32,
+    },
 }
 
 impl DerivationKind {
@@ -393,6 +416,9 @@ impl DerivationKind {
             Self::EmailExtracted { .. } => 52,
             Self::PimTaskManaged { .. } => 53,
             Self::CalendarEventManaged { .. } => 54,
+            Self::PreferenceLearned { .. } => 55,
+            Self::JitirSuggestion { .. } => 56,
+            Self::ProactiveAssistance { .. } => 57,
         }
     }
 }

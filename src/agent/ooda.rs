@@ -175,13 +175,41 @@ fn observe(agent: &mut Agent, cycle: u64) -> AgentResult<Observation> {
         }
     }
 
+    // JITIR query (Phase 13g): if the preference profile has recorded interactions,
+    // run a just-in-time information retrieval query and push ambient suggestions to WM.
+    let mut jitir_summary = String::new();
+    if agent.preference_manager.profile.interaction_count > 0
+        && let Ok(jitir) = agent.preference_manager.jitir_query(
+            &agent.working_memory,
+            &agent.goals,
+            &agent.engine,
+        )
+    {
+            let total = jitir.direct_matches.len() + jitir.serendipity_matches.len();
+            if total > 0 {
+                let labels: Vec<&str> = jitir
+                    .direct_matches
+                    .iter()
+                    .chain(jitir.serendipity_matches.iter())
+                    .take(3)
+                    .map(|s| s.label.as_str())
+                    .collect();
+                jitir_summary = format!(
+                    " | JITIR: {} suggestions ({})",
+                    total,
+                    labels.join(", ")
+                );
+            }
+    }
+
     // Push observation to WM.
     let obs_content = format!(
-        "Cycle {}: {} active goals, {} WM entries, {} recalled episodes",
+        "Cycle {}: {} active goals, {} WM entries, {} recalled episodes{}",
         cycle,
         active_goals.len(),
         wm_size,
-        recalled.len()
+        recalled.len(),
+        jitir_summary,
     );
     let _ = agent.working_memory.push(WorkingMemoryEntry {
         id: 0,

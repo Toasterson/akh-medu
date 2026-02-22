@@ -144,6 +144,10 @@ pub enum AgentError {
     #[diagnostic(transparent)]
     Calendar(#[from] super::calendar::CalendarError),
 
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Preference(#[from] super::preference::PreferenceError),
+
     #[error("{0}")]
     #[diagnostic(
         code(akh::agent::engine),
