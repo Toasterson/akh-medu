@@ -652,6 +652,11 @@ impl AkhTui {
                     "Causal commands are available via the CLI: akh causal {subcommand} {args}",
                 )));
             }
+            crate::agent::UserIntent::AwakenCommand { subcommand, args } => {
+                self.messages.push(AkhMessage::system(format!(
+                    "Awaken commands are available via the CLI: akh awaken {subcommand} {args}",
+                )));
+            }
             crate::agent::UserIntent::Freeform { text: _ } => {
                 self.messages.push(AkhMessage::system(
                     "I don't understand that. Type /help for commands.".to_string(),

@@ -429,6 +429,44 @@ via ActivityPub/oxifed. 9 sub-phases (14a-14i). Builds on existing Psyche model 
 - **Implementation plan**: `docs/ai/plans/2026-02-17-phase14-bootstrapping.md`
 - **Research**: `docs/ai/decisions/005-bootstrapping-research.md`, `docs/ai/decisions/006-identity-bootstrapping-research.md`
 
+### Phase 14a — Purpose & Identity Parser ✓
+- [x] `BootstrapError` miette diagnostic enum (4 variants: EmptyInput, NoPurpose, InvalidCompetence, Engine) with `BootstrapResult<T>`
+- [x] `DreyfusLevel` enum: Novice, AdvancedBeginner, Competent, Proficient, Expert — with as_label/from_label, Display, Default(Novice)
+- [x] `EntityType` enum: Deity, FictionalCharacter, HistoricalFigure, Concept, Unknown — with as_label/from_label, Display, Default(Unknown)
+- [x] `IdentityRef` struct: name, entity_type, source_phrase
+- [x] `PurposeModel` struct: domain, competence_level, seed_concepts, description
+- [x] `BootstrapIntent` struct: purpose, identity (optional)
+- [x] 5 `LazyLock<Regex>` patterns: RE_BASED_ON, RE_LIKE, RE_INSPIRED, RE_AS, RE_DOMAIN
+- [x] `parse_purpose()` — regex cascade + entity type classification + domain extraction + competence keywords + seed concepts
+- [x] `classify_entity_type()` — static sets: ~30 deities, ~20 fictional, ~20 historical
+- [x] `extract_competence()` — keyword matching to Dreyfus levels
+- [x] 12 unit tests
+
+### Phase 14b — Identity Resolution & Ritual of Awakening ✓
+- [x] `IdentityError` miette diagnostic enum (5 variants: ResolutionFailed, NoArchetypeMapping, NamingFailed, PsycheConstructionFailed, Engine) with `IdentityResult<T>`
+- [x] `CultureOrigin` enum: Egyptian, Greek, Norse, Latin, Fictional, Unknown — with as_label/from_label, Display, Default(Unknown)
+- [x] `CharacterKnowledge` struct: name, entity_type, culture, description, domains, traits, archetypes
+- [x] `OceanProfile`, `ArchetypeProfile`, `MorphemeTable`, `NameCandidate`, `RitualResult` types
+- [x] Static tables: DOMAIN_TRAITS (12 domains), TRAIT_ARCHETYPE (35 mappings), ARCHETYPE_OCEAN (13 archetypes), ARCHETYPE_SHADOWS (9 archetypes)
+- [x] 4 culture morpheme tables: Egyptian (Akh/Mer/Neb...), Greek (Archi/Neo/Proto...), Norse (All/Heim/Mjo...), Latin (Arch/Magn/Prim...)
+- [x] `resolve_identity()` — static tables → Wikidata → Wikipedia cascade
+- [x] `resolve_from_wikidata()` — sync HTTP via ureq, JSON parse
+- [x] `resolve_from_wikipedia()` — REST API summary extraction
+- [x] `resolve_from_static_tables()` — 15 hardcoded figures (Ptah, Thoth, Ra, Anubis, Athena, Apollo, Hermes, Odin, Thor, Gandalf, Sherlock, Spock, Turing, Einstein, Curie)
+- [x] `classify_culture()` — keyword matching on name + description
+- [x] `build_archetype_profile()` — trait→archetype counting, top 2 → primary/secondary
+- [x] `build_ocean_profile()` — weighted average (0.7/0.3) from ARCHETYPE_OCEAN
+- [x] `build_psyche()` — full Psyche construction with domain-augmented traits, culture grammar, OCEAN tone, archetype shadows
+- [x] `ritual_of_awakening()` — morpheme combination, pronounceability filter, VSA scoring, provenance recording
+- [x] `is_pronounceable()` — consonant/vowel alternation heuristic
+- [x] `generate_candidates()` — prefix+root+suffix combinations (capped at 100)
+- [x] `DerivationKind::RitualOfAwakening` (tag 59), `DerivationKind::IdentityResolved` (tag 60)
+- [x] `AgentError::Bootstrap` + `AgentError::Identity` transparent variants
+- [x] `UserIntent::AwakenCommand` in NLP, wired into TUI + headless
+- [x] CLI: `Commands::Awaken` with 3 subcommands (Parse, Resolve, Status)
+- [x] `derivation_kind_prose()` for RitualOfAwakening and IdentityResolved
+- [x] 13 unit tests (+ 12 purpose = 25 total)
+
 ## Phase 15 — Causal World Model & Event Calculus
 
 Explicit causal model of the world: cause-and-effect predicates (causes, enables, prevents),

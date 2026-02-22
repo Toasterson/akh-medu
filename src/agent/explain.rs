@@ -809,6 +809,25 @@ pub fn derivation_kind_prose(kind: &DerivationKind) -> String {
                 "causal schema learned: '{action_name}' ({precondition_count} preconditions, {effect_count} effects)"
             )
         }
+        DerivationKind::RitualOfAwakening {
+            chosen_name,
+            culture,
+            vsa_score,
+        } => {
+            format!(
+                "Ritual of Awakening: chose name '{chosen_name}' ({culture} culture, VSA score: {vsa_score:.2})"
+            )
+        }
+        DerivationKind::IdentityResolved {
+            name,
+            entity_type,
+            culture,
+            trait_count,
+        } => {
+            format!(
+                "identity resolved: {name} ({entity_type}, {culture}, {trait_count} traits)"
+            )
+        }
     }
 }
 

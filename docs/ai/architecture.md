@@ -1,6 +1,6 @@
 # Akh-medu Architecture
 
-> Last updated: 2026-02-22 (Phase 15a complete — causal world model)
+> Last updated: 2026-02-22 (Phase 14a+14b complete — identity bootstrapping & Ritual of Awakening)
 
 ## Overview
 
@@ -21,6 +21,7 @@ Akh-medu is a neuro-symbolic AI engine that runs entirely on CPU with no LLM dep
 src/
 ├── agent/              48 modules — OODA loop, tools (code_gen, code_ingest, compile_feedback, pattern_mine), memory, goals, drives, goal_generation, HTN decomposition, priority reasoning (argumentation), projects (microtheory-backed), planning, psyche, library learning, watch (GDA expectation monitoring), metacognition (Nelson-Narens monitoring/control, ZPD, AGM belief revision), resource awareness (VOC, CBR effort estimation), chunking (procedural learning), channel abstraction (CommChannel trait, ChannelRegistry, OperatorChannel), conversation (grounded dialogue, ConversationState, GroundedResponse), constraint_check (pre-communication constraint pipeline), interlocutor (social KG, InterlocutorRegistry, theory-of-mind microtheories, VSA interest vectors), oxifed (ActivityPub federation via AMQP bridge, feature-gated), explain (provenance-to-prose pipeline, DerivationNode trees, 5 query types), multi_agent (capability tokens, AgentProtocolMessage, TokenRegistry, trust bootstrap), pim (GTD + Eisenhower + PARA task overlay, petgraph dependency DAG, VSA priority encoding), causal (action schemas with preconditions/effects, pattern matching with variable binding, state transitions, outcome verification, VSA causal encoding)
 ├── email/              9 modules — email channel (feature-gated): EmailConnector trait (JMAP/IMAP/Mock), MIME parsing (mail-parser), JWZ threading (RFC 5256), email composition (lettre), EmailChannel implementing CommChannel, EmailPredicates (14 well-known relations), OnlineHD spam classifier (VSA + Bayesian + deterministic rules), email triage & priority (sender reputation, four-feature importance scoring, VSA prototypes, HEY-style screening), structured extraction (regex + grammar hybrid, multi-language temporal/action NER, compartment-scoped KG persistence)
+├── bootstrap/           2 modules — purpose/identity parser (Phase 14a), identity resolution + Ritual of Awakening (Phase 14b)
 ├── autonomous/          6 modules — background learning, confidence fusion, grounding
 ├── argumentation/       1 module  — pro/con argumentation (Phase 9e): meta-rules, verdicts, evidence chains
 ├── compartment/         5 modules — knowledge isolation, Jungian psyche, microtheories (Phase 9a, per-repo code scoping), CWA/circumscription (Phase 9m)
@@ -39,7 +40,7 @@ src/
 ├── error.rs                       — miette + thiserror rich diagnostics
 ├── rule_macro.rs                  — rule macro predicates (Phase 9g): RuleMacro trait, registry, genls/relationAllExists/relationExistsAll
 ├── temporal.rs                    — temporal projection (Phase 9k): TemporalProfile, decay computation, registry
-├── provenance.rs                  — persistent explanation ledger (redb, multi-index, 58 derivation kinds)
+├── provenance.rs                  — persistent explanation ledger (redb, multi-index, 60 derivation kinds)
 ├── skolem.rs                      — Skolem functions (Phase 9h): existential witnesses, grounding, auto-ground
 ├── tms.rs                         — truth maintenance system (Phase 9c): support sets, retraction cascades
 ├── symbol.rs                      — SymbolId (NonZeroU64), SymbolKind, allocator

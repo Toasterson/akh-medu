@@ -364,6 +364,23 @@ pub enum DerivationKind {
         precondition_count: u32,
         effect_count: u32,
     },
+
+    // --- Phase 14: Identity Bootstrapping ------------------------------------
+
+    /// The Ritual of Awakening was performed — the akh chose its name (Phase 14b).
+    RitualOfAwakening {
+        chosen_name: String,
+        culture: String,
+        vsa_score: f32,
+    },
+
+    /// An identity reference was resolved to structured character knowledge (Phase 14b).
+    IdentityResolved {
+        name: String,
+        entity_type: String,
+        culture: String,
+        trait_count: usize,
+    },
 }
 
 impl DerivationKind {
@@ -429,6 +446,8 @@ impl DerivationKind {
             Self::JitirSuggestion { .. } => 56,
             Self::ProactiveAssistance { .. } => 57,
             Self::CausalSchemaLearned { .. } => 58,
+            Self::RitualOfAwakening { .. } => 59,
+            Self::IdentityResolved { .. } => 60,
         }
     }
 }

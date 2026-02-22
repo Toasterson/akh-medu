@@ -152,6 +152,14 @@ pub enum AgentError {
     #[diagnostic(transparent)]
     Causal(#[from] super::causal::CausalError),
 
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Bootstrap(#[from] crate::bootstrap::purpose::BootstrapError),
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Identity(#[from] crate::bootstrap::identity::IdentityError),
+
     #[error("{0}")]
     #[diagnostic(
         code(akh::agent::engine),

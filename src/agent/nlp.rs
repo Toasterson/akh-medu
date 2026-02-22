@@ -62,6 +62,8 @@ pub enum UserIntent {
     PrefCommand { subcommand: String, args: String },
     /// Causal reasoning command (Phase 15a): "causal schemas", "causal predict ...", etc.
     CausalQuery { subcommand: String, args: String },
+    /// Awaken command (Phase 14a+14b): "awaken parse ...", "awaken resolve ...", etc.
+    AwakenCommand { subcommand: String, args: String },
     /// Unrecognized input — pass through.
     Freeform { text: String },
 }
@@ -78,6 +80,19 @@ pub fn classify_intent(input: &str) -> UserIntent {
     }
 
     let lower = trimmed.to_lowercase();
+
+    // Awaken commands (Phase 14a+14b).
+    if lower == "awaken" || lower.starts_with("awaken ") {
+        let rest = if lower == "awaken" {
+            ""
+        } else {
+            trimmed[7..].trim()
+        };
+        let mut parts = rest.splitn(2, char::is_whitespace);
+        let subcommand = parts.next().unwrap_or("").to_string();
+        let args = parts.next().unwrap_or("").to_string();
+        return UserIntent::AwakenCommand { subcommand, args };
+    }
 
     // Causal reasoning commands (Phase 15a).
     if lower == "causal" || lower.starts_with("causal ") {

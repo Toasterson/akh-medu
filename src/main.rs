@@ -269,6 +269,12 @@ enum Commands {
         action: CausalAction,
     },
 
+    /// Identity awakening (Phase 14a+14b).
+    Awaken {
+        #[command(subcommand)]
+        action: AwakenAction,
+    },
+
     /// Manage seed packs (knowledge bootstrapping).
     Seed {
         #[command(subcommand)]
@@ -758,6 +764,22 @@ enum CausalAction {
     Applicable,
     /// Bootstrap schemas from the tool registry.
     Bootstrap,
+}
+
+#[derive(Subcommand)]
+enum AwakenAction {
+    /// Parse a purpose/identity statement from the operator.
+    Parse {
+        /// The purpose statement (e.g., "You are the Architect based on Ptah, expert in systems").
+        statement: String,
+    },
+    /// Resolve an identity reference via static tables or external APIs.
+    Resolve {
+        /// Name of the figure to resolve (e.g., "Ptah", "Gandalf", "Turing").
+        name: String,
+    },
+    /// Show current psyche/identity state.
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -3562,6 +3584,126 @@ fn main() -> Result<()> {
             agent.persist_session().into_diagnostic()?;
         }
 
+        Commands::Awaken { action } => {
+            let engine = Arc::new(Engine::new(config).into_diagnostic()?);
+            let agent_config = akh_medu::agent::AgentConfig::default();
+            let mut agent = if akh_medu::agent::Agent::has_persisted_session(&engine) {
+                akh_medu::agent::Agent::resume(Arc::clone(&engine), agent_config)
+                    .into_diagnostic()?
+            } else {
+                akh_medu::agent::Agent::new(Arc::clone(&engine), agent_config)
+                    .into_diagnostic()?
+            };
+
+            match action {
+                AwakenAction::Parse { statement } => {
+                    match akh_medu::bootstrap::purpose::parse_purpose(&statement) {
+                        Ok(intent) => {
+                            println!("Parsed bootstrap intent:");
+                            println!("  Domain:      {}", intent.purpose.domain);
+                            println!("  Competence:  {}", intent.purpose.competence_level);
+                            println!("  Seeds:       {:?}", intent.purpose.seed_concepts);
+                            if let Some(ref id) = intent.identity {
+                                println!("  Identity:    {} ({})", id.name, id.entity_type);
+                                println!("  Source:      \"{}\"", id.source_phrase);
+                            } else {
+                                println!("  Identity:    (none)");
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("Parse failed: {e}");
+                        }
+                    }
+                }
+                AwakenAction::Resolve { name } => {
+                    let identity_ref = akh_medu::bootstrap::IdentityRef {
+                        name: name.clone(),
+                        entity_type: akh_medu::bootstrap::purpose::classify_entity_type(&name),
+                        source_phrase: format!("resolve {name}"),
+                    };
+                    match akh_medu::bootstrap::identity::resolve_identity(
+                        &identity_ref,
+                        &engine,
+                    ) {
+                        Ok(knowledge) => {
+                            println!("Resolved identity: {}", knowledge.name);
+                            println!("  Type:        {}", knowledge.entity_type);
+                            println!("  Culture:     {}", knowledge.culture);
+                            println!("  Description: {}", knowledge.description);
+                            println!("  Domains:     {:?}", knowledge.domains);
+                            println!("  Traits:      {:?}", knowledge.traits);
+                            println!("  Archetypes:  {:?}", knowledge.archetypes);
+
+                            // Perform the Ritual of Awakening.
+                            let purpose = akh_medu::bootstrap::PurposeModel {
+                                domain: knowledge.domains.first().cloned().unwrap_or_default(),
+                                competence_level: akh_medu::bootstrap::DreyfusLevel::Competent,
+                                seed_concepts: knowledge.domains.clone(),
+                                description: knowledge.description.clone(),
+                            };
+                            match akh_medu::bootstrap::identity::ritual_of_awakening(
+                                &knowledge,
+                                &purpose,
+                                &engine,
+                            ) {
+                                Ok(ritual) => {
+                                    println!("\nRitual of Awakening complete!");
+                                    println!("  Chosen name: {}", ritual.chosen_name);
+                                    println!(
+                                        "  Persona:     {}",
+                                        ritual.psyche.persona.name
+                                    );
+                                    println!(
+                                        "  Grammar:     {}",
+                                        ritual.psyche.persona.grammar_preference
+                                    );
+                                    println!(
+                                        "  Dominant:    {}",
+                                        ritual.psyche.self_integration.dominant_archetype
+                                    );
+                                    println!(
+                                        "  Provenance:  {} record(s)",
+                                        ritual.provenance_ids.len()
+                                    );
+
+                                    // Set the psyche on the agent.
+                                    agent.set_psyche(ritual.psyche);
+                                }
+                                Err(e) => {
+                                    eprintln!("Ritual failed: {e}");
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("Resolution failed: {e}");
+                        }
+                    }
+                }
+                AwakenAction::Status => {
+                    if let Some(psyche) = agent.psyche() {
+                        println!("Current psyche:");
+                        println!("  Persona:          {}", psyche.persona.name);
+                        println!("  Grammar:          {}", psyche.persona.grammar_preference);
+                        println!("  Traits:           {:?}", psyche.persona.traits);
+                        println!("  Tone:             {:?}", psyche.persona.tone);
+                        println!("  Dominant:         {}", psyche.self_integration.dominant_archetype);
+                        println!("  Individuation:    {:.2}", psyche.self_integration.individuation_level);
+                        println!("  Archetypes:");
+                        println!("    Sage:     {:.2}", psyche.archetypes.sage);
+                        println!("    Explorer: {:.2}", psyche.archetypes.explorer);
+                        println!("    Healer:   {:.2}", psyche.archetypes.healer);
+                        println!("    Guardian: {:.2}", psyche.archetypes.guardian);
+                        println!("  Shadow veto patterns: {}", psyche.shadow.veto_patterns.len());
+                        println!("  Shadow bias patterns: {}", psyche.shadow.bias_patterns.len());
+                    } else {
+                        println!("No psyche loaded. Run `akh awaken resolve <name>` to awaken.");
+                    }
+                }
+            }
+
+            agent.persist_session().into_diagnostic()?;
+        }
+
         Commands::Chat { skill, headless } => {
             let ws_name = cli.workspace.clone();
 
@@ -3831,6 +3973,9 @@ fn main() -> Result<()> {
                         }
                         akh_medu::agent::UserIntent::CausalQuery { subcommand, args } => {
                             format!("Causal commands are available via the CLI: akh causal {subcommand} {args}")
+                        }
+                        akh_medu::agent::UserIntent::AwakenCommand { subcommand, args } => {
+                            format!("Awaken commands are available via the CLI: akh awaken {subcommand} {args}")
                         }
                         akh_medu::agent::UserIntent::Freeform { .. } => {
                             "I don't understand that. Type 'help' for commands.".to_string()
@@ -5097,6 +5242,27 @@ fn format_derivation_kind(kind: &DerivationKind, engine: &Engine) -> String {
             format!(
                 "causal schema learned: '{}' ({} preconditions, {} effects)",
                 action_name, precondition_count, effect_count
+            )
+        }
+        DerivationKind::RitualOfAwakening {
+            chosen_name,
+            culture,
+            vsa_score,
+        } => {
+            format!(
+                "Ritual of Awakening: '{}' ({} culture, VSA: {:.2})",
+                chosen_name, culture, vsa_score
+            )
+        }
+        DerivationKind::IdentityResolved {
+            name,
+            entity_type,
+            culture,
+            trait_count,
+        } => {
+            format!(
+                "identity resolved: {} ({}, {}, {} traits)",
+                name, entity_type, culture, trait_count
             )
         }
     }
