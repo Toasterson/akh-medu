@@ -647,6 +647,11 @@ impl AkhTui {
                     "Preference commands are available via the CLI: akh pref {subcommand} {args}",
                 )));
             }
+            crate::agent::UserIntent::CausalQuery { subcommand, args } => {
+                self.messages.push(AkhMessage::system(format!(
+                    "Causal commands are available via the CLI: akh causal {subcommand} {args}",
+                )));
+            }
             crate::agent::UserIntent::Freeform { text: _ } => {
                 self.messages.push(AkhMessage::system(
                     "I don't understand that. Type /help for commands.".to_string(),

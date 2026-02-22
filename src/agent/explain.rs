@@ -800,6 +800,15 @@ pub fn derivation_kind_prose(kind: &DerivationKind) -> String {
                 acceptance_rate * 100.0
             )
         }
+        DerivationKind::CausalSchemaLearned {
+            action_name,
+            precondition_count,
+            effect_count,
+        } => {
+            format!(
+                "causal schema learned: '{action_name}' ({precondition_count} preconditions, {effect_count} effects)"
+            )
+        }
     }
 }
 

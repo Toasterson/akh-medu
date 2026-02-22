@@ -779,6 +779,7 @@ fn working_memory_push_and_retrieve() {
             relevance: 0.7,
             source_cycle: 1,
             reference_count: 0,
+            access_timestamps: vec![],
         })
         .unwrap();
 
@@ -792,6 +793,7 @@ fn working_memory_push_and_retrieve() {
             relevance: 0.8,
             source_cycle: 1,
             reference_count: 0,
+            access_timestamps: vec![],
         })
         .unwrap();
 
@@ -816,6 +818,7 @@ fn working_memory_eviction() {
         relevance: 0.3,
         source_cycle: 1,
         reference_count: 0,
+        access_timestamps: vec![],
     })
     .unwrap();
 
@@ -829,6 +832,7 @@ fn working_memory_eviction() {
             relevance: 0.9,
             source_cycle: 1,
             reference_count: 0,
+            access_timestamps: vec![],
         })
         .unwrap();
 
@@ -841,6 +845,7 @@ fn working_memory_eviction() {
         relevance: 0.2,
         source_cycle: 1,
         reference_count: 0,
+        access_timestamps: vec![],
     })
     .unwrap();
 
@@ -1957,6 +1962,7 @@ fn wm_serialize_deserialize_roundtrip() {
             relevance: 0.8,
             source_cycle: 1,
             reference_count: 3,
+            access_timestamps: vec![],
         })
         .unwrap();
 
@@ -1970,6 +1976,7 @@ fn wm_serialize_deserialize_roundtrip() {
             relevance: 0.6,
             source_cycle: 2,
             reference_count: 1,
+            access_timestamps: vec![],
         })
         .unwrap();
 
@@ -2133,6 +2140,7 @@ fn plan_step_completion_advances() {
                 rationale: "gather data".into(),
                 status: StepStatus::Pending,
                 index: 0,
+                expected_effects: vec![],
             },
             PlanStep {
                 tool_name: "reason".into(),
@@ -2140,6 +2148,7 @@ fn plan_step_completion_advances() {
                 rationale: "analyze".into(),
                 status: StepStatus::Pending,
                 index: 1,
+                expected_effects: vec![],
             },
         ],
         status: PlanStatus::Active,

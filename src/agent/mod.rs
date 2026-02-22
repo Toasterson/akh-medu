@@ -10,6 +10,7 @@
 
 pub mod agent;
 pub mod calendar;
+pub mod causal;
 pub mod channel;
 pub mod channel_message;
 pub mod chat;
@@ -105,6 +106,10 @@ pub use ooda::{
 pub use calendar::{
     AllenRelation, CalendarError, CalendarEvent, CalendarManager, CalendarPredicates,
     CalendarResult, CalendarRoleVectors,
+};
+pub use causal::{
+    ActionSchema, CausalEffect, CausalError, CausalManager, CausalPattern, CausalPredicates,
+    CausalRelation, CausalResult, CausalRoleVectors, EffectKind, PatternElement, StateTransition,
 };
 pub use pim::{
     DependencyEdge as PimDependencyEdge, EisenhowerQuadrant, EnergyLevel, GtdReviewResult,

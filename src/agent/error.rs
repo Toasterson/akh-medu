@@ -148,6 +148,10 @@ pub enum AgentError {
     #[diagnostic(transparent)]
     Preference(#[from] super::preference::PreferenceError),
 
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Causal(#[from] super::causal::CausalError),
+
     #[error("{0}")]
     #[diagnostic(
         code(akh::agent::engine),

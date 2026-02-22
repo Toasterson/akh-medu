@@ -263,6 +263,12 @@ enum Commands {
         action: PrefAction,
     },
 
+    /// Causal world model (Phase 15a).
+    Causal {
+        #[command(subcommand)]
+        action: CausalAction,
+    },
+
     /// Manage seed packs (knowledge bootstrapping).
     Seed {
         #[command(subcommand)]
@@ -732,6 +738,26 @@ enum PrefAction {
     },
     /// Run JITIR and show suggestions.
     Suggest,
+}
+
+#[derive(Subcommand)]
+enum CausalAction {
+    /// List all registered action schemas.
+    Schemas,
+    /// Show details of a specific action schema.
+    Schema {
+        /// Schema name (matches tool name).
+        name: String,
+    },
+    /// Predict the effects of executing an action.
+    Predict {
+        /// Action (schema) name.
+        name: String,
+    },
+    /// Show applicable actions in the current KG state.
+    Applicable,
+    /// Bootstrap schemas from the tool registry.
+    Bootstrap,
 }
 
 #[derive(Subcommand)]
@@ -3407,6 +3433,135 @@ fn main() -> Result<()> {
             agent.persist_session().into_diagnostic()?;
         }
 
+        Commands::Causal { action } => {
+            let engine = Arc::new(Engine::new(config).into_diagnostic()?);
+            let agent_config = akh_medu::agent::AgentConfig::default();
+            let mut agent = if akh_medu::agent::Agent::has_persisted_session(&engine) {
+                akh_medu::agent::Agent::resume(Arc::clone(&engine), agent_config)
+                    .into_diagnostic()?
+            } else {
+                akh_medu::agent::Agent::new(Arc::clone(&engine), agent_config)
+                    .into_diagnostic()?
+            };
+
+            match action {
+                CausalAction::Schemas => {
+                    let schemas = agent.causal_manager().list_schemas();
+                    if schemas.is_empty() {
+                        println!("No action schemas registered. Use `akh causal bootstrap` to create from tools.");
+                    } else {
+                        println!("Action schemas ({}):", schemas.len());
+                        for s in &schemas {
+                            println!(
+                                "  {:<25} precond: {} effects: {} success: {:.0}% runs: {}",
+                                s.name,
+                                s.preconditions.len(),
+                                s.effects.len(),
+                                s.success_rate * 100.0,
+                                s.execution_count,
+                            );
+                        }
+                    }
+                }
+                CausalAction::Schema { name } => {
+                    match agent.causal_manager().get_schema(&name) {
+                        Some(s) => {
+                            println!("Schema: {}", s.name);
+                            println!("  Action ID:       {}", s.action_id.get());
+                            println!("  Preconditions:   {}", s.preconditions.len());
+                            println!("  Effects:         {}", s.effects.len());
+                            println!("  Success rate:    {:.1}%", s.success_rate * 100.0);
+                            println!("  Execution count: {}", s.execution_count);
+                        }
+                        None => {
+                            println!("Schema '{name}' not found.");
+                        }
+                    }
+                }
+                CausalAction::Predict { name } => {
+                    match agent.causal_manager().predict_effects(&name, &engine) {
+                        Ok(transition) => {
+                            println!("Predicted transition for '{name}':");
+                            if transition.assertions.is_empty()
+                                && transition.retractions.is_empty()
+                                && transition.confidence_changes.is_empty()
+                            {
+                                println!("  (no predicted effects)");
+                            } else {
+                                for (s, p, o) in &transition.assertions {
+                                    println!(
+                                        "  + {} {} {}",
+                                        engine.resolve_label(*s),
+                                        engine.resolve_label(*p),
+                                        engine.resolve_label(*o),
+                                    );
+                                }
+                                for (s, p, o) in &transition.retractions {
+                                    println!(
+                                        "  - {} {} {}",
+                                        engine.resolve_label(*s),
+                                        engine.resolve_label(*p),
+                                        engine.resolve_label(*o),
+                                    );
+                                }
+                                for (s, p, o, delta) in &transition.confidence_changes {
+                                    println!(
+                                        "  ~ {} {} {} (delta: {:+.2})",
+                                        engine.resolve_label(*s),
+                                        engine.resolve_label(*p),
+                                        engine.resolve_label(*o),
+                                        delta,
+                                    );
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            println!("Prediction failed: {e}");
+                        }
+                    }
+                }
+                CausalAction::Applicable => {
+                    let applicable = agent.causal_manager().applicable_actions(&engine);
+                    if applicable.is_empty() {
+                        println!("No applicable actions in current state.");
+                    } else {
+                        println!("Applicable actions ({}):", applicable.len());
+                        for s in &applicable {
+                            println!(
+                                "  {} (success: {:.0}%, runs: {})",
+                                s.name,
+                                s.success_rate * 100.0,
+                                s.execution_count,
+                            );
+                        }
+                    }
+                }
+                CausalAction::Bootstrap => {
+                    let tool_names: Vec<String> = agent
+                        .list_tools()
+                        .iter()
+                        .map(|s| s.name.clone())
+                        .collect();
+                    match agent
+                        .causal_manager_mut()
+                        .bootstrap_schemas_from_tools(&tool_names, &engine)
+                    {
+                        Ok(count) => {
+                            println!(
+                                "Bootstrapped {count} new schema(s) from {} tool(s).",
+                                tool_names.len()
+                            );
+                        }
+                        Err(e) => {
+                            println!("Bootstrap failed: {e}");
+                        }
+                    }
+                }
+            }
+
+            agent.persist_session().into_diagnostic()?;
+        }
+
         Commands::Chat { skill, headless } => {
             let ws_name = cli.workspace.clone();
 
@@ -3673,6 +3828,9 @@ fn main() -> Result<()> {
                         }
                         akh_medu::agent::UserIntent::PrefCommand { subcommand, args } => {
                             format!("Preference commands are available via the CLI: akh pref {subcommand} {args}")
+                        }
+                        akh_medu::agent::UserIntent::CausalQuery { subcommand, args } => {
+                            format!("Causal commands are available via the CLI: akh causal {subcommand} {args}")
                         }
                         akh_medu::agent::UserIntent::Freeform { .. } => {
                             "I don't understand that. Type 'help' for commands.".to_string()
@@ -4929,6 +5087,16 @@ fn format_derivation_kind(kind: &DerivationKind, engine: &Engine) -> String {
                 level,
                 suggestion_count,
                 acceptance_rate * 100.0
+            )
+        }
+        DerivationKind::CausalSchemaLearned {
+            action_name,
+            precondition_count,
+            effect_count,
+        } => {
+            format!(
+                "causal schema learned: '{}' ({} preconditions, {} effects)",
+                action_name, precondition_count, effect_count
             )
         }
     }

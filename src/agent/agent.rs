@@ -202,6 +202,8 @@ pub struct Agent {
     pub(crate) calendar_manager: super::calendar::CalendarManager,
     /// Preference learning & proactive assistance manager (Phase 13g).
     pub(crate) preference_manager: super::preference::PreferenceManager,
+    /// Causal world model manager (Phase 15a).
+    pub(crate) causal_manager: super::causal::CausalManager,
     /// Optional WASM tool runtime (only when `wasm-tools` feature is enabled).
     #[cfg(feature = "wasm-tools")]
     pub(crate) wasm_runtime: Option<super::wasm_runtime::WasmToolRuntime>,
@@ -420,6 +422,7 @@ impl Agent {
             pim_manager: super::pim::PimManager::default(),
             calendar_manager: super::calendar::CalendarManager::default(),
             preference_manager: super::preference::PreferenceManager::default(),
+            causal_manager: super::causal::CausalManager::default(),
             #[cfg(feature = "wasm-tools")]
             wasm_runtime: super::wasm_runtime::WasmToolRuntime::new().ok(),
         };
@@ -435,6 +438,9 @@ impl Agent {
 
         // Initialize preference predicates (Phase 13g).
         let _ = agent.preference_manager.ensure_init(&agent.engine);
+
+        // Initialize causal predicates (Phase 15a).
+        let _ = agent.causal_manager.ensure_init(&agent.engine);
 
         // Load tools from active skills.
         agent.load_skill_tools();
@@ -1030,6 +1036,16 @@ impl Agent {
     /// Get a mutable reference to the preference manager.
     pub fn preference_manager_mut(&mut self) -> &mut super::preference::PreferenceManager {
         &mut self.preference_manager
+    }
+
+    /// Get a reference to the causal manager.
+    pub fn causal_manager(&self) -> &super::causal::CausalManager {
+        &self.causal_manager
+    }
+
+    /// Get a mutable reference to the causal manager.
+    pub fn causal_manager_mut(&mut self) -> &mut super::causal::CausalManager {
+        &mut self.causal_manager
     }
 
     /// Ensure an interlocutor is registered, auto-creating on first interaction.
@@ -2042,6 +2058,18 @@ impl Agent {
                 message: format!("failed to persist preference manager: {e}"),
             })?;
 
+        // Persist causal manager (Phase 15a).
+        let causal_bytes = bincode::serialize(&self.causal_manager).map_err(|e| {
+            AgentError::ConsolidationFailed {
+                message: format!("failed to serialize causal manager: {e}"),
+            }
+        })?;
+        store
+            .put_meta(b"agent:causal_manager", &causal_bytes)
+            .map_err(|e| AgentError::ConsolidationFailed {
+                message: format!("failed to persist causal manager: {e}"),
+            })?;
+
         // Flush the engine's durable store.
         self.engine
             .persist()
@@ -2210,6 +2238,12 @@ impl Agent {
                 super::preference::PreferenceManager::new(&engine).unwrap_or_default()
             });
 
+        // Restore causal manager (Phase 15a).
+        let causal_manager = super::causal::CausalManager::restore(&engine)
+            .unwrap_or_else(|_| {
+                super::causal::CausalManager::new(&engine).unwrap_or_default()
+            });
+
         let session_start_cycle = cycle_count;
         let chunking_config = config.chunking.clone();
 
@@ -2249,6 +2283,7 @@ impl Agent {
             pim_manager,
             calendar_manager,
             preference_manager,
+            causal_manager,
             #[cfg(feature = "wasm-tools")]
             wasm_runtime: super::wasm_runtime::WasmToolRuntime::new().ok(),
         };

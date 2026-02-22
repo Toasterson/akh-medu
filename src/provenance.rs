@@ -355,6 +355,15 @@ pub enum DerivationKind {
         suggestion_count: u32,
         acceptance_rate: f32,
     },
+
+    // --- Phase 15: Causal World Model ----------------------------------------
+
+    /// A causal action schema was learned or updated (Phase 15a).
+    CausalSchemaLearned {
+        action_name: String,
+        precondition_count: u32,
+        effect_count: u32,
+    },
 }
 
 impl DerivationKind {
@@ -419,6 +428,7 @@ impl DerivationKind {
             Self::PreferenceLearned { .. } => 55,
             Self::JitirSuggestion { .. } => 56,
             Self::ProactiveAssistance { .. } => 57,
+            Self::CausalSchemaLearned { .. } => 58,
         }
     }
 }
