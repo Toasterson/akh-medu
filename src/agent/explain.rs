@@ -764,6 +764,15 @@ pub fn derivation_kind_prose(kind: &DerivationKind) -> String {
         } => {
             format!("PIM task managed: GTD '{gtd_state}', quadrant '{quadrant}'")
         }
+        DerivationKind::CalendarEventManaged {
+            event_summary,
+            dtstart,
+            dtend,
+        } => {
+            let dur_secs = dtend.saturating_sub(*dtstart);
+            let dur_min = dur_secs / 60;
+            format!("calendar event managed: '{event_summary}' ({dur_min} min)")
+        }
     }
 }
 

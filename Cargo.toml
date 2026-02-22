@@ -96,11 +96,16 @@ native-tls = { version = "0.2", optional = true }
 lettre = { version = "0.11", optional = true, default-features = false, features = ["builder", "smtp-transport", "rustls-tls"] }
 regex = { version = "1", optional = true }
 
+# Calendar (feature-gated)
+icalendar = { version = "0.16", optional = true, features = ["parser"] }
+chrono = { version = "0.4", optional = true, features = ["serde"] }
+
 [features]
 daemon = ["tokio", "tokio-tungstenite", "futures-util"]
 server = ["daemon", "axum", "tower-http"]
 oxifed = ["daemon", "lapin", "deadpool-lapin", "reqwest"]
 email = ["mail-parser", "imap", "native-tls", "lettre", "regex"]
+calendar = ["icalendar", "chrono"]
 wasm-tools = ["wasmtime"]
 
 [dev-dependencies]

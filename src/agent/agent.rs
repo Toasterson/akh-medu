@@ -198,6 +198,8 @@ pub struct Agent {
     pub(crate) token_registry: super::multi_agent::TokenRegistry,
     /// Personal information manager (Phase 13e).
     pub(crate) pim_manager: super::pim::PimManager,
+    /// Calendar & temporal reasoning manager (Phase 13f).
+    pub(crate) calendar_manager: super::calendar::CalendarManager,
     /// Optional WASM tool runtime (only when `wasm-tools` feature is enabled).
     #[cfg(feature = "wasm-tools")]
     pub(crate) wasm_runtime: Option<super::wasm_runtime::WasmToolRuntime>,
@@ -414,6 +416,7 @@ impl Agent {
             interlocutor_registry: InterlocutorRegistry::new(),
             token_registry: super::multi_agent::TokenRegistry::new(),
             pim_manager: super::pim::PimManager::default(),
+            calendar_manager: super::calendar::CalendarManager::default(),
             #[cfg(feature = "wasm-tools")]
             wasm_runtime: super::wasm_runtime::WasmToolRuntime::new().ok(),
         };
@@ -423,6 +426,9 @@ impl Agent {
 
         // Initialize PIM predicates.
         let _ = agent.pim_manager.ensure_init(&agent.engine);
+
+        // Initialize calendar predicates (Phase 13f).
+        let _ = agent.calendar_manager.ensure_init(&agent.engine);
 
         // Load tools from active skills.
         agent.load_skill_tools();
@@ -998,6 +1004,16 @@ impl Agent {
     /// Get a mutable reference to the PIM manager.
     pub fn pim_manager_mut(&mut self) -> &mut super::pim::PimManager {
         &mut self.pim_manager
+    }
+
+    /// Get a reference to the calendar manager.
+    pub fn calendar_manager(&self) -> &super::calendar::CalendarManager {
+        &self.calendar_manager
+    }
+
+    /// Get a mutable reference to the calendar manager.
+    pub fn calendar_manager_mut(&mut self) -> &mut super::calendar::CalendarManager {
+        &mut self.calendar_manager
     }
 
     /// Ensure an interlocutor is registered, auto-creating on first interaction.
@@ -1985,6 +2001,18 @@ impl Agent {
                 message: format!("failed to persist PIM manager: {e}"),
             })?;
 
+        // Persist calendar manager (Phase 13f).
+        let cal_bytes = bincode::serialize(&self.calendar_manager).map_err(|e| {
+            AgentError::ConsolidationFailed {
+                message: format!("failed to serialize calendar manager: {e}"),
+            }
+        })?;
+        store
+            .put_meta(b"agent:calendar_manager", &cal_bytes)
+            .map_err(|e| AgentError::ConsolidationFailed {
+                message: format!("failed to persist calendar manager: {e}"),
+            })?;
+
         // Flush the engine's durable store.
         self.engine
             .persist()
@@ -2141,6 +2169,12 @@ impl Agent {
                 super::pim::PimManager::new(&engine).unwrap_or_default()
             });
 
+        // Restore calendar manager (Phase 13f).
+        let calendar_manager = super::calendar::CalendarManager::restore(&engine)
+            .unwrap_or_else(|_| {
+                super::calendar::CalendarManager::new(&engine).unwrap_or_default()
+            });
+
         let session_start_cycle = cycle_count;
         let chunking_config = config.chunking.clone();
 
@@ -2178,6 +2212,7 @@ impl Agent {
             interlocutor_registry: InterlocutorRegistry::new(),
             token_registry: super::multi_agent::TokenRegistry::new(),
             pim_manager,
+            calendar_manager,
             #[cfg(feature = "wasm-tools")]
             wasm_runtime: super::wasm_runtime::WasmToolRuntime::new().ok(),
         };

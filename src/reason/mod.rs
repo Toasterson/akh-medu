@@ -80,6 +80,25 @@ pub fn pim_rules() -> Vec<egg::Rewrite<AkhLang, ()>> {
     ]
 }
 
+/// Calendar-specific rewrite rules (Phase 13f).
+///
+/// - `before-trans`: the "before" relation is transitive.
+/// - `cal-conflict`: overlapping events that require the same resource conflict.
+pub fn calendar_rules() -> Vec<egg::Rewrite<AkhLang, ()>> {
+    vec![
+        // Transitivity of "before": if A before B and B before C then A before C.
+        egg::rewrite!("before-trans";
+            "(and (triple ?a ?before ?b) (triple ?b ?before ?c))"
+            => "(and (triple ?a ?before ?b) (and (triple ?b ?before ?c) (triple ?a ?before ?c)))"
+        ),
+        // Conflict: if two events overlap and require the same resource, they conflict.
+        egg::rewrite!("cal-conflict";
+            "(and (triple ?e1 ?overlaps ?e2) (and (triple ?e1 ?requires ?r) (triple ?e2 ?requires ?r)))"
+            => "(and (triple ?e1 ?overlaps ?e2) (and (triple ?e1 ?requires ?r) (and (triple ?e2 ?requires ?r) (triple ?e1 ?conflicts ?e2))))"
+        ),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -251,6 +251,12 @@ enum Commands {
         action: PimAction,
     },
 
+    /// Calendar & temporal reasoning (Phase 13f).
+    Cal {
+        #[command(subcommand)]
+        action: CalAction,
+    },
+
     /// Manage seed packs (knowledge bootstrapping).
     Seed {
         #[command(subcommand)]
@@ -649,6 +655,49 @@ enum PimAction {
     Deps,
     /// Show overdue tasks.
     Overdue,
+}
+
+#[derive(Subcommand)]
+enum CalAction {
+    /// Show today's calendar events.
+    Today,
+    /// Show this week's calendar events (next 7 days).
+    Week,
+    /// Detect scheduling conflicts.
+    Conflicts,
+    /// Add a new calendar event.
+    Add {
+        /// Event summary / title.
+        #[arg(long)]
+        summary: String,
+        /// Start time (UNIX timestamp).
+        #[arg(long)]
+        start: u64,
+        /// End time (UNIX timestamp).
+        #[arg(long)]
+        end: u64,
+        /// Location (optional).
+        #[arg(long)]
+        location: Option<String>,
+    },
+    /// Import events from an iCalendar (.ics) file.
+    Import {
+        /// Path to .ics file.
+        #[arg(long)]
+        file: std::path::PathBuf,
+    },
+    /// Sync from a CalDAV server.
+    Sync {
+        /// CalDAV URL.
+        #[arg(long)]
+        url: String,
+        /// Username.
+        #[arg(long)]
+        user: String,
+        /// Password.
+        #[arg(long)]
+        pass: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -3056,6 +3105,154 @@ fn main() -> Result<()> {
             agent.persist_session().into_diagnostic()?;
         }
 
+        Commands::Cal { action } => {
+            let engine = Arc::new(Engine::new(config).into_diagnostic()?);
+            let agent_config = akh_medu::agent::AgentConfig::default();
+            let mut agent = if akh_medu::agent::Agent::has_persisted_session(&engine) {
+                akh_medu::agent::Agent::resume(Arc::clone(&engine), agent_config)
+                    .into_diagnostic()?
+            } else {
+                akh_medu::agent::Agent::new(Arc::clone(&engine), agent_config)
+                    .into_diagnostic()?
+            };
+
+            match action {
+                CalAction::Today => {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    let events = agent.calendar_manager().today_events(now);
+                    if events.is_empty() {
+                        println!("No events today.");
+                    } else {
+                        println!("Today ({} events):", events.len());
+                        for e in &events {
+                            let dur_min = e.duration_secs() / 60;
+                            let loc = e
+                                .location
+                                .as_deref()
+                                .map(|l| format!(" @ {l}"))
+                                .unwrap_or_default();
+                            println!(
+                                "  [{:>5}] {} ({} min){}",
+                                e.symbol_id.get(),
+                                e.summary,
+                                dur_min,
+                                loc,
+                            );
+                        }
+                    }
+                }
+                CalAction::Week => {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    let events = agent.calendar_manager().week_events(now);
+                    if events.is_empty() {
+                        println!("No events this week.");
+                    } else {
+                        println!("This week ({} events):", events.len());
+                        for e in &events {
+                            let dur_min = e.duration_secs() / 60;
+                            let loc = e
+                                .location
+                                .as_deref()
+                                .map(|l| format!(" @ {l}"))
+                                .unwrap_or_default();
+                            println!(
+                                "  [{:>5}] {} ({} min){}",
+                                e.symbol_id.get(),
+                                e.summary,
+                                dur_min,
+                                loc,
+                            );
+                        }
+                    }
+                }
+                CalAction::Conflicts => {
+                    let conflicts = agent.calendar_manager().detect_conflicts();
+                    if conflicts.is_empty() {
+                        println!("No scheduling conflicts.");
+                    } else {
+                        println!("Conflicts ({}):", conflicts.len());
+                        for (a, b) in &conflicts {
+                            let a_label = engine.resolve_label(*a);
+                            let b_label = engine.resolve_label(*b);
+                            println!("  {} <-> {}", a_label, b_label);
+                        }
+                    }
+                }
+                CalAction::Add {
+                    summary,
+                    start,
+                    end,
+                    location,
+                } => {
+                    let sym = agent
+                        .calendar_manager_mut()
+                        .add_event(
+                            &engine,
+                            &summary,
+                            start,
+                            end,
+                            location.as_deref(),
+                            None,
+                            None,
+                            None,
+                        )
+                        .into_diagnostic()?;
+                    let dur_min = end.saturating_sub(start) / 60;
+                    println!(
+                        "Added event [{:>5}] '{}' ({} min)",
+                        sym.get(),
+                        summary,
+                        dur_min,
+                    );
+                }
+                CalAction::Import { file } => {
+                    #[cfg(feature = "calendar")]
+                    {
+                        let data = std::fs::read_to_string(&file).into_diagnostic()?;
+                        let imported = akh_medu::agent::calendar::import_ical(
+                            agent.calendar_manager_mut(),
+                            &engine,
+                            &data,
+                        )
+                        .into_diagnostic()?;
+                        println!("Imported {} events from {}", imported.len(), file.display());
+                    }
+                    #[cfg(not(feature = "calendar"))]
+                    {
+                        let _ = file;
+                        println!("iCalendar import requires --features calendar");
+                    }
+                }
+                CalAction::Sync { url, user, pass } => {
+                    #[cfg(feature = "calendar")]
+                    {
+                        let imported = akh_medu::agent::calendar::sync_caldav(
+                            agent.calendar_manager_mut(),
+                            &engine,
+                            &url,
+                            &user,
+                            &pass,
+                        )
+                        .into_diagnostic()?;
+                        println!("Synced {} events from CalDAV", imported.len());
+                    }
+                    #[cfg(not(feature = "calendar"))]
+                    {
+                        let _ = (url, user, pass);
+                        println!("CalDAV sync requires --features calendar");
+                    }
+                }
+            }
+
+            agent.persist_session().into_diagnostic()?;
+        }
+
         Commands::Chat { skill, headless } => {
             let ws_name = cli.workspace.clone();
 
@@ -3315,7 +3512,10 @@ fn main() -> Result<()> {
                             "[agent protocol] agent-to-agent messages are not supported in headless mode".to_string()
                         }
                         akh_medu::agent::UserIntent::PimCommand { subcommand, args } => {
-                            format!("PIM commands are available via the CLI: akh-medu pim {subcommand} {args}")
+                            format!("PIM commands are available via the CLI: akh pim {subcommand} {args}")
+                        }
+                        akh_medu::agent::UserIntent::CalCommand { subcommand, args } => {
+                            format!("Calendar commands are available via the CLI: akh cal {subcommand} {args}")
                         }
                         akh_medu::agent::UserIntent::Freeform { .. } => {
                             "I don't understand that. Type 'help' for commands.".to_string()
@@ -4524,6 +4724,17 @@ fn format_derivation_kind(kind: &DerivationKind, engine: &Engine) -> String {
             format!(
                 "PIM task managed: goal {} (GTD: {}, quadrant: {})",
                 goal_id_raw, gtd_state, quadrant
+            )
+        }
+        DerivationKind::CalendarEventManaged {
+            event_summary,
+            dtstart,
+            dtend,
+        } => {
+            let dur_min = dtend.saturating_sub(*dtstart) / 60;
+            format!(
+                "calendar event managed: '{}' ({} min)",
+                event_summary, dur_min
             )
         }
     }

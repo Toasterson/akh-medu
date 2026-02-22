@@ -634,7 +634,12 @@ impl AkhTui {
             }
             crate::agent::UserIntent::PimCommand { subcommand, args } => {
                 self.messages.push(AkhMessage::system(format!(
-                    "PIM commands are available via the CLI: akh-medu pim {subcommand} {args}",
+                    "PIM commands are available via the CLI: akh pim {subcommand} {args}",
+                )));
+            }
+            crate::agent::UserIntent::CalCommand { subcommand, args } => {
+                self.messages.push(AkhMessage::system(format!(
+                    "Calendar commands are available via the CLI: akh cal {subcommand} {args}",
                 )));
             }
             crate::agent::UserIntent::Freeform { text: _ } => {

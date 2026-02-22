@@ -368,6 +368,24 @@ identities, and email composition pipeline via grammar module + constraint check
 - [x] `AgentError::Pim` transparent variant
 - [x] ~30 new unit tests
 
+### Phase 13f — Calendar & Temporal Reasoning ✓
+- [x] `CalendarError` miette diagnostic enum (5 variants: EventNotFound, Conflict, ParseError, SyncError, Engine) with `CalendarResult<T>`
+- [x] `AllenRelation` enum: 13 variants (Before, After, Meets, MetBy, Overlaps, OverlappedBy, During, Contains, Starts, StartedBy, Finishes, FinishedBy, Equals) — pure `compute()`, `inverse()`, `is_overlapping()`, `as_label()`/`from_label()`
+- [x] `CalendarEvent` struct (symbol_id, summary, dtstart/dtend, location, description, recurrence, ical_uid, confirmed) — `duration_secs()`, `overlaps()`
+- [x] `CalendarPredicates` — 13 Allen predicates (`time:` namespace) + 6 calendar metadata (`cal:` namespace) + `allen_predicate()` mapper
+- [x] `CalendarRoleVectors` — 4 deterministic VSA role vectors (day_of_week, time_of_day, activity_type, duration)
+- [x] `CalendarManager` — HashMap event store; add_event, remove_event, get_event, events_in_range, today_events, week_events, detect_conflicts (sweep-line), compute_allen_relations, encode_temporal_pattern, sync_to_kg, persist/restore
+- [x] `import_ical()` — RFC 5545 parsing via `icalendar` crate, dedup by ical_uid (`#[cfg(feature = "calendar")]`)
+- [x] `sync_caldav()` — HTTP GET + Basic auth + iCal parse (`#[cfg(feature = "calendar")]`)
+- [x] `DerivationKind::CalendarEventManaged` (tag 54) provenance variant
+- [x] `calendar_rules()` — 2 e-graph rewrite rules (before-trans, cal-conflict)
+- [x] `Agent.calendar_manager` field with init/resume/persist lifecycle
+- [x] `UserIntent::CalCommand` in NLP, wired into TUI + headless
+- [x] CLI: `Commands::Cal` with 6 subcommands (Today, Week, Conflicts, Add, Import, Sync)
+- [x] `AgentError::Calendar` transparent variant
+- [x] Feature: `calendar = ["icalendar", "chrono"]`
+- [x] 32 new unit tests
+
 ## Phase 14 — Purpose-Driven Bootstrapping with Identity
 
 Autonomous domain knowledge acquisition AND identity construction from operator statements

@@ -140,6 +140,10 @@ pub enum AgentError {
     #[diagnostic(transparent)]
     Pim(#[from] super::pim::PimError),
 
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Calendar(#[from] super::calendar::CalendarError),
+
     #[error("{0}")]
     #[diagnostic(
         code(akh::agent::engine),

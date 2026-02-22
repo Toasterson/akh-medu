@@ -325,6 +325,13 @@ pub enum DerivationKind {
         gtd_state: String,
         quadrant: String,
     },
+
+    /// Calendar event managed (Phase 13f).
+    CalendarEventManaged {
+        event_summary: String,
+        dtstart: u64,
+        dtend: u64,
+    },
 }
 
 impl DerivationKind {
@@ -385,6 +392,7 @@ impl DerivationKind {
             Self::EmailTriaged { .. } => 51,
             Self::EmailExtracted { .. } => 52,
             Self::PimTaskManaged { .. } => 53,
+            Self::CalendarEventManaged { .. } => 54,
         }
     }
 }

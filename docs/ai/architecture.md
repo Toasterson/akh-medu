@@ -1,6 +1,6 @@
 # Akh-medu Architecture
 
-> Last updated: 2026-02-21 (Phase 13e complete — personal task & project management)
+> Last updated: 2026-02-22 (Phase 13f complete — calendar & temporal reasoning)
 
 ## Overview
 
@@ -169,7 +169,7 @@ Phase 12a–12g: Interaction — communication protocols and social reasoning (7
 Phase 13a–13i: Personal assistant (9 sub-phases):
 - **Email (13d complete)**: 13a email channel (JMAP/IMAP + MIME + JWZ threading), 13b OnlineHD spam classification (VSA-native), 13c email triage & priority (sender reputation + HEY-style screening), 13d structured extraction (regex + grammar hybrid, multi-language temporal/action NER, compartment-scoped KG)
 - **PIM (13e complete)**: 13e personal task & project management (GTD + Eisenhower + PARA, petgraph dependency DAG, VSA priority encoding, e-graph PIM rules, CLI commands)
-- **Calendar**: 13f calendar & temporal reasoning (RFC 5545, Allen interval algebra)
+- **Calendar (13f complete)**: 13f calendar & temporal reasoning (Allen interval algebra, iCalendar import, CalDAV sync, conflict detection, VSA temporal patterns)
 - **Intelligence**: 13g preference learning & proactive assistance (HyperRec-style VSA profiles, serendipity engine), 13h structured output & operator dashboards (JSON-LD, briefings, notifications)
 - **Delegation**: 13i delegated agent spawning (scoped knowledge, own identity, email composition pipeline)
 
@@ -265,6 +265,24 @@ Phase 13a–13i: Personal assistant (9 sub-phases):
 - [x] CLI: `Commands::Pim` with 9 subcommands (Inbox, Next, Review, Project, Add, Transition, Matrix, Deps, Overdue)
 - [x] `AgentError::Pim` transparent variant
 - [x] ~30 new unit tests
+
+### Phase 13f — Calendar & Temporal Reasoning ✓
+- [x] `CalendarError` miette diagnostic enum (5 variants: EventNotFound, Conflict, ParseError, SyncError, Engine) with `CalendarResult<T>`
+- [x] `AllenRelation` enum: 13 variants (Before, After, Meets, MetBy, Overlaps, OverlappedBy, During, Contains, Starts, StartedBy, Finishes, FinishedBy, Equals) — pure `compute(s1,e1,s2,e2)`, `inverse()`, `is_overlapping()`, `as_label()`/`from_label()`, Display
+- [x] `CalendarEvent` struct: symbol_id, summary, dtstart/dtend (u64), location, description, recurrence (reuses `pim::Recurrence`), ical_uid, confirmed — `duration_secs()`, `overlaps(other)`
+- [x] `CalendarPredicates` — 13 Allen predicates (`time:before` .. `time:equals`) + 6 calendar metadata (`cal:dtstart`, `cal:dtend`, `cal:location`, `cal:summary`, `cal:conflicts-with`, `cal:requires-resource`) + `allen_predicate(relation)` mapper
+- [x] `CalendarRoleVectors` — 4 deterministic VSA role vectors (day_of_week, time_of_day, activity_type, duration) via `encode_token(ops, "cal-role:*")`
+- [x] `CalendarManager` — HashMap-based event store + optional predicates/role_vectors; add_event (create entity + KG sync + Allen relations + provenance), remove_event, get_event, events, events_in_range, today_events, week_events, detect_conflicts (sweep-line O(n log n)), compute_allen_relations, encode_temporal_pattern (VSA), sync_to_kg, persist/restore
+- [x] `import_ical()` — RFC 5545 iCalendar parsing via `icalendar` crate, VEVENT extraction, chrono→u64 timestamp bridge, dedup by ical_uid (`#[cfg(feature = "calendar")]`)
+- [x] `sync_caldav()` — HTTP GET via ureq with Basic auth, parse as iCal, dedup (`#[cfg(feature = "calendar")]`)
+- [x] `DerivationKind::CalendarEventManaged` (tag 54) provenance variant
+- [x] `calendar_rules()` — 2 e-graph rewrite rules: `before-trans` (transitivity of before), `cal-conflict` (overlapping + same resource → conflicts-with)
+- [x] `Agent.calendar_manager` field with init/resume/persist lifecycle, `calendar_manager()` / `calendar_manager_mut()` accessors
+- [x] `UserIntent::CalCommand` variant in NLP classifier, wired into TUI + headless chat
+- [x] CLI: `Commands::Cal` with 6 subcommands (Today, Week, Conflicts, Add, Import, Sync)
+- [x] `AgentError::Calendar` transparent variant
+- [x] Feature: `calendar = ["icalendar", "chrono"]` — core module compiles without feature, only iCal import/CalDAV sync are feature-gated
+- [x] 32 new unit tests (13 Allen relations + boundary cases, inverse symmetry, is_overlapping, label roundtrip, event duration/overlaps, manager CRUD, conflict detection, range queries, today/week, persist/restore, iCal import + dedup)
 
 Phase 14a–14i: Purpose-driven bootstrapping with identity (9 sub-phases):
 - **Identity**: 14a purpose + identity parser (NL → PurposeModel + IdentityRef, character reference extraction), 14b identity resolution (Wikidata + DBpedia + Wikipedia cascade → 12 Jungian archetypes → OCEAN → Psyche construction, Ritual of Awakening: self-naming via cultural morphemes)

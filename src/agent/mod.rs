@@ -9,6 +9,7 @@
 //! - **Consolidation** (deliberate reasoning about what to remember)
 
 pub mod agent;
+pub mod calendar;
 pub mod channel;
 pub mod channel_message;
 pub mod chat;
@@ -99,6 +100,10 @@ pub use nlp::{QuestionWord, UserIntent, classify_intent};
 pub use ooda::{
     ActionResult, Decision, DecisionImpasse, GoalProgress, ImpasseKind, Observation,
     OodaCycleResult, Orientation,
+};
+pub use calendar::{
+    AllenRelation, CalendarError, CalendarEvent, CalendarManager, CalendarPredicates,
+    CalendarResult, CalendarRoleVectors,
 };
 pub use pim::{
     DependencyEdge as PimDependencyEdge, EisenhowerQuadrant, EnergyLevel, GtdReviewResult,
