@@ -720,12 +720,21 @@ impl Engine {
             false
         };
 
+        // Discover first so we can check current state.
+        let _ = mgr.discover();
+
+        // If already Hot, return existing activation (idempotent).
+        if mgr.skill_state(name) == Some(crate::skills::SkillState::Hot) {
+            if let Some(activation) = mgr.hot_activation(name) {
+                return Ok(activation);
+            }
+        }
+
         if has_label_triples {
             return self.load_skill_with_labels(name);
         }
 
-        // Standard numeric path.
-        let _ = mgr.discover();
+        // Standard numeric path: Cold → Warm → Hot.
         mgr.warm(name)?;
         Ok(mgr.activate(name, &self.knowledge_graph)?)
     }
@@ -1048,8 +1057,16 @@ impl Engine {
             .as_ref()
             .ok_or(crate::error::SkillError::NotFound { name: name.into() })?;
 
-        // Ensure discovered and warmed.
+        // Ensure discovered.
         let _ = mgr.discover();
+
+        // If already Hot, return existing activation (idempotent).
+        if mgr.skill_state(name) == Some(crate::skills::SkillState::Hot) {
+            if let Some(activation) = mgr.hot_activation(name) {
+                return Ok(activation);
+            }
+        }
+
         mgr.warm(name)?;
 
         // Read the skill's triples file before activation.
@@ -1098,9 +1115,11 @@ impl Engine {
         // Now activate via the standard path (which handles numeric triples and rules).
         let mut activation = mgr.activate(name, &self.knowledge_graph)?;
 
-        // If we loaded label triples, add them to the activation count.
+        // If we loaded label triples, add them to the activation count
+        // and sync back to the SkillManager so idempotent reloads report correctly.
         if label_triples_count > 0 {
             activation.triples_loaded += label_triples_count;
+            mgr.add_triple_count(name, label_triples_count);
         }
 
         Ok(activation)
