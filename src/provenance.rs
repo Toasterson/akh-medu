@@ -391,6 +391,25 @@ pub enum DerivationKind {
         relation_count: u32,
         source: String,
     },
+
+    // --- Phase 14d: Prerequisite Discovery & ZPD Classification ---------------
+
+    /// A prerequisite relationship was discovered between concepts (Phase 14d).
+    PrerequisiteDiscovered {
+        from_label: String,
+        to_label: String,
+        edge_count: u32,
+        strategy_sources: String,
+    },
+
+    /// A concept was classified into a Vygotsky ZPD zone (Phase 14d).
+    ZpdClassification {
+        concept_label: String,
+        zone: String,
+        prereq_coverage: f32,
+        similarity_to_known: f32,
+        curriculum_tier: u32,
+    },
 }
 
 impl DerivationKind {
@@ -459,6 +478,8 @@ impl DerivationKind {
             Self::RitualOfAwakening { .. } => 59,
             Self::IdentityResolved { .. } => 60,
             Self::DomainExpansion { .. } => 61,
+            Self::PrerequisiteDiscovered { .. } => 62,
+            Self::ZpdClassification { .. } => 63,
         }
     }
 }

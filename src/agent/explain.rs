@@ -838,6 +838,27 @@ pub fn derivation_kind_prose(kind: &DerivationKind) -> String {
                 "domain expansion from '{seed_label}': {concept_count} concepts, {relation_count} relations (source: {source})"
             )
         }
+        DerivationKind::PrerequisiteDiscovered {
+            from_label,
+            to_label,
+            edge_count,
+            strategy_sources,
+        } => {
+            format!(
+                "prerequisite discovered: '{from_label}' → '{to_label}' ({edge_count} edges, strategies: {strategy_sources})"
+            )
+        }
+        DerivationKind::ZpdClassification {
+            concept_label,
+            zone,
+            prereq_coverage,
+            similarity_to_known,
+            curriculum_tier,
+        } => {
+            format!(
+                "ZPD classification: '{concept_label}' → {zone} (coverage: {prereq_coverage:.2}, similarity: {similarity_to_known:.2}, tier: {curriculum_tier})"
+            )
+        }
     }
 }
 

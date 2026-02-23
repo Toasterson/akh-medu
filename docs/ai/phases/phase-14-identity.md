@@ -1,6 +1,6 @@
 # Phase 14 — Purpose-Driven Bootstrapping with Identity
 
-Status: **In Progress** (14a-14b complete, 14c-14i pending)
+Status: **In Progress** (14a-14d complete, 14e-14i pending)
 
 Autonomous domain knowledge acquisition AND identity construction from operator statements
 like "You are the Architect of the System based on Ptah" or "Be like Gandalf — a GCC
@@ -88,3 +88,31 @@ via ActivityPub/oxifed. 9 sub-phases (14a-14i). Builds on existing Psyche model 
 - [x] `AwakenAction::Expand` CLI subcommand with --seeds, --purpose, --threshold, --max-concepts, --no-conceptnet
 - [x] `pub mod expand` + re-exports in bootstrap/mod.rs
 - [x] ~18 unit tests (config defaults, display, normalize, dedup, JSON parsing, boundary, URL encoding)
+
+## Phase 14d — Prerequisite Discovery & ZPD Classification
+
+- [x] `PrerequisiteError` miette diagnostic enum (4 variants: NoConcepts, CycleDetected, EmptyCurriculum, Engine) with `PrerequisiteResult<T>`
+- [x] `PrerequisiteConfig` struct: known_min_triples, known_similarity_threshold, proximal_min_prereq_coverage, proximal_similarity_low/high, min_edge_confidence, weight_conceptnet/structural/vsa, max_prereqs_per_concept
+- [x] `PrerequisitePredicates` struct: 5 well-known relations in `prereq:` namespace (prerequisite_of, zpd_zone, curriculum_tier, prereq_coverage, similarity_to_known)
+- [x] `ZpdZone` enum: Known, Proximal, Beyond — with as_label/from_label, Display, Ord
+- [x] `PrerequisiteSource` enum: ConceptNet, Structural, VsaSimilarity — with Display
+- [x] `PrerequisiteEdge`, `CurriculumEntry`, `PrereqAnalysisResult` data types
+- [x] `PrerequisiteAnalyzer` struct with `new()` and `analyze()` methods
+- [x] `collect_domain_concepts()` — gather concepts from expansion result
+- [x] `discover_conceptnet_prereqs()` — Strategy 1: read expand:has_prerequisite triples
+- [x] `discover_structural_prereqs()` — Strategy 2: subclass_of/part_of/instance_of heuristics
+- [x] `discover_vsa_prereqs()` — Strategy 3: VSA asymmetric bind+similarity (O(n²))
+- [x] `merge_edges()` — deduplicate, combine confidences, cap max_prereqs_per_concept
+- [x] `break_cycles()` — iterative DFS cycle detection, remove lowest-confidence edge
+- [x] `build_known_bundle()` — VSA bundle of high-triple-count concepts
+- [x] `topological_sort()` — Kahn's algorithm → tier numbers
+- [x] `classify_zpd()` — bottom-up classification: Known/Proximal/Beyond
+- [x] `generate_curriculum()` — sort by (tier ASC, zone ASC, similarity DESC)
+- [x] `persist_to_kg()` — prerequisite_of triples + ZPD triples + provenance
+- [x] `DerivationKind::PrerequisiteDiscovered` (tag 62), `DerivationKind::ZpdClassification` (tag 63) in provenance.rs
+- [x] `derivation_kind_prose()` arms for both variants in explain.rs
+- [x] `format_derivation_kind()` arms for both variants in main.rs
+- [x] `AgentError::Prerequisite` transparent variant in agent/error.rs
+- [x] `AwakenAction::Prerequisite` CLI subcommand with --seeds, --purpose, --known-threshold, --zpd-low, --zpd-high
+- [x] `pub mod prerequisite` + re-exports in bootstrap/mod.rs
+- [x] ~18 unit tests (config defaults, ZPD roundtrip, source display, errors, merge, cycles, toposort, classification, curriculum ordering)

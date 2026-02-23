@@ -798,6 +798,24 @@ enum AwakenAction {
         #[arg(long)]
         no_conceptnet: bool,
     },
+    /// Discover prerequisite relationships and classify concepts by Vygotsky ZPD zones.
+    Prerequisite {
+        /// Comma-separated seed concepts (e.g., "compiler,optimization,parsing").
+        #[arg(long)]
+        seeds: Option<String>,
+        /// Purpose statement to extract seeds from (e.g., "GCC compiler expert").
+        #[arg(long)]
+        purpose: Option<String>,
+        /// Minimum triple count for a concept to be classified as "Known" (default 5).
+        #[arg(long, default_value = "5")]
+        known_threshold: usize,
+        /// Lower ZPD similarity bound for "Proximal" zone (default 0.3).
+        #[arg(long, default_value = "0.3")]
+        zpd_low: f32,
+        /// Upper ZPD similarity bound for "Proximal" zone (default 0.7).
+        #[arg(long, default_value = "0.7")]
+        zpd_high: f32,
+    },
 }
 
 #[derive(Subcommand)]
@@ -3789,6 +3807,133 @@ fn main() -> Result<()> {
                         Err(e) => eprintln!("Failed to initialize expander: {e}"),
                     }
                 }
+                AwakenAction::Prerequisite {
+                    seeds,
+                    purpose: purpose_stmt,
+                    known_threshold,
+                    zpd_low,
+                    zpd_high,
+                } => {
+                    // Resolve seed concepts: either from --seeds or --purpose.
+                    let purpose_model = if let Some(ref seed_str) = seeds {
+                        let seed_list: Vec<String> = seed_str
+                            .split(',')
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect();
+                        akh_medu::bootstrap::PurposeModel {
+                            domain: seed_list.first().cloned().unwrap_or_default(),
+                            competence_level: akh_medu::bootstrap::DreyfusLevel::Competent,
+                            seed_concepts: seed_list,
+                            description: seed_str.clone(),
+                        }
+                    } else if let Some(ref stmt) = purpose_stmt {
+                        match akh_medu::bootstrap::purpose::parse_purpose(stmt) {
+                            Ok(intent) => intent.purpose,
+                            Err(e) => {
+                                eprintln!("Failed to parse purpose: {e}");
+                                return Ok(());
+                            }
+                        }
+                    } else {
+                        eprintln!("Provide --seeds or --purpose for prerequisite analysis.");
+                        return Ok(());
+                    };
+
+                    // Step 1: Run domain expansion first to populate KG.
+                    println!(
+                        "Expanding domain from {} seed(s): {:?}",
+                        purpose_model.seed_concepts.len(),
+                        purpose_model.seed_concepts
+                    );
+
+                    let expand_config = akh_medu::bootstrap::ExpansionConfig::default();
+                    let expansion_result =
+                        match akh_medu::bootstrap::DomainExpander::new(&engine, expand_config) {
+                            Ok(mut expander) => match expander.expand(&purpose_model, &engine) {
+                                Ok(result) => {
+                                    println!(
+                                        "  Expansion: {} concepts, {} relations",
+                                        result.concept_count, result.relation_count
+                                    );
+                                    result
+                                }
+                                Err(e) => {
+                                    eprintln!("Expansion failed: {e}");
+                                    return Ok(());
+                                }
+                            },
+                            Err(e) => {
+                                eprintln!("Failed to initialize expander: {e}");
+                                return Ok(());
+                            }
+                        };
+
+                    // Step 2: Run prerequisite analysis.
+                    println!("\nAnalyzing prerequisites...");
+                    let prereq_config = akh_medu::bootstrap::PrerequisiteConfig {
+                        known_min_triples: known_threshold,
+                        proximal_similarity_low: zpd_low,
+                        proximal_similarity_high: zpd_high,
+                        ..Default::default()
+                    };
+
+                    match akh_medu::bootstrap::PrerequisiteAnalyzer::new(&engine, prereq_config) {
+                        Ok(analyzer) => {
+                            match analyzer.analyze(&expansion_result, &engine) {
+                                Ok(result) => {
+                                    println!("\nPrerequisite analysis complete!");
+                                    println!("  Concepts analyzed: {}", result.concepts_analyzed);
+                                    println!("  Prerequisite edges: {}", result.edge_count);
+                                    println!("  Cycles broken: {}", result.cycles_broken);
+                                    println!("  Max tier: {}", result.max_tier);
+                                    println!(
+                                        "  Provenance: {} record(s)",
+                                        result.provenance_ids.len()
+                                    );
+
+                                    // Zone distribution.
+                                    println!("\n  ZPD Distribution:");
+                                    for zone in [
+                                        akh_medu::bootstrap::prerequisite::ZpdZone::Known,
+                                        akh_medu::bootstrap::prerequisite::ZpdZone::Proximal,
+                                        akh_medu::bootstrap::prerequisite::ZpdZone::Beyond,
+                                    ] {
+                                        let count =
+                                            result.zone_distribution.get(&zone).unwrap_or(&0);
+                                        println!("    {zone}: {count}");
+                                    }
+
+                                    // Curriculum.
+                                    if !result.curriculum.is_empty() {
+                                        println!("\n  Curriculum (learning order):");
+                                        for (i, entry) in
+                                            result.curriculum.iter().enumerate().take(30)
+                                        {
+                                            println!(
+                                                "    {:3}. [tier {}] ({}) {} (coverage: {:.2}, sim: {:.2})",
+                                                i + 1,
+                                                entry.tier,
+                                                entry.zone,
+                                                entry.label,
+                                                entry.prereq_coverage,
+                                                entry.similarity_to_known,
+                                            );
+                                        }
+                                        if result.curriculum.len() > 30 {
+                                            println!(
+                                                "    ... and {} more",
+                                                result.curriculum.len() - 30
+                                            );
+                                        }
+                                    }
+                                }
+                                Err(e) => eprintln!("Prerequisite analysis failed: {e}"),
+                            }
+                        }
+                        Err(e) => eprintln!("Failed to initialize analyzer: {e}"),
+                    }
+                }
             }
 
             agent.persist_session().into_diagnostic()?;
@@ -5364,6 +5509,29 @@ fn format_derivation_kind(kind: &DerivationKind, engine: &Engine) -> String {
             format!(
                 "domain expansion from '{}': {} concepts, {} relations ({})",
                 seed_label, concept_count, relation_count, source
+            )
+        }
+        DerivationKind::PrerequisiteDiscovered {
+            from_label,
+            to_label,
+            edge_count,
+            strategy_sources,
+        } => {
+            format!(
+                "prerequisite discovered: '{}' → '{}' ({} edges, strategies: {})",
+                from_label, to_label, edge_count, strategy_sources
+            )
+        }
+        DerivationKind::ZpdClassification {
+            concept_label,
+            zone,
+            prereq_coverage,
+            similarity_to_known,
+            curriculum_tier,
+        } => {
+            format!(
+                "ZPD classification: '{}' → {} (coverage: {:.2}, similarity: {:.2}, tier: {})",
+                concept_label, zone, prereq_coverage, similarity_to_known, curriculum_tier
             )
         }
     }
