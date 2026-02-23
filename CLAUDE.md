@@ -75,14 +75,15 @@ Detailed completion checklists for each phase live under `docs/ai/phases/`.
 | 11 | Autonomous Task System (drives, HTN, argumentation, metacognition) | [plan](docs/ai/plans/2026-02-17-phase11-autonomous-tasks.md), [research](docs/ai/decisions/003-autonomous-tasks-research.md) |
 | 12a-12g | Interaction (channels, grounded dialogue, constraints, social KG, oxifed, explanations, multi-agent) | [phase-12](docs/ai/phases/phase-12-interaction.md), [plan](docs/ai/plans/2026-02-17-phase12-interaction.md) |
 | 13a-13g | Personal Assistant (email, spam, triage, extraction, PIM, calendar, preferences) | [phase-13](docs/ai/phases/phase-13-personal-assistant.md), [plan](docs/ai/plans/2026-02-17-phase13-personal-assistant.md) |
-| 14a-14b | Identity (purpose parser, identity resolution, Ritual of Awakening) | [phase-14](docs/ai/phases/phase-14-identity.md), [plan](docs/ai/plans/2026-02-17-phase14-bootstrapping.md) |
+| 14a-14d | Identity, domain expansion, prerequisite discovery, ZPD classification | [phase-14](docs/ai/phases/phase-14-identity.md), [plan](docs/ai/plans/2026-02-17-phase14-bootstrapping.md) |
 | 15a | Causal World Model (schemas, preconditions, effects, VSA encoding) | [phase-15](docs/ai/phases/phase-15-causal.md), [plan](docs/ai/plans/2026-02-22-phase15-causal-world-model.md) |
 
 ### Upcoming Phases
 
 | Phase | Description | Plan | Research |
 |-------|-------------|------|----------|
-| 14c-14i | Bootstrap orchestrator, domain expansion, curriculum, community recipes | [plan](docs/ai/plans/2026-02-17-phase14-bootstrapping.md) | [research](docs/ai/decisions/005-bootstrapping-research.md) |
+| 14e-14i | Bootstrap orchestrator, resource discovery, curriculum ingestion, community recipes | [plan](docs/ai/plans/2026-02-17-phase14-bootstrapping.md) | [research](docs/ai/decisions/005-bootstrapping-research.md) |
+| Release Alpha | Deployable test system (Docker, config, CLI audit, integration tests) | [plan](docs/ai/plans/2026-02-23-release-alpha.md) | — |
 | 15b-15c | Event calculus, counterfactual reasoning, prediction tracking | [plan](docs/ai/plans/2026-02-22-phase15-causal-world-model.md) | [research](docs/ai/decisions/020-predictive-planning-epistemic-research.md) |
 | 16 | Predictive Multi-Step Planning (MCTS + TD Learning) | [plan](docs/ai/plans/2026-02-22-phase16-predictive-planning.md) | [research](docs/ai/decisions/020-predictive-planning-epistemic-research.md) |
 | 17 | Dempster-Shafer Evidence Theory & Belief Intervals | [plan](docs/ai/plans/2026-02-22-phase17-evidence-theory.md) | [research](docs/ai/decisions/020-predictive-planning-epistemic-research.md) |
@@ -90,3 +91,4 @@ Detailed completion checklists for each phase live under `docs/ai/phases/`.
 | 19 | Epistemic Logic & Theory of Mind | [plan](docs/ai/plans/2026-02-22-phase19-epistemic-reasoning.md) | [research](docs/ai/decisions/020-predictive-planning-epistemic-research.md) |
 | 20 | Active Inference OODA Enhancement | [plan](docs/ai/plans/2026-02-22-phase20-active-inference.md) | [research](docs/ai/decisions/020-predictive-planning-epistemic-research.md) |
 | 21 | Game-Theoretic Social Reasoning | [plan](docs/ai/plans/2026-02-22-phase21-game-theoretic-reasoning.md) | [research](docs/ai/decisions/020-predictive-planning-epistemic-research.md) |
+| 22 | Akhipedia: Internal Knowledge Wiki | [plan](docs/ai/plans/2026-02-23-phase22-akhipedia.md) | [ADR](docs/ai/decisions/021-akhipedia-architecture.md) |
