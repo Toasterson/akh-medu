@@ -83,7 +83,7 @@ Detailed completion checklists for each phase live under `docs/ai/phases/`.
 | Phase | Description | Plan | Research |
 |-------|-------------|------|----------|
 | 14e-14i | Bootstrap orchestrator, resource discovery, curriculum ingestion, community recipes | [plan](docs/ai/plans/2026-02-17-phase14-bootstrapping.md) | [research](docs/ai/decisions/005-bootstrapping-research.md) |
-| Release Alpha | Deployable test system (Docker, config, CLI audit, integration tests) | [plan](docs/ai/plans/2026-02-23-release-alpha.md) | — |
+| Release Alpha | Kubernetes-deployed autonomous agent (Docker, Helm, Prometheus, continuous learning) | [plan](docs/ai/plans/2026-02-23-release-alpha.md) | — |
 | 15b-15c | Event calculus, counterfactual reasoning, prediction tracking | [plan](docs/ai/plans/2026-02-22-phase15-causal-world-model.md) | [research](docs/ai/decisions/020-predictive-planning-epistemic-research.md) |
 | 16 | Predictive Multi-Step Planning (MCTS + TD Learning) | [plan](docs/ai/plans/2026-02-22-phase16-predictive-planning.md) | [research](docs/ai/decisions/020-predictive-planning-epistemic-research.md) |
 | 17 | Dempster-Shafer Evidence Theory & Belief Intervals | [plan](docs/ai/plans/2026-02-22-phase17-evidence-theory.md) | [research](docs/ai/decisions/020-predictive-planning-epistemic-research.md) |
