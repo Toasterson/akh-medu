@@ -160,6 +160,10 @@ pub enum AgentError {
     #[diagnostic(transparent)]
     Identity(#[from] crate::bootstrap::identity::IdentityError),
 
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    DomainExpand(#[from] crate::bootstrap::expand::DomainExpandError),
+
     #[error("{0}")]
     #[diagnostic(
         code(akh::agent::engine),

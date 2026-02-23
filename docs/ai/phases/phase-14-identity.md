@@ -62,3 +62,29 @@ via ActivityPub/oxifed. 9 sub-phases (14a-14i). Builds on existing Psyche model 
 - [x] CLI: `Commands::Awaken` with 3 subcommands (Parse, Resolve, Status)
 - [x] `derivation_kind_prose()` for RitualOfAwakening and IdentityResolved
 - [x] 13 unit tests (+ 12 purpose = 25 total)
+
+## Phase 14c — Domain Expansion (Skeleton Ontology)
+
+- [x] `DomainExpandError` miette diagnostic enum (4 variants: NoSeeds, EmptyExpansion, RateLimitReached, Engine) with `ExpandResult<T>`
+- [x] `ExpansionConfig` struct: similarity_threshold, max_depth, max_concepts, max_api_calls, inter_call_delay_ms, use_conceptnet
+- [x] `ExpansionPredicates` struct: 9 well-known relations in `expand:` namespace (expanded_from, instance_of, subclass_of, part_of, has_part, related_to, has_prerequisite, used_for, domain_prototype)
+- [x] `ExpansionPredicates::conceptnet_relation()` mapper for IsA/PartOf/HasA/RelatedTo/HasPrerequisite/UsedFor
+- [x] `ExpansionRoleVectors` struct: 4 role vectors (concept, relation, source, depth)
+- [x] `ConceptSource` enum: Seed, Wikidata, Wikipedia, ConceptNet — with Display
+- [x] `CandidateConcept`, `DiscoveredRelation`, `ExpansionResult` data types
+- [x] `DomainExpander` struct with `new()` and `expand()` methods
+- [x] `build_domain_prototype()` — bundle encoded seed labels into prototype vector
+- [x] `is_within_boundary()` — VSA similarity check against domain prototype
+- [x] `query_wikidata()` — wbsearchentities + wbgetentities for P31/P279/P361/P527
+- [x] `query_wikipedia()` — categories + categorymembers with meta-category filter
+- [x] `query_conceptnet()` — edges for IsA/PartOf/HasA/RelatedTo/HasPrerequisite/UsedFor
+- [x] `api_call()` — rate-limited HTTP with counter and inter-call delay
+- [x] `normalize_label()` — lowercase, trim, hyphens/underscores→spaces
+- [x] Deduplication by normalized label
+- [x] `insert_into_kg()` — entity creation, relation triples, provenance recording
+- [x] `DerivationKind::DomainExpansion` (tag 61) in provenance.rs
+- [x] `derivation_kind_prose()` arm for DomainExpansion in explain.rs
+- [x] `AgentError::DomainExpand` transparent variant in agent/error.rs
+- [x] `AwakenAction::Expand` CLI subcommand with --seeds, --purpose, --threshold, --max-concepts, --no-conceptnet
+- [x] `pub mod expand` + re-exports in bootstrap/mod.rs
+- [x] ~18 unit tests (config defaults, display, normalize, dedup, JSON parsing, boundary, URL encoding)

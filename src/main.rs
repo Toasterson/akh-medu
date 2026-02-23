@@ -780,6 +780,24 @@ enum AwakenAction {
     },
     /// Show current psyche/identity state.
     Status,
+    /// Expand seed concepts into a skeleton ontology via external knowledge sources.
+    Expand {
+        /// Comma-separated seed concepts (e.g., "compiler,optimization,parsing").
+        #[arg(long)]
+        seeds: Option<String>,
+        /// Purpose statement to extract seeds from (e.g., "GCC compiler expert").
+        #[arg(long)]
+        purpose: Option<String>,
+        /// VSA similarity threshold for candidate acceptance (default 0.6).
+        #[arg(long, default_value = "0.6")]
+        threshold: f32,
+        /// Maximum number of concepts to create (default 200).
+        #[arg(long, default_value = "200")]
+        max_concepts: usize,
+        /// Disable ConceptNet queries.
+        #[arg(long)]
+        no_conceptnet: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -3699,6 +3717,78 @@ fn main() -> Result<()> {
                         println!("No psyche loaded. Run `akh awaken resolve <name>` to awaken.");
                     }
                 }
+                AwakenAction::Expand {
+                    seeds,
+                    purpose: purpose_stmt,
+                    threshold,
+                    max_concepts,
+                    no_conceptnet,
+                } => {
+                    // Resolve seed concepts: either from --seeds or --purpose.
+                    let purpose_model = if let Some(ref seed_str) = seeds {
+                        let seed_list: Vec<String> = seed_str
+                            .split(',')
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect();
+                        akh_medu::bootstrap::PurposeModel {
+                            domain: seed_list.first().cloned().unwrap_or_default(),
+                            competence_level: akh_medu::bootstrap::DreyfusLevel::Competent,
+                            seed_concepts: seed_list,
+                            description: seed_str.clone(),
+                        }
+                    } else if let Some(ref stmt) = purpose_stmt {
+                        match akh_medu::bootstrap::purpose::parse_purpose(stmt) {
+                            Ok(intent) => intent.purpose,
+                            Err(e) => {
+                                eprintln!("Failed to parse purpose: {e}");
+                                return Ok(());
+                            }
+                        }
+                    } else {
+                        eprintln!("Provide --seeds or --purpose for domain expansion.");
+                        return Ok(());
+                    };
+
+                    println!(
+                        "Expanding domain from {} seed(s): {:?}",
+                        purpose_model.seed_concepts.len(),
+                        purpose_model.seed_concepts
+                    );
+
+                    let config = akh_medu::bootstrap::ExpansionConfig {
+                        similarity_threshold: threshold,
+                        max_concepts,
+                        use_conceptnet: !no_conceptnet,
+                        ..Default::default()
+                    };
+
+                    match akh_medu::bootstrap::DomainExpander::new(&engine, config) {
+                        Ok(mut expander) => {
+                            match expander.expand(&purpose_model, &engine) {
+                                Ok(result) => {
+                                    println!("\nDomain expansion complete!");
+                                    println!("  Concepts created: {}", result.concept_count);
+                                    println!("  Relations added:  {}", result.relation_count);
+                                    println!("  Rejected:         {}", result.rejected_count);
+                                    println!("  API calls:        {}", result.api_calls);
+                                    println!("  Provenance:       {} record(s)", result.provenance_ids.len());
+                                    if !result.accepted_labels.is_empty() {
+                                        println!("\n  Accepted concepts:");
+                                        for (i, label) in result.accepted_labels.iter().enumerate().take(20) {
+                                            println!("    {}: {}", i + 1, label);
+                                        }
+                                        if result.accepted_labels.len() > 20 {
+                                            println!("    ... and {} more", result.accepted_labels.len() - 20);
+                                        }
+                                    }
+                                }
+                                Err(e) => eprintln!("Expansion failed: {e}"),
+                            }
+                        }
+                        Err(e) => eprintln!("Failed to initialize expander: {e}"),
+                    }
+                }
             }
 
             agent.persist_session().into_diagnostic()?;
@@ -5263,6 +5353,17 @@ fn format_derivation_kind(kind: &DerivationKind, engine: &Engine) -> String {
             format!(
                 "identity resolved: {} ({}, {}, {} traits)",
                 name, entity_type, culture, trait_count
+            )
+        }
+        DerivationKind::DomainExpansion {
+            seed_label,
+            concept_count,
+            relation_count,
+            source,
+        } => {
+            format!(
+                "domain expansion from '{}': {} concepts, {} relations ({})",
+                seed_label, concept_count, relation_count, source
             )
         }
     }

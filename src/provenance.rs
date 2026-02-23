@@ -381,6 +381,16 @@ pub enum DerivationKind {
         culture: String,
         trait_count: usize,
     },
+
+    // --- Phase 14c: Domain Expansion -----------------------------------------
+
+    /// Domain skeleton ontology expanded from seed concepts (Phase 14c).
+    DomainExpansion {
+        seed_label: String,
+        concept_count: u32,
+        relation_count: u32,
+        source: String,
+    },
 }
 
 impl DerivationKind {
@@ -448,6 +458,7 @@ impl DerivationKind {
             Self::CausalSchemaLearned { .. } => 58,
             Self::RitualOfAwakening { .. } => 59,
             Self::IdentityResolved { .. } => 60,
+            Self::DomainExpansion { .. } => 61,
         }
     }
 }

@@ -828,6 +828,16 @@ pub fn derivation_kind_prose(kind: &DerivationKind) -> String {
                 "identity resolved: {name} ({entity_type}, {culture}, {trait_count} traits)"
             )
         }
+        DerivationKind::DomainExpansion {
+            seed_label,
+            concept_count,
+            relation_count,
+            source,
+        } => {
+            format!(
+                "domain expansion from '{seed_label}': {concept_count} concepts, {relation_count} relations (source: {source})"
+            )
+        }
     }
 }
 

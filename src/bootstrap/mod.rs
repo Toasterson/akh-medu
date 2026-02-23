@@ -1,12 +1,14 @@
-//! Purpose-driven identity bootstrapping (Phase 14a+14b).
+//! Purpose-driven identity bootstrapping (Phase 14a-14c).
 //!
 //! Parses operator purpose statements, resolves cultural/historical/fictional
-//! references, constructs a personalized Psyche, and performs the Ritual of
-//! Awakening — self-naming via culture-specific morpheme composition.
+//! references, constructs a personalized Psyche, performs the Ritual of
+//! Awakening, and expands seed concepts into a skeleton ontology.
 
+pub mod expand;
 pub mod identity;
 pub mod purpose;
 
+pub use expand::{DomainExpandError, DomainExpander, ExpandResult, ExpansionConfig, ExpansionResult};
 pub use identity::{
     CharacterKnowledge, CultureOrigin, IdentityError, IdentityResult, RitualResult,
 };
