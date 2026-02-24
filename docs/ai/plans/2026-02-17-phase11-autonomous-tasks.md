@@ -568,6 +568,87 @@ GeneralizedStep { tool: String, arg_pattern: String, expected_outcome: String }
 
 ---
 
+### 11i — Sleep/Consolidation Cycle (Lifeform Engine Extension) (~600 lines)
+
+> Added: 2026-02-24 (Lifeform Engine — offline reorganization, like NREM/REM sleep)
+
+Periodic offline processing cycle that reorganizes the knowledge graph, merges
+redundant concepts, strengthens important connections, and prunes dead ends. Inspired
+by the role of sleep in memory consolidation — interleaved consolidation and
+reorganization phases.
+
+**Architecture**:
+```rust
+struct ConsolidationCycle {
+    phase: ConsolidationPhase,
+    interval_secs: u64,        // How often to run (default: 3600 = 1 hour)
+    last_run: u64,
+    metrics: ConsolidationMetrics,
+}
+
+enum ConsolidationPhase {
+    /// Active processing — normal OODA operation
+    Wake,
+    /// Phase 1: Replay recent episodes, strengthen associations
+    Consolidation,
+    /// Phase 2: Reorganize KG — merge duplicates, prune orphans, rebuild indices
+    Reorganization,
+    /// Phase 3: Creative association — random walks through KG, discover unexpected connections
+    DreamState,
+}
+```
+
+**What each phase does**:
+- **Consolidation**: Replay recent working memory entries. Re-encode VSA vectors with
+  updated context. Promote high-value entries to episodic memory with strengthened
+  connections.
+- **Reorganization**: Find near-duplicate entities (VSA similarity > 0.9), merge them.
+  Prune orphan nodes with no edges. Rebuild HNSW indices for compactness. Compact redb
+  storage.
+- **DreamState**: Random walks through the knowledge graph. When two distant nodes
+  have unexpectedly high VSA similarity, create a speculative relation. This is how
+  analogies and cross-domain insights emerge.
+
+**Integration points**:
+- OODA daemon loop: periodically enters consolidation cycle instead of normal OODA
+- Proprioception (Phase 20c): high uptime_fatigue increases consolidation pressure
+- Metrics: `akh_consolidation_total`, `akh_consolidation_duration_seconds`, `akh_dream_connections_found`
+
+### 11j — Directed Curiosity (Lifeform Engine Extension) (~400 lines)
+
+> Added: 2026-02-24 (Lifeform Engine — information gap theory, shaped curiosity)
+
+The existing curiosity drive (Phase 11a) is uniform — it generates exploration goals
+when novelty drops. But human curiosity is *shaped*: you're curious about things that
+almost-but-don't-quite fit your model. Information gap theory (Loewenstein 1994).
+
+**Enhancement to existing `CuriosityDrive`**:
+```rust
+struct DirectedCuriosity {
+    /// Concepts at the boundary of understanding (ZPD "proximal" zone)
+    curiosity_targets: Vec<(SymbolId, f32)>,  // (concept, gap_score)
+    /// Gap score = how close this concept is to being understood
+    /// High gap = almost understood but missing key relations → HIGH curiosity
+    /// Low gap = totally unknown → low curiosity (too far)
+    /// No gap = fully understood → no curiosity (boring)
+}
+```
+
+**Gap score computation**:
+- Count how many expected relations a concept has vs. how many are filled
+- Concepts with 60-80% of expected relations filled are *maximally interesting*
+- This creates a natural curriculum: the system pursues concepts it's almost ready to learn
+
+**Integration with Phase 14d (ZPD)**:
+- Proximal zone concepts get highest curiosity scores
+- Known zone concepts get zero curiosity (already learned)
+- Beyond zone concepts get low curiosity (can't learn yet)
+
+**Integration with Phase 23 (Affective System)**:
+- High-curiosity targets generate positive valence (anticipation, excitement)
+- Satisfying curiosity (filling the information gap) generates positive valence (eureka)
+- This creates a reward loop that drives autonomous learning
+
 ## Implementation Order
 
 ```

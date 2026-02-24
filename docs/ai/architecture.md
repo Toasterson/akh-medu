@@ -1,6 +1,6 @@
 # Akh-medu Architecture
 
-> Last updated: 2026-02-22 (Phase 14a+14b complete — identity bootstrapping & Ritual of Awakening)
+> Last updated: 2026-02-24 (Phase 14j-14m NLU Extension planned, Phases 23-24 Lifeform Engine planned)
 
 ## Overview
 
@@ -12,6 +12,7 @@ Akh-medu is a neuro-symbolic AI engine that runs entirely on CPU with no LLM dep
 - **Autonomous Agent** — OODA-loop agent with 23+ tools, working/episodic memory, planning, reflection
 - **Code Generation** — KG-to-Rust pipeline: code_gen tool, RustCodeGrammar, compiler feedback loop, parameterized templates, VSA code pattern encoding, pattern mining from examples, library learning cycle
 - **Multilingual Grammar** — GF-inspired abstract/concrete syntax split for 5 languages
+- **Four-Tier NLU** — rule parser → micro-ML NER → small LLM translator → VSA parse ranker (planned, Phase 14j-14m)
 - **Content Library** — document ingestion (PDF, EPUB, HTML) with chunking and semantic enrichment
 - **Tiered Storage** — hot (DashMap) → warm (mmap) → cold (redb) for scalability
 
@@ -127,6 +128,26 @@ OODA loop (synchronous, no async runtime):
 4. **Act** — execute selected tool, evaluate goal progress
 
 Supporting infrastructure: working memory (ephemeral), episodic memory (consolidated), goal management with HTN decomposition (6+ built-in + learned methods, dependency DAGs, VSA-based method selection), multi-step planning with backtracking, periodic reflection, Jungian psyche model, autonomous goal generation (CLARION-inspired drives: curiosity, coherence, completeness, efficiency), metacognitive self-evaluation (Nelson-Narens monitoring/control, ZPD, competence tracking, AGM belief revision, e-graph goal reformulation), resource awareness (VOC-based goal switching, CBR effort estimation, dynamic stall thresholds, diminishing returns detection, opportunity cost recording), procedural learning (Soar-inspired chunking: trace extraction → generalization → method compilation, success/failure tracking, dormancy pruning).
+
+## NLU Architecture (Planned — Phase 14j-14m)
+
+Four-tier cascading pipeline for natural language understanding. Human language enters and exits at the boundary; all internal reasoning remains in VSA space.
+
+```
+Tier 1: Extended Rule Parser     — 0 MB,    <1ms,  handles ~70% of input
+Tier 2: Micro-ML NER (ONNX)     — 130 MB,  ~5ms,  handles ~20% more (feature-gated: nlu-ml)
+Tier 3: Small LLM (Qwen2.5-1.5B)— 1.1 GB,  ~800ms, handles remaining ~10% (feature-gated: nlu-llm)
+Tier 4: VSA Parse Ranker         — 0 MB,    <1ms,  self-improving disambiguation
+```
+
+- **Tier 1** extends existing GF-inspired parser with negation, quantifiers, comparatives, conditionals, temporal, modals (all 5 languages)
+- **Tier 2** uses DistilBERT multilingual NER via `ort` (ONNX Runtime) for entity boundary detection
+- **Tier 3** uses Qwen2.5-1.5B-Instruct (Q4_K_M, Apache 2.0) via `llama-cpp-2` with GBNF-constrained decoding — can only output valid AbsTree JSON
+- **Tier 4** encodes successful parses as VSA exemplars in HNSW ItemMemory; ranks ambiguous candidates by similarity to known-good parses
+
+Total NLU memory: ~1.3 GB. Runs entirely on Mac Mini M2. No cloud API. FLOSS throughout.
+
+ADR: `docs/ai/decisions/022-nlu-architecture.md`
 
 ## Storage Architecture
 
@@ -291,3 +312,4 @@ Phase 14a–14i: Purpose-driven bootstrapping with identity (9 sub-phases):
 - **Acquisition**: 14e resource discovery (Semantic Scholar + OpenAlex + Open Library, quality scoring), 14f iterative ingestion (curriculum-ordered, NELL-style multi-extractor cross-validation, personality-biased resource selection)
 - **Assessment**: 14g competence assessment (Dreyfus model, competency questions, graph completeness, VSA structural analysis)
 - **Orchestration**: 14h bootstrap orchestrator (meta-OODA loop, personality shapes exploration style, Dreyfus-adaptive exploration), 14i community recipe sharing (TOML purpose recipes with identity section, ActivityPub federation, skillpack export)
+- **NLU Extension**: 14j extended rule parser (negation, quantifiers, comparatives, conditionals, temporal, modals — all 5 langs), 14k micro-ML NER (DistilBERT multilingual via ONNX, feature-gated), 14l small LLM translator (Qwen2.5-1.5B + GBNF constrained decoding, feature-gated), 14m VSA parse ranker (exemplar memory, self-improving disambiguation)

@@ -4,7 +4,7 @@
 
 - **Status**: Planned
 - **Phase**: Release milestone (after Phase 14 completion)
-- **Depends on**: Phase 14i (all bootstrap sub-phases complete)
+- **Depends on**: Phase 14m (all bootstrap + NLU sub-phases complete)
 
 ## Goal
 
@@ -18,8 +18,8 @@ metrics, and a health endpoint.
 
 ## Scope
 
-Everything through Phase 14 (engine, KG, VSA, e-graphs, agent OODA, drives,
-metacognition, identity bootstrap). The akh uses `akh agent daemon` mode
+Everything through Phase 14m (engine, KG, VSA, e-graphs, agent OODA, drives,
+metacognition, identity bootstrap, four-tier NLU). The akh uses `akh agent daemon` mode
 (already implemented) with its drive system, goal generation pipeline,
 metacognitive monitoring, and reflection — all running on scheduled intervals
 inside a Kubernetes pod with persistent storage.
@@ -38,7 +38,19 @@ inside a Kubernetes pod with persistent storage.
 **Binary packaging**:
 - `cargo install` support with proper `[[bin]]` section
 - Release profile with LTO + strip for minimal binary size
-- Platform targets: x86_64-linux (primary), aarch64-linux (ARM)
+- Platform targets: x86_64-linux (primary), aarch64-linux (ARM), aarch64-apple-darwin (Mac Mini M2)
+
+**ARM NEON SIMD optimization**:
+- Add `src/simd/neon.rs` — NEON intrinsics for VSA operations (xor_bind, bundle, similarity)
+- Runtime dispatch: AVX2 (x86_64) / NEON (aarch64) / generic fallback
+- Expected ~30-40% speedup on ARM vs generic kernel
+- Use `std::arch::aarch64` NEON intrinsics
+
+**NLU model packaging**:
+- `akh init --with-models` downloads ONNX NER model (~130 MB)
+- `akh init --with-llm` downloads Qwen2.5-1.5B GGUF (~1.1 GB)
+- Models stored in `$AKH_DATA_DIR/models/`, not bundled in binary
+- Graceful degradation: NLU Tiers 2+3 skip if models not present
 
 **Configuration**:
 - `akh.toml` configuration file: data directory, log level, feature toggles, API keys (Semantic Scholar, OpenAlex, ConceptNet), Oxigraph path, redb path
@@ -169,11 +181,11 @@ spec:
           periodSeconds: 60
         resources:
           requests:
-            memory: "512Mi"
-            cpu: "500m"
-          limits:
             memory: "2Gi"
-            cpu: "2"
+            cpu: "1"
+          limits:
+            memory: "8Gi"        # NLU stack (~1.3 GB) + engine + KG headroom
+            cpu: "4"
         volumeMounts:
         - name: data
           mountPath: /data
@@ -184,7 +196,7 @@ spec:
       accessModes: ["ReadWriteOnce"]
       resources:
         requests:
-          storage: 10Gi            # KG + redb + Oxigraph
+          storage: 30Gi            # KG + redb + Oxigraph + NLU models + growth
 ```
 
 **Persistent storage layout** (`/data/`):

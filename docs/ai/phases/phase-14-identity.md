@@ -1,6 +1,6 @@
 # Phase 14 — Purpose-Driven Bootstrapping with Identity
 
-Status: **In Progress** (14a-14d complete, 14e-14i pending)
+Status: **In Progress** (14a-14d complete, 14e-14m pending)
 
 Autonomous domain knowledge acquisition AND identity construction from operator statements
 like "You are the Architect of the System based on Ptah" or "Be like Gandalf — a GCC
@@ -116,3 +116,101 @@ via ActivityPub/oxifed. 9 sub-phases (14a-14i). Builds on existing Psyche model 
 - [x] `AwakenAction::Prerequisite` CLI subcommand with --seeds, --purpose, --known-threshold, --zpd-low, --zpd-high
 - [x] `pub mod prerequisite` + re-exports in bootstrap/mod.rs
 - [x] ~18 unit tests (config defaults, ZPD roundtrip, source display, errors, merge, cycles, toposort, classification, curriculum ordering)
+
+## Phase 14e — Resource Discovery
+
+- [ ] `ResourceError` miette diagnostic enum
+- [ ] Multi-API search: Semantic Scholar + OpenAlex + Open Library
+- [ ] Quality scoring: citation count, recency, open access, VSA similarity
+- [ ] Scaffolding: difficulty-appropriate resource selection by ZPD zone
+- [ ] Resource deduplication via VSA similarity
+- [ ] Unit tests
+
+## Phase 14f — Iterative Ingestion
+
+- [ ] Curriculum-ordered ingestion loop
+- [ ] Multi-extractor cross-validation (NELL-inspired)
+- [ ] Post-ingestion grounding via `ground_symbol()`
+- [ ] Progress tracking + diminishing returns detection
+- [ ] Integration with OODA cycle
+- [ ] Unit tests
+
+## Phase 14g — Competence Assessment
+
+- [ ] Dreyfus level estimation (coverage, dead-end ratio, type diversity, relation density, cross-domain)
+- [ ] Competency question evaluation (Remember, Understand, Apply, Analyze)
+- [ ] Graph completeness metrics
+- [ ] VSA structural analysis (cluster density and separation)
+- [ ] `CompetenceReport` with per-knowledge-area scores
+- [ ] Unit tests
+
+## Phase 14h — Bootstrap Orchestrator
+
+- [ ] Meta-OODA loop managing 8-stage pipeline
+- [ ] Personality shapes exploration style (Creator→building, Sage→theory, Explorer→breadth)
+- [ ] Operator interaction points (confirmation, progress, adjustment)
+- [ ] Exploration-exploitation scheduling by Dreyfus level
+- [ ] Session persistence across restarts
+- [ ] CLI: `akh bootstrap` with --plan-only, --resume, --status
+- [ ] Unit tests
+
+## Phase 14i — Community Recipe Sharing
+
+- [ ] Purpose recipe TOML format with identity section
+- [ ] Recipe generation from successful bootstrap
+- [ ] Skillpack export (`SkillInstallPayload`)
+- [ ] ActivityPub sharing via oxifed
+- [ ] Recipe import + dependency resolution
+- [ ] Unit tests
+
+## Phase 14j — Extended Rule Parser (NLU Tier 1)
+
+- [ ] `Negation { inner }` AbsTree variant + parser pattern (not/no/never + multilingual)
+- [ ] `Quantified { quantifier, scope }` variant (all/every/some/most/no + multilingual)
+- [ ] `Comparison { entity_a, entity_b, property, ordering }` variant (more/less/bigger than + multilingual)
+- [ ] `Conditional { condition, consequent }` variant (if/when/unless + multilingual)
+- [ ] `Temporal { time_expr, inner }` variant + `chrono-english` integration (+ multilingual temporal lexicons)
+- [ ] `Modal { modality, inner }` variant (want/can/should/must/may + multilingual)
+- [ ] `RelativeClause { head, clause }` variant (that/which/who patterns)
+- [ ] `to_vsa()` encoding for all new AbsTree variants
+- [ ] Concrete grammar linearization (formal, terse, narrative) for all new variants
+- [ ] ~40 unit tests (each pattern in all 5 languages, edge cases)
+
+## Phase 14k — Micro-ML NER & Intent Classification (NLU Tier 2)
+
+- [ ] `NluError` miette diagnostic enum with `NluResult<T>`
+- [ ] `src/nlu/mod.rs` — NLU pipeline orchestrator (tier routing)
+- [ ] `MicroMlLayer` — ONNX NER session + tokenizer via `ort` crate
+- [ ] `EntitySpan` + `IntentClass` types
+- [ ] DistilBERT multilingual NER model integration (`Davlan/distilbert-base-multilingual-cased-ner-hrl`)
+- [ ] `augment_parse()` — feed NER entities back into entity resolution for re-parse
+- [ ] Model management: `$AKH_DATA_DIR/models/`, `akh init --with-models` download
+- [ ] Feature-gated: `nlu-ml = ["ort", "tokenizers"]`
+- [ ] Graceful degradation: skip Tier 2 if models not present
+- [ ] ~20 unit tests (mock ONNX session, entity span extraction, intent classification)
+
+## Phase 14l — Small LLM Translator (NLU Tier 3)
+
+- [ ] `LlmTranslator` struct with `llama-cpp-2` model handle
+- [ ] GBNF grammar definition constraining output to valid AbsTree JSON
+- [ ] System prompt for NL→AbsTree translation with few-shot examples
+- [ ] `translate()` — generate constrained AbsTree JSON, deserialize
+- [ ] Model: Qwen2.5-1.5B-Instruct Q4_K_M GGUF (~1.1 GB, Apache 2.0)
+- [ ] Model management: `$AKH_DATA_DIR/models/`, `akh init --with-llm` download
+- [ ] Self-training data collection: store successful (input, AbsTree) pairs
+- [ ] Feature-gated: `nlu-llm = ["llama-cpp-2"]`
+- [ ] Graceful degradation: skip Tier 3 if model not present
+- [ ] ~15 unit tests (mock model, GBNF validation, JSON→AbsTree deserialization)
+
+## Phase 14m — VSA Parse Ranker (NLU Tier 4)
+
+- [ ] `ParseRanker` struct with exemplar `ItemMemory` (HNSW)
+- [ ] `record_success()` — encode successful parse via `AbsTree::to_vsa()`, store in exemplar memory
+- [ ] `rank_candidates()` — rank multiple parse candidates by similarity to exemplars
+- [ ] `has_similar_exemplar()` — quick check for known patterns
+- [ ] Self-improvement loop: more successful parses → better disambiguation → less LLM fallback
+- [ ] Persistence: exemplar memory via `put_meta`/`get_meta` on durable store
+- [ ] `DerivationKind::NluParsed` provenance variant (records tier, confidence, exemplar similarity)
+- [ ] Integration with parser pipeline: final ranking step after all tiers
+- [ ] Wire NLU pipeline into `agent/conversation.rs` and TUI/headless chat
+- [ ] ~15 unit tests (exemplar recording, ranking, persistence roundtrip, self-improvement)

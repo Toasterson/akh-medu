@@ -278,6 +278,42 @@ Low temperature → greedy (exploit). High temperature → exploratory. Temperat
 11. efe_prefers_goal_progress
 12. efe_explores_when_uncertain
 
+### 20c — Proprioception (Lifeform Engine Extension) (~400 lines)
+
+> Added: 2026-02-24 (Lifeform Engine — self-awareness of resource state as felt signal)
+
+Awareness of the agent's own resource state as a *felt* signal, not just a metric.
+"I'm running low on memory" should change reasoning behavior automatically, like
+hunger changes human behavior.
+
+**Key types**:
+```rust
+struct ProprioceptiveState {
+    memory_pressure: f32,      // 0.0 (plenty) to 1.0 (critical)
+    kg_density: f32,           // How "full" the knowledge graph feels
+    reasoning_load: f32,       // Current computational effort
+    uptime_fatigue: f32,       // Increases with continuous operation
+    storage_remaining: f32,    // Disk space awareness
+}
+```
+
+**Effects on behavior**:
+- High memory pressure → more aggressive consolidation, pause ingestion
+- High reasoning load → defer non-urgent goals, simplify strategies
+- High uptime fatigue → trigger consolidation cycle (like sleep drive)
+- Low storage → stop ingesting new documents, warn operator
+
+**Integration with Phase 23 (Affective System)**:
+- Resource scarcity generates negative valence (stress)
+- Recovering from pressure generates positive valence (relief)
+- Proprioceptive signals contribute to somatic markers on resource-intensive operations
+
+**Replaces**: The existing `resource.rs` (resource awareness, VOC) provides the raw
+metrics. This extension adds the *felt* dimension — converting metrics into affective
+signals that automatically modulate behavior without explicit threshold checks.
+
+**Dependencies**: Phase 11g (resource awareness), Phase 23 (affective system)
+
 ## Cross-Cutting Changes
 
 ### Agent (`src/agent/agent.rs`)

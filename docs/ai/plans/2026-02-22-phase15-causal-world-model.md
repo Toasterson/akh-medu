@@ -4,7 +4,7 @@
 > Research: `docs/ai/decisions/020-predictive-planning-epistemic-research.md`
 
 - **Status**: Planned
-- **Phase**: 15 (3 sub-phases: 15a–15c)
+- **Phase**: 15 (3 sub-phases: 15a–15c, plus 15d temporal experience extension)
 - **Depends on**: Phases 8–13 (all complete)
 - **Provenance tags**: 58–62
 
@@ -405,6 +405,42 @@ pub struct PredictionRecord {
 
 ### CLI (`src/main.rs`)
 - `Commands::Causal { action: CausalAction }` with subcommands: Schema, Predict, Simulate, Counterfactual, Accuracy
+
+### 15d — Temporal Experience (Lifeform Engine Extension) (~600 lines)
+
+> Added: 2026-02-24 (Lifeform Engine — felt duration, urgency, boredom)
+
+A sense of time passing. The existing temporal projection (Phase 9k) stores timestamps
+and applies decay, but there is no "felt" duration — no urgency from time pressure,
+no boredom from waiting, no subjective sense that some periods are more eventful than
+others.
+
+**Subjective time**:
+```rust
+struct TemporalExperience {
+    /// Ratio of events per unit time — high density = "time flies"
+    event_density: f32,
+    /// How long since last meaningful event — triggers boredom/restlessness
+    time_since_last_event: u64,
+    /// Urgency signal from approaching deadlines
+    deadline_pressure: f32,
+    /// Circadian-like cycle: activity level varies over 24h period
+    circadian_phase: f32,
+}
+```
+
+**Effects on behavior**:
+- Low event density + long idle → boredom → curiosity drive amplified
+- High deadline pressure → arousal increase → faster decisions, less exploration
+- Circadian phase modulates consolidation cycles (more consolidation during "night")
+- Subjective duration stored on episodic memories: densely-packed episodes feel shorter
+
+**Integration with Phase 23 (Affective System)**:
+- Temporal pressure generates negative valence (anxiety)
+- Post-deadline relief generates positive valence
+- Boredom generates restlessness (moderate negative valence, low arousal)
+
+**Dependencies**: Phase 9k (temporal projection), Phase 23 (affective system)
 
 ## Verification
 
