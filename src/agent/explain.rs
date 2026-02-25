@@ -859,6 +859,25 @@ pub fn derivation_kind_prose(kind: &DerivationKind) -> String {
                 "ZPD classification: '{concept_label}' → {zone} (coverage: {prereq_coverage:.2}, similarity: {similarity_to_known:.2}, tier: {curriculum_tier})"
             )
         }
+        DerivationKind::SleepConsolidation {
+            phase,
+            merged_count,
+            pruned_count,
+        } => {
+            format!(
+                "sleep consolidation ({phase}): merged {merged_count}, pruned {pruned_count}"
+            )
+        }
+        DerivationKind::DirectedCuriosity {
+            concept,
+            gap_score,
+            fill_ratio,
+        } => {
+            let _id = concept; // SymbolId — would need engine for label
+            format!(
+                "directed curiosity: gap score {gap_score:.2}, fill ratio {fill_ratio:.2} (concept #{concept})"
+            )
+        }
     }
 }
 

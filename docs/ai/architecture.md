@@ -1,6 +1,6 @@
 # Akh-medu Architecture
 
-> Last updated: 2026-02-24 (Phase 14j-14m NLU Extension planned, Phases 23-24 Lifeform Engine planned)
+> Last updated: 2026-02-25 (Phase 11i-11j sleep/consolidation + directed curiosity implemented)
 
 ## Overview
 

@@ -23,10 +23,12 @@ pub struct IdleScheduler {
     last_reflection: Instant,
     last_consolidation_check: Instant,
     last_rules: Instant,
+    last_sleep: Instant,
     equivalence_interval: Duration,
     reflection_interval: Duration,
     consolidation_interval: Duration,
     rules_interval: Duration,
+    sleep_interval: Duration,
 }
 
 impl Default for IdleScheduler {
@@ -37,11 +39,13 @@ impl Default for IdleScheduler {
             last_reflection: now,
             last_consolidation_check: now,
             last_rules: now,
+            last_sleep: now,
             // Longer intervals than daemon — TUI is interactive, don't steal CPU.
-            equivalence_interval: Duration::from_secs(600), // 10 min
-            reflection_interval: Duration::from_secs(300),  // 5 min
+            equivalence_interval: Duration::from_secs(600),  // 10 min
+            reflection_interval: Duration::from_secs(300),   // 5 min
             consolidation_interval: Duration::from_secs(120), // 2 min
-            rules_interval: Duration::from_secs(900),       // 15 min
+            rules_interval: Duration::from_secs(900),        // 15 min
+            sleep_interval: Duration::from_secs(3600),       // 60 min
         }
     }
 }
@@ -60,10 +64,12 @@ impl IdleScheduler {
             last_reflection: now,
             last_consolidation_check: now,
             last_rules: now,
+            last_sleep: now,
             equivalence_interval: equivalence,
             reflection_interval: reflection,
             consolidation_interval: consolidation,
             rules_interval: rules,
+            sleep_interval: Duration::from_secs(3600),
         }
     }
 
@@ -96,6 +102,11 @@ impl IdleScheduler {
                 "rules",
                 now.checked_duration_since(self.last_rules)
                     .and_then(|d| d.checked_sub(self.rules_interval)),
+            ),
+            (
+                "sleep",
+                now.checked_duration_since(self.last_sleep)
+                    .and_then(|d| d.checked_sub(self.sleep_interval)),
             ),
         ];
 
@@ -195,6 +206,30 @@ impl IdleScheduler {
                     }),
                 }
             }
+            "sleep" => {
+                self.last_sleep = now;
+                match super::sleep::run_sleep_cycle(
+                    &*agent.engine,
+                    &agent.working_memory,
+                    &mut agent.sleep_cycle,
+                    agent.cycle_count,
+                ) {
+                    Ok(metrics) => Some(IdleTaskResult {
+                        task: "sleep",
+                        summary: format!(
+                            "replayed {}, merged {}, pruned {}, dream {}",
+                            metrics.episodes_replayed,
+                            metrics.duplicates_merged,
+                            metrics.orphans_pruned,
+                            metrics.dream_connections_found,
+                        ),
+                    }),
+                    Err(e) => Some(IdleTaskResult {
+                        task: "sleep",
+                        summary: format!("failed: {e}"),
+                    }),
+                }
+            }
             _ => None,
         }
     }
@@ -206,6 +241,7 @@ impl IdleScheduler {
             || now.duration_since(self.last_reflection) >= self.reflection_interval
             || now.duration_since(self.last_equivalence) >= self.equivalence_interval
             || now.duration_since(self.last_rules) >= self.rules_interval
+            || now.duration_since(self.last_sleep) >= self.sleep_interval
     }
 }
 

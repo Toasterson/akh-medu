@@ -67,6 +67,10 @@ pub struct AgentConfig {
     pub metacognition: MetacognitionConfig,
     /// Procedural learning (chunking) settings (Phase 11h).
     pub chunking: ChunkingConfig,
+    /// Sleep/consolidation cycle settings (Phase 11i).
+    pub sleep: super::sleep::SleepConfig,
+    /// Directed curiosity settings (Phase 11j).
+    pub curiosity: super::curiosity::DirectedCuriosityConfig,
 }
 
 impl Default for AgentConfig {
@@ -81,6 +85,8 @@ impl Default for AgentConfig {
             goal_generation: GoalGenerationConfig::default(),
             metacognition: MetacognitionConfig::default(),
             chunking: ChunkingConfig::default(),
+            sleep: super::sleep::SleepConfig::default(),
+            curiosity: super::curiosity::DirectedCuriosityConfig::default(),
         }
     }
 }
@@ -204,6 +210,10 @@ pub struct Agent {
     pub(crate) preference_manager: super::preference::PreferenceManager,
     /// Causal world model manager (Phase 15a).
     pub(crate) causal_manager: super::causal::CausalManager,
+    /// Sleep/consolidation cycle state (Phase 11i).
+    pub(crate) sleep_cycle: super::sleep::SleepCycle,
+    /// Directed curiosity configuration (Phase 11j).
+    pub(crate) curiosity_config: super::curiosity::DirectedCuriosityConfig,
     /// Optional WASM tool runtime (only when `wasm-tools` feature is enabled).
     #[cfg(feature = "wasm-tools")]
     pub(crate) wasm_runtime: Option<super::wasm_runtime::WasmToolRuntime>,
@@ -382,6 +392,8 @@ impl Agent {
 
         let drives = DriveSystem::with_thresholds(config.goal_generation.drive_thresholds);
         let chunking_config = config.chunking.clone();
+        let sleep_cycle = super::sleep::SleepCycle::new(config.sleep.clone());
+        let curiosity_config = config.curiosity.clone();
 
         let mut htn_registry = MethodRegistry::new();
         decomposition::register_builtin_methods(&mut htn_registry);
@@ -423,6 +435,8 @@ impl Agent {
             calendar_manager: super::calendar::CalendarManager::default(),
             preference_manager: super::preference::PreferenceManager::default(),
             causal_manager: super::causal::CausalManager::default(),
+            sleep_cycle,
+            curiosity_config,
             #[cfg(feature = "wasm-tools")]
             wasm_runtime: super::wasm_runtime::WasmToolRuntime::new().ok(),
         };
@@ -474,6 +488,18 @@ impl Agent {
     pub fn run_cycle(&mut self) -> AgentResult<OodaCycleResult> {
         if goal::active_goals(&self.goals).is_empty() {
             return Err(AgentError::NoGoals);
+        }
+
+        // Phase 11i: Check if the agent should enter a sleep cycle before OODA.
+        let wm_pressure = self.working_memory.len() as f32
+            / self.config.working_memory_capacity.max(1) as f32;
+        if super::sleep::should_sleep(&self.sleep_cycle, self.cycle_count, wm_pressure) {
+            let _ = super::sleep::run_sleep_cycle(
+                &self.engine,
+                &self.working_memory,
+                &mut self.sleep_cycle,
+                self.cycle_count,
+            );
         }
 
         // Before the OODA cycle, ensure the top-priority goal has a plan.
@@ -1563,13 +1589,22 @@ impl Agent {
             .map(|g| g.symbol_id)
             .collect();
 
-        // Update drive strengths.
-        self.drives.update(
+        // Update drive strengths with directed curiosity (Phase 11j).
+        self.drives.update_with_curiosity(
             &self.engine,
             &self.working_memory,
             &goal_symbols,
             self.cycle_count,
+            Some(&self.curiosity_config),
         );
+
+        // Phase 11j: Generate curiosity proposals alongside drive signals.
+        let curiosity_proposals = super::curiosity::compute_directed_curiosity(
+            &self.engine,
+            &self.curiosity_config,
+        )
+        .map(|report| report.proposals)
+        .unwrap_or_default();
 
         // Run the three-phase pipeline.
         let gen_result = goal_generation::generate_goals(
@@ -1584,6 +1619,17 @@ impl Agent {
             self.last_reflection.as_ref(),
             &self.last_watch_firings,
         )?;
+
+        // Merge curiosity proposals into the activated set (Phase 11j).
+        let mut gen_result = gen_result;
+        for cp in curiosity_proposals {
+            // Don't exceed max activations.
+            if gen_result.activated.len() < self.config.goal_generation.max_activations {
+                gen_result.activated.push(cp);
+            } else if gen_result.dormant.len() < self.config.goal_generation.max_dormant {
+                gen_result.dormant.push(cp);
+            }
+        }
 
         // Activate generated goals by creating them in the goals list.
         for proposal in &gen_result.activated {
@@ -2070,6 +2116,29 @@ impl Agent {
                 message: format!("failed to persist causal manager: {e}"),
             })?;
 
+        // Persist sleep cycle state (Phase 11i).
+        let sleep_bytes =
+            bincode::serialize(&self.sleep_cycle).map_err(|e| AgentError::ConsolidationFailed {
+                message: format!("failed to serialize sleep cycle: {e}"),
+            })?;
+        store
+            .put_meta(b"agent:sleep_cycle", &sleep_bytes)
+            .map_err(|e| AgentError::ConsolidationFailed {
+                message: format!("failed to persist sleep cycle: {e}"),
+            })?;
+
+        // Persist curiosity config (Phase 11j).
+        let curiosity_bytes = bincode::serialize(&self.curiosity_config).map_err(|e| {
+            AgentError::ConsolidationFailed {
+                message: format!("failed to serialize curiosity config: {e}"),
+            }
+        })?;
+        store
+            .put_meta(b"agent:curiosity_config", &curiosity_bytes)
+            .map_err(|e| AgentError::ConsolidationFailed {
+                message: format!("failed to persist curiosity config: {e}"),
+            })?;
+
         // Flush the engine's durable store.
         self.engine
             .persist()
@@ -2244,6 +2313,24 @@ impl Agent {
                 super::causal::CausalManager::new(&engine).unwrap_or_default()
             });
 
+        // Restore sleep cycle state (Phase 11i).
+        let sleep_cycle = store
+            .get_meta(b"agent:sleep_cycle")
+            .ok()
+            .flatten()
+            .and_then(|bytes| bincode::deserialize::<super::sleep::SleepCycle>(&bytes).ok())
+            .unwrap_or_else(|| super::sleep::SleepCycle::new(config.sleep.clone()));
+
+        // Restore curiosity config (Phase 11j).
+        let curiosity_config = store
+            .get_meta(b"agent:curiosity_config")
+            .ok()
+            .flatten()
+            .and_then(|bytes| {
+                bincode::deserialize::<super::curiosity::DirectedCuriosityConfig>(&bytes).ok()
+            })
+            .unwrap_or_else(|| config.curiosity.clone());
+
         let session_start_cycle = cycle_count;
         let chunking_config = config.chunking.clone();
 
@@ -2284,6 +2371,8 @@ impl Agent {
             calendar_manager,
             preference_manager,
             causal_manager,
+            sleep_cycle,
+            curiosity_config,
             #[cfg(feature = "wasm-tools")]
             wasm_runtime: super::wasm_runtime::WasmToolRuntime::new().ok(),
         };

@@ -5534,5 +5534,27 @@ fn format_derivation_kind(kind: &DerivationKind, engine: &Engine) -> String {
                 concept_label, zone, prereq_coverage, similarity_to_known, curriculum_tier
             )
         }
+        DerivationKind::SleepConsolidation {
+            phase,
+            merged_count,
+            pruned_count,
+        } => {
+            format!(
+                "sleep consolidation [{}]: {} merged, {} pruned",
+                phase, merged_count, pruned_count
+            )
+        }
+        DerivationKind::DirectedCuriosity {
+            concept,
+            gap_score,
+            fill_ratio,
+        } => {
+            format!(
+                "directed curiosity: '{}' (gap: {:.2}, fill: {:.2})",
+                engine.resolve_label(*concept),
+                gap_score,
+                fill_ratio
+            )
+        }
     }
 }

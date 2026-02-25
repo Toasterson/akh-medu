@@ -18,6 +18,7 @@ pub mod constraint_check;
 pub mod conversation;
 pub mod chunking;
 pub mod cli_tool;
+pub mod curiosity;
 pub mod explain;
 #[cfg(feature = "daemon")]
 pub mod daemon;
@@ -45,6 +46,7 @@ pub mod project;
 pub mod reflect;
 pub mod resource;
 pub mod semantic_enrichment;
+pub mod sleep;
 pub mod synthesize;
 pub mod synthesize_abs;
 pub mod tool;
@@ -125,8 +127,10 @@ pub use priority_reasoning::{Audience, PriorityArgument, PriorityVerdict, Value}
 pub use project::{Agenda, Project, ProjectAssignment, ProjectPredicates, ProjectStatus};
 pub use reflect::{Adjustment, ReflectionConfig, ReflectionResult};
 pub use chunking::{ChunkingConfig, GeneralizedStep, LearnedMethod, MethodIndex};
+pub use curiosity::{CuriosityReport, CuriosityTarget, DirectedCuriosityConfig};
 pub use resource::{EffortCase, EffortEstimate, EffortIndex, ImprovementHistory, ResourceReport};
 pub use semantic_enrichment::{EnrichmentResult, SemanticPredicates};
+pub use sleep::{ConsolidationPhase, SleepConfig, SleepCycle, SleepMetrics};
 pub use synthesize::NarrativeSummary;
 pub use tool::{Tool, ToolInput, ToolOutput, ToolRegistry, ToolSignature};
 pub use tool_manifest::{Capability, DangerInfo, DangerLevel, ToolManifest, ToolSource};

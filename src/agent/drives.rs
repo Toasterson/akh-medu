@@ -140,6 +140,9 @@ impl DriveSystem {
     }
 
     /// Recompute all four drive strengths from current engine and working memory state.
+    ///
+    /// If `curiosity_config` is provided (Phase 11j), the Curiosity drive uses
+    /// directed curiosity (information-gap targeting) instead of raw KG stagnation.
     pub fn update(
         &mut self,
         engine: &Engine,
@@ -147,10 +150,35 @@ impl DriveSystem {
         goal_symbols: &[SymbolId],
         cycle: u64,
     ) {
-        // Curiosity: measures KG growth stagnation.
+        self.update_with_curiosity(engine, working_memory, goal_symbols, cycle, None);
+    }
+
+    /// Like [`update`](Self::update), but with optional directed curiosity config.
+    pub fn update_with_curiosity(
+        &mut self,
+        engine: &Engine,
+        working_memory: &WorkingMemory,
+        goal_symbols: &[SymbolId],
+        cycle: u64,
+        curiosity_config: Option<&super::curiosity::DirectedCuriosityConfig>,
+    ) {
+        // Curiosity: directed (Phase 11j) if config provided, else KG stagnation.
         let info = engine.info();
-        self.drives[0].strength =
-            compute_curiosity(info.triple_count, &self.drives[0].last_snapshot);
+        let curiosity_strength = if let Some(config) = curiosity_config {
+            match super::curiosity::compute_directed_curiosity(engine, config) {
+                Ok(report) => {
+                    // Use directed curiosity's strongest_drive, but also incorporate
+                    // KG stagnation as a fallback signal.
+                    let stagnation = compute_curiosity(info.triple_count, &self.drives[0].last_snapshot);
+                    // Blend: 70% directed, 30% stagnation.
+                    (0.7 * report.strongest_drive + 0.3 * stagnation).clamp(0.0, 1.0)
+                }
+                Err(_) => compute_curiosity(info.triple_count, &self.drives[0].last_snapshot),
+            }
+        } else {
+            compute_curiosity(info.triple_count, &self.drives[0].last_snapshot)
+        };
+        self.drives[0].strength = curiosity_strength;
         self.drives[0].last_snapshot = DriveSnapshot {
             triple_count: info.triple_count,
             symbol_count: info.symbol_count,

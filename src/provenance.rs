@@ -410,6 +410,24 @@ pub enum DerivationKind {
         similarity_to_known: f32,
         curriculum_tier: u32,
     },
+
+    // --- Phase 11i: Sleep/Consolidation Cycle ---------------------------------
+
+    /// The agent performed a sleep/consolidation cycle (Phase 11i).
+    SleepConsolidation {
+        phase: String,
+        merged_count: usize,
+        pruned_count: usize,
+    },
+
+    // --- Phase 11j: Directed Curiosity ----------------------------------------
+
+    /// A curiosity target was identified via information-gap analysis (Phase 11j).
+    DirectedCuriosity {
+        concept: SymbolId,
+        gap_score: f32,
+        fill_ratio: f32,
+    },
 }
 
 impl DerivationKind {
@@ -480,6 +498,8 @@ impl DerivationKind {
             Self::DomainExpansion { .. } => 61,
             Self::PrerequisiteDiscovered { .. } => 62,
             Self::ZpdClassification { .. } => 63,
+            Self::SleepConsolidation { .. } => 64,
+            Self::DirectedCuriosity { .. } => 65,
         }
     }
 }
