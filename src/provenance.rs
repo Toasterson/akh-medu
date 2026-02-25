@@ -450,6 +450,18 @@ pub enum DerivationKind {
         tier: u32,
         cross_validated: bool,
     },
+
+    // --- Phase 14g: Competence Assessment ------------------------------------
+
+    /// A competence assessment was performed on the akh's domain knowledge (Phase 14g).
+    CompetenceAssessment {
+        overall_score: f32,
+        overall_dreyfus: String,
+        knowledge_area_count: u32,
+        cq_answered: u32,
+        cq_total: u32,
+        recommendation: String,
+    },
 }
 
 impl DerivationKind {
@@ -524,6 +536,7 @@ impl DerivationKind {
             Self::DirectedCuriosity { .. } => 65,
             Self::ResourceDiscovery { .. } => 66,
             Self::CurriculumIngestion { .. } => 67,
+            Self::CompetenceAssessment { .. } => 68,
         }
     }
 }

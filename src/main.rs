@@ -864,6 +864,24 @@ enum AwakenAction {
         #[arg(long)]
         catalog_dir: Option<String>,
     },
+    /// Assess competence: expand → prereq → resources → ingest → assess.
+    Assess {
+        /// Comma-separated seed concepts (e.g., "rust,compiler").
+        #[arg(long)]
+        seeds: Option<String>,
+        /// Purpose statement to extract seeds from.
+        #[arg(long)]
+        purpose: Option<String>,
+        /// Minimum triples per concept for "known" classification (default 3).
+        #[arg(long, default_value = "3")]
+        min_triples: usize,
+        /// Maximum Bloom depth to evaluate (1–4, default 4).
+        #[arg(long, default_value = "4")]
+        bloom_depth: usize,
+        /// Print per-knowledge-area breakdown with score components.
+        #[arg(long)]
+        verbose: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -4330,6 +4348,241 @@ fn main() -> Result<()> {
                         Err(e) => eprintln!("Failed to initialize curriculum ingestor: {e}"),
                     }
                 }
+                AwakenAction::Assess {
+                    seeds,
+                    purpose: purpose_stmt,
+                    min_triples,
+                    bloom_depth,
+                    verbose,
+                } => {
+                    // Resolve seed concepts (same pattern as Ingest).
+                    let purpose_model = if let Some(ref seed_str) = seeds {
+                        let seed_list: Vec<String> = seed_str
+                            .split(',')
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect();
+                        akh_medu::bootstrap::PurposeModel {
+                            domain: seed_list.first().cloned().unwrap_or_default(),
+                            competence_level: akh_medu::bootstrap::DreyfusLevel::Competent,
+                            seed_concepts: seed_list,
+                            description: seed_str.clone(),
+                        }
+                    } else if let Some(ref stmt) = purpose_stmt {
+                        match akh_medu::bootstrap::purpose::parse_purpose(stmt) {
+                            Ok(intent) => intent.purpose,
+                            Err(e) => {
+                                eprintln!("Failed to parse purpose: {e}");
+                                return Ok(());
+                            }
+                        }
+                    } else {
+                        eprintln!("Provide --seeds or --purpose for competence assessment.");
+                        return Ok(());
+                    };
+
+                    // Step 1: Domain expansion.
+                    println!(
+                        "Expanding domain from {} seed(s): {:?}",
+                        purpose_model.seed_concepts.len(),
+                        purpose_model.seed_concepts
+                    );
+                    let expand_config = akh_medu::bootstrap::ExpansionConfig::default();
+                    let expansion_result =
+                        match akh_medu::bootstrap::DomainExpander::new(&engine, expand_config) {
+                            Ok(mut expander) => match expander.expand(&purpose_model, &engine) {
+                                Ok(result) => {
+                                    println!(
+                                        "  Expansion: {} concepts, {} relations",
+                                        result.concept_count, result.relation_count
+                                    );
+                                    result
+                                }
+                                Err(e) => {
+                                    eprintln!("Expansion failed: {e}");
+                                    return Ok(());
+                                }
+                            },
+                            Err(e) => {
+                                eprintln!("Failed to initialize expander: {e}");
+                                return Ok(());
+                            }
+                        };
+
+                    // Step 2: Prerequisite analysis.
+                    println!("\nAnalyzing prerequisites...");
+                    let prereq_config = akh_medu::bootstrap::PrerequisiteConfig::default();
+                    let prereq_result =
+                        match akh_medu::bootstrap::PrerequisiteAnalyzer::new(&engine, prereq_config)
+                        {
+                            Ok(analyzer) => match analyzer.analyze(&expansion_result, &engine) {
+                                Ok(result) => {
+                                    println!(
+                                        "  Prerequisites: {} edges, {} concepts",
+                                        result.edge_count, result.concepts_analyzed
+                                    );
+                                    result
+                                }
+                                Err(e) => {
+                                    eprintln!(
+                                        "  Prerequisite analysis failed: {e}\n  \
+                                         Falling back to synthetic curriculum"
+                                    );
+                                    akh_medu::bootstrap::resources::synthetic_curriculum_from_expansion(
+                                        &expansion_result,
+                                        &engine,
+                                    )
+                                }
+                            },
+                            Err(e) => {
+                                eprintln!(
+                                    "  Failed to initialize analyzer: {e}\n  \
+                                     Falling back to synthetic curriculum"
+                                );
+                                akh_medu::bootstrap::resources::synthetic_curriculum_from_expansion(
+                                    &expansion_result,
+                                    &engine,
+                                )
+                            }
+                        };
+
+                    // Step 3: Resource discovery.
+                    println!("\nDiscovering resources for proximal concepts...");
+                    let res_config = akh_medu::bootstrap::ResourceDiscoveryConfig::default();
+
+                    let resource_result =
+                        match akh_medu::bootstrap::ResourceDiscoverer::new(&engine, res_config) {
+                            Ok(mut discoverer) => {
+                                match discoverer.discover(
+                                    &prereq_result,
+                                    &expansion_result,
+                                    &purpose_model.seed_concepts,
+                                    &engine,
+                                ) {
+                                    Ok(result) => {
+                                        println!(
+                                            "  Resources found: {}, API calls: {}",
+                                            result.resources.len(),
+                                            result.api_calls_made
+                                        );
+                                        result
+                                    }
+                                    Err(e) => {
+                                        eprintln!("Resource discovery failed: {e}");
+                                        return Ok(());
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("Failed to initialize resource discoverer: {e}");
+                                return Ok(());
+                            }
+                        };
+
+                    // Step 4: Curriculum ingestion.
+                    println!("\nIngesting resources in curriculum order...");
+                    let ingest_config = akh_medu::bootstrap::IngestionConfig::default();
+
+                    match akh_medu::bootstrap::CurriculumIngestor::new(&engine, ingest_config) {
+                        Ok(mut ingestor) => {
+                            match ingestor.ingest(&prereq_result, &resource_result, &engine) {
+                                Ok(result) => {
+                                    println!(
+                                        "  Ingestion: {} triples, {} concepts",
+                                        result.total_triples, result.concepts_ingested
+                                    );
+                                }
+                                Err(e) => {
+                                    eprintln!("Curriculum ingestion failed: {e}");
+                                    // Continue to assessment — may still have partial data.
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("Failed to initialize curriculum ingestor: {e}");
+                            // Continue to assessment — may still have prior data.
+                        }
+                    }
+
+                    // Step 5: Competence assessment.
+                    println!("\nAssessing competence...");
+                    let assess_config = akh_medu::bootstrap::CompetenceConfig {
+                        min_triples_per_concept: min_triples,
+                        bloom_max_depth: bloom_depth,
+                        ..Default::default()
+                    };
+
+                    match akh_medu::bootstrap::CompetenceAssessor::new(&engine, assess_config) {
+                        Ok(assessor) => {
+                            match assessor.assess(&prereq_result, &purpose_model, &engine) {
+                                Ok(report) => {
+                                    println!("\nCompetence Assessment Report");
+                                    println!("============================");
+                                    println!(
+                                        "  Overall Dreyfus level: {}",
+                                        report.overall_dreyfus
+                                    );
+                                    println!(
+                                        "  Overall score:         {:.2}",
+                                        report.overall_score
+                                    );
+                                    println!(
+                                        "  Knowledge areas:       {}",
+                                        report.knowledge_areas.len()
+                                    );
+                                    println!(
+                                        "  Recommendation:        {}",
+                                        report.recommendation
+                                    );
+
+                                    if !report.remaining_gaps.is_empty() {
+                                        println!(
+                                            "\n  Remaining gaps ({}):",
+                                            report.remaining_gaps.len()
+                                        );
+                                        for gap in &report.remaining_gaps {
+                                            println!("    - {gap}");
+                                        }
+                                    }
+
+                                    if verbose {
+                                        println!("\n  Per-area breakdown:");
+                                        for ka in &report.knowledge_areas {
+                                            println!(
+                                                "\n    {} ({})",
+                                                ka.name, ka.dreyfus_level
+                                            );
+                                            println!(
+                                                "      Score: {:.2} | Triples: {} | CQ: {}/{} | Gaps: {} | Density: {:.1}",
+                                                ka.score,
+                                                ka.triple_count,
+                                                ka.cq_answered,
+                                                ka.cq_total,
+                                                ka.gap_count,
+                                                ka.relation_density,
+                                            );
+                                            println!(
+                                                "      Components: coverage={:.2} connectivity={:.2} type_diversity={:.2} relation_density={:.2} cross_domain={:.2}",
+                                                ka.score_components.coverage,
+                                                ka.score_components.connectivity,
+                                                ka.score_components.type_diversity,
+                                                ka.score_components.relation_density,
+                                                ka.score_components.cross_domain,
+                                            );
+                                        }
+                                    }
+
+                                    println!(
+                                        "\n  Provenance: {} record(s)",
+                                        report.provenance_ids.len()
+                                    );
+                                }
+                                Err(e) => eprintln!("Competence assessment failed: {e}"),
+                            }
+                        }
+                        Err(e) => eprintln!("Failed to initialize competence assessor: {e}"),
+                    }
+                }
             }
 
             agent.persist_session().into_diagnostic()?;
@@ -5973,6 +6226,20 @@ fn format_derivation_kind(kind: &DerivationKind, engine: &Engine) -> String {
             let xval = if *cross_validated { " [xval]" } else { "" };
             format!(
                 "curriculum ingestion: '{concept_label}' tier={tier} '{resource_title}' → {triples_added} triple(s) [{extraction_methods}]{xval}"
+            )
+        }
+        DerivationKind::CompetenceAssessment {
+            overall_score,
+            overall_dreyfus,
+            knowledge_area_count,
+            cq_answered,
+            cq_total,
+            recommendation,
+        } => {
+            format!(
+                "competence assessment: {overall_dreyfus} (score: {overall_score:.2}, \
+                 {knowledge_area_count} area(s), CQ: {cq_answered}/{cq_total}, \
+                 recommendation: {recommendation})"
             )
         }
     }

@@ -1,6 +1,6 @@
 # Phase 14 — Purpose-Driven Bootstrapping with Identity
 
-Status: **In Progress** (14a-14f complete, 14g-14m pending)
+Status: **In Progress** (14a-14g complete, 14h-14m pending)
 
 Autonomous domain knowledge acquisition AND identity construction from operator statements
 like "You are the Architect of the System based on Ptah" or "Be like Gandalf — a GCC
@@ -161,12 +161,32 @@ via ActivityPub/oxifed. 9 sub-phases (14a-14i). Builds on existing Psyche model 
 
 ## Phase 14g — Competence Assessment
 
-- [ ] Dreyfus level estimation (coverage, dead-end ratio, type diversity, relation density, cross-domain)
-- [ ] Competency question evaluation (Remember, Understand, Apply, Analyze)
-- [ ] Graph completeness metrics
-- [ ] VSA structural analysis (cluster density and separation)
-- [ ] `CompetenceReport` with per-knowledge-area scores
-- [ ] Unit tests
+- [x] `CompetenceError` miette diagnostic enum (3 variants: NoConcepts, InsufficientTriples, Engine) with `CompetenceResult<T>`
+- [x] `CompetenceConfig` struct: min_triples_per_concept, bloom_max_depth, 5 weight parameters (sum to 1.0)
+- [x] `CompetencePredicates` struct: 3 well-known relations in `assess:` namespace (dreyfus_level, competence_score, assessed_at)
+- [x] `BloomLevel` enum: Remember, Understand, Apply, Analyze — with Ord, Display, as_label, all()
+- [x] `CompetencyQuestion` struct (private): bloom_level, concept, related_concept, answered
+- [x] `KnowledgeAreaAssessment` pub struct: name, dreyfus_level, score, triple_count, cq_answered/total, gap_count, relation_density, score_components
+- [x] `ScoreComponents` pub struct: coverage, connectivity, type_diversity, relation_density, cross_domain
+- [x] `BootstrapRecommendation` pub enum: Ready, ContinueLearning { estimated_cycles, focus_areas }, NeedsOperatorInput { question }
+- [x] `CompetenceReport` pub struct: overall_dreyfus, overall_score, knowledge_areas, remaining_gaps, recommendation, provenance_ids
+- [x] `CompetenceAssessor` struct with `new()` and `assess()` methods
+- [x] Dreyfus score: 5-component weighted formula (coverage 0.30, connectivity 0.20, type_diversity 0.20, relation_density 0.15, cross_domain 0.15)
+- [x] CQ evaluation: 4 Bloom levels per concept (Remember: lookup, Understand: shortest_path, Apply: >=2 outgoing, Analyze: all prereqs known)
+- [x] Reuses `autonomous::gap::analyze_gaps` for coverage + dead-end ratio
+- [x] Reuses `autonomous::schema::discover_schema` for type diversity
+- [x] Reuses `graph::analytics::shortest_path` for Understand CQ
+- [x] `score_to_dreyfus()` and `dreyfus_to_min_score()` mapping functions
+- [x] Knowledge area grouping by tier bucket (foundational/intermediate/advanced)
+- [x] Recommendation generation: Ready / ContinueLearning / NeedsOperatorInput
+- [x] `DerivationKind::CompetenceAssessment` (tag 68) in provenance.rs
+- [x] `derivation_kind_prose()` arm for CompetenceAssessment in explain.rs
+- [x] `format_derivation_kind()` arm for CompetenceAssessment in main.rs
+- [x] `AkhError::Competence` transparent variant in error.rs
+- [x] `AgentError::Competence` transparent variant in agent/error.rs
+- [x] `AwakenAction::Assess` CLI subcommand with --seeds, --purpose, --min-triples, --bloom-depth, --verbose
+- [x] `pub mod competence` + re-exports in bootstrap/mod.rs
+- [x] 15 unit tests (config defaults, error formatting, BloomLevel ordering/display, Dreyfus boundaries, weighted formula, type diversity cap, relation density normalization, recommendation variants, score components)
 
 ## Phase 14h — Bootstrap Orchestrator
 

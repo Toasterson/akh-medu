@@ -1,6 +1,6 @@
 # Akh-medu Architecture
 
-> Last updated: 2026-02-25 (Phase 14f curriculum ingestion implemented)
+> Last updated: 2026-02-25 (Phase 14g competence assessment implemented)
 
 ## Overview
 

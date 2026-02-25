@@ -124,6 +124,10 @@ pub enum AkhError {
     #[error(transparent)]
     #[diagnostic(transparent)]
     Ingestion(#[from] crate::bootstrap::ingest::IngestionError),
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Competence(#[from] crate::bootstrap::competence::CompetenceError),
 }
 
 // ---------------------------------------------------------------------------

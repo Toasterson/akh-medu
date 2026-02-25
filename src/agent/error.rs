@@ -176,6 +176,10 @@ pub enum AgentError {
     #[diagnostic(transparent)]
     Ingestion(#[from] crate::bootstrap::ingest::IngestionError),
 
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Competence(#[from] crate::bootstrap::competence::CompetenceError),
+
     #[error("{0}")]
     #[diagnostic(
         code(akh::agent::engine),

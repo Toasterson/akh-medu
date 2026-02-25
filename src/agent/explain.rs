@@ -905,6 +905,18 @@ pub fn derivation_kind_prose(kind: &DerivationKind) -> String {
                 "curriculum ingestion for '{concept_label}' (tier {tier}): '{resource_title}' → {triples_added} triple(s) via {extraction_methods}{xval}"
             )
         }
+        DerivationKind::CompetenceAssessment {
+            overall_score,
+            overall_dreyfus,
+            knowledge_area_count,
+            cq_answered,
+            cq_total,
+            recommendation,
+        } => {
+            format!(
+                "competence assessment: {overall_dreyfus} (score: {overall_score:.2}, {knowledge_area_count} area(s), CQ: {cq_answered}/{cq_total}, recommendation: {recommendation})"
+            )
+        }
     }
 }
 

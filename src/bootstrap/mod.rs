@@ -7,6 +7,7 @@
 //! discovers learning resources for ZPD-proximal concepts, and ingests
 //! them in curriculum order with cross-validation and VSA grounding.
 
+pub mod competence;
 pub mod expand;
 pub mod identity;
 pub mod ingest;
@@ -14,6 +15,10 @@ pub mod prerequisite;
 pub mod purpose;
 pub mod resources;
 
+pub use competence::{
+    BootstrapRecommendation, CompetenceAssessor, CompetenceConfig, CompetenceError,
+    CompetenceReport, CompetenceResult, KnowledgeAreaAssessment,
+};
 pub use expand::{DomainExpandError, DomainExpander, ExpandResult, ExpansionConfig, ExpansionResult};
 pub use identity::{
     CharacterKnowledge, CultureOrigin, IdentityError, IdentityResult, RitualResult,
