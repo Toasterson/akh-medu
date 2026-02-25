@@ -840,6 +840,30 @@ enum AwakenAction {
         #[arg(long)]
         no_open_library: bool,
     },
+    /// Ingest discovered resources in curriculum order (expand → prereq → resources → ingest).
+    Ingest {
+        /// Comma-separated seed concepts (e.g., "rust,compiler").
+        #[arg(long)]
+        seeds: Option<String>,
+        /// Purpose statement to extract seeds from.
+        #[arg(long)]
+        purpose: Option<String>,
+        /// Maximum ingestion cycles (default 500).
+        #[arg(long, default_value = "500")]
+        max_cycles: usize,
+        /// Consecutive zero-triple results to consider a concept saturated (default 3).
+        #[arg(long, default_value = "3")]
+        saturation: usize,
+        /// Cross-validation confidence boost (default 0.15).
+        #[arg(long, default_value = "0.15")]
+        xval_boost: f32,
+        /// Disable URL ingestion for open-access resources.
+        #[arg(long)]
+        no_url: bool,
+        /// Override the library catalog directory.
+        #[arg(long)]
+        catalog_dir: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -4120,6 +4144,192 @@ fn main() -> Result<()> {
                         Err(e) => eprintln!("Failed to initialize resource discoverer: {e}"),
                     }
                 }
+                AwakenAction::Ingest {
+                    seeds,
+                    purpose: purpose_stmt,
+                    max_cycles,
+                    saturation,
+                    xval_boost,
+                    no_url,
+                    catalog_dir,
+                } => {
+                    // Resolve seed concepts.
+                    let purpose_model = if let Some(ref seed_str) = seeds {
+                        let seed_list: Vec<String> = seed_str
+                            .split(',')
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect();
+                        akh_medu::bootstrap::PurposeModel {
+                            domain: seed_list.first().cloned().unwrap_or_default(),
+                            competence_level: akh_medu::bootstrap::DreyfusLevel::Competent,
+                            seed_concepts: seed_list,
+                            description: seed_str.clone(),
+                        }
+                    } else if let Some(ref stmt) = purpose_stmt {
+                        match akh_medu::bootstrap::purpose::parse_purpose(stmt) {
+                            Ok(intent) => intent.purpose,
+                            Err(e) => {
+                                eprintln!("Failed to parse purpose: {e}");
+                                return Ok(());
+                            }
+                        }
+                    } else {
+                        eprintln!("Provide --seeds or --purpose for curriculum ingestion.");
+                        return Ok(());
+                    };
+
+                    // Step 1: Domain expansion.
+                    println!(
+                        "Expanding domain from {} seed(s): {:?}",
+                        purpose_model.seed_concepts.len(),
+                        purpose_model.seed_concepts
+                    );
+                    let expand_config = akh_medu::bootstrap::ExpansionConfig::default();
+                    let expansion_result =
+                        match akh_medu::bootstrap::DomainExpander::new(&engine, expand_config) {
+                            Ok(mut expander) => match expander.expand(&purpose_model, &engine) {
+                                Ok(result) => {
+                                    println!(
+                                        "  Expansion: {} concepts, {} relations",
+                                        result.concept_count, result.relation_count
+                                    );
+                                    result
+                                }
+                                Err(e) => {
+                                    eprintln!("Expansion failed: {e}");
+                                    return Ok(());
+                                }
+                            },
+                            Err(e) => {
+                                eprintln!("Failed to initialize expander: {e}");
+                                return Ok(());
+                            }
+                        };
+
+                    // Step 2: Prerequisite analysis.
+                    println!("\nAnalyzing prerequisites...");
+                    let prereq_config = akh_medu::bootstrap::PrerequisiteConfig::default();
+                    let prereq_result =
+                        match akh_medu::bootstrap::PrerequisiteAnalyzer::new(&engine, prereq_config)
+                        {
+                            Ok(analyzer) => match analyzer.analyze(&expansion_result, &engine) {
+                                Ok(result) => {
+                                    println!(
+                                        "  Prerequisites: {} edges, {} concepts",
+                                        result.edge_count, result.concepts_analyzed
+                                    );
+                                    result
+                                }
+                                Err(e) => {
+                                    eprintln!(
+                                        "  Prerequisite analysis failed: {e}\n  \
+                                         Falling back to synthetic curriculum"
+                                    );
+                                    akh_medu::bootstrap::resources::synthetic_curriculum_from_expansion(
+                                        &expansion_result,
+                                        &engine,
+                                    )
+                                }
+                            },
+                            Err(e) => {
+                                eprintln!(
+                                    "  Failed to initialize analyzer: {e}\n  \
+                                     Falling back to synthetic curriculum"
+                                );
+                                akh_medu::bootstrap::resources::synthetic_curriculum_from_expansion(
+                                    &expansion_result,
+                                    &engine,
+                                )
+                            }
+                        };
+
+                    // Step 3: Resource discovery.
+                    println!("\nDiscovering resources for proximal concepts...");
+                    let res_config = akh_medu::bootstrap::ResourceDiscoveryConfig::default();
+
+                    let resource_result =
+                        match akh_medu::bootstrap::ResourceDiscoverer::new(&engine, res_config) {
+                            Ok(mut discoverer) => {
+                                match discoverer.discover(
+                                    &prereq_result,
+                                    &expansion_result,
+                                    &purpose_model.seed_concepts,
+                                    &engine,
+                                ) {
+                                    Ok(result) => {
+                                        println!(
+                                            "  Resources found: {}, API calls: {}",
+                                            result.resources.len(),
+                                            result.api_calls_made
+                                        );
+                                        result
+                                    }
+                                    Err(e) => {
+                                        eprintln!("Resource discovery failed: {e}");
+                                        return Ok(());
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("Failed to initialize resource discoverer: {e}");
+                                return Ok(());
+                            }
+                        };
+
+                    // Step 4: Curriculum ingestion.
+                    println!("\nIngesting resources in curriculum order...");
+                    let ingest_config = akh_medu::bootstrap::IngestionConfig {
+                        max_cycles,
+                        saturation_threshold: saturation,
+                        cross_validation_boost: xval_boost,
+                        try_url_ingestion: !no_url,
+                        catalog_dir: catalog_dir.map(std::path::PathBuf::from),
+                        ..Default::default()
+                    };
+
+                    match akh_medu::bootstrap::CurriculumIngestor::new(&engine, ingest_config) {
+                        Ok(mut ingestor) => {
+                            match ingestor.ingest(&prereq_result, &resource_result, &engine) {
+                                Ok(result) => {
+                                    println!("\nCurriculum ingestion complete!");
+                                    println!("  Cycles: {}", result.cycles);
+                                    println!("  Triples created: {}", result.total_triples);
+                                    println!(
+                                        "  Concepts extracted: {}",
+                                        result.total_concepts_extracted
+                                    );
+                                    println!(
+                                        "  Concepts ingested: {}",
+                                        result.concepts_ingested
+                                    );
+                                    println!(
+                                        "  Concepts saturated: {}",
+                                        result.concepts_saturated
+                                    );
+                                    println!(
+                                        "  URL attempts/successes: {}/{}",
+                                        result.url_attempts, result.url_successes
+                                    );
+                                    println!(
+                                        "  Cross-validated concepts: {}",
+                                        result.cross_validated_concepts
+                                    );
+                                    println!(
+                                        "  Symbols grounded: {}",
+                                        result.symbols_grounded
+                                    );
+                                    println!(
+                                        "  Provenance: {} record(s)",
+                                        result.provenance_ids.len()
+                                    );
+                                }
+                                Err(e) => eprintln!("Curriculum ingestion failed: {e}"),
+                            }
+                        }
+                        Err(e) => eprintln!("Failed to initialize curriculum ingestor: {e}"),
+                    }
+                }
             }
 
             agent.persist_session().into_diagnostic()?;
@@ -5750,6 +5960,19 @@ fn format_derivation_kind(kind: &DerivationKind, engine: &Engine) -> String {
         } => {
             format!(
                 "resource discovery: '{concept_label}' → {resource_count} resource(s) from {sources} (top: '{top_title}')"
+            )
+        }
+        DerivationKind::CurriculumIngestion {
+            concept_label,
+            resource_title,
+            triples_added,
+            extraction_methods,
+            tier,
+            cross_validated,
+        } => {
+            let xval = if *cross_validated { " [xval]" } else { "" };
+            format!(
+                "curriculum ingestion: '{concept_label}' tier={tier} '{resource_title}' → {triples_added} triple(s) [{extraction_methods}]{xval}"
             )
         }
     }

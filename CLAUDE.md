@@ -75,14 +75,14 @@ Detailed completion checklists for each phase live under `docs/ai/phases/`.
 | 11 | Autonomous Task System (drives, HTN, argumentation, metacognition) + 11i-11j lifeform extensions | [plan](docs/ai/plans/2026-02-17-phase11-autonomous-tasks.md), [research](docs/ai/decisions/003-autonomous-tasks-research.md) |
 | 12a-12g | Interaction (channels, grounded dialogue, constraints, social KG, oxifed, explanations, multi-agent) | [phase-12](docs/ai/phases/phase-12-interaction.md), [plan](docs/ai/plans/2026-02-17-phase12-interaction.md) |
 | 13a-13g | Personal Assistant (email, spam, triage, extraction, PIM, calendar, preferences) | [phase-13](docs/ai/phases/phase-13-personal-assistant.md), [plan](docs/ai/plans/2026-02-17-phase13-personal-assistant.md) |
-| 14a-14e | Identity, domain expansion, prerequisite discovery, ZPD classification, resource discovery | [phase-14](docs/ai/phases/phase-14-identity.md), [plan](docs/ai/plans/2026-02-17-phase14-bootstrapping.md), [NLU plan](docs/ai/plans/2026-02-24-phase14-nlu-extension.md) |
+| 14a-14f | Identity, domain expansion, prerequisite discovery, ZPD classification, resource discovery, curriculum ingestion | [phase-14](docs/ai/phases/phase-14-identity.md), [plan](docs/ai/plans/2026-02-17-phase14-bootstrapping.md), [NLU plan](docs/ai/plans/2026-02-24-phase14-nlu-extension.md) |
 | 15a | Causal World Model (schemas, preconditions, effects, VSA encoding) | [phase-15](docs/ai/phases/phase-15-causal.md), [plan](docs/ai/plans/2026-02-22-phase15-causal-world-model.md) |
 
 ### Upcoming Phases
 
 | Phase | Description | Plan | Research |
 |-------|-------------|------|----------|
-| 14f-14i | Bootstrap orchestrator, curriculum ingestion, competence assessment, community recipes | [plan](docs/ai/plans/2026-02-17-phase14-bootstrapping.md) | [research](docs/ai/decisions/005-bootstrapping-research.md) |
+| 14g-14i | Bootstrap orchestrator, competence assessment, community recipes | [plan](docs/ai/plans/2026-02-17-phase14-bootstrapping.md) | [research](docs/ai/decisions/005-bootstrapping-research.md) |
 | 14j-14m | NLU Extension (rule parser, micro-ML NER, small LLM translator, VSA parse ranker) | [plan](docs/ai/plans/2026-02-24-phase14-nlu-extension.md) | [ADR](docs/ai/decisions/022-nlu-architecture.md) |
 | Release Alpha | Kubernetes-deployed autonomous agent (Docker, Helm, Prometheus, continuous learning) | [plan](docs/ai/plans/2026-02-23-release-alpha.md) | — |
 | 15b-15d | Event calculus, counterfactual reasoning, prediction tracking, temporal experience | [plan](docs/ai/plans/2026-02-22-phase15-causal-world-model.md) | [research](docs/ai/decisions/020-predictive-planning-epistemic-research.md) |

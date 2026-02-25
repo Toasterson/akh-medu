@@ -120,6 +120,10 @@ pub enum AkhError {
     #[error(transparent)]
     #[diagnostic(transparent)]
     ResourceDiscovery(#[from] crate::bootstrap::resources::ResourceDiscoveryError),
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Ingestion(#[from] crate::bootstrap::ingest::IngestionError),
 }
 
 // ---------------------------------------------------------------------------

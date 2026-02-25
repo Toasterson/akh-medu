@@ -1,6 +1,6 @@
 # Phase 14 — Purpose-Driven Bootstrapping with Identity
 
-Status: **In Progress** (14a-14e complete, 14f-14m pending)
+Status: **In Progress** (14a-14f complete, 14g-14m pending)
 
 Autonomous domain knowledge acquisition AND identity construction from operator statements
 like "You are the Architect of the System based on Ptah" or "Be like Gandalf — a GCC
@@ -148,12 +148,16 @@ via ActivityPub/oxifed. 9 sub-phases (14a-14i). Builds on existing Psyche model 
 
 ## Phase 14f — Iterative Ingestion
 
-- [ ] Curriculum-ordered ingestion loop
-- [ ] Multi-extractor cross-validation (NELL-inspired)
-- [ ] Post-ingestion grounding via `ground_symbol()`
-- [ ] Progress tracking + diminishing returns detection
-- [ ] Integration with OODA cycle
-- [ ] Unit tests
+- [x] Curriculum-ordered ingestion loop (tier ASC, similarity DESC)
+- [x] Two-layer strategy: abstract text (always) + URL (open-access, best-effort)
+- [x] Multi-extractor cross-validation (NELL-inspired, >=2 methods → boost)
+- [x] Post-ingestion grounding via `ground_symbol()` per concept
+- [x] SaturationTracker: consecutive zero-triple streak detection
+- [x] Provenance: `DerivationKind::CurriculumIngestion` (tag 67)
+- [x] Well-known `ingest:*` predicates (5 relations)
+- [x] CLI: `akh awaken ingest --seeds "..." [--max-cycles N] [--saturation N] [--xval-boost F] [--no-url] [--catalog-dir PATH]`
+- [x] Error chain: `IngestionError` → `AkhError` → `AgentError`
+- [x] 17 unit tests (config, errors, saturation tracker, resource index, sort order, cross-validation, accumulation, aggregation)
 
 ## Phase 14g — Competence Assessment
 

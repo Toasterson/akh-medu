@@ -888,6 +888,23 @@ pub fn derivation_kind_prose(kind: &DerivationKind) -> String {
                 "resource discovery for '{concept_label}': {resource_count} resource(s) from {sources} (top: '{top_title}')"
             )
         }
+        DerivationKind::CurriculumIngestion {
+            concept_label,
+            resource_title,
+            triples_added,
+            extraction_methods,
+            tier,
+            cross_validated,
+        } => {
+            let xval = if *cross_validated {
+                " [cross-validated]"
+            } else {
+                ""
+            };
+            format!(
+                "curriculum ingestion for '{concept_label}' (tier {tier}): '{resource_title}' → {triples_added} triple(s) via {extraction_methods}{xval}"
+            )
+        }
     }
 }
 

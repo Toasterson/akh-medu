@@ -172,6 +172,10 @@ pub enum AgentError {
     #[diagnostic(transparent)]
     ResourceDiscovery(#[from] crate::bootstrap::resources::ResourceDiscoveryError),
 
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Ingestion(#[from] crate::bootstrap::ingest::IngestionError),
+
     #[error("{0}")]
     #[diagnostic(
         code(akh::agent::engine),

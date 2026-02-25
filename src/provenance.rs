@@ -438,6 +438,18 @@ pub enum DerivationKind {
         sources: String,
         top_title: String,
     },
+
+    // --- Phase 14f: Curriculum Ingestion --------------------------------------
+
+    /// A curriculum resource was ingested for a concept (Phase 14f).
+    CurriculumIngestion {
+        concept_label: String,
+        resource_title: String,
+        triples_added: u32,
+        extraction_methods: String,
+        tier: u32,
+        cross_validated: bool,
+    },
 }
 
 impl DerivationKind {
@@ -511,6 +523,7 @@ impl DerivationKind {
             Self::SleepConsolidation { .. } => 64,
             Self::DirectedCuriosity { .. } => 65,
             Self::ResourceDiscovery { .. } => 66,
+            Self::CurriculumIngestion { .. } => 67,
         }
     }
 }
