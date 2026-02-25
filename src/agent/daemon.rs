@@ -33,6 +33,8 @@ pub struct DaemonConfig {
     pub persist_interval: Duration,
     /// Idle OODA cycle interval (default: 30s).
     pub idle_cycle_interval: Duration,
+    /// Continuous learning interval (default: 2 hours).
+    pub continuous_learning_interval: Duration,
     /// Maximum OODA cycles (0 = unlimited).
     pub max_cycles: usize,
 }
@@ -48,6 +50,7 @@ impl Default for DaemonConfig {
             gap_analysis_interval: Duration::from_secs(900),
             persist_interval: Duration::from_secs(60),
             idle_cycle_interval: Duration::from_secs(30),
+            continuous_learning_interval: Duration::from_secs(7200),
             max_cycles: 0,
         }
     }
@@ -89,6 +92,7 @@ impl AgentDaemon {
         let mut gaps_tick = interval(self.config.gap_analysis_interval);
         let mut persist_tick = interval(self.config.persist_interval);
         let mut idle_cycle_tick = interval(self.config.idle_cycle_interval);
+        let mut continuous_learning_tick = interval(self.config.continuous_learning_interval);
 
         self.agent.sink().emit(&AkhMessage::system(
             "daemon started — background learning active",
@@ -126,6 +130,9 @@ impl AgentDaemon {
                         )));
                         break;
                     }
+                }
+                _ = continuous_learning_tick.tick() => {
+                    self.run_continuous_learning();
                 }
                 _ = tokio::signal::ctrl_c() => {
                     self.agent.sink().emit(&AkhMessage::system(
@@ -289,6 +296,35 @@ impl AgentDaemon {
         }
     }
 
+    fn run_continuous_learning(&self) {
+        let config = super::continuous_learning::ContinuousLearningConfig::default();
+        match super::continuous_learning::run_continuous_learning(
+            &self.agent.engine,
+            &self.agent.curiosity_config,
+            &config,
+        ) {
+            Ok(result) => {
+                self.agent.sink().emit(&AkhMessage::system(format!(
+                    "[daemon:learning] {} targets, {} resources, {} ingested, Dreyfus: {}",
+                    result.targets_found,
+                    result.resources_discovered,
+                    result.concepts_ingested,
+                    result.dreyfus_level,
+                )));
+                tracing::info!(
+                    targets = result.targets_found,
+                    resources = result.resources_discovered,
+                    ingested = result.concepts_ingested,
+                    dreyfus = %result.dreyfus_level,
+                    "daemon: continuous learning complete",
+                );
+            }
+            Err(e) => {
+                tracing::debug!(error = %e, "daemon: continuous learning skipped");
+            }
+        }
+    }
+
     fn run_idle_cycle(&mut self) {
         use super::goal;
 
@@ -339,6 +375,7 @@ mod tests {
         assert_eq!(config.gap_analysis_interval, Duration::from_secs(900));
         assert_eq!(config.persist_interval, Duration::from_secs(60));
         assert_eq!(config.idle_cycle_interval, Duration::from_secs(30));
+        assert_eq!(config.continuous_learning_interval, Duration::from_secs(7200));
         assert_eq!(config.max_cycles, 0);
     }
 }
