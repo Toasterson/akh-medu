@@ -180,6 +180,10 @@ pub enum AgentError {
     #[diagnostic(transparent)]
     Competence(#[from] crate::bootstrap::competence::CompetenceError),
 
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Orchestrator(#[from] crate::bootstrap::orchestrator::OrchestratorError),
+
     #[error("{0}")]
     #[diagnostic(
         code(akh::agent::engine),

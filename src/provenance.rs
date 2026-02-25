@@ -462,6 +462,18 @@ pub enum DerivationKind {
         cq_total: u32,
         recommendation: String,
     },
+
+    // --- Phase 14h: Bootstrap Orchestration -----------------------------------
+
+    /// A full bootstrap orchestration pipeline was completed or checkpointed (Phase 14h).
+    BootstrapOrchestration {
+        stage: String,
+        learning_cycle: u32,
+        exploration_rate: f32,
+        target_dreyfus: String,
+        current_dreyfus: String,
+        current_score: f32,
+    },
 }
 
 impl DerivationKind {
@@ -537,6 +549,7 @@ impl DerivationKind {
             Self::ResourceDiscovery { .. } => 66,
             Self::CurriculumIngestion { .. } => 67,
             Self::CompetenceAssessment { .. } => 68,
+            Self::BootstrapOrchestration { .. } => 69,
         }
     }
 }

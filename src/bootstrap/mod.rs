@@ -11,6 +11,7 @@ pub mod competence;
 pub mod expand;
 pub mod identity;
 pub mod ingest;
+pub mod orchestrator;
 pub mod prerequisite;
 pub mod purpose;
 pub mod resources;
@@ -33,6 +34,10 @@ pub use prerequisite::{
 pub use purpose::{
     BootstrapError, BootstrapIntent, BootstrapResult, DreyfusLevel, EntityType, IdentityRef,
     PurposeModel,
+};
+pub use orchestrator::{
+    BootstrapOrchestrator, BootstrapSession, BootstrapStage, Checkpoint, OrchestratorConfig,
+    OrchestratorError, OrchestratorResult, OrchestrationResult,
 };
 pub use resources::{
     ResourceDiscoverer, ResourceDiscoveryConfig, ResourceDiscoveryError, ResourceDiscoveryResult,

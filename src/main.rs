@@ -882,6 +882,27 @@ enum AwakenAction {
         #[arg(long)]
         verbose: bool,
     },
+    /// Full bootstrap pipeline: purpose → identity → expand → learn loop → target competence.
+    Bootstrap {
+        /// Purpose/identity statement (e.g., "You are the Architect based on Ptah, expert in systems").
+        #[arg(conflicts_with_all = ["resume", "status"])]
+        statement: Option<String>,
+        /// Only parse and show the plan — do not execute.
+        #[arg(long)]
+        plan_only: bool,
+        /// Resume an interrupted bootstrap session.
+        #[arg(long, conflicts_with_all = ["statement", "status"])]
+        resume: bool,
+        /// Show current bootstrap session status.
+        #[arg(long, conflicts_with_all = ["statement", "resume"])]
+        status: bool,
+        /// Maximum learning cycles (default 10).
+        #[arg(long, default_value = "10")]
+        max_cycles: usize,
+        /// Separate identity override (e.g., "Gandalf").
+        #[arg(long)]
+        identity: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -4583,6 +4604,83 @@ fn main() -> Result<()> {
                         Err(e) => eprintln!("Failed to initialize competence assessor: {e}"),
                     }
                 }
+                AwakenAction::Bootstrap {
+                    statement,
+                    plan_only,
+                    resume,
+                    status,
+                    max_cycles,
+                    identity: _identity_override,
+                } => {
+                    if status {
+                        // Show session status.
+                        match akh_medu::bootstrap::BootstrapOrchestrator::status(&engine) {
+                            Ok(session) => {
+                                println!("Bootstrap Session Status");
+                                println!("========================");
+                                println!("  Stage:          {}", session.current_stage);
+                                println!("  Learning cycle: {}", session.learning_cycle);
+                                println!("  Purpose:        {}", session.raw_purpose);
+                                if let Some(ref name) = session.chosen_name {
+                                    println!("  Chosen name:    {name}");
+                                }
+                                println!("  Exploration:    {:.2}", session.exploration_rate);
+                                if let Some(ref a) = session.last_assessment {
+                                    println!("  Last score:     {:.2} ({})", a.overall_score, a.overall_dreyfus);
+                                    if !a.focus_areas.is_empty() {
+                                        println!("  Focus areas:    {}", a.focus_areas.join(", "));
+                                    }
+                                }
+                            }
+                            Err(e) => eprintln!("No bootstrap session: {e}"),
+                        }
+                    } else if resume {
+                        // Resume interrupted session.
+                        let config = akh_medu::bootstrap::OrchestratorConfig {
+                            max_learning_cycles: max_cycles,
+                            plan_only,
+                            ..Default::default()
+                        };
+                        match akh_medu::bootstrap::BootstrapOrchestrator::resume(&engine, config) {
+                            Ok(mut orchestrator) => {
+                                println!("Resuming bootstrap session...");
+                                match orchestrator.run(&engine) {
+                                    Ok((result, checkpoints)) => {
+                                        print_bootstrap_checkpoints(&checkpoints);
+                                        print_bootstrap_result(&result);
+                                    }
+                                    Err(e) => eprintln!("Bootstrap failed: {e}"),
+                                }
+                            }
+                            Err(e) => eprintln!("Cannot resume: {e}"),
+                        }
+                    } else if let Some(ref stmt) = statement {
+                        // Fresh bootstrap from purpose statement.
+                        let config = akh_medu::bootstrap::OrchestratorConfig {
+                            max_learning_cycles: max_cycles,
+                            plan_only,
+                            ..Default::default()
+                        };
+                        match akh_medu::bootstrap::BootstrapOrchestrator::new(stmt, config) {
+                            Ok(mut orchestrator) => {
+                                println!("Starting bootstrap pipeline...");
+                                match orchestrator.run(&engine) {
+                                    Ok((result, checkpoints)) => {
+                                        print_bootstrap_checkpoints(&checkpoints);
+                                        print_bootstrap_result(&result);
+                                    }
+                                    Err(e) => eprintln!("Bootstrap failed: {e}"),
+                                }
+                            }
+                            Err(e) => eprintln!("Bootstrap init failed: {e}"),
+                        }
+                    } else {
+                        eprintln!(
+                            "Provide a purpose statement, --resume, or --status.\n\
+                             Example: akh awaken bootstrap \"You are the Architect based on Ptah, expert in systems\""
+                        );
+                    }
+                }
             }
 
             agent.persist_session().into_diagnostic()?;
@@ -6242,5 +6340,84 @@ fn format_derivation_kind(kind: &DerivationKind, engine: &Engine) -> String {
                  recommendation: {recommendation})"
             )
         }
+        DerivationKind::BootstrapOrchestration {
+            stage,
+            learning_cycle,
+            exploration_rate,
+            target_dreyfus,
+            current_dreyfus,
+            current_score,
+        } => {
+            format!(
+                "bootstrap orchestration: stage={stage}, cycle={learning_cycle}, \
+                 exploration={exploration_rate:.2}, target={target_dreyfus}, \
+                 current={current_dreyfus} @ {current_score:.2}"
+            )
+        }
     }
+}
+
+fn print_bootstrap_checkpoints(checkpoints: &[akh_medu::bootstrap::Checkpoint]) {
+    use akh_medu::bootstrap::Checkpoint;
+    for cp in checkpoints {
+        match cp {
+            Checkpoint::PurposeParsed {
+                domain,
+                competence_level,
+                seed_count,
+                has_identity,
+            } => {
+                println!(
+                    "  [parse] Domain: {domain}, target: {competence_level}, \
+                     seeds: {seed_count}, identity: {has_identity}"
+                );
+            }
+            Checkpoint::IdentityConstructed { chosen_name } => {
+                println!("  [identity] Chosen name: {chosen_name}");
+            }
+            Checkpoint::LearningPlan {
+                concept_count,
+                relation_count,
+            } => {
+                println!(
+                    "  [plan] {concept_count} concepts, {relation_count} relations"
+                );
+            }
+            Checkpoint::AssessmentComplete {
+                cycle,
+                overall_score,
+                overall_dreyfus,
+                recommendation,
+            } => {
+                println!(
+                    "  [assess] Cycle {cycle}: {overall_dreyfus} (score: {overall_score:.2}) \
+                     — {recommendation}"
+                );
+            }
+        }
+    }
+}
+
+fn print_bootstrap_result(result: &akh_medu::bootstrap::OrchestrationResult) {
+    println!("\nBootstrap Result");
+    println!("================");
+    println!("  Domain:          {}", result.intent.purpose.domain);
+    println!(
+        "  Target level:    {}",
+        result.intent.purpose.competence_level
+    );
+    if let Some(ref name) = result.chosen_name {
+        println!("  Chosen name:     {name}");
+    }
+    println!("  Learning cycles: {}", result.learning_cycles);
+    println!("  Target reached:  {}", result.target_reached);
+    if let Some(ref report) = result.final_report {
+        println!("  Final Dreyfus:   {}", report.overall_dreyfus);
+        println!("  Final score:     {:.2}", report.overall_score);
+        println!("  Recommendation:  {}", report.recommendation);
+    }
+    println!(
+        "  Provenance:      {} record(s)",
+        result.provenance_ids.len()
+    );
 }

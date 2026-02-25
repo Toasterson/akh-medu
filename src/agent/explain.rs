@@ -917,6 +917,20 @@ pub fn derivation_kind_prose(kind: &DerivationKind) -> String {
                 "competence assessment: {overall_dreyfus} (score: {overall_score:.2}, {knowledge_area_count} area(s), CQ: {cq_answered}/{cq_total}, recommendation: {recommendation})"
             )
         }
+        DerivationKind::BootstrapOrchestration {
+            stage,
+            learning_cycle,
+            exploration_rate,
+            target_dreyfus,
+            current_dreyfus,
+            current_score,
+        } => {
+            format!(
+                "bootstrap orchestration at stage '{stage}' (cycle {learning_cycle}, \
+                 exploration: {exploration_rate:.2}, target: {target_dreyfus}, \
+                 current: {current_dreyfus} @ {current_score:.2})"
+            )
+        }
     }
 }
 

@@ -1,6 +1,6 @@
 # Phase 14 — Purpose-Driven Bootstrapping with Identity
 
-Status: **In Progress** (14a-14g complete, 14h-14m pending)
+Status: **In Progress** (14a-14h complete, 14i-14m pending)
 
 Autonomous domain knowledge acquisition AND identity construction from operator statements
 like "You are the Architect of the System based on Ptah" or "Be like Gandalf — a GCC
@@ -190,13 +190,28 @@ via ActivityPub/oxifed. 9 sub-phases (14a-14i). Builds on existing Psyche model 
 
 ## Phase 14h — Bootstrap Orchestrator
 
-- [ ] Meta-OODA loop managing 8-stage pipeline
-- [ ] Personality shapes exploration style (Creator→building, Sage→theory, Explorer→breadth)
-- [ ] Operator interaction points (confirmation, progress, adjustment)
-- [ ] Exploration-exploitation scheduling by Dreyfus level
-- [ ] Session persistence across restarts
-- [ ] CLI: `akh bootstrap` with --plan-only, --resume, --status
-- [ ] Unit tests
+- [x] `OrchestratorError` miette diagnostic enum (5 variants: EmptyPurpose, StageFailed, MaxCyclesExhausted, NoSessionToResume, Engine) with `OrchestratorResult<T>`
+- [x] `From` impls for all 7 sub-phase errors (BootstrapError, IdentityError, DomainExpandError, PrerequisiteError, ResourceDiscoveryError, IngestionError, CompetenceError) wrapping into StageFailed with stage context
+- [x] `OrchestratorConfig` struct: max_learning_cycles, plan_only, + sub-stage config overrides
+- [x] `BootstrapStage` ordered enum (9 variants: ParsePurpose..Complete) with Serialize/Deserialize/Ord, as_label/from_label roundtrip
+- [x] `BootstrapSession` persistent session struct with stage, cycle, purpose, intent, name, psyche, expansion_labels, assessment, timestamps, exploration_rate
+- [x] `SessionAssessment` compact assessment snapshot (score, dreyfus, focus_areas, recommendation)
+- [x] `Checkpoint` enum (4 variants: PurposeParsed, IdentityConstructed, LearningPlan, AssessmentComplete) for operator-visible progress
+- [x] `OrchestrationResult` struct: intent, chosen_name, psyche, final_report, learning_cycles, stages_completed, target_reached, provenance_ids
+- [x] `BootstrapOrchestrator::new()` — fresh bootstrap from purpose statement
+- [x] `BootstrapOrchestrator::resume()` — reload persisted session and continue
+- [x] `BootstrapOrchestrator::status()` — query session without running
+- [x] `BootstrapOrchestrator::run()` — 8-stage pipeline with learning loop (stages 4–7 repeat up to max_cycles)
+- [x] Session persistence via `engine.store().put_meta()/get_meta()` with bincode serialization
+- [x] Expansion reconstruction from stored labels on resume past stage 3
+- [x] `compute_exploration_rate()` — Dreyfus factor + personality factor (explorer archetype * 0.3)
+- [x] `apply_personality_bias()` — Explorer(>0.6): broader expansion; Sage(>0.6): depth; Guardian(>0.6): conservative; Healer(>0.6): gap-focused
+- [x] `DerivationKind::BootstrapOrchestration` (tag 69) with stage, learning_cycle, exploration_rate, target_dreyfus, current_dreyfus, current_score
+- [x] `AkhError::Orchestrator`, `AgentError::Orchestrator` transparent variants
+- [x] `derivation_kind_prose()` arm for BootstrapOrchestration
+- [x] `format_derivation_kind()` arm for BootstrapOrchestration in main.rs
+- [x] CLI: `AwakenAction::Bootstrap` with statement, --plan-only, --resume, --status, --max-cycles, --identity
+- [x] 14 unit tests (config, stage ordering, label roundtrip, error formatting, From impls, session serialization, assessment serialization, checkpoints, exploration rate scenarios, result construction)
 
 ## Phase 14i — Community Recipe Sharing
 
