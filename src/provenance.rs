@@ -474,6 +474,17 @@ pub enum DerivationKind {
         current_dreyfus: String,
         current_score: f32,
     },
+
+    // --- Continuous Learning (idle task) --------------------------------------
+
+    /// An idle-time continuous learning cycle completed (wires curiosity→bootstrap).
+    ContinuousLearning {
+        targets_explored: usize,
+        resources_found: usize,
+        concepts_ingested: usize,
+        dreyfus_level: String,
+        gap_score_avg: f32,
+    },
 }
 
 impl DerivationKind {
@@ -550,6 +561,7 @@ impl DerivationKind {
             Self::CurriculumIngestion { .. } => 67,
             Self::CompetenceAssessment { .. } => 68,
             Self::BootstrapOrchestration { .. } => 69,
+            Self::ContinuousLearning { .. } => 70,
         }
     }
 }

@@ -18,6 +18,7 @@ pub mod constraint_check;
 pub mod conversation;
 pub mod chunking;
 pub mod cli_tool;
+pub mod continuous_learning;
 pub mod curiosity;
 pub mod explain;
 #[cfg(feature = "daemon")]
@@ -127,6 +128,7 @@ pub use priority_reasoning::{Audience, PriorityArgument, PriorityVerdict, Value}
 pub use project::{Agenda, Project, ProjectAssignment, ProjectPredicates, ProjectStatus};
 pub use reflect::{Adjustment, ReflectionConfig, ReflectionResult};
 pub use chunking::{ChunkingConfig, GeneralizedStep, LearnedMethod, MethodIndex};
+pub use continuous_learning::{ContinuousLearningConfig, ContinuousLearningRunResult};
 pub use curiosity::{CuriosityReport, CuriosityTarget, DirectedCuriosityConfig};
 pub use resource::{EffortCase, EffortEstimate, EffortIndex, ImprovementHistory, ResourceReport};
 pub use semantic_enrichment::{EnrichmentResult, SemanticPredicates};

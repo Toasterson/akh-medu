@@ -6354,6 +6354,18 @@ fn format_derivation_kind(kind: &DerivationKind, engine: &Engine) -> String {
                  current={current_dreyfus} @ {current_score:.2}"
             )
         }
+        DerivationKind::ContinuousLearning {
+            targets_explored,
+            resources_found,
+            concepts_ingested,
+            dreyfus_level,
+            gap_score_avg,
+        } => {
+            format!(
+                "continuous learning: {targets_explored} target(s), {resources_found} resource(s), \
+                 {concepts_ingested} ingested (Dreyfus: {dreyfus_level}, avg gap: {gap_score_avg:.2})"
+            )
+        }
     }
 }
 

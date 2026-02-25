@@ -1,6 +1,6 @@
 # Akh-medu Architecture
 
-> Last updated: 2026-02-25 (Phase 14h bootstrap orchestrator implemented)
+> Last updated: 2026-02-25 (continuous learning idle task wired after Phase 14h)
 
 ## Overview
 

@@ -931,6 +931,18 @@ pub fn derivation_kind_prose(kind: &DerivationKind) -> String {
                  current: {current_dreyfus} @ {current_score:.2})"
             )
         }
+        DerivationKind::ContinuousLearning {
+            targets_explored,
+            resources_found,
+            concepts_ingested,
+            dreyfus_level,
+            gap_score_avg,
+        } => {
+            format!(
+                "continuous learning: {targets_explored} targets, {resources_found} resources, \
+                 {concepts_ingested} ingested (Dreyfus: {dreyfus_level}, avg gap: {gap_score_avg:.2})"
+            )
+        }
     }
 }
 

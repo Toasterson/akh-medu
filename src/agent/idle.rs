@@ -24,11 +24,13 @@ pub struct IdleScheduler {
     last_consolidation_check: Instant,
     last_rules: Instant,
     last_sleep: Instant,
+    last_continuous_learning: Instant,
     equivalence_interval: Duration,
     reflection_interval: Duration,
     consolidation_interval: Duration,
     rules_interval: Duration,
     sleep_interval: Duration,
+    continuous_learning_interval: Duration,
 }
 
 impl Default for IdleScheduler {
@@ -40,12 +42,14 @@ impl Default for IdleScheduler {
             last_consolidation_check: now,
             last_rules: now,
             last_sleep: now,
+            last_continuous_learning: now,
             // Longer intervals than daemon — TUI is interactive, don't steal CPU.
             equivalence_interval: Duration::from_secs(600),  // 10 min
             reflection_interval: Duration::from_secs(300),   // 5 min
             consolidation_interval: Duration::from_secs(120), // 2 min
             rules_interval: Duration::from_secs(900),        // 15 min
             sleep_interval: Duration::from_secs(3600),       // 60 min
+            continuous_learning_interval: Duration::from_secs(7200), // 2 hours
         }
     }
 }
@@ -65,11 +69,13 @@ impl IdleScheduler {
             last_consolidation_check: now,
             last_rules: now,
             last_sleep: now,
+            last_continuous_learning: now,
             equivalence_interval: equivalence,
             reflection_interval: reflection,
             consolidation_interval: consolidation,
             rules_interval: rules,
             sleep_interval: Duration::from_secs(3600),
+            continuous_learning_interval: Duration::from_secs(7200),
         }
     }
 
@@ -107,6 +113,11 @@ impl IdleScheduler {
                 "sleep",
                 now.checked_duration_since(self.last_sleep)
                     .and_then(|d| d.checked_sub(self.sleep_interval)),
+            ),
+            (
+                "continuous_learning",
+                now.checked_duration_since(self.last_continuous_learning)
+                    .and_then(|d| d.checked_sub(self.continuous_learning_interval)),
             ),
         ];
 
@@ -230,6 +241,30 @@ impl IdleScheduler {
                     }),
                 }
             }
+            "continuous_learning" => {
+                self.last_continuous_learning = now;
+                let config = super::continuous_learning::ContinuousLearningConfig::default();
+                match super::continuous_learning::run_continuous_learning(
+                    &agent.engine,
+                    &agent.curiosity_config,
+                    &config,
+                ) {
+                    Ok(result) => Some(IdleTaskResult {
+                        task: "continuous_learning",
+                        summary: format!(
+                            "{} targets explored, {} resources found, {} concepts ingested, Dreyfus: {}",
+                            result.targets_found,
+                            result.resources_discovered,
+                            result.concepts_ingested,
+                            result.dreyfus_level,
+                        ),
+                    }),
+                    Err(e) => Some(IdleTaskResult {
+                        task: "continuous_learning",
+                        summary: format!("skipped: {e}"),
+                    }),
+                }
+            }
             _ => None,
         }
     }
@@ -242,6 +277,7 @@ impl IdleScheduler {
             || now.duration_since(self.last_equivalence) >= self.equivalence_interval
             || now.duration_since(self.last_rules) >= self.rules_interval
             || now.duration_since(self.last_sleep) >= self.sleep_interval
+            || now.duration_since(self.last_continuous_learning) >= self.continuous_learning_interval
     }
 }
 

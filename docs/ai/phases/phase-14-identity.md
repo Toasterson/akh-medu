@@ -213,6 +213,17 @@ via ActivityPub/oxifed. 9 sub-phases (14a-14i). Builds on existing Psyche model 
 - [x] CLI: `AwakenAction::Bootstrap` with statement, --plan-only, --resume, --status, --max-cycles, --identity
 - [x] 14 unit tests (config, stage ordering, label roundtrip, error formatting, From impls, session serialization, assessment serialization, checkpoints, exploration rate scenarios, result construction)
 
+### Continuous Learning Idle Task (wired after 14h)
+
+- [x] `ContinuousLearningError` miette diagnostic enum (4 variants: NoCuriosityTargets, NoExpansionConcepts, StageFailed, Engine) with `ContinuousLearningResult<T>`
+- [x] `ContinuousLearningConfig`: max_targets(5), max_api_calls(5), min_gap_score(0.3)
+- [x] `ContinuousLearningRunResult`: targets_found, resources_discovered, concepts_ingested, competence_score, dreyfus_level, provenance_ids
+- [x] `run_continuous_learning()` — chains curiosity→prerequisite→resources→ingestion→assessment with soft failures
+- [x] `DerivationKind::ContinuousLearning` (tag 70) with targets_explored, resources_found, concepts_ingested, dreyfus_level, gap_score_avg
+- [x] 6th idle task in `IdleScheduler` with 2-hour interval
+- [x] `derivation_kind_prose()` + `format_derivation_kind()` arms
+- [x] 10 unit tests (config, errors, result, expansion builder, empty KG, serialization, provenance tag)
+
 ## Phase 14i — Community Recipe Sharing
 
 - [ ] Purpose recipe TOML format with identity section
