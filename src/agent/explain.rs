@@ -878,6 +878,16 @@ pub fn derivation_kind_prose(kind: &DerivationKind) -> String {
                 "directed curiosity: gap score {gap_score:.2}, fill ratio {fill_ratio:.2} (concept #{concept})"
             )
         }
+        DerivationKind::ResourceDiscovery {
+            concept_label,
+            resource_count,
+            sources,
+            top_title,
+        } => {
+            format!(
+                "resource discovery for '{concept_label}': {resource_count} resource(s) from {sources} (top: '{top_title}')"
+            )
+        }
     }
 }
 

@@ -816,6 +816,30 @@ enum AwakenAction {
         #[arg(long, default_value = "0.7")]
         zpd_high: f32,
     },
+    /// Discover learning resources for ZPD-proximal concepts.
+    Resources {
+        /// Comma-separated seed concepts (e.g., "rust,compiler").
+        #[arg(long)]
+        seeds: Option<String>,
+        /// Purpose statement to extract seeds from.
+        #[arg(long)]
+        purpose: Option<String>,
+        /// Minimum quality score for resources (default 0.2).
+        #[arg(long, default_value = "0.2")]
+        min_quality: f32,
+        /// Maximum API calls across all sources (default 60).
+        #[arg(long, default_value = "60")]
+        max_api_calls: usize,
+        /// Disable Semantic Scholar queries.
+        #[arg(long)]
+        no_semantic_scholar: bool,
+        /// Disable OpenAlex queries.
+        #[arg(long)]
+        no_openalex: bool,
+        /// Disable Open Library queries.
+        #[arg(long)]
+        no_open_library: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -3934,6 +3958,168 @@ fn main() -> Result<()> {
                         Err(e) => eprintln!("Failed to initialize analyzer: {e}"),
                     }
                 }
+                AwakenAction::Resources {
+                    seeds,
+                    purpose: purpose_stmt,
+                    min_quality,
+                    max_api_calls,
+                    no_semantic_scholar,
+                    no_openalex,
+                    no_open_library,
+                } => {
+                    // Resolve seed concepts.
+                    let purpose_model = if let Some(ref seed_str) = seeds {
+                        let seed_list: Vec<String> = seed_str
+                            .split(',')
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect();
+                        akh_medu::bootstrap::PurposeModel {
+                            domain: seed_list.first().cloned().unwrap_or_default(),
+                            competence_level: akh_medu::bootstrap::DreyfusLevel::Competent,
+                            seed_concepts: seed_list,
+                            description: seed_str.clone(),
+                        }
+                    } else if let Some(ref stmt) = purpose_stmt {
+                        match akh_medu::bootstrap::purpose::parse_purpose(stmt) {
+                            Ok(intent) => intent.purpose,
+                            Err(e) => {
+                                eprintln!("Failed to parse purpose: {e}");
+                                return Ok(());
+                            }
+                        }
+                    } else {
+                        eprintln!("Provide --seeds or --purpose for resource discovery.");
+                        return Ok(());
+                    };
+
+                    // Step 1: Domain expansion.
+                    println!(
+                        "Expanding domain from {} seed(s): {:?}",
+                        purpose_model.seed_concepts.len(),
+                        purpose_model.seed_concepts
+                    );
+                    let expand_config = akh_medu::bootstrap::ExpansionConfig::default();
+                    let expansion_result =
+                        match akh_medu::bootstrap::DomainExpander::new(&engine, expand_config) {
+                            Ok(mut expander) => match expander.expand(&purpose_model, &engine) {
+                                Ok(result) => {
+                                    println!(
+                                        "  Expansion: {} concepts, {} relations",
+                                        result.concept_count, result.relation_count
+                                    );
+                                    result
+                                }
+                                Err(e) => {
+                                    eprintln!("Expansion failed: {e}");
+                                    return Ok(());
+                                }
+                            },
+                            Err(e) => {
+                                eprintln!("Failed to initialize expander: {e}");
+                                return Ok(());
+                            }
+                        };
+
+                    // Step 2: Prerequisite analysis (fallback to synthetic curriculum if it fails).
+                    println!("\nAnalyzing prerequisites...");
+                    let prereq_config = akh_medu::bootstrap::PrerequisiteConfig::default();
+                    let prereq_result =
+                        match akh_medu::bootstrap::PrerequisiteAnalyzer::new(&engine, prereq_config)
+                        {
+                            Ok(analyzer) => match analyzer.analyze(&expansion_result, &engine) {
+                                Ok(result) => {
+                                    println!(
+                                        "  Prerequisites: {} edges, {} concepts",
+                                        result.edge_count, result.concepts_analyzed
+                                    );
+                                    result
+                                }
+                                Err(e) => {
+                                    eprintln!(
+                                        "  Prerequisite analysis failed: {e}\n  \
+                                         Falling back to synthetic curriculum (all concepts → Proximal)"
+                                    );
+                                    akh_medu::bootstrap::resources::synthetic_curriculum_from_expansion(
+                                        &expansion_result,
+                                        &engine,
+                                    )
+                                }
+                            },
+                            Err(e) => {
+                                eprintln!(
+                                    "  Failed to initialize analyzer: {e}\n  \
+                                     Falling back to synthetic curriculum (all concepts → Proximal)"
+                                );
+                                akh_medu::bootstrap::resources::synthetic_curriculum_from_expansion(
+                                    &expansion_result,
+                                    &engine,
+                                )
+                            }
+                        };
+
+                    // Step 3: Resource discovery.
+                    println!("\nDiscovering resources for proximal concepts...");
+                    let res_config = akh_medu::bootstrap::ResourceDiscoveryConfig {
+                        min_quality,
+                        max_api_calls,
+                        use_semantic_scholar: !no_semantic_scholar,
+                        use_openalex: !no_openalex,
+                        use_open_library: !no_open_library,
+                        ..Default::default()
+                    };
+
+                    match akh_medu::bootstrap::ResourceDiscoverer::new(&engine, res_config) {
+                        Ok(mut discoverer) => {
+                            match discoverer.discover(
+                                &prereq_result,
+                                &expansion_result,
+                                &purpose_model.seed_concepts,
+                                &engine,
+                            ) {
+                                Ok(result) => {
+                                    println!("\nResource discovery complete!");
+                                    println!("  Resources found: {}", result.resources.len());
+                                    println!("  API calls made: {}", result.api_calls_made);
+                                    println!("  Concepts searched: {}", result.concepts_searched);
+                                    println!(
+                                        "  Provenance: {} record(s)",
+                                        result.provenance_ids.len()
+                                    );
+
+                                    if !result.resources.is_empty() {
+                                        println!("\n  Discovered resources:");
+                                        for (i, res) in
+                                            result.resources.iter().enumerate().take(20)
+                                        {
+                                            let oa = if res.open_access { "OA" } else { "--" };
+                                            let year_str = res
+                                                .year
+                                                .map(|y| y.to_string())
+                                                .unwrap_or_else(|| "----".to_string());
+                                            println!(
+                                                "    {:3}. [{:.2}] [{oa}] ({year_str}) [{}] {} — {}",
+                                                i + 1,
+                                                res.quality_score,
+                                                res.difficulty_estimate,
+                                                res.title,
+                                                res.source_api,
+                                            );
+                                        }
+                                        if result.resources.len() > 20 {
+                                            println!(
+                                                "    ... and {} more",
+                                                result.resources.len() - 20
+                                            );
+                                        }
+                                    }
+                                }
+                                Err(e) => eprintln!("Resource discovery failed: {e}"),
+                            }
+                        }
+                        Err(e) => eprintln!("Failed to initialize resource discoverer: {e}"),
+                    }
+                }
             }
 
             agent.persist_session().into_diagnostic()?;
@@ -5554,6 +5740,16 @@ fn format_derivation_kind(kind: &DerivationKind, engine: &Engine) -> String {
                 engine.resolve_label(*concept),
                 gap_score,
                 fill_ratio
+            )
+        }
+        DerivationKind::ResourceDiscovery {
+            concept_label,
+            resource_count,
+            sources,
+            top_title,
+        } => {
+            format!(
+                "resource discovery: '{concept_label}' → {resource_count} resource(s) from {sources} (top: '{top_title}')"
             )
         }
     }

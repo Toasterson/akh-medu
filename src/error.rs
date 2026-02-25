@@ -116,6 +116,10 @@ pub enum AkhError {
     #[error(transparent)]
     #[diagnostic(transparent)]
     Nart(#[from] crate::graph::nart::NartError),
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    ResourceDiscovery(#[from] crate::bootstrap::resources::ResourceDiscoveryError),
 }
 
 // ---------------------------------------------------------------------------

@@ -340,6 +340,12 @@ impl DomainExpander {
         let (concept_count, relation_count, provenance_ids, domain_proto_id, microtheory_id) =
             self.insert_into_kg(engine, &accepted, &relations, &accepted_set, seeds)?;
 
+        // 7. Store the domain prototype HV in item memory so downstream phases
+        //    (e.g. resource discovery) can retrieve it for similarity scoring.
+        if let Some(proto_id) = domain_proto_id {
+            engine.item_memory().insert(proto_id, domain_prototype);
+        }
+
         Ok(ExpansionResult {
             concept_count,
             relation_count,

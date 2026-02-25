@@ -428,6 +428,16 @@ pub enum DerivationKind {
         gap_score: f32,
         fill_ratio: f32,
     },
+
+    // --- Phase 14e: Resource Discovery ----------------------------------------
+
+    /// A learning resource was discovered for a ZPD-proximal concept (Phase 14e).
+    ResourceDiscovery {
+        concept_label: String,
+        resource_count: u32,
+        sources: String,
+        top_title: String,
+    },
 }
 
 impl DerivationKind {
@@ -500,6 +510,7 @@ impl DerivationKind {
             Self::ZpdClassification { .. } => 63,
             Self::SleepConsolidation { .. } => 64,
             Self::DirectedCuriosity { .. } => 65,
+            Self::ResourceDiscovery { .. } => 66,
         }
     }
 }

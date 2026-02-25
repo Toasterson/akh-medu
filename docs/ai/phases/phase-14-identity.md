@@ -1,6 +1,6 @@
 # Phase 14 — Purpose-Driven Bootstrapping with Identity
 
-Status: **In Progress** (14a-14d complete, 14e-14m pending)
+Status: **In Progress** (14a-14e complete, 14f-14m pending)
 
 Autonomous domain knowledge acquisition AND identity construction from operator statements
 like "You are the Architect of the System based on Ptah" or "Be like Gandalf — a GCC
@@ -119,12 +119,32 @@ via ActivityPub/oxifed. 9 sub-phases (14a-14i). Builds on existing Psyche model 
 
 ## Phase 14e — Resource Discovery
 
-- [ ] `ResourceError` miette diagnostic enum
-- [ ] Multi-API search: Semantic Scholar + OpenAlex + Open Library
-- [ ] Quality scoring: citation count, recency, open access, VSA similarity
-- [ ] Scaffolding: difficulty-appropriate resource selection by ZPD zone
-- [ ] Resource deduplication via VSA similarity
-- [ ] Unit tests
+- [x] `ResourceDiscoveryError` miette diagnostic enum (2 variants: NoProximalConcepts, Engine) with `ResourceResult<T>`
+- [x] `ResourceDiscoveryConfig` struct: max_api_calls, delay_ms, max_per_concept, min_quality, dedup_threshold, per-API enable flags
+- [x] `ResourcePredicates` struct: 9 well-known relations in `resource:` namespace (title, url, source_api, quality_score, covers_concept, difficulty, open_access, abstract_text, year)
+- [x] `ResourceApi` enum: SemanticScholar, OpenAlex, OpenLibrary — with Display
+- [x] `DiscoveredResource`, `ResourceDiscoveryResult` data types
+- [x] `ResourceDiscoverer` struct with `new()` and `discover()` methods
+- [x] `search_semantic_scholar()` — paper search API with title/url/abstract/year/citations/openAccess
+- [x] `search_openalex()` — works search with inverted-index abstract reconstruction
+- [x] `search_open_library()` — book search via Open Library
+- [x] `api_call()` — rate-limited HTTP with counter and inter-call delay (same pattern as expand.rs)
+- [x] `score_resource()` — weighted scoring: citation_impact(0.30) + recency(0.15) + open_access(0.20) + vsa_similarity(0.25) + source_type(0.10)
+- [x] `estimate_difficulty()` — ZPD similarity → DreyfusLevel mapping
+- [x] `deduplicate_resources()` — pairwise VSA similarity, keep higher-scored on threshold match
+- [x] `limit_per_concept()` — cap resources per concept, keep highest quality
+- [x] `reconstruct_openalex_abstract()` — rebuild text from OpenAlex inverted index
+- [x] `store_resources()` — KG entity creation + 9 predicate triples + provenance recording per resource
+- [x] `build_search_query()` — concept label + domain context, truncated to 120 chars
+- [x] `url_encode()` — percent-encode for URL query parameters
+- [x] `DerivationKind::ResourceDiscovery` (tag 66) in provenance.rs
+- [x] `derivation_kind_prose()` arm for ResourceDiscovery in explain.rs
+- [x] `format_derivation_kind()` arm for ResourceDiscovery in main.rs
+- [x] `AkhError::ResourceDiscovery` transparent variant in error.rs
+- [x] `AgentError::ResourceDiscovery` transparent variant in agent/error.rs
+- [x] `AwakenAction::Resources` CLI subcommand with --seeds, --purpose, --min-quality, --max-api-calls, --no-semantic-scholar, --no-openalex, --no-open-library
+- [x] `pub mod resources` + re-exports in bootstrap/mod.rs
+- [x] 22 unit tests (config defaults, API display, error formatting, query building, difficulty boundaries, scoring, deduplication, abstract reconstruction, URL encoding, limit per concept)
 
 ## Phase 14f — Iterative Ingestion
 

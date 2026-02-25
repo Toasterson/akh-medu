@@ -1,6 +1,6 @@
 # Akh-medu Architecture
 
-> Last updated: 2026-02-25 (Phase 11i-11j sleep/consolidation + directed curiosity implemented)
+> Last updated: 2026-02-25 (Phase 14e resource discovery implemented)
 
 ## Overview
 

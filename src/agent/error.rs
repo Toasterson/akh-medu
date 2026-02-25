@@ -168,6 +168,10 @@ pub enum AgentError {
     #[diagnostic(transparent)]
     Prerequisite(#[from] crate::bootstrap::prerequisite::PrerequisiteError),
 
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    ResourceDiscovery(#[from] crate::bootstrap::resources::ResourceDiscoveryError),
+
     #[error("{0}")]
     #[diagnostic(
         code(akh::agent::engine),
