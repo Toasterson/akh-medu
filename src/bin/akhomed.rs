@@ -38,9 +38,10 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use tower_http::cors::CorsLayer;
 
-use akh_medu::agent::trigger::{self as trigger_mod, Trigger, TriggerStore};
+use akh_medu::agent::trigger::{Trigger, TriggerStore};
 use akh_medu::agent::{Agent, AgentConfig};
 use akh_medu::client::DaemonStatus;
+use akh_medu::config::AkhomedConfig;
 use akh_medu::engine::{Engine, EngineConfig};
 use akh_medu::grammar::concrete::ParseContext;
 use akh_medu::grammar::entity_resolution::{EquivalenceStats, LearnedEquivalence};
@@ -63,6 +64,7 @@ use akh_medu::workspace::WorkspaceManager;
 
 struct ServerState {
     paths: AkhPaths,
+    config: RwLock<AkhomedConfig>,
     workspaces: RwLock<HashMap<String, Arc<Engine>>>,
     daemons: RwLock<HashMap<String, WorkspaceDaemon>>,
 }
@@ -75,9 +77,10 @@ struct WorkspaceDaemon {
 }
 
 impl ServerState {
-    fn new(paths: AkhPaths) -> Self {
+    fn new(paths: AkhPaths, config: AkhomedConfig) -> Self {
         Self {
             paths,
+            config: RwLock::new(config),
             workspaces: RwLock::new(HashMap::new()),
             daemons: RwLock::new(HashMap::new()),
         }
@@ -174,6 +177,35 @@ async fn health(State(state): State<Arc<ServerState>>) -> Json<HealthResponse> {
         workspaces_loaded: map.len(),
     })
 }
+
+// ── Config handlers ──────────────────────────────────────────────────────
+
+async fn get_config_handler(
+    State(state): State<Arc<ServerState>>,
+) -> Json<AkhomedConfig> {
+    let config = state.config.read().await;
+    Json(config.clone())
+}
+
+async fn put_config_handler(
+    State(state): State<Arc<ServerState>>,
+    Json(new_config): Json<AkhomedConfig>,
+) -> Result<Json<AkhomedConfig>, (StatusCode, String)> {
+    // Persist to disk.
+    let config_path = state.paths.global_config_file();
+    new_config
+        .save(&config_path)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?;
+
+    // Update in-memory state.
+    let mut config = state.config.write().await;
+    *config = new_config.clone();
+
+    tracing::info!(path = %config_path.display(), "config updated");
+    Ok(Json(new_config))
+}
+
+// ── Workspace handlers ──────────────────────────────────────────────────
 
 async fn list_workspaces(State(state): State<Arc<ServerState>>) -> Json<WorkspaceListResponse> {
     let names = state.paths.list_workspaces();
@@ -936,6 +968,12 @@ async fn start_daemon_handler(
     let engine = state.get_engine(&ws_name).await?;
     let max_cycles = body.map(|b| b.max_cycles).unwrap_or(0);
 
+    // Build DaemonConfig from global config with request-level override.
+    let mut daemon_config = state.config.read().await.daemon.to_daemon_config();
+    if max_cycles > 0 {
+        daemon_config.max_cycles = max_cycles;
+    }
+
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -957,8 +995,14 @@ async fn start_daemon_handler(
     let daemon_ws_name = ws_name.clone();
 
     let handle = tokio::task::spawn(async move {
-        run_daemon_task(daemon_engine, daemon_status, shutdown_rx, max_cycles, daemon_ws_name)
-            .await;
+        run_daemon_task(
+            daemon_engine,
+            daemon_status,
+            shutdown_rx,
+            daemon_config,
+            daemon_ws_name,
+        )
+        .await;
     });
 
     let daemon = WorkspaceDaemon {
@@ -1008,19 +1052,18 @@ async fn daemon_status_handler(
     }
 }
 
-/// Background daemon task: runs agent cycles, evaluates triggers.
+/// Background daemon task: delegates to [`AgentDaemon`] for the full set of
+/// background learning tasks (goal generation, OODA cycles, equivalence
+/// learning, reflection, consolidation, schema discovery, rule inference,
+/// gap analysis, continuous learning, sleep cycles, and trigger evaluation).
 async fn run_daemon_task(
     engine: Arc<Engine>,
     status: Arc<tokio::sync::Mutex<DaemonStatus>>,
-    mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
-    max_cycles: usize,
+    shutdown_rx: tokio::sync::watch::Receiver<bool>,
+    daemon_config: akh_medu::agent::DaemonConfig,
     ws_name: String,
 ) {
-    use tokio::time::{interval, Duration};
-
-    let mut cycle_tick = interval(Duration::from_secs(30));
-    let mut trigger_tick = interval(Duration::from_secs(15));
-    let mut persist_tick = interval(Duration::from_secs(60));
+    use akh_medu::agent::AgentDaemon;
 
     // Create agent (heavy sync work).
     let agent_config = AgentConfig::default();
@@ -1050,86 +1093,16 @@ async fn run_daemon_task(
         }
     };
 
-    let agent = Arc::new(tokio::sync::Mutex::new(agent));
+    let mut daemon = AgentDaemon::new(agent, daemon_config)
+        .with_shutdown(shutdown_rx)
+        .with_status(Arc::clone(&status));
 
-    loop {
-        tokio::select! {
-            _ = cycle_tick.tick() => {
-                let cycle_agent = Arc::clone(&agent);
-                let cycle_engine = Arc::clone(&engine);
-                let cycle_status = Arc::clone(&status);
-                let _ = tokio::task::spawn_blocking(move || {
-                    let mut agent = cycle_agent.blocking_lock();
-                    if akh_medu::agent::goal::active_goals(agent.goals()).is_empty() {
-                        return;
-                    }
-                    if let Ok(_result) = agent.run_cycle() {
-                        let mut st = cycle_status.blocking_lock();
-                        st.total_cycles += 1;
-                    }
-                    let _ = cycle_engine; // keep alive
-                }).await;
-
-                if max_cycles > 0 {
-                    let st = status.lock().await;
-                    if st.total_cycles >= max_cycles {
-                        tracing::info!(ws = %ws_name, "daemon: max cycles reached");
-                        break;
-                    }
-                }
-            }
-            _ = trigger_tick.tick() => {
-                let trig_agent = Arc::clone(&agent);
-                let trig_engine = Arc::clone(&engine);
-                let trig_status = Arc::clone(&status);
-                let _ = tokio::task::spawn_blocking(move || {
-                    let store = TriggerStore::new(&trig_engine);
-                    let triggers = store.list();
-                    let now = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs();
-
-                    let mut agent = trig_agent.blocking_lock();
-                    for trigger in &triggers {
-                        if trigger_mod::should_fire(trigger, &agent, now) {
-                            match trigger_mod::execute_trigger(trigger, &mut agent) {
-                                Ok(msg) => tracing::info!("{msg}"),
-                                Err(e) => tracing::warn!(error = %e, "trigger execution failed"),
-                            }
-                            store.update_last_fired(&trigger.id, now);
-                        }
-                    }
-
-                    // Update trigger count in status.
-                    let mut st = trig_status.blocking_lock();
-                    st.trigger_count = triggers.len();
-                }).await;
-            }
-            _ = persist_tick.tick() => {
-                let persist_agent = Arc::clone(&agent);
-                let _ = tokio::task::spawn_blocking(move || {
-                    let agent = persist_agent.blocking_lock();
-                    let _ = agent.persist_session();
-                }).await;
-            }
-            _ = shutdown_rx.changed() => {
-                if *shutdown_rx.borrow() {
-                    tracing::info!(ws = %ws_name, "daemon: shutdown signal received");
-                    break;
-                }
-            }
-        }
+    if let Err(e) = daemon.run().await {
+        tracing::error!(error = %e, ws = %ws_name, "daemon task failed");
     }
 
-    // Final persist.
-    let agent = Arc::clone(&agent);
-    let _ = tokio::task::spawn_blocking(move || {
-        let agent = agent.blocking_lock();
-        let _ = agent.persist_session();
-    })
-    .await;
-
+    // AgentDaemon::run() already sets status.running = false and persists,
+    // but belt-and-suspenders in case of early return.
     status.lock().await.running = false;
     tracing::info!(ws = %ws_name, "daemon stopped");
 }
@@ -1509,7 +1482,28 @@ async fn main() {
 
     let port_num: u16 = port.parse().expect("AKH_SERVER_PORT must be a valid u16");
 
-    let state = Arc::new(ServerState::new(paths.clone()));
+    // Load global config from $XDG_CONFIG_HOME/akh-medu/config.toml.
+    // Creates a default config file on first boot.
+    let config_path = paths.global_config_file();
+    let config = match AkhomedConfig::load_or_create(&config_path) {
+        Ok(c) => {
+            tracing::info!(path = %config_path.display(), "loaded config");
+            c
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to load config, using defaults");
+            AkhomedConfig::default()
+        }
+    };
+
+    // AKH_AUTO_START env var overrides config if set.
+    let auto_start: Vec<String> = match std::env::var("AKH_AUTO_START") {
+        Ok(val) if val.is_empty() => Vec::new(),
+        Ok(val) => val.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect(),
+        Err(_) => config.daemon.auto_start.clone(),
+    };
+
+    let state = Arc::new(ServerState::new(paths.clone(), config));
 
     tracing::info!("akhomed initialized");
 
@@ -1518,9 +1512,65 @@ async fn main() {
         tracing::warn!("failed to write PID file: {e}");
     }
 
+    // Auto-start workspace daemons from config (or AKH_AUTO_START override).
+    if !auto_start.is_empty() {
+        let daemon_config = state.config.read().await.daemon.to_daemon_config();
+        for ws_name in &auto_start {
+            tracing::info!(workspace = %ws_name, "auto-starting daemon");
+            match state.get_engine(ws_name).await {
+                Ok(engine) => {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    let trigger_count = TriggerStore::new(&engine).list().len();
+                    let status = Arc::new(tokio::sync::Mutex::new(DaemonStatus {
+                        running: true,
+                        total_cycles: 0,
+                        started_at: now,
+                        trigger_count,
+                    }));
+                    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+                    let daemon_status = Arc::clone(&status);
+                    let daemon_engine = Arc::clone(&engine);
+                    let daemon_ws = ws_name.clone();
+                    let dc = daemon_config.clone();
+                    let handle = tokio::task::spawn(async move {
+                        run_daemon_task(
+                            daemon_engine,
+                            daemon_status,
+                            shutdown_rx,
+                            dc,
+                            daemon_ws,
+                        )
+                        .await;
+                    });
+                    state.daemons.write().await.insert(
+                        ws_name.to_string(),
+                        WorkspaceDaemon {
+                            handle,
+                            shutdown_tx,
+                            status,
+                        },
+                    );
+                    tracing::info!(workspace = %ws_name, "daemon auto-started");
+                }
+                Err((_status_code, msg)) => {
+                    tracing::warn!(
+                        workspace = %ws_name,
+                        error = %msg,
+                        "failed to auto-start daemon (workspace may not exist yet)",
+                    );
+                }
+            }
+        }
+    }
+
     let app = Router::new()
         // Health.
         .route("/health", get(health))
+        // Global config.
+        .route("/config", get(get_config_handler).put(put_config_handler))
         // Workspace management.
         .route("/workspaces", get(list_workspaces))
         .route("/workspaces/{name}", post(create_workspace))

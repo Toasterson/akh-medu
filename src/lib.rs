@@ -37,6 +37,8 @@ pub mod email;
 pub mod autonomous;
 pub mod client;
 pub mod compartment;
+#[cfg(feature = "daemon")]
+pub mod config;
 pub mod dispatch;
 pub mod engine;
 pub mod error;

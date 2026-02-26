@@ -1,6 +1,6 @@
 # Akh-medu Architecture
 
-> Last updated: 2026-02-25 (continuous learning idle task wired after Phase 14h)
+> Last updated: 2026-02-26 (autonomous daemon: auto-start, full background tasks, goal generation timer)
 
 ## Overview
 
