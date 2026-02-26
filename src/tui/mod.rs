@@ -451,9 +451,13 @@ impl AkhTui {
                                 let from_triples = engine.triples_from(sym_id);
                                 let to_triples = engine.triples_to(sym_id);
                                 if from_triples.is_empty() && to_triples.is_empty() {
-                                    self.messages.push(AkhMessage::system(format!(
-                                        "No facts found for \"{subject}\"."
-                                    )));
+                                    escalate_to_goal(
+                                        &mut self.messages,
+                                        agent,
+                                        &self.grammar,
+                                        &original_input,
+                                        &format!("No facts found for \"{subject}\"."),
+                                    );
                                 } else {
                                     let mut all_triples = from_triples;
                                     all_triples.extend(to_triples);
@@ -482,9 +486,13 @@ impl AkhTui {
                                 }
                             }
                             Err(_) => {
-                                self.messages.push(AkhMessage::system(format!(
-                                    "Symbol \"{subject}\" not found."
-                                )));
+                                escalate_to_goal(
+                                    &mut self.messages,
+                                    agent,
+                                    &self.grammar,
+                                    &original_input,
+                                    &format!("Nothing known about \"{subject}\"."),
+                                );
                             }
                         }
                     }
@@ -665,10 +673,14 @@ impl AkhTui {
                     "Awaken commands are available via the CLI: akh awaken {subcommand} {args}",
                 )));
             }
-            crate::agent::UserIntent::Freeform { text: _ } => {
-                self.messages.push(AkhMessage::system(
-                    "I don't understand that. Type /help for commands.".to_string(),
-                ));
+            crate::agent::UserIntent::Freeform { ref text } => {
+                escalate_to_goal(
+                    &mut self.messages,
+                    agent,
+                    &self.grammar,
+                    text,
+                    &format!("Exploring \"{text}\"."),
+                );
             }
         }
     }
@@ -734,12 +746,15 @@ impl AkhTui {
                 let goals = agent.goals();
                 if goals.is_empty() {
                     self.messages
-                        .push(AkhMessage::system("No active goals.".to_string()));
+                        .push(AkhMessage::system("No goals.".to_string()));
                 } else {
                     for g in goals {
                         self.messages.push(AkhMessage::goal_progress(
                             &g.description,
-                            format!("{:?}", g.status),
+                            format!(
+                                "[P{}] {} ({}, {} cycles)",
+                                g.priority, g.description, g.status, g.cycles_worked,
+                            ),
                         ));
                     }
                 }
@@ -776,6 +791,72 @@ impl AkhTui {
             }
             _ => {}
         }
+    }
+}
+
+/// Escalate unresolved input to a goal, run OODA cycles, and synthesize findings.
+///
+/// Used by both the `Query` fallback (symbol not found / no triples) and the
+/// `Freeform` intent so the agent always does *something* with user input.
+fn escalate_to_goal(
+    messages: &mut Vec<AkhMessage>,
+    agent: &mut Agent,
+    grammar: &str,
+    description: &str,
+    display_prefix: &str,
+) {
+    messages.push(AkhMessage::system(format!(
+        "{display_prefix} Investigating..."
+    )));
+
+    let goal_id = match agent.add_goal(
+        &format!("investigate: {description}"),
+        180,
+        "Find or derive relevant knowledge",
+    ) {
+        Ok(id) => id,
+        Err(e) => {
+            messages.push(AkhMessage::error("goal", e.to_string()));
+            return;
+        }
+    };
+
+    messages.push(AkhMessage::system(format!(
+        "Goal created (id: {})",
+        goal_id.get()
+    )));
+
+    // Run up to max_cycles OODA cycles (capped at a reasonable chat limit).
+    let max = agent.config.max_cycles.clamp(1, 10);
+    for _ in 0..max {
+        match agent.run_cycle() {
+            Ok(result) => {
+                messages.push(AkhMessage::tool_result(
+                    &result.decision.chosen_tool,
+                    result.action_result.tool_output.success,
+                    &result.action_result.tool_output.result,
+                ));
+            }
+            Err(_) => break,
+        }
+        if crate::agent::goal::active_goals(agent.goals()).is_empty() {
+            break;
+        }
+    }
+
+    // Synthesize findings.
+    let summary = agent.synthesize_findings_with_grammar(description, grammar);
+    if !summary.overview.is_empty() {
+        messages.push(AkhMessage::narrative(&summary.overview, grammar));
+    }
+    for section in &summary.sections {
+        messages.push(AkhMessage::narrative(
+            format!("## {}\n{}", section.heading, section.prose),
+            grammar,
+        ));
+    }
+    for gap in &summary.gaps {
+        messages.push(AkhMessage::gap("(unknown)", gap));
     }
 }
 
