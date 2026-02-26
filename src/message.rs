@@ -55,6 +55,13 @@ pub enum AkhMessage {
     },
     /// Prompt for user input.
     Prompt { question: String },
+    /// Audit ledger entry (tool call, ingestion, or agent log).
+    AuditLog {
+        id: u64,
+        kind: String,
+        summary: String,
+        timestamp: u64,
+    },
 }
 
 // ── MessageSink trait ───────────────────────────────────────────────────
@@ -144,6 +151,14 @@ impl MessageSink for StdoutSink {
             }
             AkhMessage::Prompt { question } => {
                 println!("{question}");
+            }
+            AkhMessage::AuditLog {
+                id,
+                kind,
+                summary,
+                ..
+            } => {
+                println!("[audit:{kind}] #{id} {summary}");
             }
         }
     }
@@ -246,6 +261,22 @@ impl AkhMessage {
         Self::Narrative {
             text: text.into(),
             grammar: grammar.into(),
+        }
+    }
+
+    pub fn audit_log(
+        id: u64,
+        kind: impl Into<String>,
+        summary: impl Into<String>,
+    ) -> Self {
+        Self::AuditLog {
+            id,
+            kind: kind.into(),
+            summary: summary.into(),
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
         }
     }
 

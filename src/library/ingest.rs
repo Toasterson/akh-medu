@@ -203,6 +203,23 @@ pub fn ingest_document(
         store_provenance(engine, para_sym, &slug, format, chunk.index as u32);
     }
 
+    // Audit: record the content ingestion event (best-effort).
+    // Capture source string before it's moved into the catalog record.
+    let source_str = source.to_string();
+    if let Some(ledger) = engine.audit_ledger() {
+        let mut audit_entry = crate::audit::AuditEntry::new(
+            crate::audit::AuditKind::ContentIngestion {
+                document_title: title.clone(),
+                source: source_str.clone(),
+                format: format.as_str().to_string(),
+                chunk_count: chunks.len(),
+                triple_count,
+            },
+            "default",
+        );
+        let _ = ledger.append(&mut audit_entry);
+    }
+
     // 9. Register in catalog.
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

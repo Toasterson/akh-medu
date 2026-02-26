@@ -1,8 +1,9 @@
 //! Built-in tools for the agent: KG query, KG mutate, memory recall, reason,
 //! similarity search, library search, file I/O, HTTP fetch, shell exec,
 //! user interaction, infer rules, gap analysis, CSV ingest, text ingest,
-//! code ingest, content ingest, doc gen, pattern mine.
+//! code ingest, content ingest, doc gen, pattern mine, audit log.
 
+pub mod audit_log;
 pub mod code_gen;
 pub mod code_ingest;
 pub mod code_predicates;
@@ -50,3 +51,4 @@ pub use text_ingest::TextIngestTool;
 pub use user_interact::UserInteractTool;
 pub use agent_management::{AgentListTool, AgentMessageTool, AgentRetireTool, AgentSpawnTool};
 pub use trigger_manage::TriggerManageTool;
+pub use audit_log::AuditLogTool;

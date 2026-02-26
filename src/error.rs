@@ -132,6 +132,10 @@ pub enum AkhError {
     #[error(transparent)]
     #[diagnostic(transparent)]
     Orchestrator(#[from] crate::bootstrap::orchestrator::OrchestratorError),
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Audit(#[from] crate::audit::AuditError),
 }
 
 // ---------------------------------------------------------------------------
@@ -706,6 +710,9 @@ pub type PipelineResult<T> = std::result::Result<T, PipelineError>;
 
 /// Result type for skill operations.
 pub type SkillResult<T> = std::result::Result<T, SkillError>;
+
+/// Result type for audit operations.
+pub type AuditResult<T> = std::result::Result<T, crate::audit::AuditError>;
 
 #[cfg(test)]
 mod tests {

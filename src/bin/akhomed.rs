@@ -67,6 +67,8 @@ struct ServerState {
     config: RwLock<AkhomedConfig>,
     workspaces: RwLock<HashMap<String, Arc<Engine>>>,
     daemons: RwLock<HashMap<String, WorkspaceDaemon>>,
+    /// Broadcast channel for audit entries — WS clients subscribe to this.
+    audit_broadcast: tokio::sync::broadcast::Sender<akh_medu::audit::AuditEntry>,
 }
 
 /// Background daemon state for a workspace.
@@ -78,11 +80,13 @@ struct WorkspaceDaemon {
 
 impl ServerState {
     fn new(paths: AkhPaths, config: AkhomedConfig) -> Self {
+        let (audit_tx, _) = tokio::sync::broadcast::channel(256);
         Self {
             paths,
             config: RwLock::new(config),
             workspaces: RwLock::new(HashMap::new()),
             daemons: RwLock::new(HashMap::new()),
+            audit_broadcast: audit_tx,
         }
     }
 
@@ -117,6 +121,11 @@ impl ServerState {
                 format!("failed to open workspace \"{name}\": {e}"),
             )
         })?;
+
+        // Wire audit broadcast sender so WS clients receive live entries.
+        if let Some(ledger) = engine.audit_ledger() {
+            ledger.set_broadcast(self.audit_broadcast.clone());
+        }
 
         let engine = Arc::new(engine);
         let mut map = self.workspaces.write().await;
@@ -1159,9 +1168,10 @@ async fn ws_handler(
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
     let engine_result = state.get_engine(&ws_name).await;
+    let audit_rx = state.audit_broadcast.subscribe();
     ws.on_upgrade(move |socket| async move {
         match engine_result {
-            Ok(engine) => handle_ws_session(socket, engine, ws_name).await,
+            Ok(engine) => handle_ws_session(socket, engine, ws_name, audit_rx).await,
             Err((_, msg)) => {
                 let err = AkhMessage::error("ws", msg);
                 let _ = send_message(&err, &mut None::<&mut WebSocket>).await;
@@ -1170,7 +1180,12 @@ async fn ws_handler(
     })
 }
 
-async fn handle_ws_session(mut socket: WebSocket, engine: Arc<Engine>, ws_name: String) {
+async fn handle_ws_session(
+    mut socket: WebSocket,
+    engine: Arc<Engine>,
+    ws_name: String,
+    mut audit_rx: tokio::sync::broadcast::Receiver<akh_medu::audit::AuditEntry>,
+) {
     // Create an agent for this session.
     let agent_config = AgentConfig::default();
     let mut agent = match Agent::new(Arc::clone(&engine), agent_config) {
@@ -1191,29 +1206,41 @@ async fn handle_ws_session(mut socket: WebSocket, engine: Arc<Engine>, ws_name: 
         return;
     }
 
-    while let Some(Ok(msg)) = socket.recv().await {
-        match msg {
-            Message::Text(text) => {
-                let input: WsInput = match serde_json::from_str(&text) {
-                    Ok(i) => i,
-                    Err(e) => {
-                        let err = AkhMessage::error("parse", format!("invalid JSON: {e}"));
-                        if send_akh_message(&mut socket, &err).await.is_err() {
-                            break;
-                        }
-                        continue;
-                    }
-                };
+    loop {
+        tokio::select! {
+            ws_msg = socket.recv() => {
+                match ws_msg {
+                    Some(Ok(Message::Text(text))) => {
+                        let input: WsInput = match serde_json::from_str(&text) {
+                            Ok(i) => i,
+                            Err(e) => {
+                                let err = AkhMessage::error("parse", format!("invalid JSON: {e}"));
+                                if send_akh_message(&mut socket, &err).await.is_err() {
+                                    break;
+                                }
+                                continue;
+                            }
+                        };
 
-                let responses = process_ws_input(&input, &mut agent, &engine);
-                for msg in &responses {
-                    if send_akh_message(&mut socket, msg).await.is_err() {
-                        return;
+                        let responses = process_ws_input(&input, &mut agent, &engine);
+                        for msg in &responses {
+                            if send_akh_message(&mut socket, msg).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                    Some(Ok(Message::Close(_))) | None => break,
+                    _ => {}
+                }
+            }
+            audit_entry = audit_rx.recv() => {
+                if let Ok(entry) = audit_entry {
+                    let msg = entry.to_message();
+                    if send_akh_message(&mut socket, &msg).await.is_err() {
+                        break;
                     }
                 }
             }
-            Message::Close(_) => break,
-            _ => {}
         }
     }
 
@@ -1440,6 +1467,88 @@ fn process_ws_input(input: &WsInput, agent: &mut Agent, engine: &Engine) -> Vec<
     }
 
     msgs
+}
+
+// ── Audit handlers ──────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct AuditListQuery {
+    #[serde(default)]
+    offset: u64,
+    #[serde(default = "default_audit_limit")]
+    limit: usize,
+    kind: Option<u8>,
+}
+
+fn default_audit_limit() -> usize {
+    50
+}
+
+async fn audit_list_handler(
+    State(state): State<Arc<ServerState>>,
+    Path(ws_name): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<AuditListQuery>,
+) -> Result<Json<akh_medu::audit::AuditPage>, (StatusCode, String)> {
+    let engine = state.get_engine(&ws_name).await?;
+    let ledger = engine
+        .audit_ledger()
+        .ok_or_else(|| (StatusCode::NOT_FOUND, "audit ledger not available".into()))?;
+
+    let page = if let Some(kind_tag) = query.kind {
+        ledger.list_by_kind(kind_tag, query.offset, query.limit)
+    } else {
+        ledger.list_page(query.offset, query.limit)
+    }
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?;
+
+    Ok(Json(page))
+}
+
+async fn audit_get_handler(
+    State(state): State<Arc<ServerState>>,
+    Path((ws_name, id)): Path<(String, u64)>,
+) -> Result<Json<akh_medu::audit::AuditEntry>, (StatusCode, String)> {
+    let engine = state.get_engine(&ws_name).await?;
+    let ledger = engine
+        .audit_ledger()
+        .ok_or_else(|| (StatusCode::NOT_FOUND, "audit ledger not available".into()))?;
+
+    let audit_id = akh_medu::audit::AuditId::new(id)
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "invalid audit id".into()))?;
+
+    let entry = ledger
+        .get(audit_id)
+        .map_err(|e| (StatusCode::NOT_FOUND, format!("{e}")))?;
+
+    Ok(Json(entry))
+}
+
+// ── Goals handler ──────────────────────────────────────────────────────
+
+async fn goals_handler(
+    State(state): State<Arc<ServerState>>,
+    Path(ws_name): Path<String>,
+) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, String)> {
+    let engine = state.get_engine(&ws_name).await?;
+
+    // Create a temporary agent to restore persisted goals from the KG.
+    let agent_config = AgentConfig::default();
+    let agent = Agent::new(Arc::clone(&engine), agent_config)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?;
+
+    let goals: Vec<serde_json::Value> = agent
+        .goals()
+        .iter()
+        .map(|g| {
+            serde_json::json!({
+                "description": g.description,
+                "status": format!("{}", g.status),
+                "priority": g.priority,
+            })
+        })
+        .collect();
+
+    Ok(Json(goals))
 }
 
 async fn send_akh_message(socket: &mut WebSocket, msg: &AkhMessage) -> Result<(), axum::Error> {
@@ -1696,6 +1805,20 @@ async fn main() {
         .route(
             "/workspaces/{ws_name}/skills/{skill_name}",
             get(skill_info_handler),
+        )
+        // Audit.
+        .route(
+            "/workspaces/{ws_name}/audit",
+            get(audit_list_handler),
+        )
+        .route(
+            "/workspaces/{ws_name}/audit/{id}",
+            get(audit_get_handler),
+        )
+        // Goals.
+        .route(
+            "/workspaces/{ws_name}/goals",
+            get(goals_handler),
         )
         // Engine info.
         .route("/workspaces/{ws_name}/info", get(engine_info))

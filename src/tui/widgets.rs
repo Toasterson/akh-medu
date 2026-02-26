@@ -115,6 +115,22 @@ pub fn message_to_line(msg: &AkhMessage) -> Line<'static> {
             Span::styled("? ", Style::default().fg(Color::Green)),
             Span::raw(question.clone()),
         ]),
+        AkhMessage::AuditLog {
+            id,
+            kind,
+            summary,
+            ..
+        } => Line::from(vec![
+            Span::styled(
+                format!("[audit:{kind}] "),
+                Style::default().fg(Color::Magenta),
+            ),
+            Span::styled(
+                format!("#{id} "),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::raw(summary.clone()),
+        ]),
     }
 }
 

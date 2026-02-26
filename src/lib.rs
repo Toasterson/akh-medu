@@ -31,6 +31,7 @@
 
 pub mod agent;
 pub mod argumentation;
+pub mod audit;
 pub mod bootstrap;
 #[cfg(feature = "email")]
 pub mod email;

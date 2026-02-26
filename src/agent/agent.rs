@@ -269,6 +269,16 @@ impl Agent {
 
         // Trigger management.
         registry.register(Box::new(tools::TriggerManageTool));
+
+        // Audit log.
+        registry.register(Box::new(tools::AuditLogTool));
+    }
+
+    /// Attach the audit ledger to the tool registry if persistence is configured.
+    fn wire_audit_ledger(registry: &mut ToolRegistry, engine: &Engine) {
+        if let Some(ledger) = engine.audit_ledger() {
+            registry.set_audit_ledger(Arc::clone(ledger));
+        }
     }
 
     /// Load CLI and WASM tools from active skills.
@@ -381,6 +391,7 @@ impl Agent {
 
         let mut tool_registry = ToolRegistry::new();
         Self::register_builtin_tools(&mut tool_registry, &predicates, &engine);
+        Self::wire_audit_ledger(&mut tool_registry, &engine);
 
         let working_memory = WorkingMemory::new(config.working_memory_capacity);
 
@@ -2225,6 +2236,7 @@ impl Agent {
 
         let mut tool_registry = ToolRegistry::new();
         Self::register_builtin_tools(&mut tool_registry, &predicates, &engine);
+        Self::wire_audit_ledger(&mut tool_registry, &engine);
 
         let store = engine.store();
 

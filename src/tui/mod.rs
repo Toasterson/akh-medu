@@ -50,6 +50,8 @@ pub struct AkhTui {
     input_buffer: String,
     scroll_offset: usize,
     should_quit: bool,
+    /// Whether audit log entries are displayed in the message stream.
+    show_audit: bool,
 }
 
 impl AkhTui {
@@ -67,6 +69,11 @@ impl AkhTui {
         agent.set_sink(tui_sink.clone());
         let operator_handle = agent.setup_operator_channel();
 
+        // Wire audit ledger to TUI sink so entries appear live.
+        if let Some(ledger) = engine.audit_ledger() {
+            ledger.set_sink(tui_sink.clone());
+        }
+
         Self {
             workspace,
             grammar,
@@ -83,6 +90,7 @@ impl AkhTui {
             input_buffer: String::new(),
             scroll_offset: 0,
             should_quit: false,
+            show_audit: true,
         }
     }
 
@@ -99,6 +107,7 @@ impl AkhTui {
             input_buffer: String::new(),
             scroll_offset: 0,
             should_quit: false,
+            show_audit: true,
         }
     }
 
@@ -153,15 +162,22 @@ impl AkhTui {
 
     /// Drain pending messages from the backend.
     fn drain_backend_messages(&mut self) {
+        let show_audit = self.show_audit;
         match self.backend {
             ChatBackend::Local(ref local) => {
                 let pending = local.tui_sink.drain();
-                self.messages.extend(pending);
+                self.messages.extend(
+                    pending
+                        .into_iter()
+                        .filter(|m| show_audit || !matches!(m, AkhMessage::AuditLog { .. })),
+                );
             }
             #[cfg(feature = "daemon")]
             ChatBackend::Remote { ref mut remote } => {
                 while let Some(msg) = remote.try_recv() {
-                    self.messages.push(msg);
+                    if show_audit || !matches!(msg, AkhMessage::AuditLog { .. }) {
+                        self.messages.push(msg);
+                    }
                 }
             }
         }
@@ -665,7 +681,7 @@ impl AkhTui {
             }
             "help" | "h" => {
                 self.messages.push(AkhMessage::system(
-                    "Commands: /grammar <name>, /goals, /status, /seed <pack>, /quit".to_string(),
+                    "Commands: /grammar <name>, /goals, /status, /seed <pack>, /audit, /quit".to_string(),
                 ));
             }
             "grammar" | "g" => {
@@ -679,6 +695,13 @@ impl AkhTui {
                         self.grammar
                     )));
                 }
+            }
+            "audit" => {
+                self.show_audit = !self.show_audit;
+                let state = if self.show_audit { "ON" } else { "OFF" };
+                self.messages.push(AkhMessage::system(format!(
+                    "Audit log display: {state}"
+                )));
             }
             "goals" | "status" | "seed" => {
                 match self.backend {

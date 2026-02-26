@@ -136,6 +136,7 @@ pub struct Engine {
     symbol_allocator: Arc<AtomicSymbolAllocator>,
     registry: SymbolRegistry,
     provenance_ledger: Option<ProvenanceLedger>,
+    audit_ledger: Option<Arc<crate::audit::AuditLedger>>,
     skill_manager: Option<SkillManager>,
     grammar_registry: GrammarRegistry,
     entity_resolver: RwLock<EntityResolver>,
@@ -179,7 +180,7 @@ impl Engine {
         ));
         let knowledge_graph = Arc::new(KnowledgeGraph::new());
 
-        let (store, sparql, provenance_ledger, skill_manager) = if let Some(ref dir) =
+        let (store, sparql, provenance_ledger, audit_ledger, skill_manager) = if let Some(ref dir) =
             config.data_dir
         {
             std::fs::create_dir_all(dir).map_err(|_| EngineError::DataDir {
@@ -210,6 +211,20 @@ impl Engine {
                 None
             };
 
+            // Initialize audit ledger from the same database.
+            let audit_ledger = if let Some(ref durable) = store.durable {
+                let db = durable.database_arc();
+                match crate::audit::AuditLedger::open(db) {
+                    Ok(l) => Some(Arc::new(l)),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "failed to open audit ledger, running without");
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
             // Initialize skill manager.
             let skills_dir = dir.join("skills");
             let skill_mgr = SkillManager::new(skills_dir, config.max_memory_mb);
@@ -218,9 +233,9 @@ impl Engine {
                 tracing::debug!(error = %e, "skill discovery skipped");
             }
 
-            (store, Some(sparql), ledger, Some(skill_mgr))
+            (store, Some(sparql), ledger, audit_ledger, Some(skill_mgr))
         } else {
-            (TieredStore::memory_only(), None, None, None)
+            (TieredStore::memory_only(), None, None, None, None)
         };
 
         let store = Arc::new(store);
@@ -280,6 +295,7 @@ impl Engine {
             symbol_allocator,
             registry,
             provenance_ledger,
+            audit_ledger,
             skill_manager,
             grammar_registry,
             entity_resolver,
@@ -664,6 +680,11 @@ impl Engine {
             .as_ref()
             .ok_or(ProvenanceError::NoPersistence)?;
         Ok(ledger.by_kind(kind)?)
+    }
+
+    /// Access the audit ledger, if persistence is configured.
+    pub fn audit_ledger(&self) -> Option<&Arc<crate::audit::AuditLedger>> {
+        self.audit_ledger.as_ref()
     }
 
     // -----------------------------------------------------------------------

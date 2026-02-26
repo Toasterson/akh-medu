@@ -4,7 +4,9 @@
 //! Each tool implements the [`Tool`] trait and is registered in a [`ToolRegistry`].
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
+use crate::audit::{AuditEntry, AuditKind, AuditLedger};
 use crate::engine::Engine;
 
 use super::error::{AgentError, AgentResult};
@@ -125,6 +127,7 @@ pub trait Tool: Send + Sync {
 pub struct ToolRegistry {
     tools: HashMap<String, Box<dyn Tool>>,
     manifests: HashMap<String, ToolManifest>,
+    audit_ledger: Option<Arc<AuditLedger>>,
 }
 
 impl ToolRegistry {
@@ -133,7 +136,13 @@ impl ToolRegistry {
         Self {
             tools: HashMap::new(),
             manifests: HashMap::new(),
+            audit_ledger: None,
         }
+    }
+
+    /// Attach an audit ledger for automatic tool invocation logging.
+    pub fn set_audit_ledger(&mut self, ledger: Arc<AuditLedger>) {
+        self.audit_ledger = Some(ledger);
     }
 
     /// Register a tool. Caches its manifest on registration.
@@ -166,6 +175,10 @@ impl ToolRegistry {
     }
 
     /// Execute a tool by name.
+    ///
+    /// If an audit ledger is attached, records a `ToolInvocation` audit entry
+    /// with timing, truncated params/output, and success status.
+    /// Audit failures never block the tool call.
     pub fn execute(
         &self,
         name: &str,
@@ -175,7 +188,33 @@ impl ToolRegistry {
         let tool = self
             .get(name)
             .ok_or_else(|| AgentError::ToolNotFound { name: name.into() })?;
-        tool.execute(engine, input)
+
+        let start = std::time::Instant::now();
+        let result = tool.execute(engine, input.clone());
+        let duration_ms = start.elapsed().as_millis() as u64;
+
+        // Best-effort audit logging — never fail the tool call.
+        if let Some(ref ledger) = self.audit_ledger {
+            let params_summary = truncate_summary(&format!("{:?}", input.params), 200);
+            let (success, output_summary) = match &result {
+                Ok(output) => (output.success, truncate_summary(&output.result, 200)),
+                Err(e) => (false, truncate_summary(&e.to_string(), 200)),
+            };
+
+            let mut entry = AuditEntry::new(
+                AuditKind::ToolInvocation {
+                    tool_name: name.to_string(),
+                    params_summary,
+                    success,
+                    output_summary,
+                    duration_ms,
+                },
+                "default",
+            );
+            let _ = ledger.append(&mut entry);
+        }
+
+        result
     }
 
     /// Number of registered tools.
@@ -200,6 +239,15 @@ impl std::fmt::Debug for ToolRegistry {
         f.debug_struct("ToolRegistry")
             .field("tools", &self.tools.keys().collect::<Vec<_>>())
             .finish()
+    }
+}
+
+/// Truncate a string for audit summaries, appending "..." if cut.
+fn truncate_summary(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        s.to_string()
+    } else {
+        format!("{}...", &s[..max_len])
     }
 }
 

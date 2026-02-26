@@ -446,6 +446,7 @@ fn akh_message_text(msg: &crate::message::AkhMessage) -> String {
         AkhMessage::Error { message, .. } => message.clone(),
         AkhMessage::GoalProgress { goal, status, .. } => format!("{goal}: {status}"),
         AkhMessage::Prompt { question } => question.clone(),
+        AkhMessage::AuditLog { summary, .. } => summary.clone(),
     }
 }
 

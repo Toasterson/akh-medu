@@ -1,6 +1,6 @@
 # Akh-medu Architecture
 
-> Last updated: 2026-02-26 (CLI cleanup: ValueEnum types, value_delimiter, server detection, clippy zero-warnings, dead code audit)
+> Last updated: 2026-02-26 (Append-only audit ledger with web endpoints, TUI streaming, LogTool, and broadcast WS streaming)
 
 ## Overview
 
@@ -165,6 +165,19 @@ Every inference, agent decision, and knowledge derivation creates a `ProvenanceR
 - Derived symbol, derivation kind (50 variants), confidence, depth, source symbols, metadata
 - Full traceback from any result to its original sources
 - Indices by derived symbol, source symbol, and kind for fast lookup
+
+## Audit Ledger
+
+Append-only activity log (`src/audit.rs`) recording all tool invocations, content ingestions, and agent-initiated log messages:
+- `AuditLedger` backed by redb tables (`audit` + `audit_kind_idx`) sharing the same `Database` as provenance
+- Sequential `AuditId(NonZeroU64)` keys, `AuditKind` discriminator (ToolInvocation, ContentIngestion, AgentLog)
+- **No delete/update/truncate** — append-only invariant enforced by API surface
+- Automatic tool invocation auditing via `ToolRegistry::execute()` wrapper (timing, params/output summaries)
+- Content ingestion auditing emitted from `library/ingest.rs` after successful ingest
+- `LogTool` (`audit_log`) lets the agent voluntarily write messages at info/warn/debug levels
+- `tokio::sync::broadcast` channel pushes entries to WS clients in real-time
+- `MessageSink` integration pushes `AkhMessage::AuditLog` to TUI live (togglable via `/audit`)
+- REST endpoints: `GET /workspaces/{ws}/audit` (paginated, filterable by kind), `GET /workspaces/{ws}/audit/{id}`, `GET /workspaces/{ws}/goals`
 
 ## Development Phases
 
