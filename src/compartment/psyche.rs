@@ -187,10 +187,10 @@ impl ShadowPattern {
         }
 
         // 2. Danger level threshold.
-        if let Some(threshold) = self.danger_level_threshold {
-            if manifest.danger.level >= threshold {
-                return true;
-            }
+        if let Some(threshold) = self.danger_level_threshold
+            && manifest.danger.level >= threshold
+        {
+            return true;
         }
 
         // 3. Action trigger substring match against tool's shadow_triggers.

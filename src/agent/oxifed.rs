@@ -297,7 +297,7 @@ pub fn incoming_object_to_inbound(
         .object
         .get("content")
         .and_then(|v| v.as_str())
-        .map(|s| strip_html_tags(s));
+        .map(strip_html_tags);
 
     let content = match content {
         Some(c) if !c.is_empty() => c,
@@ -329,7 +329,7 @@ pub fn incoming_activity_to_inbound(
                 .get("object")
                 .and_then(|obj| obj.get("content"))
                 .and_then(|v| v.as_str())
-                .map(|s| strip_html_tags(s));
+                .map(strip_html_tags);
 
             let content = match content {
                 Some(c) if !c.is_empty() => c,
@@ -641,10 +641,10 @@ impl OxifedChannel {
                                 _ => None,
                             };
 
-                            if let Some(inbound) = inbound {
-                                if let Ok(mut inbox) = inbox_clone.lock() {
-                                    inbox.push_back(inbound);
-                                }
+                            if let Some(inbound) = inbound
+                                && let Ok(mut inbox) = inbox_clone.lock()
+                            {
+                                inbox.push_back(inbound);
                             }
                         }
 
@@ -668,11 +668,7 @@ impl OxifedChannel {
 
         tokio::spawn(async move {
             // Block on receiving from the sync mpsc channel.
-            loop {
-                let payload = match tokio::task::block_in_place(|| outbox_rx.recv()) {
-                    Ok(p) => p,
-                    Err(_) => break, // Channel closed.
-                };
+            while let Ok(payload) = tokio::task::block_in_place(|| outbox_rx.recv()) {
 
                 let result = publisher_ch
                     .basic_publish(

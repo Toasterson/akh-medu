@@ -194,7 +194,7 @@ impl EffortIndex {
     pub fn from_cases(cases: Vec<EffortCase>) -> Self {
         let max_elements = cases.len().max(1000);
         let max_layer = (max_elements as f64).log2().ceil() as usize;
-        let max_layer = max_layer.max(4).min(16);
+        let max_layer = max_layer.clamp(4, 16);
         let hnsw = Hnsw::new(max_layer, max_elements, 16, 200, DistHamming {});
 
         // Re-insert all cases into the HNSW index.
@@ -379,13 +379,13 @@ fn current_improvement_rate(
     goal: &Goal,
     history: &ImprovementHistory,
     cycle: u64,
-    window: u64,
+    _window: u64,
 ) -> f32 {
     // Try to use the latest recorded rate from history.
-    if let Some(entries) = history.entries.get(&goal.symbol_id.get()) {
-        if let Some(&(_, rate)) = entries.last() {
-            return rate;
-        }
+    if let Some(entries) = history.entries.get(&goal.symbol_id.get())
+        && let Some(&(_, rate)) = entries.last()
+    {
+        return rate;
     }
 
     // Fallback: heuristic based on goal's last_progress_cycle.
@@ -441,19 +441,19 @@ pub fn record_opportunity_cost(
     alternative: Option<SymbolId>,
 ) {
     let cost_label = format!("cost:{cost:.3}@cycle:{cycle}");
-    if let Ok(cost_entity) = engine.resolve_or_create_entity(&cost_label) {
-        if let Ok(predicate) = engine.resolve_or_create_relation("agent:opportunity_cost") {
-            let _ = engine.add_triple(&Triple::new(selected, predicate, cost_entity));
-        }
+    if let Ok(cost_entity) = engine.resolve_or_create_entity(&cost_label)
+        && let Ok(predicate) = engine.resolve_or_create_relation("agent:opportunity_cost")
+    {
+        let _ = engine.add_triple(&Triple::new(selected, predicate, cost_entity));
     }
 
     // Link to the passed-over alternative.
     if let Some(alt) = alternative {
         let alt_label = format!("alt_goal:{}", alt.get());
-        if let Ok(alt_entity) = engine.resolve_or_create_entity(&alt_label) {
-            if let Ok(predicate) = engine.resolve_or_create_relation("agent:passed_over") {
-                let _ = engine.add_triple(&Triple::new(selected, predicate, alt_entity));
-            }
+        if let Ok(alt_entity) = engine.resolve_or_create_entity(&alt_label)
+            && let Ok(predicate) = engine.resolve_or_create_relation("agent:passed_over")
+        {
+            let _ = engine.add_triple(&Triple::new(selected, predicate, alt_entity));
         }
     }
 }
@@ -472,11 +472,11 @@ pub fn create_effort_case(
     let mut tool_usage: HashMap<String, u32> = HashMap::new();
     for entry in wm.by_kind(WorkingMemoryKind::Decision) {
         // WM Decision entries have format: "Decide: tool=X, goal=\"Y\", ..."
-        if let Some(rest) = entry.content.strip_prefix("Decide: tool=") {
-            if let Some(comma) = rest.find(',') {
-                let tool = &rest[..comma];
-                *tool_usage.entry(tool.to_string()).or_insert(0) += 1;
-            }
+        if let Some(rest) = entry.content.strip_prefix("Decide: tool=")
+            && let Some(comma) = rest.find(',')
+        {
+            let tool = &rest[..comma];
+            *tool_usage.entry(tool.to_string()).or_insert(0) += 1;
         }
     }
 
@@ -498,6 +498,7 @@ pub fn create_effort_case(
 // ---------------------------------------------------------------------------
 
 /// Compute a full resource report for a goal.
+#[allow(clippy::too_many_arguments)]
 pub fn assess_goal_resources(
     goal: &Goal,
     goals: &[Goal],

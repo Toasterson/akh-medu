@@ -179,18 +179,18 @@ impl InferEngine {
                     let all_preds: Vec<SymbolId> = triples.iter().map(|t| t.predicate).collect();
                     let mut seen_inverses = std::collections::HashSet::new();
                     for pred in &all_preds {
-                        if let Some(inv_pred) = hierarchy.inverse_of(*pred) {
-                            if seen_inverses.insert(inv_pred) {
-                                let incoming = self.knowledge_graph.triples_to(sym);
-                                for t in incoming {
-                                    if t.predicate == inv_pred {
-                                        // Flip: t is (?, inv_pred, sym) → treat as (sym, pred, ?)
-                                        let mut flipped = crate::graph::Triple::new(sym, *pred, t.subject);
-                                        flipped.confidence = t.confidence;
-                                        flipped.timestamp = t.timestamp;
-                                        if !triples.iter().any(|existing| existing.subject == flipped.subject && existing.predicate == flipped.predicate && existing.object == flipped.object) {
-                                            triples.push(flipped);
-                                        }
+                        if let Some(inv_pred) = hierarchy.inverse_of(*pred)
+                            && seen_inverses.insert(inv_pred)
+                        {
+                            let incoming = self.knowledge_graph.triples_to(sym);
+                            for t in incoming {
+                                if t.predicate == inv_pred {
+                                    // Flip: t is (?, inv_pred, sym) → treat as (sym, pred, ?)
+                                    let mut flipped = crate::graph::Triple::new(sym, *pred, t.subject);
+                                    flipped.confidence = t.confidence;
+                                    flipped.timestamp = t.timestamp;
+                                    if !triples.iter().any(|existing| existing.subject == flipped.subject && existing.predicate == flipped.predicate && existing.object == flipped.object) {
+                                        triples.push(flipped);
                                     }
                                 }
                             }
@@ -205,10 +205,10 @@ impl InferEngine {
                 let sym_vec = self.item_memory.get_or_create(&self.ops, sym);
 
                 for triple in &triples {
-                    if let Some(ref filter) = query.predicate_filter {
-                        if !filter.contains(&triple.predicate) {
-                            continue;
-                        }
+                    if let Some(ref filter) = query.predicate_filter
+                        && !filter.contains(&triple.predicate)
+                    {
+                        continue;
                     }
 
                     // Apply temporal decay if available
@@ -223,23 +223,23 @@ impl InferEngine {
                     };
 
                     let graph_confidence = parent_confidence * edge_confidence;
-                    if graph_confidence >= query.min_confidence {
-                        if ctx.activate(triple.object, graph_confidence) {
-                            ctx.provenance.push(
-                                ProvenanceRecord::new(
-                                    triple.object,
-                                    DerivationKind::GraphEdge {
-                                        from: sym,
-                                        predicate: triple.predicate,
-                                    },
-                                )
-                                .with_sources(vec![sym])
-                                .with_confidence(graph_confidence)
-                                .with_depth(depth + 1),
-                            );
-                            let obj_vec = self.item_memory.get_or_create(&self.ops, triple.object);
-                            new_vecs.push(obj_vec);
-                        }
+                    if graph_confidence >= query.min_confidence
+                        && ctx.activate(triple.object, graph_confidence)
+                    {
+                        ctx.provenance.push(
+                            ProvenanceRecord::new(
+                                triple.object,
+                                DerivationKind::GraphEdge {
+                                    from: sym,
+                                    predicate: triple.predicate,
+                                },
+                            )
+                            .with_sources(vec![sym])
+                            .with_confidence(graph_confidence)
+                            .with_depth(depth + 1),
+                        );
+                        let obj_vec = self.item_memory.get_or_create(&self.ops, triple.object);
+                        new_vecs.push(obj_vec);
                     }
 
                     // VSA recovery
@@ -255,24 +255,24 @@ impl InferEngine {
                                 let vsa_confidence =
                                     parent_confidence * edge_confidence.min(sr.similarity);
                                 let combined = graph_confidence.max(vsa_confidence);
-                                if combined >= query.min_confidence {
-                                    if ctx.activate(sr.symbol_id, combined) {
-                                        ctx.provenance.push(
-                                            ProvenanceRecord::new(
-                                                sr.symbol_id,
-                                                DerivationKind::VsaRecovery {
-                                                    from: sym,
-                                                    predicate: triple.predicate,
-                                                    similarity: sr.similarity,
-                                                },
-                                            )
-                                            .with_sources(vec![sym, triple.predicate])
-                                            .with_confidence(combined)
-                                            .with_depth(depth + 1),
-                                        );
-                                        let sr_vec = self.item_memory.get_or_create(&self.ops, sr.symbol_id);
-                                        new_vecs.push(sr_vec);
-                                    }
+                                if combined >= query.min_confidence
+                                    && ctx.activate(sr.symbol_id, combined)
+                                {
+                                    ctx.provenance.push(
+                                        ProvenanceRecord::new(
+                                            sr.symbol_id,
+                                            DerivationKind::VsaRecovery {
+                                                from: sym,
+                                                predicate: triple.predicate,
+                                                similarity: sr.similarity,
+                                            },
+                                        )
+                                        .with_sources(vec![sym, triple.predicate])
+                                        .with_confidence(combined)
+                                        .with_depth(depth + 1),
+                                    );
+                                    let sr_vec = self.item_memory.get_or_create(&self.ops, sr.symbol_id);
+                                    new_vecs.push(sr_vec);
                                 }
                             }
                         }
@@ -280,12 +280,12 @@ impl InferEngine {
                 }
             }
 
-            if !new_vecs.is_empty() {
-                if let Some(ref current_pattern) = ctx.pattern {
-                    let mut all_refs: Vec<&HyperVec> = vec![current_pattern];
-                    all_refs.extend(new_vecs.iter());
-                    ctx.pattern = Some(self.ops.bundle(&all_refs)?);
-                }
+            if !new_vecs.is_empty()
+                && let Some(ref current_pattern) = ctx.pattern
+            {
+                let mut all_refs: Vec<&HyperVec> = vec![current_pattern];
+                all_refs.extend(new_vecs.iter());
+                ctx.pattern = Some(self.ops.bundle(&all_refs)?);
             }
         }
 
@@ -367,33 +367,33 @@ impl InferEngine {
 
                 for triple in &triples {
                     // Apply predicate filter
-                    if let Some(ref filter) = query.predicate_filter {
-                        if !filter.contains(&triple.predicate) {
-                            continue;
-                        }
+                    if let Some(ref filter) = query.predicate_filter
+                        && !filter.contains(&triple.predicate)
+                    {
+                        continue;
                     }
 
                     let edge_confidence = triple.confidence;
 
                     // --- Graph-direct activation ---
                     let graph_confidence = parent_confidence * edge_confidence;
-                    if graph_confidence >= query.min_confidence {
-                        if ctx.activate(triple.object, graph_confidence) {
-                            ctx.provenance.push(
-                                ProvenanceRecord::new(
-                                    triple.object,
-                                    DerivationKind::GraphEdge {
-                                        from: sym,
-                                        predicate: triple.predicate,
-                                    },
-                                )
-                                .with_sources(vec![sym])
-                                .with_confidence(graph_confidence)
-                                .with_depth(depth + 1),
-                            );
-                            let obj_vec = self.item_memory.get_or_create(&self.ops, triple.object);
-                            new_vecs.push(obj_vec);
-                        }
+                    if graph_confidence >= query.min_confidence
+                        && ctx.activate(triple.object, graph_confidence)
+                    {
+                        ctx.provenance.push(
+                            ProvenanceRecord::new(
+                                triple.object,
+                                DerivationKind::GraphEdge {
+                                    from: sym,
+                                    predicate: triple.predicate,
+                                },
+                            )
+                            .with_sources(vec![sym])
+                            .with_confidence(graph_confidence)
+                            .with_depth(depth + 1),
+                        );
+                        let obj_vec = self.item_memory.get_or_create(&self.ops, triple.object);
+                        new_vecs.push(obj_vec);
                     }
 
                     // --- VSA recovery: unbind(subject, predicate) → recovered ---
@@ -412,25 +412,25 @@ impl InferEngine {
                                 let vsa_confidence =
                                     parent_confidence * edge_confidence.min(sr.similarity);
                                 let combined = graph_confidence.max(vsa_confidence);
-                                if combined >= query.min_confidence {
-                                    if ctx.activate(sr.symbol_id, combined) {
-                                        ctx.provenance.push(
-                                            ProvenanceRecord::new(
-                                                sr.symbol_id,
-                                                DerivationKind::VsaRecovery {
-                                                    from: sym,
-                                                    predicate: triple.predicate,
-                                                    similarity: sr.similarity,
-                                                },
-                                            )
-                                            .with_sources(vec![sym, triple.predicate])
-                                            .with_confidence(combined)
-                                            .with_depth(depth + 1),
-                                        );
-                                        let sr_vec =
-                                            self.item_memory.get_or_create(&self.ops, sr.symbol_id);
-                                        new_vecs.push(sr_vec);
-                                    }
+                                if combined >= query.min_confidence
+                                    && ctx.activate(sr.symbol_id, combined)
+                                {
+                                    ctx.provenance.push(
+                                        ProvenanceRecord::new(
+                                            sr.symbol_id,
+                                            DerivationKind::VsaRecovery {
+                                                from: sym,
+                                                predicate: triple.predicate,
+                                                similarity: sr.similarity,
+                                            },
+                                        )
+                                        .with_sources(vec![sym, triple.predicate])
+                                        .with_confidence(combined)
+                                        .with_depth(depth + 1),
+                                    );
+                                    let sr_vec =
+                                        self.item_memory.get_or_create(&self.ops, sr.symbol_id);
+                                    new_vecs.push(sr_vec);
                                 }
                             }
                         }
@@ -439,12 +439,12 @@ impl InferEngine {
             }
 
             // Bundle new vectors into the interference pattern
-            if !new_vecs.is_empty() {
-                if let Some(ref current_pattern) = ctx.pattern {
-                    let mut all_refs: Vec<&HyperVec> = vec![current_pattern];
-                    all_refs.extend(new_vecs.iter());
-                    ctx.pattern = Some(self.ops.bundle(&all_refs)?);
-                }
+            if !new_vecs.is_empty()
+                && let Some(ref current_pattern) = ctx.pattern
+            {
+                let mut all_refs: Vec<&HyperVec> = vec![current_pattern];
+                all_refs.extend(new_vecs.iter());
+                ctx.pattern = Some(self.ops.bundle(&all_refs)?);
             }
         }
 
@@ -550,10 +550,10 @@ impl InferEngine {
                     let (original_cost, _) = extractor.find_best(runner.roots[0]);
                     // If the expression didn't simplify at all, it's suspicious
                     // but we only slightly penalize rather than rejecting
-                    if original_cost >= 5 {
-                        if let Some(conf) = ctx.activations.get_mut(&record.derived_id) {
-                            *conf *= 0.9;
-                        }
+                    if original_cost >= 5
+                        && let Some(conf) = ctx.activations.get_mut(&record.derived_id)
+                    {
+                        *conf *= 0.9;
                     }
                 }
             }

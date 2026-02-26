@@ -201,27 +201,27 @@ impl ConstraintRegistry {
         }
 
         // Check arg1 type (subject)
-        if let Some(required_type) = constraint.arg1_type {
-            if !is_instance_of(engine, triple.subject, required_type) {
-                violations.push(ConstraintViolation::Type {
-                    relation: triple.predicate,
-                    arg_position: 1,
-                    expected_type: required_type,
-                    actual_symbol: triple.subject,
-                });
-            }
+        if let Some(required_type) = constraint.arg1_type
+            && !is_instance_of(engine, triple.subject, required_type)
+        {
+            violations.push(ConstraintViolation::Type {
+                relation: triple.predicate,
+                arg_position: 1,
+                expected_type: required_type,
+                actual_symbol: triple.subject,
+            });
         }
 
         // Check arg2 type (object)
-        if let Some(required_type) = constraint.arg2_type {
-            if !is_instance_of(engine, triple.object, required_type) {
-                violations.push(ConstraintViolation::Type {
-                    relation: triple.predicate,
-                    arg_position: 2,
-                    expected_type: required_type,
-                    actual_symbol: triple.object,
-                });
-            }
+        if let Some(required_type) = constraint.arg2_type
+            && !is_instance_of(engine, triple.object, required_type)
+        {
+            violations.push(ConstraintViolation::Type {
+                relation: triple.predicate,
+                arg_position: 2,
+                expected_type: required_type,
+                actual_symbol: triple.object,
+            });
         }
 
         violations

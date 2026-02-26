@@ -167,12 +167,11 @@ fn observe(agent: &mut Agent, cycle: u64) -> AgentResult<Observation> {
 
     // Recall relevant episodes if we have active goals.
     let mut recalled = Vec::new();
-    if !active_goals.is_empty() {
-        if let Ok(episodes) =
+    if !active_goals.is_empty()
+        && let Ok(episodes) =
             super::memory::recall_episodes(&agent.engine, &active_goals, &agent.predicates, 3)
-        {
-            recalled = episodes;
-        }
+    {
+        recalled = episodes;
     }
 
     // JITIR query (Phase 13g): if the preference profile has recorded interactions,
@@ -738,24 +737,24 @@ fn select_tool(
     }
 
     // ── kg_mutate: only when we can synthesize a new triple ──
-    if has_knowledge && has_inferences {
-        if let Some((subj, pred, obj)) = synthesize_triple(goal, orientation, engine) {
-            candidates.push(apply_modifiers(
-                ToolCandidate::new(
-                    "kg_mutate",
-                    ToolInput::new()
-                        .with_param("subject", &subj)
-                        .with_param("predicate", &pred)
-                        .with_param("object", &obj)
-                        .with_param("confidence", "0.7"),
-                    0.7,
-                    format!("Synthesizing new triple: {subj} -> {pred} -> {obj}."),
-                ),
-                &history,
-                &episodic_tools,
-                pressure,
-            ));
-        }
+    if has_knowledge && has_inferences
+        && let Some((subj, pred, obj)) = synthesize_triple(goal, orientation, engine)
+    {
+        candidates.push(apply_modifiers(
+            ToolCandidate::new(
+                "kg_mutate",
+                ToolInput::new()
+                    .with_param("subject", &subj)
+                    .with_param("predicate", &pred)
+                    .with_param("object", &obj)
+                    .with_param("confidence", "0.7"),
+                0.7,
+                format!("Synthesizing new triple: {subj} -> {pred} -> {obj}."),
+            ),
+            &history,
+            &episodic_tools,
+            pressure,
+        ));
     }
 
     // ── memory_recall: only when episodes exist ──
@@ -1023,7 +1022,7 @@ fn select_tool(
                             semantic_score * 0.75,
                             ToolInput::new().with_param("action", "read").with_param(
                                 "path",
-                                &format!("{}.txt", goal_label.replace(' ', "_")),
+                                format!("{}.txt", goal_label.replace(' ', "_")),
                             ),
                             format!("VSA semantic match for file I/O: {semantic_score:.3}"),
                         )
@@ -1061,7 +1060,7 @@ fn select_tool(
                             0.1
                         } else {
                             // Always-available reasoning tool: use VSA score with a floor
-                            (semantic_score * 0.7 + context_boost).max(0.35).min(0.75)
+                            (semantic_score * 0.7 + context_boost).clamp(0.35, 0.75)
                         };
                         (
                             base,
@@ -1079,7 +1078,7 @@ fn select_tool(
                             0.1
                         } else {
                             // Always-available analysis tool: use VSA score with a floor
-                            (semantic_score * 0.7 + stall_boost).max(0.3).min(0.75)
+                            (semantic_score * 0.7 + stall_boost).clamp(0.3, 0.75)
                         };
                         (
                             base,
@@ -1097,7 +1096,7 @@ fn select_tool(
                             semantic_score * 0.75,
                             ToolInput::new().with_param(
                                 "question",
-                                &format!("What should I know about: {}?", goal.description),
+                                format!("What should I know about: {}?", goal.description),
                             ),
                             format!("VSA semantic match for user interaction: {semantic_score:.3}"),
                         )
@@ -1593,13 +1592,12 @@ fn find_unexplored_code_child(
 
             queried_subjects.insert(subject);
 
-            if code_child_predicates.iter().any(|&p| p == predicate) {
-                if !object.is_empty()
-                    && !super::synthesize::is_metadata_label(&object)
-                    && object != "tests"
-                {
-                    discovered_children.push(object);
-                }
+            if code_child_predicates.contains(&predicate)
+                && !object.is_empty()
+                && !super::synthesize::is_metadata_label(&object)
+                && object != "tests"
+            {
+                discovered_children.push(object);
             }
         }
     }
@@ -1711,7 +1709,7 @@ fn find_code_entity_for_query(engine: &crate::engine::Engine, description: &str)
 
         for desc_word in &desc_words {
             // Exact word match in label (e.g., "vsa" matches label word "vsa")
-            if label_words.iter().any(|lw| *lw == desc_word.as_str()) {
+            if label_words.contains(&desc_word.as_str()) {
                 score += 3; // Strong signal: exact word boundary match
             }
             // Whole label equals the word (e.g., label "Vsa" == word "vsa")

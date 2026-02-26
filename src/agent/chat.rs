@@ -64,20 +64,20 @@ pub fn discover_ssh_fingerprint() -> Option<String> {
     let entries = std::fs::read_dir(&ssh_dir).ok()?;
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) == Some("pub") {
-            if let Ok(content) = std::fs::read_to_string(&path) {
-                // SSH public key format: "<type> <base64-data> [comment]"
-                let parts: Vec<&str> = content.trim().split_whitespace().collect();
-                if parts.len() >= 2 {
-                    // Decode base64 and hash.
-                    if let Ok(key_bytes) = base64_decode(parts[1]) {
-                        use std::collections::hash_map::DefaultHasher;
-                        use std::hash::{Hash, Hasher};
-                        let mut hasher = DefaultHasher::new();
-                        key_bytes.hash(&mut hasher);
-                        let hash = hasher.finish();
-                        return Some(format!("{hash:016x}"));
-                    }
+        if path.extension().and_then(|e| e.to_str()) == Some("pub")
+            && let Ok(content) = std::fs::read_to_string(&path)
+        {
+            // SSH public key format: "<type> <base64-data> [comment]"
+            let parts: Vec<&str> = content.split_whitespace().collect();
+            if parts.len() >= 2 {
+                // Decode base64 and hash.
+                if let Ok(key_bytes) = base64_decode(parts[1]) {
+                    use std::collections::hash_map::DefaultHasher;
+                    use std::hash::{Hash, Hasher};
+                    let mut hasher = DefaultHasher::new();
+                    key_bytes.hash(&mut hasher);
+                    let hash = hasher.finish();
+                    return Some(format!("{hash:016x}"));
                 }
             }
         }

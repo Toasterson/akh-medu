@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use miette::{IntoDiagnostic, Result};
 
 use akh_medu::agent::{Agent, AgentConfig};
@@ -21,6 +21,71 @@ use akh_medu::pipeline::{Pipeline, PipelineData, PipelineStage, StageConfig, Sta
 use akh_medu::provenance::DerivationKind;
 use akh_medu::symbol::SymbolId;
 use akh_medu::vsa::Dimension;
+
+#[derive(Clone, ValueEnum)]
+enum IngestFormat {
+    Json,
+    Csv,
+    Text,
+}
+
+#[derive(Clone, ValueEnum)]
+enum CsvFormat {
+    Spo,
+    Entity,
+}
+
+#[derive(Clone, ValueEnum)]
+enum OutputFormat {
+    Summary,
+    Json,
+}
+
+#[derive(Clone, ValueEnum)]
+enum DocFormat {
+    Markdown,
+    Json,
+    Both,
+}
+
+#[derive(Clone, ValueEnum)]
+enum PreprocessFormat {
+    Jsonl,
+    Json,
+}
+
+#[derive(Clone, ValueEnum)]
+enum EnergyLevel {
+    Low,
+    Medium,
+    High,
+}
+
+#[derive(Clone, ValueEnum)]
+enum GtdState {
+    Inbox,
+    Next,
+    Waiting,
+    Someday,
+    Reference,
+}
+
+#[derive(Clone, ValueEnum)]
+enum ParaCategory {
+    Project,
+    Area,
+    Resource,
+    Archive,
+}
+
+#[derive(Clone, ValueEnum)]
+enum ProactivityLevel {
+    Ambient,
+    Nudge,
+    Offer,
+    Scheduled,
+    Autonomous,
+}
 
 #[derive(Parser)]
 #[command(name = "akh", version, about = "Neuro-symbolic AI engine")]
@@ -62,13 +127,13 @@ enum Commands {
         #[arg(long)]
         file: PathBuf,
 
-        /// File format: "json" (default), "csv", or "text".
+        /// File format: json (default), csv, or text.
         #[arg(long, default_value = "json")]
-        format: String,
+        format: IngestFormat,
 
-        /// CSV format: "spo" (subject,predicate,object) or "entity" (headers=predicates).
+        /// CSV format: spo (subject,predicate,object) or entity (headers=predicates).
         #[arg(long, default_value = "spo")]
-        csv_format: String,
+        csv_format: CsvFormat,
 
         /// Maximum sentences to process for text format.
         #[arg(long, default_value = "100")]
@@ -80,9 +145,9 @@ enum Commands {
 
     /// Query the knowledge base using spreading-activation inference.
     Query {
-        /// Seed symbols (comma-separated names or IDs, e.g. "Sun,Moon" or "1,2").
-        #[arg(long)]
-        seeds: String,
+        /// Seed symbols (names or IDs, e.g. "Sun,Moon" or "1,2").
+        #[arg(long, value_delimiter = ',')]
+        seeds: Vec<String>,
 
         /// Number of results to return.
         #[arg(long, default_value = "10")]
@@ -95,17 +160,17 @@ enum Commands {
 
     /// Traverse the knowledge graph from seed nodes using BFS.
     Traverse {
-        /// Seed symbols (comma-separated names or IDs).
-        #[arg(long)]
-        seeds: String,
+        /// Seed symbols (names or IDs).
+        #[arg(long, value_delimiter = ',')]
+        seeds: Vec<String>,
 
         /// Maximum traversal depth.
         #[arg(long, default_value = "3")]
         max_depth: usize,
 
-        /// Only follow these predicates (comma-separated, optional).
-        #[arg(long)]
-        predicates: Option<String>,
+        /// Only follow these predicates (optional).
+        #[arg(long, value_delimiter = ',')]
+        predicates: Option<Vec<String>>,
 
         /// Minimum confidence threshold.
         #[arg(long, default_value = "0.0")]
@@ -115,9 +180,9 @@ enum Commands {
         #[arg(long, default_value = "1000")]
         max_results: usize,
 
-        /// Output format: "summary" or "json".
+        /// Output format: summary or json.
         #[arg(long, default_value = "summary")]
-        format: String,
+        format: OutputFormat,
     },
 
     /// Run a SPARQL query against the knowledge graph.
@@ -321,9 +386,9 @@ enum Commands {
         /// Target: "architecture", "module:<name>", "type:<name>", "dependencies".
         #[arg(long)]
         target: String,
-        /// Output format: "markdown" (default), "json", or "both".
+        /// Output format: markdown (default), json, or both.
         #[arg(long, default_value = "markdown")]
-        format: String,
+        format: DocFormat,
         /// Output file path (stdout if omitted).
         #[arg(long)]
         output: Option<PathBuf>,
@@ -342,9 +407,9 @@ enum Commands {
     ///
     /// Reads JSONL from stdin, extracts entities/claims, writes JSONL to stdout.
     Preprocess {
-        /// Output format: "jsonl" (default) or "json".
+        /// Output format: jsonl (default) or json.
         #[arg(long, default_value = "jsonl")]
-        format: String,
+        format: PreprocessFormat,
 
         /// Override language (en, ru, ar, fr, es). Default: auto-detect.
         #[arg(long)]
@@ -429,30 +494,30 @@ enum PipelineAction {
     List,
     /// Run the query pipeline (Retrieve -> Infer -> Reason).
     Query {
-        /// Seed symbols (comma-separated names or IDs).
-        #[arg(long)]
-        seeds: String,
+        /// Seed symbols (names or IDs).
+        #[arg(long, value_delimiter = ',')]
+        seeds: Vec<String>,
         /// Maximum traversal depth for retrieve stage.
         #[arg(long, default_value = "3")]
         max_depth: usize,
         /// Maximum inference depth.
         #[arg(long, default_value = "1")]
         infer_depth: usize,
-        /// Output format: "summary" or "json".
+        /// Output format: summary or json.
         #[arg(long, default_value = "summary")]
-        format: String,
+        format: OutputFormat,
     },
     /// Run a custom pipeline from named stages.
     Run {
-        /// Comma-separated stage names: retrieve,infer,reason,extract.
-        #[arg(long)]
-        stages: String,
-        /// Seed symbols (comma-separated names or IDs).
-        #[arg(long)]
-        seeds: String,
-        /// Output format: "summary" or "json".
+        /// Stage names: retrieve,infer,reason,extract.
+        #[arg(long, value_delimiter = ',')]
+        stages: Vec<String>,
+        /// Seed symbols (names or IDs).
+        #[arg(long, value_delimiter = ',')]
+        seeds: Vec<String>,
+        /// Output format: summary or json.
         #[arg(long, default_value = "summary")]
-        format: String,
+        format: OutputFormat,
     },
 }
 
@@ -502,9 +567,9 @@ enum AgentAction {
     },
     /// Run agent until goals complete or max cycles reached.
     Run {
-        /// Goal descriptions (comma-separated).
-        #[arg(long)]
-        goals: String,
+        /// Goal descriptions.
+        #[arg(long, value_delimiter = ',')]
+        goals: Vec<String>,
         /// Maximum OODA cycles.
         #[arg(long, default_value = "10")]
         max_cycles: usize,
@@ -533,9 +598,9 @@ enum AgentAction {
     },
     /// Interactive REPL (launches TUI).
     Repl {
-        /// Goal descriptions (comma-separated). Omit to resume existing goals.
-        #[arg(long)]
-        goals: Option<String>,
+        /// Goal descriptions. Omit to resume existing goals.
+        #[arg(long, value_delimiter = ',')]
+        goals: Option<Vec<String>>,
         /// Headless mode: use plain stdin/stdout instead of TUI.
         #[arg(long)]
         headless: bool,
@@ -571,7 +636,7 @@ enum AgentAction {
     },
     /// Discover schema patterns from the knowledge graph.
     Schema,
-    /// Interactive chat (launches TUI).
+    /// Interactive chat (launches TUI). Prefer `akh chat` instead.
     Chat {
         /// Maximum OODA cycles per question.
         #[arg(long, default_value = "5")]
@@ -620,9 +685,9 @@ enum PimAction {
         /// Filter by GTD context (e.g. "computer", "office").
         #[arg(long)]
         context: Option<String>,
-        /// Filter by energy level (low, medium, high).
+        /// Filter by energy level.
         #[arg(long)]
-        energy: Option<String>,
+        energy: Option<EnergyLevel>,
     },
     /// Run a GTD weekly review.
     Review,
@@ -636,21 +701,21 @@ enum PimAction {
         /// Goal symbol ID.
         #[arg(long)]
         goal: u64,
-        /// Initial GTD state (inbox, next, waiting, someday, reference).
+        /// Initial GTD state.
         #[arg(long, default_value = "inbox")]
-        gtd: String,
+        gtd: GtdState,
         /// Urgency (0.0–1.0).
         #[arg(long, default_value = "0.5")]
         urgency: f32,
         /// Importance (0.0–1.0).
         #[arg(long, default_value = "0.5")]
         importance: f32,
-        /// PARA category (project, area, resource, archive).
+        /// PARA category.
         #[arg(long)]
-        para: Option<String>,
-        /// GTD contexts (comma-separated, e.g. "computer,office").
-        #[arg(long)]
-        contexts: Option<String>,
+        para: Option<ParaCategory>,
+        /// GTD contexts (e.g. "computer,office").
+        #[arg(long, value_delimiter = ',')]
+        contexts: Option<Vec<String>>,
         /// Recurrence pattern (e.g. "daily", "weekly:mon,fri", "every:3d").
         #[arg(long)]
         recur: Option<String>,
@@ -665,7 +730,7 @@ enum PimAction {
         goal: u64,
         /// Target GTD state.
         #[arg(long)]
-        to: String,
+        to: GtdState,
     },
     /// Show Eisenhower matrix.
     Matrix,
@@ -734,7 +799,7 @@ enum PrefAction {
     /// Set proactivity level.
     Level {
         /// Level: ambient, nudge, offer, scheduled, autonomous.
-        level: String,
+        level: ProactivityLevel,
     },
     /// Show top interest topics.
     Interests {
@@ -782,9 +847,9 @@ enum AwakenAction {
     Status,
     /// Expand seed concepts into a skeleton ontology via external knowledge sources.
     Expand {
-        /// Comma-separated seed concepts (e.g., "compiler,optimization,parsing").
-        #[arg(long)]
-        seeds: Option<String>,
+        /// Seed concepts (e.g., "compiler,optimization,parsing").
+        #[arg(long, value_delimiter = ',')]
+        seeds: Option<Vec<String>>,
         /// Purpose statement to extract seeds from (e.g., "GCC compiler expert").
         #[arg(long)]
         purpose: Option<String>,
@@ -800,9 +865,9 @@ enum AwakenAction {
     },
     /// Discover prerequisite relationships and classify concepts by Vygotsky ZPD zones.
     Prerequisite {
-        /// Comma-separated seed concepts (e.g., "compiler,optimization,parsing").
-        #[arg(long)]
-        seeds: Option<String>,
+        /// Seed concepts (e.g., "compiler,optimization,parsing").
+        #[arg(long, value_delimiter = ',')]
+        seeds: Option<Vec<String>>,
         /// Purpose statement to extract seeds from (e.g., "GCC compiler expert").
         #[arg(long)]
         purpose: Option<String>,
@@ -818,9 +883,9 @@ enum AwakenAction {
     },
     /// Discover learning resources for ZPD-proximal concepts.
     Resources {
-        /// Comma-separated seed concepts (e.g., "rust,compiler").
-        #[arg(long)]
-        seeds: Option<String>,
+        /// Seed concepts (e.g., "rust,compiler").
+        #[arg(long, value_delimiter = ',')]
+        seeds: Option<Vec<String>>,
         /// Purpose statement to extract seeds from.
         #[arg(long)]
         purpose: Option<String>,
@@ -840,11 +905,11 @@ enum AwakenAction {
         #[arg(long)]
         no_open_library: bool,
     },
-    /// Ingest discovered resources in curriculum order (expand → prereq → resources → ingest).
+    /// Ingest discovered resources in curriculum order (expand -> prereq -> resources -> ingest).
     Ingest {
-        /// Comma-separated seed concepts (e.g., "rust,compiler").
-        #[arg(long)]
-        seeds: Option<String>,
+        /// Seed concepts (e.g., "rust,compiler").
+        #[arg(long, value_delimiter = ',')]
+        seeds: Option<Vec<String>>,
         /// Purpose statement to extract seeds from.
         #[arg(long)]
         purpose: Option<String>,
@@ -864,11 +929,11 @@ enum AwakenAction {
         #[arg(long)]
         catalog_dir: Option<String>,
     },
-    /// Assess competence: expand → prereq → resources → ingest → assess.
+    /// Assess competence: expand -> prereq -> resources -> ingest -> assess.
     Assess {
-        /// Comma-separated seed concepts (e.g., "rust,compiler").
-        #[arg(long)]
-        seeds: Option<String>,
+        /// Seed concepts (e.g., "rust,compiler").
+        #[arg(long, value_delimiter = ',')]
+        seeds: Option<Vec<String>>,
         /// Purpose statement to extract seeds from.
         #[arg(long)]
         purpose: Option<String>,
@@ -1082,11 +1147,10 @@ fn resolve_client(
     config: EngineConfig,
     xdg_paths: Option<&akh_medu::paths::AkhPaths>,
 ) -> Result<AkhClient> {
-    if let Some(paths) = xdg_paths {
-        if let Some(server) = discover_server(paths) {
+    if let Some(paths) = xdg_paths
+        && let Some(server) = discover_server(paths) {
             return Ok(AkhClient::remote(&server, workspace));
         }
-    }
     eprintln!("warning: akhomed not running, using local engine");
     let engine = Engine::new(config).into_diagnostic()?;
     Ok(AkhClient::local(Arc::new(engine)))
@@ -1263,11 +1327,10 @@ fn main() -> Result<()> {
                         language,
                         ..Default::default()
                     };
-                    if let Ok(engine) = Engine::new(engine_config) {
-                        if let Some(role) = engine.assigned_role() {
+                    if let Ok(engine) = Engine::new(engine_config)
+                        && let Some(role) = engine.assigned_role() {
                             println!("  Role: {role}");
                         }
-                    }
                 }
                 WorkspaceAction::AssignRole { name, role } => {
                     let client = resolve_client(&name, config, Some(mgr.paths()))?;
@@ -1341,8 +1404,8 @@ fn main() -> Result<()> {
         } => {
             let engine = Engine::new(config).into_diagnostic()?;
 
-            match format.as_str() {
-                "json" => {
+            match format {
+                IngestFormat::Json => {
                     let content = std::fs::read_to_string(&file).into_diagnostic()?;
                     let triples: Vec<serde_json::Value> =
                         serde_json::from_str(&content).into_diagnostic()?;
@@ -1396,7 +1459,9 @@ fn main() -> Result<()> {
                         let (created, ingested) = engine
                             .ingest_label_triples(&label_triples)
                             .into_diagnostic()?;
-                        let _ = engine.persist();
+                        if let Err(e) = engine.persist() {
+                            eprintln!("warning: failed to persist after label-triple ingest: {e}");
+                        }
                         println!(
                             "Ingested {ingested} triples ({created} new symbols) from {}",
                             file.display()
@@ -1426,32 +1491,33 @@ fn main() -> Result<()> {
                         .into_diagnostic();
                     }
                 }
-                "csv" => {
+                IngestFormat::Csv => {
                     use akh_medu::agent::tool::{Tool, ToolInput};
                     use akh_medu::agent::tools::CsvIngestTool;
 
+                    let csv_format_str = match csv_format {
+                        CsvFormat::Spo => "spo",
+                        CsvFormat::Entity => "entity",
+                    };
                     let input = ToolInput::new()
                         .with_param("path", file.to_str().unwrap_or(""))
-                        .with_param("format", &csv_format);
+                        .with_param("format", csv_format_str);
 
                     let tool = CsvIngestTool;
                     let output = tool.execute(&engine, input).into_diagnostic()?;
                     println!("{}", output.result);
                 }
-                "text" => {
+                IngestFormat::Text => {
                     use akh_medu::agent::tool::{Tool, ToolInput};
                     use akh_medu::agent::tools::TextIngestTool;
 
                     let input = ToolInput::new()
-                        .with_param("text", &format!("file:{}", file.display()))
-                        .with_param("max_sentences", &max_sentences.to_string());
+                        .with_param("text", format!("file:{}", file.display()))
+                        .with_param("max_sentences", max_sentences.to_string());
 
                     let tool = TextIngestTool;
                     let output = tool.execute(&engine, input).into_diagnostic()?;
                     println!("{}", output.result);
-                }
-                other => {
-                    miette::bail!("Unknown format: \"{other}\". Use json, csv, or text.");
                 }
             }
 
@@ -1473,7 +1539,9 @@ fn main() -> Result<()> {
                 }
             }
 
-            let _ = engine.persist();
+            if let Err(e) = engine.persist() {
+                eprintln!("warning: failed to persist after ingest: {e}");
+            }
             println!("{}", engine.info());
         }
 
@@ -1537,7 +1605,9 @@ fn main() -> Result<()> {
                 }
             }
 
-            let _ = engine.persist();
+            if let Err(e) = engine.persist() {
+                eprintln!("warning: failed to persist after bootstrap: {e}");
+            }
             println!(
                 "Bootstrap complete: {} base + derived = {} total triples, {} skills, {} rules.",
                 total_triples - total_rules,
@@ -1555,7 +1625,7 @@ fn main() -> Result<()> {
             let client = resolve_client(&cli.workspace, config.clone(), xdg_paths.as_ref())?;
 
             let seed_ids: Vec<SymbolId> = seeds
-                .split(',')
+                .iter()
                 .map(|s| client.resolve_symbol(s.trim()))
                 .collect::<std::result::Result<Vec<_>, _>>()
                 .into_diagnostic()?;
@@ -1614,14 +1684,14 @@ fn main() -> Result<()> {
             let client = resolve_client(&cli.workspace, config, xdg_paths.as_ref())?;
 
             let seed_ids: Vec<SymbolId> = seeds
-                .split(',')
+                .iter()
                 .map(|s| client.resolve_symbol(s.trim()))
                 .collect::<std::result::Result<Vec<_>, _>>()
                 .into_diagnostic()?;
 
             let predicate_filter: HashSet<SymbolId> = if let Some(ref preds) = predicates {
                 preds
-                    .split(',')
+                    .iter()
                     .map(|s| client.resolve_symbol(s.trim()))
                     .collect::<std::result::Result<Vec<_>, _>>()
                     .into_diagnostic()?
@@ -1642,7 +1712,7 @@ fn main() -> Result<()> {
                 .traverse(&seed_ids, traverse_config)
                 .into_diagnostic()?;
 
-            if format == "json" {
+            if matches!(format, OutputFormat::Json) {
                 let json_triples: Vec<serde_json::Value> = result
                     .triples
                     .iter()
@@ -2046,7 +2116,7 @@ fn main() -> Result<()> {
                     format,
                 } => {
                     let seed_ids: std::result::Result<Vec<SymbolId>, _> = seeds
-                        .split(',')
+                        .iter()
                         .map(|s| engine.resolve_symbol(s.trim()))
                         .collect();
                     let seed_ids = seed_ids.into_diagnostic()?;
@@ -2075,7 +2145,7 @@ fn main() -> Result<()> {
                         .run_pipeline(&pipeline, PipelineData::Seeds(seed_ids))
                         .into_diagnostic()?;
 
-                    if format == "json" {
+                    if matches!(format, OutputFormat::Json) {
                         print_pipeline_output_json(&output, &engine);
                     } else {
                         print_pipeline_output_summary(&output, &engine);
@@ -2087,13 +2157,13 @@ fn main() -> Result<()> {
                     format,
                 } => {
                     let seed_ids: std::result::Result<Vec<SymbolId>, _> = seeds
-                        .split(',')
+                        .iter()
                         .map(|s| engine.resolve_symbol(s.trim()))
                         .collect();
                     let seed_ids = seed_ids.into_diagnostic()?;
 
                     let stage_list: Vec<PipelineStage> = stages
-                        .split(',')
+                        .iter()
                         .map(|s| {
                             let name = s.trim().to_lowercase();
                             let kind = match name.as_str() {
@@ -2123,7 +2193,7 @@ fn main() -> Result<()> {
                         .run_pipeline(&pipeline, PipelineData::Seeds(seed_ids))
                         .into_diagnostic()?;
 
-                    if format == "json" {
+                    if matches!(format, OutputFormat::Json) {
                         print_pipeline_output_json(&output, &engine);
                     } else {
                         print_pipeline_output_summary(&output, &engine);
@@ -2315,6 +2385,17 @@ fn main() -> Result<()> {
                     println!("  Triggers:   {}", status.trigger_count);
                     return Ok(());
                 }
+                // Try remote TUI via akhomed for Chat/Repl (non-headless only).
+                #[cfg(feature = "daemon")]
+                AgentAction::Chat { headless: false, .. } | AgentAction::Repl { headless: false, .. } => {
+                    if let Some(ref paths) = xdg_paths
+                        && let Some(server_info) = discover_server(paths)
+                    {
+                        eprintln!("Connecting to akhomed at {}...", server_info.base_url());
+                        return akh_medu::tui::launch_remote(&cli.workspace, &server_info);
+                    }
+                    eprintln!("warning: akhomed not running, using local engine");
+                }
                 _ => {}
             }
 
@@ -2383,7 +2464,7 @@ fn main() -> Result<()> {
                         agent.clear_goals();
                     }
 
-                    for goal_str in goals.split(',') {
+                    for goal_str in &goals {
                         let goal = goal_str.trim();
                         if !goal.is_empty() {
                             agent
@@ -2420,7 +2501,8 @@ fn main() -> Result<()> {
                     }
 
                     // Synthesize narrative from findings.
-                    let summary = agent.synthesize_findings(&goals);
+                    let goals_joined = goals.join(",");
+                    let summary = agent.synthesize_findings(&goals_joined);
                     println!("\n{}", summary.overview);
                     for section in &summary.sections {
                         println!("\n## {}", section.heading);
@@ -2451,7 +2533,9 @@ fn main() -> Result<()> {
                         println!("    {}", engine.resolve_label(*ep));
                     }
 
-                    let _ = engine.persist();
+                    if let Err(e) = engine.persist() {
+                        eprintln!("warning: failed to persist after memory consolidation: {e}");
+                    }
                 }
 
                 AgentAction::Recall { query, top_k } => {
@@ -2562,8 +2646,8 @@ fn main() -> Result<()> {
                         };
 
                         // Add goals if provided.
-                        if let Some(ref goals_str) = goals {
-                            for goal_str in goals_str.split(',') {
+                        if let Some(ref goal_list) = goals {
+                            for goal_str in goal_list {
                                 let goal = goal_str.trim();
                                 if !goal.is_empty() {
                                     agent
@@ -2595,8 +2679,8 @@ fn main() -> Result<()> {
                             Agent::new(Arc::clone(&engine), agent_config).into_diagnostic()?
                         };
 
-                        if let Some(ref goals_str) = goals {
-                            for goal_str in goals_str.split(',') {
+                        if let Some(ref goal_list) = goals {
+                            for goal_str in goal_list {
                                 let goal = goal_str.trim();
                                 if !goal.is_empty() {
                                     agent
@@ -2979,7 +3063,9 @@ fn main() -> Result<()> {
                                 }
                             }
                             println!();
-                            let _ = agent.complete_goal(goal_id);
+                            if let Err(e) = agent.complete_goal(goal_id) {
+                                eprintln!("warning: failed to complete goal: {e}");
+                            }
                         }
 
                         agent.persist_session().into_diagnostic()?;
@@ -2997,8 +3083,8 @@ fn main() -> Result<()> {
                     persist_interval,
                 } => {
                     // Try server-mediated daemon first.
-                    if let Some(ref paths) = xdg_paths {
-                        if let Some(server) = discover_server(paths) {
+                    if let Some(ref paths) = xdg_paths
+                        && let Some(server) = discover_server(paths) {
                             let client = AkhClient::remote(&server, &cli.workspace);
                             let config = serde_json::json!({ "max_cycles": max_cycles });
                             match client.start_daemon(Some(config)) {
@@ -3014,7 +3100,6 @@ fn main() -> Result<()> {
                                 }
                             }
                         }
-                    }
 
                     use akh_medu::agent::{AgentDaemon, DaemonConfig};
 
@@ -3080,7 +3165,11 @@ fn main() -> Result<()> {
                 }
                 PimAction::Next { context, energy } => {
                     let ctx = context.map(akh_medu::agent::PimContext);
-                    let nrg = energy.and_then(|e| akh_medu::agent::EnergyLevel::from_label(&e));
+                    let nrg = energy.map(|e| match e {
+                        EnergyLevel::Low => akh_medu::agent::EnergyLevel::Low,
+                        EnergyLevel::Medium => akh_medu::agent::EnergyLevel::Medium,
+                        EnergyLevel::High => akh_medu::agent::EnergyLevel::High,
+                    });
                     let ids = agent.pim_manager().available_tasks(
                         ctx.as_ref(),
                         nrg,
@@ -3174,8 +3263,13 @@ fn main() -> Result<()> {
                     recur,
                     deadline,
                 } => {
-                    let gtd_state = akh_medu::agent::GtdState::from_label(&gtd)
-                        .ok_or_else(|| miette::miette!("unknown GTD state: {gtd}"))?;
+                    let gtd_state = match gtd {
+                        GtdState::Inbox => akh_medu::agent::GtdState::Inbox,
+                        GtdState::Next => akh_medu::agent::GtdState::Next,
+                        GtdState::Waiting => akh_medu::agent::GtdState::Waiting,
+                        GtdState::Someday => akh_medu::agent::GtdState::Someday,
+                        GtdState::Reference => akh_medu::agent::GtdState::Reference,
+                    };
                     let goal_sym = akh_medu::symbol::SymbolId::new(goal)
                         .ok_or_else(|| miette::miette!("invalid goal ID: {goal}"))?;
 
@@ -3184,17 +3278,21 @@ fn main() -> Result<()> {
                         .add_task(&engine, goal_sym, gtd_state, urgency, importance)
                         .into_diagnostic()?;
 
-                    if let Some(ref para_str) = para {
-                        if let Some(cat) = akh_medu::agent::ParaCategory::from_label(para_str) {
-                            agent
-                                .pim_manager_mut()
-                                .set_para(&engine, goal_sym, cat)
-                                .into_diagnostic()?;
-                        }
+                    if let Some(ref para_val) = para {
+                        let cat = match para_val {
+                            ParaCategory::Project => akh_medu::agent::ParaCategory::Project,
+                            ParaCategory::Area => akh_medu::agent::ParaCategory::Area,
+                            ParaCategory::Resource => akh_medu::agent::ParaCategory::Resource,
+                            ParaCategory::Archive => akh_medu::agent::ParaCategory::Archive,
+                        };
+                        agent
+                            .pim_manager_mut()
+                            .set_para(&engine, goal_sym, cat)
+                            .into_diagnostic()?;
                     }
 
-                    if let Some(ref ctx_str) = contexts {
-                        for ctx in ctx_str.split(',') {
+                    if let Some(ref ctx_list) = contexts {
+                        for ctx in ctx_list {
                             agent
                                 .pim_manager_mut()
                                 .add_context(
@@ -3215,13 +3313,12 @@ fn main() -> Result<()> {
                             .into_diagnostic()?;
                     }
 
-                    if let Some(dl) = deadline {
-                        if let Some(meta) =
+                    if let Some(dl) = deadline
+                        && let Some(meta) =
                             agent.pim_manager_mut().get_metadata_mut(goal_sym.get())
                         {
                             meta.deadline = Some(dl);
                         }
-                    }
 
                     println!(
                         "Added PIM metadata to goal {} (GTD: {}, quadrant: {})",
@@ -3231,8 +3328,13 @@ fn main() -> Result<()> {
                     );
                 }
                 PimAction::Transition { goal, to } => {
-                    let new_state = akh_medu::agent::GtdState::from_label(&to)
-                        .ok_or_else(|| miette::miette!("unknown GTD state: {to}"))?;
+                    let new_state = match to {
+                        GtdState::Inbox => akh_medu::agent::GtdState::Inbox,
+                        GtdState::Next => akh_medu::agent::GtdState::Next,
+                        GtdState::Waiting => akh_medu::agent::GtdState::Waiting,
+                        GtdState::Someday => akh_medu::agent::GtdState::Someday,
+                        GtdState::Reference => akh_medu::agent::GtdState::Reference,
+                    };
                     let goal_sym = akh_medu::symbol::SymbolId::new(goal)
                         .ok_or_else(|| miette::miette!("invalid goal ID: {goal}"))?;
                     agent
@@ -3507,17 +3609,15 @@ fn main() -> Result<()> {
                     );
                 }
                 PrefAction::Level { level } => {
-                    match akh_medu::agent::ProactivityLevel::from_label(&level) {
-                        Some(lvl) => {
-                            agent.preference_manager_mut().set_proactivity_level(lvl);
-                            println!("Proactivity level set to: {lvl}");
-                        }
-                        None => {
-                            println!(
-                                "Unknown level: '{level}'. Valid: ambient, nudge, offer, scheduled, autonomous"
-                            );
-                        }
-                    }
+                    let lvl = match level {
+                        ProactivityLevel::Ambient => akh_medu::agent::ProactivityLevel::Ambient,
+                        ProactivityLevel::Nudge => akh_medu::agent::ProactivityLevel::Nudge,
+                        ProactivityLevel::Offer => akh_medu::agent::ProactivityLevel::Offer,
+                        ProactivityLevel::Scheduled => akh_medu::agent::ProactivityLevel::Scheduled,
+                        ProactivityLevel::Autonomous => akh_medu::agent::ProactivityLevel::Autonomous,
+                    };
+                    agent.preference_manager_mut().set_proactivity_level(lvl);
+                    println!("Proactivity level set to: {lvl}");
                 }
                 PrefAction::Interests { count } => {
                     let interests = agent.preference_manager().top_interests(&engine, count);
@@ -3830,17 +3930,17 @@ fn main() -> Result<()> {
                     no_conceptnet,
                 } => {
                     // Resolve seed concepts: either from --seeds or --purpose.
-                    let purpose_model = if let Some(ref seed_str) = seeds {
-                        let seed_list: Vec<String> = seed_str
-                            .split(',')
+                    let purpose_model = if let Some(ref seed_list) = seeds {
+                        let seed_list: Vec<String> = seed_list
+                            .iter()
                             .map(|s| s.trim().to_string())
                             .filter(|s| !s.is_empty())
                             .collect();
                         akh_medu::bootstrap::PurposeModel {
                             domain: seed_list.first().cloned().unwrap_or_default(),
                             competence_level: akh_medu::bootstrap::DreyfusLevel::Competent,
-                            seed_concepts: seed_list,
-                            description: seed_str.clone(),
+                            seed_concepts: seed_list.clone(),
+                            description: seed_list.join(","),
                         }
                     } else if let Some(ref stmt) = purpose_stmt {
                         match akh_medu::bootstrap::purpose::parse_purpose(stmt) {
@@ -3902,17 +4002,17 @@ fn main() -> Result<()> {
                     zpd_high,
                 } => {
                     // Resolve seed concepts: either from --seeds or --purpose.
-                    let purpose_model = if let Some(ref seed_str) = seeds {
-                        let seed_list: Vec<String> = seed_str
-                            .split(',')
+                    let purpose_model = if let Some(ref seed_list) = seeds {
+                        let seed_list: Vec<String> = seed_list
+                            .iter()
                             .map(|s| s.trim().to_string())
                             .filter(|s| !s.is_empty())
                             .collect();
                         akh_medu::bootstrap::PurposeModel {
                             domain: seed_list.first().cloned().unwrap_or_default(),
                             competence_level: akh_medu::bootstrap::DreyfusLevel::Competent,
-                            seed_concepts: seed_list,
-                            description: seed_str.clone(),
+                            seed_concepts: seed_list.clone(),
+                            description: seed_list.join(","),
                         }
                     } else if let Some(ref stmt) = purpose_stmt {
                         match akh_medu::bootstrap::purpose::parse_purpose(stmt) {
@@ -4031,17 +4131,17 @@ fn main() -> Result<()> {
                     no_open_library,
                 } => {
                     // Resolve seed concepts.
-                    let purpose_model = if let Some(ref seed_str) = seeds {
-                        let seed_list: Vec<String> = seed_str
-                            .split(',')
+                    let purpose_model = if let Some(ref seed_list) = seeds {
+                        let seed_list: Vec<String> = seed_list
+                            .iter()
                             .map(|s| s.trim().to_string())
                             .filter(|s| !s.is_empty())
                             .collect();
                         akh_medu::bootstrap::PurposeModel {
                             domain: seed_list.first().cloned().unwrap_or_default(),
                             competence_level: akh_medu::bootstrap::DreyfusLevel::Competent,
-                            seed_concepts: seed_list,
-                            description: seed_str.clone(),
+                            seed_concepts: seed_list.clone(),
+                            description: seed_list.join(","),
                         }
                     } else if let Some(ref stmt) = purpose_stmt {
                         match akh_medu::bootstrap::purpose::parse_purpose(stmt) {
@@ -4193,17 +4293,17 @@ fn main() -> Result<()> {
                     catalog_dir,
                 } => {
                     // Resolve seed concepts.
-                    let purpose_model = if let Some(ref seed_str) = seeds {
-                        let seed_list: Vec<String> = seed_str
-                            .split(',')
+                    let purpose_model = if let Some(ref seed_list) = seeds {
+                        let seed_list: Vec<String> = seed_list
+                            .iter()
                             .map(|s| s.trim().to_string())
                             .filter(|s| !s.is_empty())
                             .collect();
                         akh_medu::bootstrap::PurposeModel {
                             domain: seed_list.first().cloned().unwrap_or_default(),
                             competence_level: akh_medu::bootstrap::DreyfusLevel::Competent,
-                            seed_concepts: seed_list,
-                            description: seed_str.clone(),
+                            seed_concepts: seed_list.clone(),
+                            description: seed_list.join(","),
                         }
                     } else if let Some(ref stmt) = purpose_stmt {
                         match akh_medu::bootstrap::purpose::parse_purpose(stmt) {
@@ -4377,17 +4477,17 @@ fn main() -> Result<()> {
                     verbose,
                 } => {
                     // Resolve seed concepts (same pattern as Ingest).
-                    let purpose_model = if let Some(ref seed_str) = seeds {
-                        let seed_list: Vec<String> = seed_str
-                            .split(',')
+                    let purpose_model = if let Some(ref seed_list) = seeds {
+                        let seed_list: Vec<String> = seed_list
+                            .iter()
                             .map(|s| s.trim().to_string())
                             .filter(|s| !s.is_empty())
                             .collect();
                         akh_medu::bootstrap::PurposeModel {
                             domain: seed_list.first().cloned().unwrap_or_default(),
                             competence_level: akh_medu::bootstrap::DreyfusLevel::Competent,
-                            seed_concepts: seed_list,
-                            description: seed_str.clone(),
+                            seed_concepts: seed_list.clone(),
+                            description: seed_list.join(","),
                         }
                     } else if let Some(ref stmt) = purpose_stmt {
                         match akh_medu::bootstrap::purpose::parse_purpose(stmt) {
@@ -4692,12 +4792,11 @@ fn main() -> Result<()> {
             // Try remote TUI via akhomed if available (non-headless only).
             #[cfg(feature = "daemon")]
             if !headless {
-                if let Some(ref paths) = xdg_paths {
-                    if let Some(server_info) = akh_medu::client::discover_server(paths) {
+                if let Some(ref paths) = xdg_paths
+                    && let Some(server_info) = akh_medu::client::discover_server(paths) {
                         eprintln!("Connecting to akhomed at {}...", server_info.base_url());
                         return akh_medu::tui::launch_remote(&ws_name, &server_info);
                     }
-                }
                 eprintln!("warning: akhomed not running, using local engine");
             }
 
@@ -4723,14 +4822,12 @@ fn main() -> Result<()> {
                 let grounding_config = akh_medu::vsa::grounding::GroundingConfig::default();
                 if let Ok(result) =
                     akh_medu::vsa::grounding::ground_all(&engine, ops, im, &grounding_config)
-                {
-                    if result.symbols_updated > 0 {
+                    && result.symbols_updated > 0 {
                         println!(
                             "Grounded {} symbols in {} round(s).",
                             result.symbols_updated, result.rounds_completed,
                         );
                     }
-                }
             }
 
             let agent_config = AgentConfig {
@@ -4774,12 +4871,14 @@ fn main() -> Result<()> {
                     let inbound = agent.drain_inbound();
 
                     // Auto-register interlocutor on first interaction.
-                    if let Some(msg) = inbound.first() {
-                        let _ = agent.ensure_interlocutor(
+                    if let Some(msg) = inbound.first()
+                        && let Err(e) = agent.ensure_interlocutor(
                             &msg.sender,
                             &msg.channel_id,
                             akh_medu::agent::ChannelKind::Operator,
-                        );
+                        )
+                    {
+                        eprintln!("warning: failed to register interlocutor: {e}");
                     }
 
                     let intent = inbound
@@ -4969,8 +5068,10 @@ fn main() -> Result<()> {
                 }
 
                 agent.persist_session().into_diagnostic()?;
-                if let Ok(bytes) = conversation.to_bytes() {
-                    let _ = engine.store().put_meta(b"chat:conversation", &bytes);
+                if let Ok(bytes) = conversation.to_bytes()
+                    && let Err(e) = engine.store().put_meta(b"chat:conversation", &bytes)
+                {
+                    eprintln!("warning: failed to persist chat conversation: {e}");
                 }
                 println!("Session saved.");
             }
@@ -4990,8 +5091,8 @@ fn main() -> Result<()> {
 
             let input = ToolInput::new()
                 .with_param("path", path.to_str().unwrap_or(""))
-                .with_param("recursive", &recursive.to_string())
-                .with_param("max_files", &max_files.to_string());
+                .with_param("recursive", recursive.to_string())
+                .with_param("max_files", max_files.to_string());
 
             let tool = CodeIngestTool;
             let output = tool.execute(&engine, input).into_diagnostic()?;
@@ -5047,7 +5148,9 @@ fn main() -> Result<()> {
                 }
             }
 
-            let _ = engine.persist();
+            if let Err(e) = engine.persist() {
+                eprintln!("warning: failed to persist after code ingest: {e}");
+            }
             println!("{}", engine.info());
         }
 
@@ -5067,7 +5170,9 @@ fn main() -> Result<()> {
                 }
             }
 
-            let _ = engine.persist();
+            if let Err(e) = engine.persist() {
+                eprintln!("warning: failed to persist after enrichment: {e}");
+            }
         }
 
         Commands::Grammar { action } => {
@@ -5110,7 +5215,9 @@ fn main() -> Result<()> {
                                 println!("  {prose}");
                             }
                         }
-                        let _ = engine.persist();
+                        if let Err(e) = engine.persist() {
+                            eprintln!("warning: failed to persist after grammar ingest: {e}");
+                        }
                     } else {
                         let result = engine.parse(&input);
                         match &result {
@@ -5328,10 +5435,15 @@ fn main() -> Result<()> {
             use akh_medu::agent::tool::{Tool, ToolInput};
             use akh_medu::agent::tools::DocGenTool;
 
+            let format_str = match format {
+                DocFormat::Markdown => "markdown",
+                DocFormat::Json => "json",
+                DocFormat::Both => "both",
+            };
             let input = ToolInput::new()
                 .with_param("target", &target)
-                .with_param("format", &format)
-                .with_param("polish", &polish.to_string());
+                .with_param("format", format_str)
+                .with_param("polish", polish.to_string());
 
             let tool = DocGenTool;
             let tool_output = tool.execute(&engine, input).into_diagnostic()?;
@@ -5341,7 +5453,7 @@ fn main() -> Result<()> {
                 println!("Documentation written to {}", out_path.display());
 
                 // Write JSON sidecar if format is "both".
-                if format == "both" {
+                if matches!(format, DocFormat::Both) {
                     let json_path = out_path.with_extension("json");
                     // The result contains both separated by ---
                     if let Some(json_part) = tool_output.result.split("\n\n---\n\n").nth(1) {
@@ -5377,7 +5489,7 @@ fn main() -> Result<()> {
             let stdout = io::stdout();
             let mut out = stdout.lock();
 
-            if format == "json" {
+            if matches!(format, PreprocessFormat::Json) {
                 // Read all input as a JSON array of chunks
                 use std::io::Read as _;
                 let mut input = String::new();
@@ -5448,8 +5560,8 @@ fn main() -> Result<()> {
                         );
                     } else {
                         println!(
-                            "{:<30} {:<30} {:<8} {:<6} {}",
-                            "Surface", "Canonical", "Lang", "Conf", "Source"
+                            "{:<30} {:<30} {:<8} {:<6} Source",
+                            "Surface", "Canonical", "Lang", "Conf"
                         );
                         println!("{}", "-".repeat(90));
                         for e in &equivs {
@@ -5548,8 +5660,8 @@ fn main() -> Result<()> {
                         );
                     } else {
                         println!(
-                            "{:<30} {:<20} {:<8} {:<8} {}",
-                            "ID", "Title", "Format", "Chunks", "Tags"
+                            "{:<30} {:<20} {:<8} {:<8} Tags",
+                            "ID", "Title", "Format", "Chunks"
                         );
                         println!("{}", "-".repeat(80));
                         for doc in &docs {
@@ -5579,7 +5691,7 @@ fn main() -> Result<()> {
                         println!("No matching content found for: \"{query}\"");
                     } else {
                         println!("Search results for \"{query}\":");
-                        println!("{:<8} {:<10} {}", "Rank", "Sim", "Symbol");
+                        println!("{:<8} {:<10} Symbol", "Rank", "Sim");
                         println!("{}", "-".repeat(60));
                         for result in &results {
                             println!(

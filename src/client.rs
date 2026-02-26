@@ -187,6 +187,7 @@ impl AkhClient {
 
     // -- helpers for remote calls --
 
+    #[allow(dead_code)] // Reserved for WebSocket-based TUI streaming
     fn ws_url(&self, path: &str) -> String {
         match self {
             AkhClient::Remote {

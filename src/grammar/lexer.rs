@@ -597,7 +597,7 @@ impl Lexicon {
     /// Whether a word is semantically void (article/determiner).
     pub fn is_void(&self, word: &str) -> bool {
         let lower = word.to_lowercase();
-        self.void_words.iter().any(|v| *v == lower)
+        self.void_words.contains(&lower)
     }
 
     /// Get the relational patterns (longest first).
@@ -608,31 +608,31 @@ impl Lexicon {
     /// Whether a word is a question word.
     pub fn is_question_word(&self, word: &str) -> bool {
         let lower = word.to_lowercase();
-        self.question_words.iter().any(|q| *q == lower)
+        self.question_words.contains(&lower)
     }
 
     /// Whether a word is a goal-setting verb.
     pub fn is_goal_verb(&self, word: &str) -> bool {
         let lower = word.to_lowercase();
-        self.goal_verbs.iter().any(|g| *g == lower)
+        self.goal_verbs.contains(&lower)
     }
 
     /// Whether a word is an auxiliary/modal verb.
     pub fn is_auxiliary_verb(&self, word: &str) -> bool {
         let lower = word.to_lowercase();
-        self.auxiliary_verbs.iter().any(|a| *a == lower)
+        self.auxiliary_verbs.contains(&lower)
     }
 
     /// Whether a word is a trailing auxiliary (strippable at end of questions).
     pub fn is_trailing_auxiliary(&self, word: &str) -> bool {
         let lower = word.to_lowercase();
-        self.trailing_auxiliaries.iter().any(|a| *a == lower)
+        self.trailing_auxiliaries.contains(&lower)
     }
 
     /// Whether a word is a capability/ability modal verb.
     pub fn is_capability_modal(&self, word: &str) -> bool {
         let lower = word.to_lowercase();
-        self.capability_modals.iter().any(|m| *m == lower)
+        self.capability_modals.contains(&lower)
     }
 
     /// Parse a question into its grammatical frame.
@@ -682,13 +682,12 @@ impl Lexicon {
 
         // Strip trailing auxiliary if more than one content word remains.
         let mut trailing_stripped = false;
-        if content.len() > 1 {
-            if let Some(last) = content.last() {
-                if self.is_trailing_auxiliary(last) {
-                    content.pop();
-                    trailing_stripped = true;
-                }
-            }
+        if content.len() > 1
+            && let Some(last) = content.last()
+            && self.is_trailing_auxiliary(last)
+        {
+            content.pop();
+            trailing_stripped = true;
         }
 
         // Strip leading void words (articles) from content.
@@ -949,13 +948,13 @@ fn resolve_fuzzy(token: &mut Token, ops: &VsaOps, item_memory: &ItemMemory) {
         Err(_) => return, // Silently fall through on search errors
     };
 
-    if let Some(best) = results.first() {
-        if best.similarity > DEFAULT_FUZZY_THRESHOLD {
-            token.resolution = Resolution::Fuzzy {
-                symbol_id: best.symbol_id,
-                similarity: best.similarity,
-            };
-        }
+    if let Some(best) = results.first()
+        && best.similarity > DEFAULT_FUZZY_THRESHOLD
+    {
+        token.resolution = Resolution::Fuzzy {
+            symbol_id: best.symbol_id,
+            similarity: best.similarity,
+        };
     }
 }
 

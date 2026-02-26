@@ -251,7 +251,7 @@ impl MethodIndex {
     pub fn from_methods(methods: Vec<LearnedMethod>) -> Self {
         let max_elements = methods.len().max(1000);
         let max_layer = (max_elements as f64).log2().ceil() as usize;
-        let max_layer = max_layer.max(4).min(16);
+        let max_layer = max_layer.clamp(4, 16);
         let hnsw = Hnsw::new(max_layer, max_elements, 16, 200, DistHamming {});
 
         // Re-insert all methods into the HNSW index.
@@ -305,24 +305,24 @@ pub fn extract_trace(goal_id: SymbolId, wm: &WorkingMemory) -> ChunkingResult<Ve
         }
 
         // Parse "Decide: tool=X, goal=\"Y\", reasoning=\"Z\""
-        if let Some(rest) = entry.content.strip_prefix("Decide: tool=") {
-            if let Some(comma) = rest.find(',') {
-                let tool = rest[..comma].to_string();
-                // Extract a brief input summary from the reasoning.
-                let input_summary = rest
-                    .find("reasoning=\"")
-                    .and_then(|start| {
-                        let begin = start + 11;
-                        rest[begin..].find('"').map(|end| rest[begin..begin + end].to_string())
-                    })
-                    .unwrap_or_default();
+        if let Some(rest) = entry.content.strip_prefix("Decide: tool=")
+            && let Some(comma) = rest.find(',')
+        {
+            let tool = rest[..comma].to_string();
+            // Extract a brief input summary from the reasoning.
+            let input_summary = rest
+                .find("reasoning=\"")
+                .and_then(|start| {
+                    let begin = start + 11;
+                    rest[begin..].find('"').map(|end| rest[begin..begin + end].to_string())
+                })
+                .unwrap_or_default();
 
-                steps.push(TraceStep {
-                    tool,
-                    input_summary,
-                    cycle: entry.source_cycle,
-                });
-            }
+            steps.push(TraceStep {
+                tool,
+                input_summary,
+                cycle: entry.source_cycle,
+            });
         }
     }
 
@@ -381,14 +381,13 @@ fn generalize_input(input: &str, engine: &Engine) -> String {
 
     // Find numeric patterns that could be SymbolIds and try to resolve their type.
     for word in input.split_whitespace() {
-        if let Ok(num) = word.parse::<u64>() {
-            if let Some(sym_id) = SymbolId::new(num) {
-                if let Ok(meta) = engine.get_symbol_meta(sym_id) {
-                    // Use the symbol's kind label as the type pattern.
-                    let kind_label = format!("{{{}}}", meta.kind);
-                    result = result.replace(word, &kind_label);
-                }
-            }
+        if let Ok(num) = word.parse::<u64>()
+            && let Some(sym_id) = SymbolId::new(num)
+            && let Ok(meta) = engine.get_symbol_meta(sym_id)
+        {
+            // Use the symbol's kind label as the type pattern.
+            let kind_label = format!("{{{}}}", meta.kind);
+            result = result.replace(word, &kind_label);
         }
     }
 
@@ -587,10 +586,10 @@ pub fn detect_compilation_opportunity(
     let mut traces: Vec<(SymbolId, Vec<TraceStep>)> = Vec::new();
 
     for goal in recent_goals {
-        if let Ok(trace) = extract_trace(goal.symbol_id, wm) {
-            if trace.len() >= config.min_trace_length {
-                traces.push((goal.symbol_id, trace));
-            }
+        if let Ok(trace) = extract_trace(goal.symbol_id, wm)
+            && trace.len() >= config.min_trace_length
+        {
+            traces.push((goal.symbol_id, trace));
         }
     }
 

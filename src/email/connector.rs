@@ -200,10 +200,10 @@ impl JmapConnector {
         self.session_url = Some(well_known);
 
         // Extract primary account ID.
-        if let Some(accounts) = body["primaryAccounts"].as_object() {
-            if let Some(mail_account) = accounts.get("urn:ietf:params:jmap:mail") {
-                self.account_id = mail_account.as_str().map(|s| s.to_string());
-            }
+        if let Some(accounts) = body["primaryAccounts"].as_object()
+            && let Some(mail_account) = accounts.get("urn:ietf:params:jmap:mail")
+        {
+            self.account_id = mail_account.as_str().map(|s| s.to_string());
         }
 
         if self.api_url.is_none() {
@@ -294,33 +294,32 @@ impl EmailConnector for JmapConnector {
         // Extract Email/get results.
         if let Some(method_responses) = body["methodResponses"].as_array() {
             for response in method_responses {
-                if let Some(arr) = response.as_array() {
-                    if arr.first().and_then(|v| v.as_str()) == Some("Email/get") {
-                        if let Some(list) = arr.get(1).and_then(|v| v["list"].as_array()) {
-                            for email in list {
-                                let id =
-                                    email["id"].as_str().unwrap_or("unknown").to_string();
-                                // JMAP returns structured data, not raw RFC5322.
-                                // We serialize the JSON as the "raw" data for downstream parsing.
-                                let data =
-                                    serde_json::to_vec(email).unwrap_or_default();
-                                emails.push(RawEmail {
-                                    uid: id,
-                                    mailbox: self
-                                        .config
-                                        .mailboxes
-                                        .first()
-                                        .cloned()
-                                        .unwrap_or_else(|| "INBOX".to_string()),
-                                    flags: Vec::new(),
-                                    data,
-                                });
-                            }
+                if let Some(arr) = response.as_array()
+                    && arr.first().and_then(|v| v.as_str()) == Some("Email/get")
+                {
+                    if let Some(list) = arr.get(1).and_then(|v| v["list"].as_array()) {
+                        for email in list {
+                            let id =
+                                email["id"].as_str().unwrap_or("unknown").to_string();
+                            // JMAP returns structured data, not raw RFC5322.
+                            // We serialize the JSON as the "raw" data for downstream parsing.
+                            let data = serde_json::to_vec(email).unwrap_or_default();
+                            emails.push(RawEmail {
+                                uid: id,
+                                mailbox: self
+                                    .config
+                                    .mailboxes
+                                    .first()
+                                    .cloned()
+                                    .unwrap_or_else(|| "INBOX".to_string()),
+                                flags: Vec::new(),
+                                data,
+                            });
                         }
-                        // Update sync state.
-                        if let Some(state) = arr.get(1).and_then(|v| v["state"].as_str()) {
-                            self.state = Some(state.to_string());
-                        }
+                    }
+                    // Update sync state.
+                    if let Some(state) = arr.get(1).and_then(|v| v["state"].as_str()) {
+                        self.state = Some(state.to_string());
                     }
                 }
             }
@@ -376,20 +375,18 @@ impl EmailConnector for JmapConnector {
 
         if let Some(method_responses) = body["methodResponses"].as_array() {
             for response in method_responses {
-                if let Some(arr) = response.as_array() {
-                    if arr.first().and_then(|v| v.as_str()) == Some("Email/get") {
-                        if let Some(list) = arr.get(1).and_then(|v| v["list"].as_array()) {
-                            if let Some(email) = list.first() {
-                                let data = serde_json::to_vec(email).unwrap_or_default();
-                                return Ok(Some(RawEmail {
-                                    uid: id.to_string(),
-                                    mailbox: "INBOX".to_string(),
-                                    flags: Vec::new(),
-                                    data,
-                                }));
-                            }
-                        }
-                    }
+                if let Some(arr) = response.as_array()
+                    && arr.first().and_then(|v| v.as_str()) == Some("Email/get")
+                    && let Some(list) = arr.get(1).and_then(|v| v["list"].as_array())
+                    && let Some(email) = list.first()
+                {
+                    let data = serde_json::to_vec(email).unwrap_or_default();
+                    return Ok(Some(RawEmail {
+                        uid: id.to_string(),
+                        mailbox: "INBOX".to_string(),
+                        flags: Vec::new(),
+                        data,
+                    }));
                 }
             }
         }
@@ -695,7 +692,7 @@ fn basic_auth(user: &str, pass: &str) -> String {
 /// Minimal base64 encoder (avoids adding a base64 crate dependency).
 fn base64_encode(input: &[u8]) -> String {
     const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut result = String::with_capacity((input.len() + 2) / 3 * 4);
+    let mut result = String::with_capacity(input.len().div_ceil(3) * 4);
     for chunk in input.chunks(3) {
         let b0 = chunk[0] as u32;
         let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };

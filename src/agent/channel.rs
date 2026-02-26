@@ -309,10 +309,10 @@ impl ChannelRegistry {
         let kind = channel.channel_kind();
 
         if kind == ChannelKind::Operator {
-            if let Some(ref existing) = self.operator_id {
-                if existing != &id {
-                    return Err(ChannelError::DuplicateOperator);
-                }
+            if let Some(ref existing) = self.operator_id
+                && existing != &id
+            {
+                return Err(ChannelError::DuplicateOperator);
             }
             self.operator_id = Some(id.clone());
         }

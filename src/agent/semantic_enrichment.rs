@@ -382,7 +382,7 @@ pub fn compute_and_persist_importance(
 /// Collected I/O types for a module.
 struct ModuleIO {
     symbol: SymbolId,
-    #[allow(dead_code)]
+    #[allow(dead_code)] // TODO: wire into semantic report output (Phase 14j NLU)
     name: String,
     produces: HashSet<String>,
     consumes: HashSet<String>,

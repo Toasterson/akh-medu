@@ -389,57 +389,56 @@ pub fn generate_arguments(
     }
 
     // ── ChildOfHighPriority: Pro/Timeliness ──
-    if let Some(parent_id) = goal.parent {
-        if let Some(parent) = all_goals.iter().find(|g| g.symbol_id == parent_id) {
-            let parent_p = parent.computed_priority();
-            if parent_p > 200 {
-                let weight = parent_p as f64 / 255.0 * 0.6;
-                args.push(PriorityArgument {
-                    direction: PriorityDirection::Pro,
-                    value: Value::Timeliness,
-                    source: ArgumentSource::ChildOfHighPriority {
-                        parent_priority: parent_p,
-                    },
-                    base_weight: weight,
-                    reasoning: format!(
-                        "Child of high-priority parent (priority {parent_p})."
-                    ),
-                });
-            }
+    if let Some(parent_id) = goal.parent
+        && let Some(parent) = all_goals.iter().find(|g| g.symbol_id == parent_id)
+    {
+        let parent_p = parent.computed_priority();
+        if parent_p > 200 {
+            let weight = parent_p as f64 / 255.0 * 0.6;
+            args.push(PriorityArgument {
+                direction: PriorityDirection::Pro,
+                value: Value::Timeliness,
+                source: ArgumentSource::ChildOfHighPriority {
+                    parent_priority: parent_p,
+                },
+                base_weight: weight,
+                reasoning: format!(
+                    "Child of high-priority parent (priority {parent_p})."
+                ),
+            });
         }
     }
 
     // ── NearCompletion: Pro/Timeliness ──
-    if let Some(parent_id) = goal.parent {
-        if let Some(parent) = all_goals.iter().find(|g| g.symbol_id == parent_id) {
-            if !parent.children.is_empty() {
-                let total = parent.children.len();
-                let completed = parent
-                    .children
+    if let Some(parent_id) = goal.parent
+        && let Some(parent) = all_goals.iter().find(|g| g.symbol_id == parent_id)
+        && !parent.children.is_empty()
+    {
+        let total = parent.children.len();
+        let completed = parent
+            .children
+            .iter()
+            .filter(|cid| {
+                all_goals
                     .iter()
-                    .filter(|cid| {
-                        all_goals
-                            .iter()
-                            .find(|g| g.symbol_id == **cid)
-                            .is_some_and(|g| matches!(g.status, GoalStatus::Completed))
-                    })
-                    .count();
-                if total > 1 && completed * 4 >= total * 3 {
-                    // >75% siblings done
-                    args.push(PriorityArgument {
-                        direction: PriorityDirection::Pro,
-                        value: Value::Timeliness,
-                        source: ArgumentSource::NearCompletion {
-                            completed_siblings: completed,
-                            total_siblings: total,
-                        },
-                        base_weight: 0.7,
-                        reasoning: format!(
-                            "Near completion: {completed}/{total} siblings done."
-                        ),
-                    });
-                }
-            }
+                    .find(|g| g.symbol_id == **cid)
+                    .is_some_and(|g| matches!(g.status, GoalStatus::Completed))
+            })
+            .count();
+        if total > 1 && completed * 4 >= total * 3 {
+            // >75% siblings done
+            args.push(PriorityArgument {
+                direction: PriorityDirection::Pro,
+                value: Value::Timeliness,
+                source: ArgumentSource::NearCompletion {
+                    completed_siblings: completed,
+                    total_siblings: total,
+                },
+                base_weight: 0.7,
+                reasoning: format!(
+                    "Near completion: {completed}/{total} siblings done."
+                ),
+            });
         }
     }
 

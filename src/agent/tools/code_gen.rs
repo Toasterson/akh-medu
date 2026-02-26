@@ -731,54 +731,51 @@ pub fn analyze_compiler_errors(
         let trimmed = line.trim();
 
         // Type mismatch: "expected `X`, found `Y`"
-        if let Some(rest) = trimmed.strip_prefix("expected `") {
-            if let Some((expected, rest2)) = rest.split_once("`, found `") {
-                if let Some(found) = rest2.strip_suffix('`') {
-                    actions.push(RefinementAction {
-                        kind: RefinementKind::TypeMismatch {
-                            expected: expected.to_string(),
-                            found: found.to_string(),
-                        },
-                        description: format!(
-                            "Type mismatch: expected `{expected}`, found `{found}`"
-                        ),
-                        affected_symbols: vec![target],
-                    });
-                }
-            }
+        if let Some(rest) = trimmed.strip_prefix("expected `")
+            && let Some((expected, rest2)) = rest.split_once("`, found `")
+            && let Some(found) = rest2.strip_suffix('`')
+        {
+            actions.push(RefinementAction {
+                kind: RefinementKind::TypeMismatch {
+                    expected: expected.to_string(),
+                    found: found.to_string(),
+                },
+                description: format!(
+                    "Type mismatch: expected `{expected}`, found `{found}`"
+                ),
+                affected_symbols: vec![target],
+            });
         }
 
         // Missing import: "unresolved import `X`" or "cannot find X in this scope"
-        if trimmed.contains("unresolved import") {
-            if let Some(rest) = trimmed.split("unresolved import `").nth(1) {
-                if let Some(module) = rest.strip_suffix('`') {
-                    actions.push(RefinementAction {
-                        kind: RefinementKind::MissingImport {
-                            module: module.to_string(),
-                        },
-                        description: format!("Missing import: `{module}`"),
-                        affected_symbols: vec![target],
-                    });
-                }
-            }
+        if trimmed.contains("unresolved import")
+            && let Some(rest) = trimmed.split("unresolved import `").nth(1)
+            && let Some(module) = rest.strip_suffix('`')
+        {
+            actions.push(RefinementAction {
+                kind: RefinementKind::MissingImport {
+                    module: module.to_string(),
+                },
+                description: format!("Missing import: `{module}`"),
+                affected_symbols: vec![target],
+            });
         }
 
         // Missing trait impl: "the trait `X` is not implemented for `Y`"
-        if let Some(rest) = trimmed.strip_prefix("the trait `") {
-            if let Some((trait_name, rest2)) = rest.split_once("` is not implemented for `") {
-                if let Some(type_name) = rest2.strip_suffix('`') {
-                    actions.push(RefinementAction {
-                        kind: RefinementKind::MissingTraitImpl {
-                            trait_name: trait_name.to_string(),
-                            type_name: type_name.to_string(),
-                        },
-                        description: format!(
-                            "Missing impl: `{trait_name}` for `{type_name}`"
-                        ),
-                        affected_symbols: vec![target],
-                    });
-                }
-            }
+        if let Some(rest) = trimmed.strip_prefix("the trait `")
+            && let Some((trait_name, rest2)) = rest.split_once("` is not implemented for `")
+            && let Some(type_name) = rest2.strip_suffix('`')
+        {
+            actions.push(RefinementAction {
+                kind: RefinementKind::MissingTraitImpl {
+                    trait_name: trait_name.to_string(),
+                    type_name: type_name.to_string(),
+                },
+                description: format!(
+                    "Missing impl: `{trait_name}` for `{type_name}`"
+                ),
+                affected_symbols: vec![target],
+            });
         }
 
         // Syntax errors

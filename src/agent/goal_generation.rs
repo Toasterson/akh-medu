@@ -377,7 +377,7 @@ fn proposals_from_opportunities(engine: &Engine, goals: &[Goal]) -> Vec<GoalProp
             }
 
             let satisfied = newly_available.join(", ");
-            let boost_priority = g.priority.saturating_add(30).min(255);
+            let boost_priority = g.priority.saturating_add(30);
 
             Some(GoalProposal {
                 description: format!("Retry: {}", g.description),
@@ -427,11 +427,7 @@ fn proposal_from_impasse(impasse: &DecisionImpasse) -> GoalProposal {
 
 /// Reflection insights → goal proposals.
 fn proposals_from_reflection(reflection: &ReflectionResult) -> Vec<GoalProposal> {
-    reflection
-        .goal_proposals
-        .iter()
-        .map(|p| p.clone())
-        .collect()
+    reflection.goal_proposals.to_vec()
 }
 
 /// Watch firings with `GenerateGoal` actions → goal proposals.
@@ -539,12 +535,10 @@ fn is_duplicate(
     if let Ok(new_vec) = encode_text_as_vector(description, engine, ops, item_memory) {
         for existing_desc in existing {
             if let Ok(existing_vec) = encode_text_as_vector(existing_desc, engine, ops, item_memory)
+                && let Ok(sim) = ops.similarity(&new_vec, &existing_vec)
+                && sim > similarity_threshold
             {
-                if let Ok(sim) = ops.similarity(&new_vec, &existing_vec) {
-                    if sim > similarity_threshold {
-                        return true;
-                    }
-                }
+                return true;
             }
         }
         return false;
@@ -610,10 +604,10 @@ fn assess_feasibility(proposal: &GoalProposal, engine: &Engine) -> f32 {
 
     let mut max_similarity = 0.0f32;
     for keywords in &tool_keywords {
-        if let Ok(tool_vec) = encode_text_as_vector(keywords, engine, ops, item_memory) {
-            if let Ok(sim) = ops.similarity(&proposal_vec, &tool_vec) {
-                max_similarity = max_similarity.max(sim);
-            }
+        if let Ok(tool_vec) = encode_text_as_vector(keywords, engine, ops, item_memory)
+            && let Ok(sim) = ops.similarity(&proposal_vec, &tool_vec)
+        {
+            max_similarity = max_similarity.max(sim);
         }
     }
 

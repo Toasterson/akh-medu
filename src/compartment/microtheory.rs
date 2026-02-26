@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::engine::Engine;
 use crate::error::AkhResult;
 use crate::graph::Triple;
-use crate::symbol::{SymbolId, SymbolKind};
+use crate::symbol::SymbolId;
 
 // ---------------------------------------------------------------------------
 // Context domain
@@ -381,7 +381,7 @@ pub fn lifting_rules_from(
 pub fn apply_lifting_rule(
     engine: &Engine,
     rule: &LiftingRule,
-    specializes_pred: SymbolId,
+    _specializes_pred: SymbolId,
 ) -> Vec<Triple> {
     let target_label = engine.resolve_label(rule.to);
     let source_label = engine.resolve_label(rule.from);
@@ -454,11 +454,9 @@ impl ContextAncestryCache {
         context_id: SymbolId,
         specializes_pred: SymbolId,
     ) -> &[SymbolId] {
-        if !self.cache.contains_key(&context_id) {
-            let ancestors = resolve_ancestors(engine, context_id, specializes_pred);
-            self.cache.insert(context_id, ancestors);
-        }
-        &self.cache[&context_id]
+        self.cache
+            .entry(context_id)
+            .or_insert_with(|| resolve_ancestors(engine, context_id, specializes_pred))
     }
 
     /// Invalidate the entire cache (call after hierarchy changes).
@@ -487,6 +485,7 @@ mod tests {
     use super::*;
     use crate::engine::EngineConfig;
     use crate::vsa::Dimension;
+    use crate::symbol::SymbolKind;
 
     fn test_engine() -> Engine {
         Engine::new(EngineConfig {

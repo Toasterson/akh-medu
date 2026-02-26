@@ -408,12 +408,11 @@ pub fn infer_category(block: &CodeBlock, ast: &SimplifiedAst) -> String {
     let src_lower = block.source.to_lowercase();
 
     // Error handling patterns
-    if ctx_lower.contains("error") || ctx_lower.contains("diagnostic")
-        || src_lower.contains("error") || src_lower.contains("result")
+    if (ctx_lower.contains("error") || ctx_lower.contains("diagnostic")
+        || src_lower.contains("error") || src_lower.contains("result"))
+        && let SimplifiedAst::Enum { .. } | SimplifiedAst::Match { .. } = ast
     {
-        if let SimplifiedAst::Enum { .. } | SimplifiedAst::Match { .. } = ast {
-            return "error-handling".to_string();
-        }
+        return "error-handling".to_string();
     }
 
     // Iterator patterns
@@ -435,10 +434,10 @@ pub fn infer_category(block: &CodeBlock, ast: &SimplifiedAst) -> String {
     }
 
     // Conversion
-    if ctx_lower.contains("convert") || ctx_lower.contains("from") || ctx_lower.contains("into") {
-        if let SimplifiedAst::Impl { .. } = ast {
-            return "conversion".to_string();
-        }
+    if (ctx_lower.contains("convert") || ctx_lower.contains("from") || ctx_lower.contains("into"))
+        && let SimplifiedAst::Impl { .. } = ast
+    {
+        return "conversion".to_string();
     }
 
     "general".to_string()

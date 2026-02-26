@@ -49,10 +49,10 @@ impl GoalStatus {
                 reason: reason.into(),
             }
         } else if let Some(id_str) = label.strip_prefix("reformulated:") {
-            if let Ok(id) = id_str.parse::<u64>() {
-                if let Some(sym) = SymbolId::new(id) {
-                    return Self::Reformulated { replacement: sym };
-                }
+            if let Ok(id) = id_str.parse::<u64>()
+                && let Some(sym) = SymbolId::new(id)
+            {
+                return Self::Reformulated { replacement: sym };
             }
             Self::Pending
         } else {
@@ -338,7 +338,7 @@ pub fn active_goals(goals: &[Goal]) -> Vec<&Goal> {
         .iter()
         .filter(|g| matches!(g.status, GoalStatus::Active))
         .collect();
-    active.sort_by(|a, b| b.computed_priority().cmp(&a.computed_priority()));
+    active.sort_by_key(|g| std::cmp::Reverse(g.computed_priority()));
     active
 }
 
@@ -398,7 +398,7 @@ pub fn restore_goals(engine: &Engine, predicates: &AgentPredicates) -> AgentResu
                     status_sym_id = Some(triple.object);
                 }
             } else if triple.predicate == predicates.has_priority {
-                if let Some(p) = obj_label.trim_start_matches("priority:").parse::<u8>().ok() {
+                if let Ok(p) = obj_label.trim_start_matches("priority:").parse::<u8>() {
                     priority = p;
                 }
             } else if triple.predicate == predicates.has_criteria {

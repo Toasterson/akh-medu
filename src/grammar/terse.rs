@@ -296,13 +296,13 @@ fn try_parse_arrow(input: &str) -> Option<AbsTree> {
 /// Parse trailing confidence like "[0.95]" from the end of a string.
 fn parse_trailing_confidence(s: &str) -> (&str, Option<f32>) {
     let trimmed = s.trim();
-    if let Some(bracket_start) = trimmed.rfind('[') {
-        if trimmed.ends_with(']') {
-            let inner = &trimmed[bracket_start + 1..trimmed.len() - 1];
-            if let Ok(conf) = inner.parse::<f32>() {
-                let before = trimmed[..bracket_start].trim();
-                return (before, Some(conf));
-            }
+    if let Some(bracket_start) = trimmed.rfind('[')
+        && trimmed.ends_with(']')
+    {
+        let inner = &trimmed[bracket_start + 1..trimmed.len() - 1];
+        if let Ok(conf) = inner.parse::<f32>() {
+            let before = trimmed[..bracket_start].trim();
+            return (before, Some(conf));
         }
     }
     (trimmed, None)

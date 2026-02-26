@@ -681,7 +681,7 @@ pub fn discover_abstractions(
 
     let mut candidates = Vec::new();
 
-    for (_key, group) in &groups {
+    for group in groups.values() {
         if group.len() < 2 {
             continue;
         }

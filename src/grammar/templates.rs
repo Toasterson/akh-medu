@@ -451,7 +451,7 @@ fn generate_builder(params: &HashMap<String, String>) -> GrammarResult<String> {
     let mut out = String::new();
 
     // Builder struct with Option fields
-    out.push_str(&format!("#[derive(Debug, Default)]\n"));
+    out.push_str("#[derive(Debug, Default)]\n");
     out.push_str(&format!("pub struct {builder_name} {{\n"));
     for (name, ty) in &fields {
         out.push_str(&format!("    {name}: Option<{ty}>,\n"));
@@ -560,7 +560,7 @@ fn generate_new_constructor(params: &HashMap<String, String>) -> GrammarResult<S
         "    pub fn new({}) -> Self {{\n",
         param_list.join(", ")
     ));
-    out.push_str(&format!("        Self {{\n"));
+    out.push_str("        Self {\n");
     for (name, _ty) in &fields {
         out.push_str(&format!("            {name},\n"));
     }

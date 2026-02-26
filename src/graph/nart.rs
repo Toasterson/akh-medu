@@ -130,10 +130,10 @@ impl NartRegistry {
         };
 
         // Deduplication check
-        if let Some(&existing_id) = self.structural_index.get(&key) {
-            if let Some(existing) = self.narts.get(&existing_id) {
-                return Ok(existing.clone());
-            }
+        if let Some(&existing_id) = self.structural_index.get(&key)
+            && let Some(existing) = self.narts.get(&existing_id)
+        {
+            return Ok(existing.clone());
         }
 
         // Build the label: (FunctionName Arg1 Arg2 ...)

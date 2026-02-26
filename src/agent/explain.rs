@@ -11,7 +11,7 @@ use miette::Diagnostic;
 use thiserror::Error;
 
 use crate::engine::Engine;
-use crate::provenance::{DerivationKind, ProvenanceRecord};
+use crate::provenance::DerivationKind;
 use crate::symbol::SymbolId;
 
 // ── Errors ──────────────────────────────────────────────────────────────
@@ -94,14 +94,14 @@ impl ExplanationQuery {
         }
 
         // "what do you know about X?" / "what is known about X?"
-        if lower.contains("know about ") || lower.contains("known about ") {
-            if let Some(idx) = lower.find("about ") {
-                let rest = strip_question_suffix(&trimmed[idx + 6..]);
-                if !rest.is_empty() {
-                    return Some(Self::WhatKnown {
-                        subject: rest.to_string(),
-                    });
-                }
+        if (lower.contains("know about ") || lower.contains("known about "))
+            && let Some(idx) = lower.find("about ")
+        {
+            let rest = strip_question_suffix(&trimmed[idx + 6..]);
+            if !rest.is_empty() {
+                return Some(Self::WhatKnown {
+                    subject: rest.to_string(),
+                });
             }
         }
 
@@ -561,14 +561,12 @@ pub fn execute_query(
 
 /// Collect a human-readable provenance tag for a triple.
 fn collect_provenance_tag(engine: &Engine, triple: &crate::graph::Triple) -> String {
-    if let Some(prov_id) = triple.provenance_id {
-        if let Some(id) = SymbolId::new(prov_id) {
-            if let Ok(records) = engine.provenance_of(id) {
-                if let Some(rec) = records.first() {
-                    return derivation_kind_prose(&rec.kind);
-                }
-            }
-        }
+    if let Some(prov_id) = triple.provenance_id
+        && let Some(id) = SymbolId::new(prov_id)
+        && let Ok(records) = engine.provenance_of(id)
+        && let Some(rec) = records.first()
+    {
+        return derivation_kind_prose(&rec.kind);
     }
 
     if triple.confidence >= 0.99 {
@@ -958,9 +956,7 @@ fn strip_question_prefix(s: &str) -> &str {
     let lower = trimmed.to_lowercase();
     if lower.starts_with("is ") {
         trimmed[3..].trim()
-    } else if lower.starts_with("are ") {
-        trimmed[4..].trim()
-    } else if lower.starts_with("was ") {
+    } else if lower.starts_with("are ") || lower.starts_with("was ") {
         trimmed[4..].trim()
     } else if lower.starts_with("were ") {
         trimmed[5..].trim()
@@ -974,15 +970,15 @@ fn strip_question_prefix(s: &str) -> &str {
 fn strip_how_prefix(s: &str) -> &str {
     let s = strip_question_suffix(s);
     // Strip leading "how " if present.
-    let s = if s.starts_with("how ") { &s[4..] } else { s };
-    if s.starts_with("did you decide ") {
-        s[15..].trim()
-    } else if s.starts_with("did you ") {
-        s[8..].trim()
-    } else if s.starts_with("was ") {
-        s[4..].trim()
-    } else if s.starts_with("is ") {
-        s[3..].trim()
+    let s = s.strip_prefix("how ").unwrap_or(s);
+    if let Some(rest) = s.strip_prefix("did you decide ") {
+        rest.trim()
+    } else if let Some(rest) = s.strip_prefix("did you ") {
+        rest.trim()
+    } else if let Some(rest) = s.strip_prefix("was ") {
+        rest.trim()
+    } else if let Some(rest) = s.strip_prefix("is ") {
+        rest.trim()
     } else {
         s
     }

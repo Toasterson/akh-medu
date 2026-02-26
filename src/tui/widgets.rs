@@ -119,6 +119,7 @@ pub fn message_to_line(msg: &AkhMessage) -> Line<'static> {
 }
 
 /// Main TUI layout rendering.
+#[allow(clippy::too_many_arguments)]
 pub fn render(
     frame: &mut Frame,
     workspace: &str,

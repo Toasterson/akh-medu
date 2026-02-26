@@ -17,20 +17,15 @@ use crate::symbol::SymbolId;
 // ── ResponseDetail ───────────────────────────────────────────────────────
 
 /// How much detail to include in agent responses.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum ResponseDetail {
     /// Just the core answer, no supporting information.
     Concise,
     /// Answer with brief rationale (default).
+    #[default]
     Normal,
     /// Answer + provenance IDs + confidence scores + supporting triples.
     Full,
-}
-
-impl Default for ResponseDetail {
-    fn default() -> Self {
-        Self::Normal
-    }
 }
 
 impl std::fmt::Display for ResponseDetail {
@@ -357,10 +352,10 @@ pub fn ground_query(
 
         // Collect provenance.
         let derivation = collect_derivation_tag(engine, triple);
-        if let Some(prov_id) = triple.provenance_id {
-            if let Some(id) = SymbolId::new(prov_id) {
-                provenance_ids.push(id);
-            }
+        if let Some(prov_id) = triple.provenance_id
+            && let Some(id) = SymbolId::new(prov_id)
+        {
+            provenance_ids.push(id);
         }
 
         grounded.push(GroundedTriple {
@@ -424,14 +419,12 @@ pub fn ground_query(
 
 /// Derive a human-readable tag for how a triple was derived.
 fn collect_derivation_tag(engine: &Engine, triple: &Triple) -> String {
-    if let Some(prov_id) = triple.provenance_id {
-        if let Some(id) = SymbolId::new(prov_id) {
-            if let Ok(records) = engine.provenance_of(id) {
-                if let Some(rec) = records.first() {
-                    return derivation_kind_tag(&rec.kind);
-                }
-            }
-        }
+    if let Some(prov_id) = triple.provenance_id
+        && let Some(id) = SymbolId::new(prov_id)
+        && let Ok(records) = engine.provenance_of(id)
+        && let Some(rec) = records.first()
+    {
+        return derivation_kind_tag(&rec.kind);
     }
 
     // Fallback: infer from confidence.

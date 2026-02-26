@@ -220,7 +220,7 @@ impl IdleScheduler {
             "sleep" => {
                 self.last_sleep = now;
                 match super::sleep::run_sleep_cycle(
-                    &*agent.engine,
+                    &agent.engine,
                     &agent.working_memory,
                     &mut agent.sleep_cycle,
                     agent.cycle_count,

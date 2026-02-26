@@ -1,6 +1,6 @@
 # Akh-medu Architecture
 
-> Last updated: 2026-02-26 (autonomous daemon: auto-start, full background tasks, goal generation timer)
+> Last updated: 2026-02-26 (CLI cleanup: ValueEnum types, value_delimiter, server detection, clippy zero-warnings, dead code audit)
 
 ## Overview
 

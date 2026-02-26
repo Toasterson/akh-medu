@@ -257,17 +257,17 @@ impl SparqlStore {
     /// Get the number of triples in the store.
     pub fn len(&self) -> GraphResult<usize> {
         let results = self.query_select("SELECT (COUNT(*) AS ?count) WHERE { ?s ?p ?o }")?;
-        if let Some(row) = results.first() {
-            if let Some((_, val)) = row.first() {
-                // oxigraph returns count as a typed literal like "\"3\"^^<http://...#integer>"
-                let count_str = val
-                    .trim_matches('"')
-                    .split('^')
-                    .next()
-                    .unwrap_or("0")
-                    .trim_matches('"');
-                return Ok(count_str.parse().unwrap_or(0));
-            }
+        if let Some(row) = results.first()
+            && let Some((_, val)) = row.first()
+        {
+            // oxigraph returns count as a typed literal like "\"3\"^^<http://...#integer>"
+            let count_str = val
+                .trim_matches('"')
+                .split('^')
+                .next()
+                .unwrap_or("0")
+                .trim_matches('"');
+            return Ok(count_str.parse().unwrap_or(0));
         }
         Ok(0)
     }

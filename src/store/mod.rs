@@ -87,12 +87,12 @@ impl TieredStore {
         if let Some(v) = self.hot.get(key) {
             return Some(v);
         }
-        if let Some(warm) = &self.warm {
-            if let Some(v) = warm.get(key) {
-                // Promote to hot on read
-                self.hot.put(key, v.clone());
-                return Some(v);
-            }
+        if let Some(warm) = &self.warm
+            && let Some(v) = warm.get(key)
+        {
+            // Promote to hot on read
+            self.hot.put(key, v.clone());
+            return Some(v);
         }
         None
     }

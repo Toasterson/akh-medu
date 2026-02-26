@@ -21,16 +21,19 @@ use crate::agent::{Agent, AgentConfig, IdleScheduler, InboundHandle};
 use crate::engine::Engine;
 use crate::message::AkhMessage;
 
+/// Local backend state: agent + engine bundled for the TUI.
+struct LocalBackend {
+    agent: Box<Agent>,
+    engine: Arc<Engine>,
+    tui_sink: Arc<sink::TuiSink>,
+    idle_scheduler: IdleScheduler,
+    operator_handle: InboundHandle,
+}
+
 /// The chat backend: either a local agent+engine or a remote WS connection.
 enum ChatBackend {
     /// Direct local engine and agent.
-    Local {
-        agent: Agent,
-        engine: Arc<Engine>,
-        tui_sink: Arc<sink::TuiSink>,
-        idle_scheduler: IdleScheduler,
-        operator_handle: InboundHandle,
-    },
+    Local(Box<LocalBackend>),
     /// WebSocket connection to akhomed.
     #[cfg(feature = "daemon")]
     Remote {
@@ -67,13 +70,13 @@ impl AkhTui {
         Self {
             workspace,
             grammar,
-            backend: ChatBackend::Local {
-                agent,
+            backend: ChatBackend::Local(Box::new(LocalBackend {
+                agent: Box::new(agent),
                 engine,
                 tui_sink,
                 idle_scheduler: IdleScheduler::default(),
                 operator_handle,
-            },
+            })),
             messages: vec![AkhMessage::system(
                 "Welcome to akh. Type a question or command. /help for commands, /quit to exit.",
             )],
@@ -151,8 +154,8 @@ impl AkhTui {
     /// Drain pending messages from the backend.
     fn drain_backend_messages(&mut self) {
         match self.backend {
-            ChatBackend::Local { ref tui_sink, .. } => {
-                let pending = tui_sink.drain();
+            ChatBackend::Local(ref local) => {
+                let pending = local.tui_sink.drain();
                 self.messages.extend(pending);
             }
             #[cfg(feature = "daemon")]
@@ -167,18 +170,15 @@ impl AkhTui {
     /// Get (cycle_count, symbol_count, goal_count) for the status bar.
     fn status_counts(&self) -> (u64, usize, usize) {
         match self.backend {
-            ChatBackend::Local {
-                ref agent,
-                ref engine,
-                ..
-            } => {
-                let symbol_count = engine.all_symbols().len();
-                let goal_count = agent
+            ChatBackend::Local(ref local) => {
+                let symbol_count = local.engine.all_symbols().len();
+                let goal_count = local
+                    .agent
                     .goals()
                     .iter()
                     .filter(|g| matches!(g.status, crate::agent::GoalStatus::Active))
                     .count();
-                (agent.cycle_count(), symbol_count, goal_count)
+                (local.agent.cycle_count(), symbol_count, goal_count)
             }
             #[cfg(feature = "daemon")]
             ChatBackend::Remote { .. } => {
@@ -190,25 +190,20 @@ impl AkhTui {
 
     /// Called on idle (no key events).
     fn on_idle(&mut self) {
-        if let ChatBackend::Local {
-            ref mut agent,
-            ref mut idle_scheduler,
-            ..
-        } = self.backend
+        if let ChatBackend::Local(ref mut local) = self.backend
+            && let Some(result) = local.idle_scheduler.tick(&mut local.agent)
         {
-            if let Some(result) = idle_scheduler.tick(agent) {
-                self.messages.push(AkhMessage::system(format!(
-                    "[idle:{}] {}",
-                    result.task, result.summary,
-                )));
-            }
+            self.messages.push(AkhMessage::system(format!(
+                "[idle:{}] {}",
+                result.task, result.summary,
+            )));
         }
     }
 
     /// Called on exit — persist session, etc.
     fn on_exit(&mut self) -> miette::Result<()> {
-        if let ChatBackend::Local { ref mut agent, .. } = self.backend {
-            agent.persist_session().into_diagnostic()?;
+        if let ChatBackend::Local(ref mut local) = self.backend {
+            local.agent.persist_session().into_diagnostic()?;
         }
         Ok(())
     }
@@ -267,9 +262,9 @@ impl AkhTui {
         });
 
         match self.backend {
-            ChatBackend::Local { ref operator_handle, .. } => {
+            ChatBackend::Local(ref local) => {
                 // Push through the operator channel, then process locally.
-                operator_handle.push_text(input);
+                local.operator_handle.push_text(input);
                 self.process_inbound_local();
             }
             #[cfg(feature = "daemon")]
@@ -287,15 +282,15 @@ impl AkhTui {
     fn process_inbound_local(&mut self) {
         // Drain and process inbound messages in two passes to avoid borrow conflicts.
         let texts: Vec<String> = {
-            let ChatBackend::Local { ref mut agent, .. } = self.backend else {
+            let ChatBackend::Local(ref mut local) = self.backend else {
                 return;
             };
 
-            let inbound = agent.drain_inbound();
+            let inbound = local.agent.drain_inbound();
             let mut texts = Vec::new();
             for msg in &inbound {
                 // Auto-register interlocutor on first interaction.
-                let _ = agent.ensure_interlocutor(
+                let _ = local.agent.ensure_interlocutor(
                     &msg.sender,
                     &msg.channel_id,
                     crate::agent::ChannelKind::Operator,
@@ -314,14 +309,11 @@ impl AkhTui {
 
     /// Process input against the local engine/agent.
     fn process_input_local(&mut self, input: &str) {
-        let ChatBackend::Local {
-            ref mut agent,
-            ref engine,
-            ..
-        } = self.backend
-        else {
+        let ChatBackend::Local(ref mut local) = self.backend else {
             return;
         };
+        let agent = &mut local.agent;
+        let engine = &local.engine;
 
         let intent = crate::agent::classify_intent(input);
 
@@ -690,7 +682,7 @@ impl AkhTui {
             }
             "goals" | "status" | "seed" => {
                 match self.backend {
-                    ChatBackend::Local { .. } => self.handle_command_local(parts[0], parts.get(1).copied()),
+                    ChatBackend::Local(..) => self.handle_command_local(parts[0], parts.get(1).copied()),
                     #[cfg(feature = "daemon")]
                     ChatBackend::Remote { ref remote, .. } => {
                         // Forward as a command to the server.
@@ -708,14 +700,11 @@ impl AkhTui {
 
     /// Handle /goals, /status, /seed locally.
     fn handle_command_local(&mut self, cmd: &str, arg: Option<&str>) {
-        let ChatBackend::Local {
-            ref agent,
-            ref engine,
-            ..
-        } = self.backend
-        else {
+        let ChatBackend::Local(ref local) = self.backend else {
             return;
         };
+        let agent = &local.agent;
+        let engine = &local.engine;
 
         match cmd {
             "goals" => {

@@ -156,6 +156,7 @@ pub struct ReflectionResult {
 ///
 /// Analyzes working memory entries (tool results, decisions) and goal status
 /// to produce insights and recommended adjustments.
+#[allow(clippy::too_many_arguments)]
 pub fn reflect(
     working_memory: &WorkingMemory,
     goals: &[Goal],
@@ -368,7 +369,7 @@ fn compute_adjustments(
         if goal.children.is_empty() {
             adjustments.push(Adjustment::SuggestNewGoal {
                 description: format!("Decompose: {}", insight.description),
-                priority: goal.priority.saturating_add(10).min(255),
+                priority: goal.priority.saturating_add(10),
                 reason: format!(
                     "Goal \"{}\" may benefit from decomposition into smaller tasks.",
                     insight.description,
@@ -391,7 +392,7 @@ fn compute_adjustments(
             adjustments.push(Adjustment::IncreasePriority {
                 goal_id: insight.goal_id,
                 from: goal.priority,
-                to: goal.priority.saturating_add(20).min(255),
+                to: goal.priority.saturating_add(20),
                 reason: format!(
                     "Goal \"{}\" is making progress after {} cycles — boosting priority.",
                     insight.description, insight.cycles_worked,

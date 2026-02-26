@@ -66,7 +66,7 @@ pub fn humanize_predicate(predicate: &str) -> String {
         // Code predicates with namespace prefix
         p if p.starts_with("code:") => humanize_predicate(&p[5..]),
         // Generic kebab-to-space fallback
-        other => other.replace('-', " ").replace('_', " "),
+        other => other.replace(['-', '_'], " "),
     }
 }
 
@@ -130,7 +130,7 @@ pub fn pluralize(word: &str) -> String {
 
 /// Preserve the case style of the original word in the replacement.
 fn format_case(original: &str, replacement: &str) -> String {
-    if original.chars().next().map_or(false, |c| c.is_uppercase()) {
+    if original.chars().next().is_some_and(|c| c.is_uppercase()) {
         capitalize(replacement)
     } else {
         replacement.to_string()
@@ -143,12 +143,12 @@ fn format_case(original: &str, replacement: &str) -> String {
 /// - "has" → "have"
 /// - other → unchanged
 pub fn first_person_predicate(pred: &str) -> String {
-    if pred.starts_with("is ") {
-        format!("am {}", &pred[3..])
+    if let Some(rest) = pred.strip_prefix("is ") {
+        format!("am {rest}")
     } else if pred == "is" {
         "am".to_string()
-    } else if pred.starts_with("has ") {
-        format!("have {}", &pred[4..])
+    } else if let Some(rest) = pred.strip_prefix("has ") {
+        format!("have {rest}")
     } else if pred == "has" {
         "have".to_string()
     } else {
@@ -164,7 +164,7 @@ pub fn capitalize_entity(name: &str) -> String {
         .map(|segment| {
             segment
                 .split_whitespace()
-                .map(|w| capitalize(w))
+                .map(capitalize)
                 .collect::<Vec<_>>()
                 .join(" ")
         })

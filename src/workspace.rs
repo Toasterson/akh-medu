@@ -157,10 +157,8 @@ impl WorkspaceConfig {
             _ => Language::Auto,
         };
 
-        let encoding = match self.encoding.as_str() {
-            // Currently only Bipolar is supported; future: FHRR, SSP.
-            _ => Encoding::Bipolar,
-        };
+        // Currently only Bipolar is supported; future: FHRR, SSP.
+        let encoding = Encoding::Bipolar;
 
         crate::engine::EngineConfig {
             dimension: Dimension(self.dimension),
@@ -228,7 +226,7 @@ impl WorkspaceManager {
             .ensure_dirs()
             .map_err(|e| WorkspaceError::ConfigWrite {
                 path: ws_paths.root.display().to_string(),
-                source: std::io::Error::new(std::io::ErrorKind::Other, e.to_string()),
+                source: std::io::Error::other(e.to_string()),
             })?;
 
         // Save workspace config.

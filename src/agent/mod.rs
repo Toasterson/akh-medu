@@ -8,6 +8,7 @@
 //! - **OODA loop** (Observe → Orient → Decide → Act cycle)
 //! - **Consolidation** (deliberate reasoning about what to remember)
 
+#[allow(clippy::module_inception)]
 pub mod agent;
 pub mod calendar;
 pub mod causal;

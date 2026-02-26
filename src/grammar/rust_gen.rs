@@ -26,7 +26,7 @@ pub struct RustCodeGrammar;
 
 impl RustCodeGrammar {
     /// Linearize a single node with the given indent level.
-    fn linearize_node(&self, tree: &AbsTree, ctx: &LinContext, indent: usize) -> GrammarResult<String> {
+    fn linearize_node(&self, tree: &AbsTree, _ctx: &LinContext, indent: usize) -> GrammarResult<String> {
         let prefix = "    ".repeat(indent);
         match tree {
             AbsTree::CodeModule {
@@ -42,7 +42,7 @@ impl RustCodeGrammar {
                 }
                 out.push_str(&format!("{prefix}pub mod {name} {{\n"));
                 for child in children {
-                    let child_code = self.linearize_node(child, ctx, indent + 1)?;
+                    let child_code = self.linearize_node(child, _ctx, indent + 1)?;
                     out.push_str(&child_code);
                     out.push('\n');
                 }
@@ -113,7 +113,7 @@ impl RustCodeGrammar {
                 let mut out = String::new();
                 out.push_str(&format!("{prefix}// === {heading} ===\n\n"));
                 for item in body {
-                    let item_code = self.linearize_node(item, ctx, indent)?;
+                    let item_code = self.linearize_node(item, _ctx, indent)?;
                     out.push_str(&item_code);
                     out.push('\n');
                 }
@@ -134,7 +134,7 @@ impl RustCodeGrammar {
                     out.push('\n');
                 }
                 for section in sections {
-                    let section_code = self.linearize_node(section, ctx, indent)?;
+                    let section_code = self.linearize_node(section, _ctx, indent)?;
                     out.push_str(&section_code);
                     out.push('\n');
                 }
@@ -146,7 +146,7 @@ impl RustCodeGrammar {
             AbsTree::Conjunction { items, is_and: _ } => {
                 let mut out = String::new();
                 for item in items {
-                    let code = self.linearize_node(item, ctx, indent)?;
+                    let code = self.linearize_node(item, _ctx, indent)?;
                     out.push_str(&code);
                     out.push('\n');
                 }
@@ -155,7 +155,7 @@ impl RustCodeGrammar {
 
             AbsTree::WithConfidence { inner, .. }
             | AbsTree::WithProvenance { inner, .. } => {
-                self.linearize_node(inner, ctx, indent)
+                self.linearize_node(inner, _ctx, indent)
             }
 
             other => Err(GrammarError::LinearizationFailed {
@@ -460,10 +460,7 @@ fn item_to_abstree(item: &syn::Item) -> Option<AbsTree> {
                 .iter()
                 .map(|arg| match arg {
                     syn::FnArg::Receiver(_) => "&self".to_string(),
-                    syn::FnArg::Typed(pat) => {
-                        let pat_str = quote::quote!(#pat).to_string();
-                        pat_str
-                    }
+                    syn::FnArg::Typed(pat) => quote::quote!(#pat).to_string(),
                 })
                 .collect();
             let return_type = match &f.sig.output {
@@ -608,16 +605,14 @@ fn extract_doc_attrs(attrs: &[syn::Attribute]) -> Option<String> {
     let docs: Vec<String> = attrs
         .iter()
         .filter_map(|attr| {
-            if attr.path().is_ident("doc") {
-                if let syn::Meta::NameValue(nv) = &attr.meta {
-                    if let syn::Expr::Lit(syn::ExprLit {
-                        lit: syn::Lit::Str(s),
-                        ..
-                    }) = &nv.value
-                    {
-                        return Some(s.value().trim().to_string());
-                    }
-                }
+            if attr.path().is_ident("doc")
+                && let syn::Meta::NameValue(nv) = &attr.meta
+                && let syn::Expr::Lit(syn::ExprLit {
+                    lit: syn::Lit::Str(s),
+                    ..
+                }) = &nv.value
+            {
+                return Some(s.value().trim().to_string());
             }
             None
         })
@@ -635,16 +630,16 @@ fn extract_derives(attrs: &[syn::Attribute]) -> Vec<String> {
     attrs
         .iter()
         .filter_map(|attr| {
-            if attr.path().is_ident("derive") {
-                if let syn::Meta::List(list) = &attr.meta {
-                    let tokens = list.tokens.to_string();
-                    return Some(
-                        tokens
-                            .split(',')
-                            .map(|s| s.trim().to_string())
-                            .collect::<Vec<_>>(),
-                    );
-                }
+            if attr.path().is_ident("derive")
+                && let syn::Meta::List(list) = &attr.meta
+            {
+                let tokens = list.tokens.to_string();
+                return Some(
+                    tokens
+                        .split(',')
+                        .map(|s| s.trim().to_string())
+                        .collect::<Vec<_>>(),
+                );
             }
             None
         })

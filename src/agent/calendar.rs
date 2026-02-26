@@ -363,6 +363,7 @@ impl CalendarRoleVectors {
 // ═══════════════════════════════════════════════════════════════════════
 
 /// Manages calendar events, Allen relations, conflict detection, and VSA encoding.
+#[derive(Default)]
 pub struct CalendarManager {
     events: HashMap<u64, CalendarEvent>,
     predicates: Option<CalendarPredicates>,
@@ -387,15 +388,6 @@ impl<'de> Deserialize<'de> for CalendarManager {
     }
 }
 
-impl Default for CalendarManager {
-    fn default() -> Self {
-        Self {
-            events: HashMap::new(),
-            predicates: None,
-            role_vectors: None,
-        }
-    }
-}
 
 impl fmt::Debug for CalendarManager {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -439,6 +431,7 @@ impl CalendarManager {
     ///
     /// Creates a KG entity, syncs metadata triples, computes Allen relations
     /// against existing events, and records provenance.
+    #[allow(clippy::too_many_arguments)]
     pub fn add_event(
         &mut self,
         engine: &Engine,
@@ -790,7 +783,7 @@ pub fn import_ical(
 /// Extract a UNIX timestamp from an icalendar `DatePerhapsTime`.
 #[cfg(feature = "calendar")]
 fn extract_timestamp(dp: &icalendar::DatePerhapsTime) -> Option<u64> {
-    use chrono::{NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc};
+    use chrono::{NaiveDateTime, NaiveTime};
     match dp {
         icalendar::DatePerhapsTime::DateTime(cdt) => match cdt {
             icalendar::CalendarDateTime::Floating(ndt) => {
@@ -849,7 +842,7 @@ pub fn sync_caldav(
 fn base64_encode(input: &str) -> String {
     const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let bytes = input.as_bytes();
-    let mut result = String::with_capacity((bytes.len() + 2) / 3 * 4);
+    let mut result = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {
         let b0 = chunk[0] as u32;
         let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };

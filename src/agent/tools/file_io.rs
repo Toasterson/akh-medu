@@ -129,13 +129,13 @@ impl Tool for FileIoTool {
                 }
 
                 // Ensure parent directory exists.
-                if let Some(parent) = path.parent() {
-                    if let Err(e) = std::fs::create_dir_all(parent) {
-                        return Ok(ToolOutput::err(format!(
-                            "Failed to create directory \"{}\": {e}",
-                            parent.display()
-                        )));
-                    }
+                if let Some(parent) = path.parent()
+                    && let Err(e) = std::fs::create_dir_all(parent)
+                {
+                    return Ok(ToolOutput::err(format!(
+                        "Failed to create directory \"{}\": {e}",
+                        parent.display()
+                    )));
                 }
 
                 match std::fs::write(&path, content) {

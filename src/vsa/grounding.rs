@@ -145,7 +145,7 @@ fn blend_vectors(
     let mut result = base_data.to_vec();
 
     // Deterministic PRNG seeded from symbol ID (xorshift64)
-    let mut state = u64::from(symbol.get()).wrapping_mul(0x517cc1b727220a95) | 1;
+    let mut state = symbol.get().wrapping_mul(0x517cc1b727220a95) | 1;
     let threshold = (weight * 256.0) as u64;
 
     for (i, byte) in result.iter_mut().enumerate() {

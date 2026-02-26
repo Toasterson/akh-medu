@@ -397,10 +397,10 @@ pub fn argue_with_rules(
 /// object. Otherwise, creates a synthetic record from the triple itself.
 fn build_provenance_chain(engine: &Engine, triple: &Triple) -> Vec<ProvenanceRecord> {
     // Try to get real provenance records from the ledger.
-    if let Ok(records) = engine.provenance_of(triple.object) {
-        if !records.is_empty() {
-            return records;
-        }
+    if let Ok(records) = engine.provenance_of(triple.object)
+        && !records.is_empty()
+    {
+        return records;
     }
 
     // Fallback: create a synthetic provenance record from the triple.

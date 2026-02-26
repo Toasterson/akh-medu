@@ -173,7 +173,7 @@ pub fn run_sleep_cycle(
 
     // Record provenance for the sleep cycle.
     let dummy_sym = SymbolId::new(1).unwrap_or(SymbolId::new(1).unwrap());
-    let _ = engine.store_provenance(
+    if let Err(e) = engine.store_provenance(
         &mut ProvenanceRecord::new(
             dummy_sym,
             DerivationKind::SleepConsolidation {
@@ -183,7 +183,9 @@ pub fn run_sleep_cycle(
             },
         )
         .with_confidence(1.0),
-    );
+    ) {
+        tracing::debug!("sleep cycle: failed to store full_cycle provenance: {e}");
+    }
 
     Ok(metrics)
 }
@@ -316,15 +318,23 @@ fn redirect_triples(engine: &Engine, old_sym: SymbolId, new_sym: SymbolId) {
     // Redirect outgoing triples.
     let outgoing = engine.triples_from(old_sym);
     for triple in &outgoing {
-        let _ = engine.add_triple(&Triple::new(new_sym, triple.predicate, triple.object).with_confidence(triple.confidence));
-        let _ = engine.remove_triple(triple.subject, triple.predicate, triple.object);
+        if let Err(e) = engine.add_triple(&Triple::new(new_sym, triple.predicate, triple.object).with_confidence(triple.confidence)) {
+            tracing::warn!("sleep merge: failed to add redirected outgoing triple ({old_sym} -> {new_sym}): {e}");
+        }
+        if let Err(e) = engine.remove_triple(triple.subject, triple.predicate, triple.object) {
+            tracing::warn!("sleep merge: failed to remove old outgoing triple from {old_sym}: {e}");
+        }
     }
 
     // Redirect incoming triples.
     let incoming = engine.triples_to(old_sym);
     for triple in &incoming {
-        let _ = engine.add_triple(&Triple::new(triple.subject, triple.predicate, new_sym).with_confidence(triple.confidence));
-        let _ = engine.remove_triple(triple.subject, triple.predicate, triple.object);
+        if let Err(e) = engine.add_triple(&Triple::new(triple.subject, triple.predicate, new_sym).with_confidence(triple.confidence)) {
+            tracing::warn!("sleep merge: failed to add redirected incoming triple ({old_sym} -> {new_sym}): {e}");
+        }
+        if let Err(e) = engine.remove_triple(triple.subject, triple.predicate, triple.object) {
+            tracing::warn!("sleep merge: failed to remove old incoming triple to {old_sym}: {e}");
+        }
     }
 }
 
@@ -378,33 +388,36 @@ fn run_dream_phase(engine: &Engine, config: &SleepConfig) -> AgentResult<usize> 
                 let start_vec = engine.item_memory().get(start);
                 let end_vec = engine.item_memory().get(end);
 
-                if let (Some(sv), Some(ev)) = (start_vec, end_vec) {
-                    if let Ok(sim) = ops.similarity(&sv, &ev) {
-                        if sim >= config.dream_similarity_threshold {
-                            // Create a speculative "dream:related_to" connection.
-                            let predicate = engine
-                                .resolve_or_create_relation("dream:related_to")
-                                .unwrap_or_else(|_| SymbolId::new(1).unwrap());
+                if let (Some(sv), Some(ev)) = (start_vec, end_vec)
+                    && let Ok(sim) = ops.similarity(&sv, &ev)
+                    && sim >= config.dream_similarity_threshold
+                {
+                    // Create a speculative "dream:related_to" connection.
+                    let predicate = engine
+                        .resolve_or_create_relation("dream:related_to")
+                        .unwrap_or_else(|_| SymbolId::new(1).unwrap());
 
-                            let _ = engine.add_triple(&Triple::new(start, predicate, end).with_confidence(0.3));
-
-                            // Record provenance.
-                            let _ = engine.store_provenance(
-                                &mut ProvenanceRecord::new(
-                                    end,
-                                    DerivationKind::SleepConsolidation {
-                                        phase: "dream".to_string(),
-                                        merged_count: 0,
-                                        pruned_count: 0,
-                                    },
-                                )
-                                .with_sources(vec![start, end])
-                                .with_confidence(0.3),
-                            );
-
-                            found += 1;
-                        }
+                    if let Err(e) = engine.add_triple(&Triple::new(start, predicate, end).with_confidence(0.3)) {
+                        tracing::debug!("dream phase: failed to add speculative triple ({start} -> {end}): {e}");
                     }
+
+                    // Record provenance.
+                    if let Err(e) = engine.store_provenance(
+                        &mut ProvenanceRecord::new(
+                            end,
+                            DerivationKind::SleepConsolidation {
+                                phase: "dream".to_string(),
+                                merged_count: 0,
+                                pruned_count: 0,
+                            },
+                        )
+                        .with_sources(vec![start, end])
+                        .with_confidence(0.3),
+                    ) {
+                        tracing::debug!("dream phase: failed to store provenance for speculative connection: {e}");
+                    }
+
+                    found += 1;
                 }
             }
         }

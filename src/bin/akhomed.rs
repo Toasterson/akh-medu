@@ -230,8 +230,8 @@ async fn create_workspace(
     match manager.create(config) {
         Ok(_) => {
             // Assign role if provided in the request body.
-            if let Some(Json(req)) = body {
-                if let Some(ref role) = req.role {
+            if let Some(Json(req)) = body
+                && let Some(ref role) = req.role {
                     let engine = state.get_engine(&name).await?;
                     engine.assign_role(role).map_err(|e| {
                         (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}"))
@@ -240,7 +240,6 @@ async fn create_workspace(
                         (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}"))
                     })?;
                 }
-            }
             Ok(Json(WorkspaceCreatedResponse {
                 name,
                 created: true,
@@ -957,12 +956,11 @@ async fn start_daemon_handler(
     // Check if already running.
     {
         let daemons = state.daemons.read().await;
-        if let Some(d) = daemons.get(&ws_name) {
-            if !d.handle.is_finished() {
+        if let Some(d) = daemons.get(&ws_name)
+            && !d.handle.is_finished() {
                 let st = d.status.lock().await;
                 return Ok(Json(st.clone()));
             }
-        }
     }
 
     let engine = state.get_engine(&ws_name).await?;

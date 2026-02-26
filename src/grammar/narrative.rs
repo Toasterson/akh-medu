@@ -49,6 +49,12 @@ pub struct NarrativeGrammar {
     transition_counter: AtomicUsize,
 }
 
+impl Default for NarrativeGrammar {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl NarrativeGrammar {
     /// Create a new narrative grammar with the transition counter at zero.
     pub fn new() -> Self {
@@ -333,7 +339,7 @@ impl NarrativeGrammar {
     fn linearize_first_person(
         &self,
         tree: &AbsTree,
-        focus: &QueryFocus,
+        _focus: &QueryFocus,
         ctx: &LinContext,
     ) -> GrammarResult<String> {
         match tree {
@@ -366,14 +372,14 @@ impl NarrativeGrammar {
             AbsTree::Conjunction { items, .. } => {
                 let mut sentences = Vec::new();
                 for item in items {
-                    let s = self.linearize_first_person(item, focus, ctx)?;
+                    let s = self.linearize_first_person(item, _focus, ctx)?;
                     sentences.push(s);
                 }
                 Ok(join_first_person_sentences(&sentences))
             }
 
             AbsTree::WithConfidence { inner, confidence } => {
-                let text = self.linearize_first_person(inner, focus, ctx)?;
+                let text = self.linearize_first_person(inner, _focus, ctx)?;
                 let qualifier = if *confidence > 0.9 {
                     "with high confidence"
                 } else if *confidence > 0.7 {
@@ -391,7 +397,7 @@ impl NarrativeGrammar {
             }
 
             AbsTree::WithProvenance { inner, .. } => {
-                self.linearize_first_person(inner, focus, ctx)
+                self.linearize_first_person(inner, _focus, ctx)
             }
 
             // For non-triple nodes, fall back to standard linearization.
@@ -477,15 +483,13 @@ fn merge_i_am_clauses(clauses: &[String]) -> String {
     }
 
     // Join with commas.
-    let joined = if parts.len() == 2 {
+    if parts.len() == 2 {
         format!("{}, {}.", parts[0], parts[1])
     } else {
         let last = parts.last().unwrap();
         let rest = &parts[..parts.len() - 1];
         format!("{}, and {last}.", rest.join(", "))
-    };
-
-    joined
+    }
 }
 
 fn format_provenance_narrative(tag: &ProvenanceTag) -> String {

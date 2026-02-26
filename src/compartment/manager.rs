@@ -15,6 +15,7 @@ struct LoadedCompartment {
     state: CompartmentState,
     triple_count: usize,
     /// Named graph IRI for this compartment's triples.
+    #[allow(dead_code)] // Will be used when SPARQL named graph routing is implemented
     graph_name: String,
 }
 
@@ -98,17 +99,14 @@ impl CompartmentManager {
                 })?;
 
             let id = manifest.id.clone();
-            if !compartments.contains_key(&id) {
-                let graph_name = format!("{COMPARTMENT_NS}{id}");
-                compartments.insert(
-                    id,
-                    LoadedCompartment {
-                        manifest,
-                        state: CompartmentState::Dormant,
-                        triple_count: 0,
-                        graph_name,
-                    },
-                );
+            if let std::collections::hash_map::Entry::Vacant(entry) = compartments.entry(id) {
+                let graph_name = format!("{COMPARTMENT_NS}{}", entry.key());
+                entry.insert(LoadedCompartment {
+                    manifest,
+                    state: CompartmentState::Dormant,
+                    triple_count: 0,
+                    graph_name,
+                });
                 count += 1;
             }
         }

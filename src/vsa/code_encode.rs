@@ -21,7 +21,7 @@
 use crate::symbol::SymbolId;
 
 use super::HyperVec;
-use super::encode::{encode_sequence, encode_symbol, encode_token};
+use super::encode::{encode_sequence, encode_token};
 use super::ops::{VsaOps, VsaResult};
 
 // ---------------------------------------------------------------------------

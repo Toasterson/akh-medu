@@ -176,17 +176,17 @@ impl CapabilityToken {
             match (action, scope) {
                 ("query", CapabilityScope::QueryAll) => return true,
                 ("query", CapabilityScope::QueryTopics(topics)) => {
-                    if let Some(t) = topic {
-                        if topics.contains(&t) {
-                            return true;
-                        }
+                    if let Some(t) = topic
+                        && topics.contains(&t)
+                    {
+                        return true;
                     }
                 }
                 ("assert", CapabilityScope::AssertTopics(topics)) => {
-                    if let Some(t) = topic {
-                        if topics.contains(&t) {
-                            return true;
-                        }
+                    if let Some(t) = topic
+                        && topics.contains(&t)
+                    {
+                        return true;
                     }
                 }
                 ("propose_goals", CapabilityScope::ProposeGoals) => return true,
@@ -324,18 +324,13 @@ impl AgentProtocolMessage {
 // ── InterlocutorKind ────────────────────────────────────────────────────
 
 /// Whether an interlocutor is a human or another agent.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub enum InterlocutorKind {
     /// A human user.
+    #[default]
     Human,
     /// Another autonomous agent.
     Agent,
-}
-
-impl Default for InterlocutorKind {
-    fn default() -> Self {
-        Self::Human
-    }
 }
 
 impl fmt::Display for InterlocutorKind {

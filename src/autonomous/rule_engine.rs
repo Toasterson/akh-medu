@@ -220,6 +220,7 @@ impl RuleEngine {
 
     /// Match all antecedents of a rule against the KG.
     /// Returns a list of (variable bindings, matched triples) tuples.
+    #[allow(clippy::type_complexity)]
     fn match_antecedents(
         &self,
         rule: &InferenceRule,

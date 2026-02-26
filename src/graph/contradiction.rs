@@ -247,33 +247,33 @@ pub fn check_contradictions(
     // 2. Disjointness violation check
     // Only relevant for is-a triples
     let is_a = engine.lookup_symbol("is-a").ok();
-    if let Some(is_a_id) = is_a {
-        if incoming.predicate == is_a_id {
-            // The incoming triple asserts: entity is-a new_type
-            // Check all existing types of this entity
-            let existing_types: Vec<SymbolId> = kg
-                .triples_from(incoming.subject)
-                .into_iter()
-                .filter(|t| t.predicate == is_a_id)
-                .map(|t| t.object)
-                .collect();
+    if let Some(is_a_id) = is_a
+        && incoming.predicate == is_a_id
+    {
+        // The incoming triple asserts: entity is-a new_type
+        // Check all existing types of this entity
+        let existing_types: Vec<SymbolId> = kg
+            .triples_from(incoming.subject)
+            .into_iter()
+            .filter(|t| t.predicate == is_a_id)
+            .map(|t| t.object)
+            .collect();
 
-            for existing_type in &existing_types {
-                if disjointness.are_disjoint(*existing_type, incoming.object) {
-                    contradictions.push(Contradiction {
-                        existing: Triple::new(incoming.subject, is_a_id, *existing_type),
-                        incoming: incoming.clone(),
-                        kind: ContradictionKind::DisjointnessViolation {
-                            entity: incoming.subject,
-                            type_a: *existing_type,
-                            type_b: incoming.object,
-                        },
-                        context: incoming
-                            .compartment_id
-                            .as_ref()
-                            .and_then(|c| engine.lookup_symbol(c).ok()),
-                    });
-                }
+        for existing_type in &existing_types {
+            if disjointness.are_disjoint(*existing_type, incoming.object) {
+                contradictions.push(Contradiction {
+                    existing: Triple::new(incoming.subject, is_a_id, *existing_type),
+                    incoming: incoming.clone(),
+                    kind: ContradictionKind::DisjointnessViolation {
+                        entity: incoming.subject,
+                        type_a: *existing_type,
+                        type_b: incoming.object,
+                    },
+                    context: incoming
+                        .compartment_id
+                        .as_ref()
+                        .and_then(|c| engine.lookup_symbol(c).ok()),
+                });
             }
         }
     }

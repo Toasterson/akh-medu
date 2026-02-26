@@ -126,10 +126,10 @@ impl SkolemRegistry {
     ) -> AkhResult<SkolemSymbol> {
         // Check if one already exists
         let key = (existential_relation, bound_var);
-        if let Some(&existing_id) = self.existential_index.get(&key) {
-            if let Some(existing) = self.skolems.get(&existing_id) {
-                return Ok(existing.clone());
-            }
+        if let Some(&existing_id) = self.existential_index.get(&key)
+            && let Some(existing) = self.skolems.get(&existing_id)
+        {
+            return Ok(existing.clone());
         }
 
         // Create a new Skolem entity

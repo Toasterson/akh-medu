@@ -426,11 +426,9 @@ pub fn build_discourse_response(
 fn score_triple_for_focus(predicate_label: &str, focus: &QueryFocus) -> i32 {
     let base = match focus {
         QueryFocus::Identity => {
-            if IDENTITY_PREDICATES.iter().any(|p| predicate_label == *p) {
+            if IDENTITY_PREDICATES.contains(&predicate_label) {
                 10
-            } else if DEPRIORITIZED_PREDICATES
-                .iter()
-                .any(|p| predicate_label == *p)
+            } else if DEPRIORITIZED_PREDICATES.contains(&predicate_label)
             {
                 -5
             } else {
@@ -457,11 +455,9 @@ fn score_triple_for_focus(predicate_label: &str, focus: &QueryFocus) -> i32 {
         QueryFocus::Capability => {
             if predicate_label == "has-capability" {
                 10
-            } else if IDENTITY_PREDICATES.iter().any(|p| predicate_label == *p) {
+            } else if IDENTITY_PREDICATES.contains(&predicate_label) {
                 3
-            } else if DEPRIORITIZED_PREDICATES
-                .iter()
-                .any(|p| predicate_label == *p)
+            } else if DEPRIORITIZED_PREDICATES.contains(&predicate_label)
             {
                 -5
             } else {

@@ -969,19 +969,18 @@ impl PimManager {
             .filter(|m| m.gtd_state == GtdState::Next)
             .filter(|m| {
                 // Context filter: match if task has no contexts or context matches.
-                context.map_or(true, |ctx| m.contexts.is_empty() || m.contexts.contains(ctx))
+                context.is_none_or(|ctx| m.contexts.is_empty() || m.contexts.contains(ctx))
             })
             .filter(|m| {
                 // Energy filter: task energy ≤ available energy.
-                match (m.energy, energy) {
-                    (None, _) | (_, None) => true,
-                    (Some(EnergyLevel::Low), _) => true,
-                    (Some(EnergyLevel::Medium), Some(EnergyLevel::Medium | EnergyLevel::High)) => {
-                        true
-                    }
-                    (Some(EnergyLevel::High), Some(EnergyLevel::High)) => true,
-                    _ => false,
-                }
+                matches!(
+                    (m.energy, energy),
+                    (None, _)
+                        | (_, None)
+                        | (Some(EnergyLevel::Low), _)
+                        | (Some(EnergyLevel::Medium), Some(EnergyLevel::Medium | EnergyLevel::High))
+                        | (Some(EnergyLevel::High), Some(EnergyLevel::High))
+                )
             })
             .filter(|m| {
                 // Must not be blocked (all blockers must be Done).
@@ -1003,11 +1002,11 @@ impl PimManager {
             let pim_done = self
                 .metadata
                 .get(&blocker_sym.get())
-                .map_or(false, |m| m.gtd_state == GtdState::Done);
+                .is_some_and(|m| m.gtd_state == GtdState::Done);
             let goal_done = goals
                 .iter()
                 .find(|g| g.symbol_id == blocker_sym)
-                .map_or(false, |g| matches!(g.status, GoalStatus::Completed));
+                .is_some_and(|g| matches!(g.status, GoalStatus::Completed));
             if !pim_done && !goal_done {
                 return true;
             }
@@ -1049,16 +1048,20 @@ impl PimManager {
 
         // Record in KG.
         if let Some(preds) = &self.predicates {
-            let _ = engine.add_triple(&Triple::new(
+            if let Err(e) = engine.add_triple(&Triple::new(
                 blocked,
                 preds.blocked_by,
                 blocker,
-            ));
-            let _ = engine.add_triple(&Triple::new(
+            )) {
+                tracing::debug!("failed to add blocked_by triple: {e}");
+            }
+            if let Err(e) = engine.add_triple(&Triple::new(
                 blocker,
                 preds.blocks,
                 blocked,
-            ));
+            )) {
+                tracing::debug!("failed to add blocks triple: {e}");
+            }
         }
 
         Ok(())
@@ -1253,7 +1256,7 @@ impl PimManager {
             .values()
             .filter(|m| {
                 m.gtd_state != GtdState::Done
-                    && m.next_due.map_or(false, |due| due < deadline_ts)
+                    && m.next_due.is_some_and(|due| due < deadline_ts)
             })
             .map(|m| m.goal_id)
             .collect()
@@ -1382,107 +1385,129 @@ impl PimManager {
 
         // GTD state.
         let gtd_entity = engine.resolve_or_create_entity(&format!("pim-gtd:{}", meta.gtd_state))?;
-        let _ = engine.add_triple(&Triple::new(
+        if let Err(e) = engine.add_triple(&Triple::new(
             goal_id,
             preds.gtd_state,
             gtd_entity,
-        ));
+        )) {
+            tracing::warn!("failed to sync gtd_state triple for goal {}: {e}", goal_id.get());
+        }
 
         // Quadrant.
         let quad_entity =
             engine.resolve_or_create_entity(&format!("pim-quadrant:{}", meta.quadrant))?;
-        let _ = engine.add_triple(&Triple::new(
+        if let Err(e) = engine.add_triple(&Triple::new(
             goal_id,
             preds.quadrant,
             quad_entity,
-        ));
+        )) {
+            tracing::warn!("failed to sync quadrant triple for goal {}: {e}", goal_id.get());
+        }
 
         // Urgency/Importance as label entities.
         let urgency_entity =
             engine.resolve_or_create_entity(&format!("pim-urgency:{:.2}", meta.urgency))?;
-        let _ = engine.add_triple(&Triple::new(
+        if let Err(e) = engine.add_triple(&Triple::new(
             goal_id,
             preds.urgency,
             urgency_entity,
-        ));
+        )) {
+            tracing::warn!("failed to sync urgency triple for goal {}: {e}", goal_id.get());
+        }
 
         let importance_entity =
             engine.resolve_or_create_entity(&format!("pim-importance:{:.2}", meta.importance))?;
-        let _ = engine.add_triple(&Triple::new(
+        if let Err(e) = engine.add_triple(&Triple::new(
             goal_id,
             preds.importance,
             importance_entity,
-        ));
+        )) {
+            tracing::warn!("failed to sync importance triple for goal {}: {e}", goal_id.get());
+        }
 
         // Optional fields.
         if let Some(para) = meta.para {
             let para_entity =
                 engine.resolve_or_create_entity(&format!("pim-para:{}", para))?;
-            let _ = engine.add_triple(&Triple::new(
+            if let Err(e) = engine.add_triple(&Triple::new(
                 goal_id,
                 preds.para_category,
                 para_entity,
-            ));
+            )) {
+                tracing::warn!("failed to sync para_category triple for goal {}: {e}", goal_id.get());
+            }
         }
 
         if let Some(energy) = meta.energy {
             let energy_entity =
                 engine.resolve_or_create_entity(&format!("pim-energy:{}", energy))?;
-            let _ = engine.add_triple(&Triple::new(
+            if let Err(e) = engine.add_triple(&Triple::new(
                 goal_id,
                 preds.energy,
                 energy_entity,
-            ));
+            )) {
+                tracing::warn!("failed to sync energy triple for goal {}: {e}", goal_id.get());
+            }
         }
 
         for ctx in &meta.contexts {
             let ctx_entity =
                 engine.resolve_or_create_entity(&format!("pim-context:{}", ctx.0))?;
-            let _ = engine.add_triple(&Triple::new(
+            if let Err(e) = engine.add_triple(&Triple::new(
                 goal_id,
                 preds.context,
                 ctx_entity,
-            ));
+            )) {
+                tracing::warn!("failed to sync context triple for goal {}: {e}", goal_id.get());
+            }
         }
 
         if let Some(deadline) = meta.deadline {
             let deadline_entity =
                 engine.resolve_or_create_entity(&format!("pim-deadline:{deadline}"))?;
-            let _ = engine.add_triple(&Triple::new(
+            if let Err(e) = engine.add_triple(&Triple::new(
                 goal_id,
                 preds.deadline,
                 deadline_entity,
-            ));
+            )) {
+                tracing::warn!("failed to sync deadline triple for goal {}: {e}", goal_id.get());
+            }
         }
 
         if let Some(ref recurrence) = meta.recurrence {
             let recur_entity =
                 engine.resolve_or_create_entity(&format!("pim-recur:{}", recurrence.as_label()))?;
-            let _ = engine.add_triple(&Triple::new(
+            if let Err(e) = engine.add_triple(&Triple::new(
                 goal_id,
                 preds.recurrence,
                 recur_entity,
-            ));
+            )) {
+                tracing::warn!("failed to sync recurrence triple for goal {}: {e}", goal_id.get());
+            }
         }
 
         if let Some(next_due) = meta.next_due {
             let due_entity =
                 engine.resolve_or_create_entity(&format!("pim-next-due:{next_due}"))?;
-            let _ = engine.add_triple(&Triple::new(
+            if let Err(e) = engine.add_triple(&Triple::new(
                 goal_id,
                 preds.next_due,
                 due_entity,
-            ));
+            )) {
+                tracing::warn!("failed to sync next_due triple for goal {}: {e}", goal_id.get());
+            }
         }
 
         if let Some(time_est) = meta.time_estimate_minutes {
             let est_entity =
                 engine.resolve_or_create_entity(&format!("pim-time-est:{time_est}"))?;
-            let _ = engine.add_triple(&Triple::new(
+            if let Err(e) = engine.add_triple(&Triple::new(
                 goal_id,
                 preds.time_estimate,
                 est_entity,
-            ));
+            )) {
+                tracing::warn!("failed to sync time_estimate triple for goal {}: {e}", goal_id.get());
+            }
         }
 
         Ok(())
@@ -1498,7 +1523,9 @@ impl PimManager {
                 quadrant: meta.quadrant.to_string(),
             },
         );
-        let _ = engine.store_provenance(&mut record);
+        if let Err(e) = engine.store_provenance(&mut record) {
+            tracing::warn!("failed to store PIM provenance for goal {}: {e}", goal_id.get());
+        }
     }
 
     // ── Persistence ──────────────────────────────────────────────────
@@ -1578,7 +1605,7 @@ pub fn gtd_weekly_review(
             goals
                 .iter()
                 .find(|g| g.symbol_id == m.goal_id)
-                .map_or(false, |g| current_ts.saturating_sub(g.created_at) > SEVEN_DAYS)
+                .is_some_and(|g| current_ts.saturating_sub(g.created_at) > SEVEN_DAYS)
         })
         .map(|m| m.goal_id)
         .collect();
@@ -1601,7 +1628,7 @@ pub fn gtd_weekly_review(
         .filter(|p| {
             !p.goals.iter().any(|gid| {
                 pim.get_metadata(gid.get())
-                    .map_or(false, |m| m.gtd_state == GtdState::Next)
+                    .is_some_and(|m| m.gtd_state == GtdState::Next)
             })
         })
         .map(|p| p.id)
@@ -1616,7 +1643,7 @@ pub fn gtd_weekly_review(
             goals
                 .iter()
                 .find(|g| g.symbol_id == m.goal_id)
-                .map_or(false, |g| {
+                .is_some_and(|g| {
                     current_ts.saturating_sub(g.created_at) > FOURTEEN_DAYS
                 })
         })

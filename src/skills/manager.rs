@@ -24,7 +24,8 @@ pub struct SkillManager {
     skills: RwLock<HashMap<String, LoadedSkill>>,
     loaded_bytes: AtomicUsize,
     max_bytes: usize,
-    /// Stored rule text per skill: skill_id → Vec<(name, lhs, rhs)>.
+    /// Stored rule text per skill: skill_id -> Vec<(name, lhs, rhs)>.
+    #[allow(clippy::type_complexity)]
     rule_sources: RwLock<HashMap<String, Vec<(String, String, String)>>>,
 }
 

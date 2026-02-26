@@ -137,6 +137,7 @@ impl SuperpositionState {
     ///
     /// When two hypotheses have similar patterns (similarity > threshold),
     /// they are merged into one with boosted confidence.
+    #[allow(clippy::needless_range_loop)]
     pub fn merge_constructive(&mut self, ops: &VsaOps, threshold: f32) {
         if self.hypotheses.len() < 2 {
             return;
@@ -159,11 +160,11 @@ impl SuperpositionState {
                 }
                 if let Ok(sim) =
                     ops.similarity(&self.hypotheses[i].pattern, &self.hypotheses[j].pattern)
+                    && sim > threshold
+                    && sim > best_sim
                 {
-                    if sim > threshold && sim > best_sim {
-                        best_merge = Some(j);
-                        best_sim = sim;
-                    }
+                    best_merge = Some(j);
+                    best_sim = sim;
                 }
             }
 

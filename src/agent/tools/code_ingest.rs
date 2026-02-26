@@ -112,10 +112,10 @@ impl Tool for CodeIngestTool {
             if let Ok(name_sym) = engine.resolve_or_create_entity(&repo.name) {
                 let _ = add_triple(engine, repo_mt, preds.repo_name, name_sym, 1.0, None);
             }
-            if let Some(ref url) = repo.remote_url {
-                if let Ok(url_sym) = engine.resolve_or_create_entity(url) {
-                    let _ = add_triple(engine, repo_mt, preds.repo_url, url_sym, 1.0, None);
-                }
+            if let Some(ref url) = repo.remote_url
+                && let Ok(url_sym) = engine.resolve_or_create_entity(url)
+            {
+                let _ = add_triple(engine, repo_mt, preds.repo_url, url_sym, 1.0, None);
             }
 
             Some(repo.mt_label.clone())
@@ -439,14 +439,12 @@ impl<'a> CodeVisitor<'a> {
     fn extract_doc_comments(attrs: &[syn::Attribute]) -> Option<String> {
         let mut docs = Vec::new();
         for attr in attrs {
-            if attr.path().is_ident("doc") {
-                if let syn::Meta::NameValue(nv) = &attr.meta {
-                    if let syn::Expr::Lit(lit) = &nv.value {
-                        if let syn::Lit::Str(s) = &lit.lit {
-                            docs.push(s.value().trim().to_string());
-                        }
-                    }
-                }
+            if attr.path().is_ident("doc")
+                && let syn::Meta::NameValue(nv) = &attr.meta
+                && let syn::Expr::Lit(lit) = &nv.value
+                && let syn::Lit::Str(s) = &lit.lit
+            {
+                docs.push(s.value().trim().to_string());
             }
         }
         if docs.is_empty() {
@@ -459,14 +457,14 @@ impl<'a> CodeVisitor<'a> {
     fn extract_derives(attrs: &[syn::Attribute]) -> Vec<String> {
         let mut derives = Vec::new();
         for attr in attrs {
-            if attr.path().is_ident("derive") {
-                if let syn::Meta::List(list) = &attr.meta {
-                    let tokens = list.tokens.to_string();
-                    for part in tokens.split(',') {
-                        let name = part.trim().to_string();
-                        if !name.is_empty() {
-                            derives.push(name);
-                        }
+            if attr.path().is_ident("derive")
+                && let syn::Meta::List(list) = &attr.meta
+            {
+                let tokens = list.tokens.to_string();
+                for part in tokens.split(',') {
+                    let name = part.trim().to_string();
+                    if !name.is_empty() {
+                        derives.push(name);
                     }
                 }
             }
@@ -568,10 +566,10 @@ impl<'a> Visit<'a> for CodeVisitor<'_> {
             }
 
             // Return type.
-            if let Some(ret) = Self::return_type_label(&node.sig.output) {
-                if let Ok(ret_sym) = self.engine.resolve_or_create_entity(&ret) {
-                    self.add_triple(fn_sym, self.preds.returns_type, ret_sym, 1.0);
-                }
+            if let Some(ret) = Self::return_type_label(&node.sig.output)
+                && let Ok(ret_sym) = self.engine.resolve_or_create_entity(&ret)
+            {
+                self.add_triple(fn_sym, self.preds.returns_type, ret_sym, 1.0);
             }
 
             // Doc comments.
@@ -759,10 +757,10 @@ impl<'a> Visit<'a> for CodeVisitor<'_> {
                     }
 
                     // Return type.
-                    if let Some(ret) = Self::return_type_label(&method.sig.output) {
-                        if let Ok(ret_sym) = self.engine.resolve_or_create_entity(&ret) {
-                            self.add_triple(method_sym, self.preds.returns_type, ret_sym, 1.0);
-                        }
+                    if let Some(ret) = Self::return_type_label(&method.sig.output)
+                        && let Ok(ret_sym) = self.engine.resolve_or_create_entity(&ret)
+                    {
+                        self.add_triple(method_sym, self.preds.returns_type, ret_sym, 1.0);
                     }
                 }
             }
@@ -906,14 +904,12 @@ fn add_triple(
 fn extract_inner_doc_comments(attrs: &[syn::Attribute]) -> Option<String> {
     let mut docs = Vec::new();
     for attr in attrs {
-        if attr.path().is_ident("doc") {
-            if let syn::Meta::NameValue(nv) = &attr.meta {
-                if let syn::Expr::Lit(lit) = &nv.value {
-                    if let syn::Lit::Str(s) = &lit.lit {
-                        docs.push(s.value().trim().to_string());
-                    }
-                }
-            }
+        if attr.path().is_ident("doc")
+            && let syn::Meta::NameValue(nv) = &attr.meta
+            && let syn::Expr::Lit(lit) = &nv.value
+            && let syn::Lit::Str(s) = &lit.lit
+        {
+            docs.push(s.value().trim().to_string());
         }
     }
     if docs.is_empty() {
@@ -993,7 +989,7 @@ fn detect_repository(path: &Path, override_name: Option<&str>) -> Option<RepoIde
     }
 
     // No .git found — fall back to directory name.
-    let dir = if start.is_dir() { start } else { start };
+    let dir = start;
     let name = override_name
         .map(|s| s.to_string())
         .unwrap_or_else(|| {
@@ -1024,10 +1020,10 @@ fn parse_git_remote(git_dir: &Path) -> Option<String> {
             in_origin = trimmed == r#"[remote "origin"]"#;
             continue;
         }
-        if in_origin && trimmed.starts_with("url") {
-            if let Some((_key, val)) = trimmed.split_once('=') {
-                return Some(val.trim().to_string());
-            }
+        if in_origin && trimmed.starts_with("url")
+            && let Some((_key, val)) = trimmed.split_once('=')
+        {
+            return Some(val.trim().to_string());
         }
     }
     None

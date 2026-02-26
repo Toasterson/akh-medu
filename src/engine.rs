@@ -71,20 +71,15 @@ impl Default for EngineConfig {
 }
 
 /// How the engine handles detected contradictions during `add_triple`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum ContradictionPolicy {
     /// Log a warning but insert anyway (default).
+    #[default]
     Warn,
     /// Return an error and refuse to insert.
     Reject,
     /// Remove the conflicting existing triple, then insert the new one.
     Replace,
-}
-
-impl Default for ContradictionPolicy {
-    fn default() -> Self {
-        Self::Warn
-    }
 }
 
 /// Configuration for Phase 9 (Cyc-inspired HOL) subsystems.
@@ -483,10 +478,10 @@ impl Engine {
         if let (Ok(gen_sym), Ok(inv_sym)) = (
             self.registry.lookup("rel:generalizes").ok_or(()),
             self.registry.lookup("rel:inverse").ok_or(()),
-        ) {
-            if triple.predicate == gen_sym || triple.predicate == inv_sym {
-                self.hierarchy_dirty.store(true, Ordering::Release);
-            }
+        )
+            && (triple.predicate == gen_sym || triple.predicate == inv_sym)
+        {
+            self.hierarchy_dirty.store(true, Ordering::Release);
         }
 
         // --- Phase 9 post-insert: Skolem auto-grounding ---
@@ -556,7 +551,7 @@ impl Engine {
         let mut result = if self.phase9_config.hierarchy_in_inference
             || self.phase9_config.temporal_decay_enabled
         {
-            self.ensure_hierarchy();
+            let _ = self.ensure_hierarchy();
             let hierarchy_guard = self.predicate_hierarchy.read().unwrap();
             let temporal_guard = self.temporal_registry.read().unwrap();
             let now = std::time::SystemTime::now()
@@ -582,10 +577,10 @@ impl Engine {
         };
 
         // Persist provenance records if ledger is available.
-        if let Some(ref ledger) = self.provenance_ledger {
-            if let Err(e) = ledger.store_batch(&mut result.provenance) {
-                tracing::warn!(error = %e, "failed to persist provenance records");
-            }
+        if let Some(ref ledger) = self.provenance_ledger
+            && let Err(e) = ledger.store_batch(&mut result.provenance)
+        {
+            tracing::warn!(error = %e, "failed to persist provenance records");
         }
 
         Ok(result)
@@ -724,10 +719,10 @@ impl Engine {
         let _ = mgr.discover();
 
         // If already Hot, return existing activation (idempotent).
-        if mgr.skill_state(name) == Some(crate::skills::SkillState::Hot) {
-            if let Some(activation) = mgr.hot_activation(name) {
-                return Ok(activation);
-            }
+        if mgr.skill_state(name) == Some(crate::skills::SkillState::Hot)
+            && let Some(activation) = mgr.hot_activation(name)
+        {
+            return Ok(activation);
         }
 
         if has_label_triples {
@@ -850,10 +845,10 @@ impl Engine {
     /// Resolve a name-or-id string: try parsing as u64 first, then label lookup.
     pub fn resolve_symbol(&self, name_or_id: &str) -> AkhResult<SymbolId> {
         // Try numeric ID first.
-        if let Ok(raw) = name_or_id.trim().parse::<u64>() {
-            if let Some(id) = SymbolId::new(raw) {
-                return Ok(id);
-            }
+        if let Ok(raw) = name_or_id.trim().parse::<u64>()
+            && let Some(id) = SymbolId::new(raw)
+        {
+            return Ok(id);
         }
         // Fall back to label lookup.
         self.lookup_symbol(name_or_id)
@@ -1061,10 +1056,10 @@ impl Engine {
         let _ = mgr.discover();
 
         // If already Hot, return existing activation (idempotent).
-        if mgr.skill_state(name) == Some(crate::skills::SkillState::Hot) {
-            if let Some(activation) = mgr.hot_activation(name) {
-                return Ok(activation);
-            }
+        if mgr.skill_state(name) == Some(crate::skills::SkillState::Hot)
+            && let Some(activation) = mgr.hot_activation(name)
+        {
+            return Ok(activation);
         }
 
         mgr.warm(name)?;
@@ -1888,7 +1883,7 @@ impl Engine {
         subject: SymbolId,
         predicate: SymbolId,
     ) -> AkhResult<crate::argumentation::ArgumentSet> {
-        Ok(crate::argumentation::argue(self, subject, predicate)?)
+        crate::argumentation::argue(self, subject, predicate)
     }
 
     /// Like [`argue`] but with a custom meta-rule ordering.
@@ -1898,7 +1893,7 @@ impl Engine {
         predicate: SymbolId,
         meta_rules: &[crate::argumentation::MetaRule],
     ) -> AkhResult<crate::argumentation::ArgumentSet> {
-        Ok(crate::argumentation::argue_with_rules(self, subject, predicate, meta_rules)?)
+        crate::argumentation::argue_with_rules(self, subject, predicate, meta_rules)
     }
 
     // -----------------------------------------------------------------------
@@ -1912,7 +1907,7 @@ impl Engine {
 
     /// Resolve well-known macro predicates, creating them if needed.
     pub fn macro_predicates(&self) -> AkhResult<crate::rule_macro::MacroPredicates> {
-        Ok(crate::rule_macro::MacroPredicates::resolve(self)?)
+        crate::rule_macro::MacroPredicates::resolve(self)
     }
 
     // -----------------------------------------------------------------------
@@ -1951,7 +1946,7 @@ impl Engine {
 
     /// Resolve well-known arity predicates, creating them if needed.
     pub fn arity_predicates(&self) -> AkhResult<crate::graph::arity::ArityPredicates> {
-        Ok(crate::graph::arity::ArityPredicates::resolve(self)?)
+        crate::graph::arity::ArityPredicates::resolve(self)
     }
 
     // -----------------------------------------------------------------------
@@ -1962,7 +1957,7 @@ impl Engine {
     pub fn contradiction_predicates(
         &self,
     ) -> AkhResult<crate::graph::contradiction::ContradictionPredicates> {
-        Ok(crate::graph::contradiction::ContradictionPredicates::resolve(self)?)
+        crate::graph::contradiction::ContradictionPredicates::resolve(self)
     }
 
     /// Get a read lock on the functional predicates set.
@@ -2041,7 +2036,7 @@ impl Engine {
 
     /// Resolve well-known CWA predicates, creating them if needed.
     pub fn cwa_predicates(&self) -> AkhResult<crate::compartment::cwa::CwaPredicates> {
-        Ok(crate::compartment::cwa::CwaPredicates::resolve(self)?)
+        crate::compartment::cwa::CwaPredicates::resolve(self)
     }
 
     // -----------------------------------------------------------------------
@@ -2057,7 +2052,7 @@ impl Engine {
     pub fn second_order_predicates(
         &self,
     ) -> AkhResult<crate::reason::second_order::SecondOrderPredicates> {
-        Ok(crate::reason::second_order::SecondOrderPredicates::resolve(self)?)
+        crate::reason::second_order::SecondOrderPredicates::resolve(self)
     }
 
     // -----------------------------------------------------------------------
@@ -2266,40 +2261,40 @@ impl Engine {
             self.store.get_meta(key).ok().flatten()
         };
 
-        if let Some(bytes) = load(b"phase9:tms") {
-            if let Ok(tms) = bincode::deserialize(&bytes) {
-                *self.tms.write().unwrap() = tms;
-            }
+        if let Some(bytes) = load(b"phase9:tms")
+            && let Ok(tms) = bincode::deserialize(&bytes)
+        {
+            *self.tms.write().unwrap() = tms;
         }
-        if let Some(bytes) = load(b"phase9:temporal") {
-            if let Ok(reg) = bincode::deserialize(&bytes) {
-                *self.temporal_registry.write().unwrap() = reg;
-            }
+        if let Some(bytes) = load(b"phase9:temporal")
+            && let Ok(reg) = bincode::deserialize(&bytes)
+        {
+            *self.temporal_registry.write().unwrap() = reg;
         }
-        if let Some(bytes) = load(b"phase9:constraints") {
-            if let Ok(reg) = bincode::deserialize(&bytes) {
-                *self.constraint_registry.write().unwrap() = reg;
-            }
+        if let Some(bytes) = load(b"phase9:constraints")
+            && let Ok(reg) = bincode::deserialize(&bytes)
+        {
+            *self.constraint_registry.write().unwrap() = reg;
         }
-        if let Some(bytes) = load(b"phase9:functional") {
-            if let Ok(fp) = bincode::deserialize(&bytes) {
-                *self.functional_predicates.write().unwrap() = fp;
-            }
+        if let Some(bytes) = load(b"phase9:functional")
+            && let Ok(fp) = bincode::deserialize(&bytes)
+        {
+            *self.functional_predicates.write().unwrap() = fp;
         }
-        if let Some(bytes) = load(b"phase9:disjointness") {
-            if let Ok(dc) = bincode::deserialize(&bytes) {
-                *self.disjointness_constraints.write().unwrap() = dc;
-            }
+        if let Some(bytes) = load(b"phase9:disjointness")
+            && let Ok(dc) = bincode::deserialize(&bytes)
+        {
+            *self.disjointness_constraints.write().unwrap() = dc;
         }
-        if let Some(bytes) = load(b"phase9:skolem") {
-            if let Ok(reg) = bincode::deserialize(&bytes) {
-                *self.skolem_registry.write().unwrap() = reg;
-            }
+        if let Some(bytes) = load(b"phase9:skolem")
+            && let Ok(reg) = bincode::deserialize(&bytes)
+        {
+            *self.skolem_registry.write().unwrap() = reg;
         }
-        if let Some(bytes) = load(b"phase9:nart") {
-            if let Ok(reg) = bincode::deserialize(&bytes) {
-                *self.nart_registry.write().unwrap() = reg;
-            }
+        if let Some(bytes) = load(b"phase9:nart")
+            && let Ok(reg) = bincode::deserialize(&bytes)
+        {
+            *self.nart_registry.write().unwrap() = reg;
         }
         // hierarchy_dirty stays true — rebuilt from KG on first use.
     }

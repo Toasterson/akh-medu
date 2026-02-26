@@ -14,7 +14,7 @@ use crate::symbol::{SymbolId, SymbolKind};
 use crate::vsa::HyperVec;
 
 use super::agent::AgentPredicates;
-use super::error::{AgentError, AgentResult};
+use super::error::AgentResult;
 use super::goal::Goal;
 
 // ---------------------------------------------------------------------------
@@ -310,7 +310,7 @@ pub fn create_project(
 pub fn restore_projects(
     engine: &Engine,
     predicates: &ProjectPredicates,
-    agent_predicates: &AgentPredicates,
+    _agent_predicates: &AgentPredicates,
 ) -> AgentResult<Vec<Project>> {
     let mut projects = Vec::new();
 
@@ -468,13 +468,12 @@ pub fn assign_goal_to_project(
     let mut best_project: Option<SymbolId> = None;
 
     for project in projects {
-        if let Some(ref scope_vec) = project.scope_vector {
-            if let Ok(sim) = ops.similarity(&goal_vec, scope_vec) {
-                if sim > best_sim {
-                    best_sim = sim;
-                    best_project = Some(project.id);
-                }
-            }
+        if let Some(ref scope_vec) = project.scope_vector
+            && let Ok(sim) = ops.similarity(&goal_vec, scope_vec)
+            && sim > best_sim
+        {
+            best_sim = sim;
+            best_project = Some(project.id);
         }
     }
 

@@ -263,10 +263,10 @@ fn matches_bare_verb(word: &str, verb: &str) -> bool {
     }
     // Match 3rd-person forms: "agrees" for "agree", "influences" for "influence",
     // "produces" for "produce", "resembles" for "resemble", "opposes" for "oppose".
-    if let Some(stem) = word.strip_suffix('s') {
-        if stem == verb {
-            return true;
-        }
+    if let Some(stem) = word.strip_suffix('s')
+        && stem == verb
+    {
+        return true;
         // "es" suffix: "produces" → strip "es" → "produc" != "produce", but
         // strip "s" → "produce" == "produce" ✓ (already handled above).
         // Handle verbs ending in 'e': "influences" → strip "s" → "influence" ✓.
@@ -280,7 +280,7 @@ pub fn extract_richer_triples(sentence: &str) -> Vec<ExtractedTriple> {
     let mut results = Vec::new();
     let s = sentence
         .trim()
-        .trim_end_matches(|c: char| c == '.' || c == '!' || c == '?');
+        .trim_end_matches(['.', '!', '?']);
     let words: Vec<&str> = s.split_whitespace().collect();
     if words.len() < 3 {
         return results;
@@ -325,10 +325,10 @@ pub fn extract_richer_triples(sentence: &str) -> Vec<ExtractedTriple> {
                 // Try conjunction splitting on subject.
                 let subjects = split_conjunction(subj_words);
                 for subj_span in &subjects {
-                    if let Some(subj) = extract_head_noun_phrase(subj_span) {
-                        if let Some(obj) = extract_head_noun_phrase(obj_words) {
-                            results.push((subj, verb.to_string(), obj, conf));
-                        }
+                    if let Some(subj) = extract_head_noun_phrase(subj_span)
+                        && let Some(obj) = extract_head_noun_phrase(obj_words)
+                    {
+                        results.push((subj, verb.to_string(), obj, conf));
                     }
                 }
                 break; // Only match first occurrence of this verb.
@@ -432,10 +432,10 @@ fn extract_conjunction_relational(
             };
 
             for subj_span in &subjects {
-                if let Some(subj) = extract_head_noun_phrase(subj_span) {
-                    if let Some(obj) = extract_head_noun_phrase(obj_words) {
-                        results.push((subj, predicate.to_string(), obj, conf));
-                    }
+                if let Some(subj) = extract_head_noun_phrase(subj_span)
+                    && let Some(obj) = extract_head_noun_phrase(obj_words)
+                {
+                    results.push((subj, predicate.to_string(), obj, conf));
                 }
             }
             return; // Found a pattern, done.
@@ -462,7 +462,7 @@ pub fn extract_concepts_from_chunk(
         .collect();
 
     // --- Capitalized sequences (confidence 0.8) ---
-    for sentence in text.split(|c: char| c == '.' || c == '!' || c == '?') {
+    for sentence in text.split(['.', '!', '?']) {
         let words: Vec<&str> = sentence.split_whitespace().collect();
         if words.len() < 2 {
             continue;
@@ -471,7 +471,7 @@ pub fn extract_concepts_from_chunk(
         let mut i = 1;
         while i < words.len() {
             let w = words[i].trim_matches(|c: char| !c.is_alphanumeric());
-            if !w.is_empty() && w.chars().next().map_or(false, |c| c.is_uppercase())
+            if !w.is_empty() && w.chars().next().is_some_and(|c| c.is_uppercase())
                 && w.len() > 1
                 && !is_stopword(w)
             {
@@ -481,7 +481,7 @@ pub fn extract_concepts_from_chunk(
                 while end < words.len() && end - start < 3 {
                     let next = words[end].trim_matches(|c: char| !c.is_alphanumeric());
                     if !next.is_empty()
-                        && next.chars().next().map_or(false, |c| c.is_uppercase())
+                        && next.chars().next().is_some_and(|c| c.is_uppercase())
                     {
                         end += 1;
                     } else {

@@ -37,12 +37,12 @@ fn extract_metadata(document: &Html) -> DocumentMetadata {
     let mut meta = DocumentMetadata::default();
 
     // <title> tag
-    if let Ok(sel) = Selector::parse("title") {
-        if let Some(el) = document.select(&sel).next() {
-            let title = el.text().collect::<String>().trim().to_string();
-            if !title.is_empty() {
-                meta.title = Some(title);
-            }
+    if let Ok(sel) = Selector::parse("title")
+        && let Some(el) = document.select(&sel).next()
+    {
+        let title = el.text().collect::<String>().trim().to_string();
+        if !title.is_empty() {
+            meta.title = Some(title);
         }
     }
 
@@ -67,14 +67,12 @@ fn extract_metadata(document: &Html) -> DocumentMetadata {
     }
 
     // <html lang="..."> attribute
-    if meta.language.is_none() {
-        if let Ok(sel) = Selector::parse("html") {
-            if let Some(el) = document.select(&sel).next() {
-                if let Some(lang) = el.value().attr("lang") {
-                    meta.language = Some(lang.to_string());
-                }
-            }
-        }
+    if meta.language.is_none()
+        && let Ok(sel) = Selector::parse("html")
+        && let Some(el) = document.select(&sel).next()
+        && let Some(lang) = el.value().attr("lang")
+    {
+        meta.language = Some(lang.to_string());
     }
 
     meta

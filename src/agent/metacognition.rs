@@ -347,7 +347,7 @@ impl FailureIndex {
     pub fn from_cases(cases: Vec<FailureCase>) -> Self {
         let max_elements = cases.len().max(1000);
         let max_layer = (max_elements as f64).log2().ceil() as usize;
-        let max_layer = max_layer.max(4).min(16);
+        let max_layer = max_layer.clamp(4, 16);
         let hnsw = Hnsw::new(max_layer, max_elements, 16, 200, DistHamming {});
 
         // Re-insert all cases into the HNSW index.
@@ -883,16 +883,16 @@ pub fn evaluate_goals(
         }
 
         // Justification validation.
-        if let Some(ref justification) = goal.justification {
-            if !is_justification_valid(justification, goals, engine) {
-                signals.push(MetacognitiveControl::InvalidateJustification {
-                    goal_id: goal.symbol_id,
-                    reason: format!(
-                        "Justification no longer holds for goal \"{}\"",
-                        goal.description.chars().take(40).collect::<String>()
-                    ),
-                });
-            }
+        if let Some(ref justification) = goal.justification
+            && !is_justification_valid(justification, goals, engine)
+        {
+            signals.push(MetacognitiveControl::InvalidateJustification {
+                goal_id: goal.symbol_id,
+                reason: format!(
+                    "Justification no longer holds for goal \"{}\"",
+                    goal.description.chars().take(40).collect::<String>()
+                ),
+            });
         }
     }
 

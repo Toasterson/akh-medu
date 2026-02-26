@@ -797,10 +797,7 @@ pub fn decompose_goal_htn(
 
     // Fallback: existing comma/and splitting.
     let sub_descs = goal::generate_sub_goal_descriptions(&goal.description);
-    let sub_goals: Vec<(String, u8, String)> = sub_descs
-        .into_iter()
-        .map(|(d, p, c)| (d, p, c))
-        .collect();
+    let sub_goals: Vec<(String, u8, String)> = sub_descs;
 
     // Build a trivial sequential TaskTree for the fallback.
     let mut dag: DiGraph<TaskNode, DependencyEdge> = DiGraph::new();

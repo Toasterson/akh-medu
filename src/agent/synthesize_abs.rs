@@ -303,109 +303,109 @@ fn build_code_section(facts: &[ExtractedFact], engine: &Engine) -> AbsTree {
     let mut body: Vec<AbsTree> = Vec::new();
     let mut rendered_children: HashSet<String> = HashSet::new();
 
-    if let Some(ref primary_name) = primary {
-        if let Some(children) = modules.get(primary_name) {
-            // Sort children by importance.
-            let mut sorted_children: Vec<&String> = children.iter().collect();
-            sorted_children.sort_by(|a, b| {
-                let imp_a = get_importance(a).unwrap_or(0.0);
-                let imp_b = get_importance(b).unwrap_or(0.0);
-                imp_b
-                    .partial_cmp(&imp_a)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
+    if let Some(ref primary_name) = primary
+        && let Some(children) = modules.get(primary_name)
+    {
+        // Sort children by importance.
+        let mut sorted_children: Vec<&String> = children.iter().collect();
+        sorted_children.sort_by(|a, b| {
+            let imp_a = get_importance(a).unwrap_or(0.0);
+            let imp_b = get_importance(b).unwrap_or(0.0);
+            imp_b
+                .partial_cmp(&imp_a)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
-            // Truncation: > 8 children → show top 5.
-            let total_children = sorted_children.len();
-            let display_children = if total_children > 8 {
-                &sorted_children[..5]
-            } else {
-                &sorted_children
-            };
+        // Truncation: > 8 children → show top 5.
+        let total_children = sorted_children.len();
+        let display_children = if total_children > 8 {
+            &sorted_children[..5]
+        } else {
+            &sorted_children
+        };
 
-            // Build child AbsTree nodes.
-            let mut child_nodes: Vec<AbsTree> = Vec::new();
-            for child in display_children {
-                child_nodes.push(build_child_node(
-                    child,
-                    &functions,
-                    &types,
-                    &get_role,
+        // Build child AbsTree nodes.
+        let mut child_nodes: Vec<AbsTree> = Vec::new();
+        for child in display_children {
+            child_nodes.push(build_child_node(
+                child,
+                &functions,
+                &types,
+                &get_role,
+                &get_importance,
+                &get_doc,
+                &get_fn_signature,
+                &get_fields,
+                &get_derives,
+            ));
+            rendered_children.insert((*child).clone());
+        }
+
+        if total_children > 8 {
+            child_nodes.push(AbsTree::Freeform(format!(
+                "...and {} more",
+                total_children - 5,
+            )));
+        }
+
+        // Primary module node with enrichment.
+        let primary_doc = get_doc(primary_name).map(|d| first_sentence_of(&d));
+        let primary_role = get_role(primary_name);
+        let primary_imp = get_importance(primary_name);
+
+        body.push(AbsTree::code_module(
+            primary_name.clone(),
+            primary_role,
+            primary_imp,
+            primary_doc,
+            child_nodes,
+        ));
+
+        // Data flow chain.
+        if let Some(ref preds) = sem_preds {
+            let child_syms: Vec<crate::symbol::SymbolId> = sorted_children
+                .iter()
+                .filter_map(|c| resolve_sym(c))
+                .collect();
+            let flow_chain =
+                super::semantic_enrichment::build_flow_chain(engine, preds, &child_syms);
+            if flow_chain.len() >= 2 {
+                let steps: Vec<DataFlowStep> = flow_chain
+                    .iter()
+                    .map(|(name, via)| DataFlowStep {
+                        name: name.clone(),
+                        via_type: via.clone(),
+                    })
+                    .collect();
+                body.push(AbsTree::data_flow(steps));
+            }
+        }
+
+        // Primary entity's own types.
+        if let Some(ts) = types.get(primary_name) {
+            for t in ts {
+                body.push(build_type_signature(
+                    t,
                     &get_importance,
-                    &get_doc,
-                    &get_fn_signature,
                     &get_fields,
                     &get_derives,
+                    &get_doc,
                 ));
-                rendered_children.insert((*child).clone());
             }
-
-            if total_children > 8 {
-                child_nodes.push(AbsTree::Freeform(format!(
-                    "...and {} more",
-                    total_children - 5,
-                )));
-            }
-
-            // Primary module node with enrichment.
-            let primary_doc = get_doc(primary_name).map(|d| first_sentence_of(&d));
-            let primary_role = get_role(primary_name);
-            let primary_imp = get_importance(primary_name);
-
-            body.push(AbsTree::code_module(
-                primary_name.clone(),
-                primary_role,
-                primary_imp,
-                primary_doc,
-                child_nodes,
-            ));
-
-            // Data flow chain.
-            if let Some(ref preds) = sem_preds {
-                let child_syms: Vec<crate::symbol::SymbolId> = sorted_children
-                    .iter()
-                    .filter_map(|c| resolve_sym(c))
-                    .collect();
-                let flow_chain =
-                    super::semantic_enrichment::build_flow_chain(engine, preds, &child_syms);
-                if flow_chain.len() >= 2 {
-                    let steps: Vec<DataFlowStep> = flow_chain
-                        .iter()
-                        .map(|(name, via)| DataFlowStep {
-                            name: name.clone(),
-                            via_type: via.clone(),
-                        })
-                        .collect();
-                    body.push(AbsTree::data_flow(steps));
-                }
-            }
-
-            // Primary entity's own types.
-            if let Some(ts) = types.get(primary_name) {
-                for t in ts {
-                    body.push(build_type_signature(
-                        t,
-                        &get_importance,
-                        &get_fields,
-                        &get_derives,
-                        &get_doc,
-                    ));
-                }
-            }
-
-            // Primary entity's deps.
-            if let Some(ds) = deps.get(primary_name) {
-                for d in ds {
-                    body.push(AbsTree::CodeFact {
-                        kind: "dependency".to_string(),
-                        name: primary_name.clone(),
-                        detail: d.clone(),
-                    });
-                }
-            }
-
-            rendered_children.insert(primary_name.clone());
         }
+
+        // Primary entity's deps.
+        if let Some(ds) = deps.get(primary_name) {
+            for d in ds {
+                body.push(AbsTree::CodeFact {
+                    kind: "dependency".to_string(),
+                    name: primary_name.clone(),
+                    detail: d.clone(),
+                });
+            }
+        }
+
+        rendered_children.insert(primary_name.clone());
     }
 
     // Render remaining entities not covered by the hierarchical tree.
@@ -482,6 +482,7 @@ fn build_code_section(facts: &[ExtractedFact], engine: &Engine) -> AbsTree {
 }
 
 /// Build a child module/signature node for a sub-component.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn build_child_node(
     child: &str,
     functions: &BTreeMap<String, Vec<String>>,
@@ -522,6 +523,7 @@ fn build_child_node(
 }
 
 /// Build a function CodeSignature node.
+#[allow(clippy::type_complexity)]
 fn build_fn_signature(
     name: &str,
     get_fn_signature: &dyn Fn(&str) -> (Vec<String>, Option<String>),

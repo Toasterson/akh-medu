@@ -259,7 +259,7 @@ pub fn generate_plan(
     let mut strategy_parts = Vec::new();
 
     // On backtrack attempts, try a different strategy ordering.
-    let explore_first = attempt % 2 == 0;
+    let explore_first = attempt.is_multiple_of(2);
 
     if explore_first {
         // Strategy A: explore → reason → synthesize
@@ -446,7 +446,7 @@ pub fn generate_plan(
                     "file_io" => (
                         ToolInput::new()
                             .with_param("action", "read")
-                            .with_param("path", &format!("{}.txt", goal_label.replace(' ', "_"))),
+                            .with_param("path", format!("{}.txt", goal_label.replace(' ', "_"))),
                         format!("VSA-selected file I/O (similarity: {score:.3})."),
                     ),
                     "http_fetch" => (
@@ -479,7 +479,7 @@ pub fn generate_plan(
                     tool_name: "file_io".into(),
                     tool_input: ToolInput::new()
                         .with_param("action", "read")
-                        .with_param("path", &format!("{}.txt", goal_label.replace(' ', "_"))),
+                        .with_param("path", format!("{}.txt", goal_label.replace(' ', "_"))),
                     rationale: "Access file data relevant to the goal.".into(),
                     status: StepStatus::Pending,
                     index: steps.len(),
@@ -630,7 +630,7 @@ fn generate_code_plan(
     let scope = detect_code_scope(&goal_lower);
 
     // Strategy alternation for backtracking
-    let scaffold_first = attempt % 2 == 0;
+    let scaffold_first = attempt.is_multiple_of(2);
 
     if scaffold_first {
         // Strategy A: scaffold-first — generate skeleton, then fill in

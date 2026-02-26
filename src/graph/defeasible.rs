@@ -12,7 +12,7 @@
 //! 4. Recency (newer triples break ties)
 //! 5. Confidence (higher confidence as final tiebreaker)
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashSet, VecDeque};
 
 use serde::{Deserialize, Serialize};
 
@@ -21,7 +21,6 @@ use crate::error::AkhResult;
 use crate::graph::Triple;
 use crate::symbol::SymbolId;
 
-use super::predicate_hierarchy::PredicateHierarchy;
 
 // ---------------------------------------------------------------------------
 // Well-known predicates
@@ -137,6 +136,7 @@ pub fn type_depth(engine: &Engine, symbol: SymbolId, is_a_pred: SymbolId) -> usi
 }
 
 /// Check if `specific_type` is a (transitive) subtype of `general_type` via `is-a` chains.
+#[cfg(test)]
 fn is_subtype_of(
     engine: &Engine,
     specific_type: SymbolId,

@@ -62,7 +62,7 @@ impl ItemMemory {
         // ef_construction: 200 (higher = better recall during build)
         // max_layer: computed from expected elements
         let max_layer = (max_elements as f64).log2().ceil() as usize;
-        let max_layer = max_layer.max(4).min(16);
+        let max_layer = max_layer.clamp(4, 16);
 
         let hnsw = Hnsw::new(max_layer, max_elements, 16, 200, DistHamming {});
 
@@ -196,7 +196,7 @@ impl std::fmt::Debug for ItemMemory {
 
 /// Convert a byte slice to a `Vec<u32>` for HNSW Hamming distance.
 fn bytes_to_u32_vec(bytes: &[u8]) -> Vec<u32> {
-    let mut result = Vec::with_capacity((bytes.len() + 3) / 4);
+    let mut result = Vec::with_capacity(bytes.len().div_ceil(4));
     for chunk in bytes.chunks(4) {
         let mut word = [0u8; 4];
         word[..chunk.len()].copy_from_slice(chunk);

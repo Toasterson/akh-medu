@@ -22,6 +22,7 @@ use crate::symbol::SymbolId;
 use crate::vsa::encode::encode_label;
 
 /// Configuration for the ingestion pipeline.
+#[derive(Default)]
 pub struct IngestConfig {
     /// Override the detected title.
     pub title: Option<String>,
@@ -33,16 +34,6 @@ pub struct IngestConfig {
     pub chunk_config: ChunkConfig,
 }
 
-impl Default for IngestConfig {
-    fn default() -> Self {
-        Self {
-            title: None,
-            tags: Vec::new(),
-            format: None,
-            chunk_config: ChunkConfig::default(),
-        }
-    }
-}
 
 /// Result of a successful document ingestion.
 pub struct IngestResult {
@@ -336,6 +327,7 @@ fn add_triple(
 }
 
 /// Add metadata triples for the document.
+#[allow(clippy::too_many_arguments)]
 fn add_metadata_triples(
     engine: &Engine,
     doc_sym: SymbolId,
@@ -577,7 +569,7 @@ fn extract_triples(sentence: &str) -> Vec<ExtractedTriple> {
     let mut results = Vec::new();
     let s = sentence
         .trim()
-        .trim_end_matches(|c: char| c == '.' || c == '!' || c == '?');
+        .trim_end_matches(['.', '!', '?']);
     let words: Vec<&str> = s.split_whitespace().collect();
     if words.len() < 3 {
         return results;

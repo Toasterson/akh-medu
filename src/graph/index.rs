@@ -158,22 +158,22 @@ impl KnowledgeGraph {
         let mut removed = 0;
         for ei in to_remove {
             // Capture the edge data before removing so we can update the predicate index.
-            if let Some(edge) = graph.edge_weight(ei).cloned() {
-                if let Some((src, dst)) = graph.edge_endpoints(ei) {
-                    let subject = graph.node_weight(src).copied();
-                    let object = graph.node_weight(dst).copied();
+            if let Some(edge) = graph.edge_weight(ei).cloned()
+                && let Some((src, dst)) = graph.edge_endpoints(ei)
+            {
+                let subject = graph.node_weight(src).copied();
+                let object = graph.node_weight(dst).copied();
 
-                    graph.remove_edge(ei);
+                graph.remove_edge(ei);
 
-                    // Update predicate index.
-                    if let (Some(s), Some(o)) = (subject, object) {
-                        if let Some(mut pairs) = self.predicate_index.get_mut(&edge.predicate) {
-                            pairs.retain(|&(ps, po)| !(ps == s && po == o));
-                        }
-                    }
-
-                    removed += 1;
+                // Update predicate index.
+                if let (Some(s), Some(o)) = (subject, object)
+                    && let Some(mut pairs) = self.predicate_index.get_mut(&edge.predicate)
+                {
+                    pairs.retain(|&(ps, po)| !(ps == s && po == o));
                 }
+
+                removed += 1;
             }
         }
 

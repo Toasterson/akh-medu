@@ -42,10 +42,10 @@ impl<'a> LinContext<'a> {
     /// Resolve a label: if a symbol registry is available, look up the
     /// canonical label; otherwise return the original.
     pub fn resolve_label(&self, label: &str, symbol_id: Option<crate::symbol::SymbolId>) -> String {
-        if let (Some(registry), Some(id)) = (self.registry, symbol_id) {
-            if let Some(meta) = registry.get(id) {
-                return meta.label;
-            }
+        if let (Some(registry), Some(id)) = (self.registry, symbol_id)
+            && let Some(meta) = registry.get(id)
+        {
+            return meta.label;
         }
         label.to_string()
     }

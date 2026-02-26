@@ -688,26 +688,26 @@ impl ProvenanceLedger {
     pub fn open(db: Arc<Database>) -> ProvenanceResult<Self> {
         // Ensure tables exist by opening a write txn.
         {
-            let txn = db.begin_write().map_err(|e| redb_err(e))?;
+            let txn = db.begin_write().map_err(redb_err)?;
             // Opening the tables creates them if absent.
-            txn.open_table(PROVENANCE_TABLE).map_err(|e| redb_err(e))?;
+            txn.open_table(PROVENANCE_TABLE).map_err(redb_err)?;
             txn.open_multimap_table(DERIVED_INDEX)
-                .map_err(|e| redb_err(e))?;
+                .map_err(redb_err)?;
             txn.open_multimap_table(SOURCE_INDEX)
-                .map_err(|e| redb_err(e))?;
+                .map_err(redb_err)?;
             txn.open_multimap_table(KIND_INDEX)
-                .map_err(|e| redb_err(e))?;
-            txn.commit().map_err(|e| redb_err(e))?;
+                .map_err(redb_err)?;
+            txn.commit().map_err(redb_err)?;
         }
 
         // Recover max ID from the primary table.
         let max_id = {
-            let txn = db.begin_read().map_err(|e| redb_err(e))?;
-            let table = txn.open_table(PROVENANCE_TABLE).map_err(|e| redb_err(e))?;
+            let txn = db.begin_read().map_err(redb_err)?;
+            let table = txn.open_table(PROVENANCE_TABLE).map_err(redb_err)?;
             let mut max = 0u64;
-            let iter = table.iter().map_err(|e| redb_err(e))?;
+            let iter = table.iter().map_err(redb_err)?;
             for entry in iter {
-                let (key_guard, _val_guard) = entry.map_err(|e| redb_err(e))?;
+                let (key_guard, _val_guard) = entry.map_err(redb_err)?;
                 let key: u64 = key_guard.value();
                 if key > max {
                     max = key;
@@ -735,36 +735,36 @@ impl ProvenanceLedger {
             })
         })?;
 
-        let txn = self.db.begin_write().map_err(|e| redb_err(e))?;
+        let txn = self.db.begin_write().map_err(redb_err)?;
         {
-            let mut table = txn.open_table(PROVENANCE_TABLE).map_err(|e| redb_err(e))?;
+            let mut table = txn.open_table(PROVENANCE_TABLE).map_err(redb_err)?;
             table
                 .insert(raw_id, encoded.as_slice())
-                .map_err(|e| redb_err(e))?;
+                .map_err(redb_err)?;
         }
         {
             let mut idx = txn
                 .open_multimap_table(DERIVED_INDEX)
-                .map_err(|e| redb_err(e))?;
+                .map_err(redb_err)?;
             idx.insert(record.derived_id.get(), raw_id)
-                .map_err(|e| redb_err(e))?;
+                .map_err(redb_err)?;
         }
         {
             let mut idx = txn
                 .open_multimap_table(SOURCE_INDEX)
-                .map_err(|e| redb_err(e))?;
+                .map_err(redb_err)?;
             for src in &record.sources {
-                idx.insert(src.get(), raw_id).map_err(|e| redb_err(e))?;
+                idx.insert(src.get(), raw_id).map_err(redb_err)?;
             }
         }
         {
             let mut idx = txn
                 .open_multimap_table(KIND_INDEX)
-                .map_err(|e| redb_err(e))?;
+                .map_err(redb_err)?;
             idx.insert(record.kind.tag(), raw_id)
-                .map_err(|e| redb_err(e))?;
+                .map_err(redb_err)?;
         }
-        txn.commit().map_err(|e| redb_err(e))?;
+        txn.commit().map_err(redb_err)?;
 
         Ok(prov_id)
     }
@@ -797,53 +797,53 @@ impl ProvenanceLedger {
             encoded_batch.push((raw_id, encoded));
         }
 
-        let txn = self.db.begin_write().map_err(|e| redb_err(e))?;
+        let txn = self.db.begin_write().map_err(redb_err)?;
         {
-            let mut table = txn.open_table(PROVENANCE_TABLE).map_err(|e| redb_err(e))?;
+            let mut table = txn.open_table(PROVENANCE_TABLE).map_err(redb_err)?;
             for (raw_id, encoded) in &encoded_batch {
                 table
                     .insert(*raw_id, encoded.as_slice())
-                    .map_err(|e| redb_err(e))?;
+                    .map_err(redb_err)?;
             }
         }
         {
             let mut derived_idx = txn
                 .open_multimap_table(DERIVED_INDEX)
-                .map_err(|e| redb_err(e))?;
+                .map_err(redb_err)?;
             let mut source_idx = txn
                 .open_multimap_table(SOURCE_INDEX)
-                .map_err(|e| redb_err(e))?;
+                .map_err(redb_err)?;
             let mut kind_idx = txn
                 .open_multimap_table(KIND_INDEX)
-                .map_err(|e| redb_err(e))?;
+                .map_err(redb_err)?;
 
             for (i, (raw_id, _)) in encoded_batch.iter().enumerate() {
                 let record = &records[i];
                 derived_idx
                     .insert(record.derived_id.get(), *raw_id)
-                    .map_err(|e| redb_err(e))?;
+                    .map_err(redb_err)?;
                 for src in &record.sources {
                     source_idx
                         .insert(src.get(), *raw_id)
-                        .map_err(|e| redb_err(e))?;
+                        .map_err(redb_err)?;
                 }
                 kind_idx
                     .insert(record.kind.tag(), *raw_id)
-                    .map_err(|e| redb_err(e))?;
+                    .map_err(redb_err)?;
             }
         }
-        txn.commit().map_err(|e| redb_err(e))?;
+        txn.commit().map_err(redb_err)?;
 
         Ok(ids)
     }
 
     /// Get a provenance record by its ID.
     pub fn get(&self, id: ProvenanceId) -> ProvenanceResult<ProvenanceRecord> {
-        let txn = self.db.begin_read().map_err(|e| redb_err(e))?;
-        let table = txn.open_table(PROVENANCE_TABLE).map_err(|e| redb_err(e))?;
+        let txn = self.db.begin_read().map_err(redb_err)?;
+        let table = txn.open_table(PROVENANCE_TABLE).map_err(redb_err)?;
         let guard = table
             .get(id.get())
-            .map_err(|e| redb_err(e))?
+            .map_err(redb_err)?
             .ok_or(ProvenanceError::NotFound { id: id.get() })?;
         let record: ProvenanceRecord = bincode::deserialize(guard.value()).map_err(|e| {
             ProvenanceError::Store(StoreError::Serialization {
@@ -872,9 +872,9 @@ impl ProvenanceLedger {
 
     /// Total number of provenance records.
     pub fn len(&self) -> ProvenanceResult<usize> {
-        let txn = self.db.begin_read().map_err(|e| redb_err(e))?;
-        let table = txn.open_table(PROVENANCE_TABLE).map_err(|e| redb_err(e))?;
-        Ok(table.len().map_err(|e| redb_err(e))? as usize)
+        let txn = self.db.begin_read().map_err(redb_err)?;
+        let table = txn.open_table(PROVENANCE_TABLE).map_err(redb_err)?;
+        Ok(table.len().map_err(redb_err)? as usize)
     }
 
     /// Whether the ledger has no records.
@@ -892,20 +892,20 @@ impl ProvenanceLedger {
         table_def: &MultimapTableDefinition<u64, u64>,
         key: u64,
     ) -> ProvenanceResult<Vec<ProvenanceRecord>> {
-        let txn = self.db.begin_read().map_err(|e| redb_err(e))?;
+        let txn = self.db.begin_read().map_err(redb_err)?;
         let idx = txn
             .open_multimap_table(*table_def)
-            .map_err(|e| redb_err(e))?;
-        let primary = txn.open_table(PROVENANCE_TABLE).map_err(|e| redb_err(e))?;
+            .map_err(redb_err)?;
+        let primary = txn.open_table(PROVENANCE_TABLE).map_err(redb_err)?;
 
-        let values = idx.get(key).map_err(|e| redb_err(e))?;
+        let values = idx.get(key).map_err(redb_err)?;
 
         let mut records = Vec::new();
         for entry in values {
-            let raw_id = entry.map_err(|e| redb_err(e))?.value();
+            let raw_id = entry.map_err(redb_err)?.value();
             let guard = primary
                 .get(raw_id)
-                .map_err(|e| redb_err(e))?
+                .map_err(redb_err)?
                 .ok_or(ProvenanceError::NotFound { id: raw_id })?;
             let record: ProvenanceRecord = bincode::deserialize(guard.value()).map_err(|e| {
                 ProvenanceError::Store(StoreError::Serialization {
@@ -919,20 +919,20 @@ impl ProvenanceLedger {
 
     /// Retrieve records given a u8-keyed multimap index (kind).
     fn records_from_kind_index(&self, tag: u8) -> ProvenanceResult<Vec<ProvenanceRecord>> {
-        let txn = self.db.begin_read().map_err(|e| redb_err(e))?;
+        let txn = self.db.begin_read().map_err(redb_err)?;
         let idx = txn
             .open_multimap_table(KIND_INDEX)
-            .map_err(|e| redb_err(e))?;
-        let primary = txn.open_table(PROVENANCE_TABLE).map_err(|e| redb_err(e))?;
+            .map_err(redb_err)?;
+        let primary = txn.open_table(PROVENANCE_TABLE).map_err(redb_err)?;
 
-        let values = idx.get(tag).map_err(|e| redb_err(e))?;
+        let values = idx.get(tag).map_err(redb_err)?;
 
         let mut records = Vec::new();
         for entry in values {
-            let raw_id = entry.map_err(|e| redb_err(e))?.value();
+            let raw_id = entry.map_err(redb_err)?.value();
             let guard = primary
                 .get(raw_id)
-                .map_err(|e| redb_err(e))?
+                .map_err(redb_err)?
                 .ok_or(ProvenanceError::NotFound { id: raw_id })?;
             let record: ProvenanceRecord = bincode::deserialize(guard.value()).map_err(|e| {
                 ProvenanceError::Store(StoreError::Serialization {

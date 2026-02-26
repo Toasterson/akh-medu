@@ -283,7 +283,7 @@ fn build_architecture_doc(engine: &Engine, preds: &CodePredicates) -> Vec<DocSec
             sorted.sort();
             let body = sorted.join(", ");
             type_section = type_section
-                .with_subsection(DocSection::new(format!("{type_name}")).with_body(body));
+                .with_subsection(DocSection::new(type_name.to_string()).with_body(body));
         }
         sections.push(type_section);
     }
