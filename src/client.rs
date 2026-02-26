@@ -891,6 +891,38 @@ impl AkhClient {
     }
 
     // -----------------------------------------------------------------------
+    // Awaken status
+    // -----------------------------------------------------------------------
+
+    /// Query the awaken (psyche/identity) status.
+    pub fn awaken_status(&self) -> ClientResult<serde_json::Value> {
+        match self {
+            AkhClient::Local(engine) => {
+                let psyche = engine.compartments().and_then(|m| m.psyche());
+
+                let agent_config = crate::agent::AgentConfig::default();
+                let agent = crate::agent::Agent::new(Arc::clone(engine), agent_config)
+                    .map_err(|e| ClientError::Engine(crate::error::AkhError::Agent(e)))?;
+
+                let active_goals = agent
+                    .goals()
+                    .iter()
+                    .filter(|g| matches!(g.status, crate::agent::GoalStatus::Active))
+                    .count();
+
+                Ok(serde_json::json!({
+                    "awakened": psyche.is_some(),
+                    "psyche": psyche,
+                    "active_goals": active_goals,
+                    "total_goals": agent.goals().len(),
+                    "cycle_count": agent.cycle_count(),
+                }))
+            }
+            AkhClient::Remote { .. } => self.get_json("/awaken/status"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // Daemon (server-side only — Local returns an error)
     // -----------------------------------------------------------------------
 

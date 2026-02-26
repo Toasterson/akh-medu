@@ -1523,6 +1523,42 @@ async fn audit_get_handler(
     Ok(Json(entry))
 }
 
+// ── Awaken status handler ─────────────────────────────────────────────
+
+#[derive(Serialize)]
+struct AwakenStatusResponse {
+    awakened: bool,
+    psyche: Option<akh_medu::compartment::psyche::Psyche>,
+    active_goals: usize,
+    total_goals: usize,
+    cycle_count: u64,
+}
+
+async fn awaken_status_handler(
+    State(state): State<Arc<ServerState>>,
+    Path(ws_name): Path<String>,
+) -> Result<Json<AwakenStatusResponse>, (StatusCode, String)> {
+    let engine = state.get_engine(&ws_name).await?;
+    let psyche = engine.compartments().and_then(|m| m.psyche());
+
+    let agent = Agent::new(Arc::clone(&engine), AgentConfig::default())
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?;
+
+    let active_goals = agent
+        .goals()
+        .iter()
+        .filter(|g| matches!(g.status, akh_medu::agent::GoalStatus::Active))
+        .count();
+
+    Ok(Json(AwakenStatusResponse {
+        awakened: psyche.is_some(),
+        psyche,
+        active_goals,
+        total_goals: agent.goals().len(),
+        cycle_count: agent.cycle_count(),
+    }))
+}
+
 // ── Goals handler ──────────────────────────────────────────────────────
 
 async fn goals_handler(
@@ -1819,6 +1855,11 @@ async fn main() {
         .route(
             "/workspaces/{ws_name}/goals",
             get(goals_handler),
+        )
+        // Awaken status.
+        .route(
+            "/workspaces/{ws_name}/awaken/status",
+            get(awaken_status_handler),
         )
         // Engine info.
         .route("/workspaces/{ws_name}/info", get(engine_info))

@@ -669,9 +669,13 @@ impl AkhTui {
                 )));
             }
             crate::agent::UserIntent::AwakenCommand { subcommand, args } => {
-                self.messages.push(AkhMessage::system(format!(
-                    "Awaken commands are available via the CLI: akh awaken {subcommand} {args}",
-                )));
+                if subcommand == "status" {
+                    self.handle_awaken_status();
+                } else {
+                    self.messages.push(AkhMessage::system(format!(
+                        "Awaken commands are available via the CLI: akh awaken {subcommand} {args}",
+                    )));
+                }
             }
             crate::agent::UserIntent::Freeform { ref text } => {
                 escalate_to_goal(
@@ -790,6 +794,45 @@ impl AkhTui {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Display awaken/psyche status for both local and remote backends.
+    fn handle_awaken_status(&mut self) {
+        match &self.backend {
+            ChatBackend::Local(local) => {
+                let psyche = local.engine.compartments().and_then(|m| m.psyche());
+                if let Some(p) = psyche {
+                    self.messages.push(AkhMessage::system(format!(
+                        "Psyche:\n\
+                         \x20 Persona:    {}\n\
+                         \x20 Grammar:    {}\n\
+                         \x20 Traits:     {:?}\n\
+                         \x20 Archetypes: sage={:.2} explorer={:.2} healer={:.2} guardian={:.2}\n\
+                         \x20 Shadow:     {} veto, {} bias patterns\n\
+                         \x20 Integration: {:.1}% (dominant: {})",
+                        p.persona.name,
+                        p.persona.grammar_preference,
+                        p.persona.traits,
+                        p.archetypes.sage,
+                        p.archetypes.explorer,
+                        p.archetypes.healer,
+                        p.archetypes.guardian,
+                        p.shadow.veto_patterns.len(),
+                        p.shadow.bias_patterns.len(),
+                        p.self_integration.individuation_level * 100.0,
+                        p.self_integration.dominant_archetype,
+                    )));
+                } else {
+                    self.messages.push(AkhMessage::system(
+                        "No psyche loaded. Run `akh awaken resolve <name>` to awaken.".to_string(),
+                    ));
+                }
+            }
+            #[cfg(feature = "daemon")]
+            ChatBackend::Remote { remote, .. } => {
+                remote.send_command("awaken status");
+            }
         }
     }
 }
