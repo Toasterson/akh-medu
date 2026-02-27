@@ -361,7 +361,7 @@ mod tests {
     #[test]
     fn functional_violation_detected() {
         let engine = Engine::new(EngineConfig::default()).unwrap();
-        let preds = ContradictionPredicates::resolve(&engine).unwrap();
+        let _preds = ContradictionPredicates::resolve(&engine).unwrap();
 
         let alice = engine.create_symbol(SymbolKind::Entity, "Alice").unwrap();
         let bob = engine.create_symbol(SymbolKind::Entity, "Bob").unwrap();

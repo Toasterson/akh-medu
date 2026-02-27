@@ -84,6 +84,17 @@ pub enum CompartmentError {
     )]
     ContextCycle { context: String },
 
+    #[error("psyche is immutable after awakening — use evolve() for gradual change")]
+    #[diagnostic(
+        code(akh::compartment::psyche_immutable),
+        help(
+            "The psyche has been finalized by the Ritual of Awakening and cannot be \
+             wholesale-replaced. Use `psyche.evolve()` for gradual adaptation, or \
+             `force_set_psyche()` for admin override."
+        )
+    )]
+    PsycheImmutable,
+
     #[error(transparent)]
     #[diagnostic(transparent)]
     Store(#[from] StoreError),

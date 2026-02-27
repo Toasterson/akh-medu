@@ -763,8 +763,8 @@ mod tests {
     #[test]
     fn assign_existing_project() {
         let engine = test_engine();
-        let ops = engine.ops();
-        let im = engine.item_memory();
+        let _ops = engine.ops();
+        let _im = engine.item_memory();
 
         // Create a project with scope vector from "rust" and "code".
         let rust_id = engine.resolve_or_create_entity("rust").unwrap();

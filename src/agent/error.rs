@@ -92,6 +92,17 @@ pub enum AgentError {
     )]
     CliToolError { tool_name: String, message: String },
 
+    #[error("psyche is immutable after awakening — use evolve() for gradual change")]
+    #[diagnostic(
+        code(akh::agent::psyche_immutable),
+        help(
+            "The agent's psyche has been finalized by the Ritual of Awakening and cannot be \
+             wholesale-replaced. Use `psyche.evolve()` for gradual adaptation, or \
+             `force_set_psyche()` for admin override."
+        )
+    )]
+    PsycheImmutable,
+
     #[error("project not found: {project_id}")]
     #[diagnostic(
         code(akh::agent::project_not_found),

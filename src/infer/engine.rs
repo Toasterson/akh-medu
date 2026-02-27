@@ -873,7 +873,7 @@ mod tests {
         kg.insert_triple(&Triple::new(dog, bio_mother, mother_dog)).unwrap();
 
         // Build hierarchy with those predicates
-        let mut hierarchy = PredicateHierarchy::new();
+        let _hierarchy = PredicateHierarchy::new();
         // Manually build (normally from KG, but we shortcut since we don't have rel:generalizes resolved)
         // We'll just use infer_with_phase9 with an empty hierarchy first
         let phase9_empty = InferPhase9Context::empty();
@@ -910,7 +910,7 @@ mod tests {
 
         // Set up temporal registry with ephemeral profile (TTL = 100s)
         let mut temporal = TemporalRegistry::new();
-        temporal.set_profile(rel, TemporalProfile::Ephemeral { ttl_secs: 100 });
+        let _ = temporal.set_profile(rel, TemporalProfile::Ephemeral { ttl_secs: 100 });
 
         let rules = crate::reason::builtin_rules();
 
@@ -957,7 +957,7 @@ mod tests {
 
         // Stable profile — no decay
         let mut temporal = TemporalRegistry::new();
-        temporal.set_profile(rel, TemporalProfile::Stable);
+        let _ = temporal.set_profile(rel, TemporalProfile::Stable);
 
         let rules = crate::reason::builtin_rules();
 

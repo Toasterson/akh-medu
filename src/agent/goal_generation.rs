@@ -663,8 +663,6 @@ pub fn provenance_from_source(source: &GoalSource) -> (String, f32) {
 mod tests {
     use super::*;
     use crate::agent::drives::DriveSystem;
-    use crate::agent::memory::WorkingMemoryEntry;
-    use crate::agent::memory::WorkingMemoryKind;
 
     #[test]
     fn proposals_from_drives_empty_when_below_threshold() {

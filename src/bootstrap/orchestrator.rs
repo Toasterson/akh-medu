@@ -1080,6 +1080,7 @@ mod tests {
                 rebalance_count: 0,
                 dominant_archetype: "sage".to_string(),
             },
+            awakened: false,
         }
     }
 }

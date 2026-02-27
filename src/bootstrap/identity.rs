@@ -56,6 +56,16 @@ pub enum IdentityError {
     )]
     PsycheConstructionFailed { reason: String },
 
+    #[error("workspace already awakened — psyche is immutable")]
+    #[diagnostic(
+        code(akh::identity::already_awakened),
+        help(
+            "This workspace already has an awakened psyche. The Ritual of Awakening \
+             cannot be performed again. Use `psyche.evolve()` for gradual adaptation."
+        )
+    )]
+    AlreadyAwakened,
+
     #[error("{0}")]
     #[diagnostic(
         code(akh::identity::engine),
@@ -772,6 +782,7 @@ pub fn build_psyche(
             rebalance_count: 0,
             dominant_archetype: archetype_profile.primary.clone(),
         },
+        awakened: false, // will be marked true by ritual_of_awakening
     };
 
     // Validate: domain should match purpose.
@@ -799,6 +810,15 @@ pub fn ritual_of_awakening(
     purpose: &PurposeModel,
     engine: &Engine,
 ) -> IdentityResult<RitualResult> {
+    // Guard: if the workspace already has an awakened psyche, refuse re-awakening.
+    if let Some(cm) = engine.compartments() {
+        if let Some(ref existing) = cm.psyche() {
+            if existing.is_awakened() {
+                return Err(IdentityError::AlreadyAwakened);
+            }
+        }
+    }
+
     let table = select_morpheme_table(character.culture);
     let mut candidates = generate_candidates(table, character.culture);
 
@@ -837,13 +857,15 @@ pub fn ritual_of_awakening(
     let chosen_name = chosen.name.clone();
     let vsa_score = chosen.vsa_score;
 
-    // Build the psyche with the chosen name.
+    // Build the psyche with the chosen name and mark as awakened.
     let mut psyche = build_psyche(character, purpose)?;
     psyche.persona.name = chosen_name.clone();
+    psyche.mark_awakened();
 
     // Update engine psyche if compartment manager is available.
     if let Some(cm) = engine.compartments() {
-        cm.set_psyche(psyche.clone());
+        // Use force_set_psyche since we just built and awakened this psyche.
+        cm.force_set_psyche(psyche.clone());
     }
 
     // Store provenance records.

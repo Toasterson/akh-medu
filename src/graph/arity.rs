@@ -366,7 +366,7 @@ mod tests {
 
     #[test]
     fn is_instance_of_direct() {
-        let (engine, preds) = setup_typed_scenario();
+        let (engine, _preds) = setup_typed_scenario();
         let alice = engine.lookup_symbol("Alice").unwrap();
         let person = engine.lookup_symbol("Person").unwrap();
 

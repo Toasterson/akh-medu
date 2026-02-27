@@ -205,6 +205,7 @@ impl AkhTui {
     }
 
     /// Called on idle (no key events).
+    #[allow(irrefutable_let_patterns)]
     fn on_idle(&mut self) {
         if let ChatBackend::Local(ref mut local) = self.backend
             && let Some(result) = local.idle_scheduler.tick(&mut local.agent)
@@ -217,6 +218,7 @@ impl AkhTui {
     }
 
     /// Called on exit — persist session, etc.
+    #[allow(irrefutable_let_patterns)]
     fn on_exit(&mut self) -> miette::Result<()> {
         if let ChatBackend::Local(ref mut local) = self.backend {
             local.agent.persist_session().into_diagnostic()?;
@@ -295,6 +297,7 @@ impl AkhTui {
 
     /// Drain all pending inbound messages from the agent's channel registry
     /// and dispatch each one through intent classification.
+    #[allow(irrefutable_let_patterns)]
     fn process_inbound_local(&mut self) {
         // Drain and process inbound messages in two passes to avoid borrow conflicts.
         let texts: Vec<String> = {
@@ -324,6 +327,7 @@ impl AkhTui {
     }
 
     /// Process input against the local engine/agent.
+    #[allow(irrefutable_let_patterns)]
     fn process_input_local(&mut self, input: &str) {
         let ChatBackend::Local(ref mut local) = self.backend else {
             return;
@@ -738,6 +742,7 @@ impl AkhTui {
     }
 
     /// Handle /goals, /status, /seed locally.
+    #[allow(irrefutable_let_patterns)]
     fn handle_command_local(&mut self, cmd: &str, arg: Option<&str>) {
         let ChatBackend::Local(ref local) = self.backend else {
             return;

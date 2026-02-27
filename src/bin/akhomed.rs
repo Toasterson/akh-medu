@@ -1551,7 +1551,7 @@ async fn awaken_status_handler(
         .count();
 
     Ok(Json(AwakenStatusResponse {
-        awakened: psyche.is_some(),
+        awakened: psyche.as_ref().is_some_and(|p| p.is_awakened()),
         psyche,
         active_goals,
         total_goals: agent.goals().len(),

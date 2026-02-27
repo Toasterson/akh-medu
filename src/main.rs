@@ -3889,8 +3889,8 @@ fn main() -> Result<()> {
                                         ritual.provenance_ids.len()
                                     );
 
-                                    // Set the psyche on the agent.
-                                    agent.set_psyche(ritual.psyche);
+                                    // Set the psyche on the agent (use force: ritual already guards).
+                                    agent.force_set_psyche(ritual.psyche);
                                 }
                                 Err(e) => {
                                     eprintln!("Ritual failed: {e}");

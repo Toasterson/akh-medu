@@ -311,7 +311,22 @@ impl CompartmentManager {
     }
 
     /// Update the stored psyche (after evolution).
-    pub fn set_psyche(&self, psyche: Psyche) {
+    ///
+    /// Returns `PsycheImmutable` if the existing psyche is awakened.
+    /// Use [`force_set_psyche`] for admin override.
+    pub fn set_psyche(&self, psyche: Psyche) -> CompartmentResult<()> {
+        let mut guard = self.psyche.write().expect("psyche lock poisoned");
+        if let Some(ref existing) = *guard {
+            if existing.is_awakened() {
+                return Err(CompartmentError::PsycheImmutable);
+            }
+        }
+        *guard = Some(psyche);
+        Ok(())
+    }
+
+    /// Unconditionally replace the stored psyche (admin override).
+    pub fn force_set_psyche(&self, psyche: Psyche) {
         *self.psyche.write().expect("psyche lock poisoned") = Some(psyche);
     }
 

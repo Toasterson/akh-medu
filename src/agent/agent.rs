@@ -992,7 +992,24 @@ impl Agent {
     }
 
     /// Set or replace the agent's psyche.
-    pub fn set_psyche(&mut self, psyche: crate::compartment::psyche::Psyche) {
+    ///
+    /// Returns `PsycheImmutable` if the existing psyche is awakened.
+    /// Use [`force_set_psyche`] for admin override.
+    pub fn set_psyche(
+        &mut self,
+        psyche: crate::compartment::psyche::Psyche,
+    ) -> super::error::AgentResult<()> {
+        if let Some(ref existing) = self.psyche {
+            if existing.is_awakened() {
+                return Err(super::error::AgentError::PsycheImmutable);
+            }
+        }
+        self.psyche = Some(psyche);
+        Ok(())
+    }
+
+    /// Unconditionally replace the agent's psyche (admin override).
+    pub fn force_set_psyche(&mut self, psyche: crate::compartment::psyche::Psyche) {
         self.psyche = Some(psyche);
     }
 

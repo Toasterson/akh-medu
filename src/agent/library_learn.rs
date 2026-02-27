@@ -380,7 +380,7 @@ fn ensure_patterns_microtheory(engine: &Engine) -> AgentResult<SymbolId> {
 mod tests {
     use super::*;
     use crate::engine::EngineConfig;
-    use crate::reason::anti_unify::{GeneralizedAst, AstSlot, AntiUnifyVar, generalized_fingerprint};
+    use crate::reason::anti_unify::{GeneralizedAst, AstSlot, AntiUnifyVar};
     use crate::vsa::Dimension;
 
     /// Create an engine with a temp data dir so provenance is available.

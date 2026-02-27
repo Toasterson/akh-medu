@@ -368,7 +368,6 @@ pub enum MatchVia {
 mod tests {
     use super::*;
     use crate::engine::EngineConfig;
-    use crate::symbol::SymbolKind;
     use crate::vsa::Dimension;
 
     fn test_engine() -> Engine {
