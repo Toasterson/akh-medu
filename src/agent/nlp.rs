@@ -205,7 +205,7 @@ pub fn classify_intent(input: &str) -> UserIntent {
     let lexicon = crate::grammar::lexer::Lexicon::for_language(
         crate::grammar::lexer::Language::default(),
     );
-    let question_word = extract_question_word(&lower);
+    let question_word = extract_question_word(&lower, &lexicon);
     let first_word = lower.split_whitespace().next().unwrap_or("");
     if question_word.is_some()
         || lexicon.is_auxiliary_verb(first_word)
@@ -310,23 +310,22 @@ fn extract_number(input: &str) -> Option<usize> {
 }
 
 /// Extract the question word from the beginning of a lowercase query.
-fn extract_question_word(lower: &str) -> Option<QuestionWord> {
-    if lower.starts_with("what ") {
-        Some(QuestionWord::What)
-    } else if lower.starts_with("who ") {
-        Some(QuestionWord::Who)
-    } else if lower.starts_with("where ") {
-        Some(QuestionWord::Where)
-    } else if lower.starts_with("when ") {
-        Some(QuestionWord::When)
-    } else if lower.starts_with("how ") {
-        Some(QuestionWord::How)
-    } else if lower.starts_with("why ") {
-        Some(QuestionWord::Why)
-    } else if lower.starts_with("which ") {
-        Some(QuestionWord::Which)
-    } else {
-        None
+///
+/// Uses the [`Lexicon`]'s question-word category mapping so the same logic
+/// works for any supported language.
+fn extract_question_word(lower: &str, lexicon: &crate::grammar::lexer::Lexicon) -> Option<QuestionWord> {
+    let first_word = lower.split_whitespace().next()?;
+    let category = lexicon.classify_question_word(first_word)?;
+    match category {
+        "what" => Some(QuestionWord::What),
+        "who" => Some(QuestionWord::Who),
+        "where" => Some(QuestionWord::Where),
+        "when" => Some(QuestionWord::When),
+        "how" => Some(QuestionWord::How),
+        "why" => Some(QuestionWord::Why),
+        "which" => Some(QuestionWord::Which),
+        "yesno" => Some(QuestionWord::YesNo),
+        _ => None,
     }
 }
 

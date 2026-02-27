@@ -414,6 +414,9 @@ impl AkhTui {
 
                 if grounded.is_none() {
                     // Fallback: discourse-aware response, then synthesis.
+                    let lexicon = crate::grammar::lexer::Lexicon::for_language(
+                        crate::grammar::lexer::Language::default(),
+                    );
                     let discourse_result = crate::grammar::discourse::resolve_discourse(
                         &subject,
                         question_word,
@@ -421,6 +424,7 @@ impl AkhTui {
                         engine,
                         capability_signal,
                         Some(agent.conversation_state()),
+                        Some(&lexicon),
                     );
                     let handled = if let Ok(ref ctx) = discourse_result {
                         let from_triples = engine.triples_from(ctx.subject_id);

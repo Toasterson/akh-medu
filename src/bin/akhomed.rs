@@ -1275,6 +1275,7 @@ fn process_ws_input(input: &WsInput, agent: &mut Agent, engine: &Engine) -> Vec<
                         engine,
                         capability_signal,
                         None,
+                        None,
                     )
                     .ok()
                     .and_then(|ctx| {

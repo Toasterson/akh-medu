@@ -147,6 +147,11 @@ pub struct Lexicon {
     relational_patterns: Vec<RelationalPattern>,
     /// Question words that trigger query parsing.
     question_words: Vec<String>,
+    /// Maps question words to canonical semantic categories (e.g., "что" → "what").
+    ///
+    /// Categories: "what", "who", "where", "when", "how", "why", "which", "yesno".
+    /// Used for language-independent question word classification.
+    question_word_categories: Vec<(String, String)>,
     /// Goal-setting verbs.
     goal_verbs: Vec<String>,
     /// Command patterns.
@@ -174,6 +179,10 @@ pub struct Lexicon {
     ack_phrases: Vec<String>,
     /// Self-referential words for meta-questions (e.g., "yourself", "toi-même").
     meta_self_words: Vec<String>,
+    /// Singular anaphoric pronouns that resolve to the active topic (e.g., "it", "это", "ça").
+    singular_anaphora: Vec<String>,
+    /// Plural anaphoric pronouns that resolve to active referents (e.g., "them", "их", "les").
+    plural_anaphora: Vec<String>,
     /// Capability/purpose words for meta-questions (e.g., "capabilities", "capacités").
     meta_capability_words: Vec<String>,
     /// Multi-word meta-question phrases (e.g., "what can you do", "que peux-tu faire").
@@ -251,6 +260,16 @@ impl Lexicon {
             "does".into(),
             "do".into(),
             "can".into(),
+        ];
+
+        let question_word_categories = vec![
+            ("what".into(), "what".into()),
+            ("who".into(), "who".into()),
+            ("where".into(), "where".into()),
+            ("when".into(), "when".into()),
+            ("how".into(), "how".into()),
+            ("why".into(), "why".into()),
+            ("which".into(), "which".into()),
         ];
 
         let goal_verbs = vec![
@@ -336,11 +355,18 @@ impl Lexicon {
             "your capabilities".into(), "your abilities".into(),
             "your purpose".into(),
         ];
+        let singular_anaphora = vec![
+            "it".into(), "that".into(), "this".into(),
+        ];
+        let plural_anaphora = vec![
+            "them".into(), "they".into(), "those".into(), "these".into(),
+        ];
 
         Self {
             void_words,
             relational_patterns,
             question_words,
+            question_word_categories,
             goal_verbs,
             commands,
             auxiliary_verbs,
@@ -352,6 +378,8 @@ impl Lexicon {
             followup_phrases,
             ack_words,
             ack_phrases,
+            singular_anaphora,
+            plural_anaphora,
             meta_self_words,
             meta_capability_words,
             meta_phrases,
@@ -394,6 +422,18 @@ impl Lexicon {
             "какой".into(),
             "какая".into(),
             "какие".into(),
+        ];
+
+        let question_word_categories = vec![
+            ("что".into(), "what".into()),
+            ("кто".into(), "who".into()),
+            ("где".into(), "where".into()),
+            ("когда".into(), "when".into()),
+            ("как".into(), "how".into()),
+            ("почему".into(), "why".into()),
+            ("какой".into(), "which".into()),
+            ("какая".into(), "which".into()),
+            ("какие".into(), "which".into()),
         ];
 
         let goal_verbs = vec![
@@ -457,11 +497,18 @@ impl Lexicon {
             "опиши себя".into(), "представься".into(),
             "твои возможности".into(), "ваши возможности".into(),
         ];
+        let singular_anaphora = vec![
+            "это".into(), "оно".into(), "то".into(), "этот".into(), "эта".into(),
+        ];
+        let plural_anaphora = vec![
+            "они".into(), "их".into(), "те".into(), "эти".into(),
+        ];
 
         Self {
             void_words,
             relational_patterns,
             question_words,
+            question_word_categories,
             goal_verbs,
             commands,
             auxiliary_verbs,
@@ -473,6 +520,8 @@ impl Lexicon {
             followup_phrases,
             ack_words,
             ack_phrases,
+            singular_anaphora,
+            plural_anaphora,
             meta_self_words,
             meta_capability_words,
             meta_phrases,
@@ -511,6 +560,16 @@ impl Lexicon {
             "كيف".into(),
             "لماذا".into(),
             "هل".into(),
+        ];
+
+        let question_word_categories = vec![
+            ("ما".into(), "what".into()),
+            ("من".into(), "who".into()),
+            ("أين".into(), "where".into()),
+            ("متى".into(), "when".into()),
+            ("كيف".into(), "how".into()),
+            ("لماذا".into(), "why".into()),
+            ("هل".into(), "yesno".into()),
         ];
 
         let goal_verbs = vec![
@@ -569,11 +628,18 @@ impl Lexicon {
             "ماذا تستطيع".into(), "من أنت".into(),
             "عرف عن نفسك".into(), "ما هي قدراتك".into(),
         ];
+        let singular_anaphora = vec![
+            "هذا".into(), "هذه".into(), "ذلك".into(), "تلك".into(),
+        ];
+        let plural_anaphora = vec![
+            "هم".into(), "هن".into(), "هؤلاء".into(), "أولئك".into(),
+        ];
 
         Self {
             void_words,
             relational_patterns,
             question_words,
+            question_word_categories,
             goal_verbs,
             commands,
             auxiliary_verbs,
@@ -585,6 +651,8 @@ impl Lexicon {
             followup_phrases,
             ack_words,
             ack_phrases,
+            singular_anaphora,
+            plural_anaphora,
             meta_self_words,
             meta_capability_words,
             meta_phrases,
@@ -642,6 +710,20 @@ impl Lexicon {
             "quels".into(),
             "quelles".into(),
             "est-ce".into(),
+        ];
+
+        let question_word_categories = vec![
+            ("que".into(), "what".into()),
+            ("qui".into(), "who".into()),
+            ("où".into(), "where".into()),
+            ("quand".into(), "when".into()),
+            ("comment".into(), "how".into()),
+            ("pourquoi".into(), "why".into()),
+            ("quel".into(), "which".into()),
+            ("quelle".into(), "which".into()),
+            ("quels".into(), "which".into()),
+            ("quelles".into(), "which".into()),
+            ("est-ce".into(), "yesno".into()),
         ];
 
         let goal_verbs = vec![
@@ -713,11 +795,20 @@ impl Lexicon {
             "présente-toi".into(), "presente-toi".into(),
             "tes capacités".into(), "tes capacites".into(),
         ];
+        let singular_anaphora = vec![
+            "ça".into(), "ca".into(), "cela".into(), "ceci".into(),
+            "il".into(), "elle".into(), "ce".into(),
+        ];
+        let plural_anaphora = vec![
+            "eux".into(), "elles".into(), "les".into(), "ceux".into(),
+            "celles".into(), "ces".into(),
+        ];
 
         Self {
             void_words,
             relational_patterns,
             question_words,
+            question_word_categories,
             goal_verbs,
             commands,
             auxiliary_verbs,
@@ -729,6 +820,8 @@ impl Lexicon {
             followup_phrases,
             ack_words,
             ack_phrases,
+            singular_anaphora,
+            plural_anaphora,
             meta_self_words,
             meta_capability_words,
             meta_phrases,
@@ -785,6 +878,20 @@ impl Lexicon {
             "cómo".into(),
             "como".into(),
             "por qué".into(),
+        ];
+
+        let question_word_categories = vec![
+            ("qué".into(), "what".into()),
+            ("que".into(), "what".into()),
+            ("quién".into(), "who".into()),
+            ("quien".into(), "who".into()),
+            ("dónde".into(), "where".into()),
+            ("donde".into(), "where".into()),
+            ("cuándo".into(), "when".into()),
+            ("cuando".into(), "when".into()),
+            ("cómo".into(), "how".into()),
+            ("como".into(), "how".into()),
+            ("por qué".into(), "why".into()),
         ];
 
         let goal_verbs = vec![
@@ -854,11 +961,20 @@ impl Lexicon {
             "preséntate".into(), "presentate".into(),
             "tus capacidades".into(), "tus habilidades".into(),
         ];
+        let singular_anaphora = vec![
+            "eso".into(), "esto".into(), "ello".into(), "ese".into(),
+            "esta".into(), "este".into(), "aquel".into(), "aquella".into(),
+        ];
+        let plural_anaphora = vec![
+            "ellos".into(), "ellas".into(), "esos".into(), "estos".into(),
+            "aquellos".into(), "aquellas".into(),
+        ];
 
         Self {
             void_words,
             relational_patterns,
             question_words,
+            question_word_categories,
             goal_verbs,
             commands,
             auxiliary_verbs,
@@ -870,6 +986,8 @@ impl Lexicon {
             followup_phrases,
             ack_words,
             ack_phrases,
+            singular_anaphora,
+            plural_anaphora,
             meta_self_words,
             meta_capability_words,
             meta_phrases,
@@ -891,6 +1009,19 @@ impl Lexicon {
     pub fn is_question_word(&self, word: &str) -> bool {
         let lower = word.to_lowercase();
         self.question_words.contains(&lower)
+    }
+
+    /// Classify a question word into its canonical semantic category.
+    ///
+    /// Returns a canonical tag ("what", "who", "where", "when", "how", "why",
+    /// "which", "yesno") or `None` if the word is not a recognized question word.
+    /// This works across all supported languages.
+    pub fn classify_question_word(&self, word: &str) -> Option<&str> {
+        let lower = word.to_lowercase();
+        self.question_word_categories
+            .iter()
+            .find(|(surface, _)| *surface == lower)
+            .map(|(_, category)| category.as_str())
     }
 
     /// Whether a word is a goal-setting verb.
@@ -915,6 +1046,20 @@ impl Lexicon {
     pub fn is_capability_modal(&self, word: &str) -> bool {
         let lower = word.to_lowercase();
         self.capability_modals.contains(&lower)
+    }
+
+    // ── Anaphora accessors ─────────────────────────────────────────
+
+    /// Whether a word is a singular anaphoric pronoun (resolves to active topic).
+    pub fn is_singular_anaphora(&self, word: &str) -> bool {
+        let lower = word.to_lowercase();
+        self.singular_anaphora.contains(&lower)
+    }
+
+    /// Whether a word is a plural anaphoric pronoun (resolves to active referents).
+    pub fn is_plural_anaphora(&self, word: &str) -> bool {
+        let lower = word.to_lowercase();
+        self.plural_anaphora.contains(&lower)
     }
 
     // ── Conversational category accessors ────────────────────────────
