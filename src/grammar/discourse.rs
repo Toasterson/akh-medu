@@ -17,6 +17,7 @@ use miette::Diagnostic;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::agent::conversation::ConversationState;
 use crate::agent::nlp::QuestionWord;
 use crate::agent::synthesize::is_metadata_label;
 use crate::engine::Engine;
@@ -219,12 +220,22 @@ pub fn resolve_discourse(
     original_input: &str,
     engine: &Engine,
     capability_signal: bool,
+    conversation: Option<&ConversationState>,
 ) -> DiscourseResult<DiscourseContext> {
     let original_subject = subject.to_string();
 
-    // Step 1: Try to resolve the subject directly.
-    let (resolved_label, subject_id, pronoun_resolved) =
-        resolve_pronoun_chain(subject, engine)?;
+    // Step 1: Try to resolve the subject via KG pronoun chain.
+    let resolve_result = resolve_pronoun_chain(subject, engine);
+
+    // Step 1b: If KG resolution failed and we have conversation history,
+    // try anaphora resolution from conversation context.
+    let (resolved_label, subject_id, pronoun_resolved) = match resolve_result {
+        Ok(triple) => triple,
+        Err(DiscourseError::SubjectNotFound { .. }) if conversation.is_some() => {
+            resolve_from_conversation(subject, engine, conversation.unwrap())?
+        }
+        Err(e) => return Err(e),
+    };
 
     // Step 2: Determine POV.
     let pov = determine_pov(&resolved_label, pronoun_resolved);
@@ -241,6 +252,44 @@ pub fn resolve_discourse(
         focus,
         question_word,
         original_input: original_input.to_string(),
+    })
+}
+
+/// Pronouns that resolve to the active topic (singular anaphora).
+const SINGULAR_ANAPHORA: &[&str] = &["it", "that", "this"];
+
+/// Pronouns that resolve to the first active referent (plural anaphora).
+const PLURAL_ANAPHORA: &[&str] = &["them", "they", "those", "these"];
+
+/// Attempt to resolve a pronoun from conversation history.
+///
+/// - "it", "that", "this" → `conversation.active_topic`
+/// - "them", "they", "those", "these" → `conversation.active_referents[0]`
+///
+/// Falls through to [`DiscourseError::SubjectNotFound`] if no referent is available.
+fn resolve_from_conversation(
+    subject: &str,
+    engine: &Engine,
+    conversation: &ConversationState,
+) -> DiscourseResult<(String, SymbolId, bool)> {
+    let lower = subject.to_lowercase();
+
+    if SINGULAR_ANAPHORA.contains(&lower.as_str()) {
+        if let Some(topic_id) = conversation.active_topic {
+            let label = engine.resolve_label(topic_id);
+            return Ok((label, topic_id, true));
+        }
+    }
+
+    if PLURAL_ANAPHORA.contains(&lower.as_str()) {
+        if let Some(&referent_id) = conversation.active_referents.first() {
+            let label = engine.resolve_label(referent_id);
+            return Ok((label, referent_id, true));
+        }
+    }
+
+    Err(DiscourseError::SubjectNotFound {
+        subject: subject.to_string(),
     })
 }
 
@@ -749,5 +798,90 @@ mod tests {
             is_a_pos < cap_pos,
             "is-a ({is_a_pos:?}) should come before has-capability ({cap_pos:?})"
         );
+    }
+
+    // ── Anaphora resolution from conversation history ────────────────
+
+    #[test]
+    fn resolve_it_from_conversation_topic() {
+        let engine = test_engine();
+        let dog = engine.create_symbol(SymbolKind::Entity, "dog").unwrap();
+        let mut conv = ConversationState::new("test", "narrative");
+        conv.add_turn(
+            crate::agent::conversation::Speaker::Operator,
+            "what is a dog",
+            vec![dog.id],
+        );
+
+        let result = resolve_from_conversation("it", &engine, &conv).unwrap();
+        assert_eq!(result.0, "dog");
+        assert_eq!(result.1, dog.id);
+        assert!(result.2); // pronoun_resolved
+    }
+
+    #[test]
+    fn resolve_that_from_conversation_topic() {
+        let engine = test_engine();
+        let cat = engine.create_symbol(SymbolKind::Entity, "cat").unwrap();
+        let mut conv = ConversationState::new("test", "narrative");
+        conv.add_turn(
+            crate::agent::conversation::Speaker::Operator,
+            "what is a cat",
+            vec![cat.id],
+        );
+
+        let result = resolve_from_conversation("that", &engine, &conv).unwrap();
+        assert_eq!(result.0, "cat");
+    }
+
+    #[test]
+    fn resolve_them_from_conversation_referents() {
+        let engine = test_engine();
+        let dog = engine.create_symbol(SymbolKind::Entity, "dog").unwrap();
+        let mut conv = ConversationState::new("test", "narrative");
+        conv.add_turn(
+            crate::agent::conversation::Speaker::Operator,
+            "tell me about dogs",
+            vec![dog.id],
+        );
+
+        let result = resolve_from_conversation("them", &engine, &conv).unwrap();
+        assert_eq!(result.0, "dog");
+    }
+
+    #[test]
+    fn resolve_pronoun_no_topic_fails() {
+        let engine = test_engine();
+        let conv = ConversationState::new("test", "narrative");
+
+        let result = resolve_from_conversation("it", &engine, &conv);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn resolve_discourse_with_conversation_fallback() {
+        let engine = test_engine();
+        let dog = engine.create_symbol(SymbolKind::Entity, "dog").unwrap();
+        let mut conv = ConversationState::new("test", "narrative");
+        conv.add_turn(
+            crate::agent::conversation::Speaker::Operator,
+            "what is a dog",
+            vec![dog.id],
+        );
+
+        // "it" is not in the KG as a symbol, but should resolve via conversation.
+        let ctx = resolve_discourse("it", Some(QuestionWord::What), "what about it?", &engine, false, Some(&conv));
+        assert!(ctx.is_ok());
+        let ctx = ctx.unwrap();
+        assert_eq!(ctx.resolved_subject, "dog");
+        assert!(ctx.pronoun_resolved);
+    }
+
+    #[test]
+    fn resolve_discourse_without_conversation_fails() {
+        let engine = test_engine();
+        // "it" is not in the KG, and no conversation context provided.
+        let ctx = resolve_discourse("it", Some(QuestionWord::What), "what is it?", &engine, false, None);
+        assert!(ctx.is_err());
     }
 }

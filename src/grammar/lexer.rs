@@ -157,6 +157,27 @@ pub struct Lexicon {
     trailing_auxiliaries: Vec<String>,
     /// Modal verbs that signal capability/ability (subset of auxiliary_verbs).
     capability_modals: Vec<String>,
+
+    // ── Conversational token categories ──────────────────────────────
+
+    /// Greeting words (e.g., "hello", "привет", "مرحبا").
+    greeting_words: Vec<String>,
+    /// Multi-word greeting phrases (e.g., "good morning", "bonjour").
+    greeting_phrases: Vec<String>,
+    /// Follow-up cue words (e.g., "more", "elaborate", "ещё").
+    followup_cues: Vec<String>,
+    /// Multi-word follow-up phrases (e.g., "tell me more", "dis-moi plus").
+    followup_phrases: Vec<String>,
+    /// Acknowledgment words (e.g., "thanks", "ok", "спасибо").
+    ack_words: Vec<String>,
+    /// Multi-word acknowledgment phrases (e.g., "got it", "compris").
+    ack_phrases: Vec<String>,
+    /// Self-referential words for meta-questions (e.g., "yourself", "toi-même").
+    meta_self_words: Vec<String>,
+    /// Capability/purpose words for meta-questions (e.g., "capabilities", "capacités").
+    meta_capability_words: Vec<String>,
+    /// Multi-word meta-question phrases (e.g., "what can you do", "que peux-tu faire").
+    meta_phrases: Vec<String>,
 }
 
 /// Non-declarative commands recognized by the lexer.
@@ -267,6 +288,55 @@ impl Lexicon {
         let trailing_auxiliaries = vec!["do".into(), "does".into()];
         let capability_modals = vec!["can".into(), "could".into()];
 
+        let greeting_words = vec![
+            "hello".into(), "hi".into(), "hey".into(), "howdy".into(),
+            "yo".into(), "greetings".into(), "hiya".into(), "sup".into(),
+        ];
+        let greeting_phrases = vec![
+            "good morning".into(), "good afternoon".into(),
+            "good evening".into(), "good day".into(),
+        ];
+        let followup_cues = vec![
+            "more".into(), "elaborate".into(), "continue".into(),
+            "expand".into(), "detail".into(), "details".into(),
+            "further".into(), "deeper".into(),
+        ];
+        let followup_phrases = vec![
+            "tell me more".into(), "go on".into(), "keep going".into(),
+            "what else".into(), "more about".into(), "expand on".into(),
+            "elaborate on".into(), "more details".into(), "and then".into(),
+            "what about it".into(), "say more".into(),
+        ];
+        let ack_words = vec![
+            "thanks".into(), "thank".into(), "ok".into(), "okay".into(),
+            "understood".into(), "interesting".into(), "cool".into(),
+            "nice".into(), "great".into(), "sure".into(), "alright".into(),
+            "right".into(), "noted".into(), "appreciate".into(),
+            "acknowledged".into(), "cheers".into(), "sweet".into(),
+            "perfect".into(), "wonderful".into(), "excellent".into(),
+            "fantastic".into(), "brilliant".into(),
+        ];
+        let ack_phrases = vec![
+            "got it".into(), "thank you".into(), "makes sense".into(),
+            "i see".into(), "fair enough".into(), "no worries".into(),
+            "sounds good".into(), "good to know".into(),
+        ];
+        let meta_self_words = vec![
+            "yourself".into(), "you".into(), "your".into(),
+        ];
+        let meta_capability_words = vec![
+            "capabilities".into(), "capability".into(), "abilities".into(),
+            "ability".into(), "skills".into(), "purpose".into(),
+            "function".into(),
+        ];
+        let meta_phrases = vec![
+            "what can you".into(), "what do you".into(), "who are you".into(),
+            "describe yourself".into(), "tell me about yourself".into(),
+            "introduce yourself".into(), "what are you".into(),
+            "your capabilities".into(), "your abilities".into(),
+            "your purpose".into(),
+        ];
+
         Self {
             void_words,
             relational_patterns,
@@ -276,6 +346,15 @@ impl Lexicon {
             auxiliary_verbs,
             trailing_auxiliaries,
             capability_modals,
+            greeting_words,
+            greeting_phrases,
+            followup_cues,
+            followup_phrases,
+            ack_words,
+            ack_phrases,
+            meta_self_words,
+            meta_capability_words,
+            meta_phrases,
         }
     }
 
@@ -339,6 +418,46 @@ impl Lexicon {
         let trailing_auxiliaries = vec!["делать".into()];
         let capability_modals = vec!["может".into()];
 
+        let greeting_words = vec![
+            "привет".into(), "здравствуйте".into(), "здравствуй".into(),
+            "приветствую".into(), "салют".into(),
+        ];
+        let greeting_phrases = vec![
+            "доброе утро".into(), "добрый день".into(), "добрый вечер".into(),
+        ];
+        let followup_cues = vec![
+            "ещё".into(), "еще".into(), "подробнее".into(), "продолжай".into(),
+            "дальше".into(), "детальнее".into(), "глубже".into(),
+        ];
+        let followup_phrases = vec![
+            "расскажи больше".into(), "расскажи подробнее".into(),
+            "продолжай дальше".into(), "что ещё".into(), "что еще".into(),
+        ];
+        let ack_words = vec![
+            "спасибо".into(), "благодарю".into(), "понятно".into(),
+            "ясно".into(), "хорошо".into(), "ладно".into(), "ок".into(),
+            "интересно".into(), "отлично".into(), "замечательно".into(),
+            "прекрасно".into(),
+        ];
+        let ack_phrases = vec![
+            "всё понятно".into(), "все понятно".into(),
+            "имеет смысл".into(), "я понимаю".into(),
+        ];
+        let meta_self_words = vec![
+            "себя".into(), "ты".into(), "вы".into(), "тебя".into(),
+            "твои".into(), "ваши".into(),
+        ];
+        let meta_capability_words = vec![
+            "способности".into(), "возможности".into(), "навыки".into(),
+            "умения".into(), "назначение".into(), "функции".into(),
+        ];
+        let meta_phrases = vec![
+            "что ты умеешь".into(), "что ты можешь".into(),
+            "кто ты".into(), "расскажи о себе".into(),
+            "опиши себя".into(), "представься".into(),
+            "твои возможности".into(), "ваши возможности".into(),
+        ];
+
         Self {
             void_words,
             relational_patterns,
@@ -348,6 +467,15 @@ impl Lexicon {
             auxiliary_verbs,
             trailing_auxiliaries,
             capability_modals,
+            greeting_words,
+            greeting_phrases,
+            followup_cues,
+            followup_phrases,
+            ack_words,
+            ack_phrases,
+            meta_self_words,
+            meta_capability_words,
+            meta_phrases,
         }
     }
 
@@ -405,6 +533,43 @@ impl Lexicon {
         let trailing_auxiliaries = vec!["تفعل".into(), "يفعل".into()];
         let capability_modals = vec!["يمكن".into(), "يستطيع".into()];
 
+        let greeting_words = vec![
+            "مرحبا".into(), "أهلا".into(), "سلام".into(),
+            "مرحبًا".into(), "أهلاً".into(),
+        ];
+        let greeting_phrases = vec![
+            "صباح الخير".into(), "مساء الخير".into(),
+            "السلام عليكم".into(),
+        ];
+        let followup_cues = vec![
+            "المزيد".into(), "أكثر".into(), "تفصيل".into(),
+            "استمر".into(), "أكمل".into(),
+        ];
+        let followup_phrases = vec![
+            "أخبرني المزيد".into(), "تابع".into(),
+            "ماذا أيضا".into(), "ماذا أيضاً".into(),
+        ];
+        let ack_words = vec![
+            "شكرا".into(), "شكراً".into(), "حسنا".into(), "حسناً".into(),
+            "فهمت".into(), "تمام".into(), "جيد".into(), "ممتاز".into(),
+            "رائع".into(), "مفهوم".into(),
+        ];
+        let ack_phrases = vec![
+            "شكرا لك".into(), "شكراً لك".into(), "فهمت ذلك".into(),
+            "أنا أفهم".into(),
+        ];
+        let meta_self_words = vec![
+            "نفسك".into(), "أنت".into(), "أنتِ".into(),
+        ];
+        let meta_capability_words = vec![
+            "قدرات".into(), "قدراتك".into(), "مهارات".into(),
+            "إمكانيات".into(), "وظيفة".into(),
+        ];
+        let meta_phrases = vec![
+            "ماذا تستطيع".into(), "من أنت".into(),
+            "عرف عن نفسك".into(), "ما هي قدراتك".into(),
+        ];
+
         Self {
             void_words,
             relational_patterns,
@@ -414,6 +579,15 @@ impl Lexicon {
             auxiliary_verbs,
             trailing_auxiliaries,
             capability_modals,
+            greeting_words,
+            greeting_phrases,
+            followup_cues,
+            followup_phrases,
+            ack_words,
+            ack_phrases,
+            meta_self_words,
+            meta_capability_words,
+            meta_phrases,
         }
     }
 
@@ -494,6 +668,52 @@ impl Lexicon {
         let trailing_auxiliaries = vec!["faire".into()];
         let capability_modals = vec!["peut".into(), "peux".into(), "pouvez".into()];
 
+        let greeting_words = vec![
+            "bonjour".into(), "salut".into(), "coucou".into(),
+            "bonsoir".into(),
+        ];
+        let greeting_phrases = vec![
+            "bon matin".into(), "bonne journée".into(),
+            "bonne journee".into(), "bonne soirée".into(),
+            "bonne soiree".into(),
+        ];
+        let followup_cues = vec![
+            "plus".into(), "davantage".into(), "détails".into(),
+            "details".into(), "continue".into(), "approfondir".into(),
+        ];
+        let followup_phrases = vec![
+            "dis-moi plus".into(), "continue".into(),
+            "dis m'en plus".into(), "quoi d'autre".into(),
+            "plus de détails".into(), "plus de details".into(),
+        ];
+        let ack_words = vec![
+            "merci".into(), "ok".into(), "compris".into(),
+            "intéressant".into(), "interessant".into(), "bien".into(),
+            "super".into(), "génial".into(), "genial".into(),
+            "parfait".into(), "excellent".into(), "entendu".into(),
+        ];
+        let ack_phrases = vec![
+            "c'est compris".into(), "j'ai compris".into(),
+            "je comprends".into(), "ça a du sens".into(),
+            "ca a du sens".into(), "c'est bon".into(),
+        ];
+        let meta_self_words = vec![
+            "toi".into(), "toi-même".into(), "toi-meme".into(),
+            "tu".into(), "vous".into(), "tes".into(), "vos".into(),
+        ];
+        let meta_capability_words = vec![
+            "capacités".into(), "capacites".into(), "compétences".into(),
+            "competences".into(), "fonctions".into(), "rôle".into(),
+            "role".into(),
+        ];
+        let meta_phrases = vec![
+            "que peux-tu faire".into(), "que peux tu faire".into(),
+            "qui es-tu".into(), "qui es tu".into(),
+            "décris-toi".into(), "decris-toi".into(),
+            "présente-toi".into(), "presente-toi".into(),
+            "tes capacités".into(), "tes capacites".into(),
+        ];
+
         Self {
             void_words,
             relational_patterns,
@@ -503,6 +723,15 @@ impl Lexicon {
             auxiliary_verbs,
             trailing_auxiliaries,
             capability_modals,
+            greeting_words,
+            greeting_phrases,
+            followup_cues,
+            followup_phrases,
+            ack_words,
+            ack_phrases,
+            meta_self_words,
+            meta_capability_words,
+            meta_phrases,
         }
     }
 
@@ -582,6 +811,50 @@ impl Lexicon {
         let trailing_auxiliaries = vec!["hacer".into()];
         let capability_modals = vec!["puede".into(), "puedes".into(), "pueden".into()];
 
+        let greeting_words = vec![
+            "hola".into(), "buenas".into(), "saludos".into(),
+        ];
+        let greeting_phrases = vec![
+            "buenos días".into(), "buenos dias".into(),
+            "buenas tardes".into(), "buenas noches".into(),
+            "buen día".into(), "buen dia".into(),
+        ];
+        let followup_cues = vec![
+            "más".into(), "mas".into(), "detalle".into(), "detalles".into(),
+            "continua".into(), "continúa".into(), "profundiza".into(),
+        ];
+        let followup_phrases = vec![
+            "dime más".into(), "dime mas".into(), "cuéntame más".into(),
+            "cuentame mas".into(), "sigue adelante".into(),
+            "qué más".into(), "que mas".into(),
+            "más detalles".into(), "mas detalles".into(),
+        ];
+        let ack_words = vec![
+            "gracias".into(), "ok".into(), "vale".into(), "entendido".into(),
+            "interesante".into(), "genial".into(), "bien".into(),
+            "perfecto".into(), "excelente".into(), "estupendo".into(),
+            "claro".into(), "bueno".into(),
+        ];
+        let ack_phrases = vec![
+            "lo entiendo".into(), "ya veo".into(), "tiene sentido".into(),
+            "muchas gracias".into(), "está bien".into(), "esta bien".into(),
+        ];
+        let meta_self_words = vec![
+            "tú".into(), "tu".into(), "usted".into(), "ti".into(),
+            "tus".into(), "sus".into(),
+        ];
+        let meta_capability_words = vec![
+            "capacidades".into(), "habilidades".into(),
+            "funciones".into(), "propósito".into(), "proposito".into(),
+        ];
+        let meta_phrases = vec![
+            "qué puedes hacer".into(), "que puedes hacer".into(),
+            "quién eres".into(), "quien eres".into(),
+            "descríbete".into(), "describete".into(),
+            "preséntate".into(), "presentate".into(),
+            "tus capacidades".into(), "tus habilidades".into(),
+        ];
+
         Self {
             void_words,
             relational_patterns,
@@ -591,6 +864,15 @@ impl Lexicon {
             auxiliary_verbs,
             trailing_auxiliaries,
             capability_modals,
+            greeting_words,
+            greeting_phrases,
+            followup_cues,
+            followup_phrases,
+            ack_words,
+            ack_phrases,
+            meta_self_words,
+            meta_capability_words,
+            meta_phrases,
         }
     }
 
@@ -633,6 +915,62 @@ impl Lexicon {
     pub fn is_capability_modal(&self, word: &str) -> bool {
         let lower = word.to_lowercase();
         self.capability_modals.contains(&lower)
+    }
+
+    // ── Conversational category accessors ────────────────────────────
+
+    /// Whether a word is a greeting word (e.g., "hello", "привет", "مرحبا").
+    pub fn is_greeting_word(&self, word: &str) -> bool {
+        let lower = word.to_lowercase();
+        self.greeting_words.contains(&lower)
+    }
+
+    /// Whether a string contains a greeting phrase (e.g., "good morning").
+    pub fn has_greeting_phrase(&self, text: &str) -> bool {
+        let lower = text.to_lowercase();
+        self.greeting_phrases.iter().any(|p| lower.contains(p.as_str()))
+    }
+
+    /// Whether a word is a follow-up cue (e.g., "more", "elaborate").
+    pub fn is_followup_cue(&self, word: &str) -> bool {
+        let lower = word.to_lowercase();
+        self.followup_cues.contains(&lower)
+    }
+
+    /// Whether a string contains a follow-up phrase (e.g., "tell me more").
+    pub fn has_followup_phrase(&self, text: &str) -> bool {
+        let lower = text.to_lowercase();
+        self.followup_phrases.iter().any(|p| lower.contains(p.as_str()))
+    }
+
+    /// Whether a word is an acknowledgment word (e.g., "thanks", "ok").
+    pub fn is_ack_word(&self, word: &str) -> bool {
+        let lower = word.to_lowercase();
+        self.ack_words.contains(&lower)
+    }
+
+    /// Whether a string contains an acknowledgment phrase (e.g., "got it").
+    pub fn has_ack_phrase(&self, text: &str) -> bool {
+        let lower = text.to_lowercase();
+        self.ack_phrases.iter().any(|p| lower.contains(p.as_str()))
+    }
+
+    /// Whether a word is a self-referential meta-question word (e.g., "yourself").
+    pub fn is_meta_self_word(&self, word: &str) -> bool {
+        let lower = word.to_lowercase();
+        self.meta_self_words.contains(&lower)
+    }
+
+    /// Whether a word is a capability/purpose meta-question word.
+    pub fn is_meta_capability_word(&self, word: &str) -> bool {
+        let lower = word.to_lowercase();
+        self.meta_capability_words.contains(&lower)
+    }
+
+    /// Whether a string contains a meta-question phrase (e.g., "what can you do").
+    pub fn has_meta_phrase(&self, text: &str) -> bool {
+        let lower = text.to_lowercase();
+        self.meta_phrases.iter().any(|p| lower.contains(p.as_str()))
     }
 
     /// Parse a question into its grammatical frame.

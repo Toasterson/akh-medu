@@ -200,6 +200,72 @@ impl Default for ConversationState {
     }
 }
 
+// ── Conversational responses ─────────────────────────────────────────
+
+/// A pre-composed conversational response (no KG grounding needed).
+///
+/// When `text` is empty the TUI should fall through to a KG-grounded
+/// handler (e.g., re-query the active topic or route to `ground_query`).
+#[derive(Debug, Clone)]
+pub struct ConversationalResponse {
+    /// The response text. Empty means "delegate to a grounded handler".
+    pub text: String,
+}
+
+impl ConversationState {
+    /// Produce a conversational response for the given [`ConversationalKind`].
+    ///
+    /// `persona_name` and `traits` come from the Psyche persona (or defaults).
+    /// Returns a [`ConversationalResponse`] whose `text` may be empty to signal
+    /// that the TUI should delegate to a grounded handler instead.
+    pub fn respond_conversational(
+        &self,
+        kind: &super::nlp::ConversationalKind,
+        persona_name: &str,
+        traits: &[String],
+    ) -> ConversationalResponse {
+        use crate::agent::nlp::ConversationalKind;
+
+        let text = match kind {
+            ConversationalKind::Greeting => {
+                if self.turns.is_empty() {
+                    format!(
+                        "Hello. I am {persona_name}. Ask me a question or tell me something to learn."
+                    )
+                } else {
+                    "Hello again. What would you like to explore?".to_string()
+                }
+            }
+            ConversationalKind::FollowUp => {
+                if self.active_topic.is_some() {
+                    // Empty → TUI will re-query the active topic at Full detail.
+                    String::new()
+                } else {
+                    "I don't have a current topic. What would you like to know?".to_string()
+                }
+            }
+            ConversationalKind::Acknowledgment => {
+                let warm = traits.iter().any(|t| t.eq_ignore_ascii_case("warm"));
+                if warm {
+                    "You're welcome! Let me know if there's more.".to_string()
+                } else {
+                    "Understood.".to_string()
+                }
+            }
+            ConversationalKind::MetaQuestion => {
+                // Empty → TUI routes to ground_query("self", ...).
+                String::new()
+            }
+            ConversationalKind::Unrecognized => {
+                // Should not be called for Unrecognized, but return empty to be safe.
+                String::new()
+            }
+        };
+
+        ConversationalResponse { text }
+    }
+}
+
 // ── GroundedResponse ─────────────────────────────────────────────────────
 
 /// A response grounded in KG triples with provenance.
@@ -670,5 +736,95 @@ mod tests {
         assert_eq!(state.len(), 1);
         assert!(state.topic().is_none());
         assert!(state.active_referents.is_empty());
+    }
+
+    // ── respond_conversational tests ─────────────────────────────────
+
+    #[test]
+    fn respond_greeting_first_turn() {
+        use crate::agent::nlp::ConversationalKind;
+        let state = ConversationState::new("ch", "formal");
+        let resp = state.respond_conversational(
+            &ConversationalKind::Greeting,
+            "Scholar",
+            &["precise".to_string()],
+        );
+        assert!(resp.text.contains("Scholar"));
+        assert!(resp.text.contains("Hello"));
+    }
+
+    #[test]
+    fn respond_greeting_subsequent() {
+        use crate::agent::nlp::ConversationalKind;
+        let mut state = ConversationState::new("ch", "formal");
+        state.add_turn(Speaker::Operator, "hi", vec![]);
+        let resp = state.respond_conversational(
+            &ConversationalKind::Greeting,
+            "Scholar",
+            &["precise".to_string()],
+        );
+        assert!(resp.text.contains("again"));
+    }
+
+    #[test]
+    fn respond_follow_up_no_topic() {
+        use crate::agent::nlp::ConversationalKind;
+        let state = ConversationState::new("ch", "formal");
+        let resp = state.respond_conversational(
+            &ConversationalKind::FollowUp,
+            "Scholar",
+            &[],
+        );
+        assert!(resp.text.contains("don't have a current topic"));
+    }
+
+    #[test]
+    fn respond_follow_up_with_topic() {
+        use crate::agent::nlp::ConversationalKind;
+        let mut state = ConversationState::new("ch", "formal");
+        state.add_turn(Speaker::Operator, "dogs", vec![sym(42)]);
+        let resp = state.respond_conversational(
+            &ConversationalKind::FollowUp,
+            "Scholar",
+            &[],
+        );
+        // Empty text → TUI should re-query.
+        assert!(resp.text.is_empty());
+    }
+
+    #[test]
+    fn respond_ack_warm() {
+        use crate::agent::nlp::ConversationalKind;
+        let state = ConversationState::new("ch", "formal");
+        let resp = state.respond_conversational(
+            &ConversationalKind::Acknowledgment,
+            "Scholar",
+            &["warm".to_string()],
+        );
+        assert!(resp.text.contains("welcome"));
+    }
+
+    #[test]
+    fn respond_ack_default() {
+        use crate::agent::nlp::ConversationalKind;
+        let state = ConversationState::new("ch", "formal");
+        let resp = state.respond_conversational(
+            &ConversationalKind::Acknowledgment,
+            "Scholar",
+            &["precise".to_string()],
+        );
+        assert_eq!(resp.text, "Understood.");
+    }
+
+    #[test]
+    fn respond_meta_question_delegates() {
+        use crate::agent::nlp::ConversationalKind;
+        let state = ConversationState::new("ch", "formal");
+        let resp = state.respond_conversational(
+            &ConversationalKind::MetaQuestion,
+            "Scholar",
+            &[],
+        );
+        assert!(resp.text.is_empty());
     }
 }

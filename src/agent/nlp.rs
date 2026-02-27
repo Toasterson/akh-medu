@@ -330,6 +330,127 @@ fn extract_question_word(lower: &str) -> Option<QuestionWord> {
     }
 }
 
+/// Classification of conversational (non-query, non-command) user input.
+///
+/// Used to distinguish greetings, follow-ups, and acknowledgments from
+/// freeform input that should escalate to an autonomous goal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConversationalKind {
+    /// "hello", "hi", "hey", "good morning", etc.
+    Greeting,
+    /// "tell me more", "go on", "what else", "elaborate", etc.
+    FollowUp,
+    /// "thanks", "ok", "got it", "interesting", etc.
+    Acknowledgment,
+    /// "what can you do", "describe yourself", "who are you" (sans question mark).
+    MetaQuestion,
+    /// Fallback — still escalate to goal.
+    Unrecognized,
+}
+
+/// Classify freeform text into a conversational kind using keyword-feature scoring.
+///
+/// Uses the language-aware [`Lexicon`] for all word/phrase lookups, so the same
+/// scoring logic works for English, Russian, Arabic, French, Spanish, etc.
+///
+/// Extracts features (keyword presence, position, co-occurrence) and scores each
+/// category. The highest-scoring category wins if it meets the threshold.
+pub fn classify_conversational(
+    text: &str,
+    lexicon: &crate::grammar::lexer::Lexicon,
+) -> ConversationalKind {
+    let lower = text.trim().to_lowercase();
+    if lower.is_empty() {
+        return ConversationalKind::Unrecognized;
+    }
+
+    let words: Vec<&str> = lower.split_whitespace().collect();
+    if words.is_empty() {
+        return ConversationalKind::Unrecognized;
+    }
+
+    let mut scores = [
+        (ConversationalKind::Greeting, 0i32),
+        (ConversationalKind::FollowUp, 0),
+        (ConversationalKind::Acknowledgment, 0),
+        (ConversationalKind::MetaQuestion, 0),
+    ];
+
+    // ── Greeting features ────────────────────────────────────────────
+    let has_greeting_word = words.iter().any(|w| {
+        let stripped = w.trim_matches(|c: char| c.is_ascii_punctuation());
+        lexicon.is_greeting_word(stripped)
+    });
+    let has_greeting_phrase = lexicon.has_greeting_phrase(&lower);
+    let greeting_at_start = words.first().is_some_and(|w| {
+        let stripped = w.trim_matches(|c: char| c.is_ascii_punctuation());
+        lexicon.is_greeting_word(stripped)
+    }) || has_greeting_phrase;
+
+    if greeting_at_start {
+        scores[0].1 += 3;
+    } else if has_greeting_word {
+        scores[0].1 += 1;
+    }
+
+    // ── Follow-up features ───────────────────────────────────────────
+    let has_followup_phrase = lexicon.has_followup_phrase(&lower);
+    let has_followup_cue = words.iter().any(|w| {
+        let stripped = w.trim_matches(|c: char| c.is_ascii_punctuation());
+        lexicon.is_followup_cue(stripped)
+    });
+    let short_followup = has_followup_cue && words.len() <= 4;
+
+    if has_followup_phrase {
+        scores[1].1 += 3;
+    } else if short_followup {
+        scores[1].1 += 2;
+    }
+
+    // ── Acknowledgment features ──────────────────────────────────────
+    let has_ack_phrase = lexicon.has_ack_phrase(&lower);
+    let has_ack_word = words.iter().any(|w| {
+        let stripped = w.trim_matches(|c: char| c.is_ascii_punctuation());
+        lexicon.is_ack_word(stripped)
+    });
+    let terse_ack = has_ack_word && words.len() <= 3;
+
+    if has_ack_phrase {
+        scores[2].1 += 3;
+    } else if terse_ack {
+        scores[2].1 += 3;
+    } else if has_ack_word {
+        scores[2].1 += 1;
+    }
+
+    // ── Meta-question features ───────────────────────────────────────
+    let has_meta_phrase = lexicon.has_meta_phrase(&lower);
+    let has_self_ref = words.iter().any(|w| {
+        let stripped = w.trim_matches(|c: char| c.is_ascii_punctuation());
+        lexicon.is_meta_self_word(stripped)
+    });
+    let has_capability_ref = words.iter().any(|w| {
+        let stripped = w.trim_matches(|c: char| c.is_ascii_punctuation());
+        lexicon.is_meta_capability_word(stripped)
+    });
+
+    if has_meta_phrase {
+        scores[3].1 += 3;
+    } else if has_self_ref && has_capability_ref {
+        scores[3].1 += 2;
+    }
+
+    // ── Pick winner ──────────────────────────────────────────────────
+    const THRESHOLD: i32 = 2;
+
+    scores.sort_by(|a, b| b.1.cmp(&a.1));
+    if scores[0].1 >= THRESHOLD {
+        scores[0].0
+    } else {
+        ConversationalKind::Unrecognized
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -444,5 +565,128 @@ mod tests {
         let frame = lexicon.parse_question_frame("Who are you?");
         assert_eq!(frame.subject_tokens.join(" "), "you");
         assert!(!frame.signals_capability);
+    }
+
+    // ── classify_conversational tests ────────────────────────────────────
+
+    fn en() -> crate::grammar::lexer::Lexicon {
+        crate::grammar::lexer::Lexicon::default_english()
+    }
+
+    #[test]
+    fn conversational_greeting_basic() {
+        let lex = en();
+        assert_eq!(classify_conversational("hello", &lex), ConversationalKind::Greeting);
+        assert_eq!(classify_conversational("Hi", &lex), ConversationalKind::Greeting);
+        assert_eq!(classify_conversational("good morning", &lex), ConversationalKind::Greeting);
+        assert_eq!(classify_conversational("Hey there", &lex), ConversationalKind::Greeting);
+    }
+
+    #[test]
+    fn conversational_greeting_natural() {
+        let lex = en();
+        assert_eq!(classify_conversational("hello!", &lex), ConversationalKind::Greeting);
+        assert_eq!(classify_conversational("hey, how's it going", &lex), ConversationalKind::Greeting);
+        assert_eq!(classify_conversational("Good afternoon", &lex), ConversationalKind::Greeting);
+    }
+
+    #[test]
+    fn conversational_follow_up_basic() {
+        let lex = en();
+        assert_eq!(classify_conversational("tell me more", &lex), ConversationalKind::FollowUp);
+        assert_eq!(classify_conversational("go on", &lex), ConversationalKind::FollowUp);
+        assert_eq!(classify_conversational("what else", &lex), ConversationalKind::FollowUp);
+    }
+
+    #[test]
+    fn conversational_follow_up_natural() {
+        let lex = en();
+        assert_eq!(classify_conversational("elaborate please", &lex), ConversationalKind::FollowUp);
+        assert_eq!(classify_conversational("can you expand on that", &lex), ConversationalKind::FollowUp);
+        assert_eq!(classify_conversational("more details", &lex), ConversationalKind::FollowUp);
+    }
+
+    #[test]
+    fn conversational_acknowledgment_basic() {
+        let lex = en();
+        assert_eq!(classify_conversational("thanks", &lex), ConversationalKind::Acknowledgment);
+        assert_eq!(classify_conversational("ok", &lex), ConversationalKind::Acknowledgment);
+        assert_eq!(classify_conversational("got it", &lex), ConversationalKind::Acknowledgment);
+        assert_eq!(classify_conversational("interesting", &lex), ConversationalKind::Acknowledgment);
+    }
+
+    #[test]
+    fn conversational_acknowledgment_natural() {
+        let lex = en();
+        assert_eq!(classify_conversational("thank you!", &lex), ConversationalKind::Acknowledgment);
+        assert_eq!(classify_conversational("cool, thanks", &lex), ConversationalKind::Acknowledgment);
+        assert_eq!(classify_conversational("makes sense", &lex), ConversationalKind::Acknowledgment);
+        assert_eq!(classify_conversational("sounds good", &lex), ConversationalKind::Acknowledgment);
+    }
+
+    #[test]
+    fn conversational_meta_question_basic() {
+        let lex = en();
+        assert_eq!(classify_conversational("what can you do", &lex), ConversationalKind::MetaQuestion);
+        assert_eq!(classify_conversational("describe yourself", &lex), ConversationalKind::MetaQuestion);
+        assert_eq!(classify_conversational("who are you", &lex), ConversationalKind::MetaQuestion);
+    }
+
+    #[test]
+    fn conversational_meta_question_natural() {
+        let lex = en();
+        assert_eq!(classify_conversational("tell me about yourself", &lex), ConversationalKind::MetaQuestion);
+        assert_eq!(classify_conversational("what are you", &lex), ConversationalKind::MetaQuestion);
+        assert_eq!(classify_conversational("your capabilities", &lex), ConversationalKind::MetaQuestion);
+    }
+
+    #[test]
+    fn conversational_unrecognized() {
+        let lex = en();
+        assert_eq!(classify_conversational("the quick brown fox", &lex), ConversationalKind::Unrecognized);
+        assert_eq!(classify_conversational("", &lex), ConversationalKind::Unrecognized);
+        assert_eq!(classify_conversational("photosynthesis in plants", &lex), ConversationalKind::Unrecognized);
+    }
+
+    // ── Multilingual conversational tests ────────────────────────────
+
+    #[test]
+    fn conversational_russian_greeting() {
+        let lex = crate::grammar::lexer::Lexicon::default_russian();
+        assert_eq!(classify_conversational("привет", &lex), ConversationalKind::Greeting);
+        assert_eq!(classify_conversational("доброе утро", &lex), ConversationalKind::Greeting);
+    }
+
+    #[test]
+    fn conversational_russian_ack() {
+        let lex = crate::grammar::lexer::Lexicon::default_russian();
+        assert_eq!(classify_conversational("спасибо", &lex), ConversationalKind::Acknowledgment);
+    }
+
+    #[test]
+    fn conversational_french_greeting() {
+        let lex = crate::grammar::lexer::Lexicon::default_french();
+        assert_eq!(classify_conversational("bonjour", &lex), ConversationalKind::Greeting);
+        assert_eq!(classify_conversational("salut", &lex), ConversationalKind::Greeting);
+    }
+
+    #[test]
+    fn conversational_french_meta() {
+        let lex = crate::grammar::lexer::Lexicon::default_french();
+        assert_eq!(classify_conversational("qui es-tu", &lex), ConversationalKind::MetaQuestion);
+    }
+
+    #[test]
+    fn conversational_spanish_greeting() {
+        let lex = crate::grammar::lexer::Lexicon::default_spanish();
+        assert_eq!(classify_conversational("hola", &lex), ConversationalKind::Greeting);
+        assert_eq!(classify_conversational("buenos días", &lex), ConversationalKind::Greeting);
+    }
+
+    #[test]
+    fn conversational_arabic_greeting() {
+        let lex = crate::grammar::lexer::Lexicon::default_arabic();
+        assert_eq!(classify_conversational("مرحبا", &lex), ConversationalKind::Greeting);
+        assert_eq!(classify_conversational("السلام عليكم", &lex), ConversationalKind::Greeting);
     }
 }

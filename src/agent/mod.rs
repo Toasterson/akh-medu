@@ -102,7 +102,8 @@ pub use memory::{
     ConsolidationConfig, ConsolidationResult, EpisodicEntry, SessionSummary, WorkingMemory,
     WorkingMemoryEntry, WorkingMemoryKind,
 };
-pub use nlp::{QuestionWord, UserIntent, classify_intent};
+pub use conversation::ConversationalResponse;
+pub use nlp::{ConversationalKind, QuestionWord, UserIntent, classify_conversational, classify_intent};
 pub use ooda::{
     ActionResult, Decision, DecisionImpasse, GoalProgress, ImpasseKind, Observation,
     OodaCycleResult, Orientation,

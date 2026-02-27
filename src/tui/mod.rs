@@ -420,6 +420,7 @@ impl AkhTui {
                         &original_input,
                         engine,
                         capability_signal,
+                        Some(agent.conversation_state()),
                     );
                     let handled = if let Ok(ref ctx) = discourse_result {
                         let from_triples = engine.triples_from(ctx.subject_id);
@@ -455,12 +456,12 @@ impl AkhTui {
                                 let from_triples = engine.triples_from(sym_id);
                                 let to_triples = engine.triples_to(sym_id);
                                 if from_triples.is_empty() && to_triples.is_empty() {
-                                    escalate_to_goal(
+                                    handle_unknown_subject(
                                         &mut self.messages,
                                         agent,
                                         &self.grammar,
+                                        &subject,
                                         &original_input,
-                                        &format!("No facts found for \"{subject}\"."),
                                     );
                                 } else {
                                     let mut all_triples = from_triples;
@@ -490,12 +491,12 @@ impl AkhTui {
                                 }
                             }
                             Err(_) => {
-                                escalate_to_goal(
+                                handle_unknown_subject(
                                     &mut self.messages,
                                     agent,
                                     &self.grammar,
+                                    &subject,
                                     &original_input,
-                                    &format!("Nothing known about \"{subject}\"."),
                                 );
                             }
                         }
@@ -682,13 +683,73 @@ impl AkhTui {
                 }
             }
             crate::agent::UserIntent::Freeform { ref text } => {
-                escalate_to_goal(
-                    &mut self.messages,
-                    agent,
-                    &self.grammar,
-                    text,
-                    &format!("Exploring \"{text}\"."),
+                let lexicon = crate::grammar::lexer::Lexicon::for_language(
+                    crate::grammar::lexer::Language::default(),
                 );
+                let kind = crate::agent::nlp::classify_conversational(text, &lexicon);
+                match kind {
+                    crate::agent::nlp::ConversationalKind::Greeting
+                    | crate::agent::nlp::ConversationalKind::Acknowledgment => {
+                        let (name, traits) = persona_name_and_traits(engine);
+                        let resp = agent.conversation_state().respond_conversational(
+                            &kind, &name, &traits,
+                        );
+                        if !resp.text.is_empty() {
+                            self.messages.push(AkhMessage::narrative(&resp.text, &self.grammar));
+                            agent.conversation_state_mut().record_agent_turn(&resp.text);
+                        }
+                    }
+                    crate::agent::nlp::ConversationalKind::FollowUp => {
+                        let (name, traits) = persona_name_and_traits(engine);
+                        let resp = agent.conversation_state().respond_conversational(
+                            &kind, &name, &traits,
+                        );
+                        if resp.text.is_empty() {
+                            // Active topic exists — re-query at Full detail.
+                            if let Some(topic_id) = agent.conversation_state().topic() {
+                                let label = engine.resolve_label(topic_id);
+                                if let Some(gr) = crate::agent::conversation::ground_query(
+                                    &label, engine, &self.grammar,
+                                ) {
+                                    let rendered = gr.render(
+                                        crate::agent::conversation::ResponseDetail::Full,
+                                    );
+                                    self.messages.push(AkhMessage::narrative(&rendered, &self.grammar));
+                                    agent.conversation_state_mut().record_agent_turn(&rendered);
+                                }
+                            }
+                        } else {
+                            self.messages.push(AkhMessage::narrative(&resp.text, &self.grammar));
+                            agent.conversation_state_mut().record_agent_turn(&resp.text);
+                        }
+                    }
+                    crate::agent::nlp::ConversationalKind::MetaQuestion => {
+                        // Route to grounded self-description.
+                        if let Some(gr) = crate::agent::conversation::ground_query(
+                            "self", engine, &self.grammar,
+                        ) {
+                            let detail = agent.conversation_state().response_detail;
+                            let rendered = gr.render(detail);
+                            self.messages.push(AkhMessage::narrative(&rendered, &self.grammar));
+                            agent.conversation_state_mut().record_agent_turn(&rendered);
+                        } else {
+                            let (name, _) = persona_name_and_traits(engine);
+                            self.messages.push(AkhMessage::narrative(
+                                &format!("I am {name}. I can answer questions about what I know, learn new facts, and investigate topics autonomously."),
+                                &self.grammar,
+                            ));
+                        }
+                    }
+                    crate::agent::nlp::ConversationalKind::Unrecognized => {
+                        escalate_to_goal(
+                            &mut self.messages,
+                            agent,
+                            &self.grammar,
+                            text,
+                            &format!("Exploring \"{text}\"."),
+                        );
+                    }
+                }
             }
         }
     }
@@ -906,6 +967,32 @@ fn escalate_to_goal(
     for gap in &summary.gaps {
         messages.push(AkhMessage::gap("(unknown)", gap));
     }
+}
+
+/// Extract persona name and traits from the engine's Psyche compartment.
+///
+/// Falls back to `("Akh", vec![])` if Psyche is not configured.
+fn persona_name_and_traits(engine: &Arc<Engine>) -> (String, Vec<String>) {
+    engine
+        .compartments()
+        .and_then(|cm| cm.psyche())
+        .map(|p| (p.persona.name.clone(), p.persona.traits.clone()))
+        .unwrap_or_else(|| ("Akh".to_string(), Vec::new()))
+}
+
+/// Handle an unknown subject gracefully: show a friendly message, then escalate.
+fn handle_unknown_subject(
+    messages: &mut Vec<AkhMessage>,
+    agent: &mut Agent,
+    grammar: &str,
+    subject: &str,
+    original_input: &str,
+) {
+    messages.push(AkhMessage::narrative(
+        &format!("I don't know about \"{subject}\" yet. Let me investigate."),
+        grammar,
+    ));
+    escalate_to_goal(messages, agent, grammar, original_input, "");
 }
 
 /// Launch the TUI with a local engine and workspace.
