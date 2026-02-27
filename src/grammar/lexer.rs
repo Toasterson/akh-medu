@@ -187,6 +187,21 @@ pub struct Lexicon {
     meta_capability_words: Vec<String>,
     /// Multi-word meta-question phrases (e.g., "what can you do", "que peux-tu faire").
     meta_phrases: Vec<String>,
+
+    // ── NLU extension categories (Phase 14j) ────────────────────────
+
+    /// Negation words (e.g., "not", "never", "не").
+    negation_words: Vec<String>,
+    /// Quantifier words (e.g., "all", "every", "все").
+    quantifier_words: Vec<String>,
+    /// Comparative words (e.g., "more", "less", "больше").
+    comparative_words: Vec<String>,
+    /// Modal verbs (e.g., "want", "can", "хочу").
+    modal_verbs: Vec<String>,
+    /// Conditional triggers (e.g., "if", "when", "если").
+    conditional_triggers: Vec<String>,
+    /// Temporal words (e.g., "now", "tomorrow", "сейчас").
+    temporal_words: Vec<String>,
 }
 
 /// Non-declarative commands recognized by the lexer.
@@ -362,6 +377,38 @@ impl Lexicon {
             "them".into(), "they".into(), "those".into(), "these".into(),
         ];
 
+        let negation_words = vec![
+            "not".into(), "no".into(), "never".into(), "neither".into(), "nor".into(),
+            "cannot".into(), "can't".into(), "don't".into(), "doesn't".into(),
+            "isn't".into(), "aren't".into(), "won't".into(),
+        ];
+        let quantifier_words = vec![
+            "all".into(), "every".into(), "each".into(), "some".into(), "any".into(),
+            "most".into(), "none".into(), "few".into(), "many".into(), "several".into(),
+            "both".into(),
+        ];
+        let comparative_words = vec![
+            "more".into(), "less".into(), "bigger".into(), "smaller".into(),
+            "greater".into(), "fewer".into(), "better".into(), "worse".into(),
+            "higher".into(), "lower".into(), "faster".into(), "slower".into(),
+            "larger".into(), "taller".into(), "shorter".into(),
+        ];
+        let modal_verbs = vec![
+            "want".into(), "wants".into(), "can".into(), "could".into(),
+            "should".into(), "must".into(), "may".into(), "might".into(),
+            "need".into(), "needs".into(),
+        ];
+        let conditional_triggers = vec![
+            "if".into(), "when".into(), "whenever".into(), "unless".into(),
+            "provided".into(), "assuming".into(),
+        ];
+        let temporal_words = vec![
+            "now".into(), "today".into(), "tomorrow".into(), "yesterday".into(),
+            "soon".into(), "later".into(), "before".into(), "after".into(),
+            "next".into(), "last".into(), "during".into(), "since".into(),
+            "until".into(), "recently".into(), "already".into(),
+        ];
+
         Self {
             void_words,
             relational_patterns,
@@ -383,6 +430,12 @@ impl Lexicon {
             meta_self_words,
             meta_capability_words,
             meta_phrases,
+            negation_words,
+            quantifier_words,
+            comparative_words,
+            modal_verbs,
+            conditional_triggers,
+            temporal_words,
         }
     }
 
@@ -525,6 +578,32 @@ impl Lexicon {
             meta_self_words,
             meta_capability_words,
             meta_phrases,
+            negation_words: vec![
+                "не".into(), "нет".into(), "никогда".into(), "ни".into(),
+                "нельзя".into(), "невозможно".into(),
+            ],
+            quantifier_words: vec![
+                "все".into(), "всё".into(), "каждый".into(), "каждая".into(),
+                "каждое".into(), "некоторые".into(), "любой".into(),
+                "большинство".into(), "никакой".into(), "много".into(),
+                "несколько".into(), "оба".into(),
+            ],
+            comparative_words: vec![
+                "больше".into(), "меньше".into(), "лучше".into(), "хуже".into(),
+                "выше".into(), "ниже".into(), "быстрее".into(), "медленнее".into(),
+            ],
+            modal_verbs: vec![
+                "хочу".into(), "хочет".into(), "могу".into(), "может".into(),
+                "должен".into(), "должна".into(), "нужно".into(),
+            ],
+            conditional_triggers: vec![
+                "если".into(), "когда".into(), "пока".into(), "если бы".into(),
+            ],
+            temporal_words: vec![
+                "сейчас".into(), "сегодня".into(), "завтра".into(), "вчера".into(),
+                "скоро".into(), "потом".into(), "позже".into(), "раньше".into(),
+                "после".into(), "до".into(), "недавно".into(), "уже".into(),
+            ],
         }
     }
 
@@ -656,6 +735,37 @@ impl Lexicon {
             meta_self_words,
             meta_capability_words,
             meta_phrases,
+            negation_words: vec![
+                "لا".into(), "ليس".into(), "ليست".into(), "لم".into(),
+                "لن".into(), "ما".into(), "غير".into(), "بدون".into(),
+                "أبدا".into(), "أبداً".into(), "مش".into(),
+            ],
+            quantifier_words: vec![
+                "كل".into(), "جميع".into(), "بعض".into(), "أي".into(),
+                "معظم".into(), "لا".into(), "عدة".into(), "كثير".into(),
+                "قليل".into(), "كلا".into(),
+            ],
+            comparative_words: vec![
+                "أكثر".into(), "أقل".into(), "أكبر".into(), "أصغر".into(),
+                "أفضل".into(), "أسوأ".into(), "أعلى".into(), "أدنى".into(),
+            ],
+            modal_verbs: vec![
+                "أريد".into(), "أريدُ".into(), "يريد".into(), "تريد".into(),
+                "يستطيع".into(), "تستطيع".into(), "أستطيع".into(),
+                "يجب".into(), "ينبغي".into(), "يمكن".into(),
+                "يحتاج".into(), "تحتاج".into(), "أحتاج".into(),
+            ],
+            conditional_triggers: vec![
+                "إذا".into(), "لو".into(), "إن".into(), "عندما".into(),
+                "متى".into(), "ما لم".into(), "بشرط".into(),
+            ],
+            temporal_words: vec![
+                "الآن".into(), "اليوم".into(), "غدا".into(), "غداً".into(),
+                "أمس".into(), "قريبا".into(), "قريباً".into(),
+                "لاحقا".into(), "لاحقاً".into(), "قبل".into(), "بعد".into(),
+                "خلال".into(), "منذ".into(), "حتى".into(), "مؤخرا".into(),
+                "مؤخراً".into(), "فعلا".into(), "فعلاً".into(),
+            ],
         }
     }
 
@@ -825,6 +935,42 @@ impl Lexicon {
             meta_self_words,
             meta_capability_words,
             meta_phrases,
+            negation_words: vec![
+                "ne".into(), "pas".into(), "non".into(), "jamais".into(),
+                "ni".into(), "aucun".into(), "aucune".into(), "rien".into(),
+                "personne".into(), "plus".into(),
+            ],
+            quantifier_words: vec![
+                "tout".into(), "toute".into(), "tous".into(), "toutes".into(),
+                "chaque".into(), "quelque".into(), "quelques".into(),
+                "aucun".into(), "aucune".into(), "la plupart".into(),
+                "plusieurs".into(), "beaucoup".into(), "peu".into(),
+            ],
+            comparative_words: vec![
+                "plus".into(), "moins".into(), "meilleur".into(), "meilleure".into(),
+                "pire".into(), "mieux".into(), "supérieur".into(), "superieur".into(),
+                "inférieur".into(), "inferieur".into(),
+            ],
+            modal_verbs: vec![
+                "vouloir".into(), "veux".into(), "veut".into(), "voulons".into(),
+                "pouvoir".into(), "peux".into(), "peut".into(), "pouvons".into(),
+                "devoir".into(), "dois".into(), "doit".into(), "devons".into(),
+                "falloir".into(), "faut".into(),
+            ],
+            conditional_triggers: vec![
+                "si".into(), "quand".into(), "lorsque".into(),
+                "à moins que".into(), "a moins que".into(),
+                "pourvu que".into(), "en supposant que".into(),
+            ],
+            temporal_words: vec![
+                "maintenant".into(), "aujourd'hui".into(), "demain".into(),
+                "hier".into(), "bientôt".into(), "bientot".into(),
+                "plus tard".into(), "avant".into(), "après".into(), "apres".into(),
+                "prochain".into(), "prochaine".into(), "dernier".into(), "dernière".into(),
+                "derniere".into(), "pendant".into(), "depuis".into(), "jusqu'à".into(),
+                "jusqua".into(), "récemment".into(), "recemment".into(),
+                "déjà".into(), "deja".into(),
+            ],
         }
     }
 
@@ -991,6 +1137,43 @@ impl Lexicon {
             meta_self_words,
             meta_capability_words,
             meta_phrases,
+            negation_words: vec![
+                "no".into(), "ni".into(), "nunca".into(), "jamás".into(),
+                "jamas".into(), "tampoco".into(), "ningún".into(), "ningun".into(),
+                "ninguna".into(), "nada".into(), "nadie".into(),
+            ],
+            quantifier_words: vec![
+                "todo".into(), "toda".into(), "todos".into(), "todas".into(),
+                "cada".into(), "algún".into(), "algun".into(), "alguna".into(),
+                "algunos".into(), "algunas".into(), "ningún".into(), "ningun".into(),
+                "ninguna".into(), "la mayoría".into(), "la mayoria".into(),
+                "varios".into(), "varias".into(), "muchos".into(), "muchas".into(),
+                "pocos".into(), "pocas".into(),
+            ],
+            comparative_words: vec![
+                "más".into(), "mas".into(), "menos".into(), "mejor".into(),
+                "peor".into(), "mayor".into(), "menor".into(), "superior".into(),
+                "inferior".into(),
+            ],
+            modal_verbs: vec![
+                "querer".into(), "quiero".into(), "quiere".into(), "queremos".into(),
+                "poder".into(), "puedo".into(), "puede".into(), "podemos".into(),
+                "deber".into(), "debo".into(), "debe".into(), "debemos".into(),
+                "necesitar".into(), "necesito".into(), "necesita".into(),
+            ],
+            conditional_triggers: vec![
+                "si".into(), "cuando".into(), "siempre que".into(),
+                "a menos que".into(), "con tal de que".into(),
+                "suponiendo que".into(),
+            ],
+            temporal_words: vec![
+                "ahora".into(), "hoy".into(), "mañana".into(), "manana".into(),
+                "ayer".into(), "pronto".into(), "luego".into(), "después".into(),
+                "despues".into(), "antes".into(), "próximo".into(), "proximo".into(),
+                "próxima".into(), "proxima".into(), "último".into(), "ultimo".into(),
+                "última".into(), "ultima".into(), "durante".into(), "desde".into(),
+                "hasta".into(), "recientemente".into(), "ya".into(),
+            ],
         }
     }
 
@@ -1116,6 +1299,139 @@ impl Lexicon {
     pub fn has_meta_phrase(&self, text: &str) -> bool {
         let lower = text.to_lowercase();
         self.meta_phrases.iter().any(|p| lower.contains(p.as_str()))
+    }
+
+    // ── NLU category accessors ─────────────────────────────────────
+
+    /// Whether a word is a negation word (e.g., "not", "не", "لا").
+    pub fn is_negation_word(&self, word: &str) -> bool {
+        let lower = word.to_lowercase();
+        self.negation_words.contains(&lower)
+    }
+
+    /// Whether a word is a quantifier word (e.g., "all", "все", "كل").
+    pub fn is_quantifier_word(&self, word: &str) -> bool {
+        let lower = word.to_lowercase();
+        self.quantifier_words.contains(&lower)
+    }
+
+    /// Whether a word is a comparative word (e.g., "more", "больше", "أكثر").
+    pub fn is_comparative_word(&self, word: &str) -> bool {
+        let lower = word.to_lowercase();
+        self.comparative_words.contains(&lower)
+    }
+
+    /// Whether a word is a modal verb (e.g., "want", "хочу", "أريد").
+    pub fn is_modal_verb(&self, word: &str) -> bool {
+        let lower = word.to_lowercase();
+        self.modal_verbs.contains(&lower)
+    }
+
+    /// Whether a word is a conditional trigger (e.g., "if", "если", "إذا").
+    pub fn is_conditional_trigger(&self, word: &str) -> bool {
+        let lower = word.to_lowercase();
+        self.conditional_triggers.contains(&lower)
+    }
+
+    /// Whether a word is a temporal word (e.g., "now", "сейчас", "الآن").
+    pub fn is_temporal_word(&self, word: &str) -> bool {
+        let lower = word.to_lowercase();
+        self.temporal_words.contains(&lower)
+    }
+
+    /// Map a quantifier word to its semantic `Quantifier` variant.
+    pub fn quantifier_for(&self, word: &str) -> Option<super::abs::Quantifier> {
+        use super::abs::Quantifier;
+        let lower = word.to_lowercase();
+        if !self.is_quantifier_word(&lower) {
+            return None;
+        }
+        // Universal quantifiers — matches across all 5 languages
+        let universals = [
+            "all", "every", "each", "both",
+            "все", "каждый", "каждая", "каждое",
+            "كل", "جميع", "كلا",
+            "tout", "toute", "tous", "toutes", "chaque",
+            "todo", "toda", "todos", "todas", "cada",
+        ];
+        if universals.contains(&lower.as_str()) {
+            return Some(Quantifier::Universal);
+        }
+        // None quantifiers
+        let nones = [
+            "no", "none",
+            "ни один", "никакой",
+            "لا",
+            "aucun", "aucune",
+            "ningún", "ningun", "ninguna",
+        ];
+        if nones.contains(&lower.as_str()) {
+            return Some(Quantifier::None);
+        }
+        // Most quantifiers
+        let mosts = [
+            "most",
+            "большинство",
+            "معظم",
+            "la plupart",
+            "la mayoría", "la mayoria",
+        ];
+        if mosts.contains(&lower.as_str()) {
+            return Some(Quantifier::Most);
+        }
+        // Default: Existential for "some", "any", "few", "many", "several", etc.
+        Some(Quantifier::Existential)
+    }
+
+    /// Map a modal verb to its semantic `Modality` variant.
+    pub fn modality_for(&self, word: &str) -> Option<super::abs::Modality> {
+        use super::abs::Modality;
+        let lower = word.to_lowercase();
+        if !self.is_modal_verb(&lower) {
+            return None;
+        }
+        let wants = [
+            "want", "wants",
+            "хочу", "хочет", "хотеть",
+            "أريد", "أريدُ", "يريد", "تريد",
+            "vouloir", "veux", "veut", "voulons",
+            "querer", "quiero", "quiere", "queremos",
+        ];
+        if wants.contains(&lower.as_str()) {
+            return Some(Modality::Want);
+        }
+        let cans = [
+            "can", "could",
+            "могу", "может", "мочь",
+            "يستطيع", "تستطيع", "أستطيع",
+            "pouvoir", "peux", "peut", "pouvons",
+            "poder", "puedo", "puede", "podemos",
+        ];
+        if cans.contains(&lower.as_str()) {
+            return Some(Modality::Can);
+        }
+        let shoulds = [
+            "should",
+            "следует",
+            "ينبغي",
+            "devoir", "devrait",
+            "debería", "deberia",
+        ];
+        if shoulds.contains(&lower.as_str()) {
+            return Some(Modality::Should);
+        }
+        let musts = [
+            "must",
+            "должен", "должна", "должно",
+            "يجب",
+            "dois", "doit", "faut",
+            "debo", "debe",
+        ];
+        if musts.contains(&lower.as_str()) {
+            return Some(Modality::Must);
+        }
+        // Default: May for remaining modals
+        Some(Modality::May)
     }
 
     /// Parse a question into its grammatical frame.

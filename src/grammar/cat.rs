@@ -53,6 +53,20 @@ pub enum Cat {
     DiscourseFrame,
     /// Free-form text that didn't parse into a structured category.
     Freeform,
+    /// A negated expression.
+    Negation,
+    /// A quantified expression (universal, existential, etc.).
+    Quantifier,
+    /// A comparison between entities.
+    Comparison,
+    /// A conditional (if-then) expression.
+    Conditional,
+    /// A temporally scoped expression.
+    Temporal,
+    /// A modal expression (want, can, should, etc.).
+    Modal,
+    /// A relative clause (head + subordinate clause).
+    RelativeClause,
 }
 
 impl Cat {
@@ -99,6 +113,13 @@ impl std::fmt::Display for Cat {
             Cat::Provenance => write!(f, "Provenance"),
             Cat::DiscourseFrame => write!(f, "DiscourseFrame"),
             Cat::Freeform => write!(f, "Freeform"),
+            Cat::Negation => write!(f, "Negation"),
+            Cat::Quantifier => write!(f, "Quantifier"),
+            Cat::Comparison => write!(f, "Comparison"),
+            Cat::Conditional => write!(f, "Conditional"),
+            Cat::Temporal => write!(f, "Temporal"),
+            Cat::Modal => write!(f, "Modal"),
+            Cat::RelativeClause => write!(f, "RelativeClause"),
         }
     }
 }

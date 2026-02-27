@@ -40,7 +40,7 @@ rayon = "1"
 hnsw_rs = "0.3"
 anndists = "0.1"
 petgraph = "0.7"
-oxigraph = "0.4"
+oxigraph = "0.5"
 
 # Code analysis
 syn = { version = "2", features = ["full", "visit"] }
@@ -107,6 +107,9 @@ oxifed = ["daemon", "lapin", "deadpool-lapin", "reqwest"]
 email = ["mail-parser", "imap", "native-tls", "lettre"]
 calendar = ["icalendar", "chrono"]
 wasm-tools = ["wasmtime"]
+nlu-ml = []
+nlu-llm = []
+nlu-full = ["nlu-ml", "nlu-llm"]
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

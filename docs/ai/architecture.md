@@ -1,6 +1,6 @@
 # Akh-medu Architecture
 
-> Last updated: 2026-02-26 (Append-only audit ledger with web endpoints, TUI streaming, LogTool, and broadcast WS streaming)
+> Last updated: 2026-02-28 (Phase 14j-14m: NLU pipeline with extended rule parser, VSA parse ranker, new AbsTree variants, TUI integration)
 
 ## Overview
 

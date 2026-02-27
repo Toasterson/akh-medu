@@ -941,6 +941,16 @@ pub fn derivation_kind_prose(kind: &DerivationKind) -> String {
                  {concepts_ingested} ingested (Dreyfus: {dreyfus_level}, avg gap: {gap_score_avg:.2})"
             )
         }
+        DerivationKind::NluParsed {
+            source_tier,
+            confidence,
+            exemplar_similarity,
+        } => {
+            let sim = exemplar_similarity
+                .map(|s| format!(", exemplar sim: {s:.2}"))
+                .unwrap_or_default();
+            format!("NLU parsed (tier {source_tier}, confidence: {confidence:.2}{sim})")
+        }
     }
 }
 

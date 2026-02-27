@@ -6,7 +6,7 @@
 //! The parser is hand-rolled (no external parser combinator dependency) for
 //! full control over error messages, recovery, and the small fixed grammar.
 
-use super::abs::AbsTree;
+use super::abs::{AbsTree, CompareOrd, TemporalExpr};
 use super::concrete::ParseContext;
 use super::error::{GrammarError, GrammarResult};
 use super::lexer::{self, CommandKind, Language, Lexicon, Token};
@@ -74,6 +74,36 @@ pub fn parse_prose(input: &str, ctx: &ParseContext) -> ParseResult {
     // Tokenize for pattern matching
     let tokens = lexer::tokenize(trimmed, ctx.registry, ctx.ops, ctx.item_memory, &lexicon);
 
+    // 3a. Conditionals ("if X then Y")
+    if let Some(tree) = try_conditional(trimmed, &tokens, &lexicon) {
+        return ParseResult::Facts(vec![tree]);
+    }
+
+    // 3b. Modals ("want to X", "must Y")
+    if let Some(tree) = try_modal(trimmed, &tokens, &lexicon) {
+        return ParseResult::Facts(vec![tree]);
+    }
+
+    // 3c. Temporals ("tomorrow X", "now X")
+    if let Some(tree) = try_temporal(trimmed, &tokens, &lexicon) {
+        return ParseResult::Facts(vec![tree]);
+    }
+
+    // 3d. Negation ("not X", "X is not Y")
+    if let Some(tree) = try_negation(trimmed, &tokens, &lexicon) {
+        return ParseResult::Facts(vec![tree]);
+    }
+
+    // 3e. Quantified ("all X are Y")
+    if let Some(tree) = try_quantified(trimmed, &tokens, &lexicon) {
+        return ParseResult::Facts(vec![tree]);
+    }
+
+    // 3f. Comparative ("X is bigger than Y")
+    if let Some(tree) = try_comparative(trimmed, &tokens, &lexicon) {
+        return ParseResult::Facts(vec![tree]);
+    }
+
     // 4. Compound sentences (split on "and"/"or")
     if let Some(result) = try_compound(&tokens, &lexicon) {
         return result;
@@ -120,6 +150,232 @@ fn is_question(input: &str, lexicon: &Lexicon) -> bool {
     }
     let first_word = input.split_whitespace().next().unwrap_or("").to_lowercase();
     lexicon.is_question_word(&first_word)
+}
+
+// ── NLU recognizer functions ──────────────────────────────────────────
+
+/// Try to parse a conditional: "if X then Y" / "если X то Y" / "si X entonces Y".
+///
+/// Strategy: find a conditional trigger word, split at comma/"then", parse halves.
+fn try_conditional(input: &str, tokens: &[Token], lexicon: &Lexicon) -> Option<AbsTree> {
+    // Check if first content token is a conditional trigger
+    let first_content = tokens.iter().find(|t| !t.semantically_void)?;
+    if !lexicon.is_conditional_trigger(&first_content.normalized) {
+        return None;
+    }
+
+    // Remove the trigger word from the input
+    let after_trigger = input
+        .trim()
+        .get(first_content.span.end..)?
+        .trim()
+        .trim_start_matches(',')
+        .trim();
+
+    if after_trigger.is_empty() {
+        return None;
+    }
+
+    // Split at "then"/comma — find the split point
+    let (cond_str, cons_str) = split_conditional(after_trigger, lexicon)?;
+
+    let condition = AbsTree::Freeform(cond_str.trim().to_string());
+    let consequent = AbsTree::Freeform(cons_str.trim().to_string());
+
+    Some(AbsTree::conditional(condition, consequent))
+}
+
+/// Split conditional body into condition and consequent parts.
+fn split_conditional<'a>(input: &'a str, _lexicon: &Lexicon) -> Option<(&'a str, &'a str)> {
+    // Try splitting at known delimiters: "then", "то", "entonces", "alors", comma
+    let delimiters = [", then ", " then ", ",then ", ", то ", " то ", ", entonces ", " entonces ", ", alors ", " alors "];
+    for delim in &delimiters {
+        if let Some(pos) = input.to_lowercase().find(delim) {
+            let cond = &input[..pos];
+            let cons = &input[pos + delim.len()..];
+            if !cond.is_empty() && !cons.is_empty() {
+                return Some((cond, cons));
+            }
+        }
+    }
+    // Try splitting at comma
+    if let Some(pos) = input.find(',') {
+        let cond = &input[..pos];
+        let cons = &input[pos + 1..];
+        if !cond.trim().is_empty() && !cons.trim().is_empty() {
+            return Some((cond, cons.trim_start()));
+        }
+    }
+    None
+}
+
+/// Try to parse a modal: "want to X" / "хочу X" / "quiero X".
+///
+/// Strategy: check first 1-2 tokens for a modal verb, parse remainder as scope.
+fn try_modal(input: &str, tokens: &[Token], lexicon: &Lexicon) -> Option<AbsTree> {
+    let content_tokens: Vec<&Token> = tokens.iter().filter(|t| !t.semantically_void).collect();
+    if content_tokens.is_empty() {
+        return None;
+    }
+
+    // Check first content token for modal verb
+    let first = &content_tokens[0];
+    let modality = lexicon.modality_for(&first.normalized)?;
+
+    // Get the rest of the input after the modal verb
+    let after_modal = input.trim().get(first.span.end..)?.trim();
+
+    // Strip common infinitive markers: "to", "que", "de"
+    let scope_str = after_modal
+        .strip_prefix("to ")
+        .or_else(|| after_modal.strip_prefix("que "))
+        .or_else(|| after_modal.strip_prefix("de "))
+        .or_else(|| after_modal.strip_prefix("أن "))
+        .unwrap_or(after_modal)
+        .trim();
+
+    if scope_str.is_empty() {
+        return None;
+    }
+
+    let inner = AbsTree::Freeform(scope_str.to_string());
+    Some(AbsTree::modal(modality, inner))
+}
+
+/// Try to parse a temporal expression: "tomorrow X" / "сейчас X" / "الآن X".
+///
+/// Strategy: find a temporal word (typically at start or end), extract TemporalExpr::Named.
+fn try_temporal(input: &str, tokens: &[Token], lexicon: &Lexicon) -> Option<AbsTree> {
+    let content_tokens: Vec<&Token> = tokens.iter().filter(|t| !t.semantically_void).collect();
+    if content_tokens.len() < 2 {
+        return None;
+    }
+
+    // Check if first content token is a temporal word
+    let first = &content_tokens[0];
+    if lexicon.is_temporal_word(&first.normalized) {
+        let after = input.trim().get(first.span.end..)?.trim();
+        if after.is_empty() {
+            return None;
+        }
+        let time_expr = TemporalExpr::Named(first.surface.to_string());
+        let inner = AbsTree::Freeform(after.to_string());
+        return Some(AbsTree::temporal(time_expr, inner));
+    }
+
+    // Check if last content token is a temporal word
+    let last = content_tokens.last()?;
+    if lexicon.is_temporal_word(&last.normalized) {
+        let before = input.trim().get(..last.span.start)?.trim();
+        if before.is_empty() {
+            return None;
+        }
+        let time_expr = TemporalExpr::Named(last.surface.to_string());
+        let inner = AbsTree::Freeform(before.to_string());
+        return Some(AbsTree::temporal(time_expr, inner));
+    }
+
+    None
+}
+
+/// Try to parse negation: "not X" / "dogs are not cats" / "не X".
+///
+/// Strategy: find a negation word, remove it, parse remainder, wrap in Negation.
+fn try_negation(input: &str, tokens: &[Token], lexicon: &Lexicon) -> Option<AbsTree> {
+    // Find negation word in the token stream
+    let neg_pos = tokens
+        .iter()
+        .position(|t| lexicon.is_negation_word(&t.normalized))?;
+
+    let neg_token = &tokens[neg_pos];
+
+    // Build the remainder text without the negation word
+    let before = input.get(..neg_token.span.start).unwrap_or("").trim();
+    let after = input.get(neg_token.span.end..).unwrap_or("").trim();
+
+    let remainder = if before.is_empty() {
+        after.to_string()
+    } else if after.is_empty() {
+        before.to_string()
+    } else {
+        format!("{before} {after}")
+    };
+
+    if remainder.is_empty() {
+        return None;
+    }
+
+    let inner = AbsTree::Freeform(remainder);
+    Some(AbsTree::negation(inner))
+}
+
+/// Try to parse quantified statement: "all dogs are mammals" / "все собаки — млекопитающие".
+///
+/// Strategy: check first token for quantifier, map to Quantifier, parse scope.
+fn try_quantified(input: &str, tokens: &[Token], lexicon: &Lexicon) -> Option<AbsTree> {
+    let content_tokens: Vec<&Token> = tokens.iter().filter(|t| !t.semantically_void).collect();
+    if content_tokens.len() < 2 {
+        return None;
+    }
+
+    let first = &content_tokens[0];
+    let quantifier = lexicon.quantifier_for(&first.normalized)?;
+
+    let after = input.trim().get(first.span.end..)?.trim();
+    if after.is_empty() {
+        return None;
+    }
+
+    let scope = AbsTree::Freeform(after.to_string());
+    Some(AbsTree::quantified(quantifier, scope))
+}
+
+/// Try to parse a comparative: "X is bigger than Y" / "X больше чем Y".
+///
+/// Strategy: scan for comparative word + "than"/"чем", extract entities & property.
+fn try_comparative(input: &str, tokens: &[Token], lexicon: &Lexicon) -> Option<AbsTree> {
+    // Find the comparative word
+    let comp_pos = tokens
+        .iter()
+        .position(|t| lexicon.is_comparative_word(&t.normalized))?;
+
+    let comp_token = &tokens[comp_pos];
+    let property = comp_token.surface.clone();
+
+    // Find "than"/"чем"/"que"/"de" after the comparative
+    let than_words = ["than", "чем", "que", "de", "من"];
+    let than_pos = tokens[comp_pos + 1..]
+        .iter()
+        .position(|t| than_words.contains(&t.normalized.as_str()))
+        .map(|p| p + comp_pos + 1)?;
+
+    let than_token = &tokens[than_pos];
+
+    // Entity A: everything before the comparative (skip copulas like "is")
+    let before_comp = input.get(..comp_token.span.start).unwrap_or("").trim();
+    // Strip trailing copulas
+    let entity_a_str = before_comp
+        .trim_end_matches(" is")
+        .trim_end_matches(" are")
+        .trim_end_matches(" es")
+        .trim_end_matches(" est")
+        .trim();
+
+    // Entity B: everything after "than"
+    let entity_b_str = input.get(than_token.span.end..).unwrap_or("").trim();
+
+    if entity_a_str.is_empty() || entity_b_str.is_empty() {
+        return None;
+    }
+
+    let entity_a = AbsTree::entity(entity_a_str);
+    let entity_b = AbsTree::entity(entity_b_str);
+
+    // Default to GreaterThan for comparatives like "bigger", "more"
+    // Could be refined with word-level semantics later
+    let ordering = CompareOrd::GreaterThan;
+
+    Some(AbsTree::comparison(entity_a, entity_b, property, ordering))
 }
 
 /// Try to parse a compound sentence (split on "and"/"or").
@@ -443,5 +699,167 @@ mod tests {
         if let ParseResult::Query { subject, .. } = result {
             assert_eq!(subject, "you");
         }
+    }
+
+    // ── NLU recognizer tests ────────────────────────────────────
+
+    use super::super::cat::Cat;
+
+    fn parse_facts_cat(input: &str) -> Option<Cat> {
+        match parse(input) {
+            ParseResult::Facts(facts) if !facts.is_empty() => Some(facts[0].cat()),
+            _ => None,
+        }
+    }
+
+    // Conditional tests
+    #[test]
+    fn parse_conditional_if_then() {
+        let cat = parse_facts_cat("if it rains, cancel the meeting");
+        assert_eq!(cat, Some(Cat::Conditional));
+    }
+
+    #[test]
+    fn parse_conditional_if_then_explicit() {
+        let cat = parse_facts_cat("if it rains then stay inside");
+        assert_eq!(cat, Some(Cat::Conditional));
+    }
+
+    // Modal tests
+    #[test]
+    fn parse_modal_want() {
+        let cat = parse_facts_cat("want to learn rust");
+        assert_eq!(cat, Some(Cat::Modal));
+    }
+
+    #[test]
+    fn parse_modal_must() {
+        let cat = parse_facts_cat("must finish the report");
+        assert_eq!(cat, Some(Cat::Modal));
+    }
+
+    #[test]
+    fn parse_modal_could() {
+        let cat = parse_facts_cat("could learn faster");
+        assert_eq!(cat, Some(Cat::Modal));
+    }
+
+    // Temporal tests
+    #[test]
+    fn parse_temporal_tomorrow() {
+        let cat = parse_facts_cat("tomorrow finish the report");
+        assert_eq!(cat, Some(Cat::Temporal));
+    }
+
+    #[test]
+    fn parse_temporal_now() {
+        let cat = parse_facts_cat("now start the meeting");
+        assert_eq!(cat, Some(Cat::Temporal));
+    }
+
+    // Negation tests
+    #[test]
+    fn parse_negation_not() {
+        let cat = parse_facts_cat("not a mammal");
+        assert_eq!(cat, Some(Cat::Negation));
+    }
+
+    #[test]
+    fn parse_negation_never() {
+        let cat = parse_facts_cat("never eat fish");
+        assert_eq!(cat, Some(Cat::Negation));
+    }
+
+    // Quantified tests
+    #[test]
+    fn parse_quantified_all() {
+        let cat = parse_facts_cat("all dogs are mammals");
+        assert_eq!(cat, Some(Cat::Quantifier));
+    }
+
+    #[test]
+    fn parse_quantified_every() {
+        let cat = parse_facts_cat("every student passed");
+        assert_eq!(cat, Some(Cat::Quantifier));
+    }
+
+    #[test]
+    fn parse_quantified_some() {
+        let cat = parse_facts_cat("some birds can fly");
+        assert_eq!(cat, Some(Cat::Quantifier));
+    }
+
+    // Comparative tests
+    #[test]
+    fn parse_comparative_bigger() {
+        let cat = parse_facts_cat("elephants are bigger than mice");
+        assert_eq!(cat, Some(Cat::Comparison));
+    }
+
+    #[test]
+    fn parse_comparative_more() {
+        let cat = parse_facts_cat("gold is more valuable than silver");
+        assert_eq!(cat, Some(Cat::Comparison));
+    }
+
+    // Russian NLU tests
+    #[test]
+    fn parse_negation_russian() {
+        let cat = parse_facts_cat("не млекопитающее");
+        assert_eq!(cat, Some(Cat::Negation));
+    }
+
+    #[test]
+    fn parse_modal_russian() {
+        let cat = parse_facts_cat("хочу учить русский");
+        assert_eq!(cat, Some(Cat::Modal));
+    }
+
+    #[test]
+    fn parse_conditional_russian() {
+        let cat = parse_facts_cat("если идёт дождь, останься дома");
+        assert_eq!(cat, Some(Cat::Conditional));
+    }
+
+    // French NLU tests
+    #[test]
+    fn parse_negation_french() {
+        // "pas" is a negation word
+        let cat = parse_facts_cat("pas un mammifère");
+        assert_eq!(cat, Some(Cat::Negation));
+    }
+
+    #[test]
+    fn parse_modal_french() {
+        let cat = parse_facts_cat("veux apprendre le français");
+        assert_eq!(cat, Some(Cat::Modal));
+    }
+
+    // Additional negation tests
+    #[test]
+    fn parse_negation_dogs_not_fish() {
+        let cat = parse_facts_cat("not a valid solution");
+        assert_eq!(cat, Some(Cat::Negation));
+    }
+
+    #[test]
+    fn parse_negation_cannot() {
+        let cat = parse_facts_cat("cannot proceed further");
+        assert_eq!(cat, Some(Cat::Negation));
+    }
+
+    // Cascade priority tests
+    #[test]
+    fn parse_conditional_before_negation() {
+        // "if" conditional trigger should take priority over "not" negation
+        let cat = parse_facts_cat("if not ready, then wait");
+        assert_eq!(cat, Some(Cat::Conditional));
+    }
+
+    #[test]
+    fn parse_temporal_before_negation() {
+        // Temporal word at start takes priority
+        let cat = parse_facts_cat("tomorrow not available");
+        assert_eq!(cat, Some(Cat::Temporal));
     }
 }

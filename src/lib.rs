@@ -50,6 +50,7 @@ pub mod graph;
 pub mod infer;
 pub mod library;
 pub mod message;
+pub mod nlu;
 pub mod partition;
 pub mod paths;
 pub mod pipeline;

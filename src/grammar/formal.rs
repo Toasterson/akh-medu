@@ -11,7 +11,7 @@
 //! - Gap → "Knowledge gap identified for 'Dog': no habitat data available."
 //! - Similarity → "'Dog' exhibits similarity to 'Wolf' (score: 0.87)."
 
-use super::abs::{AbsTree, ProvenanceTag};
+use super::abs::{AbsTree, CompareOrd, Modality, ProvenanceTag, Quantifier, TemporalExpr};
 use super::cat::Cat;
 use super::concrete::{ConcreteGrammar, LinContext, ParseContext};
 use super::error::GrammarResult;
@@ -237,6 +237,72 @@ impl FormalGrammar {
             // Discourse frames: delegate to inner content (formal doesn't
             // do POV transformation — that's narrative's job).
             AbsTree::DiscourseFrame { inner, .. } => self.linearize_inner(inner, ctx),
+
+            // ── NLU extensions ────────────────────────────────────────
+            AbsTree::Negation { inner } => {
+                let text = self.linearize_inner(inner, ctx)?;
+                Ok(format!("It is not the case that {text}"))
+            }
+            AbsTree::Quantified { quantifier, scope } => {
+                let scope_text = self.linearize_inner(scope, ctx)?;
+                let q = match quantifier {
+                    Quantifier::Universal => "For all cases,",
+                    Quantifier::Existential => "There exist cases where",
+                    Quantifier::Most => "In most cases,",
+                    Quantifier::None => "In no cases,",
+                    Quantifier::Specific(_) => "In specific cases,",
+                };
+                Ok(format!("{q} {scope_text}"))
+            }
+            AbsTree::Comparison {
+                entity_a,
+                entity_b,
+                property,
+                ordering,
+            } => {
+                let a = self.linearize_inner(entity_a, ctx)?;
+                let b = self.linearize_inner(entity_b, ctx)?;
+                let dir = match ordering {
+                    CompareOrd::GreaterThan => "more",
+                    CompareOrd::LessThan => "less",
+                    CompareOrd::Equal => "equally",
+                };
+                Ok(format!("{a} is {dir} {property} than {b}."))
+            }
+            AbsTree::Conditional {
+                condition,
+                consequent,
+            } => {
+                let cond = self.linearize_inner(condition, ctx)?;
+                let cons = self.linearize_inner(consequent, ctx)?;
+                Ok(format!("If {cond}, then {cons}."))
+            }
+            AbsTree::Temporal { time_expr, inner } => {
+                let text = self.linearize_inner(inner, ctx)?;
+                let t = match time_expr {
+                    TemporalExpr::Named(n) => n.clone(),
+                    TemporalExpr::Recurring(r) => r.clone(),
+                    TemporalExpr::Absolute(ts) => format!("timestamp {ts}"),
+                    TemporalExpr::Relative(delta) => format!("offset {delta}"),
+                };
+                Ok(format!("At {t}, {text}"))
+            }
+            AbsTree::Modal { modality, inner } => {
+                let text = self.linearize_inner(inner, ctx)?;
+                let m = match modality {
+                    Modality::Want => "wants to",
+                    Modality::Can => "can",
+                    Modality::Should => "should",
+                    Modality::Must => "must",
+                    Modality::May => "may",
+                };
+                Ok(format!("The subject {m} {text}."))
+            }
+            AbsTree::RelativeClause { head, clause } => {
+                let h = self.linearize_inner(head, ctx)?;
+                let c = self.linearize_inner(clause, ctx)?;
+                Ok(format!("{h}, which {c}."))
+            }
         }
     }
 }

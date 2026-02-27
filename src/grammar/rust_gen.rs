@@ -158,6 +158,19 @@ impl RustCodeGrammar {
                 self.linearize_node(inner, _ctx, indent)
             }
 
+            // NLU extensions: delegate through formal grammar for non-code nodes
+            AbsTree::Negation { inner }
+            | AbsTree::Quantified { scope: inner, .. }
+            | AbsTree::Temporal { inner, .. }
+            | AbsTree::Modal { inner, .. } => self.linearize_node(inner, _ctx, indent),
+            AbsTree::Conditional { consequent, .. } => {
+                self.linearize_node(consequent, _ctx, indent)
+            }
+            AbsTree::Comparison { .. } | AbsTree::RelativeClause { .. } => {
+                Ok(format!("{prefix}// (NLU expression)\n"))
+            }
+            AbsTree::DiscourseFrame { inner, .. } => self.linearize_node(inner, _ctx, indent),
+
             other => Err(GrammarError::LinearizationFailed {
                 cat: other.cat(),
                 grammar: "rust-gen".to_string(),

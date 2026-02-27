@@ -485,6 +485,18 @@ pub enum DerivationKind {
         dreyfus_level: String,
         gap_score_avg: f32,
     },
+
+    // --- Phase 14j: NLU Parsing ---------------------------------------------------
+
+    /// Input was successfully parsed by the NLU pipeline (Phase 14j).
+    NluParsed {
+        /// Which NLU tier produced the parse (1 = rule parser, 2 = micro-ML, 3 = LLM, 4 = ranker).
+        source_tier: u8,
+        /// Parse confidence from the producing tier.
+        confidence: f32,
+        /// If the VSA parse ranker contributed, the exemplar similarity score.
+        exemplar_similarity: Option<f32>,
+    },
 }
 
 impl DerivationKind {
@@ -562,6 +574,7 @@ impl DerivationKind {
             Self::CompetenceAssessment { .. } => 68,
             Self::BootstrapOrchestration { .. } => 69,
             Self::ContinuousLearning { .. } => 70,
+            Self::NluParsed { .. } => 71,
         }
     }
 }

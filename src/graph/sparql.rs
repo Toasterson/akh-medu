@@ -4,7 +4,7 @@
 //! The in-memory `KnowledgeGraph` can be synced to this store for persistence.
 
 use oxigraph::model::{GraphNameRef, NamedNode, Quad};
-use oxigraph::sparql::QueryResults;
+use oxigraph::sparql::{QueryResults, SparqlEvaluator};
 use oxigraph::store::Store;
 
 use crate::error::GraphError;
@@ -148,9 +148,13 @@ impl SparqlStore {
     /// triples will have default confidence of 1.0.
     // TODO: Store confidence via reification or named graphs to preserve across restarts.
     pub fn all_triples(&self) -> GraphResult<Vec<Triple>> {
-        let results = self
-            .store
-            .query("SELECT ?s ?p ?o WHERE { ?s ?p ?o }")
+        let results = SparqlEvaluator::new()
+            .parse_query("SELECT ?s ?p ?o WHERE { ?s ?p ?o }")
+            .map_err(|e| GraphError::Sparql {
+                message: format!("SPARQL parse failed: {e}"),
+            })?
+            .on_store(&self.store)
+            .execute()
             .map_err(|e| GraphError::Sparql {
                 message: format!("SPARQL all_triples query failed: {e}"),
             })?;
@@ -215,9 +219,16 @@ impl SparqlStore {
 
     /// Execute a SPARQL SELECT query and return results as Vec of binding maps.
     pub fn query_select(&self, sparql: &str) -> GraphResult<Vec<Vec<(String, String)>>> {
-        let results = self.store.query(sparql).map_err(|e| GraphError::Sparql {
-            message: format!("SPARQL query failed: {e}"),
-        })?;
+        let results = SparqlEvaluator::new()
+            .parse_query(sparql)
+            .map_err(|e| GraphError::Sparql {
+                message: format!("SPARQL parse failed: {e}"),
+            })?
+            .on_store(&self.store)
+            .execute()
+            .map_err(|e| GraphError::Sparql {
+                message: format!("SPARQL query failed: {e}"),
+            })?;
 
         match results {
             QueryResults::Solutions(solutions) => {
@@ -243,9 +254,16 @@ impl SparqlStore {
 
     /// Execute a SPARQL ASK query.
     pub fn query_ask(&self, sparql: &str) -> GraphResult<bool> {
-        let results = self.store.query(sparql).map_err(|e| GraphError::Sparql {
-            message: format!("SPARQL query failed: {e}"),
-        })?;
+        let results = SparqlEvaluator::new()
+            .parse_query(sparql)
+            .map_err(|e| GraphError::Sparql {
+                message: format!("SPARQL parse failed: {e}"),
+            })?
+            .on_store(&self.store)
+            .execute()
+            .map_err(|e| GraphError::Sparql {
+                message: format!("SPARQL query failed: {e}"),
+            })?;
         match results {
             QueryResults::Boolean(b) => Ok(b),
             _ => Err(GraphError::Sparql {

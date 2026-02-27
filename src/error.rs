@@ -136,6 +136,10 @@ pub enum AkhError {
     #[error(transparent)]
     #[diagnostic(transparent)]
     Audit(#[from] crate::audit::AuditError),
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Nlu(#[from] crate::nlu::error::NluError),
 }
 
 // ---------------------------------------------------------------------------

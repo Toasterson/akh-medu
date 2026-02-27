@@ -13,7 +13,7 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use super::abs::{AbsTree, ProvenanceTag};
+use super::abs::{AbsTree, CompareOrd, Modality, ProvenanceTag, Quantifier, TemporalExpr};
 use super::cat::Cat;
 use super::concrete::{ConcreteGrammar, LinContext, ParseContext};
 use super::discourse::{PointOfView, QueryFocus};
@@ -330,6 +330,87 @@ impl NarrativeGrammar {
                 PointOfView::SecondPerson => self.linearize_second_person(inner, ctx),
                 PointOfView::ThirdPerson => self.linearize_inner(inner, ctx),
             },
+
+            // ── NLU extensions ────────────────────────────────────────
+            AbsTree::Negation { inner } => {
+                let transition = self.next_transition();
+                let text = self.linearize_inner(inner, ctx)?;
+                Ok(format!("{transition}That is not the case: {text}"))
+            }
+            AbsTree::Quantified { quantifier, scope } => {
+                let transition = self.next_transition();
+                let text = self.linearize_inner(scope, ctx)?;
+                match quantifier {
+                    Quantifier::Universal => Ok(format!("{transition}In every case, {text}")),
+                    Quantifier::Existential => {
+                        Ok(format!("{transition}There are cases where {text}"))
+                    }
+                    Quantifier::Most => Ok(format!("{transition}In most cases, {text}")),
+                    Quantifier::None => Ok(format!("{transition}In no case {text}")),
+                    Quantifier::Specific(n) => {
+                        Ok(format!("{transition}In {n} specific instances, {text}"))
+                    }
+                }
+            }
+            AbsTree::Comparison {
+                entity_a,
+                entity_b,
+                property,
+                ordering,
+            } => {
+                let transition = self.next_transition();
+                let a = self.linearize_inner(entity_a, ctx)?;
+                let b = self.linearize_inner(entity_b, ctx)?;
+                match ordering {
+                    CompareOrd::GreaterThan => {
+                        Ok(format!("{transition}{a} is more {property} than {b}."))
+                    }
+                    CompareOrd::LessThan => {
+                        Ok(format!("{transition}{a} is less {property} than {b}."))
+                    }
+                    CompareOrd::Equal => {
+                        Ok(format!("{transition}{a} is equally {property} as {b}."))
+                    }
+                }
+            }
+            AbsTree::Conditional {
+                condition,
+                consequent,
+            } => {
+                let transition = self.next_transition();
+                let cond = self.linearize_inner(condition, ctx)?;
+                let cons = self.linearize_inner(consequent, ctx)?;
+                Ok(format!("{transition}If {cond}, then {cons}."))
+            }
+            AbsTree::Temporal { time_expr, inner } => {
+                let transition = self.next_transition();
+                let text = self.linearize_inner(inner, ctx)?;
+                let t = match time_expr {
+                    TemporalExpr::Named(n) => n.clone(),
+                    TemporalExpr::Recurring(r) => format!("on a recurring basis ({r})"),
+                    TemporalExpr::Absolute(ts) => format!("at time {ts}"),
+                    TemporalExpr::Relative(delta) if *delta > 0 => format!("in {delta} units"),
+                    TemporalExpr::Relative(delta) => format!("{} units ago", delta.unsigned_abs()),
+                };
+                Ok(format!("{transition}{t}, {text}"))
+            }
+            AbsTree::Modal { modality, inner } => {
+                let transition = self.next_transition();
+                let text = self.linearize_inner(inner, ctx)?;
+                let m = match modality {
+                    Modality::Want => "wants to",
+                    Modality::Can => "is able to",
+                    Modality::Should => "should",
+                    Modality::Must => "must",
+                    Modality::May => "may",
+                };
+                Ok(format!("{transition}One {m} {text}."))
+            }
+            AbsTree::RelativeClause { head, clause } => {
+                let h = self.linearize_inner(head, ctx)?;
+                let c = self.linearize_inner(clause, ctx)?;
+                Ok(format!("{h}, which {c}."))
+            }
         }
     }
 

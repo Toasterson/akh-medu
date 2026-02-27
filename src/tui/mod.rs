@@ -28,6 +28,7 @@ struct LocalBackend {
     tui_sink: Arc<sink::TuiSink>,
     idle_scheduler: IdleScheduler,
     operator_handle: InboundHandle,
+    nlu_pipeline: crate::nlu::NluPipeline,
 }
 
 /// The chat backend: either a local agent+engine or a remote WS connection.
@@ -77,12 +78,24 @@ impl AkhTui {
         Self {
             workspace,
             grammar,
-            backend: ChatBackend::Local(Box::new(LocalBackend {
-                agent: Box::new(agent),
-                engine,
-                tui_sink,
-                idle_scheduler: IdleScheduler::default(),
-                operator_handle,
+            backend: ChatBackend::Local(Box::new({
+                // Restore NLU ranker from durable storage if available.
+                let nlu_pipeline = engine
+                    .store()
+                    .get_meta(b"nlu_ranker_state")
+                    .ok()
+                    .flatten()
+                    .and_then(|bytes| crate::nlu::parse_ranker::ParseRanker::from_bytes(&bytes))
+                    .map(crate::nlu::NluPipeline::with_ranker)
+                    .unwrap_or_default();
+                LocalBackend {
+                    agent: Box::new(agent),
+                    engine,
+                    tui_sink,
+                    idle_scheduler: IdleScheduler::default(),
+                    operator_handle,
+                    nlu_pipeline,
+                }
             })),
             messages: vec![AkhMessage::system(
                 "Welcome to akh. Type a question or command. /help for commands, /quit to exit.",
@@ -222,6 +235,9 @@ impl AkhTui {
     fn on_exit(&mut self) -> miette::Result<()> {
         if let ChatBackend::Local(ref mut local) = self.backend {
             local.agent.persist_session().into_diagnostic()?;
+            // Persist NLU ranker state for next session.
+            let ranker_bytes = local.nlu_pipeline.ranker().to_bytes();
+            let _ = local.engine.store().put_meta(b"nlu_ranker_state", &ranker_bytes);
         }
         Ok(())
     }
@@ -745,13 +761,43 @@ impl AkhTui {
                         }
                     }
                     crate::agent::nlp::ConversationalKind::Unrecognized => {
-                        escalate_to_goal(
-                            &mut self.messages,
-                            agent,
-                            &self.grammar,
-                            text,
-                            &format!("Exploring \"{text}\"."),
+                        // Try NLU pipeline before escalating to goal.
+                        let parse_ctx = crate::grammar::concrete::ParseContext::with_engine(
+                            engine.registry(), engine.ops(), engine.item_memory(),
                         );
+                        let nlu_ok = local.nlu_pipeline.parse(text, &parse_ctx).is_ok();
+                        if nlu_ok {
+                            // Structured parse succeeded — ingest as fact.
+                            use crate::agent::tool::Tool;
+                            let tool_input = crate::agent::ToolInput::new()
+                                .with_param("text", text);
+                            match crate::agent::tools::TextIngestTool
+                                .execute(engine, tool_input)
+                            {
+                                Ok(output) => {
+                                    self.messages.push(AkhMessage::tool_result(
+                                        "nlu_parse",
+                                        output.success,
+                                        &output.result,
+                                    ));
+                                }
+                                Err(e) => {
+                                    self.messages.push(AkhMessage::error(
+                                        "nlu_ingest",
+                                        e.to_string(),
+                                    ));
+                                }
+                            }
+                        } else {
+                            // NLU also failed — escalate to goal.
+                            escalate_to_goal(
+                                &mut self.messages,
+                                agent,
+                                &self.grammar,
+                                text,
+                                &format!("Exploring \"{text}\"."),
+                            );
+                        }
                     }
                 }
             }
