@@ -108,7 +108,7 @@ icalendar = { version = "0.16", optional = true, features = ["parser"] }
 chrono = { version = "0.4", optional = true, features = ["serde"] }
 
 [features]
-client-only = []  # Strips local engine from akh binary; requires running akhomed server
+client-only = [ "daemon" ]  # Strips local engine from akh binary; requires running akhomed server
 daemon = ["tokio", "tokio-tungstenite", "futures-util"]
 server = ["daemon", "axum", "tower-http"]
 oxifed = ["daemon", "lapin", "deadpool-lapin", "reqwest"]
