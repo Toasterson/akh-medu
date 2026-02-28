@@ -201,6 +201,9 @@ enum Commands {
         /// Headless mode: use plain stdin/stdout instead of TUI.
         #[arg(long)]
         headless: bool,
+        /// Fresh start: ignore persisted session and goals.
+        #[arg(long)]
+        fresh: bool,
     },
 
     /// Manage the shared content library (ingest books, websites, documents).
@@ -270,7 +273,7 @@ enum AgentAction {
         #[arg(long)]
         headless: bool,
     },
-    /// Interactive chat (launches TUI). Prefer `akh chat` instead.
+    /// Interactive chat (launches TUI). DEPRECATED: use `akh chat` instead.
     Chat {
         /// Maximum OODA cycles per question.
         #[arg(long, default_value = "5")]
@@ -1573,22 +1576,22 @@ fn main() -> Result<()> {
                 }
 
                 AgentAction::Chat {
-                    max_cycles,
+                    max_cycles: _,
                     fresh,
                     headless,
                 } => {
+                    eprintln!("warning: `akh agent chat` is deprecated. Use `akh chat` instead.");
+
                     if !headless {
-                        // TUI mode.
                         let agent_config = AgentConfig {
-                            max_cycles,
+                            max_cycles: 20,
                             ..Default::default()
                         };
                         let ws_name = cli.workspace.clone();
                         akh_medu::tui::launch(&ws_name, Arc::clone(&engine), agent_config, fresh)?;
                     } else {
-                        // Headless mode (legacy stdin/stdout).
                         let agent_config = AgentConfig {
-                            max_cycles,
+                            max_cycles: 20,
                             ..Default::default()
                         };
                         let mut agent = if !fresh && Agent::has_persisted_session(&engine) {
@@ -1600,63 +1603,48 @@ fn main() -> Result<()> {
                             agent.clear_goals();
                         }
 
-                        println!("akh agent chat (headless). Type 'quit' to exit.\n");
+                        let data_dir = engine.config().data_dir.as_deref();
+                        let nlu_pipeline = engine
+                            .store()
+                            .get_meta(b"nlu_ranker_state")
+                            .ok()
+                            .flatten()
+                            .and_then(|bytes| akh_medu::nlu::parse_ranker::ParseRanker::from_bytes(&bytes))
+                            .map(|ranker| akh_medu::nlu::NluPipeline::with_ranker_and_models(ranker, data_dir))
+                            .unwrap_or_else(|| akh_medu::nlu::NluPipeline::new_with_models(data_dir));
+                        let mut chat_processor = akh_medu::chat::ChatProcessor::new(&engine, nlu_pipeline);
+
+                        println!("akh chat (headless). Type 'quit' to exit.\n");
                         use std::io::Write as _;
-                        let stdin = std::io::stdin();
-                        let mut input = String::new();
 
                         loop {
-                            input.clear();
                             print!("> ");
                             std::io::stdout().flush().ok();
-                            if stdin.read_line(&mut input).into_diagnostic()? == 0 {
-                                break;
+                            let mut input = String::new();
+                            match std::io::stdin().read_line(&mut input) {
+                                Ok(0) => break,
+                                Ok(_) => {}
+                                Err(e) => {
+                                    eprintln!("Read error: {e}");
+                                    break;
+                                }
                             }
-                            let cmd = input.trim();
-                            if cmd.is_empty() {
+                            let trimmed = input.trim();
+                            if trimmed.is_empty() {
                                 continue;
                             }
-                            if cmd == "quit" || cmd == "exit" || cmd == "q" {
+                            if trimmed == "quit" || trimmed == "exit" || trimmed == "q" {
                                 break;
                             }
 
-                            let question = cmd.to_string();
-                            let goal_desc = format!("chat: {question}");
-                            let goal_id = match agent.add_goal(
-                                &goal_desc,
-                                200,
-                                "Agent-determined completion",
-                            ) {
-                                Ok(id) => id,
-                                Err(e) => {
-                                    eprintln!("Error: {e}");
-                                    continue;
-                                }
-                            };
-
-                            match agent.run_until_complete() {
-                                Ok(_) => {}
-                                Err(e) => eprintln!("(agent stopped: {e})"),
-                            }
-
-                            let summary = agent.synthesize_findings(&question);
-                            println!("\n{}", summary.overview);
-                            for section in &summary.sections {
-                                println!("\n## {}", section.heading);
-                                println!("{}", section.prose);
-                            }
-                            if !summary.gaps.is_empty() {
-                                println!("\nOpen questions:");
-                                for gap in &summary.gaps {
-                                    println!("  - {gap}");
-                                }
+                            let responses = chat_processor.process_input(trimmed, &mut agent, &engine);
+                            for msg in &responses {
+                                println!("{}", msg.to_plain_text());
                             }
                             println!();
-                            if let Err(e) = agent.complete_goal(goal_id) {
-                                eprintln!("warning: failed to complete goal: {e}");
-                            }
                         }
 
+                        chat_processor.persist_nlu_state(&engine);
                         agent.persist_session().into_diagnostic()?;
                         println!("Session saved.");
                     }
@@ -3375,7 +3363,7 @@ fn main() -> Result<()> {
             agent.persist_session().into_diagnostic()?;
         }
 
-        Commands::Chat { skill, headless } => {
+        Commands::Chat { skill, headless, fresh } => {
             let ws_name = cli.workspace.clone();
 
             // Try remote TUI via akhomed if available (non-headless only).
@@ -3426,17 +3414,36 @@ fn main() -> Result<()> {
 
             if !headless {
                 // TUI mode (local fallback).
-                akh_medu::tui::launch(&ws_name, engine, agent_config, false)?;
+                akh_medu::tui::launch(&ws_name, engine, agent_config, fresh)?;
             } else {
-                // Headless mode (legacy stdin/stdout).
-                let mut agent = Agent::new(Arc::clone(&engine), agent_config).into_diagnostic()?;
-                let operator_handle = agent.setup_operator_channel();
-                let mut conversation = akh_medu::agent::Conversation::new(100);
+                // Headless mode: use ChatProcessor for unified input processing.
+                let mut agent = if !fresh && Agent::has_persisted_session(&engine) {
+                    Agent::resume(Arc::clone(&engine), agent_config).into_diagnostic()?
+                } else {
+                    Agent::new(Arc::clone(&engine), agent_config).into_diagnostic()?
+                };
+                if fresh {
+                    agent.clear_goals();
+                }
+
+                // Create ChatProcessor with NLU pipeline.
+                let data_dir = engine.config().data_dir.as_deref();
+                let nlu_pipeline = engine
+                    .store()
+                    .get_meta(b"nlu_ranker_state")
+                    .ok()
+                    .flatten()
+                    .and_then(|bytes| akh_medu::nlu::parse_ranker::ParseRanker::from_bytes(&bytes))
+                    .map(|ranker| akh_medu::nlu::NluPipeline::with_ranker_and_models(ranker, data_dir))
+                    .unwrap_or_else(|| akh_medu::nlu::NluPipeline::new_with_models(data_dir));
+                let mut chat_processor = akh_medu::chat::ChatProcessor::new(&engine, nlu_pipeline);
 
                 println!("akh chat (headless). Type 'quit' to exit.\n");
+                use std::io::Write as _;
 
                 loop {
-                    eprint!("> ");
+                    print!("> ");
+                    std::io::stdout().flush().ok();
                     let mut input = String::new();
                     match std::io::stdin().read_line(&mut input) {
                         Ok(0) => break,
@@ -3455,215 +3462,15 @@ fn main() -> Result<()> {
                         break;
                     }
 
-                    // Push through the operator channel and drain for classification.
-                    operator_handle.push_text(trimmed);
-                    let inbound = agent.drain_inbound();
-
-                    // Auto-register interlocutor on first interaction.
-                    if let Some(msg) = inbound.first()
-                        && let Err(e) = agent.ensure_interlocutor(
-                            &msg.sender,
-                            &msg.channel_id,
-                            akh_medu::agent::ChannelKind::Operator,
-                        )
-                    {
-                        eprintln!("warning: failed to register interlocutor: {e}");
+                    let responses = chat_processor.process_input(trimmed, &mut agent, &engine);
+                    for msg in &responses {
+                        println!("{}", msg.to_plain_text());
                     }
-
-                    let intent = inbound
-                        .first()
-                        .map(|msg| msg.classify())
-                        .unwrap_or_else(|| akh_medu::agent::classify_intent(trimmed));
-                    let response = match intent {
-                        akh_medu::agent::UserIntent::Help => {
-                            "Commands: <question>? query, <fact> assert, find <topic> goal, status, help, quit"
-                                .to_string()
-                        }
-                        akh_medu::agent::UserIntent::ShowStatus => {
-                            format!(
-                                "Cycle: {}, Goals: {}, WM: {} entries, Triples: {}",
-                                agent.cycle_count(),
-                                agent.goals().len(),
-                                agent.working_memory().len(),
-                                engine.all_triples().len(),
-                            )
-                        }
-                        akh_medu::agent::UserIntent::Query { subject, original_input, question_word, capability_signal } => {
-                            let grammar_name = engine
-                                .compartments()
-                                .and_then(|mgr| mgr.psyche())
-                                .map(|p| p.persona.grammar_preference.clone())
-                                .unwrap_or_else(|| "narrative".to_string());
-
-                            // Phase 12b+12c: Try grounded dialogue with constraint checking.
-                            let grounded = akh_medu::agent::conversation::ground_query(
-                                &subject, &engine, &grammar_name,
-                            );
-                            if let Some(ref gr) = grounded {
-                                let (out_msg, decision) = agent.check_and_wrap_grounded(
-                                    gr, "operator", akh_medu::agent::ChannelKind::Operator,
-                                );
-                                if decision == akh_medu::agent::EmissionDecision::Emit {
-                                    let rendered = gr.render(agent.conversation_state().response_detail);
-                                    agent.conversation_state_mut().record_agent_turn(&rendered);
-                                    agent.conversation_state_mut().track_referent(subject.clone());
-                                    let _ = out_msg; // constraint status logged on message
-                                    rendered
-                                } else {
-                                    format!("No information found for \"{subject}\".")
-                                }
-                            } else {
-                                // Fallback: discourse-aware response first.
-                                let discourse_prose = akh_medu::grammar::discourse::resolve_discourse(
-                                    &subject,
-                                    question_word,
-                                    &original_input,
-                                    &engine,
-                                    capability_signal,
-                                    None,
-                                    None,
-                                )
-                                .ok()
-                                .and_then(|ctx| {
-                                    let from = engine.triples_from(ctx.subject_id);
-                                    let to = engine.triples_to(ctx.subject_id);
-                                    let mut all = from;
-                                    all.extend(to);
-                                    akh_medu::grammar::discourse::build_discourse_response(
-                                        &all, &ctx, &engine,
-                                    )
-                                })
-                                .and_then(|tree| {
-                                    let registry = akh_medu::grammar::GrammarRegistry::new();
-                                    registry.linearize(&grammar_name, &tree).ok()
-                                })
-                                .filter(|s| !s.trim().is_empty());
-
-                                if let Some(prose) = discourse_prose {
-                                    prose
-                                } else {
-                                    // Fallback: existing synthesis path.
-                                    match engine.resolve_symbol(&subject) {
-                                        Ok(sym_id) => {
-                                            let from = engine.triples_from(sym_id);
-                                            let to = engine.triples_to(sym_id);
-                                            if from.is_empty() && to.is_empty() {
-                                                format!("No information found for \"{subject}\".")
-                                            } else {
-                                                let mut all_triples = from;
-                                                all_triples.extend(to);
-                                                let summary =
-                                                    akh_medu::agent::synthesize::synthesize_from_triples(
-                                                        &subject,
-                                                        &all_triples,
-                                                        &engine,
-                                                        &grammar_name,
-                                                    );
-                                                let mut lines = Vec::new();
-                                                if !summary.overview.is_empty() {
-                                                    lines.push(summary.overview);
-                                                }
-                                                for section in &summary.sections {
-                                                    lines.push(format!(
-                                                        "{}: {}",
-                                                        section.heading, section.prose
-                                                    ));
-                                                }
-                                                for gap in &summary.gaps {
-                                                    lines.push(format!("(gap) {gap}"));
-                                                }
-                                                if lines.is_empty() {
-                                                    format!("No information found for \"{subject}\".")
-                                                } else {
-                                                    lines.join("\n")
-                                                }
-                                            }
-                                        }
-                                        Err(_) => format!("Symbol \"{subject}\" not found."),
-                                    }
-                                }
-                            }
-                        }
-                        akh_medu::agent::UserIntent::Assert { text } => {
-                            use akh_medu::agent::tool::Tool;
-                            let tool_input = akh_medu::agent::ToolInput::new().with_param("text", &text);
-                            match akh_medu::agent::tools::TextIngestTool.execute(&engine, tool_input) {
-                                Ok(output) => output.result,
-                                Err(e) => format!("Extraction error: {e}"),
-                            }
-                        }
-                        akh_medu::agent::UserIntent::SetGoal { description } => {
-                            match agent.add_goal(&description, 128, "Agent-determined completion") {
-                                Ok(_) => format!("Goal set: \"{description}\""),
-                                Err(e) => format!("Failed to set goal: {e}"),
-                            }
-                        }
-                        akh_medu::agent::UserIntent::RunAgent { cycles } => {
-                            let n = cycles.unwrap_or(1);
-                            let mut out = Vec::new();
-                            for _ in 0..n {
-                                match agent.run_cycle() {
-                                    Ok(r) => out.push(format!("[{}] {}", r.cycle_number, r.decision.chosen_tool)),
-                                    Err(e) => { out.push(format!("Error: {e}")); break; }
-                                }
-                            }
-                            out.join("\n")
-                        }
-                        akh_medu::agent::UserIntent::RenderHiero { .. } => {
-                            "Hieroglyphic rendering not available in headless mode. Use the TUI.".to_string()
-                        }
-                        akh_medu::agent::UserIntent::SetDetail { level } => {
-                            match akh_medu::agent::conversation::ResponseDetail::from_str_loose(&level) {
-                                Some(detail) => {
-                                    agent.set_response_detail(detail);
-                                    format!("Response detail set to: {detail:?}")
-                                }
-                                None => {
-                                    "Unknown detail level. Use: concise, normal, or full.".to_string()
-                                }
-                            }
-                        }
-                        akh_medu::agent::UserIntent::Explain { ref query } => {
-                            match akh_medu::agent::explain::execute_query(
-                                &engine, query, None,
-                            ) {
-                                Ok(explanation) => explanation,
-                                Err(e) => format!("{e}"),
-                            }
-                        }
-                        akh_medu::agent::UserIntent::AgentProtocol { .. } => {
-                            "[agent protocol] agent-to-agent messages are not supported in headless mode".to_string()
-                        }
-                        akh_medu::agent::UserIntent::PimCommand { subcommand, args } => {
-                            format!("PIM commands are available via the CLI: akh pim {subcommand} {args}")
-                        }
-                        akh_medu::agent::UserIntent::CalCommand { subcommand, args } => {
-                            format!("Calendar commands are available via the CLI: akh cal {subcommand} {args}")
-                        }
-                        akh_medu::agent::UserIntent::PrefCommand { subcommand, args } => {
-                            format!("Preference commands are available via the CLI: akh pref {subcommand} {args}")
-                        }
-                        akh_medu::agent::UserIntent::CausalQuery { subcommand, args } => {
-                            format!("Causal commands are available via the CLI: akh causal {subcommand} {args}")
-                        }
-                        akh_medu::agent::UserIntent::AwakenCommand { subcommand, args } => {
-                            format!("Awaken commands are available via the CLI: akh awaken {subcommand} {args}")
-                        }
-                        akh_medu::agent::UserIntent::Freeform { .. } => {
-                            "I don't understand that. Type 'help' for commands.".to_string()
-                        }
-                    };
-
-                    println!("{response}\n");
-                    conversation.add_turn(trimmed.to_string(), response);
+                    println!();
                 }
 
+                chat_processor.persist_nlu_state(&engine);
                 agent.persist_session().into_diagnostic()?;
-                if let Ok(bytes) = conversation.to_bytes()
-                    && let Err(e) = engine.store().put_meta(b"chat:conversation", &bytes)
-                {
-                    eprintln!("warning: failed to persist chat conversation: {e}");
-                }
                 println!("Session saved.");
             }
         }
@@ -4171,6 +3978,7 @@ fn run_client_only(cli: Cli) -> Result<()> {
                 fresh: _,
                 headless,
             } => {
+                eprintln!("warning: `akh agent chat` is deprecated. Use `akh chat` instead.");
                 if headless {
                     miette::bail!(
                         "Headless chat is not available in client-only mode.\n\
@@ -4864,7 +4672,7 @@ fn run_client_only(cli: Cli) -> Result<()> {
         },
 
         // ── Chat ──────────────────────────────────────────────────────────
-        Commands::Chat { skill: _, headless } => {
+        Commands::Chat { skill: _, headless, fresh: _ } => {
             if headless {
                 miette::bail!(
                     "Headless chat is not available in client-only mode.\n\

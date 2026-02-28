@@ -1,6 +1,6 @@
 # Akh-medu Architecture
 
-> Last updated: 2026-02-28 (NLU-enriched document ingestion: three-phase concept extraction with NluPipeline wired into library ingest)
+> Last updated: 2026-02-28 (Unified ChatProcessor: NLU-first input processing replacing duplicated handlers in TUI, akhomed, and headless CLI)
 
 ## Overview
 
@@ -37,6 +37,7 @@ src/
 ├── store/               3 modules — tiered storage (hot/warm/cold)
 ├── tui/                 6 modules — ratatui terminal UI, WebSocket remote
 ├── vsa/                 5 modules — HyperVec, VsaOps, encoding, item memory (HNSW), code pattern encoding (Phase 10f)
+├── chat.rs                        — unified ChatProcessor (NLU-first input processing for TUI, daemon WS, headless CLI)
 ├── api_types.rs                   — shared request/response types for akhomed ↔ AkhClient wire format
 ├── engine.rs                      — facade composing all subsystems (Phase9Config, 9 stored registries, wired add_triple/remove_triple pipeline)
 ├── error.rs                       — miette + thiserror rich diagnostics

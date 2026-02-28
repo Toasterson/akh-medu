@@ -1220,11 +1220,9 @@ async fn handle_ws_session(
         }
     };
 
-    // Initialise the NLU pipeline for this session.
-    // Restore the VSA parse ranker from durable storage if available,
-    // and attempt to load ML/LLM models from the workspace data directory.
+    // Initialise the unified ChatProcessor for this session.
     let data_dir = engine.config().data_dir.as_deref();
-    let mut nlu_pipeline = engine
+    let nlu_pipeline = engine
         .store()
         .get_meta(b"nlu_ranker_state")
         .ok()
@@ -1232,6 +1230,7 @@ async fn handle_ws_session(
         .and_then(|bytes| akh_medu::nlu::parse_ranker::ParseRanker::from_bytes(&bytes))
         .map(|ranker| akh_medu::nlu::NluPipeline::with_ranker_and_models(ranker, data_dir))
         .unwrap_or_else(|| akh_medu::nlu::NluPipeline::new_with_models(data_dir));
+    let mut chat_processor = akh_medu::chat::ChatProcessor::new(&engine, nlu_pipeline);
 
     let welcome = AkhMessage::system(format!(
         "Connected to workspace \"{ws_name}\". {} symbols, {} triples.",
@@ -1258,7 +1257,20 @@ async fn handle_ws_session(
                             }
                         };
 
-                        let responses = process_ws_input(&input, &mut agent, &engine, &mut nlu_pipeline);
+                        let responses = match input.msg_type.as_str() {
+                            "input" => {
+                                chat_processor.process_input(&input.text, &mut agent, &engine)
+                            }
+                            "command" => {
+                                process_ws_command(&input.text, &agent, &engine)
+                            }
+                            _ => {
+                                vec![AkhMessage::error(
+                                    "protocol",
+                                    format!("unknown message type: \"{}\"", input.msg_type),
+                                )]
+                            }
+                        };
                         for msg in &responses {
                             if send_akh_message(&mut socket, msg).await.is_err() {
                                 break;
@@ -1280,292 +1292,43 @@ async fn handle_ws_session(
         }
     }
 
-    // Persist NLU ranker state for next session.
-    let ranker_bytes = nlu_pipeline.ranker().to_bytes();
-    let _ = engine.store().put_meta(b"nlu_ranker_state", &ranker_bytes);
-
-    // Persist agent session on disconnect.
+    // Persist ChatProcessor NLU state and agent session on disconnect.
+    chat_processor.persist_nlu_state(&engine);
     let _ = agent.persist_session();
 }
 
-fn process_ws_input(
-    input: &WsInput,
-    agent: &mut Agent,
-    engine: &Engine,
-    nlu_pipeline: &mut akh_medu::nlu::NluPipeline,
-) -> Vec<AkhMessage> {
+/// Handle WS protocol commands (status, goals) — these are WS-specific
+/// and not part of the ChatProcessor's concern.
+fn process_ws_command(cmd: &str, agent: &Agent, engine: &Engine) -> Vec<AkhMessage> {
     let mut msgs = Vec::new();
-
-    match input.msg_type.as_str() {
-        "input" => {
-            let text = input.text.trim();
-            if text.is_empty() {
-                return msgs;
-            }
-
-            let intent = akh_medu::agent::classify_intent(text);
-            match intent {
-                akh_medu::agent::UserIntent::Query { subject, original_input, question_word, capability_signal } => {
-                    let grammar_name = engine
-                        .compartments()
-                        .and_then(|mgr| mgr.psyche())
-                        .map(|p| p.persona.grammar_preference.clone())
-                        .unwrap_or_else(|| "narrative".to_string());
-
-                    // Try discourse-aware response first.
-                    let discourse_prose = akh_medu::grammar::discourse::resolve_discourse(
-                        &subject,
-                        question_word,
-                        &original_input,
-                        engine,
-                        capability_signal,
-                        None,
-                        None,
-                    )
-                    .ok()
-                    .and_then(|ctx| {
-                        let from = engine.triples_from(ctx.subject_id);
-                        let to = engine.triples_to(ctx.subject_id);
-                        let mut all = from;
-                        all.extend(to);
-                        akh_medu::grammar::discourse::build_discourse_response(
-                            &all, &ctx, engine,
-                        )
-                    })
-                    .and_then(|tree| {
-                        let registry = akh_medu::grammar::GrammarRegistry::new();
-                        registry.linearize(&grammar_name, &tree).ok()
-                    })
-                    .filter(|s| !s.trim().is_empty());
-
-                    if let Some(prose) = discourse_prose {
-                        msgs.push(AkhMessage::narrative(&prose, &grammar_name));
-                    } else {
-                        // Fallback: existing synthesis path.
-                        match engine.resolve_symbol(&subject) {
-                            Ok(sym_id) => {
-                                let from_triples = engine.triples_from(sym_id);
-                                let to_triples = engine.triples_to(sym_id);
-                                if from_triples.is_empty() && to_triples.is_empty() {
-                                    msgs.push(AkhMessage::system(format!(
-                                        "No facts found for \"{subject}\"."
-                                    )));
-                                } else {
-                                    let mut all_triples = from_triples;
-                                    all_triples.extend(to_triples);
-                                    let summary =
-                                        akh_medu::agent::synthesize::synthesize_from_triples(
-                                            &subject,
-                                            &all_triples,
-                                            engine,
-                                            &grammar_name,
-                                        );
-                                    if !summary.overview.is_empty() {
-                                        msgs.push(AkhMessage::narrative(
-                                            &summary.overview,
-                                            &grammar_name,
-                                        ));
-                                    }
-                                    for section in &summary.sections {
-                                        msgs.push(AkhMessage::narrative(
-                                            format!("## {}\n{}", section.heading, section.prose),
-                                            &grammar_name,
-                                        ));
-                                    }
-                                    for gap in &summary.gaps {
-                                        msgs.push(AkhMessage::gap("(unknown)", gap));
-                                    }
-                                }
-                            }
-                            Err(_) => {
-                                msgs.push(AkhMessage::system(format!(
-                                    "Symbol \"{subject}\" not found."
-                                )));
-                            }
-                        }
-                    }
-                }
-                akh_medu::agent::UserIntent::Assert { text } => {
-                    use akh_medu::agent::tool::Tool;
-                    let tool_input = akh_medu::agent::ToolInput::new().with_param("text", &text);
-                    match akh_medu::agent::tools::TextIngestTool.execute(engine, tool_input) {
-                        Ok(output) => {
-                            msgs.push(AkhMessage::tool_result(
-                                "text_ingest",
-                                output.success,
-                                &output.result,
-                            ));
-                        }
-                        Err(e) => {
-                            msgs.push(AkhMessage::error("ingest", e.to_string()));
-                        }
-                    }
-                }
-                akh_medu::agent::UserIntent::SetGoal { description } => {
-                    match agent.add_goal(&description, 128, "User-directed goal") {
-                        Ok(id) => {
-                            msgs.push(AkhMessage::system(format!(
-                                "Goal added: \"{description}\" (id: {})",
-                                id.get()
-                            )));
-                            // Run a few cycles.
-                            for _ in 0..5 {
-                                match agent.run_cycle() {
-                                    Ok(result) => {
-                                        msgs.push(AkhMessage::tool_result(
-                                            &result.decision.chosen_tool,
-                                            result.action_result.tool_output.success,
-                                            &result.action_result.tool_output.result,
-                                        ));
-                                    }
-                                    Err(_) => break,
-                                }
-                                let active = akh_medu::agent::goal::active_goals(agent.goals());
-                                if active.is_empty() {
-                                    break;
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            msgs.push(AkhMessage::error("goal", e.to_string()));
-                        }
-                    }
-                }
-                akh_medu::agent::UserIntent::RunAgent { cycles } => {
-                    let n = cycles.unwrap_or(1);
-                    for _ in 0..n {
-                        match agent.run_cycle() {
-                            Ok(result) => {
-                                msgs.push(AkhMessage::tool_result(
-                                    &result.decision.chosen_tool,
-                                    result.action_result.tool_output.success,
-                                    &result.action_result.tool_output.result,
-                                ));
-                            }
-                            Err(e) => {
-                                msgs.push(AkhMessage::error("cycle", e.to_string()));
-                                break;
-                            }
-                        }
-                    }
-                }
-                akh_medu::agent::UserIntent::ShowStatus => {
-                    let goals = agent.goals();
-                    for g in goals {
-                        msgs.push(AkhMessage::goal_progress(
-                            &g.description,
-                            format!("{}", g.status),
-                        ));
-                    }
-                    msgs.push(AkhMessage::system(format!(
-                        "Cycles: {}, WM: {}, Triples: {}",
-                        agent.cycle_count(),
-                        agent.working_memory().len(),
-                        engine.all_triples().len(),
-                    )));
-                }
-                akh_medu::agent::UserIntent::Help => {
-                    msgs.push(AkhMessage::system(
-                        "Send JSON: {\"type\":\"input\",\"text\":\"...\"} or {\"type\":\"command\",\"cmd\":\"...\"}"
-                            .to_string(),
-                    ));
-                }
-                _ => {
-                    // classify_intent couldn't categorize — try the full NLU pipeline.
-                    let parse_ctx = ParseContext::with_engine(
-                        engine.registry(),
-                        engine.ops(),
-                        engine.item_memory(),
-                    );
-                    if nlu_pipeline.parse(text, &parse_ctx).is_ok() {
-                        // Structured parse succeeded — ingest as fact.
-                        use akh_medu::agent::tool::Tool;
-                        let tool_input =
-                            akh_medu::agent::ToolInput::new().with_param("text", text);
-                        match akh_medu::agent::tools::TextIngestTool.execute(engine, tool_input) {
-                            Ok(output) => {
-                                msgs.push(AkhMessage::tool_result(
-                                    "nlu_parse",
-                                    output.success,
-                                    &output.result,
-                                ));
-                            }
-                            Err(e) => {
-                                msgs.push(AkhMessage::error("nlu_ingest", e.to_string()));
-                            }
-                        }
-                    } else {
-                        // NLU also failed — escalate to goal so the agent investigates.
-                        match agent.add_goal(text, 128, "Unrecognized input — exploring") {
-                            Ok(id) => {
-                                msgs.push(AkhMessage::system(format!(
-                                    "Exploring: \"{text}\" (goal {})",
-                                    id.get()
-                                )));
-                                for _ in 0..5 {
-                                    match agent.run_cycle() {
-                                        Ok(result) => {
-                                            msgs.push(AkhMessage::tool_result(
-                                                &result.decision.chosen_tool,
-                                                result.action_result.tool_output.success,
-                                                &result.action_result.tool_output.result,
-                                            ));
-                                        }
-                                        Err(_) => break,
-                                    }
-                                    let active =
-                                        akh_medu::agent::goal::active_goals(agent.goals());
-                                    if active.is_empty() {
-                                        break;
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                msgs.push(AkhMessage::error("goal", e.to_string()));
-                            }
-                        }
-                    }
-                }
-            }
+    let trimmed = cmd.trim();
+    match trimmed {
+        "status" => {
+            msgs.push(AkhMessage::system(format!(
+                "Cycles: {}, WM: {}, Symbols: {}, Triples: {}",
+                agent.cycle_count(),
+                agent.working_memory().len(),
+                engine.all_symbols().len(),
+                engine.all_triples().len(),
+            )));
         }
-        "command" => {
-            let cmd = input.text.trim();
-            match cmd {
-                "status" => {
-                    msgs.push(AkhMessage::system(format!(
-                        "Cycles: {}, WM: {}, Symbols: {}, Triples: {}",
-                        agent.cycle_count(),
-                        agent.working_memory().len(),
-                        engine.all_symbols().len(),
-                        engine.all_triples().len(),
-                    )));
-                }
-                "goals" => {
-                    let goals = agent.goals();
-                    if goals.is_empty() {
-                        msgs.push(AkhMessage::system("No active goals.".to_string()));
-                    } else {
-                        for g in goals {
-                            msgs.push(AkhMessage::goal_progress(
-                                &g.description,
-                                format!("{}", g.status),
-                            ));
-                        }
-                    }
-                }
-                _ => {
-                    msgs.push(AkhMessage::system(format!("Unknown command: \"{cmd}\"")));
+        "goals" => {
+            let goals = agent.goals();
+            if goals.is_empty() {
+                msgs.push(AkhMessage::system("No active goals.".to_string()));
+            } else {
+                for g in goals {
+                    msgs.push(AkhMessage::goal_progress(
+                        &g.description,
+                        format!("{}", g.status),
+                    ));
                 }
             }
         }
         _ => {
-            msgs.push(AkhMessage::error(
-                "protocol",
-                format!("unknown message type: \"{}\"", input.msg_type),
-            ));
+            msgs.push(AkhMessage::system(format!("Unknown command: \"{trimmed}\"")));
         }
     }
-
     msgs
 }
 

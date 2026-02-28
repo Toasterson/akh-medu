@@ -19,6 +19,7 @@ use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use miette::IntoDiagnostic;
 
 use crate::agent::{Agent, AgentConfig, IdleScheduler, InboundHandle};
+use crate::chat::ChatProcessor;
 use crate::engine::Engine;
 use crate::message::AkhMessage;
 
@@ -29,7 +30,7 @@ struct LocalBackend {
     tui_sink: Arc<sink::TuiSink>,
     idle_scheduler: IdleScheduler,
     operator_handle: InboundHandle,
-    nlu_pipeline: crate::nlu::NluPipeline,
+    chat_processor: ChatProcessor,
 }
 
 /// The chat backend: either a local agent+engine or a remote WS connection.
@@ -46,7 +47,6 @@ enum ChatBackend {
 /// TUI application state.
 pub struct AkhTui {
     workspace: String,
-    grammar: String,
     backend: ChatBackend,
     messages: Vec<AkhMessage>,
     input_buffer: String,
@@ -59,12 +59,6 @@ pub struct AkhTui {
 impl AkhTui {
     /// Create a new TUI instance with a local engine backend.
     pub fn new_local(workspace: String, engine: Arc<Engine>, mut agent: Agent) -> Self {
-        let grammar = engine
-            .compartments()
-            .and_then(|cm| cm.psyche())
-            .map(|p| p.persona.grammar_preference.clone())
-            .unwrap_or_else(|| "narrative".to_string());
-
         let tui_sink = Arc::new(sink::TuiSink::new());
 
         // Set up the operator channel so input flows through the channel abstraction.
@@ -76,29 +70,29 @@ impl AkhTui {
             ledger.set_sink(tui_sink.clone());
         }
 
+        // Restore NLU ranker from durable storage if available,
+        // and attempt to load ML/LLM models from data_dir.
+        let data_dir = engine.config().data_dir.as_deref();
+        let nlu_pipeline = engine
+            .store()
+            .get_meta(b"nlu_ranker_state")
+            .ok()
+            .flatten()
+            .and_then(|bytes| crate::nlu::parse_ranker::ParseRanker::from_bytes(&bytes))
+            .map(|ranker| crate::nlu::NluPipeline::with_ranker_and_models(ranker, data_dir))
+            .unwrap_or_else(|| crate::nlu::NluPipeline::new_with_models(data_dir));
+
+        let chat_processor = ChatProcessor::new(&engine, nlu_pipeline);
+
         Self {
             workspace,
-            grammar,
-            backend: ChatBackend::Local(Box::new({
-                // Restore NLU ranker from durable storage if available,
-                // and attempt to load ML/LLM models from data_dir.
-                let data_dir = engine.config().data_dir.as_deref();
-                let nlu_pipeline = engine
-                    .store()
-                    .get_meta(b"nlu_ranker_state")
-                    .ok()
-                    .flatten()
-                    .and_then(|bytes| crate::nlu::parse_ranker::ParseRanker::from_bytes(&bytes))
-                    .map(|ranker| crate::nlu::NluPipeline::with_ranker_and_models(ranker, data_dir))
-                    .unwrap_or_else(|| crate::nlu::NluPipeline::new_with_models(data_dir));
-                LocalBackend {
-                    agent: Box::new(agent),
-                    engine,
-                    tui_sink,
-                    idle_scheduler: IdleScheduler::default(),
-                    operator_handle,
-                    nlu_pipeline,
-                }
+            backend: ChatBackend::Local(Box::new(LocalBackend {
+                agent: Box::new(agent),
+                engine,
+                tui_sink,
+                idle_scheduler: IdleScheduler::default(),
+                operator_handle,
+                chat_processor,
             })),
             messages: vec![AkhMessage::system(
                 "Welcome to akh. Type a question or command. /help for commands, /quit to exit.",
@@ -115,7 +109,6 @@ impl AkhTui {
     pub fn new_remote(workspace: String, remote: remote::RemoteChat) -> Self {
         Self {
             workspace,
-            grammar: "narrative".to_string(),
             backend: ChatBackend::Remote { remote },
             messages: vec![AkhMessage::system(
                 "Connected to akhomed. Type a question or command. /help for commands, /quit to exit.",
@@ -149,10 +142,11 @@ impl AkhTui {
                 .draw(|frame| {
                     let (cycle_count, symbol_count, goal_count) = self.status_counts();
 
+                    let grammar = self.grammar();
                     widgets::render(
                         frame,
                         &self.workspace,
-                        &self.grammar,
+                        &grammar,
                         &self.messages,
                         &self.input_buffer,
                         self.scroll_offset,
@@ -230,6 +224,15 @@ impl AkhTui {
         }
     }
 
+    /// Get the current grammar archetype name.
+    fn grammar(&self) -> String {
+        match self.backend {
+            ChatBackend::Local(ref local) => local.chat_processor.grammar().to_string(),
+            #[cfg(feature = "daemon")]
+            ChatBackend::Remote { .. } => "narrative".to_string(),
+        }
+    }
+
     /// Called on idle (no key events).
     #[allow(irrefutable_let_patterns)]
     fn on_idle(&mut self) {
@@ -248,9 +251,7 @@ impl AkhTui {
     fn on_exit(&mut self) -> miette::Result<()> {
         if let ChatBackend::Local(ref mut local) = self.backend {
             local.agent.persist_session().into_diagnostic()?;
-            // Persist NLU ranker state for next session.
-            let ranker_bytes = local.nlu_pipeline.ranker().to_bytes();
-            let _ = local.engine.store().put_meta(b"nlu_ranker_state", &ranker_bytes);
+            local.chat_processor.persist_nlu_state(&local.engine);
         }
         Ok(())
     }
@@ -355,466 +356,17 @@ impl AkhTui {
         }
     }
 
-    /// Process input against the local engine/agent.
+    /// Process input against the local engine/agent via the unified ChatProcessor.
     #[allow(irrefutable_let_patterns)]
     fn process_input_local(&mut self, input: &str) {
         let ChatBackend::Local(ref mut local) = self.backend else {
             return;
         };
-        let agent = &mut local.agent;
-        let engine = &local.engine;
-
-        let intent = crate::agent::classify_intent(input);
-
-        match intent {
-            crate::agent::UserIntent::SetGoal { description } => {
-                match agent.add_goal(&description, 128, "User-directed goal") {
-                    Ok(id) => {
-                        self.messages.push(AkhMessage::system(format!(
-                            "Goal added: \"{description}\" (id: {})",
-                            id.get()
-                        )));
-                        // Run a few cycles.
-                        for _ in 0..5 {
-                            match agent.run_cycle() {
-                                Ok(result) => {
-                                    self.messages.push(AkhMessage::tool_result(
-                                        &result.decision.chosen_tool,
-                                        result.action_result.tool_output.success,
-                                        &result.action_result.tool_output.result,
-                                    ));
-                                }
-                                Err(_) => break,
-                            }
-                            // Stop if no more active goals.
-                            let active = crate::agent::goal::active_goals(agent.goals());
-                            if active.is_empty() {
-                                break;
-                            }
-                        }
-                        // Synthesize findings.
-                        let summary = agent
-                            .synthesize_findings_with_grammar(&description, &self.grammar);
-                        if !summary.overview.is_empty() {
-                            self.messages
-                                .push(AkhMessage::narrative(&summary.overview, &self.grammar));
-                        }
-                        for section in &summary.sections {
-                            self.messages.push(AkhMessage::narrative(
-                                format!("## {}\n{}", section.heading, section.prose),
-                                &self.grammar,
-                            ));
-                        }
-                        for gap in &summary.gaps {
-                            self.messages.push(AkhMessage::gap("(unknown)", gap));
-                        }
-                    }
-                    Err(e) => {
-                        self.messages.push(AkhMessage::error("goal", e.to_string()));
-                    }
-                }
-            }
-            crate::agent::UserIntent::Query { subject, original_input, question_word, capability_signal } => {
-                // Phase 12b+12c: Try grounded dialogue with constraint checking.
-                let grounded = crate::agent::conversation::ground_query(
-                    &subject, engine, &self.grammar,
-                );
-                if let Some(ref gr) = grounded {
-                    let (out_msg, decision) = agent.check_and_wrap_grounded(
-                        gr, "operator", crate::agent::ChannelKind::Operator,
-                    );
-                    // Operator always emits (may annotate with warnings).
-                    if decision == crate::agent::EmissionDecision::Emit {
-                        let detail = agent.conversation_state().response_detail;
-                        let rendered = gr.render(detail);
-                        agent.conversation_state_mut().record_agent_turn(&rendered);
-                        agent.conversation_state_mut().track_referent(subject.clone());
-                        for akh_msg in out_msg.to_akh_messages() {
-                            self.messages.push(akh_msg);
-                        }
-                        // Show constraint warnings to operator.
-                        if !out_msg.constraint_check.is_passed() {
-                            self.messages.push(AkhMessage::system(
-                                "[constraint check: some violations detected]".to_string(),
-                            ));
-                        }
-                    }
-                }
-
-                if grounded.is_none() {
-                    // Fallback: discourse-aware response, then synthesis.
-                    let lexicon = crate::grammar::lexer::Lexicon::for_language(
-                        crate::grammar::lexer::Language::default(),
-                    );
-                    let discourse_result = crate::grammar::discourse::resolve_discourse(
-                        &subject,
-                        question_word,
-                        &original_input,
-                        engine,
-                        capability_signal,
-                        Some(agent.conversation_state()),
-                        Some(&lexicon),
-                    );
-                    let handled = if let Ok(ref ctx) = discourse_result {
-                        let from_triples = engine.triples_from(ctx.subject_id);
-                        let to_triples = engine.triples_to(ctx.subject_id);
-                        let mut all_triples = from_triples;
-                        all_triples.extend(to_triples);
-                        if let Some(discourse_tree) =
-                            crate::grammar::discourse::build_discourse_response(
-                                &all_triples, ctx, engine,
-                            )
-                        {
-                            let registry = crate::grammar::GrammarRegistry::new();
-                            if let Ok(prose) = registry.linearize(&self.grammar, &discourse_tree) {
-                                if !prose.trim().is_empty() {
-                                    self.messages.push(AkhMessage::narrative(&prose, &self.grammar));
-                                    true
-                                } else {
-                                    false
-                                }
-                            } else {
-                                false
-                            }
-                        } else {
-                            false
-                        }
-                    } else {
-                        false
-                    };
-                    if !handled {
-                        // Fallback: existing synthesis path.
-                        match engine.resolve_symbol(&subject) {
-                            Ok(sym_id) => {
-                                let from_triples = engine.triples_from(sym_id);
-                                let to_triples = engine.triples_to(sym_id);
-                                if from_triples.is_empty() && to_triples.is_empty() {
-                                    handle_unknown_subject(
-                                        &mut self.messages,
-                                        agent,
-                                        &self.grammar,
-                                        &subject,
-                                        &original_input,
-                                    );
-                                } else {
-                                    let mut all_triples = from_triples;
-                                    all_triples.extend(to_triples);
-                                    let summary =
-                                        crate::agent::synthesize::synthesize_from_triples(
-                                            &subject,
-                                            &all_triples,
-                                            engine,
-                                            &self.grammar,
-                                        );
-                                    if !summary.overview.is_empty() {
-                                        self.messages.push(AkhMessage::narrative(
-                                            &summary.overview,
-                                            &self.grammar,
-                                        ));
-                                    }
-                                    for section in &summary.sections {
-                                        self.messages.push(AkhMessage::narrative(
-                                            format!("## {}\n{}", section.heading, section.prose),
-                                            &self.grammar,
-                                        ));
-                                    }
-                                    for gap in &summary.gaps {
-                                        self.messages.push(AkhMessage::gap("(unknown)", gap));
-                                    }
-                                }
-                            }
-                            Err(_) => {
-                                handle_unknown_subject(
-                                    &mut self.messages,
-                                    agent,
-                                    &self.grammar,
-                                    &subject,
-                                    &original_input,
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-            crate::agent::UserIntent::Assert { text } => {
-                use crate::agent::tool::Tool;
-                let tool_input = crate::agent::ToolInput::new().with_param("text", &text);
-                match crate::agent::tools::TextIngestTool.execute(engine, tool_input) {
-                    Ok(output) => {
-                        self.messages.push(AkhMessage::tool_result(
-                            "text_ingest",
-                            output.success,
-                            &output.result,
-                        ));
-                    }
-                    Err(e) => {
-                        self.messages
-                            .push(AkhMessage::error("ingest", e.to_string()));
-                    }
-                }
-            }
-            crate::agent::UserIntent::RunAgent { cycles } => {
-                let n = cycles.unwrap_or(1);
-                for _ in 0..n {
-                    match agent.run_cycle() {
-                        Ok(result) => {
-                            self.messages.push(AkhMessage::tool_result(
-                                &result.decision.chosen_tool,
-                                result.action_result.tool_output.success,
-                                &result.action_result.tool_output.result,
-                            ));
-                        }
-                        Err(e) => {
-                            self.messages
-                                .push(AkhMessage::error("cycle", e.to_string()));
-                            break;
-                        }
-                    }
-                }
-            }
-            crate::agent::UserIntent::ShowStatus => {
-                let goals = agent.goals();
-                if goals.is_empty() {
-                    self.messages
-                        .push(AkhMessage::system("No active goals.".to_string()));
-                } else {
-                    for g in goals {
-                        self.messages.push(AkhMessage::goal_progress(
-                            &g.description,
-                            format!("{}", g.status),
-                        ));
-                    }
-                }
-                self.messages.push(AkhMessage::system(format!(
-                    "Cycles: {}, WM entries: {}, Triples: {}",
-                    agent.cycle_count(),
-                    agent.working_memory().len(),
-                    engine.all_triples().len(),
-                )));
-            }
-            crate::agent::UserIntent::RenderHiero { entity } => {
-                let render_config = crate::glyph::RenderConfig {
-                    color: false,
-                    notation: crate::glyph::NotationConfig {
-                        use_pua: crate::glyph::catalog::font_available(),
-                        show_confidence: true,
-                        show_provenance: false,
-                        show_sigils: true,
-                        compact: false,
-                    },
-                    ..Default::default()
-                };
-
-                if let Some(ref name) = entity {
-                    match engine.resolve_symbol(name) {
-                        Ok(sym_id) => match engine.extract_subgraph(&[sym_id], 1) {
-                            Ok(result) if !result.triples.is_empty() => {
-                                let rendered = crate::glyph::render::render_to_terminal(
-                                    engine,
-                                    &result.triples,
-                                    &render_config,
-                                );
-                                self.messages.push(AkhMessage::system(rendered));
-                            }
-                            _ => {
-                                self.messages.push(AkhMessage::system(format!(
-                                    "No triples found around \"{name}\"."
-                                )));
-                            }
-                        },
-                        Err(_) => {
-                            self.messages
-                                .push(AkhMessage::system(format!("Symbol \"{name}\" not found.")));
-                        }
-                    }
-                } else {
-                    let triples = engine.all_triples();
-                    if triples.is_empty() {
-                        self.messages.push(AkhMessage::system(
-                            "No triples in knowledge graph.".to_string(),
-                        ));
-                    } else {
-                        let rendered = crate::glyph::render::render_to_terminal(
-                            engine,
-                            &triples,
-                            &render_config,
-                        );
-                        self.messages.push(AkhMessage::system(rendered));
-                    }
-                }
-            }
-            crate::agent::UserIntent::SetDetail { level } => {
-                match crate::agent::conversation::ResponseDetail::from_str_loose(&level) {
-                    Some(detail) => {
-                        agent.set_response_detail(detail);
-                        self.messages.push(AkhMessage::system(format!(
-                            "Response detail set to: {detail:?}"
-                        )));
-                    }
-                    None => {
-                        self.messages.push(AkhMessage::system(
-                            "Unknown detail level. Use: concise, normal, or full.".to_string(),
-                        ));
-                    }
-                }
-            }
-            crate::agent::UserIntent::Help => {
-                self.messages.push(AkhMessage::system(
-                    "Type a question (\"What is X?\"), assert a fact (\"X is a Y\"), \
-                     or set a goal (\"find X\"). Commands: /help, /grammar, /goals, \
-                     /status, /seed, /quit, detail <level>"
-                        .to_string(),
-                ));
-            }
-            crate::agent::UserIntent::Explain { ref query } => {
-                match crate::agent::explain::execute_query(
-                    engine, query, None,
-                ) {
-                    Ok(explanation) => {
-                        self.messages.push(AkhMessage::system(explanation));
-                    }
-                    Err(e) => {
-                        self.messages.push(AkhMessage::system(format!("{e}")));
-                    }
-                }
-            }
-            crate::agent::UserIntent::AgentProtocol { ref message } => {
-                // Agent protocol messages arrive from agent channels, not the operator TUI.
-                // Display a summary for operator visibility.
-                self.messages.push(AkhMessage::system(format!(
-                    "[agent protocol] received: {:?}",
-                    std::mem::discriminant(message),
-                )));
-            }
-            crate::agent::UserIntent::PimCommand { subcommand, args } => {
-                self.messages.push(AkhMessage::system(format!(
-                    "PIM commands are available via the CLI: akh pim {subcommand} {args}",
-                )));
-            }
-            crate::agent::UserIntent::CalCommand { subcommand, args } => {
-                self.messages.push(AkhMessage::system(format!(
-                    "Calendar commands are available via the CLI: akh cal {subcommand} {args}",
-                )));
-            }
-            crate::agent::UserIntent::PrefCommand { subcommand, args } => {
-                self.messages.push(AkhMessage::system(format!(
-                    "Preference commands are available via the CLI: akh pref {subcommand} {args}",
-                )));
-            }
-            crate::agent::UserIntent::CausalQuery { subcommand, args } => {
-                self.messages.push(AkhMessage::system(format!(
-                    "Causal commands are available via the CLI: akh causal {subcommand} {args}",
-                )));
-            }
-            crate::agent::UserIntent::AwakenCommand { subcommand, args } => {
-                if subcommand == "status" {
-                    self.handle_awaken_status();
-                } else {
-                    self.messages.push(AkhMessage::system(format!(
-                        "Awaken commands are available via the CLI: akh awaken {subcommand} {args}",
-                    )));
-                }
-            }
-            crate::agent::UserIntent::Freeform { ref text } => {
-                let lexicon = crate::grammar::lexer::Lexicon::for_language(
-                    crate::grammar::lexer::Language::default(),
-                );
-                let kind = crate::agent::nlp::classify_conversational(text, &lexicon);
-                match kind {
-                    crate::agent::nlp::ConversationalKind::Greeting
-                    | crate::agent::nlp::ConversationalKind::Acknowledgment => {
-                        let (name, traits) = persona_name_and_traits(engine);
-                        let resp = agent.conversation_state().respond_conversational(
-                            &kind, &name, &traits,
-                        );
-                        if !resp.text.is_empty() {
-                            self.messages.push(AkhMessage::narrative(&resp.text, &self.grammar));
-                            agent.conversation_state_mut().record_agent_turn(&resp.text);
-                        }
-                    }
-                    crate::agent::nlp::ConversationalKind::FollowUp => {
-                        let (name, traits) = persona_name_and_traits(engine);
-                        let resp = agent.conversation_state().respond_conversational(
-                            &kind, &name, &traits,
-                        );
-                        if resp.text.is_empty() {
-                            // Active topic exists — re-query at Full detail.
-                            if let Some(topic_id) = agent.conversation_state().topic() {
-                                let label = engine.resolve_label(topic_id);
-                                if let Some(gr) = crate::agent::conversation::ground_query(
-                                    &label, engine, &self.grammar,
-                                ) {
-                                    let rendered = gr.render(
-                                        crate::agent::conversation::ResponseDetail::Full,
-                                    );
-                                    self.messages.push(AkhMessage::narrative(&rendered, &self.grammar));
-                                    agent.conversation_state_mut().record_agent_turn(&rendered);
-                                }
-                            }
-                        } else {
-                            self.messages.push(AkhMessage::narrative(&resp.text, &self.grammar));
-                            agent.conversation_state_mut().record_agent_turn(&resp.text);
-                        }
-                    }
-                    crate::agent::nlp::ConversationalKind::MetaQuestion => {
-                        // Route to grounded self-description.
-                        if let Some(gr) = crate::agent::conversation::ground_query(
-                            "self", engine, &self.grammar,
-                        ) {
-                            let detail = agent.conversation_state().response_detail;
-                            let rendered = gr.render(detail);
-                            self.messages.push(AkhMessage::narrative(&rendered, &self.grammar));
-                            agent.conversation_state_mut().record_agent_turn(&rendered);
-                        } else {
-                            let (name, _) = persona_name_and_traits(engine);
-                            self.messages.push(AkhMessage::narrative(
-                                &format!("I am {name}. I can answer questions about what I know, learn new facts, and investigate topics autonomously."),
-                                &self.grammar,
-                            ));
-                        }
-                    }
-                    crate::agent::nlp::ConversationalKind::Unrecognized => {
-                        // Try NLU pipeline before escalating to goal.
-                        let parse_ctx = crate::grammar::concrete::ParseContext::with_engine(
-                            engine.registry(), engine.ops(), engine.item_memory(),
-                        );
-                        let nlu_ok = local.nlu_pipeline.parse(text, &parse_ctx).is_ok();
-                        if nlu_ok {
-                            // Structured parse succeeded — ingest as fact.
-                            use crate::agent::tool::Tool;
-                            let tool_input = crate::agent::ToolInput::new()
-                                .with_param("text", text);
-                            match crate::agent::tools::TextIngestTool
-                                .execute(engine, tool_input)
-                            {
-                                Ok(output) => {
-                                    self.messages.push(AkhMessage::tool_result(
-                                        "nlu_parse",
-                                        output.success,
-                                        &output.result,
-                                    ));
-                                }
-                                Err(e) => {
-                                    self.messages.push(AkhMessage::error(
-                                        "nlu_ingest",
-                                        e.to_string(),
-                                    ));
-                                }
-                            }
-                        } else {
-                            // NLU also failed — escalate to goal.
-                            escalate_to_goal(
-                                &mut self.messages,
-                                agent,
-                                &self.grammar,
-                                text,
-                                &format!("Exploring \"{text}\"."),
-                            );
-                        }
-                    }
-                }
-            }
-        }
+        let responses =
+            local
+                .chat_processor
+                .process_input(input, &mut local.agent, &local.engine);
+        self.messages.extend(responses);
     }
 
     fn handle_command(&mut self, cmd: &str) {
@@ -830,13 +382,16 @@ impl AkhTui {
             }
             "grammar" | "g" => {
                 if let Some(name) = parts.get(1) {
-                    self.grammar = name.to_string();
+                    #[allow(irrefutable_let_patterns)]
+                    if let ChatBackend::Local(ref mut local) = self.backend {
+                        local.chat_processor.set_grammar(name);
+                    }
                     self.messages
                         .push(AkhMessage::system(format!("Grammar switched to: {name}")));
                 } else {
+                    let current = self.grammar();
                     self.messages.push(AkhMessage::system(format!(
-                        "Current grammar: {}. Use /grammar <name> to switch.",
-                        self.grammar
+                        "Current grammar: {current}. Use /grammar <name> to switch.",
                     )));
                 }
             }
@@ -926,136 +481,6 @@ impl AkhTui {
         }
     }
 
-    /// Display awaken/psyche status for both local and remote backends.
-    fn handle_awaken_status(&mut self) {
-        match &self.backend {
-            ChatBackend::Local(local) => {
-                let psyche = local.engine.compartments().and_then(|m| m.psyche());
-                if let Some(p) = psyche {
-                    self.messages.push(AkhMessage::system(format!(
-                        "Psyche:\n\
-                         \x20 Persona:    {}\n\
-                         \x20 Grammar:    {}\n\
-                         \x20 Traits:     {:?}\n\
-                         \x20 Archetypes: sage={:.2} explorer={:.2} healer={:.2} guardian={:.2}\n\
-                         \x20 Shadow:     {} veto, {} bias patterns\n\
-                         \x20 Integration: {:.1}% (dominant: {})",
-                        p.persona.name,
-                        p.persona.grammar_preference,
-                        p.persona.traits,
-                        p.archetypes.sage,
-                        p.archetypes.explorer,
-                        p.archetypes.healer,
-                        p.archetypes.guardian,
-                        p.shadow.veto_patterns.len(),
-                        p.shadow.bias_patterns.len(),
-                        p.self_integration.individuation_level * 100.0,
-                        p.self_integration.dominant_archetype,
-                    )));
-                } else {
-                    self.messages.push(AkhMessage::system(
-                        "No psyche loaded. Run `akh awaken resolve <name>` to awaken.".to_string(),
-                    ));
-                }
-            }
-            #[cfg(feature = "daemon")]
-            ChatBackend::Remote { remote, .. } => {
-                remote.send_command("awaken status");
-            }
-        }
-    }
-}
-
-/// Escalate unresolved input to a goal, run OODA cycles, and synthesize findings.
-///
-/// Used by both the `Query` fallback (symbol not found / no triples) and the
-/// `Freeform` intent so the agent always does *something* with user input.
-fn escalate_to_goal(
-    messages: &mut Vec<AkhMessage>,
-    agent: &mut Agent,
-    grammar: &str,
-    description: &str,
-    display_prefix: &str,
-) {
-    messages.push(AkhMessage::system(format!(
-        "{display_prefix} Investigating..."
-    )));
-
-    let goal_id = match agent.add_goal(
-        &format!("investigate: {description}"),
-        180,
-        "Find or derive relevant knowledge",
-    ) {
-        Ok(id) => id,
-        Err(e) => {
-            messages.push(AkhMessage::error("goal", e.to_string()));
-            return;
-        }
-    };
-
-    messages.push(AkhMessage::system(format!(
-        "Goal created (id: {})",
-        goal_id.get()
-    )));
-
-    // Run up to max_cycles OODA cycles (capped at a reasonable chat limit).
-    let max = agent.config.max_cycles.clamp(1, 10);
-    for _ in 0..max {
-        match agent.run_cycle() {
-            Ok(result) => {
-                messages.push(AkhMessage::tool_result(
-                    &result.decision.chosen_tool,
-                    result.action_result.tool_output.success,
-                    &result.action_result.tool_output.result,
-                ));
-            }
-            Err(_) => break,
-        }
-        if crate::agent::goal::active_goals(agent.goals()).is_empty() {
-            break;
-        }
-    }
-
-    // Synthesize findings.
-    let summary = agent.synthesize_findings_with_grammar(description, grammar);
-    if !summary.overview.is_empty() {
-        messages.push(AkhMessage::narrative(&summary.overview, grammar));
-    }
-    for section in &summary.sections {
-        messages.push(AkhMessage::narrative(
-            format!("## {}\n{}", section.heading, section.prose),
-            grammar,
-        ));
-    }
-    for gap in &summary.gaps {
-        messages.push(AkhMessage::gap("(unknown)", gap));
-    }
-}
-
-/// Extract persona name and traits from the engine's Psyche compartment.
-///
-/// Falls back to `("Akh", vec![])` if Psyche is not configured.
-fn persona_name_and_traits(engine: &Arc<Engine>) -> (String, Vec<String>) {
-    engine
-        .compartments()
-        .and_then(|cm| cm.psyche())
-        .map(|p| (p.persona.name.clone(), p.persona.traits.clone()))
-        .unwrap_or_else(|| ("Akh".to_string(), Vec::new()))
-}
-
-/// Handle an unknown subject gracefully: show a friendly message, then escalate.
-fn handle_unknown_subject(
-    messages: &mut Vec<AkhMessage>,
-    agent: &mut Agent,
-    grammar: &str,
-    subject: &str,
-    original_input: &str,
-) {
-    messages.push(AkhMessage::narrative(
-        &format!("I don't know about \"{subject}\" yet. Let me investigate."),
-        grammar,
-    ));
-    escalate_to_goal(messages, agent, grammar, original_input, "");
 }
 
 /// Launch the TUI with a local engine and workspace.

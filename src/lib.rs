@@ -34,6 +34,7 @@ pub mod api_types;
 pub mod argumentation;
 pub mod audit;
 pub mod bootstrap;
+pub mod chat;
 #[cfg(feature = "email")]
 pub mod email;
 pub mod autonomous;
