@@ -1,6 +1,6 @@
 # Akh-medu Architecture
 
-> Last updated: 2026-02-28 (Phase 14j-14m: Full NLU pipeline — rule parser, Micro-ML NER (Tier 2), LLM translator (Tier 3), VSA parse ranker, TUI integration)
+> Last updated: 2026-02-28 (NLU-enriched document ingestion: three-phase concept extraction with NluPipeline wired into library ingest)
 
 ## Overview
 
@@ -30,13 +30,14 @@ src/
 ├── grammar/            22 modules — GF-inspired parsing/generation, entity resolution, Rust code gen (Phase 10a), templates (Phase 10e)
 ├── graph/               9 modules — KG (petgraph), SPARQL (oxigraph), analytics, predicate hierarchy (Phase 9b), defeasible reasoning (Phase 9d), arity constraints (Phase 9j), contradiction detection (Phase 9l), argumentation truth (Phase 9i), NARTs (Phase 9o)
 ├── infer/               3 modules — spreading activation (with Phase 9 hierarchy + temporal context), backward chaining, superposition
-├── library/            12 modules — document parsing, chunking, concept extraction
+├── library/            12 modules — document parsing, chunking, three-phase concept extraction (regex + standalone + NLU)
 ├── reason/              3 modules — e-graph language (AkhLang), rewrite rules, second-order quantification (Phase 9n), anti-unification (Phase 10h)
 ├── simd/                5 modules — runtime SIMD kernel dispatch (AVX2 / generic)
 ├── skills/              1 module  — skillpack lifecycle (Cold/Warm/Hot)
 ├── store/               3 modules — tiered storage (hot/warm/cold)
 ├── tui/                 6 modules — ratatui terminal UI, WebSocket remote
 ├── vsa/                 5 modules — HyperVec, VsaOps, encoding, item memory (HNSW), code pattern encoding (Phase 10f)
+├── api_types.rs                   — shared request/response types for akhomed ↔ AkhClient wire format
 ├── engine.rs                      — facade composing all subsystems (Phase9Config, 9 stored registries, wired add_triple/remove_triple pipeline)
 ├── error.rs                       — miette + thiserror rich diagnostics
 ├── rule_macro.rs                  — rule macro predicates (Phase 9g): RuleMacro trait, registry, genls/relationAllExists/relationExistsAll
@@ -129,7 +130,7 @@ OODA loop (synchronous, no async runtime):
 
 Supporting infrastructure: working memory (ephemeral), episodic memory (consolidated), goal management with HTN decomposition (6+ built-in + learned methods, dependency DAGs, VSA-based method selection), multi-step planning with backtracking, periodic reflection, Jungian psyche model, autonomous goal generation (CLARION-inspired drives: curiosity, coherence, completeness, efficiency), metacognitive self-evaluation (Nelson-Narens monitoring/control, ZPD, competence tracking, AGM belief revision, e-graph goal reformulation), resource awareness (VOC-based goal switching, CBR effort estimation, dynamic stall thresholds, diminishing returns detection, opportunity cost recording), procedural learning (Soar-inspired chunking: trace extraction → generalization → method compilation, success/failure tracking, dormancy pruning).
 
-## NLU Architecture (Planned — Phase 14j-14m)
+## NLU Architecture (Phase 14j-14m)
 
 Four-tier cascading pipeline for natural language understanding. Human language enters and exits at the boundary; all internal reasoning remains in VSA space.
 
@@ -147,7 +148,68 @@ Tier 4: VSA Parse Ranker         — 0 MB,    <1ms,  self-improving disambiguati
 
 Total NLU memory: ~1.3 GB. Runs entirely on Mac Mini M2. No cloud API. FLOSS throughout.
 
+### Server-Side NLU
+
+The akhomed WebSocket handler initialises an `NluPipeline` per session, restoring the VSA parse ranker from durable storage. When `classify_intent()` cannot categorize user input, the full 4-tier cascade runs server-side:
+
+1. NLU parse succeeds → input is ingested as a structured fact via `TextIngestTool`
+2. NLU parse fails → input is escalated to a goal for the agent to investigate
+
+This means `client-only` builds get the full NLU capability without any local ML models — the server does all the parsing. The available tiers depend on the server's feature flags:
+
+| Server features | Available tiers |
+|-----------------|-----------------|
+| `server` | Tier 1 (rules) + Tier 4 (VSA ranker) |
+| `server,nlu-ml` | + Tier 2 (ONNX NER) |
+| `server,nlu-full` | + Tier 2 + Tier 3 (LLM translator) |
+
+The ranker state is persisted per-workspace via `engine.store().put_meta(b"nlu_ranker_state", ...)` on session disconnect, shared with the TUI's ranker.
+
+### NLU-Enriched Document Ingestion
+
+The library document ingestion pipeline (`src/library/ingest.rs`) uses a three-phase concept extraction strategy in `run_concept_extraction()`:
+
+- **Phase A (relational):** Regex-based triple extraction (`extract_triples` + `extract_richer_triples`) handles "X is-a Y", "X has Y", conjunction splitting, bare verbs, and adverb modulation.
+- **Phase B (standalone):** Capitalized proper nouns, technical compounds, and repeated terms not captured by Phase A.
+- **Phase C (NLU pipeline):** When an `NluPipeline` is available, each sentence is parsed through the 4-tier cascade. This captures constructs Phase A cannot: negation, conditionals, temporal scoping, modals, comparatives, quantifiers, and relative clauses. Parsed `AbsTree` structures are grounded against the symbol registry and committed via `engine.commit_abs_tree()`.
+
+Phase C deduplicates against Phase A using shared `seen_triple_keys`. Parse failures are non-fatal — Phase A/B results stand.
+
+The `ingest_document`, `ingest_file`, and `ingest_url` functions accept an optional `nlu: Option<&mut NluPipeline>` parameter. Call sites that lack NLU (bootstrap, inbox, agent tools, client-only) pass `None`. The akhomed `library_add_handler` initialises an NluPipeline from the workspace's persisted ranker state and persists it after ingestion.
+
 ADR: `docs/ai/decisions/022-nlu-architecture.md`
+
+## Client-Only Build Mode
+
+The `akh` binary supports a `client-only` feature flag for lightweight remote-only deployments:
+
+```
+cargo build --features client-only --bin akh
+```
+
+### Architecture
+
+- **Feature flag**: `client-only` in `Cargo.toml` — no extra dependencies, strips local engine from `akh`
+- **Transport**: All 50+ CLI commands route through HTTP to a running `akhomed` server
+- **Discovery**: PID file (`~/.local/state/akh-medu/{ws}/akhomed.pid`) + health check
+- **Shared types**: `src/api_types.rs` defines request/response structs used by both akhomed handlers and `AkhClient`
+- **Error handling**: `ClientError::NoServer` with miette diagnostic telling the user to start akhomed
+
+### Command Dispatch
+
+Under `client-only`, `main.rs` calls `run_client_only(cli)` which routes every subcommand through `AkhClient::Remote`. The non-client-only codepath is completely unchanged (feature-gated behind `#[cfg(not(feature = "client-only"))]`).
+
+Commands that cannot work remotely (CSV/text ingest, headless chat, CalDAV sync, library watch) bail with informative diagnostics.
+
+### Feature Combinations
+
+| Features | Binary | Behavior |
+|----------|--------|----------|
+| (default) | `akh` | Local engine with remote fallback |
+| `client-only` | `akh` | Remote only, requires akhomed |
+| `server` | `akhomed` | HTTP+WS server with full engine |
+
+ADR: `docs/ai/decisions/023-client-only-mode.md`
 
 ## Storage Architecture
 

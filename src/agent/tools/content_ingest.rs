@@ -79,10 +79,10 @@ impl Tool for ContentIngestTool {
         };
 
         let result = if source.starts_with("http://") || source.starts_with("https://") {
-            ingest_url(engine, &mut catalog, source, config)
+            ingest_url(engine, &mut catalog, source, config, None)
         } else {
             let path = PathBuf::from(source);
-            ingest_file(engine, &mut catalog, &path, config)
+            ingest_file(engine, &mut catalog, &path, config, None)
         };
 
         match result {

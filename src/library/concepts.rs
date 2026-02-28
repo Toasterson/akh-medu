@@ -27,6 +27,11 @@ pub enum ConceptSource {
     TechnicalTerm,
     /// Non-stopword appearing 3+ times in chunk.
     RepeatedTerm,
+    /// Extracted by the NLU pipeline (Phase 14j cascade).
+    NluParsed {
+        /// Which NLU tier produced the parse (1–4).
+        tier: u8,
+    },
 }
 
 impl ConceptSource {
@@ -37,6 +42,11 @@ impl ConceptSource {
             Self::CapitalizedTerm => "capitalized",
             Self::TechnicalTerm => "technical",
             Self::RepeatedTerm => "repeated",
+            Self::NluParsed { tier: 1 } => "nlu_tier_1",
+            Self::NluParsed { tier: 2 } => "nlu_tier_2",
+            Self::NluParsed { tier: 3 } => "nlu_tier_3",
+            Self::NluParsed { tier: 4 } => "nlu_tier_4",
+            Self::NluParsed { .. } => "nlu_tier_unknown",
         }
     }
 }

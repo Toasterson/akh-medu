@@ -1389,7 +1389,7 @@ impl Engine {
     }
 
     /// Walk an [`AbsTree`] and commit each Triple node to the knowledge graph.
-    fn commit_abs_tree(&self, tree: &AbsTree) -> AkhResult<usize> {
+    pub fn commit_abs_tree(&self, tree: &AbsTree) -> AkhResult<usize> {
         match tree {
             AbsTree::Triple {
                 subject,
@@ -1429,6 +1429,59 @@ impl Engine {
                 }
                 Ok(count)
             }
+
+            // ── NLU extensions (Phase 14j) ──────────────────────────────
+            AbsTree::Negation { inner } => self.commit_abs_tree(inner),
+            AbsTree::Conditional {
+                condition,
+                consequent,
+            } => {
+                let mut count = self.commit_abs_tree(condition)?;
+                count += self.commit_abs_tree(consequent)?;
+                Ok(count)
+            }
+            AbsTree::Temporal { inner, .. } => self.commit_abs_tree(inner),
+            AbsTree::Modal { inner, .. } => self.commit_abs_tree(inner),
+            AbsTree::Quantified { scope, .. } => self.commit_abs_tree(scope),
+            AbsTree::Comparison {
+                entity_a,
+                entity_b,
+                property,
+                ordering,
+            } => {
+                let a_label = entity_a.label().unwrap_or("?");
+                let b_label = entity_b.label().unwrap_or("?");
+                let pred_label = match ordering {
+                    crate::grammar::abs::CompareOrd::GreaterThan => {
+                        format!("greater-{property}-than")
+                    }
+                    crate::grammar::abs::CompareOrd::LessThan => {
+                        format!("less-{property}-than")
+                    }
+                    crate::grammar::abs::CompareOrd::Equal => {
+                        format!("equal-{property}-to")
+                    }
+                };
+                let s = self.resolve_or_create_entity(a_label)?;
+                let p = self.resolve_or_create_relation(&pred_label)?;
+                let o = self.resolve_or_create_entity(b_label)?;
+                self.add_triple(&Triple::new(s, p, o))?;
+                Ok(1)
+            }
+            AbsTree::RelativeClause { head, clause } => {
+                let mut count = self.commit_abs_tree(head)?;
+                count += self.commit_abs_tree(clause)?;
+                Ok(count)
+            }
+            AbsTree::WithProvenance { inner, .. } => self.commit_abs_tree(inner),
+            AbsTree::Section { body, .. } => {
+                let mut count = 0;
+                for item in body {
+                    count += self.commit_abs_tree(item)?;
+                }
+                Ok(count)
+            }
+
             _ => Ok(0),
         }
     }

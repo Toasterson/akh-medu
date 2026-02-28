@@ -474,7 +474,7 @@ impl CurriculumIngestor {
                 ..Default::default()
             };
 
-            match ingest_document(engine, catalog, data, source, config) {
+            match ingest_document(engine, catalog, data, source, config, None) {
                 Ok(ingest_result) => {
                     outcome.triples_added += ingest_result.triple_count;
                     outcome.concepts_extracted += ingest_result.concept_count;
@@ -517,7 +517,7 @@ impl CurriculumIngestor {
                 ..Default::default()
             };
 
-            match ingest_url(engine, catalog, &resource.url, url_config) {
+            match ingest_url(engine, catalog, &resource.url, url_config, None) {
                 Ok(ingest_result) => {
                     outcome.triples_added += ingest_result.triple_count;
                     outcome.concepts_extracted += ingest_result.concept_count;

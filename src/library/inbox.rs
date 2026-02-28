@@ -109,7 +109,7 @@ fn process_inbox_file(
 ) -> LibraryResult<()> {
     let mut catalog = LibraryCatalog::open(library_dir)?;
 
-    let result = ingest_file(engine, &mut catalog, path, IngestConfig::default())?;
+    let result = ingest_file(engine, &mut catalog, path, IngestConfig::default(), None)?;
 
     println!(
         "  Ingested: \"{}\" ({} chunks, {} triples)",

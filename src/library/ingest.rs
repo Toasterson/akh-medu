@@ -7,6 +7,8 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use crate::engine::Engine;
+use crate::grammar::abs::AbsTree;
+use crate::grammar::concrete::ParseContext;
 use crate::graph::Triple;
 use crate::library::catalog::{LibraryCatalog, slugify};
 use crate::library::chunker::{ChunkConfig, normalize_chunks};
@@ -17,6 +19,7 @@ use crate::library::error::{LibraryError, LibraryResult};
 use crate::library::model::*;
 use crate::library::parser;
 use crate::library::predicates::LibraryPredicates;
+use crate::nlu::NluPipeline;
 use crate::provenance::{DerivationKind, ProvenanceRecord};
 use crate::symbol::SymbolId;
 use crate::vsa::encode::encode_label;
@@ -47,6 +50,8 @@ pub struct IngestResult {
     pub concept_count: usize,
     /// Total chunks after normalization.
     pub chunk_count: usize,
+    /// Triples added by the NLU pipeline (Phase C). Subset of `triple_count`.
+    pub nlu_triple_count: usize,
 }
 
 /// Ingest a document from raw bytes with a known source.
@@ -66,6 +71,7 @@ pub fn ingest_document(
     data: &[u8],
     source: DocumentSource,
     config: IngestConfig,
+    nlu: Option<&mut NluPipeline>,
 ) -> LibraryResult<IngestResult> {
     // 1. Determine format.
     let format = config.format.unwrap_or_else(|| {
@@ -159,6 +165,8 @@ pub fn ingest_document(
     // 8. Per-chunk: create paragraph symbols, structural triples, concept extraction, VSA.
     let mut prev_chunk_sym: Option<SymbolId> = None;
     let mut total_concepts = 0usize;
+    let mut total_nlu_triples = 0usize;
+    let mut nlu = nlu;
 
     for chunk in &chunks {
         let para_label = format!("para:{slug}:{}", chunk.index);
@@ -187,12 +195,22 @@ pub fn ingest_document(
         add_triple(engine, para_sym, preds.chunk_index, idx_sym, &slug)?;
         triple_count += 1;
 
-        // Concept extraction: two-phase atomic concept extraction from chunk text.
-        let (rel_triples, concepts) = run_concept_extraction(
-            engine, para_sym, &chunk.text, &preds, &slug, format, chunk.index as u32,
+        // Concept extraction: three-phase concept extraction from chunk text.
+        //   Phase A: relational patterns, Phase B: standalone concepts,
+        //   Phase C: NLU pipeline (if available).
+        let extraction = run_concept_extraction(
+            engine,
+            para_sym,
+            &chunk.text,
+            &preds,
+            &slug,
+            format,
+            chunk.index as u32,
+            nlu.as_mut().map(|p| &mut **p),
         )?;
-        triple_count += rel_triples;
-        total_concepts += concepts;
+        triple_count += extraction.triple_count;
+        total_concepts += extraction.concept_count;
+        total_nlu_triples += extraction.nlu_triple_count;
 
         // VSA embedding: encode the chunk text and insert into item memory.
         if let Ok(vec) = encode_label(engine.ops(), &chunk.text) {
@@ -244,6 +262,7 @@ pub fn ingest_document(
         triple_count,
         concept_count: total_concepts,
         chunk_count: chunks.len(),
+        nlu_triple_count: total_nlu_triples,
     })
 }
 
@@ -253,6 +272,7 @@ pub fn ingest_file(
     catalog: &mut LibraryCatalog,
     path: &Path,
     config: IngestConfig,
+    nlu: Option<&mut NluPipeline>,
 ) -> LibraryResult<IngestResult> {
     let data = std::fs::read(path).map_err(|e| LibraryError::Io { source: e })?;
     let source = DocumentSource::File(path.display().to_string());
@@ -267,7 +287,7 @@ pub fn ingest_file(
         config
     };
 
-    ingest_document(engine, catalog, &data, source, config)
+    ingest_document(engine, catalog, &data, source, config, nlu)
 }
 
 /// Ingest a document from a URL via HTTP GET.
@@ -276,6 +296,7 @@ pub fn ingest_url(
     catalog: &mut LibraryCatalog,
     url: &str,
     config: IngestConfig,
+    nlu: Option<&mut NluPipeline>,
 ) -> LibraryResult<IngestResult> {
     let response = ureq::get(url)
         .call()
@@ -308,7 +329,7 @@ pub fn ingest_url(
         config
     };
 
-    ingest_document(engine, catalog, &data, source, config)
+    ingest_document(engine, catalog, &data, source, config, nlu)
 }
 
 // ---------------------------------------------------------------------------
@@ -404,13 +425,21 @@ fn add_metadata_triples(
     Ok(count)
 }
 
-/// Two-phase concept extraction from chunk text.
+/// Result of concept extraction for a single chunk.
+struct ExtractionResult {
+    triple_count: usize,
+    concept_count: usize,
+    nlu_triple_count: usize,
+}
+
+/// Three-phase concept extraction from chunk text.
 ///
-/// Phase A: Relational patterns (existing `extract_triples` + new `extract_richer_triples`)
+/// Phase A: Relational patterns (existing `extract_triples` + `extract_richer_triples`)
 ///   with head noun phrase extraction to trim spans to atomic concepts.
 /// Phase B: Standalone concepts (capitalized terms, technical compounds, repeated terms).
-///
-/// Returns `(triple_count, concept_count)`.
+/// Phase C: NLU pipeline parsing (if available) — produces richer AbsTree structures
+///   that capture negation, conditionals, temporals, modals, comparisons, etc.
+#[allow(clippy::too_many_arguments)]
 fn run_concept_extraction(
     engine: &Engine,
     para_sym: SymbolId,
@@ -419,9 +448,11 @@ fn run_concept_extraction(
     slug: &str,
     _format: ContentFormat,
     chunk_index: u32,
-) -> LibraryResult<(usize, usize)> {
+    nlu: Option<&mut NluPipeline>,
+) -> LibraryResult<ExtractionResult> {
     let mut triple_count = 0usize;
     let mut concept_count = 0usize;
+    let mut nlu_triple_count = 0usize;
     let mut relational_labels: HashSet<String> = HashSet::new();
 
     let sentences = split_sentences(text);
@@ -518,7 +549,132 @@ fn run_concept_extraction(
         concept_count += 1;
     }
 
-    Ok((triple_count, concept_count))
+    // Phase C: NLU pipeline sentence-level parsing (when available).
+    //
+    // The NLU cascade produces rich AbsTree structures with negation, conditionals,
+    // temporal scoping, modals, comparatives, and relative clauses — constructs that
+    // the regex-based Phase A cannot capture. Parse failures are non-fatal since
+    // Phase A/B already extracted what they could.
+    if let Some(nlu) = nlu {
+        let ctx = ParseContext::with_engine(engine.registry(), engine.ops(), engine.item_memory());
+
+        for sentence in &sentences {
+            let parse_result = match nlu.parse(sentence, &ctx) {
+                Ok(r) => r,
+                Err(_) => continue, // Non-fatal: Phase A/B already handled this sentence.
+            };
+
+            let grounded = parse_result.tree.ground(engine.registry());
+
+            // Extract triple keys from the grounded tree to dedup against Phase A.
+            let tree_keys = collect_triple_keys(&grounded);
+            let has_new = tree_keys.iter().any(|k| !seen_triple_keys.contains(k));
+            if !has_new && !tree_keys.is_empty() {
+                // All triples from this parse were already captured by Phase A.
+                continue;
+            }
+            // Record the keys so later sentences don't re-add them either.
+            for key in tree_keys {
+                seen_triple_keys.insert(key);
+            }
+
+            // Commit the grounded tree to the KG.
+            let committed = engine.commit_abs_tree(&grounded).map_err(|e| {
+                LibraryError::IngestFailed {
+                    document: slug.into(),
+                    message: format!("NLU commit: {e}"),
+                }
+            })?;
+            nlu_triple_count += committed;
+            triple_count += committed;
+
+            // Add doc:mentions triples for all entity labels discovered by NLU.
+            for label in grounded.collect_labels() {
+                if relational_labels.contains(&label.to_lowercase()) {
+                    continue; // Already linked by Phase A.
+                }
+                if let Ok(sym) = engine.resolve_or_create_entity(label) {
+                    let _ = add_triple(engine, para_sym, preds.mentions, sym, slug);
+                    triple_count += 1;
+                    relational_labels.insert(label.to_lowercase());
+                }
+            }
+
+            // NLU-specific provenance.
+            let nlu_source = ConceptSource::NluParsed {
+                tier: parse_result.source_tier,
+            };
+            store_concept_provenance(engine, para_sym, slug, chunk_index, nlu_source);
+
+            // Also store the richer DerivationKind::NluParsed provenance.
+            let nlu_kind = DerivationKind::NluParsed {
+                source_tier: parse_result.source_tier,
+                confidence: parse_result.confidence,
+                exemplar_similarity: parse_result.exemplar_similarity,
+            };
+            let mut nlu_record =
+                ProvenanceRecord::new(para_sym, nlu_kind).with_confidence(parse_result.confidence);
+            let _ = engine.store_provenance(&mut nlu_record);
+        }
+    }
+
+    Ok(ExtractionResult {
+        triple_count,
+        concept_count,
+        nlu_triple_count,
+    })
+}
+
+/// Walk an [`AbsTree`] and collect dedup keys for any `Triple` nodes.
+///
+/// Keys are `"subject|predicate|object"` (lowercased), matching the format
+/// used by Phase A's `seen_triple_keys` set.
+fn collect_triple_keys(tree: &AbsTree) -> Vec<String> {
+    let mut keys = Vec::new();
+    collect_triple_keys_inner(tree, &mut keys);
+    keys
+}
+
+fn collect_triple_keys_inner(tree: &AbsTree, keys: &mut Vec<String>) {
+    match tree {
+        AbsTree::Triple {
+            subject,
+            predicate,
+            object,
+        } => {
+            let s = subject.label().unwrap_or("?").to_lowercase();
+            let p = predicate.label().unwrap_or("?").to_lowercase();
+            let o = object.label().unwrap_or("?").to_lowercase();
+            keys.push(format!("{s}|{p}|{o}"));
+        }
+        AbsTree::WithConfidence { inner, .. }
+        | AbsTree::WithProvenance { inner, .. }
+        | AbsTree::Negation { inner }
+        | AbsTree::Temporal { inner, .. }
+        | AbsTree::Modal { inner, .. } => {
+            collect_triple_keys_inner(inner, keys);
+        }
+        AbsTree::Quantified { scope, .. } => {
+            collect_triple_keys_inner(scope, keys);
+        }
+        AbsTree::Conjunction { items, .. } | AbsTree::Section { body: items, .. } => {
+            for item in items {
+                collect_triple_keys_inner(item, keys);
+            }
+        }
+        AbsTree::Conditional {
+            condition,
+            consequent,
+        } => {
+            collect_triple_keys_inner(condition, keys);
+            collect_triple_keys_inner(consequent, keys);
+        }
+        AbsTree::RelativeClause { head, clause } => {
+            collect_triple_keys_inner(head, keys);
+            collect_triple_keys_inner(clause, keys);
+        }
+        _ => {}
+    }
 }
 
 /// Store a provenance record for an extracted concept.
