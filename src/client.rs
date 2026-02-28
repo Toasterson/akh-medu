@@ -64,12 +64,24 @@ impl ServerInfo {
 /// 3. The server responds to `GET /health`
 pub fn discover_server(paths: &AkhPaths) -> Option<ServerInfo> {
     let pid_path = paths.pid_file();
-    let contents = std::fs::read_to_string(&pid_path).ok()?;
-    let info: ServerInfo = serde_json::from_str(&contents).ok()?;
+    let contents = match std::fs::read_to_string(&pid_path) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::debug!(path = %pid_path.display(), error = %e, "PID file not readable");
+            return None;
+        }
+    };
+    let info: ServerInfo = match serde_json::from_str(&contents) {
+        Ok(i) => i,
+        Err(e) => {
+            tracing::warn!(path = %pid_path.display(), error = %e, "PID file corrupt");
+            return None;
+        }
+    };
 
     // Check process is alive.
     if !process_alive(info.pid) {
-        // Stale PID file — clean up.
+        tracing::debug!(pid = info.pid, "stale PID file — process not alive, removing");
         let _ = std::fs::remove_file(&pid_path);
         return None;
     }
@@ -78,7 +90,20 @@ pub fn discover_server(paths: &AkhPaths) -> Option<ServerInfo> {
     let url = format!("{}/health", info.base_url());
     match ureq::get(&url).timeout(std::time::Duration::from_secs(2)).call() {
         Ok(resp) if resp.status() == 200 => Some(info),
-        _ => None,
+        Ok(resp) => {
+            tracing::warn!(
+                pid = info.pid, url = %url, status = resp.status(),
+                "akhomed process alive but health check returned non-200"
+            );
+            None
+        }
+        Err(e) => {
+            tracing::warn!(
+                pid = info.pid, url = %url, error = %e,
+                "akhomed process alive but health check failed"
+            );
+            None
+        }
     }
 }
 
@@ -132,10 +157,9 @@ pub enum ClientError {
     #[error("no akhomed server found — client-only mode requires a running server")]
     #[diagnostic(
         code(akh::client::no_server),
-        help("Start the server first: cargo run --features server --bin akhomed\n\
-              Or build without --features client-only to use a local engine.")
+        help("{hint}")
     )]
-    NoServer,
+    NoServer { hint: String },
 }
 
 pub type ClientResult<T> = Result<T, ClientError>;
@@ -179,8 +203,28 @@ pub fn require_server(workspace: &str, paths: Option<&AkhPaths>) -> ClientResult
         if let Some(server) = discover_server(paths) {
             return Ok(AkhClient::remote(&server, workspace));
         }
+        let pid_path = paths.pid_file();
+        let hint = if pid_path.exists() {
+            format!(
+                "PID file exists at {} but the health check failed.\n\
+                 Check akhomed logs: journalctl --user -u akh-medu.akhomed  (Linux)\n\
+                 Or: log show --predicate 'process==\"akhomed\"' --last 5m  (macOS)\n\
+                 Or build without --features client-only to use a local engine.",
+                pid_path.display()
+            )
+        } else {
+            format!(
+                "No PID file at {}.\n\
+                 Start the server: akhomed  (or: cargo run --features server --bin akhomed)\n\
+                 Or build without --features client-only to use a local engine.",
+                pid_path.display()
+            )
+        };
+        return Err(ClientError::NoServer { hint });
     }
-    Err(ClientError::NoServer)
+    Err(ClientError::NoServer {
+        hint: "Could not resolve XDG paths. Set $HOME or $XDG_RUNTIME_DIR.".to_string(),
+    })
 }
 
 impl AkhClient {
