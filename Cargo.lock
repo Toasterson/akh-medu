@@ -83,6 +83,7 @@ dependencies = [
  "dashmap",
  "deadpool-lapin",
  "egg",
+ "encoding_rs",
  "epub",
  "futures-util",
  "hnsw_rs",

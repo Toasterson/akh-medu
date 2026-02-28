@@ -98,15 +98,31 @@ impl ChatProcessor {
             return self.dispatch_intent(intent, trimmed, agent, engine);
         }
 
-        // ── NLU pipeline first ──────────────────────────────────────
+        // ── Conversational fast-path (skip NLU + classify_intent) ──
+        // Greetings, meta-questions ("who are you?"), acknowledgments,
+        // and follow-ups go directly to conversational handling.
+        // This prevents "Hello, who are you?" from being parsed as
+        // Query { subject: "you" } or ingested as a fact.
+        let conv_kind = classify_conversational(trimmed, &self.lexicon);
+        if !matches!(conv_kind, ConversationalKind::Unrecognized) {
+            let grammar = self.config.grammar.clone();
+            let mut msgs = Vec::new();
+            self.handle_freeform(&mut msgs, agent, engine, trimmed, trimmed, &grammar);
+            return msgs;
+        }
+
+        // ── NLU pipeline ────────────────────────────────────────────
         let parse_ctx = ParseContext::with_engine(
             engine.registry(),
             engine.ops(),
             engine.item_memory(),
         );
-        if self.nlu_pipeline.parse(trimmed, &parse_ctx).is_ok() {
-            // Structured parse succeeded — ingest as fact.
-            return self.ingest_as_fact(trimmed, engine, "nlu_parse");
+        if let Ok(nlu_result) = self.nlu_pipeline.parse(trimmed, &parse_ctx) {
+            // Only ingest assertable structures (triples, compounds).
+            // Query-like parses (bare entities) fall through to classify_intent.
+            if nlu_result.tree.is_assertable() {
+                return self.ingest_as_fact(trimmed, engine, "nlu_parse");
+            }
         }
 
         // ── classify_intent fallback ────────────────────────────────
@@ -797,5 +813,27 @@ mod tests {
         assert!(!is_structural_command("hello"));
         assert!(!is_structural_command("Rust is a programming language"));
         assert!(!is_structural_command("find similar animals"));
+    }
+
+    #[test]
+    fn conversational_inputs_skip_nlu() {
+        use crate::grammar::lexer::{Language, Lexicon};
+
+        let lexicon = Lexicon::for_language(Language::default());
+
+        // Greetings should be recognized as conversational, not unrecognized.
+        let hello = classify_conversational("hello", &lexicon);
+        assert!(!matches!(hello, ConversationalKind::Unrecognized), "hello should be Greeting");
+
+        let hi = classify_conversational("hi there", &lexicon);
+        assert!(!matches!(hi, ConversationalKind::Unrecognized), "hi there should be Greeting");
+
+        // Meta-questions should be recognized as conversational.
+        let who = classify_conversational("who are you?", &lexicon);
+        assert!(!matches!(who, ConversationalKind::Unrecognized), "who are you should be MetaQuestion");
+
+        // Factual statements should NOT be conversational.
+        let fact = classify_conversational("Rust is a programming language", &lexicon);
+        assert!(matches!(fact, ConversationalKind::Unrecognized), "fact should be Unrecognized");
     }
 }

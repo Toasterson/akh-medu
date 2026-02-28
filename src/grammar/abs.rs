@@ -845,6 +845,37 @@ impl AbsTree {
             clause: Box::new(clause),
         }
     }
+
+    /// Whether this tree contains assertable relational content (triples,
+    /// comparisons, conditionals, etc.) vs being a bare entity/query.
+    ///
+    /// Used by ChatProcessor to decide whether an NLU parse should be
+    /// ingested as a fact or routed through the query/intent handler.
+    pub fn is_assertable(&self) -> bool {
+        match self {
+            // Relational structures are assertable.
+            AbsTree::Triple { .. }
+            | AbsTree::Similarity { .. }
+            | AbsTree::Comparison { .. }
+            | AbsTree::Conditional { .. }
+            | AbsTree::Negation { .. }
+            | AbsTree::Quantified { .. }
+            | AbsTree::Modal { .. }
+            | AbsTree::Temporal { .. }
+            | AbsTree::RelativeClause { .. }
+            | AbsTree::CodeFact { .. } => true,
+
+            // Wrappers — check the inner node.
+            AbsTree::WithConfidence { inner, .. }
+            | AbsTree::WithProvenance { inner, .. } => inner.is_assertable(),
+
+            // Conjunction/disjunction — assertable if any child is.
+            AbsTree::Conjunction { items, .. } => items.iter().any(|i| i.is_assertable()),
+
+            // Bare entities, relations, freeform, gaps, etc. are not assertable.
+            _ => false,
+        }
+    }
 }
 
 // ── Grounding & VSA encoding ────────────────────────────────────────────
