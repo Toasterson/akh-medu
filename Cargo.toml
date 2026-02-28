@@ -103,6 +103,7 @@ tokenizers = { version = "0.22", optional = true, default-features = false, feat
 
 # NLU Tier 3: Small LLM translator (feature-gated)
 llama-cpp-2 = { version = "0.1", optional = true, features = ["sampler"] }
+encoding_rs = { version = "0.8", optional = true }
 
 # Calendar (feature-gated)
 icalendar = { version = "0.16", optional = true, features = ["parser"] }
@@ -117,7 +118,7 @@ email = ["mail-parser", "imap", "native-tls", "lettre"]
 calendar = ["icalendar", "chrono"]
 wasm-tools = ["wasmtime"]
 nlu-ml = ["ort", "tokenizers"]
-nlu-llm = ["llama-cpp-2"]
+nlu-llm = ["llama-cpp-2", "encoding_rs"]
 nlu-full = ["nlu-ml", "nlu-llm"]
 
 [dev-dependencies]

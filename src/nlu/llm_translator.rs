@@ -204,9 +204,10 @@ impl LlmTranslator {
         }
 
         // Detokenize output
+        let mut decoder = encoding_rs::UTF_8.new_decoder();
         let json: String = output_tokens
             .iter()
-            .filter_map(|t| self.model.token_to_str(*t, llama_cpp_2::model::Special::Plaintext).ok())
+            .filter_map(|t| self.model.token_to_piece(*t, &mut decoder, false, None).ok())
             .collect();
 
         let tree = parse_abstree_json(&json)?;
