@@ -316,10 +316,43 @@ impl Engine {
         // Restore Phase 9 registries from persistent storage if available.
         engine.restore_phase9();
 
+        // Auto-load all discovered compartments (psyche, domain, etc.) so their
+        // triples and psyche config are available immediately.
+        engine.load_discovered_compartments();
+
         // Auto-activate all discovered skills so installed == active.
         engine.activate_installed_skills();
 
         Ok(engine)
+    }
+
+    /// Auto-load all discovered (Dormant) compartments.
+    ///
+    /// Called during engine startup so that psyche config and compartment
+    /// triples are available immediately for all consumers (agent, daemon, TUI).
+    fn load_discovered_compartments(&self) {
+        let ids: Vec<String> = self
+            .compartment_manager
+            .as_ref()
+            .map(|mgr| mgr.dormant_ids())
+            .unwrap_or_default();
+
+        for id in ids {
+            if let Some(mgr) = &self.compartment_manager {
+                match mgr.load(&id, self) {
+                    Ok(()) => {
+                        tracing::info!(compartment = id.as_str(), "auto-loaded compartment");
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            compartment = id.as_str(),
+                            error = %e,
+                            "failed to auto-load compartment"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     /// Activate all discovered (Cold) skills, making them Hot.

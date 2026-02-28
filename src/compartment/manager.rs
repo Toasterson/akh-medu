@@ -330,6 +330,19 @@ impl CompartmentManager {
         *self.psyche.write().expect("psyche lock poisoned") = Some(psyche);
     }
 
+    /// List the IDs of all discovered but not-yet-loaded (Dormant) compartments.
+    pub fn dormant_ids(&self) -> Vec<String> {
+        let compartments = self
+            .compartments
+            .read()
+            .expect("compartments lock poisoned");
+        compartments
+            .iter()
+            .filter(|(_, c)| c.state == CompartmentState::Dormant)
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
     /// Get the compartments directory path.
     pub fn compartments_dir(&self) -> &std::path::Path {
         &self.compartments_dir
