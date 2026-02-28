@@ -482,6 +482,11 @@ impl Agent {
             tracing::warn!("failed to init causal predicates: {e}");
         }
 
+        // Restore KG dialogue state into ConversationState.
+        if let Some(topic_id) = agent.dialogue_manager.query_active_topic(&agent.engine) {
+            agent.conversation_state.active_topic = Some(topic_id);
+        }
+
         // Load tools from active skills.
         agent.load_skill_tools();
 
@@ -2496,6 +2501,11 @@ impl Agent {
         // Initialize interlocutor predicates.
         if let Err(e) = agent.interlocutor_registry.init_predicates(&agent.engine) {
             tracing::warn!("failed to init interlocutor predicates on resume: {e}");
+        }
+
+        // Restore KG dialogue state into ConversationState.
+        if let Some(topic_id) = agent.dialogue_manager.query_active_topic(&agent.engine) {
+            agent.conversation_state.active_topic = Some(topic_id);
         }
 
         // Load tools from active skills.

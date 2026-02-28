@@ -15,7 +15,7 @@ use crate::engine::Engine;
 use crate::grammar::abs::AbsTree;
 use crate::symbol::SymbolId;
 
-use super::conversation::{ConversationState, ResponseDetail, Speaker};
+use super::conversation::{ResponseDetail, Speaker};
 use super::error::AgentResult;
 
 // ── Well-known predicates ────────────────────────────────────────────────
@@ -100,19 +100,28 @@ impl DialogueManager {
 
     /// Record a turn in the dialogue.
     ///
-    /// Updates the last-act type in the KG and increments the turn count.
-    /// If the tree is a dialogue act, records the act type.
+    /// Updates the last-act type in the KG, increments the turn count,
+    /// and sets the active topic from the first resolved entity.
     pub fn record_turn(
         &self,
         _speaker: Speaker,
         _raw_text: &str,
         tree: &AbsTree,
         engine: &Engine,
+        resolved_entities: &[SymbolId],
     ) {
         // Record dialogue act type if applicable.
         if let Some(act_label) = dialogue_act_label(tree) {
             let _ = self.set_last_act(engine, act_label);
         }
+
+        // Persist active topic from first resolved entity.
+        if let Some(&first) = resolved_entities.first() {
+            let _ = self.set_active_topic(engine, first);
+        }
+
+        // Persist turn count.
+        let _ = self.increment_turn_count(engine);
     }
 
     /// Set the last dialogue act type in the KG.
@@ -146,14 +155,92 @@ impl DialogueManager {
         Ok(())
     }
 
+    // ── KG query methods ────────────────────────────────────────────
+
+    /// Query the active topic from the KG.
+    ///
+    /// Resolves the dialogue microtheory entity, scans its outgoing triples
+    /// for a `dlg:active-topic` predicate, and returns the most recent object.
+    pub fn query_active_topic(&self, engine: &Engine) -> Option<SymbolId> {
+        let mt_id = engine.resolve_or_create_entity(&self.mt_name).ok()?;
+        let triples = engine.triples_from(mt_id);
+        triples
+            .iter()
+            .filter(|t| t.predicate == self.predicates.active_topic)
+            .max_by_key(|t| t.timestamp)
+            .map(|t| t.object)
+    }
+
+    /// Query the turn count from the KG.
+    ///
+    /// The turn count is stored as an entity whose label is a numeric string
+    /// (e.g. `"42"`). Returns 0 if no count has been recorded yet.
+    pub fn query_turn_count(&self, engine: &Engine) -> u64 {
+        let mt_id = match engine.resolve_or_create_entity(&self.mt_name) {
+            Ok(id) => id,
+            Err(_) => return 0,
+        };
+        let triples = engine.triples_from(mt_id);
+        triples
+            .iter()
+            .filter(|t| t.predicate == self.predicates.turn_count)
+            .max_by_key(|t| t.timestamp)
+            .and_then(|t| {
+                let label = engine.resolve_label(t.object);
+                label.parse::<u64>().ok()
+            })
+            .unwrap_or(0)
+    }
+
+    /// Query the last dialogue act label from the KG.
+    ///
+    /// Returns the label of the most recent `dlg:last-act` object entity.
+    pub fn query_last_act(&self, engine: &Engine) -> Option<String> {
+        let mt_id = engine.resolve_or_create_entity(&self.mt_name).ok()?;
+        let triples = engine.triples_from(mt_id);
+        triples
+            .iter()
+            .filter(|t| t.predicate == self.predicates.last_act)
+            .max_by_key(|t| t.timestamp)
+            .map(|t| engine.resolve_label(t.object))
+    }
+
+    /// Increment the turn count in the KG.
+    ///
+    /// Reads the current count, increments it, and writes a new triple
+    /// with the updated value.
+    fn increment_turn_count(&self, engine: &Engine) -> AgentResult<()> {
+        let current = self.query_turn_count(engine);
+        let next = current + 1;
+        let mt_id = engine.resolve_or_create_entity(&self.mt_name)?;
+        let count_label = next.to_string();
+        let count_id = engine.resolve_or_create_entity(&count_label)?;
+        engine.add_triple(&crate::graph::Triple {
+            subject: mt_id,
+            predicate: self.predicates.turn_count,
+            object: count_id,
+            confidence: 1.0,
+            timestamp: now_secs(),
+            compartment_id: Some(self.mt_name.clone()),
+            provenance_id: None,
+        })?;
+        Ok(())
+    }
+
+    // ── Dialogue act handlers ──────────────────────────────────────
+
     /// Generate a persona greeting response.
+    ///
+    /// Uses the KG turn count to detect first-ever greeting (persists across
+    /// sessions), falling back to in-memory conversation state for the
+    /// current session.
     pub fn handle_greeting(
         &self,
-        conversation: &ConversationState,
+        engine: &Engine,
         persona_name: &str,
         _traits: &[String],
     ) -> String {
-        if conversation.is_empty() {
+        if self.query_turn_count(engine) == 0 {
             format!(
                 "Hello. I am {persona_name}. Ask me a question or tell me something to learn."
             )
@@ -196,11 +283,13 @@ impl DialogueManager {
     /// Handle a follow-up request.
     ///
     /// Returns `None` if the active topic should be re-queried at Full detail.
+    /// Checks the KG for a persisted active topic, so follow-ups survive
+    /// session boundaries.
     pub fn handle_follow_up(
         &self,
-        conversation: &ConversationState,
+        engine: &Engine,
     ) -> Option<String> {
-        if conversation.topic().is_some() {
+        if self.query_active_topic(engine).is_some() {
             // Caller should re-query the active topic at Full detail.
             None
         } else {

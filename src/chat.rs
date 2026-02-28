@@ -118,12 +118,14 @@ impl ChatProcessor {
 
         match self.nlu_pipeline.parse(trimmed, &parse_ctx) {
             Ok(nlu_result) => {
-                // Record turn in dialogue manager
+                // Record turn in dialogue manager (no resolved entities at parse time;
+                // entity resolution happens downstream in dispatch handlers).
                 agent.dialogue_manager().record_turn(
                     Speaker::Operator,
                     trimmed,
                     &nlu_result.tree,
                     engine,
+                    &[],
                 );
 
                 // Dispatch on AbsTree variant
@@ -263,7 +265,7 @@ impl ChatProcessor {
     ) {
         let (name, traits) = Self::persona_name_and_traits(engine);
         let text = agent.dialogue_manager().handle_greeting(
-            agent.conversation_state(),
+            engine,
             &name,
             &traits,
         );
@@ -304,9 +306,7 @@ impl ChatProcessor {
         engine: &Arc<Engine>,
         grammar: &str,
     ) {
-        let result = agent.dialogue_manager().handle_follow_up(
-            agent.conversation_state(),
-        );
+        let result = agent.dialogue_manager().handle_follow_up(engine);
         match result {
             Some(text) => {
                 // No active topic — inform the user.
@@ -314,9 +314,11 @@ impl ChatProcessor {
                 agent.conversation_state_mut().record_agent_turn(&text);
             }
             None => {
-                // Active topic exists — re-query at Full detail.
-                if let Some(topic_id) = agent.conversation_state().topic() {
-                    let label = engine.resolve_label(topic_id);
+                // Active topic exists in KG — resolve and re-query at Full detail.
+                let topic_id = agent.dialogue_manager().query_active_topic(engine)
+                    .or_else(|| agent.conversation_state().topic());
+                if let Some(tid) = topic_id {
+                    let label = engine.resolve_label(tid);
                     if let Some(gr) =
                         crate::agent::conversation::ground_query(&label, engine, grammar)
                     {
@@ -613,6 +615,13 @@ impl ChatProcessor {
                 agent
                     .conversation_state_mut()
                     .track_referent(subject.to_string());
+
+                // Persist active topic to KG via dialogue manager.
+                if let Ok(sym_id) = engine.resolve_symbol(subject) {
+                    let _ = agent.dialogue_manager().set_active_topic(engine, sym_id);
+                    agent.conversation_state_mut().active_topic = Some(sym_id);
+                }
+
                 for akh_msg in out_msg.to_akh_messages() {
                     msgs.push(akh_msg);
                 }
