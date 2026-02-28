@@ -6,16 +6,17 @@
 //! through `ChatProcessor::process_input()`, which implements:
 //!
 //! 1. Structural command fast-path (help, status, goals, etc.)
-//! 2. NLU pipeline parse attempt (confidence ≥ tier threshold → ingest as fact)
-//! 3. `classify_intent()` fallback with full intent handling chain
-//! 4. Conversational classification for `Freeform` intent
-//! 5. Escalation to autonomous goal when all else fails
+//! 2. NLU pipeline parse → AbsTree dispatch (dialogue acts, facts, queries)
+//! 3. Escalation to autonomous goal when all else fails
 
 use std::sync::Arc;
 
-use crate::agent::nlp::{classify_conversational, ConversationalKind};
-use crate::agent::{Agent, classify_intent, UserIntent};
+use crate::agent::Agent;
+#[allow(deprecated)]
+use crate::agent::{classify_intent, UserIntent};
+use crate::agent::conversation::Speaker;
 use crate::engine::Engine;
+use crate::grammar::abs::AbsTree;
 use crate::grammar::concrete::ParseContext;
 use crate::grammar::lexer::Lexicon;
 use crate::message::AkhMessage;
@@ -44,8 +45,11 @@ impl Default for ChatProcessorConfig {
 
 /// Unified input processor for all chat surfaces.
 ///
-/// Owns the NLU pipeline and grammar preference, and contains all intent
-/// handlers migrated from the TUI's `process_input_local()`.
+/// Owns the NLU pipeline and grammar preference. All user input (except
+/// slash commands) is parsed through the NLU pipeline into AbsTree nodes,
+/// then dispatched by variant: dialogue acts go to the DialogueManager,
+/// assertable structures are ingested as facts, queries are grounded, and
+/// unrecognized input is escalated to an autonomous goal.
 pub struct ChatProcessor {
     nlu_pipeline: NluPipeline,
     config: ChatProcessorConfig,
@@ -81,6 +85,11 @@ impl ChatProcessor {
     /// Slash commands (`/quit`, `/grammar`, etc.) are NOT handled here — the
     /// caller (TUI, WS handler, headless loop) should intercept those before
     /// calling this method.
+    ///
+    /// Processing flow:
+    /// 1. Structural commands (help, status, run, show, etc.) bypass NLU
+    /// 2. All other input goes through NLU pipeline → AbsTree
+    /// 3. AbsTree variant dispatch: dialogue acts, facts, queries, goals
     pub fn process_input(
         &mut self,
         text: &str,
@@ -93,41 +102,47 @@ impl ChatProcessor {
         }
 
         // ── Structural command fast-path (skip NLU) ─────────────────
+        // These are system commands where NLU parsing would be wasteful.
         if is_structural_command(trimmed) {
+            #[allow(deprecated)]
             let intent = classify_intent(trimmed);
-            return self.dispatch_intent(intent, trimmed, agent, engine);
+            return self.dispatch_structural(intent, trimmed, agent, engine);
         }
 
-        // ── Conversational fast-path (skip NLU + classify_intent) ──
-        // Greetings, meta-questions ("who are you?"), acknowledgments,
-        // and follow-ups go directly to conversational handling.
-        // This prevents "Hello, who are you?" from being parsed as
-        // Query { subject: "you" } or ingested as a fact.
-        let conv_kind = classify_conversational(trimmed, &self.lexicon);
-        if !matches!(conv_kind, ConversationalKind::Unrecognized) {
-            let grammar = self.config.grammar.clone();
-            let mut msgs = Vec::new();
-            self.handle_freeform(&mut msgs, agent, engine, trimmed, trimmed, &grammar);
-            return msgs;
-        }
-
-        // ── NLU pipeline ────────────────────────────────────────────
+        // ── NLU pipeline (all other input) ──────────────────────────
         let parse_ctx = ParseContext::with_engine(
             engine.registry(),
             engine.ops(),
             engine.item_memory(),
         );
-        if let Ok(nlu_result) = self.nlu_pipeline.parse(trimmed, &parse_ctx) {
-            // Only ingest assertable structures (triples, compounds).
-            // Query-like parses (bare entities) fall through to classify_intent.
-            if nlu_result.tree.is_assertable() {
-                return self.ingest_as_fact(trimmed, engine, "nlu_parse");
+
+        match self.nlu_pipeline.parse(trimmed, &parse_ctx) {
+            Ok(nlu_result) => {
+                // Record turn in dialogue manager
+                agent.dialogue_manager().record_turn(
+                    Speaker::Operator,
+                    trimmed,
+                    &nlu_result.tree,
+                    engine,
+                );
+
+                // Dispatch on AbsTree variant
+                self.dispatch_abstree(&nlu_result.tree, trimmed, agent, engine)
+            }
+            Err(_) => {
+                // NLU pipeline completely failed — escalate to goal
+                let grammar = self.config.grammar.clone();
+                let mut msgs = Vec::new();
+                self.escalate_to_goal(
+                    &mut msgs,
+                    agent,
+                    &grammar,
+                    trimmed,
+                    &format!("Exploring \"{trimmed}\"."),
+                );
+                msgs
             }
         }
-
-        // ── classify_intent fallback ────────────────────────────────
-        let intent = classify_intent(trimmed);
-        self.dispatch_intent(intent, trimmed, agent, engine)
     }
 
     /// Current grammar archetype name.
@@ -151,9 +166,278 @@ impl ChatProcessor {
         &self.nlu_pipeline
     }
 
-    // ── Private intent dispatch ─────────────────────────────────────
+    // ── AbsTree dispatch ────────────────────────────────────────────
 
-    fn dispatch_intent(
+    /// Dispatch on an NLU-parsed AbsTree variant.
+    fn dispatch_abstree(
+        &mut self,
+        tree: &AbsTree,
+        raw_input: &str,
+        agent: &mut Agent,
+        engine: &Arc<Engine>,
+    ) -> Vec<AkhMessage> {
+        let grammar = self.config.grammar.clone();
+        let mut msgs = Vec::new();
+
+        match tree {
+            // ── Dialogue acts ───────────────────────────────────────
+            AbsTree::Greeting { .. } => {
+                self.handle_dialogue_greeting(&mut msgs, agent, engine, &grammar);
+            }
+            AbsTree::Farewell { .. } => {
+                self.handle_dialogue_farewell(&mut msgs, agent, engine, &grammar);
+            }
+            AbsTree::Acknowledgment { .. } => {
+                self.handle_dialogue_ack(&mut msgs, agent, engine, &grammar);
+            }
+            AbsTree::FollowUpRequest { .. } => {
+                self.handle_dialogue_follow_up(&mut msgs, agent, engine, &grammar);
+            }
+            AbsTree::MetaQuery { .. } => {
+                self.handle_dialogue_meta_query(&mut msgs, agent, engine, &grammar);
+            }
+            AbsTree::GoalRequest { description } => {
+                let desc = description.label()
+                    .map(String::from)
+                    .unwrap_or_else(|| description.collect_labels().join(" "));
+                self.handle_set_goal(&mut msgs, agent, engine, &desc, &grammar);
+            }
+            AbsTree::StructuralCommand { command, args } => {
+                self.handle_structural_command(&mut msgs, agent, engine, command, args);
+            }
+
+            // ── Assertable structures (triples, compounds) ──────────
+            tree if tree.is_assertable() => {
+                msgs.extend(self.ingest_as_fact(raw_input, engine, "nlu_parse"));
+            }
+
+            // ── Free-form text that parsed but isn't assertable ─────
+            AbsTree::Freeform(_) => {
+                self.escalate_to_goal(
+                    &mut msgs,
+                    agent,
+                    &grammar,
+                    raw_input,
+                    &format!("Exploring \"{raw_input}\"."),
+                );
+            }
+
+            // ── Query-like trees (entity refs, etc.) ────────────────
+            _ => {
+                // Extract a subject label from the tree for query handling.
+                let subject = tree.label()
+                    .map(String::from)
+                    .unwrap_or_else(|| tree.collect_labels().join(" "));
+                if subject.is_empty() {
+                    self.escalate_to_goal(
+                        &mut msgs,
+                        agent,
+                        &grammar,
+                        raw_input,
+                        &format!("Exploring \"{raw_input}\"."),
+                    );
+                } else {
+                    self.handle_query_from_tree(
+                        &mut msgs,
+                        agent,
+                        engine,
+                        &subject,
+                        raw_input,
+                        &grammar,
+                    );
+                }
+            }
+        }
+
+        msgs
+    }
+
+    // ── Dialogue act handlers ───────────────────────────────────────
+
+    fn handle_dialogue_greeting(
+        &self,
+        msgs: &mut Vec<AkhMessage>,
+        agent: &mut Agent,
+        engine: &Arc<Engine>,
+        grammar: &str,
+    ) {
+        let (name, traits) = Self::persona_name_and_traits(engine);
+        let text = agent.dialogue_manager().handle_greeting(
+            agent.conversation_state(),
+            &name,
+            &traits,
+        );
+        msgs.push(AkhMessage::narrative(&text, grammar));
+        agent.conversation_state_mut().record_agent_turn(&text);
+    }
+
+    fn handle_dialogue_farewell(
+        &self,
+        msgs: &mut Vec<AkhMessage>,
+        agent: &mut Agent,
+        engine: &Arc<Engine>,
+        grammar: &str,
+    ) {
+        let (name, _) = Self::persona_name_and_traits(engine);
+        let text = agent.dialogue_manager().handle_farewell(&name);
+        msgs.push(AkhMessage::narrative(&text, grammar));
+        agent.conversation_state_mut().record_agent_turn(&text);
+    }
+
+    fn handle_dialogue_ack(
+        &self,
+        msgs: &mut Vec<AkhMessage>,
+        agent: &mut Agent,
+        engine: &Arc<Engine>,
+        grammar: &str,
+    ) {
+        let (_, traits) = Self::persona_name_and_traits(engine);
+        let text = agent.dialogue_manager().handle_ack(&traits);
+        msgs.push(AkhMessage::narrative(&text, grammar));
+        agent.conversation_state_mut().record_agent_turn(&text);
+    }
+
+    fn handle_dialogue_follow_up(
+        &self,
+        msgs: &mut Vec<AkhMessage>,
+        agent: &mut Agent,
+        engine: &Arc<Engine>,
+        grammar: &str,
+    ) {
+        let result = agent.dialogue_manager().handle_follow_up(
+            agent.conversation_state(),
+        );
+        match result {
+            Some(text) => {
+                // No active topic — inform the user.
+                msgs.push(AkhMessage::narrative(&text, grammar));
+                agent.conversation_state_mut().record_agent_turn(&text);
+            }
+            None => {
+                // Active topic exists — re-query at Full detail.
+                if let Some(topic_id) = agent.conversation_state().topic() {
+                    let label = engine.resolve_label(topic_id);
+                    if let Some(gr) =
+                        crate::agent::conversation::ground_query(&label, engine, grammar)
+                    {
+                        let rendered = gr.render(
+                            crate::agent::conversation::ResponseDetail::Full,
+                        );
+                        msgs.push(AkhMessage::narrative(&rendered, grammar));
+                        agent.conversation_state_mut().record_agent_turn(&rendered);
+                    }
+                }
+            }
+        }
+    }
+
+    fn handle_dialogue_meta_query(
+        &self,
+        msgs: &mut Vec<AkhMessage>,
+        agent: &mut Agent,
+        engine: &Arc<Engine>,
+        grammar: &str,
+    ) {
+        let result = agent.dialogue_manager().handle_meta_query(engine, grammar);
+        match result {
+            Some(text) => {
+                msgs.push(AkhMessage::narrative(&text, grammar));
+                agent.conversation_state_mut().record_agent_turn(&text);
+            }
+            None => {
+                // Fallback: generic self-description.
+                let (name, _) = Self::persona_name_and_traits(engine);
+                let text = format!(
+                    "I am {name}. I can answer questions about what I know, \
+                     learn new facts, and investigate topics autonomously."
+                );
+                msgs.push(AkhMessage::narrative(&text, grammar));
+                agent.conversation_state_mut().record_agent_turn(&text);
+            }
+        }
+    }
+
+    fn handle_structural_command(
+        &self,
+        msgs: &mut Vec<AkhMessage>,
+        agent: &mut Agent,
+        engine: &Arc<Engine>,
+        command: &str,
+        args: &[String],
+    ) {
+        match command {
+            "help" => {
+                msgs.push(AkhMessage::system(
+                    "Type a question (\"What is X?\"), assert a fact (\"X is a Y\"), \
+                     or set a goal (\"find X\"). Commands: /help, /grammar, /goals, \
+                     /status, /seed, /quit, detail <level>"
+                        .to_string(),
+                ));
+            }
+            "status" | "goals" => {
+                Self::handle_show_status(msgs, agent, engine);
+            }
+            "run" => {
+                let cycles = args.first().and_then(|a| a.parse::<usize>().ok());
+                Self::handle_run_agent(msgs, agent, cycles);
+            }
+            "show" | "render" | "graph" => {
+                let entity = args.first().map(|s| s.as_str());
+                Self::handle_render_hiero(msgs, engine, entity);
+            }
+            "detail" => {
+                if let Some(level) = args.first() {
+                    Self::handle_set_detail(msgs, agent, level);
+                } else {
+                    msgs.push(AkhMessage::system(
+                        "Usage: detail <concise|normal|full>".to_string(),
+                    ));
+                }
+            }
+            "explain" => {
+                let query_text = args.join(" ");
+                if let Some(eq) = crate::agent::explain::ExplanationQuery::parse(&query_text) {
+                    match crate::agent::explain::execute_query(engine, &eq, None) {
+                        Ok(explanation) => msgs.push(AkhMessage::system(explanation)),
+                        Err(e) => msgs.push(AkhMessage::system(format!("{e}"))),
+                    }
+                } else {
+                    msgs.push(AkhMessage::system(format!(
+                        "Could not parse explanation query: \"{query_text}\". \
+                         Try: explain why <entity>, explain how <entity>, explain what changed"
+                    )));
+                }
+            }
+            "pim" | "cal" | "pref" | "causal" => {
+                let sub = args.first().map(|s| s.as_str()).unwrap_or("");
+                let rest = if args.len() > 1 { args[1..].join(" ") } else { String::new() };
+                msgs.push(AkhMessage::system(format!(
+                    "{command} commands are available via the CLI: akh {command} {sub} {rest}",
+                )));
+            }
+            "awaken" => {
+                let sub = args.first().map(|s| s.as_str()).unwrap_or("");
+                if sub == "status" {
+                    Self::handle_awaken_status(msgs, engine);
+                } else {
+                    let rest = if args.len() > 1 { args[1..].join(" ") } else { String::new() };
+                    msgs.push(AkhMessage::system(format!(
+                        "Awaken commands are available via the CLI: akh awaken {sub} {rest}",
+                    )));
+                }
+            }
+            _ => {
+                msgs.push(AkhMessage::system(format!(
+                    "Unknown command: {command}. Type \"help\" for available commands.",
+                )));
+            }
+        }
+    }
+
+    // ── Structural command dispatch (legacy, for is_structural_command fast-path) ──
+
+    #[allow(deprecated)]
+    fn dispatch_structural(
         &mut self,
         intent: UserIntent,
         raw_input: &str,
@@ -170,17 +454,15 @@ impl ChatProcessor {
             UserIntent::Query {
                 subject,
                 original_input,
-                question_word,
-                capability_signal,
+                question_word: _,
+                capability_signal: _,
             } => {
-                self.handle_query(
+                self.handle_query_from_tree(
                     &mut msgs,
                     agent,
                     engine,
                     &subject,
                     &original_input,
-                    question_word,
-                    capability_signal,
                     &grammar,
                 );
             }
@@ -249,7 +531,14 @@ impl ChatProcessor {
                 }
             }
             UserIntent::Freeform { ref text } => {
-                self.handle_freeform(&mut msgs, agent, engine, text, raw_input, &grammar);
+                // For structural command fallthrough, escalate to goal.
+                self.escalate_to_goal(
+                    &mut msgs,
+                    agent,
+                    &grammar,
+                    raw_input,
+                    &format!("Exploring \"{text}\"."),
+                );
             }
         }
 
@@ -299,16 +588,14 @@ impl ChatProcessor {
         let _ = engine;
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn handle_query(
+    /// Handle a query derived from an AbsTree parse (entity ref, etc.).
+    fn handle_query_from_tree(
         &self,
         msgs: &mut Vec<AkhMessage>,
         agent: &mut Agent,
         engine: &Arc<Engine>,
         subject: &str,
         original_input: &str,
-        question_word: Option<crate::agent::QuestionWord>,
-        capability_signal: bool,
         grammar: &str,
     ) {
         // Phase 12b+12c: Try grounded dialogue with constraint checking.
@@ -335,35 +622,32 @@ impl ChatProcessor {
                     ));
                 }
             }
+            return;
         }
 
-        if grounded.is_none() {
-            // Fallback: discourse-aware response, then synthesis.
-            let discourse_result = crate::grammar::discourse::resolve_discourse(
-                subject,
-                question_word,
-                original_input,
-                engine,
-                capability_signal,
-                Some(agent.conversation_state()),
-                Some(&self.lexicon),
-            );
-            let handled = if let Ok(ref ctx) = discourse_result {
-                let from_triples = engine.triples_from(ctx.subject_id);
-                let to_triples = engine.triples_to(ctx.subject_id);
-                let mut all_triples = from_triples;
-                all_triples.extend(to_triples);
-                if let Some(discourse_tree) =
-                    crate::grammar::discourse::build_discourse_response(&all_triples, ctx, engine)
-                {
-                    let registry = crate::grammar::GrammarRegistry::new();
-                    if let Ok(prose) = registry.linearize(grammar, &discourse_tree) {
-                        if !prose.trim().is_empty() {
-                            msgs.push(AkhMessage::narrative(&prose, grammar));
-                            true
-                        } else {
-                            false
-                        }
+        // Fallback: discourse-aware response, then synthesis.
+        let discourse_result = crate::grammar::discourse::resolve_discourse(
+            subject,
+            None, // question_word no longer extracted from regex
+            original_input,
+            engine,
+            false,
+            Some(agent.conversation_state()),
+            Some(&self.lexicon),
+        );
+        let handled = if let Ok(ref ctx) = discourse_result {
+            let from_triples = engine.triples_from(ctx.subject_id);
+            let to_triples = engine.triples_to(ctx.subject_id);
+            let mut all_triples = from_triples;
+            all_triples.extend(to_triples);
+            if let Some(discourse_tree) =
+                crate::grammar::discourse::build_discourse_response(&all_triples, ctx, engine)
+            {
+                let registry = crate::grammar::GrammarRegistry::new();
+                if let Ok(prose) = registry.linearize(grammar, &discourse_tree) {
+                    if !prose.trim().is_empty() {
+                        msgs.push(AkhMessage::narrative(&prose, grammar));
+                        true
                     } else {
                         false
                     }
@@ -372,36 +656,18 @@ impl ChatProcessor {
                 }
             } else {
                 false
-            };
+            }
+        } else {
+            false
+        };
 
-            if !handled {
-                // Fallback: existing synthesis path.
-                match engine.resolve_symbol(subject) {
-                    Ok(sym_id) => {
-                        let from_triples = engine.triples_from(sym_id);
-                        let to_triples = engine.triples_to(sym_id);
-                        if from_triples.is_empty() && to_triples.is_empty() {
-                            self.handle_unknown_subject(
-                                msgs,
-                                agent,
-                                grammar,
-                                subject,
-                                original_input,
-                            );
-                        } else {
-                            let mut all_triples = from_triples;
-                            all_triples.extend(to_triples);
-                            let summary =
-                                crate::agent::synthesize::synthesize_from_triples(
-                                    subject,
-                                    &all_triples,
-                                    engine,
-                                    grammar,
-                                );
-                            Self::push_summary(msgs, &summary, grammar);
-                        }
-                    }
-                    Err(_) => {
+        if !handled {
+            // Fallback: existing synthesis path.
+            match engine.resolve_symbol(subject) {
+                Ok(sym_id) => {
+                    let from_triples = engine.triples_from(sym_id);
+                    let to_triples = engine.triples_to(sym_id);
+                    if from_triples.is_empty() && to_triples.is_empty() {
                         self.handle_unknown_subject(
                             msgs,
                             agent,
@@ -409,89 +675,28 @@ impl ChatProcessor {
                             subject,
                             original_input,
                         );
-                    }
-                }
-            }
-        }
-    }
-
-    fn handle_freeform(
-        &mut self,
-        msgs: &mut Vec<AkhMessage>,
-        agent: &mut Agent,
-        engine: &Arc<Engine>,
-        text: &str,
-        raw_input: &str,
-        grammar: &str,
-    ) {
-        let kind = classify_conversational(text, &self.lexicon);
-        match kind {
-            ConversationalKind::Greeting | ConversationalKind::Acknowledgment => {
-                let (name, traits) = Self::persona_name_and_traits(engine);
-                let resp =
-                    agent
-                        .conversation_state()
-                        .respond_conversational(&kind, &name, &traits);
-                if !resp.text.is_empty() {
-                    msgs.push(AkhMessage::narrative(&resp.text, grammar));
-                    agent.conversation_state_mut().record_agent_turn(&resp.text);
-                }
-            }
-            ConversationalKind::FollowUp => {
-                let (name, traits) = Self::persona_name_and_traits(engine);
-                let resp =
-                    agent
-                        .conversation_state()
-                        .respond_conversational(&kind, &name, &traits);
-                if resp.text.is_empty() {
-                    // Active topic exists — re-query at Full detail.
-                    if let Some(topic_id) = agent.conversation_state().topic() {
-                        let label = engine.resolve_label(topic_id);
-                        if let Some(gr) =
-                            crate::agent::conversation::ground_query(&label, engine, grammar)
-                        {
-                            let rendered = gr.render(
-                                crate::agent::conversation::ResponseDetail::Full,
+                    } else {
+                        let mut all_triples = from_triples;
+                        all_triples.extend(to_triples);
+                        let summary =
+                            crate::agent::synthesize::synthesize_from_triples(
+                                subject,
+                                &all_triples,
+                                engine,
+                                grammar,
                             );
-                            msgs.push(AkhMessage::narrative(&rendered, grammar));
-                            agent.conversation_state_mut().record_agent_turn(&rendered);
-                        }
+                        Self::push_summary(msgs, &summary, grammar);
                     }
-                } else {
-                    msgs.push(AkhMessage::narrative(&resp.text, grammar));
-                    agent.conversation_state_mut().record_agent_turn(&resp.text);
                 }
-            }
-            ConversationalKind::MetaQuestion => {
-                // Route to grounded self-description.
-                if let Some(gr) =
-                    crate::agent::conversation::ground_query("self", engine, grammar)
-                {
-                    let detail = agent.conversation_state().response_detail;
-                    let rendered = gr.render(detail);
-                    msgs.push(AkhMessage::narrative(&rendered, grammar));
-                    agent.conversation_state_mut().record_agent_turn(&rendered);
-                } else {
-                    let (name, _) = Self::persona_name_and_traits(engine);
-                    msgs.push(AkhMessage::narrative(
-                        &format!(
-                            "I am {name}. I can answer questions about what I know, \
-                             learn new facts, and investigate topics autonomously."
-                        ),
+                Err(_) => {
+                    self.handle_unknown_subject(
+                        msgs,
+                        agent,
                         grammar,
-                    ));
+                        subject,
+                        original_input,
+                    );
                 }
-            }
-            ConversationalKind::Unrecognized => {
-                // NLU already tried in process_input() and failed.
-                // Escalate to goal.
-                self.escalate_to_goal(
-                    msgs,
-                    agent,
-                    grammar,
-                    raw_input,
-                    &format!("Exploring \"{text}\"."),
-                );
             }
         }
     }
@@ -813,27 +1018,5 @@ mod tests {
         assert!(!is_structural_command("hello"));
         assert!(!is_structural_command("Rust is a programming language"));
         assert!(!is_structural_command("find similar animals"));
-    }
-
-    #[test]
-    fn conversational_inputs_skip_nlu() {
-        use crate::grammar::lexer::{Language, Lexicon};
-
-        let lexicon = Lexicon::for_language(Language::default());
-
-        // Greetings should be recognized as conversational, not unrecognized.
-        let hello = classify_conversational("hello", &lexicon);
-        assert!(!matches!(hello, ConversationalKind::Unrecognized), "hello should be Greeting");
-
-        let hi = classify_conversational("hi there", &lexicon);
-        assert!(!matches!(hi, ConversationalKind::Unrecognized), "hi there should be Greeting");
-
-        // Meta-questions should be recognized as conversational.
-        let who = classify_conversational("who are you?", &lexicon);
-        assert!(!matches!(who, ConversationalKind::Unrecognized), "who are you should be MetaQuestion");
-
-        // Factual statements should NOT be conversational.
-        let fact = classify_conversational("Rust is a programming language", &lexicon);
-        assert!(matches!(fact, ConversationalKind::Unrecognized), "fact should be Unrecognized");
     }
 }

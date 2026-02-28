@@ -258,6 +258,27 @@ impl TerseGrammar {
                 let c = self.linearize_inner(clause, ctx)?;
                 Ok(format!("{h} WHERE({c})"))
             }
+
+            // ── Dialogue acts ────────────────────────────────────────
+            AbsTree::Greeting { .. } => Ok("GREET".to_string()),
+            AbsTree::Farewell { .. } => Ok("BYE".to_string()),
+            AbsTree::Acknowledgment { .. } => Ok("ACK".to_string()),
+            AbsTree::FollowUpRequest { .. } => Ok("MORE?".to_string()),
+            AbsTree::MetaQuery { about } => {
+                let a = self.linearize_inner(about, ctx)?;
+                Ok(format!("META({a})"))
+            }
+            AbsTree::GoalRequest { description } => {
+                let d = self.linearize_inner(description, ctx)?;
+                Ok(format!("GOAL({d})"))
+            }
+            AbsTree::StructuralCommand { command, args } => {
+                if args.is_empty() {
+                    Ok(format!("CMD:{command}"))
+                } else {
+                    Ok(format!("CMD:{command}({})", args.join(",")))
+                }
+            }
         }
     }
 }

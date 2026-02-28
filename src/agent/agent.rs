@@ -210,6 +210,8 @@ pub struct Agent {
     pub(crate) preference_manager: super::preference::PreferenceManager,
     /// Causal world model manager (Phase 15a).
     pub(crate) causal_manager: super::causal::CausalManager,
+    /// Dialogue state manager backed by KG microtheories.
+    pub(crate) dialogue_manager: super::dialogue::DialogueManager,
     /// Sleep/consolidation cycle state (Phase 11i).
     pub(crate) sleep_cycle: super::sleep::SleepCycle,
     /// Directed curiosity configuration (Phase 11j).
@@ -388,6 +390,8 @@ impl Agent {
     pub fn new(engine: Arc<Engine>, config: AgentConfig) -> AgentResult<Self> {
         let predicates = AgentPredicates::init(&engine)?;
         let project_predicates = ProjectPredicates::init(&engine)?;
+        let dialogue_predicates = super::dialogue::DialoguePredicates::init(&engine)?;
+        let dialogue_manager = super::dialogue::DialogueManager::new(dialogue_predicates, "operator");
 
         let mut tool_registry = ToolRegistry::new();
         Self::register_builtin_tools(&mut tool_registry, &predicates, &engine);
@@ -446,6 +450,7 @@ impl Agent {
             calendar_manager: super::calendar::CalendarManager::default(),
             preference_manager: super::preference::PreferenceManager::default(),
             causal_manager: super::causal::CausalManager::default(),
+            dialogue_manager,
             sleep_cycle,
             curiosity_config,
             #[cfg(feature = "wasm-tools")]
@@ -1067,6 +1072,18 @@ impl Agent {
     /// Set the response detail level for grounded dialogue.
     pub fn set_response_detail(&mut self, detail: ResponseDetail) {
         self.conversation_state.response_detail = detail;
+    }
+
+    // ── Dialogue manager ─────────────────────────────────────────────
+
+    /// Get a shared reference to the dialogue manager.
+    pub fn dialogue_manager(&self) -> &super::dialogue::DialogueManager {
+        &self.dialogue_manager
+    }
+
+    /// Get a mutable reference to the dialogue manager.
+    pub fn dialogue_manager_mut(&mut self) -> &mut super::dialogue::DialogueManager {
+        &mut self.dialogue_manager
     }
 
     // ── Constraint checking (Phase 12c) ────────────────────────────────
@@ -2250,6 +2267,8 @@ impl Agent {
     pub fn resume(engine: Arc<Engine>, config: AgentConfig) -> AgentResult<Self> {
         let predicates = AgentPredicates::init(&engine)?;
         let project_predicates = ProjectPredicates::init(&engine)?;
+        let dialogue_predicates = super::dialogue::DialoguePredicates::init(&engine)?;
+        let dialogue_manager = super::dialogue::DialogueManager::new(dialogue_predicates, "operator");
 
         let mut tool_registry = ToolRegistry::new();
         Self::register_builtin_tools(&mut tool_registry, &predicates, &engine);
@@ -2467,6 +2486,7 @@ impl Agent {
             calendar_manager,
             preference_manager,
             causal_manager,
+            dialogue_manager,
             sleep_cycle,
             curiosity_config,
             #[cfg(feature = "wasm-tools")]

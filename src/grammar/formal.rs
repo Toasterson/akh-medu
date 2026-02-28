@@ -303,6 +303,27 @@ impl FormalGrammar {
                 let c = self.linearize_inner(clause, ctx)?;
                 Ok(format!("{h}, which {c}."))
             }
+
+            // ── Dialogue acts ────────────────────────────────────────
+            AbsTree::Greeting { .. } => Ok("Greeting acknowledged.".to_string()),
+            AbsTree::Farewell { .. } => Ok("Farewell acknowledged.".to_string()),
+            AbsTree::Acknowledgment { .. } => Ok("Acknowledged.".to_string()),
+            AbsTree::FollowUpRequest { .. } => Ok("Follow-up requested.".to_string()),
+            AbsTree::MetaQuery { about } => {
+                let a = self.linearize_inner(about, ctx)?;
+                Ok(format!("Meta-query regarding {a}."))
+            }
+            AbsTree::GoalRequest { description } => {
+                let d = self.linearize_inner(description, ctx)?;
+                Ok(format!("Goal request: {d}."))
+            }
+            AbsTree::StructuralCommand { command, args } => {
+                if args.is_empty() {
+                    Ok(format!("Command: {command}."))
+                } else {
+                    Ok(format!("Command: {command} {}.", args.join(" ")))
+                }
+            }
         }
     }
 }

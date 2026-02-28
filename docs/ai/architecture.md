@@ -1,6 +1,6 @@
 # Akh-medu Architecture
 
-> Last updated: 2026-02-28 (Unified ChatProcessor: NLU-first input processing replacing duplicated handlers in TUI, akhomed, and headless CLI)
+> Last updated: 2026-02-28 (VSA-Native Dialogue System: AbsTree dialogue-act variants replace regex classifiers, KG-backed DialogueManager, NLU-first dispatch)
 
 ## Overview
 
@@ -20,7 +20,7 @@ Akh-medu is a neuro-symbolic AI engine that runs entirely on CPU with no LLM dep
 
 ```
 src/
-├── agent/              48 modules — OODA loop, tools (code_gen, code_ingest, compile_feedback, pattern_mine), memory, goals, drives, goal_generation, HTN decomposition, priority reasoning (argumentation), projects (microtheory-backed), planning, psyche, library learning, watch (GDA expectation monitoring), metacognition (Nelson-Narens monitoring/control, ZPD, AGM belief revision), resource awareness (VOC, CBR effort estimation), chunking (procedural learning), channel abstraction (CommChannel trait, ChannelRegistry, OperatorChannel), conversation (grounded dialogue, ConversationState, GroundedResponse), constraint_check (pre-communication constraint pipeline), interlocutor (social KG, InterlocutorRegistry, theory-of-mind microtheories, VSA interest vectors), oxifed (ActivityPub federation via AMQP bridge, feature-gated), explain (provenance-to-prose pipeline, DerivationNode trees, 5 query types), multi_agent (capability tokens, AgentProtocolMessage, TokenRegistry, trust bootstrap), pim (GTD + Eisenhower + PARA task overlay, petgraph dependency DAG, VSA priority encoding), causal (action schemas with preconditions/effects, pattern matching with variable binding, state transitions, outcome verification, VSA causal encoding)
+├── agent/              49 modules — OODA loop, tools (code_gen, code_ingest, compile_feedback, pattern_mine), memory, goals, drives, goal_generation, HTN decomposition, priority reasoning (argumentation), projects (microtheory-backed), planning, psyche, library learning, watch (GDA expectation monitoring), metacognition (Nelson-Narens monitoring/control, ZPD, AGM belief revision), resource awareness (VOC, CBR effort estimation), chunking (procedural learning), channel abstraction (CommChannel trait, ChannelRegistry, OperatorChannel), conversation (grounded dialogue, ConversationState, GroundedResponse), dialogue (KG-backed DialogueManager, DialoguePredicates, per-channel microtheory state), constraint_check (pre-communication constraint pipeline), interlocutor (social KG, InterlocutorRegistry, theory-of-mind microtheories, VSA interest vectors), oxifed (ActivityPub federation via AMQP bridge, feature-gated), explain (provenance-to-prose pipeline, DerivationNode trees, 5 query types), multi_agent (capability tokens, AgentProtocolMessage, TokenRegistry, trust bootstrap), pim (GTD + Eisenhower + PARA task overlay, petgraph dependency DAG, VSA priority encoding), causal (action schemas with preconditions/effects, pattern matching with variable binding, state transitions, outcome verification, VSA causal encoding)
 ├── email/              9 modules — email channel (feature-gated): EmailConnector trait (JMAP/IMAP/Mock), MIME parsing (mail-parser), JWZ threading (RFC 5256), email composition (lettre), EmailChannel implementing CommChannel, EmailPredicates (14 well-known relations), OnlineHD spam classifier (VSA + Bayesian + deterministic rules), email triage & priority (sender reputation, four-feature importance scoring, VSA prototypes, HEY-style screening), structured extraction (regex + grammar hybrid, multi-language temporal/action NER, compartment-scoped KG persistence)
 ├── bootstrap/           2 modules — purpose/identity parser (Phase 14a), identity resolution + Ritual of Awakening (Phase 14b)
 ├── autonomous/          6 modules — background learning, confidence fusion, grounding
@@ -37,7 +37,7 @@ src/
 ├── store/               3 modules — tiered storage (hot/warm/cold)
 ├── tui/                 6 modules — ratatui terminal UI, WebSocket remote
 ├── vsa/                 5 modules — HyperVec, VsaOps, encoding, item memory (HNSW), code pattern encoding (Phase 10f)
-├── chat.rs                        — unified ChatProcessor (NLU-first input processing for TUI, daemon WS, headless CLI)
+├── chat.rs                        — unified ChatProcessor (NLU-first AbsTree dispatch: dialogue acts, facts, queries, goals; DialogueManager integration)
 ├── api_types.rs                   — shared request/response types for akhomed ↔ AkhClient wire format
 ├── engine.rs                      — facade composing all subsystems (Phase9Config, 9 stored registries, wired add_triple/remove_triple pipeline)
 ├── error.rs                       — miette + thiserror rich diagnostics
@@ -149,11 +149,24 @@ Tier 4: VSA Parse Ranker         — 0 MB,    <1ms,  self-improving disambiguati
 
 Total NLU memory: ~1.3 GB. Runs entirely on Mac Mini M2. No cloud API. FLOSS throughout.
 
+### Input Processing (AbsTree Dispatch)
+
+All user input (except slash commands) flows through `ChatProcessor::process_input()`, which runs the NLU pipeline and dispatches on the resulting `AbsTree` variant:
+
+1. **Dialogue acts** (`Greeting`, `Farewell`, `Acknowledgment`, `FollowUpRequest`, `MetaQuery`, `GoalRequest`, `StructuralCommand`) route to the `DialogueManager`, which generates persona-aware responses and records state in a KG microtheory (`dialogue:<channel_id>`).
+2. **Assertable structures** (triples, compounds, etc.) are ingested as facts via `TextIngestTool`.
+3. **Query-like trees** are routed to the `ground_query` pipeline with discourse and synthesis.
+4. **Freeform / unparseable input** is escalated to an autonomous goal.
+
+The Tier 1 rule parser detects dialogue acts first via `try_dialogue_act()` using Lexicon word lists, before attempting structural or relational parses. The GBNF grammar also covers dialogue acts so Tier 3 (LLM) can produce them via constrained decoding.
+
+**Deprecated**: `classify_intent()`, `classify_conversational()`, and `ConversationalKind` in `nlp.rs` are deprecated (ADR 025). They remain as a structural-command fast-path but will be removed once all callers migrate to AbsTree dispatch.
+
 ### Server-Side NLU
 
-The akhomed WebSocket handler initialises an `NluPipeline` per session, restoring the VSA parse ranker from durable storage. When `classify_intent()` cannot categorize user input, the full 4-tier cascade runs server-side:
+The akhomed WebSocket handler initialises an `NluPipeline` per session, restoring the VSA parse ranker from durable storage. All input goes through the NLU pipeline:
 
-1. NLU parse succeeds → input is ingested as a structured fact via `TextIngestTool`
+1. NLU parse succeeds → AbsTree variant dispatch (dialogue acts, facts, queries, goals)
 2. NLU parse fails → input is escalated to a goal for the agent to investigate
 
 This means `client-only` builds get the full NLU capability without any local ML models — the server does all the parsing. The available tiers depend on the server's feature flags:

@@ -53,6 +53,11 @@ pub fn parse_prose(input: &str, ctx: &ParseContext) -> ParseResult {
         .clone()
         .unwrap_or_else(|| Lexicon::for_language(effective_lang));
 
+    // 0. Dialogue acts (highest priority — before commands/questions)
+    if let Some(tree) = try_dialogue_act(trimmed, &lexicon) {
+        return ParseResult::Facts(vec![tree]);
+    }
+
     // 1. Commands (highest priority)
     if let Some(cmd) = lexicon.match_command(trimmed) {
         return ParseResult::Command(cmd);
@@ -141,6 +146,98 @@ pub fn parse_universal(input: &str, ctx: &ParseContext) -> GrammarResult<AbsTree
         ParseResult::Goal { description } => Ok(AbsTree::Freeform(description)),
         ParseResult::Freeform { text, .. } => Ok(AbsTree::Freeform(text)),
     }
+}
+
+/// Try to detect a dialogue act (greeting, farewell, ack, follow-up, meta-query).
+///
+/// Returns an [`AbsTree`] dialogue-act node if the input matches, `None` otherwise.
+/// Uses the Lexicon's language-aware word lists so this works across all languages.
+fn try_dialogue_act(input: &str, lexicon: &Lexicon) -> Option<AbsTree> {
+    let lower = input.trim().to_lowercase();
+    if lower.is_empty() {
+        return None;
+    }
+
+    let words: Vec<&str> = lower.split_whitespace().collect();
+    if words.is_empty() {
+        return None;
+    }
+
+    // ── Greeting ──────────────────────────────────────────────────────
+    let has_greeting_phrase = lexicon.has_greeting_phrase(&lower);
+    let greeting_at_start = words.first().is_some_and(|w| {
+        let stripped = w.trim_matches(|c: char| c.is_ascii_punctuation());
+        lexicon.is_greeting_word(stripped)
+    }) || has_greeting_phrase;
+
+    if greeting_at_start {
+        return Some(AbsTree::greeting(None));
+    }
+
+    // ── Meta-question ("who are you", "what can you do") ─────────────
+    // Must be checked before follow-up/ack to avoid "what" triggering ack.
+    let has_meta_phrase = lexicon.has_meta_phrase(&lower);
+    if has_meta_phrase {
+        return Some(AbsTree::meta_query(AbsTree::entity("self")));
+    }
+
+    // Check for meta self+capability co-occurrence.
+    let has_self_ref = words.iter().any(|w| {
+        let stripped = w.trim_matches(|c: char| c.is_ascii_punctuation());
+        lexicon.is_meta_self_word(stripped)
+    });
+    let has_capability_ref = words.iter().any(|w| {
+        let stripped = w.trim_matches(|c: char| c.is_ascii_punctuation());
+        lexicon.is_meta_capability_word(stripped)
+    });
+    if has_self_ref && has_capability_ref {
+        return Some(AbsTree::meta_query(AbsTree::entity("self")));
+    }
+
+    // ── Follow-up ────────────────────────────────────────────────────
+    // Skip follow-up detection if the input contains negation words
+    // (e.g., "cannot proceed further" should NOT be a follow-up).
+    let has_negation = words.iter().any(|w| {
+        let stripped = w.trim_matches(|c: char| c.is_ascii_punctuation());
+        lexicon.is_negation_word(stripped)
+    });
+
+    if !has_negation {
+        let has_followup_phrase = lexicon.has_followup_phrase(&lower);
+        if has_followup_phrase {
+            return Some(AbsTree::follow_up_request(None));
+        }
+        let has_followup_cue = words.iter().any(|w| {
+            let stripped = w.trim_matches(|c: char| c.is_ascii_punctuation());
+            lexicon.is_followup_cue(stripped)
+        });
+        if has_followup_cue && words.len() <= 4 {
+            return Some(AbsTree::follow_up_request(None));
+        }
+    }
+
+    // ── Acknowledgment ───────────────────────────────────────────────
+    let has_ack_phrase = lexicon.has_ack_phrase(&lower);
+    if has_ack_phrase {
+        return Some(AbsTree::acknowledgment(None));
+    }
+    let has_ack_word = words.iter().any(|w| {
+        let stripped = w.trim_matches(|c: char| c.is_ascii_punctuation());
+        lexicon.is_ack_word(stripped)
+    });
+    if has_ack_word && words.len() <= 3 {
+        return Some(AbsTree::acknowledgment(None));
+    }
+
+    // ── Farewell ─────────────────────────────────────────────────────
+    // Simple farewell detection via common words (not in Lexicon yet,
+    // but "goodbye"/"bye" are often greeting words too).
+    let farewell_words = ["goodbye", "bye", "farewell", "see you", "cya", "later"];
+    if farewell_words.iter().any(|fw| lower.starts_with(fw)) {
+        return Some(AbsTree::farewell(None));
+    }
+
+    None
 }
 
 /// Check if input looks like a question.
@@ -676,8 +773,12 @@ mod tests {
 
     #[test]
     fn parse_freeform() {
+        // "hello world" is now classified as a greeting by the dialogue-act detector.
         let result = parse("hello world");
-        assert!(matches!(result, ParseResult::Freeform { .. }));
+        assert!(matches!(result, ParseResult::Facts(_)));
+        if let ParseResult::Facts(facts) = result {
+            assert_eq!(facts[0].cat(), super::super::cat::Cat::Greeting);
+        }
     }
 
     #[test]
@@ -694,10 +795,11 @@ mod tests {
 
     #[test]
     fn parse_capability_question() {
+        // "What can you do?" is now a MetaQuery dialogue act, not a bare Query.
         let result = parse("What can you do?");
-        assert!(matches!(result, ParseResult::Query { .. }));
-        if let ParseResult::Query { subject, .. } = result {
-            assert_eq!(subject, "you");
+        assert!(matches!(result, ParseResult::Facts(_)));
+        if let ParseResult::Facts(facts) = result {
+            assert_eq!(facts[0].cat(), super::super::cat::Cat::MetaQuery);
         }
     }
 
@@ -846,6 +948,84 @@ mod tests {
     fn parse_negation_cannot() {
         let cat = parse_facts_cat("cannot proceed further");
         assert_eq!(cat, Some(Cat::Negation));
+    }
+
+    // ── Dialogue act tests ─────────────────────────────────────
+
+    #[test]
+    fn parse_greeting_hello() {
+        let result = parse("hello");
+        assert!(matches!(result, ParseResult::Facts(_)));
+        if let ParseResult::Facts(facts) = result {
+            assert_eq!(facts.len(), 1);
+            assert_eq!(facts[0].cat(), Cat::Greeting);
+        }
+    }
+
+    #[test]
+    fn parse_greeting_hi() {
+        let result = parse("hi there");
+        assert!(matches!(result, ParseResult::Facts(_)));
+        if let ParseResult::Facts(facts) = result {
+            assert_eq!(facts[0].cat(), Cat::Greeting);
+        }
+    }
+
+    #[test]
+    fn parse_ack_thanks() {
+        let result = parse("thanks");
+        assert!(matches!(result, ParseResult::Facts(_)));
+        if let ParseResult::Facts(facts) = result {
+            assert_eq!(facts[0].cat(), Cat::Acknowledgment);
+        }
+    }
+
+    #[test]
+    fn parse_ack_ok() {
+        let result = parse("ok");
+        assert!(matches!(result, ParseResult::Facts(_)));
+        if let ParseResult::Facts(facts) = result {
+            assert_eq!(facts[0].cat(), Cat::Acknowledgment);
+        }
+    }
+
+    #[test]
+    fn parse_follow_up_tell_me_more() {
+        let result = parse("tell me more");
+        assert!(matches!(result, ParseResult::Facts(_)));
+        if let ParseResult::Facts(facts) = result {
+            assert_eq!(facts[0].cat(), Cat::FollowUpRequest);
+        }
+    }
+
+    #[test]
+    fn parse_meta_query_who_are_you() {
+        let result = parse("who are you");
+        assert!(matches!(result, ParseResult::Facts(_)));
+        if let ParseResult::Facts(facts) = result {
+            assert_eq!(facts[0].cat(), Cat::MetaQuery);
+        }
+    }
+
+    #[test]
+    fn parse_farewell_goodbye() {
+        let result = parse("goodbye");
+        assert!(matches!(result, ParseResult::Facts(_)));
+        if let ParseResult::Facts(facts) = result {
+            assert_eq!(facts[0].cat(), Cat::Farewell);
+        }
+    }
+
+    #[test]
+    fn parse_fact_not_dialogue_act() {
+        // Factual statements should NOT be caught by dialogue act detection.
+        let result = parse("Dogs are mammals");
+        assert!(matches!(result, ParseResult::Facts(_)));
+        if let ParseResult::Facts(facts) = result {
+            // Should be a triple/statement, not a dialogue act.
+            assert_ne!(facts[0].cat(), Cat::Greeting);
+            assert_ne!(facts[0].cat(), Cat::Acknowledgment);
+        }
     }
 
     // Cascade priority tests

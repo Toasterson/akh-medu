@@ -71,6 +71,12 @@ pub enum UserIntent {
 /// Classify user intent from natural language input using regex patterns.
 ///
 /// Patterns are tried in priority order; first match wins.
+///
+/// **Deprecated**: Use the NLU pipeline → AbsTree dispatch in `ChatProcessor::process_input()`
+/// instead. This function is retained only for the structural command fast-path
+/// during migration and will be removed once all structural commands are parsed
+/// as `AbsTree::StructuralCommand` by the NLU pipeline.
+#[deprecated(note = "Use NLU pipeline → AbsTree dispatch instead (ADR 025)")]
 pub fn classify_intent(input: &str) -> UserIntent {
     let trimmed = input.trim();
     if trimmed.is_empty() {
@@ -333,6 +339,11 @@ fn extract_question_word(lower: &str, lexicon: &crate::grammar::lexer::Lexicon) 
 ///
 /// Used to distinguish greetings, follow-ups, and acknowledgments from
 /// freeform input that should escalate to an autonomous goal.
+///
+/// **Deprecated**: Replaced by `AbsTree` dialogue-act variants (Greeting,
+/// Farewell, Acknowledgment, FollowUpRequest, MetaQuery) produced by the
+/// NLU pipeline (ADR 025).
+#[deprecated(note = "Use AbsTree dialogue-act variants instead (ADR 025)")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConversationalKind {
     /// "hello", "hi", "hey", "good morning", etc.
@@ -354,6 +365,11 @@ pub enum ConversationalKind {
 ///
 /// Extracts features (keyword presence, position, co-occurrence) and scores each
 /// category. The highest-scoring category wins if it meets the threshold.
+///
+/// **Deprecated**: The NLU pipeline's `try_dialogue_act()` in the rule parser
+/// now produces `AbsTree` dialogue-act variants directly (ADR 025).
+#[deprecated(note = "Use NLU pipeline's try_dialogue_act() instead (ADR 025)")]
+#[allow(deprecated)]
 pub fn classify_conversational(
     text: &str,
     lexicon: &crate::grammar::lexer::Lexicon,
@@ -451,6 +467,7 @@ pub fn classify_conversational(
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
 

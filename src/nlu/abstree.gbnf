@@ -9,7 +9,7 @@
 
 root ::= abstree
 
-abstree ::= entity-ref | relation-ref | freeform | triple | negation | quantified | comparison | conditional | temporal | modal | conjunction | relative-clause
+abstree ::= entity-ref | relation-ref | freeform | triple | negation | quantified | comparison | conditional | temporal | modal | conjunction | relative-clause | dialogue-act
 
 # ── Leaf nodes ──────────────────────────────────────────────────────────
 
@@ -60,6 +60,26 @@ temporal-recurring ::= "{\"Recurring\":" ws string ws "}"
 modality ::= "\"Want\"" | "\"Can\"" | "\"Should\"" | "\"Must\"" | "\"May\""
 
 boolean ::= "true" | "false"
+
+# ── Dialogue acts ──────────────────────────────────────────────────────
+
+dialogue-act ::= greeting | farewell | acknowledgment | follow-up-request | meta-query | goal-request | structural-command
+
+greeting ::= "{\"Greeting\":{\"addressee\":" ws (abstree | "null") ws "}}"
+
+farewell ::= "{\"Farewell\":{\"addressee\":" ws (abstree | "null") ws "}}"
+
+acknowledgment ::= "{\"Acknowledgment\":{\"referent\":" ws (abstree | "null") ws "}}"
+
+follow-up-request ::= "{\"FollowUpRequest\":{\"topic\":" ws (abstree | "null") ws "}}"
+
+meta-query ::= "{\"MetaQuery\":{\"about\":" ws abstree ws "}}"
+
+goal-request ::= "{\"GoalRequest\":{\"description\":" ws abstree ws "}}"
+
+structural-command ::= "{\"StructuralCommand\":{\"command\":" ws string ws ",\"args\":[" ws string-list? ws "]}}"
+
+string-list ::= string (ws "," ws string)*
 
 # ── Lists ───────────────────────────────────────────────────────────────
 

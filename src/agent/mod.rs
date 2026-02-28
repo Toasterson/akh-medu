@@ -18,6 +18,7 @@ pub mod chat;
 pub mod constraint_check;
 pub mod conversation;
 pub mod chunking;
+pub mod dialogue;
 pub mod cli_tool;
 pub mod continuous_learning;
 pub mod curiosity;
@@ -103,6 +104,8 @@ pub use memory::{
     WorkingMemoryEntry, WorkingMemoryKind,
 };
 pub use conversation::ConversationalResponse;
+pub use dialogue::{DialogueManager, DialoguePredicates};
+#[allow(deprecated)]
 pub use nlp::{ConversationalKind, QuestionWord, UserIntent, classify_conversational, classify_intent};
 pub use ooda::{
     ActionResult, Decision, DecisionImpasse, GoalProgress, ImpasseKind, Observation,

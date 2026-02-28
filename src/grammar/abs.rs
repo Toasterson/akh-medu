@@ -337,6 +337,23 @@ pub enum AbsTree {
         head: Box<AbsTree>,
         clause: Box<AbsTree>,
     },
+
+    // ── Dialogue acts ──────────────────────────────────────────────────
+
+    /// Greeting speech act ("hello", "good morning").
+    Greeting { addressee: Option<Box<AbsTree>> },
+    /// Farewell speech act ("goodbye", "see you").
+    Farewell { addressee: Option<Box<AbsTree>> },
+    /// Acknowledgment ("ok", "thanks", "got it").
+    Acknowledgment { referent: Option<Box<AbsTree>> },
+    /// Follow-up request ("tell me more", "go on", "elaborate").
+    FollowUpRequest { topic: Option<Box<AbsTree>> },
+    /// Meta-query about self/capabilities ("who are you", "what can you do").
+    MetaQuery { about: Box<AbsTree> },
+    /// Goal-setting request ("find X", "learn about Y", "investigate Z").
+    GoalRequest { description: Box<AbsTree> },
+    /// Structural command ("help", "status", "run 5", "show Dog", "pim inbox").
+    StructuralCommand { command: String, args: Vec<String> },
 }
 
 impl AbsTree {
@@ -367,6 +384,13 @@ impl AbsTree {
             AbsTree::Temporal { .. } => Cat::Temporal,
             AbsTree::Modal { .. } => Cat::Modal,
             AbsTree::RelativeClause { .. } => Cat::RelativeClause,
+            AbsTree::Greeting { .. } => Cat::Greeting,
+            AbsTree::Farewell { .. } => Cat::Farewell,
+            AbsTree::Acknowledgment { .. } => Cat::Acknowledgment,
+            AbsTree::FollowUpRequest { .. } => Cat::FollowUpRequest,
+            AbsTree::MetaQuery { .. } => Cat::MetaQuery,
+            AbsTree::GoalRequest { .. } => Cat::GoalRequest,
+            AbsTree::StructuralCommand { .. } => Cat::StructuralCommand,
         }
     }
 
@@ -477,6 +501,21 @@ impl AbsTree {
                 head.validate()?;
                 clause.validate()
             }
+            AbsTree::MetaQuery { about } | AbsTree::GoalRequest { description: about } => {
+                about.validate()
+            }
+            AbsTree::Greeting { addressee } | AbsTree::Farewell { addressee } => {
+                if let Some(inner) = addressee {
+                    inner.validate()?;
+                }
+                Ok(())
+            }
+            AbsTree::Acknowledgment { referent } | AbsTree::FollowUpRequest { topic: referent } => {
+                if let Some(inner) = referent {
+                    inner.validate()?;
+                }
+                Ok(())
+            }
             // Leaves and simple nodes are always valid.
             _ => Ok(()),
         }
@@ -565,6 +604,17 @@ impl AbsTree {
             AbsTree::RelativeClause { head, clause } => {
                 1 + head.node_count() + clause.node_count()
             }
+
+            AbsTree::Greeting { addressee } | AbsTree::Farewell { addressee } => {
+                1 + addressee.as_ref().map_or(0, |a| a.node_count())
+            }
+            AbsTree::Acknowledgment { referent } | AbsTree::FollowUpRequest { topic: referent } => {
+                1 + referent.as_ref().map_or(0, |r| r.node_count())
+            }
+            AbsTree::MetaQuery { about } | AbsTree::GoalRequest { description: about } => {
+                1 + about.node_count()
+            }
+            AbsTree::StructuralCommand { .. } => 1,
         }
     }
 
@@ -653,6 +703,19 @@ impl AbsTree {
             AbsTree::RelativeClause { head, clause } => {
                 head.collect_labels_inner(out);
                 clause.collect_labels_inner(out);
+            }
+            AbsTree::Greeting { addressee } | AbsTree::Farewell { addressee } => {
+                if let Some(inner) = addressee {
+                    inner.collect_labels_inner(out);
+                }
+            }
+            AbsTree::Acknowledgment { referent } | AbsTree::FollowUpRequest { topic: referent } => {
+                if let Some(inner) = referent {
+                    inner.collect_labels_inner(out);
+                }
+            }
+            AbsTree::MetaQuery { about } | AbsTree::GoalRequest { description: about } => {
+                about.collect_labels_inner(out);
             }
             _ => {}
         }
@@ -846,6 +909,41 @@ impl AbsTree {
         }
     }
 
+    /// Create a greeting speech act.
+    pub fn greeting(addressee: Option<AbsTree>) -> Self {
+        AbsTree::Greeting { addressee: addressee.map(Box::new) }
+    }
+
+    /// Create a farewell speech act.
+    pub fn farewell(addressee: Option<AbsTree>) -> Self {
+        AbsTree::Farewell { addressee: addressee.map(Box::new) }
+    }
+
+    /// Create an acknowledgment.
+    pub fn acknowledgment(referent: Option<AbsTree>) -> Self {
+        AbsTree::Acknowledgment { referent: referent.map(Box::new) }
+    }
+
+    /// Create a follow-up request.
+    pub fn follow_up_request(topic: Option<AbsTree>) -> Self {
+        AbsTree::FollowUpRequest { topic: topic.map(Box::new) }
+    }
+
+    /// Create a meta-query about self/capabilities.
+    pub fn meta_query(about: AbsTree) -> Self {
+        AbsTree::MetaQuery { about: Box::new(about) }
+    }
+
+    /// Create a goal-setting request.
+    pub fn goal_request(description: AbsTree) -> Self {
+        AbsTree::GoalRequest { description: Box::new(description) }
+    }
+
+    /// Create a structural command.
+    pub fn structural_command(command: impl Into<String>, args: Vec<String>) -> Self {
+        AbsTree::StructuralCommand { command: command.into(), args }
+    }
+
     /// Whether this tree contains assertable relational content (triples,
     /// comparisons, conditionals, etc.) vs being a bare entity/query.
     ///
@@ -871,6 +969,15 @@ impl AbsTree {
 
             // Conjunction/disjunction — assertable if any child is.
             AbsTree::Conjunction { items, .. } => items.iter().any(|i| i.is_assertable()),
+
+            // Dialogue acts are performative, not assertable.
+            AbsTree::Greeting { .. }
+            | AbsTree::Farewell { .. }
+            | AbsTree::Acknowledgment { .. }
+            | AbsTree::FollowUpRequest { .. }
+            | AbsTree::MetaQuery { .. }
+            | AbsTree::GoalRequest { .. }
+            | AbsTree::StructuralCommand { .. } => false,
 
             // Bare entities, relations, freeform, gaps, etc. are not assertable.
             _ => false,
@@ -1033,6 +1140,28 @@ impl AbsTree {
             AbsTree::RelativeClause { head, clause } => AbsTree::RelativeClause {
                 head: Box::new(head.ground(registry)),
                 clause: Box::new(clause.ground(registry)),
+            },
+            AbsTree::Greeting { addressee } => AbsTree::Greeting {
+                addressee: addressee.as_ref().map(|a| Box::new(a.ground(registry))),
+            },
+            AbsTree::Farewell { addressee } => AbsTree::Farewell {
+                addressee: addressee.as_ref().map(|a| Box::new(a.ground(registry))),
+            },
+            AbsTree::Acknowledgment { referent } => AbsTree::Acknowledgment {
+                referent: referent.as_ref().map(|r| Box::new(r.ground(registry))),
+            },
+            AbsTree::FollowUpRequest { topic } => AbsTree::FollowUpRequest {
+                topic: topic.as_ref().map(|t| Box::new(t.ground(registry))),
+            },
+            AbsTree::MetaQuery { about } => AbsTree::MetaQuery {
+                about: Box::new(about.ground(registry)),
+            },
+            AbsTree::GoalRequest { description } => AbsTree::GoalRequest {
+                description: Box::new(description.ground(registry)),
+            },
+            AbsTree::StructuralCommand { command, args } => AbsTree::StructuralCommand {
+                command: command.clone(),
+                args: args.clone(),
             },
         }
     }
@@ -1437,6 +1566,62 @@ impl AbsTree {
                 }
                 let refs: Vec<&HyperVec> = all_vecs.iter().collect();
                 ops.bundle(&refs).map_err(vsa_err)
+            }
+
+            // ── Dialogue acts ──────────────────────────────────────────
+            // Dialogue acts encode their act-type label plus any inner content.
+            AbsTree::Greeting { addressee } => {
+                let act_vec = encode_token(ops, "dlg:greeting");
+                match addressee {
+                    Some(inner) => {
+                        let inner_vec = inner.to_vsa(ops, item_memory, roles)?;
+                        ops.bundle(&[&act_vec, &inner_vec]).map_err(vsa_err)
+                    }
+                    None => Ok(act_vec),
+                }
+            }
+            AbsTree::Farewell { addressee } => {
+                let act_vec = encode_token(ops, "dlg:farewell");
+                match addressee {
+                    Some(inner) => {
+                        let inner_vec = inner.to_vsa(ops, item_memory, roles)?;
+                        ops.bundle(&[&act_vec, &inner_vec]).map_err(vsa_err)
+                    }
+                    None => Ok(act_vec),
+                }
+            }
+            AbsTree::Acknowledgment { referent } => {
+                let act_vec = encode_token(ops, "dlg:ack");
+                match referent {
+                    Some(inner) => {
+                        let inner_vec = inner.to_vsa(ops, item_memory, roles)?;
+                        ops.bundle(&[&act_vec, &inner_vec]).map_err(vsa_err)
+                    }
+                    None => Ok(act_vec),
+                }
+            }
+            AbsTree::FollowUpRequest { topic } => {
+                let act_vec = encode_token(ops, "dlg:followup");
+                match topic {
+                    Some(inner) => {
+                        let inner_vec = inner.to_vsa(ops, item_memory, roles)?;
+                        ops.bundle(&[&act_vec, &inner_vec]).map_err(vsa_err)
+                    }
+                    None => Ok(act_vec),
+                }
+            }
+            AbsTree::MetaQuery { about } => {
+                let act_vec = encode_token(ops, "dlg:meta-query");
+                let inner_vec = about.to_vsa(ops, item_memory, roles)?;
+                ops.bundle(&[&act_vec, &inner_vec]).map_err(vsa_err)
+            }
+            AbsTree::GoalRequest { description } => {
+                let act_vec = encode_token(ops, "dlg:goal-request");
+                let inner_vec = description.to_vsa(ops, item_memory, roles)?;
+                ops.bundle(&[&act_vec, &inner_vec]).map_err(vsa_err)
+            }
+            AbsTree::StructuralCommand { command, .. } => {
+                Ok(encode_token(ops, &format!("dlg:cmd:{command}")))
             }
         }
     }

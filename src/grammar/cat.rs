@@ -67,6 +67,21 @@ pub enum Cat {
     Modal,
     /// A relative clause (head + subordinate clause).
     RelativeClause,
+    // ── Dialogue acts ────────────────────────────────────────────────
+    /// A greeting speech act.
+    Greeting,
+    /// A farewell speech act.
+    Farewell,
+    /// An acknowledgment speech act.
+    Acknowledgment,
+    /// A follow-up request.
+    FollowUpRequest,
+    /// A meta-query about self/capabilities.
+    MetaQuery,
+    /// A goal-setting request.
+    GoalRequest,
+    /// A structural command (help, status, run, show, etc.).
+    StructuralCommand,
 }
 
 impl Cat {
@@ -120,6 +135,13 @@ impl std::fmt::Display for Cat {
             Cat::Temporal => write!(f, "Temporal"),
             Cat::Modal => write!(f, "Modal"),
             Cat::RelativeClause => write!(f, "RelativeClause"),
+            Cat::Greeting => write!(f, "Greeting"),
+            Cat::Farewell => write!(f, "Farewell"),
+            Cat::Acknowledgment => write!(f, "Acknowledgment"),
+            Cat::FollowUpRequest => write!(f, "FollowUpRequest"),
+            Cat::MetaQuery => write!(f, "MetaQuery"),
+            Cat::GoalRequest => write!(f, "GoalRequest"),
+            Cat::StructuralCommand => write!(f, "StructuralCommand"),
         }
     }
 }

@@ -116,8 +116,10 @@ impl InboundMessage {
     /// For `Text` content, delegates to `nlp::classify_intent()`.
     /// For `Command` content, maps to the corresponding `UserIntent` directly.
     /// For `AgentMessage` content, returns `UserIntent::AgentProtocol`.
+    #[allow(deprecated)]
     pub fn classify(&self) -> crate::agent::nlp::UserIntent {
         match &self.content {
+            #[allow(deprecated)]
             MessageContent::Text(text) => crate::agent::nlp::classify_intent(text),
             MessageContent::Command { name, args } => {
                 match name.as_str() {

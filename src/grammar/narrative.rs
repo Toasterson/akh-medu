@@ -411,6 +411,27 @@ impl NarrativeGrammar {
                 let c = self.linearize_inner(clause, ctx)?;
                 Ok(format!("{h}, which {c}."))
             }
+
+            // ── Dialogue acts ────────────────────────────────────────
+            AbsTree::Greeting { .. } => Ok("Hello.".to_string()),
+            AbsTree::Farewell { .. } => Ok("Farewell.".to_string()),
+            AbsTree::Acknowledgment { .. } => Ok("Understood.".to_string()),
+            AbsTree::FollowUpRequest { .. } => Ok("Tell me more.".to_string()),
+            AbsTree::MetaQuery { about } => {
+                let a = self.linearize_inner(about, ctx)?;
+                Ok(format!("About {a}:"))
+            }
+            AbsTree::GoalRequest { description } => {
+                let d = self.linearize_inner(description, ctx)?;
+                Ok(format!("Goal: {d}"))
+            }
+            AbsTree::StructuralCommand { command, args } => {
+                if args.is_empty() {
+                    Ok(format!("[command: {command}]"))
+                } else {
+                    Ok(format!("[command: {command} {}]", args.join(" ")))
+                }
+            }
         }
     }
 

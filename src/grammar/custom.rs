@@ -383,6 +383,16 @@ impl CustomGrammar {
                 let c = self.linearize_inner(clause, ctx)?;
                 Ok(format!("{h}, which {c}."))
             }
+
+            // Dialogue acts — these are handled by the ChatProcessor dispatch,
+            // not by grammar linearization. Return empty string if we reach here.
+            AbsTree::Greeting { .. }
+            | AbsTree::Farewell { .. }
+            | AbsTree::Acknowledgment { .. }
+            | AbsTree::FollowUpRequest { .. }
+            | AbsTree::MetaQuery { .. }
+            | AbsTree::GoalRequest { .. }
+            | AbsTree::StructuralCommand { .. } => Ok(String::new()),
         }
     }
 }

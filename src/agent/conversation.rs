@@ -215,9 +215,13 @@ pub struct ConversationalResponse {
 impl ConversationState {
     /// Produce a conversational response for the given [`ConversationalKind`].
     ///
+    /// **Deprecated**: Use `DialogueManager::handle_greeting()`, `handle_farewell()`,
+    /// `handle_ack()`, `handle_follow_up()`, `handle_meta_query()` instead (ADR 025).
+    ///
     /// `persona_name` and `traits` come from the Psyche persona (or defaults).
     /// Returns a [`ConversationalResponse`] whose `text` may be empty to signal
     /// that the TUI should delegate to a grounded handler instead.
+    #[allow(deprecated)]
     pub fn respond_conversational(
         &self,
         kind: &super::nlp::ConversationalKind,
@@ -738,9 +742,10 @@ mod tests {
         assert!(state.active_referents.is_empty());
     }
 
-    // ── respond_conversational tests ─────────────────────────────────
+    // ── respond_conversational tests (deprecated, kept for backwards compat) ──
 
     #[test]
+    #[allow(deprecated)]
     fn respond_greeting_first_turn() {
         use crate::agent::nlp::ConversationalKind;
         let state = ConversationState::new("ch", "formal");
@@ -754,6 +759,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn respond_greeting_subsequent() {
         use crate::agent::nlp::ConversationalKind;
         let mut state = ConversationState::new("ch", "formal");
@@ -767,6 +773,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn respond_follow_up_no_topic() {
         use crate::agent::nlp::ConversationalKind;
         let state = ConversationState::new("ch", "formal");
@@ -779,6 +786,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn respond_follow_up_with_topic() {
         use crate::agent::nlp::ConversationalKind;
         let mut state = ConversationState::new("ch", "formal");
@@ -793,6 +801,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn respond_ack_warm() {
         use crate::agent::nlp::ConversationalKind;
         let state = ConversationState::new("ch", "formal");
@@ -805,6 +814,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn respond_ack_default() {
         use crate::agent::nlp::ConversationalKind;
         let state = ConversationState::new("ch", "formal");
@@ -817,6 +827,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn respond_meta_question_delegates() {
         use crate::agent::nlp::ConversationalKind;
         let state = ConversationState::new("ch", "formal");
