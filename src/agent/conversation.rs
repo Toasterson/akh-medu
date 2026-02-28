@@ -462,12 +462,18 @@ pub fn ground_query(
 
     // Step 6: Also try discourse-aware rendering for richer prose.
     let prose = if summary.overview.is_empty() {
-        // Fallback: manual composition.
-        grounded
+        // Fallback: concise manual composition, capped to avoid overwhelming output.
+        const MAX_FALLBACK_TRIPLES: usize = 8;
+        let capped: Vec<_> = grounded.iter().take(MAX_FALLBACK_TRIPLES).collect();
+        let mut lines: Vec<String> = capped
             .iter()
             .map(|g| format!("{} {} {}", g.subject_label, g.predicate_label, g.object_label))
-            .collect::<Vec<_>>()
-            .join(". ")
+            .collect();
+        let remaining = grounded.len().saturating_sub(MAX_FALLBACK_TRIPLES);
+        if remaining > 0 {
+            lines.push(format!("...and {remaining} more relation(s)."));
+        }
+        lines.join(". ")
     } else {
         let mut parts = vec![summary.overview];
         for section in &summary.sections {

@@ -84,6 +84,14 @@ pub fn is_metadata_label(label: &str) -> bool {
         || label.starts_with("role:")
         || label.starts_with("importance:")
         || label.starts_with("semantic:")
+        || label.starts_with("dlg:")
+        || label.starts_with("dialogue:")
+        || label.starts_with("mt:")
+        || label.starts_with("pim:")
+        || label.starts_with("cal:")
+        || label.starts_with("causal:")
+        || label.starts_with("project:")
+        || label.starts_with("watch:")
 }
 
 /// Whether a line references agent metadata labels (even embedded in a sentence).

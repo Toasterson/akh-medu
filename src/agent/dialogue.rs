@@ -15,7 +15,7 @@ use crate::engine::Engine;
 use crate::grammar::abs::AbsTree;
 use crate::symbol::SymbolId;
 
-use super::conversation::{ResponseDetail, Speaker};
+use super::conversation::Speaker;
 use super::error::AgentResult;
 
 // ── Well-known predicates ────────────────────────────────────────────────
@@ -266,18 +266,31 @@ impl DialogueManager {
 
     /// Handle a meta-query ("who are you", "what can you do").
     ///
-    /// Returns `None` if the caller should route to `ground_query("self", ...)` instead.
+    /// Prefers a persona-aware response from the psyche compartment. Falls back
+    /// to a concise grounded query only if psyche is unavailable and the KG
+    /// has meaningful (non-metadata) "self" triples.
     pub fn handle_meta_query(
         &self,
         engine: &Arc<Engine>,
-        grammar: &str,
+        _grammar: &str,
     ) -> Option<String> {
-        if let Some(gr) = super::conversation::ground_query("self", engine, grammar) {
-            let rendered = gr.render(ResponseDetail::Normal);
-            Some(rendered)
-        } else {
-            None
+        // Prefer psyche-based persona response.
+        if let Some(psyche) = engine.compartments().and_then(|cm| cm.psyche()) {
+            let name = &psyche.persona.name;
+            let traits = &psyche.persona.traits;
+            let trait_str = if traits.is_empty() {
+                String::new()
+            } else {
+                format!(" My traits: {}.", traits.join(", "))
+            };
+            return Some(format!(
+                "I am {name}.{trait_str} I can answer questions about what I know, \
+                 learn new facts, and investigate topics autonomously."
+            ));
         }
+
+        // No psyche loaded — return None so the caller uses a generic fallback.
+        None
     }
 
     /// Handle a follow-up request.

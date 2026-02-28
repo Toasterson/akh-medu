@@ -954,6 +954,19 @@ impl ChatProcessor {
         summary: &crate::agent::NarrativeSummary,
         grammar: &str,
     ) {
+        let has_content = !summary.overview.is_empty()
+            || !summary.sections.is_empty()
+            || !summary.gaps.is_empty();
+
+        if !has_content {
+            msgs.push(AkhMessage::narrative(
+                "I couldn't find enough information to answer that. \
+                 Try teaching me about it first, or rephrase your question.",
+                grammar,
+            ));
+            return;
+        }
+
         if !summary.overview.is_empty() {
             msgs.push(AkhMessage::narrative(&summary.overview, grammar));
         }
