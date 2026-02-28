@@ -96,6 +96,13 @@ native-tls = { version = "0.2", optional = true }
 lettre = { version = "0.11", optional = true, default-features = false, features = ["builder", "smtp-transport", "rustls-tls"] }
 regex = "1"
 
+# NLU Tier 2: Micro-ML NER (feature-gated)
+ort = { version = "2.0.0-rc.11", optional = true, default-features = false, features = ["std", "download-binaries", "copy-dylibs", "tls-native"] }
+tokenizers = { version = "0.22", optional = true, default-features = false, features = ["progressbar", "fancy-regex"] }
+
+# NLU Tier 3: Small LLM translator (feature-gated)
+llama-cpp-2 = { version = "0.1", optional = true, features = ["sampler"] }
+
 # Calendar (feature-gated)
 icalendar = { version = "0.16", optional = true, features = ["parser"] }
 chrono = { version = "0.4", optional = true, features = ["serde"] }
@@ -107,8 +114,8 @@ oxifed = ["daemon", "lapin", "deadpool-lapin", "reqwest"]
 email = ["mail-parser", "imap", "native-tls", "lettre"]
 calendar = ["icalendar", "chrono"]
 wasm-tools = ["wasmtime"]
-nlu-ml = []
-nlu-llm = []
+nlu-ml = ["ort", "tokenizers"]
+nlu-llm = ["llama-cpp-2"]
 nlu-full = ["nlu-ml", "nlu-llm"]
 
 [dev-dependencies]

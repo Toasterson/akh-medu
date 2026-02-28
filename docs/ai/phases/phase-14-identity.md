@@ -246,31 +246,31 @@ via ActivityPub/oxifed. 9 sub-phases (14a-14i). Builds on existing Psyche model 
 - [x] Concrete grammar linearization (formal, terse, narrative, rust_gen, custom) for all new variants
 - [x] 46+ unit tests (parser recognizers, linearization, edge cases)
 
-## Phase 14k — Micro-ML NER & Intent Classification (NLU Tier 2)
+## Phase 14k — Micro-ML NER & Intent Classification (NLU Tier 2) ✓
 
 - [x] `NluError` miette diagnostic enum with `NluResult<T>` (created in Phase 14j/14m)
 - [x] `src/nlu/mod.rs` — NLU pipeline orchestrator (created in Phase 14j/14m)
-- [ ] `MicroMlLayer` — ONNX NER session + tokenizer via `ort` crate
-- [ ] `EntitySpan` + `IntentClass` types
-- [ ] DistilBERT multilingual NER model integration (`Davlan/distilbert-base-multilingual-cased-ner-hrl`)
-- [ ] `augment_parse()` — feed NER entities back into entity resolution for re-parse
-- [ ] Model management: `$AKH_DATA_DIR/models/`, `akh init --with-models` download
-- [ ] Feature-gated: `nlu-ml = ["ort", "tokenizers"]`
-- [ ] Graceful degradation: skip Tier 2 if models not present
-- [ ] ~20 unit tests (mock ONNX session, entity span extraction, intent classification)
+- [x] `MicroMlLayer` — ONNX NER session + tokenizer via `ort` crate
+- [x] `EntitySpan` + `IntentClass` types
+- [x] DistilBERT multilingual NER model integration (`Davlan/distilbert-base-multilingual-cased-ner-hrl`)
+- [x] `augment_parse()` — feed NER entities back into entity resolution for re-parse
+- [x] Model management: `$AKH_DATA_DIR/models/`, `akh init --with-models` download
+- [x] Feature-gated: `nlu-ml = ["ort", "tokenizers"]`
+- [x] Graceful degradation: skip Tier 2 if models not present
+- [x] ~20 unit tests (mock ONNX session, entity span extraction, intent classification)
 
-## Phase 14l — Small LLM Translator (NLU Tier 3)
+## Phase 14l — Small LLM Translator (NLU Tier 3) ✓
 
-- [ ] `LlmTranslator` struct with `llama-cpp-2` model handle
-- [ ] GBNF grammar definition constraining output to valid AbsTree JSON
-- [ ] System prompt for NL→AbsTree translation with few-shot examples
-- [ ] `translate()` — generate constrained AbsTree JSON, deserialize
-- [ ] Model: Qwen2.5-1.5B-Instruct Q4_K_M GGUF (~1.1 GB, Apache 2.0)
-- [ ] Model management: `$AKH_DATA_DIR/models/`, `akh init --with-llm` download
+- [x] `LlmTranslator` struct with `llama-cpp-2` model handle
+- [x] GBNF grammar definition constraining output to valid AbsTree JSON
+- [x] System prompt for NL→AbsTree translation with few-shot examples
+- [x] `translate()` — generate constrained AbsTree JSON, deserialize
+- [x] Model: Qwen2.5-1.5B-Instruct Q4_K_M GGUF (~1.1 GB, Apache 2.0)
+- [x] Model management: `$AKH_DATA_DIR/models/`, `akh init --with-llm` download
 - [ ] Self-training data collection: store successful (input, AbsTree) pairs
-- [ ] Feature-gated: `nlu-llm = ["llama-cpp-2"]`
-- [ ] Graceful degradation: skip Tier 3 if model not present
-- [ ] ~15 unit tests (mock model, GBNF validation, JSON→AbsTree deserialization)
+- [x] Feature-gated: `nlu-llm = ["llama-cpp-2"]`
+- [x] Graceful degradation: skip Tier 3 if model not present
+- [x] ~15 unit tests (mock model, GBNF validation, JSON→AbsTree deserialization)
 
 ## Phase 14m — VSA Parse Ranker (NLU Tier 4) ✓
 

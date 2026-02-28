@@ -1,6 +1,6 @@
 # Akh-medu Architecture
 
-> Last updated: 2026-02-28 (Phase 14j-14m: NLU pipeline with extended rule parser, VSA parse ranker, new AbsTree variants, TUI integration)
+> Last updated: 2026-02-28 (Phase 14j-14m: Full NLU pipeline — rule parser, Micro-ML NER (Tier 2), LLM translator (Tier 3), VSA parse ranker, TUI integration)
 
 ## Overview
 

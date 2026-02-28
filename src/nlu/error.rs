@@ -36,6 +36,30 @@ pub enum NluError {
     )]
     RankerError { reason: String },
 
+    /// A required model file was not found on disk.
+    #[error("NLU model not found: {path}")]
+    #[diagnostic(
+        code(akh::nlu::model_not_found),
+        help("Download with `akh init --with-models`")
+    )]
+    ModelNotFound { path: std::path::PathBuf },
+
+    /// A model file exists but could not be loaded.
+    #[error("NLU model load failed: {reason}")]
+    #[diagnostic(
+        code(akh::nlu::model_load),
+        help("Check model file integrity")
+    )]
+    ModelLoadFailed { reason: String },
+
+    /// The LLM could not produce valid structured output.
+    #[error("LLM generation failed: {reason}")]
+    #[diagnostic(
+        code(akh::nlu::llm_generation),
+        help("The LLM could not produce valid output")
+    )]
+    LlmGenerationFailed { reason: String },
+
     /// Wrapped grammar error.
     #[error(transparent)]
     #[diagnostic(transparent)]

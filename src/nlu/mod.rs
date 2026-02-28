@@ -5,13 +5,11 @@
 //!
 //! 1. **Rule parser** (always available) — extended `parse_prose()` with
 //!    negation, quantification, conditionals, temporal, modal, comparative
-//! 2. **Micro-ML NER** (feature-gated: `nlu-ml`) — stub for future ONNX-based
-//!    named entity recognition
-//! 3. **Small LLM translator** (feature-gated: `nlu-llm`) — stub for future
-//!    local LLM-based semantic parsing
+//! 2. **Micro-ML NER** (feature-gated: `nlu-ml`) — ONNX-based multilingual
+//!    named entity recognition with intent classification
+//! 3. **Small LLM translator** (feature-gated: `nlu-llm`) — local LLM-based
+//!    semantic parsing with GBNF-constrained AbsTree JSON output
 //! 4. **VSA parse ranker** — ranks candidate parses using exemplar memory
-//!
-//! Tiers 2 and 3 are feature-gated stubs placed now, implemented later.
 
 pub mod error;
 pub mod parse_ranker;
@@ -19,8 +17,9 @@ pub mod parse_ranker;
 #[cfg(feature = "nlu-ml")]
 pub mod micro_ml;
 
-#[cfg(feature = "nlu-llm")]
 pub mod llm_translator;
+
+use std::path::Path;
 
 use crate::grammar::abs::AbsTree;
 use crate::grammar::concrete::ParseContext;
@@ -46,22 +45,73 @@ pub struct NluParseResult {
 ///
 /// Holds configuration and state for the cascading parse pipeline.
 /// The ranker accumulates exemplars over time for self-improving parsing.
+/// ML and LLM tiers are feature-gated and degrade gracefully when models
+/// are absent.
 pub struct NluPipeline {
     /// VSA parse ranker (Tier 4) — always available.
     ranker: ParseRanker,
+    /// Micro-ML NER layer (Tier 2) — loaded if model files present.
+    #[cfg(feature = "nlu-ml")]
+    ml_layer: Option<micro_ml::MicroMlLayer>,
+    /// Small LLM translator (Tier 3) — loaded if model file present.
+    #[cfg(feature = "nlu-llm")]
+    llm_translator: Option<llm_translator::LlmTranslator>,
 }
 
 impl NluPipeline {
-    /// Create a new NLU pipeline with a fresh ranker.
+    /// Create a new NLU pipeline with a fresh ranker and no ML models.
     pub fn new() -> Self {
         Self {
             ranker: ParseRanker::new(),
+            #[cfg(feature = "nlu-ml")]
+            ml_layer: None,
+            #[cfg(feature = "nlu-llm")]
+            llm_translator: None,
         }
     }
 
     /// Create a pipeline with a pre-existing ranker (restored from persistence).
     pub fn with_ranker(ranker: ParseRanker) -> Self {
-        Self { ranker }
+        Self {
+            ranker,
+            #[cfg(feature = "nlu-ml")]
+            ml_layer: None,
+            #[cfg(feature = "nlu-llm")]
+            llm_translator: None,
+        }
+    }
+
+    /// Create a pipeline with a pre-existing ranker and attempt to load models
+    /// from `data_dir`. Models that are absent are silently skipped.
+    pub fn with_ranker_and_models(ranker: ParseRanker, data_dir: Option<&Path>) -> Self {
+        let mut pipeline = Self::with_ranker(ranker);
+        if let Some(dir) = data_dir {
+            pipeline.load_models(dir);
+        }
+        pipeline
+    }
+
+    /// Create a pipeline with a fresh ranker, attempting to load models
+    /// from `data_dir`. Models that are absent are silently skipped.
+    pub fn new_with_models(data_dir: Option<&Path>) -> Self {
+        let mut pipeline = Self::new();
+        if let Some(dir) = data_dir {
+            pipeline.load_models(dir);
+        }
+        pipeline
+    }
+
+    /// Attempt to load ML and LLM models from the given data directory.
+    /// Missing models are silently skipped (graceful degradation).
+    fn load_models(&mut self, _data_dir: &Path) {
+        #[cfg(feature = "nlu-ml")]
+        {
+            self.ml_layer = micro_ml::MicroMlLayer::try_load(_data_dir);
+        }
+        #[cfg(feature = "nlu-llm")]
+        {
+            self.llm_translator = llm_translator::LlmTranslator::try_load(_data_dir);
+        }
     }
 
     /// Access the ranker for persistence.
@@ -127,16 +177,36 @@ impl NluPipeline {
             _ => {}
         }
 
-        // Tier 2: Micro-ML NER (feature-gated stub)
+        // Tier 2: Micro-ML NER (feature-gated)
         #[cfg(feature = "nlu-ml")]
-        {
-            // TODO: Phase 14k — ONNX NER model
+        if let Some(ref mut ml) = self.ml_layer {
+            if let Ok(augmented) = ml.augment_parse(input, ctx) {
+                if let Some(tree) = augmented.tree {
+                    self.ranker
+                        .record_success(input, &tree, 2, augmented.confidence);
+                    return Ok(NluParseResult {
+                        tree,
+                        source_tier: 2,
+                        confidence: augmented.confidence,
+                        exemplar_similarity: None,
+                    });
+                }
+            }
         }
 
-        // Tier 3: Small LLM translator (feature-gated stub)
+        // Tier 3: Small LLM translator (feature-gated)
         #[cfg(feature = "nlu-llm")]
-        {
-            // TODO: Phase 14l — local LLM semantic parsing
+        if let Some(ref llm) = self.llm_translator {
+            if let Ok(translation) = llm.translate(input) {
+                self.ranker
+                    .record_success(input, &translation.tree, 3, 0.70);
+                return Ok(NluParseResult {
+                    tree: translation.tree,
+                    source_tier: 3,
+                    confidence: 0.70,
+                    exemplar_similarity: None,
+                });
+            }
         }
 
         // Tier 4: VSA Parse Ranker — check if we have a similar exemplar

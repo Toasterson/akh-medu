@@ -79,15 +79,17 @@ impl AkhTui {
             workspace,
             grammar,
             backend: ChatBackend::Local(Box::new({
-                // Restore NLU ranker from durable storage if available.
+                // Restore NLU ranker from durable storage if available,
+                // and attempt to load ML/LLM models from data_dir.
+                let data_dir = engine.config().data_dir.as_deref();
                 let nlu_pipeline = engine
                     .store()
                     .get_meta(b"nlu_ranker_state")
                     .ok()
                     .flatten()
                     .and_then(|bytes| crate::nlu::parse_ranker::ParseRanker::from_bytes(&bytes))
-                    .map(crate::nlu::NluPipeline::with_ranker)
-                    .unwrap_or_default();
+                    .map(|ranker| crate::nlu::NluPipeline::with_ranker_and_models(ranker, data_dir))
+                    .unwrap_or_else(|| crate::nlu::NluPipeline::new_with_models(data_dir));
                 LocalBackend {
                     agent: Box::new(agent),
                     engine,
