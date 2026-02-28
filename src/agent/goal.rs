@@ -12,7 +12,7 @@ use super::error::AgentResult;
 use super::priority_reasoning::PriorityVerdict;
 
 /// Status of a goal.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum GoalStatus {
     Pending,
     Active,
@@ -87,7 +87,7 @@ impl std::fmt::Display for GoalStatus {
 }
 
 /// How a goal was generated (provenance for autonomous goals).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum GoalSource {
     /// Generated from knowledge gap detection.
     GapDetection {
@@ -129,7 +129,7 @@ pub enum GoalSource {
 /// Justification for a goal's existence (Phase 11f: AGM belief revision).
 ///
 /// Four variants with entrenchment levels determining retraction order.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum GoalJustification {
     /// Explicitly requested by the user — never auto-suspended (entrenchment 3).
     UserRequested,
@@ -157,7 +157,7 @@ impl GoalJustification {
 pub const DEFAULT_STALL_THRESHOLD: u32 = 5;
 
 /// A goal the agent is working toward.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Goal {
     /// The goal's Entity symbol in the KG.
     pub symbol_id: SymbolId,

@@ -1,19 +1,30 @@
 //! akh CLI: neuro-symbolic AI engine.
 
 use std::path::PathBuf;
+#[cfg(not(feature = "client-only"))]
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use miette::{IntoDiagnostic, Result};
 
+#[cfg(not(feature = "client-only"))]
 use akh_medu::agent::{Agent, AgentConfig};
-use akh_medu::client::{AkhClient, discover_server};
+#[cfg(not(feature = "client-only"))]
+use akh_medu::client::discover_server;
+use akh_medu::client::AkhClient;
+#[cfg(not(feature = "client-only"))]
 use akh_medu::engine::{Engine, EngineConfig};
+#[cfg(not(feature = "client-only"))]
 use akh_medu::error::EngineError;
+#[cfg(not(feature = "client-only"))]
 use akh_medu::glyph;
+#[cfg(not(feature = "client-only"))]
 use akh_medu::grammar::Language;
+#[cfg(not(feature = "client-only"))]
 use akh_medu::graph::Triple;
+#[cfg(not(feature = "client-only"))]
 use akh_medu::symbol::SymbolId;
+#[cfg(not(feature = "client-only"))]
 use akh_medu::vsa::Dimension;
 
 #[derive(Clone, ValueEnum)]
@@ -683,6 +694,7 @@ enum WorkspaceAction {
 }
 
 /// Resolve an [`AkhClient`]: prefer a running akhomed server, fall back to local engine.
+#[cfg(not(feature = "client-only"))]
 fn resolve_client(
     workspace: &str,
     config: EngineConfig,
@@ -695,6 +707,15 @@ fn resolve_client(
     eprintln!("warning: akhomed not running, using local engine");
     let engine = Engine::new(config).into_diagnostic()?;
     Ok(AkhClient::local(Arc::new(engine)))
+}
+
+/// Resolve an [`AkhClient`]: requires a running akhomed server (client-only mode).
+#[cfg(feature = "client-only")]
+fn resolve_client(
+    workspace: &str,
+    xdg_paths: Option<&akh_medu::paths::AkhPaths>,
+) -> Result<AkhClient> {
+    akh_medu::client::require_server(workspace, xdg_paths).into_diagnostic()
 }
 
 
@@ -721,6 +742,13 @@ fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
+    // In client-only mode, route all commands through a running akhomed server.
+    #[cfg(feature = "client-only")]
+    return run_client_only(cli);
+
+    // Normal mode: resolve paths and engine config, then dispatch locally.
+    #[cfg(not(feature = "client-only"))]
+    {
     let language = Language::from_code(&cli.language).unwrap_or(Language::Auto);
 
     // Resolve data directory: explicit --data-dir wins, otherwise XDG workspace.
@@ -3769,9 +3797,1211 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+    } // #[cfg(not(feature = "client-only"))]
+}
+
+/// Route all commands through a running akhomed server (client-only mode).
+///
+/// This function mirrors the main dispatch but uses [`AkhClient`] remote
+/// methods instead of local Engine/Agent instances.
+#[cfg(feature = "client-only")]
+fn run_client_only(cli: Cli) -> Result<()> {
+    use akh_medu::api_types;
+    use std::path::Path;
+
+    let xdg_paths = akh_medu::paths::AkhPaths::resolve().ok();
+    let client = resolve_client(&cli.workspace, xdg_paths.as_ref())?;
+
+    match cli.command {
+        // ── Init ──────────────────────────────────────────────────────────
+        Commands::Init => {
+            client
+                .workspace_create(&cli.workspace, None)
+                .into_diagnostic()?;
+            println!(
+                "Initialized workspace \"{}\" (via server).",
+                cli.workspace
+            );
+        }
+
+        // ── Workspace ─────────────────────────────────────────────────────
+        Commands::Workspace { action } => match action {
+            WorkspaceAction::List => {
+                let names = client.workspace_list().into_diagnostic()?;
+                if names.is_empty() {
+                    println!(
+                        "No workspaces found. Create one with: akh workspace create <name>"
+                    );
+                } else {
+                    println!("Workspaces:");
+                    for name in &names {
+                        println!("  {name}");
+                    }
+                }
+            }
+            WorkspaceAction::Create { name, role } => {
+                client
+                    .workspace_create(&name, role.as_deref())
+                    .into_diagnostic()?;
+                println!("Created workspace \"{name}\" (via server).");
+                if let Some(ref role_name) = role {
+                    println!("Assigned role \"{role_name}\" to workspace \"{name}\".");
+                }
+            }
+            WorkspaceAction::Delete { name } => {
+                client.workspace_delete(&name).into_diagnostic()?;
+                println!("Deleted workspace \"{name}\".");
+            }
+            WorkspaceAction::Info { name: _ } => {
+                let info = client.info().into_diagnostic()?;
+                println!("{info}");
+            }
+            WorkspaceAction::AssignRole { name, role } => {
+                let ws_client = resolve_client(&name, xdg_paths.as_ref())?;
+                ws_client.assign_role(&role).into_diagnostic()?;
+                println!("Assigned role \"{role}\" to workspace \"{name}\".");
+            }
+        },
+
+        // ── Seeds ─────────────────────────────────────────────────────────
+        Commands::Seed { action } => match action {
+            SeedAction::List => {
+                let packs = client.seed_list().into_diagnostic()?;
+                if packs.is_empty() {
+                    println!("No seed packs available.");
+                } else {
+                    println!("Available seed packs:");
+                    for p in &packs {
+                        println!(
+                            "  {} ({}) — {} [{} triples]",
+                            p.id, p.source, p.description, p.triple_count,
+                        );
+                    }
+                }
+            }
+            SeedAction::Apply { pack } => {
+                let report: serde_json::Value =
+                    client.seed_apply(&pack).into_diagnostic()?;
+                println!("Applied seed \"{pack}\": {report}");
+            }
+            SeedAction::Status => {
+                let status = client.seed_status().into_diagnostic()?;
+                println!("Seed status for workspace \"{}\":", status.workspace);
+                for entry in &status.seeds {
+                    let s = if entry.applied {
+                        "applied"
+                    } else {
+                        "not applied"
+                    };
+                    println!("  {} — {s}", entry.id);
+                }
+            }
+        },
+
+        // ── Ingest ────────────────────────────────────────────────────────
+        Commands::Ingest {
+            file,
+            format,
+            csv_format: _,
+            max_sentences: _,
+        } => match format {
+            IngestFormat::Json => {
+                let content = std::fs::read_to_string(&file).into_diagnostic()?;
+                let triples: Vec<serde_json::Value> =
+                    serde_json::from_str(&content).into_diagnostic()?;
+
+                if triples.is_empty() {
+                    println!("No triples found in {}", file.display());
+                    return Ok(());
+                }
+
+                let first = &triples[0];
+                if first.get("subject").is_some() {
+                    // Label-based format.
+                    let mut label_triples = Vec::new();
+                    for (i, val) in triples.iter().enumerate() {
+                        let subject = val["subject"].as_str().ok_or_else(|| {
+                            miette::miette!("triple {i}: missing or non-string 'subject'")
+                        })?;
+                        let predicate = val["predicate"].as_str().ok_or_else(|| {
+                            miette::miette!("triple {i}: missing or non-string 'predicate'")
+                        })?;
+                        let object = val["object"].as_str().ok_or_else(|| {
+                            miette::miette!("triple {i}: missing or non-string 'object'")
+                        })?;
+                        let confidence = val["confidence"].as_f64().unwrap_or(1.0) as f32;
+                        label_triples.push((
+                            subject.to_string(),
+                            predicate.to_string(),
+                            object.to_string(),
+                            confidence,
+                        ));
+                    }
+                    let (created, ingested) = client
+                        .ingest_label_triples(&label_triples)
+                        .into_diagnostic()?;
+                    println!(
+                        "Ingested {ingested} triples ({created} new symbols) from {}",
+                        file.display()
+                    );
+                } else {
+                    miette::bail!(
+                        "numeric-format JSON ingest is not supported in client-only mode.\n\
+                         Use label-based format: {{\"subject\": ..., \"predicate\": ..., \"object\": ...}}"
+                    );
+                }
+            }
+            IngestFormat::Csv => {
+                miette::bail!(
+                    "CSV ingest requires a local engine. Start akhomed and re-run without --features client-only,\n\
+                     or convert to JSON label format first."
+                );
+            }
+            IngestFormat::Text => {
+                miette::bail!(
+                    "Text ingest requires a local engine. Start akhomed and re-run without --features client-only,\n\
+                     or convert to JSON label format first."
+                );
+            }
+        },
+
+        // ── Skills ────────────────────────────────────────────────────────
+        Commands::Skill { action } => match action {
+            SkillAction::Scaffold { name } => {
+                // Scaffold writes local template files — no server needed.
+                let skill_base = cli
+                    .data_dir
+                    .as_deref()
+                    .unwrap_or_else(|| Path::new(".akh-medu"));
+                let skill_dir = skill_base.join("skills").join(&name);
+                std::fs::create_dir_all(&skill_dir).into_diagnostic()?;
+
+                let manifest = serde_json::json!({
+                    "id": name,
+                    "name": name,
+                    "version": "0.1.0",
+                    "description": format!("{name} knowledge domain"),
+                    "domains": [&name],
+                    "weight_size_bytes": 0,
+                    "triples_file": "triples.json",
+                    "rules_file": "rules.txt"
+                });
+                std::fs::write(
+                    skill_dir.join("skill.json"),
+                    serde_json::to_string_pretty(&manifest).into_diagnostic()?,
+                )
+                .into_diagnostic()?;
+
+                let triples = serde_json::json!([{
+                    "subject": "ExampleEntity",
+                    "predicate": "is-a",
+                    "object": "Category",
+                    "confidence": 1.0
+                }]);
+                std::fs::write(
+                    skill_dir.join("triples.json"),
+                    serde_json::to_string_pretty(&triples).into_diagnostic()?,
+                )
+                .into_diagnostic()?;
+
+                std::fs::write(
+                    skill_dir.join("rules.txt"),
+                    "# Rewrite rules for this skillpack.\n\
+                     # Format: <lhs-pattern> => <rhs-pattern>\n",
+                )
+                .into_diagnostic()?;
+
+                println!("Scaffolded skill '{}' at {}", name, skill_dir.display());
+            }
+            SkillAction::List => {
+                let skills = client.list_skills().into_diagnostic()?;
+                if skills.is_empty() {
+                    println!("No skillpacks discovered.");
+                } else {
+                    println!("Skillpacks ({}):", skills.len());
+                    for s in &skills {
+                        println!(
+                            "  {} ({}) [{}] - {}",
+                            s.id, s.version, s.state, s.description
+                        );
+                    }
+                }
+            }
+            SkillAction::Load { name } => {
+                let activation = client.load_skill(&name).into_diagnostic()?;
+                println!("Loaded skill: {}", activation.skill_id);
+                println!("  triples: {}", activation.triples_loaded);
+                println!("  rules:   {}", activation.rules_loaded);
+                println!("  memory:  {} bytes", activation.memory_bytes);
+            }
+            SkillAction::Unload { name } => {
+                client.unload_skill(&name).into_diagnostic()?;
+                println!("Unloaded skill: {name}");
+            }
+            SkillAction::Info { name } => {
+                let info = client.skill_info(&name).into_diagnostic()?;
+                println!("Skill: {}", info.id);
+                println!("  name:        {}", info.name);
+                println!("  version:     {}", info.version);
+                println!("  description: {}", info.description);
+                println!("  state:       {}", info.state);
+                println!("  domains:     {}", info.domains.join(", "));
+                println!("  triples:     {}", info.triple_count);
+                println!("  rules:       {}", info.rule_count);
+            }
+            SkillAction::Install { path } => {
+                let skill_path = std::path::Path::new(&path);
+                let manifest_content =
+                    std::fs::read_to_string(skill_path.join("skill.json")).into_diagnostic()?;
+                let manifest: akh_medu::skills::SkillManifest =
+                    serde_json::from_str(&manifest_content).into_diagnostic()?;
+
+                let triples_path = skill_path.join("triples.json");
+                let triples: Vec<akh_medu::skills::LabelTriple> = if triples_path.exists() {
+                    let content = std::fs::read_to_string(&triples_path).into_diagnostic()?;
+                    serde_json::from_str(&content).into_diagnostic()?
+                } else {
+                    vec![]
+                };
+
+                let rules_path = skill_path.join("rules.txt");
+                let rules = if rules_path.exists() {
+                    std::fs::read_to_string(&rules_path).into_diagnostic()?
+                } else {
+                    String::new()
+                };
+
+                let payload = akh_medu::skills::SkillInstallPayload {
+                    manifest,
+                    triples,
+                    rules,
+                };
+                let activation = client.install_skill(&payload).into_diagnostic()?;
+                println!("Installed skill: {}", activation.skill_id);
+                println!("  triples: {}", activation.triples_loaded);
+                println!("  rules:   {}", activation.rules_loaded);
+                println!("  memory:  {} bytes", activation.memory_bytes);
+            }
+        },
+
+        // ── Render ────────────────────────────────────────────────────────
+        Commands::Render {
+            entity,
+            depth,
+            all,
+            legend,
+            no_color: _,
+        } => {
+            let req = api_types::RenderRequest {
+                entity,
+                depth,
+                all,
+                legend,
+            };
+            let resp = client.render(&req).into_diagnostic()?;
+            println!("{}", resp.output);
+        }
+
+        // ── Agent ─────────────────────────────────────────────────────────
+        Commands::Agent { action } => match action {
+            AgentAction::Run {
+                goals,
+                max_cycles,
+                fresh,
+            } => {
+                let req = api_types::AgentRunRequest {
+                    goals,
+                    max_cycles,
+                    fresh,
+                };
+                let resp = client.agent_run(&req).into_diagnostic()?;
+                println!(
+                    "Agent completed: {} cycles, {} goals",
+                    resp.cycles_completed,
+                    resp.goals.len(),
+                );
+                println!("\nGoals:");
+                for g in &resp.goals {
+                    println!("  [{}] {}: {}", g.status, g.label, g.description);
+                }
+                if !resp.overview.is_empty() {
+                    println!("\n{}", resp.overview);
+                }
+            }
+            AgentAction::Resume { max_cycles } => {
+                let req = api_types::AgentResumeRequest { max_cycles };
+                let resp = client.agent_resume(&req).into_diagnostic()?;
+                println!(
+                    "Agent completed: {} cycles, {} goals",
+                    resp.cycles_completed,
+                    resp.goals.len(),
+                );
+                for g in &resp.goals {
+                    println!("  [{}] {}: {}", g.status, g.label, g.description);
+                }
+            }
+            AgentAction::Repl {
+                goals: _,
+                headless,
+            } => {
+                if headless {
+                    miette::bail!(
+                        "Headless REPL is not available in client-only mode.\n\
+                         Use TUI mode (without --headless) to connect to akhomed."
+                    );
+                }
+                #[cfg(feature = "daemon")]
+                {
+                    let paths = xdg_paths.ok_or_else(|| {
+                        miette::miette!("Cannot resolve XDG paths. Set HOME environment variable.")
+                    })?;
+                    let server_info = akh_medu::client::discover_server(&paths).ok_or_else(|| {
+                        miette::miette!("No running akhomed server found.")
+                    })?;
+                    eprintln!("Connecting to akhomed at {}...", server_info.base_url());
+                    return akh_medu::tui::launch_remote(&cli.workspace, &server_info);
+                }
+                #[cfg(not(feature = "daemon"))]
+                miette::bail!(
+                    "TUI requires --features daemon. Build with: cargo build --features client-only,daemon"
+                );
+            }
+            AgentAction::Chat {
+                max_cycles: _,
+                fresh: _,
+                headless,
+            } => {
+                if headless {
+                    miette::bail!(
+                        "Headless chat is not available in client-only mode.\n\
+                         Use TUI mode (without --headless) to connect to akhomed."
+                    );
+                }
+                #[cfg(feature = "daemon")]
+                {
+                    let paths = xdg_paths.ok_or_else(|| {
+                        miette::miette!("Cannot resolve XDG paths. Set HOME environment variable.")
+                    })?;
+                    let server_info = akh_medu::client::discover_server(&paths).ok_or_else(|| {
+                        miette::miette!("No running akhomed server found.")
+                    })?;
+                    eprintln!("Connecting to akhomed at {}...", server_info.base_url());
+                    return akh_medu::tui::launch_remote(&cli.workspace, &server_info);
+                }
+                #[cfg(not(feature = "daemon"))]
+                miette::bail!(
+                    "TUI requires --features daemon. Build with: cargo build --features client-only,daemon"
+                );
+            }
+            #[cfg(feature = "daemon")]
+            AgentAction::Daemon {
+                max_cycles,
+                fresh: _,
+                equiv_interval: _,
+                reflect_interval: _,
+                rules_interval: _,
+                persist_interval: _,
+            } => {
+                let config = serde_json::json!({ "max_cycles": max_cycles });
+                let status = client
+                    .start_daemon(Some(config))
+                    .into_diagnostic()?;
+                println!(
+                    "Daemon started via akhomed (cycles: {}, triggers: {})",
+                    status.total_cycles, status.trigger_count
+                );
+            }
+            AgentAction::DaemonStop => {
+                client.stop_daemon().into_diagnostic()?;
+                println!("Daemon stopped.");
+            }
+            AgentAction::DaemonStatus => {
+                let status = client.daemon_status().into_diagnostic()?;
+                println!("Daemon status:");
+                println!("  Running:    {}", status.running);
+                println!("  Cycles:     {}", status.total_cycles);
+                println!("  Started at: {}", status.started_at);
+                println!("  Triggers:   {}", status.trigger_count);
+            }
+        },
+
+        // ── PIM ───────────────────────────────────────────────────────────
+        Commands::Pim { action } => match action {
+            PimAction::Inbox => {
+                let resp = client.pim_inbox().into_diagnostic()?;
+                if resp.tasks.is_empty() {
+                    println!("Inbox is empty.");
+                } else {
+                    println!("Inbox ({} items):", resp.tasks.len());
+                    for t in &resp.tasks {
+                        println!("  [{:>5}] {} ({})", t.symbol_id, t.label, t.quadrant);
+                    }
+                }
+            }
+            PimAction::Next { context, energy } => {
+                let req = api_types::PimNextRequest {
+                    context,
+                    energy: energy.map(|e| match e {
+                        EnergyLevel::Low => "low".into(),
+                        EnergyLevel::Medium => "medium".into(),
+                        EnergyLevel::High => "high".into(),
+                    }),
+                };
+                let resp = client.pim_next(&req).into_diagnostic()?;
+                if resp.tasks.is_empty() {
+                    println!("No next actions available.");
+                } else {
+                    println!("Next actions ({} tasks):", resp.tasks.len());
+                    for t in &resp.tasks {
+                        let energy_str = t
+                            .energy
+                            .as_deref()
+                            .map(|e| format!(" [{e}]"))
+                            .unwrap_or_default();
+                        println!(
+                            "  [{:>5}] {} ({}){}",
+                            t.symbol_id, t.label, t.quadrant, energy_str
+                        );
+                    }
+                }
+            }
+            PimAction::Review => {
+                let resp = client.pim_review().into_diagnostic()?;
+                println!("{}", resp.summary);
+                if !resp.overdue.is_empty() {
+                    println!("\nOverdue:");
+                    for t in &resp.overdue {
+                        println!("  [{:>5}] {}", t.symbol_id, t.label);
+                    }
+                }
+                if !resp.stale_inbox.is_empty() {
+                    println!("\nStale inbox (>7 days):");
+                    for t in &resp.stale_inbox {
+                        println!("  [{:>5}] {}", t.symbol_id, t.label);
+                    }
+                }
+                if !resp.stalled_projects.is_empty() {
+                    println!("\nStalled projects (no Next actions):");
+                    for t in &resp.stalled_projects {
+                        println!("  [{:>5}] {}", t.symbol_id, t.label);
+                    }
+                }
+                if resp.adjustment_count > 0 {
+                    println!("\nRecommended adjustments: {}", resp.adjustment_count);
+                }
+            }
+            PimAction::Project { name } => {
+                let resp = client.pim_project(&name).into_diagnostic()?;
+                println!("Project: {} ({})", resp.name, resp.status);
+                for t in &resp.goals {
+                    let gtd = t.gtd_state.as_deref().unwrap_or("no-pim");
+                    println!("  [{:>5}] {} (GTD: {})", t.symbol_id, t.label, gtd);
+                }
+            }
+            PimAction::Add {
+                goal,
+                gtd,
+                urgency,
+                importance,
+                para,
+                contexts,
+                recur,
+                deadline,
+            } => {
+                let gtd_str = match gtd {
+                    GtdState::Inbox => "inbox",
+                    GtdState::Next => "next",
+                    GtdState::Waiting => "waiting",
+                    GtdState::Someday => "someday",
+                    GtdState::Reference => "reference",
+                };
+                let para_str = para.map(|p| match p {
+                    ParaCategory::Project => "project".to_string(),
+                    ParaCategory::Area => "area".to_string(),
+                    ParaCategory::Resource => "resource".to_string(),
+                    ParaCategory::Archive => "archive".to_string(),
+                });
+                let req = api_types::PimAddRequest {
+                    goal,
+                    gtd: gtd_str.to_string(),
+                    urgency,
+                    importance,
+                    para: para_str,
+                    contexts,
+                    recur,
+                    deadline,
+                };
+                let resp = client.pim_add(&req).into_diagnostic()?;
+                println!(
+                    "Added PIM metadata to goal {} (GTD: {}, quadrant: {})",
+                    resp.goal, resp.gtd_state, resp.quadrant,
+                );
+            }
+            PimAction::Transition { goal, to } => {
+                let to_str = match to {
+                    GtdState::Inbox => "inbox",
+                    GtdState::Next => "next",
+                    GtdState::Waiting => "waiting",
+                    GtdState::Someday => "someday",
+                    GtdState::Reference => "reference",
+                };
+                let req = api_types::PimTransitionRequest {
+                    goal,
+                    to: to_str.to_string(),
+                };
+                client.pim_transition(&req).into_diagnostic()?;
+                println!("Transitioned goal {} to GTD state: {}", goal, to_str);
+            }
+            PimAction::Matrix => {
+                let resp = client.pim_matrix().into_diagnostic()?;
+                for (label, tasks) in [
+                    ("DO", &resp.do_tasks),
+                    ("SCHEDULE", &resp.schedule_tasks),
+                    ("DELEGATE", &resp.delegate_tasks),
+                    ("ELIMINATE", &resp.eliminate_tasks),
+                ] {
+                    println!("{} ({} tasks):", label, tasks.len());
+                    for t in tasks {
+                        let gtd = t.gtd_state.as_deref().unwrap_or("");
+                        println!("  [{:>5}] {} (GTD: {})", t.symbol_id, t.label, gtd);
+                    }
+                }
+            }
+            PimAction::Deps => {
+                let resp = client.pim_deps().into_diagnostic()?;
+                println!("Dependency order ({} tasks):", resp.order.len());
+                for (i, t) in resp.order.iter().enumerate() {
+                    println!("  {}. [{:>5}] {}", i + 1, t.symbol_id, t.label);
+                }
+            }
+            PimAction::Overdue => {
+                let resp = client.pim_overdue().into_diagnostic()?;
+                if resp.tasks.is_empty() {
+                    println!("No overdue tasks.");
+                } else {
+                    println!("Overdue ({} tasks):", resp.tasks.len());
+                    for t in &resp.tasks {
+                        let days = t.overdue_days.unwrap_or(0);
+                        println!(
+                            "  [{:>5}] {} (overdue by {} days)",
+                            t.symbol_id, t.label, days
+                        );
+                    }
+                }
+            }
+        },
+
+        // ── Calendar ──────────────────────────────────────────────────────
+        Commands::Cal { action } => match action {
+            CalAction::Today => {
+                let resp = client.cal_today().into_diagnostic()?;
+                if resp.events.is_empty() {
+                    println!("No events today.");
+                } else {
+                    println!("Today ({} events):", resp.events.len());
+                    for e in &resp.events {
+                        let loc = e
+                            .location
+                            .as_deref()
+                            .map(|l| format!(" @ {l}"))
+                            .unwrap_or_default();
+                        println!(
+                            "  [{:>5}] {} ({} min){}",
+                            e.symbol_id, e.summary, e.duration_minutes, loc,
+                        );
+                    }
+                }
+            }
+            CalAction::Week => {
+                let resp = client.cal_week().into_diagnostic()?;
+                if resp.events.is_empty() {
+                    println!("No events this week.");
+                } else {
+                    println!("This week ({} events):", resp.events.len());
+                    for e in &resp.events {
+                        let loc = e
+                            .location
+                            .as_deref()
+                            .map(|l| format!(" @ {l}"))
+                            .unwrap_or_default();
+                        println!(
+                            "  [{:>5}] {} ({} min){}",
+                            e.symbol_id, e.summary, e.duration_minutes, loc,
+                        );
+                    }
+                }
+            }
+            CalAction::Conflicts => {
+                let conflicts = client.cal_conflicts().into_diagnostic()?;
+                if conflicts.is_empty() {
+                    println!("No scheduling conflicts.");
+                } else {
+                    println!("Conflicts ({}):", conflicts.len());
+                    for c in &conflicts {
+                        println!("  {} <-> {}", c.event_a, c.event_b);
+                    }
+                }
+            }
+            CalAction::Add {
+                summary,
+                start,
+                end,
+                location,
+            } => {
+                let req = api_types::CalAddRequest {
+                    summary: summary.clone(),
+                    start,
+                    end,
+                    location,
+                };
+                let resp = client.cal_add(&req).into_diagnostic()?;
+                println!(
+                    "Added event [{:>5}] '{}' ({} min)",
+                    resp.symbol_id, resp.summary, resp.duration_minutes,
+                );
+            }
+            CalAction::Import { file } => {
+                let data = std::fs::read_to_string(&file).into_diagnostic()?;
+                let req = api_types::CalImportRequest { ical_data: data };
+                let resp = client.cal_import(&req).into_diagnostic()?;
+                println!(
+                    "Imported {} events from {}",
+                    resp.imported_count,
+                    file.display()
+                );
+            }
+            CalAction::Sync { .. } => {
+                miette::bail!(
+                    "CalDAV sync requires a local engine. Run without --features client-only."
+                );
+            }
+        },
+
+        // ── Preferences ───────────────────────────────────────────────────
+        Commands::Pref { action } => match action {
+            PrefAction::Status => {
+                let resp = client.pref_status().into_diagnostic()?;
+                println!("Preference Profile:");
+                println!("  Interactions: {}", resp.interaction_count);
+                println!("  Proactivity:  {}", resp.proactivity_level);
+                println!("  Decay rate:   {}", resp.decay_rate);
+                println!(
+                    "  Suggestions:  {} offered, {} accepted ({:.0}%)",
+                    resp.suggestions_offered,
+                    resp.suggestions_accepted,
+                    resp.acceptance_rate * 100.0,
+                );
+                println!(
+                    "  Prototype:    {}",
+                    if resp.prototype_active {
+                        "active"
+                    } else {
+                        "empty"
+                    }
+                );
+            }
+            PrefAction::Train { entity, weight } => {
+                let req = api_types::PrefTrainRequest { entity, weight };
+                let resp = client.pref_train(&req).into_diagnostic()?;
+                println!(
+                    "Recorded preference: '{}' (weight: {:.2}, total interactions: {})",
+                    resp.entity_label, resp.weight, resp.total_interactions,
+                );
+            }
+            PrefAction::Level { level } => {
+                let lvl_str = match level {
+                    ProactivityLevel::Ambient => "ambient",
+                    ProactivityLevel::Nudge => "nudge",
+                    ProactivityLevel::Offer => "offer",
+                    ProactivityLevel::Scheduled => "scheduled",
+                    ProactivityLevel::Autonomous => "autonomous",
+                };
+                let req = api_types::PrefLevelRequest {
+                    level: lvl_str.to_string(),
+                };
+                client.pref_level(&req).into_diagnostic()?;
+                println!("Proactivity level set to: {lvl_str}");
+            }
+            PrefAction::Interests { count } => {
+                let interests = client.pref_interests(count).into_diagnostic()?;
+                if interests.is_empty() {
+                    println!(
+                        "No interests recorded yet. Use `akh pref train` to add feedback."
+                    );
+                } else {
+                    println!("Top interests ({}):", interests.len());
+                    for i in &interests {
+                        println!("  {:<30} (similarity: {:.3})", i.label, i.similarity);
+                    }
+                }
+            }
+            PrefAction::Suggest => {
+                let resp: serde_json::Value =
+                    client.pref_suggest().into_diagnostic()?;
+                println!("{}", serde_json::to_string_pretty(&resp).unwrap_or_default());
+            }
+        },
+
+        // ── Causal ────────────────────────────────────────────────────────
+        Commands::Causal { action } => match action {
+            CausalAction::Schemas => {
+                let schemas = client.causal_schemas().into_diagnostic()?;
+                if schemas.is_empty() {
+                    println!(
+                        "No action schemas registered. Use `akh causal bootstrap` to create from tools."
+                    );
+                } else {
+                    println!("Action schemas ({}):", schemas.len());
+                    for s in &schemas {
+                        println!(
+                            "  {:<25} precond: {} effects: {} success: {:.0}% runs: {}",
+                            s.name,
+                            s.precondition_count,
+                            s.effect_count,
+                            s.success_rate * 100.0,
+                            s.execution_count,
+                        );
+                    }
+                }
+            }
+            CausalAction::Schema { name } => {
+                let s = client.causal_schema(&name).into_diagnostic()?;
+                println!("Schema: {}", s.name);
+                println!("  Action ID:       {}", s.action_id);
+                println!("  Preconditions:   {}", s.precondition_count);
+                println!("  Effects:         {}", s.effect_count);
+                println!("  Success rate:    {:.1}%", s.success_rate * 100.0);
+                println!("  Execution count: {}", s.execution_count);
+            }
+            CausalAction::Predict { name } => {
+                let req = api_types::CausalPredictRequest { name: name.clone() };
+                let resp = client.causal_predict(&req).into_diagnostic()?;
+                println!("Predicted transition for '{name}':");
+                if resp.assertions.is_empty()
+                    && resp.retractions.is_empty()
+                    && resp.confidence_changes.is_empty()
+                {
+                    println!("  (no predicted effects)");
+                } else {
+                    for t in &resp.assertions {
+                        println!("  + {} {} {}", t.subject, t.predicate, t.object);
+                    }
+                    for t in &resp.retractions {
+                        println!("  - {} {} {}", t.subject, t.predicate, t.object);
+                    }
+                    for c in &resp.confidence_changes {
+                        println!(
+                            "  ~ {} {} {} (delta: {:+.2})",
+                            c.subject, c.predicate, c.object, c.delta,
+                        );
+                    }
+                }
+            }
+            CausalAction::Applicable => {
+                let applicable = client.causal_applicable().into_diagnostic()?;
+                if applicable.is_empty() {
+                    println!("No applicable actions in current state.");
+                } else {
+                    println!("Applicable actions ({}):", applicable.len());
+                    for s in &applicable {
+                        println!(
+                            "  {} (success: {:.0}%, runs: {})",
+                            s.name,
+                            s.success_rate * 100.0,
+                            s.execution_count,
+                        );
+                    }
+                }
+            }
+            CausalAction::Bootstrap => {
+                let resp = client.causal_bootstrap().into_diagnostic()?;
+                println!(
+                    "Bootstrapped {} new schema(s) from {} tool(s).",
+                    resp.schemas_created, resp.tools_scanned,
+                );
+            }
+        },
+
+        // ── Awaken ────────────────────────────────────────────────────────
+        Commands::Awaken { action } => match action {
+            AwakenAction::Parse { statement } => {
+                let req = api_types::AwakenParseRequest { statement };
+                let resp = client.awaken_parse(&req).into_diagnostic()?;
+                println!("Parsed bootstrap intent:");
+                println!("  Domain:      {}", resp.domain);
+                println!("  Competence:  {}", resp.competence_level);
+                println!("  Seeds:       {:?}", resp.seed_concepts);
+                if let Some(ref name) = resp.identity_name {
+                    let id_type = resp.identity_type.as_deref().unwrap_or("unknown");
+                    println!("  Identity:    {} ({})", name, id_type);
+                } else {
+                    println!("  Identity:    (none)");
+                }
+            }
+            AwakenAction::Resolve { name } => {
+                let req = api_types::AwakenResolveRequest { name };
+                let resp = client.awaken_resolve(&req).into_diagnostic()?;
+                println!("Resolved identity: {}", resp.name);
+                println!("  Type:        {}", resp.entity_type);
+                println!("  Culture:     {}", resp.culture);
+                println!("  Description: {}", resp.description);
+                println!("  Domains:     {:?}", resp.domains);
+                println!("  Traits:      {:?}", resp.traits);
+                println!("  Archetypes:  {:?}", resp.archetypes);
+                if let Some(ref chosen) = resp.chosen_name {
+                    println!("\nRitual of Awakening complete!");
+                    println!("  Chosen name: {chosen}");
+                }
+                if let Some(ref persona) = resp.persona {
+                    println!("  Persona:     {persona}");
+                }
+            }
+            AwakenAction::Status => {
+                let resp: serde_json::Value =
+                    client.awaken_status().into_diagnostic()?;
+                let awakened = resp["awakened"].as_bool().unwrap_or(false);
+                if !awakened {
+                    println!("No psyche loaded. Run `akh awaken resolve <name>` to awaken.");
+                } else if let Some(psyche) = resp.get("psyche") {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(psyche).unwrap_or_default()
+                    );
+                }
+            }
+            AwakenAction::Expand {
+                seeds,
+                purpose,
+                threshold,
+                max_concepts,
+                no_conceptnet,
+            } => {
+                let req = api_types::AwakenExpandRequest {
+                    seeds,
+                    purpose,
+                    threshold,
+                    max_concepts,
+                    no_conceptnet,
+                };
+                let resp = client.awaken_expand(&req).into_diagnostic()?;
+                println!("\nDomain expansion complete!");
+                println!("  Concepts created: {}", resp.concept_count);
+                println!("  Relations added:  {}", resp.relation_count);
+                println!("  Rejected:         {}", resp.rejected_count);
+                println!("  API calls:        {}", resp.api_calls);
+                if !resp.accepted_labels.is_empty() {
+                    println!("\n  Accepted concepts:");
+                    for (i, label) in resp.accepted_labels.iter().enumerate().take(20) {
+                        println!("    {}: {label}", i + 1);
+                    }
+                    if resp.accepted_labels.len() > 20 {
+                        println!(
+                            "    ... and {} more",
+                            resp.accepted_labels.len() - 20
+                        );
+                    }
+                }
+            }
+            AwakenAction::Prerequisite {
+                seeds,
+                purpose,
+                known_threshold,
+                zpd_low,
+                zpd_high,
+            } => {
+                let req = api_types::AwakenPrerequisiteRequest {
+                    seeds,
+                    purpose,
+                    known_threshold,
+                    zpd_low,
+                    zpd_high,
+                };
+                let resp = client.awaken_prerequisite(&req).into_diagnostic()?;
+                println!("\nPrerequisite analysis complete!");
+                println!("  Concepts analyzed: {}", resp.concepts_analyzed);
+                println!("  Prerequisite edges: {}", resp.edge_count);
+                println!("  Cycles broken: {}", resp.cycles_broken);
+                println!("  Max tier: {}", resp.max_tier);
+                println!("\n  ZPD Distribution:");
+                for (zone, count) in &resp.zone_distribution {
+                    println!("    {zone}: {count}");
+                }
+                if !resp.curriculum.is_empty() {
+                    println!("\n  Curriculum (learning order):");
+                    for (i, entry) in resp.curriculum.iter().enumerate().take(30) {
+                        println!(
+                            "    {:3}. [tier {}] ({}) {} (coverage: {:.2}, sim: {:.2})",
+                            i + 1,
+                            entry.tier,
+                            entry.zone,
+                            entry.label,
+                            entry.prereq_coverage,
+                            entry.similarity_to_known,
+                        );
+                    }
+                    if resp.curriculum.len() > 30 {
+                        println!(
+                            "    ... and {} more",
+                            resp.curriculum.len() - 30
+                        );
+                    }
+                }
+            }
+            AwakenAction::Resources {
+                seeds,
+                purpose,
+                min_quality,
+                max_api_calls,
+                no_semantic_scholar,
+                no_openalex,
+                no_open_library,
+            } => {
+                let req = api_types::AwakenResourcesRequest {
+                    seeds,
+                    purpose,
+                    min_quality,
+                    max_api_calls,
+                    no_semantic_scholar,
+                    no_openalex,
+                    no_open_library,
+                };
+                let resp = client.awaken_resources(&req).into_diagnostic()?;
+                println!("\nResource discovery complete!");
+                println!("  Resources found: {}", resp.resources_discovered);
+                println!("  API calls made: {}", resp.api_calls_used);
+                println!("  Concepts searched: {}", resp.concepts_covered);
+            }
+            AwakenAction::Ingest {
+                seeds,
+                purpose,
+                max_cycles,
+                saturation,
+                xval_boost,
+                no_url,
+                catalog_dir,
+            } => {
+                let req = api_types::AwakenIngestRequest {
+                    seeds,
+                    purpose,
+                    max_cycles,
+                    saturation,
+                    xval_boost,
+                    no_url,
+                    catalog_dir,
+                };
+                let resp = client.awaken_ingest(&req).into_diagnostic()?;
+                println!("\nCurriculum ingestion complete!");
+                println!("  Triples created: {}", resp.triples_added);
+                println!("  Concepts covered: {}", resp.concepts_covered);
+                println!("  Cycles used: {}", resp.cycles_used);
+            }
+            AwakenAction::Assess {
+                seeds,
+                purpose,
+                min_triples,
+                bloom_depth,
+                verbose,
+            } => {
+                let req = api_types::AwakenAssessRequest {
+                    seeds,
+                    purpose,
+                    min_triples,
+                    bloom_depth,
+                    verbose,
+                };
+                let resp = client.awaken_assess(&req).into_diagnostic()?;
+                println!("\nCompetence Assessment Report");
+                println!("============================");
+                println!("  Overall Dreyfus level: {}", resp.overall_dreyfus);
+                println!("  Overall score:         {:.2}", resp.overall_score);
+                println!("  Recommendation:        {}", resp.recommendation);
+                if verbose && !resp.knowledge_areas.is_empty() {
+                    println!("\n  Per-area breakdown:");
+                    for ka in &resp.knowledge_areas {
+                        println!(
+                            "    {} ({}) score: {:.2}",
+                            ka.name, ka.dreyfus_level, ka.score,
+                        );
+                    }
+                }
+            }
+            AwakenAction::Bootstrap {
+                statement,
+                plan_only,
+                resume,
+                status,
+                max_cycles,
+                identity,
+            } => {
+                let req = api_types::AwakenBootstrapRequest {
+                    statement,
+                    plan_only,
+                    resume,
+                    status,
+                    max_cycles,
+                    identity,
+                };
+                let resp = client.awaken_bootstrap(&req).into_diagnostic()?;
+                println!("\nBootstrap Result");
+                println!("================");
+                println!("  Domain:          {}", resp.domain);
+                println!("  Target level:    {}", resp.target_level);
+                if let Some(ref name) = resp.chosen_name {
+                    println!("  Chosen name:     {name}");
+                }
+                println!("  Learning cycles: {}", resp.learning_cycles);
+                println!("  Target reached:  {}", resp.target_reached);
+                if let Some(ref dreyfus) = resp.final_dreyfus {
+                    println!("  Final Dreyfus:   {dreyfus}");
+                }
+                if let Some(score) = resp.final_score {
+                    println!("  Final score:     {score:.2}");
+                }
+                if let Some(ref rec) = resp.recommendation {
+                    println!("  Recommendation:  {rec}");
+                }
+            }
+        },
+
+        // ── Chat ──────────────────────────────────────────────────────────
+        Commands::Chat { skill: _, headless } => {
+            if headless {
+                miette::bail!(
+                    "Headless chat is not available in client-only mode.\n\
+                     Use TUI mode (without --headless) to connect to akhomed."
+                );
+            }
+            #[cfg(feature = "daemon")]
+            {
+                let paths = xdg_paths.ok_or_else(|| {
+                    miette::miette!("Cannot resolve XDG paths. Set HOME environment variable.")
+                })?;
+                let server_info = akh_medu::client::discover_server(&paths).ok_or_else(|| {
+                    miette::miette!("No running akhomed server found.")
+                })?;
+                eprintln!("Connecting to akhomed at {}...", server_info.base_url());
+                return akh_medu::tui::launch_remote(&cli.workspace, &server_info);
+            }
+            #[cfg(not(feature = "daemon"))]
+            miette::bail!(
+                "TUI requires --features daemon. Build with: cargo build --features client-only,daemon"
+            );
+        }
+
+        // ── Library ───────────────────────────────────────────────────────
+        Commands::Library { action } => {
+            // Remote client ignores library_dir — pass a dummy path.
+            let library_dir = xdg_paths
+                .as_ref()
+                .map(|p| p.library_dir())
+                .unwrap_or_default();
+
+            match action {
+                LibraryAction::Add {
+                    source,
+                    title,
+                    tags,
+                    format,
+                } => {
+                    let tag_list: Vec<String> = tags
+                        .map(|t| t.split(',').map(|s| s.trim().to_string()).collect())
+                        .unwrap_or_default();
+                    let req = akh_medu::library::LibraryAddRequest {
+                        source,
+                        title,
+                        tags: tag_list,
+                        format,
+                    };
+                    let result = client.library_add(&library_dir, &req).into_diagnostic()?;
+                    println!("Ingested: {}", result.title);
+                    println!("  ID:       {}", result.id);
+                    println!("  Format:   {}", result.format);
+                    println!("  Chunks:   {}", result.chunk_count);
+                    println!("  Triples:  {}", result.triple_count);
+                    println!("  Concepts: {}", result.concept_count);
+                }
+                LibraryAction::List => {
+                    let docs = client.library_list(&library_dir).into_diagnostic()?;
+                    if docs.is_empty() {
+                        println!(
+                            "Library is empty. Add a document with: akh library add <file-or-url>"
+                        );
+                    } else {
+                        println!(
+                            "{:<30} {:<20} {:<8} {:<8} Tags",
+                            "ID", "Title", "Format", "Chunks"
+                        );
+                        println!("{}", "-".repeat(80));
+                        for doc in &docs {
+                            let title_short = if doc.title.len() > 18 {
+                                format!("{}...", &doc.title[..18])
+                            } else {
+                                doc.title.clone()
+                            };
+                            println!(
+                                "{:<30} {:<20} {:<8} {:<8} {}",
+                                doc.id,
+                                title_short,
+                                doc.format,
+                                doc.chunk_count,
+                                doc.tags.join(", "),
+                            );
+                        }
+                        println!("\nTotal: {} document(s)", docs.len());
+                    }
+                }
+                LibraryAction::Search { query, top_k } => {
+                    let results = client.library_search(&query, top_k).into_diagnostic()?;
+                    if results.is_empty() {
+                        println!("No matching content found for: \"{query}\"");
+                    } else {
+                        println!("Search results for \"{query}\":");
+                        println!("{:<8} {:<10} Symbol", "Rank", "Sim");
+                        println!("{}", "-".repeat(60));
+                        for r in &results {
+                            println!(
+                                "{:<8} {:<10.4} {}",
+                                r.rank, r.similarity, r.symbol_label,
+                            );
+                        }
+                    }
+                }
+                LibraryAction::Remove { id } => {
+                    let removed = client.library_remove(&library_dir, &id).into_diagnostic()?;
+                    println!("Removed: {} (\"{}\")", removed.id, removed.title);
+                }
+                LibraryAction::Info { id } => {
+                    let doc = client.library_info(&library_dir, &id).into_diagnostic()?;
+                    println!("Document: {}", doc.title);
+                    println!("  ID:       {}", doc.id);
+                    println!("  Format:   {}", doc.format);
+                    println!("  Source:   {}", doc.source);
+                    println!("  Chunks:   {}", doc.chunk_count);
+                    println!("  Triples:  {}", doc.triple_count);
+                    println!(
+                        "  Tags:     {}",
+                        if doc.tags.is_empty() {
+                            "(none)".to_string()
+                        } else {
+                            doc.tags.join(", ")
+                        }
+                    );
+                    println!("  Ingested: {} (unix timestamp)", doc.ingested_at);
+                }
+                LibraryAction::Watch { .. } => {
+                    miette::bail!(
+                        "Library watch requires a local engine. Run without --features client-only."
+                    );
+                }
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// Print agent REPL status line.
+#[cfg(not(feature = "client-only"))]
 fn print_repl_status(agent: &Agent, engine: &Engine) {
     println!(
         "  cycle: {}, WM: {}/{}, goals: {} active / {} total",
@@ -3790,6 +5020,7 @@ fn print_repl_status(agent: &Agent, engine: &Engine) {
     }
 }
 
+#[cfg(not(feature = "client-only"))]
 fn print_bootstrap_checkpoints(checkpoints: &[akh_medu::bootstrap::Checkpoint]) {
     use akh_medu::bootstrap::Checkpoint;
     for cp in checkpoints {
@@ -3831,6 +5062,7 @@ fn print_bootstrap_checkpoints(checkpoints: &[akh_medu::bootstrap::Checkpoint]) 
     }
 }
 
+#[cfg(not(feature = "client-only"))]
 fn print_bootstrap_result(result: &akh_medu::bootstrap::OrchestrationResult) {
     println!("\nBootstrap Result");
     println!("================");

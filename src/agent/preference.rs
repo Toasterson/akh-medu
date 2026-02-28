@@ -312,7 +312,7 @@ impl Default for PreferenceProfile {
 // ═══════════════════════════════════════════════════════════════════════
 
 /// A proactive suggestion surfaced by JITIR or serendipity.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Suggestion {
     /// The entity being suggested.
     pub entity: SymbolId,
@@ -329,7 +329,7 @@ pub struct Suggestion {
 }
 
 /// Result of a JITIR (Just-in-Time Information Retrieval) query.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct JitirResult {
     /// Directly relevant matches from HNSW / KG.
     pub direct_matches: Vec<Suggestion>,

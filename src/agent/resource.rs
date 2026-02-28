@@ -71,7 +71,7 @@ pub struct EffortCase {
 }
 
 /// Estimated effort for a goal, derived from similar past cases.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct EffortEstimate {
     /// Predicted number of OODA cycles to completion.
     pub estimated_cycles: u32,

@@ -304,7 +304,7 @@ impl BootstrapSession {
 // ── Checkpoint ──────────────────────────────────────────────────────────
 
 /// Operator-visible checkpoints emitted during orchestration.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum Checkpoint {
     /// Purpose statement parsed into a structured intent.
     PurposeParsed {
@@ -334,7 +334,7 @@ pub enum Checkpoint {
 // ── Orchestration Result ────────────────────────────────────────────────
 
 /// Final result of a bootstrap orchestration run.
-#[derive(Debug)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct OrchestrationResult {
     pub intent: BootstrapIntent,
     pub chosen_name: Option<String>,

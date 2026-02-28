@@ -154,7 +154,7 @@ struct CompetencyQuestion {
 }
 
 /// Assessment of a single knowledge area (group of concepts at similar tiers).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct KnowledgeAreaAssessment {
     /// Name of this knowledge area (derived from concept labels).
     pub name: String,
@@ -177,7 +177,7 @@ pub struct KnowledgeAreaAssessment {
 }
 
 /// Individual score components for transparency.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ScoreComponents {
     pub coverage: f32,
     pub connectivity: f32,
@@ -187,7 +187,7 @@ pub struct ScoreComponents {
 }
 
 /// What should the akh do after assessment?
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum BootstrapRecommendation {
     /// Knowledge is sufficient for the target Dreyfus level.
     Ready,
@@ -221,7 +221,7 @@ impl std::fmt::Display for BootstrapRecommendation {
 }
 
 /// Full competence assessment report.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CompetenceReport {
     /// Overall estimated Dreyfus level.
     pub overall_dreyfus: DreyfusLevel,
