@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
 use miette::IntoDiagnostic;
 
 use crate::agent::{Agent, AgentConfig, IdleScheduler, InboundHandle};
@@ -134,6 +134,10 @@ impl AkhTui {
 
         let mut terminal = ratatui::init();
 
+        // Enable mouse capture for scroll wheel support.
+        crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture)
+            .into_diagnostic()?;
+
         loop {
             // Drain pending messages from backend.
             self.drain_backend_messages();
@@ -163,11 +167,24 @@ impl AkhTui {
 
             // Poll for events.
             if event::poll(Duration::from_millis(100)).into_diagnostic()? {
-                if let Event::Key(key) = event::read().into_diagnostic()? {
-                    if key.kind != KeyEventKind::Press {
-                        continue;
+                match event::read().into_diagnostic()? {
+                    Event::Key(key) => {
+                        if key.kind != KeyEventKind::Press {
+                            continue;
+                        }
+                        self.handle_key(key.code, key.modifiers);
                     }
-                    self.handle_key(key.code, key.modifiers);
+                    Event::Mouse(mouse) => match mouse.kind {
+                        MouseEventKind::ScrollUp => {
+                            self.scroll_offset = self.scroll_offset.saturating_sub(3);
+                        }
+                        MouseEventKind::ScrollDown => {
+                            self.scroll_offset = (self.scroll_offset + 3)
+                                .min(self.messages.len().saturating_sub(1));
+                        }
+                        _ => {}
+                    },
+                    _ => {}
                 }
             } else {
                 self.on_idle();
@@ -175,6 +192,9 @@ impl AkhTui {
         }
 
         self.on_exit()?;
+
+        // Disable mouse capture before restoring terminal.
+        let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
 
         ratatui::restore();
         Ok(())
@@ -321,8 +341,13 @@ impl AkhTui {
             }
         }
 
-        // Auto-scroll to bottom.
-        self.scroll_offset = self.messages.len().saturating_sub(1);
+        // Auto-scroll to bottom only if user was already near the bottom
+        // (within 5 messages). This preserves the scroll position when reading
+        // older messages and typing a new question.
+        let at_bottom = self.scroll_offset + 5 >= self.messages.len().saturating_sub(1);
+        if at_bottom {
+            self.scroll_offset = self.messages.len().saturating_sub(1);
+        }
     }
 
     /// Drain all pending inbound messages from the agent's channel registry

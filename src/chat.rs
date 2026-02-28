@@ -557,6 +557,8 @@ impl ChatProcessor {
         description: &str,
         grammar: &str,
     ) {
+        let wm_before = agent.working_memory().len();
+
         match agent.add_goal(description, 128, "User-directed goal") {
             Ok(id) => {
                 msgs.push(AkhMessage::system(format!(
@@ -579,8 +581,19 @@ impl ChatProcessor {
                         break;
                     }
                 }
-                // Synthesize findings.
-                let summary = agent.synthesize_findings_with_grammar(description, grammar);
+                // Synthesize only from entries added during this goal's cycles.
+                let all_entries = agent.working_memory().entries();
+                let new_entries = if wm_before < all_entries.len() {
+                    &all_entries[wm_before..]
+                } else {
+                    &[]
+                };
+                let summary = crate::agent::synthesize::synthesize_with_grammar(
+                    description,
+                    new_entries,
+                    agent.engine(),
+                    grammar,
+                );
                 Self::push_summary(msgs, &summary, grammar);
             }
             Err(e) => {
@@ -870,6 +883,9 @@ impl ChatProcessor {
     }
 
     /// Escalate unresolved input to a goal, run OODA cycles, and synthesize findings.
+    ///
+    /// Only synthesizes from working memory entries added during the escalation
+    /// cycles, avoiding stale entries from previous goals or sessions.
     fn escalate_to_goal(
         &self,
         msgs: &mut Vec<AkhMessage>,
@@ -881,6 +897,9 @@ impl ChatProcessor {
         msgs.push(AkhMessage::system(format!(
             "{display_prefix} Investigating..."
         )));
+
+        // Snapshot WM size before adding the goal so we can scope synthesis.
+        let wm_before = agent.working_memory().len();
 
         let goal_id = match agent.add_goal(
             &format!("investigate: {description}"),
@@ -919,7 +938,19 @@ impl ChatProcessor {
             }
         }
 
-        let summary = agent.synthesize_findings_with_grammar(description, grammar);
+        // Synthesize only from entries added during this escalation.
+        let all_entries = agent.working_memory().entries();
+        let new_entries = if wm_before < all_entries.len() {
+            &all_entries[wm_before..]
+        } else {
+            &[]
+        };
+        let summary = crate::agent::synthesize::synthesize_with_grammar(
+            description,
+            new_entries,
+            agent.engine(),
+            grammar,
+        );
         Self::push_summary(msgs, &summary, grammar);
     }
 
