@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{Path, State, WebSocketUpgrade};
@@ -3509,7 +3509,7 @@ async fn main() {
         // WebSocket.
         .route("/ws/{ws_name}", get(ws_handler))
         .layer(CorsLayer::permissive())
-        .with_state(state);
+        .with_state(Arc::clone(&state));
 
     tracing::info!("akhomed listening on {addr}");
 
@@ -3519,6 +3519,7 @@ async fn main() {
 
     // Serve with graceful shutdown on SIGTERM/SIGINT.
     let paths_for_shutdown = paths.clone();
+    let state_for_shutdown = state;
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {
             let ctrl_c = tokio::signal::ctrl_c();
@@ -3536,7 +3537,21 @@ async fn main() {
             {
                 ctrl_c.await.ok();
             }
-            tracing::info!("akhomed shutting down");
+            tracing::info!("akhomed shutting down — draining workspace daemons");
+
+            // Signal all workspace daemons to stop, then join with timeout.
+            let mut daemons = state_for_shutdown.daemons.write().await;
+            for (name, daemon) in daemons.drain() {
+                tracing::info!(workspace = %name, "stopping workspace daemon");
+                let _ = daemon.shutdown_tx.send(true);
+                match tokio::time::timeout(Duration::from_secs(5), daemon.handle).await {
+                    Ok(Ok(())) => tracing::info!(workspace = %name, "daemon stopped cleanly"),
+                    Ok(Err(e)) => tracing::warn!(workspace = %name, error = %e, "daemon task panicked"),
+                    Err(_) => tracing::warn!(workspace = %name, "daemon did not stop within 5s, abandoning"),
+                }
+            }
+            drop(daemons);
+
             akh_medu::client::remove_pid_file(&paths_for_shutdown);
         })
         .await

@@ -66,6 +66,7 @@ rand = "0.8"
 # TUI
 ratatui = "0.29"
 crossterm = "0.28"
+signal-hook = "0.3"
 
 # Infrastructure
 tracing = "0.1"

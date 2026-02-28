@@ -222,12 +222,26 @@ impl AgentDaemon {
         Ok(())
     }
 
-    /// Wait for either the external shutdown receiver or Ctrl+C.
+    /// Wait for either the external shutdown receiver, Ctrl+C, or SIGTERM.
     async fn wait_for_shutdown(&mut self) {
         if let Some(ref mut rx) = self.shutdown {
             let _ = rx.changed().await;
         } else {
-            tokio::signal::ctrl_c().await.ok();
+            let ctrl_c = tokio::signal::ctrl_c();
+            #[cfg(unix)]
+            {
+                let mut sigterm =
+                    tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                        .expect("failed to register SIGTERM handler");
+                tokio::select! {
+                    _ = ctrl_c => {},
+                    _ = sigterm.recv() => {},
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                ctrl_c.await.ok();
+            }
         }
     }
 

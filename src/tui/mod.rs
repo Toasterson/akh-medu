@@ -12,6 +12,7 @@ pub mod sink;
 pub mod widgets;
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
@@ -128,6 +129,16 @@ impl AkhTui {
 
     /// Run the TUI event loop.
     pub fn run(&mut self) -> miette::Result<()> {
+        // Register SIGTERM handler so `kill <pid>` triggers a clean exit
+        // (terminal restore + session persist) instead of leaving raw mode.
+        let sigterm_flag = Arc::new(AtomicBool::new(false));
+        #[cfg(unix)]
+        {
+            use signal_hook::consts::SIGTERM;
+            signal_hook::flag::register(SIGTERM, Arc::clone(&sigterm_flag))
+                .into_diagnostic()?;
+        }
+
         let mut terminal = ratatui::init();
 
         loop {
@@ -152,7 +163,7 @@ impl AkhTui {
                 })
                 .into_diagnostic()?;
 
-            if self.should_quit {
+            if self.should_quit || sigterm_flag.load(Ordering::Relaxed) {
                 break;
             }
 
