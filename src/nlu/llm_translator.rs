@@ -39,7 +39,10 @@ pub const ABSTREE_GBNF: &str = include_str!("abstree.gbnf");
 pub struct LlmTranslator {
     /// The loaded LLM model.
     #[cfg(feature = "nlu-llm")]
-    model: llama_cpp_2::LlamaModel,
+    model: llama_cpp_2::model::LlamaModel,
+    /// The llama.cpp backend handle (must outlive model usage).
+    #[cfg(feature = "nlu-llm")]
+    backend: llama_cpp_2::llama_backend::LlamaBackend,
     /// Maximum tokens to generate per translation.
     max_tokens: u32,
     /// Path to the model file (for diagnostics).
@@ -66,14 +69,22 @@ impl LlmTranslator {
     /// or `NluError::ModelLoadFailed` if loading fails.
     #[cfg(feature = "nlu-llm")]
     pub fn load(model_path: &Path) -> NluResult<Self> {
+        use llama_cpp_2::llama_backend::LlamaBackend;
+        use llama_cpp_2::model::LlamaModel;
+        use llama_cpp_2::model::params::LlamaModelParams;
+
         if !model_path.exists() {
             return Err(NluError::ModelNotFound {
                 path: model_path.to_path_buf(),
             });
         }
 
-        let params = llama_cpp_2::LlamaParams::default();
-        let model = llama_cpp_2::LlamaModel::load_from_file(model_path, &params).map_err(|e| {
+        let backend = LlamaBackend::init().map_err(|e| NluError::ModelLoadFailed {
+            reason: format!("LlamaBackend init: {e}"),
+        })?;
+
+        let params = LlamaModelParams::default();
+        let model = LlamaModel::load_from_file(&backend, model_path, &params).map_err(|e| {
             NluError::ModelLoadFailed {
                 reason: format!("GGUF model load: {e}"),
             }
@@ -81,6 +92,7 @@ impl LlmTranslator {
 
         Ok(Self {
             model,
+            backend,
             max_tokens: 512,
             _model_path: model_path.to_path_buf(),
         })
@@ -111,7 +123,10 @@ impl LlmTranslator {
     /// Generates constrained JSON via GBNF grammar, then deserializes.
     #[cfg(feature = "nlu-llm")]
     pub fn translate(&self, input: &str) -> NluResult<LlmTranslation> {
-        use llama_cpp_2::LlamaContextParams;
+        use llama_cpp_2::context::params::LlamaContextParams;
+        use llama_cpp_2::llama_batch::LlamaBatch;
+        use llama_cpp_2::model::AddBos;
+        use llama_cpp_2::token::LlamaToken;
 
         let prompt = build_prompt(input);
 
@@ -119,7 +134,7 @@ impl LlmTranslator {
         let ctx_params = LlamaContextParams::default();
         let mut ctx = self
             .model
-            .new_context(&ctx_params)
+            .new_context(&self.backend, ctx_params)
             .map_err(|e| NluError::LlmGenerationFailed {
                 reason: format!("Context creation: {e}"),
             })?;
@@ -127,13 +142,13 @@ impl LlmTranslator {
         // Tokenize the prompt
         let tokens = self
             .model
-            .str_to_token(&prompt, llama_cpp_2::AddBos::Always)
+            .str_to_token(&prompt, AddBos::Always)
             .map_err(|e| NluError::LlmGenerationFailed {
                 reason: format!("Tokenization: {e}"),
             })?;
 
         // Feed prompt tokens
-        let mut batch = llama_cpp_2::LlamaBatch::new(tokens.len().max(512));
+        let mut batch = LlamaBatch::new(tokens.len().max(512), 1);
         for (i, &token) in tokens.iter().enumerate() {
             let is_last = i == tokens.len() - 1;
             batch
@@ -157,12 +172,12 @@ impl LlmTranslator {
             let logits = ctx.get_logits_ith((batch.n_tokens() - 1) as i32);
 
             // Greedy: pick highest logit
-            let mut best_token = llama_cpp_2::LlamaToken(0);
+            let mut best_token = LlamaToken(0);
             let mut best_logit = f32::NEG_INFINITY;
             for (i, &logit) in logits.iter().enumerate() {
                 if logit > best_logit {
                     best_logit = logit;
-                    best_token = llama_cpp_2::LlamaToken(i as i32);
+                    best_token = LlamaToken(i as i32);
                 }
             }
 
@@ -191,7 +206,7 @@ impl LlmTranslator {
         // Detokenize output
         let json: String = output_tokens
             .iter()
-            .filter_map(|t| self.model.token_to_str(*t).ok())
+            .filter_map(|t| self.model.token_to_str(*t, llama_cpp_2::model::Special::Plaintext).ok())
             .collect();
 
         let tree = parse_abstree_json(&json)?;
