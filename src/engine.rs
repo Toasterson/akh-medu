@@ -147,6 +147,7 @@ pub struct Engine {
     temporal_registry: RwLock<crate::temporal::TemporalRegistry>,
     constraint_registry: RwLock<crate::graph::arity::ConstraintRegistry>,
     functional_predicates: RwLock<crate::graph::contradiction::FunctionalPredicates>,
+    multi_valued_predicates: RwLock<crate::graph::contradiction::MultiValuedPredicates>,
     disjointness_constraints: RwLock<crate::graph::contradiction::DisjointnessConstraints>,
     skolem_registry: RwLock<crate::skolem::SkolemRegistry>,
     nart_registry: RwLock<crate::graph::nart::NartRegistry>,
@@ -306,6 +307,7 @@ impl Engine {
             temporal_registry: RwLock::new(crate::temporal::TemporalRegistry::new()),
             constraint_registry: RwLock::new(crate::graph::arity::ConstraintRegistry::new()),
             functional_predicates: RwLock::new(crate::graph::contradiction::FunctionalPredicates::new()),
+            multi_valued_predicates: RwLock::new(crate::graph::contradiction::MultiValuedPredicates::new()),
             disjointness_constraints: RwLock::new(crate::graph::contradiction::DisjointnessConstraints::new()),
             skolem_registry: RwLock::new(crate::skolem::SkolemRegistry::new()),
             nart_registry: RwLock::new(crate::graph::nart::NartRegistry::new()),
@@ -464,8 +466,9 @@ impl Engine {
             let func = self.functional_predicates.read().unwrap();
             let disj = self.disjointness_constraints.read().unwrap();
             let temp = self.temporal_registry.read().unwrap();
+            let mv = self.multi_valued_predicates.read().unwrap();
             let contradictions = crate::graph::contradiction::check_contradictions(
-                self, triple, &func, &disj, Some(&temp),
+                self, triple, &func, &disj, Some(&temp), Some(&mv),
             );
 
             if !contradictions.is_empty() {
@@ -2110,6 +2113,16 @@ impl Engine {
         self.disjointness_constraints.write().unwrap()
     }
 
+    /// Get a read lock on the multi-valued predicates set.
+    pub fn multi_valued_preds(&self) -> std::sync::RwLockReadGuard<'_, crate::graph::contradiction::MultiValuedPredicates> {
+        self.multi_valued_predicates.read().unwrap()
+    }
+
+    /// Get a write lock on the multi-valued predicates set.
+    pub fn multi_valued_preds_mut(&self) -> std::sync::RwLockWriteGuard<'_, crate::graph::contradiction::MultiValuedPredicates> {
+        self.multi_valued_predicates.write().unwrap()
+    }
+
     /// Check a triple for contradictions using the engine's stored registries.
     pub fn check_contradictions(
         &self,
@@ -2118,12 +2131,14 @@ impl Engine {
         let func = self.functional_predicates.read().unwrap();
         let disj = self.disjointness_constraints.read().unwrap();
         let temp = self.temporal_registry.read().unwrap();
+        let mv = self.multi_valued_predicates.read().unwrap();
         crate::graph::contradiction::check_contradictions(
             self,
             incoming,
             &func,
             &disj,
             Some(&temp),
+            Some(&mv),
         )
     }
 
@@ -2376,6 +2391,7 @@ impl Engine {
         self.store.put_meta(b"phase9:temporal", &enc(&*self.temporal_registry.read().unwrap())?)?;
         self.store.put_meta(b"phase9:constraints", &enc(&*self.constraint_registry.read().unwrap())?)?;
         self.store.put_meta(b"phase9:functional", &enc(&*self.functional_predicates.read().unwrap())?)?;
+        self.store.put_meta(b"phase9:multi_valued", &enc(&*self.multi_valued_predicates.read().unwrap())?)?;
         self.store.put_meta(b"phase9:disjointness", &enc(&*self.disjointness_constraints.read().unwrap())?)?;
         self.store.put_meta(b"phase9:skolem", &enc(&*self.skolem_registry.read().unwrap())?)?;
         self.store.put_meta(b"phase9:nart", &enc(&*self.nart_registry.read().unwrap())?)?;
@@ -2410,6 +2426,11 @@ impl Engine {
             && let Ok(fp) = bincode::deserialize(&bytes)
         {
             *self.functional_predicates.write().unwrap() = fp;
+        }
+        if let Some(bytes) = load(b"phase9:multi_valued")
+            && let Ok(mv) = bincode::deserialize(&bytes)
+        {
+            *self.multi_valued_predicates.write().unwrap() = mv;
         }
         if let Some(bytes) = load(b"phase9:disjointness")
             && let Ok(dc) = bincode::deserialize(&bytes)

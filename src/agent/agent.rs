@@ -504,6 +504,17 @@ impl Agent {
             tracing::warn!("failed to init style manager predicates: {e}");
         }
 
+        // Register multi-valued agent predicates so temporal conflict detection
+        // doesn't flag natural one-to-many relations (e.g. episode learns many things).
+        {
+            let mut mv = agent.engine.multi_valued_preds_mut();
+            mv.declare_multi_valued(agent.predicates.learned);
+            mv.declare_multi_valued(agent.predicates.has_tag);
+            mv.declare_multi_valued(agent.predicates.child_goal);
+            mv.declare_multi_valued(agent.predicates.has_criteria);
+            mv.declare_multi_valued(agent.predicates.blocked_by);
+        }
+
         // Initialize causal manager (Phase 15a): try restoring persisted
         // schemas first so a fresh Agent picks up bootstrapped schemas.
         if let Ok(restored) = super::causal::CausalManager::restore(&agent.engine) {
@@ -2624,6 +2635,17 @@ impl Agent {
         // Initialize interlocutor predicates.
         if let Err(e) = agent.interlocutor_registry.init_predicates(&agent.engine) {
             tracing::warn!("failed to init interlocutor predicates on resume: {e}");
+        }
+
+        // Register multi-valued agent predicates (idempotent — safe even when
+        // the set was already restored from the durable store).
+        {
+            let mut mv = agent.engine.multi_valued_preds_mut();
+            mv.declare_multi_valued(agent.predicates.learned);
+            mv.declare_multi_valued(agent.predicates.has_tag);
+            mv.declare_multi_valued(agent.predicates.child_goal);
+            mv.declare_multi_valued(agent.predicates.has_criteria);
+            mv.declare_multi_valued(agent.predicates.blocked_by);
         }
 
         // Restore KG dialogue state into ConversationState.

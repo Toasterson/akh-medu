@@ -485,7 +485,7 @@ impl ConstraintChecker {
             };
 
             let contradictions = crate::graph::contradiction::check_contradictions(
-                engine, &triple, &func_preds, &disjointness, None,
+                engine, &triple, &func_preds, &disjointness, None, None,
             );
 
             for c in contradictions {

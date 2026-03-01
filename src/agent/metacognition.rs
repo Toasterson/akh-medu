@@ -174,14 +174,30 @@ impl CompetenceModel {
     }
 
     /// Store per-tool success rates as KG triples for SPARQL queryability.
+    ///
+    /// Removes any previous rate triple for each tool before inserting the
+    /// updated value, preventing stale `(tool:X, agent:success_rate, rate:old)`
+    /// triples from accumulating and triggering temporal conflict warnings.
     pub fn store_competence_triples(
         &self,
         engine: &Engine,
         success_rate_pred: SymbolId,
     ) -> AgentResult<()> {
+        let kg = engine.knowledge_graph();
         for (tool_name, record) in &self.tools {
             let rate = (record.successes as f32 + 1.0) / (record.attempts as f32 + 2.0);
             let tool_sym = engine.resolve_or_create_entity(&format!("tool:{tool_name}"))?;
+
+            // Remove old rate triples for this tool before inserting the new one.
+            let old_triples: Vec<_> = kg
+                .triples_from(tool_sym)
+                .into_iter()
+                .filter(|t| t.predicate == success_rate_pred)
+                .collect();
+            for old in &old_triples {
+                let _ = kg.remove_triple(old.subject, old.predicate, old.object);
+            }
+
             let rate_sym =
                 engine.resolve_or_create_entity(&format!("rate:{rate:.4}"))?;
             let _ = engine.add_triple(&Triple::new(tool_sym, success_rate_pred, rate_sym));

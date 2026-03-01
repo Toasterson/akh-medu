@@ -171,6 +171,46 @@ impl FunctionalPredicates {
     }
 }
 
+// ─── Multi-valued predicates ─────────────────────────────────────────────────
+
+/// Set of predicates declared as multi-valued (one-to-many).
+///
+/// Multi-valued predicates naturally have multiple objects for the same
+/// subject (e.g. `agent:learned` — an episode learns many things).
+/// These are excluded from temporal conflict detection, which would
+/// otherwise flag every new object as conflicting with existing ones.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MultiValuedPredicates {
+    predicates: HashSet<SymbolId>,
+}
+
+impl MultiValuedPredicates {
+    /// Create an empty set.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Declare a predicate as multi-valued.
+    pub fn declare_multi_valued(&mut self, predicate: SymbolId) {
+        self.predicates.insert(predicate);
+    }
+
+    /// Check if a predicate is multi-valued.
+    pub fn is_multi_valued(&self, predicate: SymbolId) -> bool {
+        self.predicates.contains(&predicate)
+    }
+
+    /// Number of declared multi-valued predicates.
+    pub fn len(&self) -> usize {
+        self.predicates.len()
+    }
+
+    /// Whether no multi-valued predicates are declared.
+    pub fn is_empty(&self) -> bool {
+        self.predicates.is_empty()
+    }
+}
+
 /// Set of disjointness constraints.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DisjointnessConstraints {
@@ -216,6 +256,7 @@ pub fn check_contradictions(
     functional_preds: &FunctionalPredicates,
     disjointness: &DisjointnessConstraints,
     temporal_registry: Option<&TemporalRegistry>,
+    multi_valued: Option<&MultiValuedPredicates>,
 ) -> Vec<Contradiction> {
     let mut contradictions = Vec::new();
 
@@ -278,8 +319,13 @@ pub fn check_contradictions(
         }
     }
 
-    // 3. Temporal conflict check
-    if let Some(temp_reg) = temporal_registry {
+    // 3. Temporal conflict check — skipped for multi-valued predicates.
+    let is_multi = multi_valued
+        .map(|mv| mv.is_multi_valued(incoming.predicate))
+        .unwrap_or(false);
+    if !is_multi
+        && let Some(temp_reg) = temporal_registry
+    {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -383,7 +429,7 @@ mod tests {
         // Try to add Alice spouse Charlie — functional violation
         let incoming = Triple::new(alice.id, spouse.id, charlie.id);
         let contradictions =
-            check_contradictions(&engine, &incoming, &func, &disjoint, None);
+            check_contradictions(&engine, &incoming, &func, &disjoint, None, None);
 
         assert_eq!(contradictions.len(), 1);
         assert!(matches!(
@@ -417,6 +463,7 @@ mod tests {
             &func,
             &DisjointnessConstraints::new(),
             None,
+            None,
         );
         assert!(contradictions.is_empty());
     }
@@ -445,6 +492,7 @@ mod tests {
             &incoming,
             &FunctionalPredicates::new(),
             &disjoint,
+            None,
             None,
         );
 
@@ -477,6 +525,7 @@ mod tests {
             &incoming,
             &FunctionalPredicates::new(),
             &disjoint,
+            None,
             None,
         );
         assert!(contradictions.is_empty());
@@ -519,6 +568,7 @@ mod tests {
             &FunctionalPredicates::new(),
             &DisjointnessConstraints::new(),
             Some(&temp_reg),
+            None,
         );
 
         assert_eq!(contradictions.len(), 1);
@@ -559,6 +609,7 @@ mod tests {
             &FunctionalPredicates::new(),
             &DisjointnessConstraints::new(),
             Some(&temp_reg),
+            None,
         );
 
         // The existing triple is expired, so no temporal conflict
@@ -580,6 +631,7 @@ mod tests {
             &FunctionalPredicates::new(),
             &DisjointnessConstraints::new(),
             None,
+            None,
         );
         assert!(contradictions.is_empty());
     }
@@ -591,6 +643,83 @@ mod tests {
         fp.declare_functional(SymbolId::new(1).unwrap());
         assert_eq!(fp.len(), 1);
         assert!(!fp.is_empty());
+    }
+
+    #[test]
+    fn multi_valued_skips_temporal_conflict() {
+        let engine = Engine::new(EngineConfig::default()).unwrap();
+
+        let ep = engine.create_symbol(SymbolKind::Entity, "episode:1").unwrap();
+        let sym_a = engine.create_symbol(SymbolKind::Entity, "concept:A").unwrap();
+        let sym_b = engine.create_symbol(SymbolKind::Entity, "concept:B").unwrap();
+        let learned = engine
+            .create_symbol(SymbolKind::Relation, "agent:learned")
+            .unwrap();
+
+        // episode:1 learned concept:A (existing)
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let mut existing = Triple::new(ep.id, learned.id, sym_a.id);
+        existing.timestamp = now - 10;
+        engine.add_triple(&existing).unwrap();
+
+        let mut temp_reg = TemporalRegistry::new();
+        temp_reg
+            .set_profile(
+                learned.id,
+                crate::temporal::TemporalProfile::Ephemeral { ttl_secs: 3600 },
+            )
+            .unwrap();
+
+        // Declare agent:learned as multi-valued.
+        let mut mv = MultiValuedPredicates::new();
+        mv.declare_multi_valued(learned.id);
+
+        // Adding episode:1 learned concept:B should NOT trigger temporal conflict.
+        let incoming = Triple::new(ep.id, learned.id, sym_b.id);
+        let contradictions = check_contradictions(
+            &engine,
+            &incoming,
+            &FunctionalPredicates::new(),
+            &DisjointnessConstraints::new(),
+            Some(&temp_reg),
+            Some(&mv),
+        );
+
+        assert!(
+            contradictions.is_empty(),
+            "multi-valued predicate should not trigger temporal conflict"
+        );
+
+        // Without multi-valued flag, same scenario DOES trigger temporal conflict.
+        let contradictions_no_mv = check_contradictions(
+            &engine,
+            &incoming,
+            &FunctionalPredicates::new(),
+            &DisjointnessConstraints::new(),
+            Some(&temp_reg),
+            None,
+        );
+
+        assert_eq!(contradictions_no_mv.len(), 1);
+        assert!(matches!(
+            contradictions_no_mv[0].kind,
+            ContradictionKind::TemporalConflict { .. }
+        ));
+    }
+
+    #[test]
+    fn multi_valued_predicates_len() {
+        let mut mv = MultiValuedPredicates::new();
+        assert!(mv.is_empty());
+        mv.declare_multi_valued(SymbolId::new(1).unwrap());
+        assert_eq!(mv.len(), 1);
+        assert!(!mv.is_empty());
+        assert!(mv.is_multi_valued(SymbolId::new(1).unwrap()));
+        assert!(!mv.is_multi_valued(SymbolId::new(2).unwrap()));
     }
 
     #[test]
