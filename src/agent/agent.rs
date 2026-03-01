@@ -520,7 +520,11 @@ impl Agent {
                     mv.declare_multi_valued(sym);
                 }
             }
-            for label in &["doc:mentions", "doc:has_keyword", "doc:has_tag"] {
+            for label in &[
+                "doc:mentions", "doc:has_keyword", "doc:has_tag",
+                "doc:has_chapter", "doc:has_section", "doc:has_paragraph",
+                "doc:has_author",
+            ] {
                 if let Ok(sym) = agent.engine.resolve_or_create_relation(label) {
                     mv.declare_multi_valued(sym);
                 }
@@ -2664,7 +2668,11 @@ impl Agent {
                     mv.declare_multi_valued(sym);
                 }
             }
-            for label in &["doc:mentions", "doc:has_keyword", "doc:has_tag"] {
+            for label in &[
+                "doc:mentions", "doc:has_keyword", "doc:has_tag",
+                "doc:has_chapter", "doc:has_section", "doc:has_paragraph",
+                "doc:has_author",
+            ] {
                 if let Ok(sym) = agent.engine.resolve_or_create_relation(label) {
                     mv.declare_multi_valued(sym);
                 }
