@@ -10,7 +10,7 @@
 //! same `AgentDaemon`, so every background task added here automatically works
 //! in both deployment modes.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use super::Agent;
@@ -96,8 +96,13 @@ impl Default for DaemonConfig {
 // ---------------------------------------------------------------------------
 
 /// Long-running daemon that schedules background learning tasks.
+///
+/// The agent is shared via `Arc<Mutex<Agent>>` so that HTTP handlers,
+/// WebSocket sessions, and the daemon all operate on the same agent
+/// instance. Each daemon method locks briefly, does synchronous work,
+/// and releases — near-zero contention since ticks are 15s–2h apart.
 pub struct AgentDaemon {
-    agent: Agent,
+    agent: Arc<Mutex<Agent>>,
     config: DaemonConfig,
     total_cycles: usize,
     /// Optional external shutdown signal (replaces Ctrl+C when set).
@@ -110,8 +115,8 @@ pub struct AgentDaemon {
 }
 
 impl AgentDaemon {
-    /// Create a new daemon wrapping the given agent.
-    pub fn new(agent: Agent, config: DaemonConfig) -> Self {
+    /// Create a new daemon wrapping the given shared agent.
+    pub fn new(agent: Arc<Mutex<Agent>>, config: DaemonConfig) -> Self {
         Self {
             agent,
             config,
@@ -154,7 +159,7 @@ impl AgentDaemon {
         let mut sleep_tick = interval(self.config.sleep_cycle_interval);
         let mut trigger_tick = interval(self.config.trigger_evaluation_interval);
 
-        self.agent.sink().emit(&AkhMessage::system(
+        self.agent.lock().unwrap().sink().emit(&AkhMessage::system(
             "daemon started — background learning active",
         ));
 
@@ -189,7 +194,7 @@ impl AgentDaemon {
                 _ = idle_cycle_tick.tick() => {
                     self.run_idle_cycle();
                     if self.config.max_cycles > 0 && self.total_cycles >= self.config.max_cycles {
-                        self.agent.sink().emit(&AkhMessage::system(format!(
+                        self.agent.lock().unwrap().sink().emit(&AkhMessage::system(format!(
                             "daemon: max cycles ({}) reached, shutting down",
                             self.config.max_cycles,
                         )));
@@ -209,7 +214,7 @@ impl AgentDaemon {
                     self.run_trigger_evaluation();
                 }
                 _ = self.wait_for_shutdown() => {
-                    self.agent.sink().emit(&AkhMessage::system(
+                    self.agent.lock().unwrap().sink().emit(&AkhMessage::system(
                         "daemon: received shutdown signal, persisting session...",
                     ));
                     break;
@@ -225,6 +230,8 @@ impl AgentDaemon {
             st.running = false;
         }
         self.agent
+            .lock()
+            .unwrap()
             .sink()
             .emit(&AkhMessage::system("daemon stopped"));
         Ok(())
@@ -258,10 +265,11 @@ impl AgentDaemon {
     // -----------------------------------------------------------------------
 
     fn run_equivalence_learning(&mut self) {
-        match self.agent.engine().learn_equivalences() {
+        let agent = self.agent.lock().unwrap();
+        match agent.engine().learn_equivalences() {
             Ok(count) => {
                 if count > 0 {
-                    self.agent.sink().emit(&AkhMessage::system(format!(
+                    agent.sink().emit(&AkhMessage::system(format!(
                         "[daemon:equivalence] {count} new equivalences discovered",
                     )));
                 }
@@ -274,7 +282,8 @@ impl AgentDaemon {
     }
 
     fn run_reflection(&mut self) {
-        match self.agent.reflect() {
+        let mut agent = self.agent.lock().unwrap();
+        match agent.reflect() {
             Ok(result) => {
                 let adj_count = result.adjustments.len();
                 // Auto-apply safe priority adjustments.
@@ -290,9 +299,9 @@ impl AgentDaemon {
                     })
                     .cloned()
                     .collect();
-                let applied = self.agent.apply_adjustments(&safe).unwrap_or(0);
+                let applied = agent.apply_adjustments(&safe).unwrap_or(0);
                 if adj_count > 0 {
-                    self.agent.sink().emit(&AkhMessage::system(format!(
+                    agent.sink().emit(&AkhMessage::system(format!(
                         "[daemon:reflection] {adj_count} insights, {applied} adjustments applied",
                     )));
                 }
@@ -305,15 +314,16 @@ impl AgentDaemon {
     }
 
     fn run_consolidation_check(&mut self) {
-        let wm_len = self.agent.working_memory().len();
-        let threshold = self.agent.config.consolidation.auto_consolidate_at;
+        let mut agent = self.agent.lock().unwrap();
+        let wm_len = agent.working_memory().len();
+        let threshold = agent.config.consolidation.auto_consolidate_at;
         if wm_len < threshold {
             return;
         }
 
-        match self.agent.consolidate() {
+        match agent.consolidate() {
             Ok(result) => {
-                self.agent.sink().emit(&AkhMessage::system(format!(
+                agent.sink().emit(&AkhMessage::system(format!(
                     "[daemon:consolidation] {} entries evicted, {} episodes stored",
                     result.entries_evicted,
                     result.episodes_created.len(),
@@ -331,13 +341,14 @@ impl AgentDaemon {
     }
 
     fn run_schema_discovery(&self) {
+        let agent = self.agent.lock().unwrap();
         let config = crate::autonomous::schema::SchemaDiscoveryConfig::default();
-        match self.agent.engine().discover_schema(config) {
+        match agent.engine().discover_schema(config) {
             Ok(result) => {
                 let types = result.types.len();
                 let hierarchies = result.relation_hierarchies.len();
                 if types > 0 || hierarchies > 0 {
-                    self.agent.sink().emit(&AkhMessage::system(format!(
+                    agent.sink().emit(&AkhMessage::system(format!(
                         "[daemon:schema] discovered {types} types, {hierarchies} relation hierarchies",
                     )));
                 }
@@ -350,12 +361,13 @@ impl AgentDaemon {
     }
 
     fn run_rule_inference(&self) {
+        let agent = self.agent.lock().unwrap();
         let config = crate::autonomous::rule_engine::RuleEngineConfig::default();
-        match self.agent.engine().run_rules(config) {
+        match agent.engine().run_rules(config) {
             Ok(result) => {
                 let derived_count = result.derived.len();
                 if derived_count > 0 {
-                    self.agent.sink().emit(&AkhMessage::system(format!(
+                    agent.sink().emit(&AkhMessage::system(format!(
                         "[daemon:rules] {} new triples from {} iterations",
                         derived_count, result.iterations,
                     )));
@@ -375,18 +387,19 @@ impl AgentDaemon {
     fn run_gap_analysis(&self) {
         use super::goal;
 
-        let active = goal::active_goals(self.agent.goals());
+        let agent = self.agent.lock().unwrap();
+        let active = goal::active_goals(agent.goals());
         if active.is_empty() {
             return;
         }
 
         let goal_ids: Vec<_> = active.iter().map(|g| g.symbol_id).collect();
         let config = crate::autonomous::gap::GapAnalysisConfig::default();
-        match self.agent.engine().analyze_gaps(&goal_ids, config) {
+        match agent.engine().analyze_gaps(&goal_ids, config) {
             Ok(result) => {
                 let gaps = result.gaps.len();
                 if gaps > 0 {
-                    self.agent.sink().emit(&AkhMessage::system(format!(
+                    agent.sink().emit(&AkhMessage::system(format!(
                         "[daemon:gaps] {gaps} knowledge gaps identified around active goals",
                     )));
                 }
@@ -399,14 +412,17 @@ impl AgentDaemon {
     }
 
     fn run_continuous_learning(&self) {
+        let agent = self.agent.lock().unwrap();
+        // Reborrow through the guard so partial field access works.
+        let agent_ref: &Agent = &agent;
         let config = super::continuous_learning::ContinuousLearningConfig::default();
         match super::continuous_learning::run_continuous_learning(
-            &self.agent.engine,
-            &self.agent.curiosity_config,
+            &agent_ref.engine,
+            &agent_ref.curiosity_config,
             &config,
         ) {
             Ok(result) => {
-                self.agent.sink().emit(&AkhMessage::system(format!(
+                agent.sink().emit(&AkhMessage::system(format!(
                     "[daemon:learning] {} targets, {} resources, {} ingested, Dreyfus: {}",
                     result.targets_found,
                     result.resources_discovered,
@@ -433,21 +449,25 @@ impl AgentDaemon {
     }
 
     fn run_goal_generation(&mut self) {
-        match self.agent.generate_goals() {
+        let mut agent = self.agent.lock().unwrap();
+        match agent.generate_goals() {
             Ok(result) => {
                 let activated = result.activated.len();
                 let dormant = result.dormant.len();
                 if activated > 0 || dormant > 0 {
-                    self.agent.sink().emit(&AkhMessage::system(format!(
+                    agent.sink().emit(&AkhMessage::system(format!(
                         "[daemon:goals] {activated} activated, {dormant} dormant",
                     )));
                 }
                 tracing::info!(activated, dormant, "daemon: goal generation complete");
+                // Read goal count while agent is locked, then update status.
+                let goal_count = super::goal::active_goals(agent.goals()).len();
+                drop(agent); // Release agent lock before status lock.
                 if let Some(ref status) = self.status
                     && let Ok(mut st) = status.try_lock()
                 {
                     st.last_goal_gen_at = Some(now_secs());
-                    st.active_goals = super::goal::active_goals(self.agent.goals()).len();
+                    st.active_goals = goal_count;
                 }
             }
             Err(e) => tracing::debug!(error = %e, "daemon: goal generation skipped"),
@@ -455,14 +475,17 @@ impl AgentDaemon {
     }
 
     fn run_sleep_cycle(&mut self) {
+        let mut guard = self.agent.lock().unwrap();
+        // Explicit reborrow so the borrow checker can see partial field access.
+        let agent: &mut Agent = &mut *guard;
         match super::sleep::run_sleep_cycle(
-            &self.agent.engine,
-            &self.agent.working_memory,
-            &mut self.agent.sleep_cycle,
-            self.agent.cycle_count,
+            &agent.engine,
+            &agent.working_memory,
+            &mut agent.sleep_cycle,
+            agent.cycle_count,
         ) {
             Ok(metrics) => {
-                self.agent.sink().emit(&AkhMessage::system(format!(
+                agent.sink().emit(&AkhMessage::system(format!(
                     "[daemon:sleep] replayed {}, merged {}, pruned {}, dream {}",
                     metrics.episodes_replayed,
                     metrics.duplicates_merged,
@@ -470,6 +493,7 @@ impl AgentDaemon {
                     metrics.dream_connections_found,
                 )));
                 tracing::info!(?metrics, "daemon: sleep cycle complete");
+                drop(guard); // Release agent lock before status lock.
                 if let Some(ref status) = self.status
                     && let Ok(mut st) = status.try_lock()
                 {
@@ -483,9 +507,11 @@ impl AgentDaemon {
     fn run_trigger_evaluation(&mut self) {
         use super::trigger::{self as trigger_mod, TriggerStore};
 
-        // Collect triggers first so the immutable borrow on engine is released
-        // before we need &mut self.agent for execute_trigger.
-        let triggers = TriggerStore::new(&self.agent.engine).list();
+        let mut guard = self.agent.lock().unwrap();
+        // Explicit reborrow for partial field access.
+        let agent: &mut Agent = &mut *guard;
+
+        let triggers = TriggerStore::new(&agent.engine).list();
         if triggers.is_empty() {
             return;
         }
@@ -496,25 +522,26 @@ impl AgentDaemon {
             .unwrap_or_default()
             .as_secs();
 
-        // Collect which triggers should fire (needs &self.agent immutably).
+        // Collect which triggers should fire (immutable access).
         let to_fire: Vec<usize> = triggers
             .iter()
             .enumerate()
-            .filter(|(_, t)| trigger_mod::should_fire(t, &self.agent, now))
+            .filter(|(_, t)| trigger_mod::should_fire(t, agent, now))
             .map(|(i, _)| i)
             .collect();
 
-        // Execute and update last-fired (needs &mut self.agent).
+        // Execute and update last-fired (mutable access).
         for idx in to_fire {
             let trigger = &triggers[idx];
-            match trigger_mod::execute_trigger(trigger, &mut self.agent) {
+            match trigger_mod::execute_trigger(trigger, agent) {
                 Ok(msg) => tracing::info!("{msg}"),
                 Err(e) => tracing::warn!(error = %e, "trigger execution failed"),
             }
-            TriggerStore::new(&self.agent.engine).update_last_fired(&trigger.id, now);
+            TriggerStore::new(&agent.engine).update_last_fired(&trigger.id, now);
         }
 
         // Sync trigger count in shared status.
+        drop(guard); // Release agent lock before status lock.
         if let Some(ref status) = self.status
             && let Ok(mut st) = status.try_lock()
         {
@@ -525,20 +552,15 @@ impl AgentDaemon {
     fn run_idle_cycle(&mut self) {
         use super::goal;
 
-        if goal::active_goals(self.agent.goals()).is_empty() {
+        let mut agent = self.agent.lock().unwrap();
+        if goal::active_goals(agent.goals()).is_empty() {
             return;
         }
 
-        match self.agent.run_cycle() {
+        match agent.run_cycle() {
             Ok(result) => {
                 self.total_cycles += 1;
-                // Sync status for real-time HTTP monitoring.
-                if let Some(ref status) = self.status
-                    && let Ok(mut st) = status.try_lock()
-                {
-                    st.total_cycles = self.total_cycles;
-                }
-                self.agent.sink().emit(&AkhMessage::system(format!(
+                agent.sink().emit(&AkhMessage::system(format!(
                     "[daemon:cycle] tool={}, success={}",
                     result.decision.chosen_tool, result.action_result.tool_output.success,
                 )));
@@ -547,6 +569,13 @@ impl AgentDaemon {
                     cycle = self.total_cycles,
                     "daemon: OODA cycle complete",
                 );
+                drop(agent); // Release agent lock before status lock.
+                // Sync status for real-time HTTP monitoring.
+                if let Some(ref status) = self.status
+                    && let Ok(mut st) = status.try_lock()
+                {
+                    st.total_cycles = self.total_cycles;
+                }
             }
             Err(e) => {
                 tracing::warn!(error = %e, "daemon: OODA cycle failed");
@@ -555,10 +584,12 @@ impl AgentDaemon {
     }
 
     fn persist(&self) {
-        if let Err(e) = self.agent.persist_session() {
+        let agent = self.agent.lock().unwrap();
+        if let Err(e) = agent.persist_session() {
             tracing::warn!(error = %e, "daemon: session persist failed");
         } else {
             tracing::debug!("daemon: session persisted");
+            drop(agent); // Release agent lock before status lock.
             if let Some(ref status) = self.status
                 && let Ok(mut st) = status.try_lock()
             {
