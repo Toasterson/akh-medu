@@ -488,6 +488,184 @@ async fn ingest_triples(
     }
 }
 
+async fn ingest_csv_handler(
+    State(state): State<Arc<ServerState>>,
+    Path(ws_name): Path<String>,
+    Json(req): Json<akh_medu::api_types::CsvIngestRequest>,
+) -> Result<Json<akh_medu::api_types::IngestResponse>, (StatusCode, String)> {
+    let engine = state.get_engine(&ws_name).await?;
+    let result = tokio::task::spawn_blocking(move || -> Result<_, String> {
+        use akh_medu::agent::tool::{Tool, ToolInput};
+        use akh_medu::agent::tools::CsvIngestTool;
+
+        // Write content to a temp file so CsvIngestTool can read it.
+        let tmp = std::env::temp_dir().join(format!("akh-csv-{}.csv", std::process::id()));
+        std::fs::write(&tmp, &req.content)
+            .map_err(|e| format!("failed to write temp CSV: {e}"))?;
+
+        let input = ToolInput::new()
+            .with_param("path", tmp.to_str().unwrap_or(""))
+            .with_param("format", &req.format);
+
+        let tool = CsvIngestTool;
+        let output = tool.execute(&engine, input).map_err(|e| format!("{e}"))?;
+
+        let _ = std::fs::remove_file(&tmp);
+        let _ = engine.persist();
+
+        Ok(akh_medu::api_types::IngestResponse {
+            success: output.success,
+            message: output.result,
+        })
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?
+    .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    Ok(Json(result))
+}
+
+async fn ingest_text_handler(
+    State(state): State<Arc<ServerState>>,
+    Path(ws_name): Path<String>,
+    Json(req): Json<akh_medu::api_types::TextIngestRequest>,
+) -> Result<Json<akh_medu::api_types::IngestResponse>, (StatusCode, String)> {
+    let engine = state.get_engine(&ws_name).await?;
+    let result = tokio::task::spawn_blocking(move || -> Result<_, String> {
+        use akh_medu::agent::tool::{Tool, ToolInput};
+        use akh_medu::agent::tools::TextIngestTool;
+
+        let input = ToolInput::new()
+            .with_param("text", &req.text)
+            .with_param("max_sentences", req.max_sentences.to_string());
+
+        let tool = TextIngestTool;
+        let output = tool.execute(&engine, input).map_err(|e| format!("{e}"))?;
+
+        let _ = engine.persist();
+
+        Ok(akh_medu::api_types::IngestResponse {
+            success: output.success,
+            message: output.result,
+        })
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?
+    .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    Ok(Json(result))
+}
+
+#[cfg(feature = "calendar")]
+async fn cal_sync_handler(
+    State(state): State<Arc<ServerState>>,
+    Path(ws_name): Path<String>,
+    Json(req): Json<akh_medu::api_types::CalSyncRequest>,
+) -> Result<Json<akh_medu::api_types::CalImportResponse>, (StatusCode, String)> {
+    let engine = state.get_engine(&ws_name).await?;
+    let result = tokio::task::spawn_blocking(move || -> Result<_, String> {
+        let mut agent = create_agent(&engine)?;
+        let imported = akh_medu::agent::calendar::sync_caldav(
+            agent.calendar_manager_mut(),
+            &engine,
+            &req.url,
+            &req.user,
+            &req.pass,
+        )
+        .map_err(|e| format!("{e}"))?;
+        let _ = agent.persist_session();
+        Ok(akh_medu::api_types::CalImportResponse {
+            imported_count: imported.len(),
+        })
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?
+    .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    Ok(Json(result))
+}
+
+#[cfg(not(feature = "calendar"))]
+async fn cal_sync_handler(
+    _state: State<Arc<ServerState>>,
+    _ws_name: Path<String>,
+    _req: Json<akh_medu::api_types::CalSyncRequest>,
+) -> Result<Json<akh_medu::api_types::CalImportResponse>, (StatusCode, String)> {
+    Err((
+        StatusCode::NOT_IMPLEMENTED,
+        "CalDAV sync requires --features calendar".into(),
+    ))
+}
+
+async fn library_scan_handler(
+    State(state): State<Arc<ServerState>>,
+    Path(ws_name): Path<String>,
+    Json(req): Json<akh_medu::api_types::LibraryScanRequest>,
+) -> Result<Json<akh_medu::api_types::LibraryScanResponse>, (StatusCode, String)> {
+    let engine = state.get_engine(&ws_name).await?;
+    let paths = state.paths.clone();
+    let result = tokio::task::spawn_blocking(move || -> Result<_, String> {
+        use akh_medu::library::catalog::LibraryCatalog;
+        use akh_medu::library::ingest::{IngestConfig, ingest_file};
+
+        let inbox_dir = req
+            .inbox_dir
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| paths.library_inbox());
+        let library_dir = paths.library_dir();
+        let done_dir = inbox_dir.join("done");
+
+        // Ensure directories exist.
+        let _ = std::fs::create_dir_all(&inbox_dir);
+        let _ = std::fs::create_dir_all(&done_dir);
+
+        let entries = std::fs::read_dir(&inbox_dir)
+            .map_err(|e| format!("cannot read inbox {}: {e}", inbox_dir.display()))?;
+
+        let mut catalog = LibraryCatalog::open(&library_dir)
+            .map_err(|e| format!("cannot open library catalog: {e}"))?;
+
+        let mut processed = 0usize;
+        let mut failed = 0usize;
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                continue;
+            }
+            if path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with('.'))
+            {
+                continue;
+            }
+
+            match ingest_file(&engine, &mut catalog, &path, IngestConfig::default(), None) {
+                Ok(_result) => {
+                    // Move to done/.
+                    if let Some(filename) = path.file_name() {
+                        let _ = std::fs::rename(&path, done_dir.join(filename));
+                    }
+                    processed += 1;
+                }
+                Err(e) => {
+                    tracing::warn!(path = %path.display(), error = %e, "library scan: ingest failed");
+                    failed += 1;
+                }
+            }
+        }
+
+        let _ = engine.persist();
+
+        Ok(akh_medu::api_types::LibraryScanResponse {
+            files_processed: processed,
+            files_failed: failed,
+        })
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?
+    .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    Ok(Json(result))
+}
+
 // ── Query & reasoning handlers ──────────────────────────────────────────
 
 #[derive(Deserialize)]
@@ -3012,6 +3190,14 @@ async fn main() {
             get(triples_to),
         )
         .route("/workspaces/{ws_name}/ingest", post(ingest_triples))
+        .route(
+            "/workspaces/{ws_name}/ingest/csv",
+            post(ingest_csv_handler),
+        )
+        .route(
+            "/workspaces/{ws_name}/ingest/text",
+            post(ingest_text_handler),
+        )
         // Query & reasoning.
         .route("/workspaces/{ws_name}/sparql", post(sparql_query))
         .route("/workspaces/{ws_name}/infer", post(infer_handler))
@@ -3055,10 +3241,14 @@ async fn main() {
             "/workspaces/{ws_name}/library",
             get(library_list_handler).post(library_add_handler),
         )
-        // Static /search before wildcard /{doc_id}.
+        // Static routes before wildcard /{doc_id}.
         .route(
             "/workspaces/{ws_name}/library/search",
             post(library_search_handler),
+        )
+        .route(
+            "/workspaces/{ws_name}/library/scan",
+            post(library_scan_handler),
         )
         .route(
             "/workspaces/{ws_name}/library/{doc_id}",
@@ -3261,6 +3451,10 @@ async fn main() {
         .route(
             "/workspaces/{ws_name}/cal/import",
             post(cal_import_handler),
+        )
+        .route(
+            "/workspaces/{ws_name}/cal/sync",
+            post(cal_sync_handler),
         )
         // Awaken (extends existing /awaken/status).
         .route(

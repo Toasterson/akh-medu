@@ -1297,6 +1297,46 @@ impl AkhClient {
         self.post_json("/cal/import", req)
     }
 
+    /// Sync a CalDAV calendar. Requires akhomed with calendar feature.
+    pub fn cal_sync(
+        &self,
+        req: &crate::api_types::CalSyncRequest,
+    ) -> ClientResult<crate::api_types::CalImportResponse> {
+        self.post_json("/cal/sync", req)
+    }
+
+    // -----------------------------------------------------------------------
+    // Ingest (CSV / Text — remote-only)
+    // -----------------------------------------------------------------------
+
+    /// Ingest CSV content (SPO or entity format). Requires akhomed.
+    pub fn ingest_csv(
+        &self,
+        req: &crate::api_types::CsvIngestRequest,
+    ) -> ClientResult<crate::api_types::IngestResponse> {
+        self.post_json("/ingest/csv", req)
+    }
+
+    /// Ingest natural language text (regex triple extraction). Requires akhomed.
+    pub fn ingest_text(
+        &self,
+        req: &crate::api_types::TextIngestRequest,
+    ) -> ClientResult<crate::api_types::IngestResponse> {
+        self.post_json("/ingest/text", req)
+    }
+
+    // -----------------------------------------------------------------------
+    // Library scan (remote-only)
+    // -----------------------------------------------------------------------
+
+    /// Scan the library inbox for new files and ingest them. Requires akhomed.
+    pub fn library_scan(
+        &self,
+        req: &crate::api_types::LibraryScanRequest,
+    ) -> ClientResult<crate::api_types::LibraryScanResponse> {
+        self.post_json("/library/scan", req)
+    }
+
     // -----------------------------------------------------------------------
     // Awaken (remote-only — local uses bootstrap module directly)
     // -----------------------------------------------------------------------

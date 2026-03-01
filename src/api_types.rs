@@ -370,6 +370,65 @@ pub struct CalImportResponse {
     pub imported_count: usize,
 }
 
+/// Request for `POST /workspaces/{ws}/cal/sync`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CalSyncRequest {
+    pub url: String,
+    pub user: String,
+    pub pass: String,
+}
+
+// ── Ingest ───────────────────────────────────────────────────────────────
+
+/// Request for `POST /workspaces/{ws}/ingest/csv`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CsvIngestRequest {
+    /// CSV content as a string.
+    pub content: String,
+    /// Format: "spo" (default) or "entity".
+    #[serde(default = "default_csv_format")]
+    pub format: String,
+}
+
+fn default_csv_format() -> String {
+    "spo".into()
+}
+
+/// Request for `POST /workspaces/{ws}/ingest/text`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TextIngestRequest {
+    /// Natural language text to extract triples from.
+    pub text: String,
+    /// Maximum sentences to process (default: 100).
+    #[serde(default = "default_max_sentences")]
+    pub max_sentences: usize,
+}
+
+fn default_max_sentences() -> usize {
+    100
+}
+
+/// Generic ingest response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IngestResponse {
+    pub success: bool,
+    pub message: String,
+}
+
+/// Request for `POST /workspaces/{ws}/library/scan`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LibraryScanRequest {
+    /// Optional inbox directory override. Uses default if not provided.
+    pub inbox_dir: Option<String>,
+}
+
+/// Response for `POST /workspaces/{ws}/library/scan`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LibraryScanResponse {
+    pub files_processed: usize,
+    pub files_failed: usize,
+}
+
 // ── Awaken ────────────────────────────────────────────────────────────────
 
 /// Request for `POST /workspaces/{ws}/awaken/parse`.

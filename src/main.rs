@@ -3842,8 +3842,8 @@ fn run_client_only(cli: Cli) -> Result<()> {
         Commands::Ingest {
             file,
             format,
-            csv_format: _,
-            max_sentences: _,
+            csv_format,
+            max_sentences,
         } => match format {
             IngestFormat::Json => {
                 let content = std::fs::read_to_string(&file).into_diagnostic()?;
@@ -3892,16 +3892,26 @@ fn run_client_only(cli: Cli) -> Result<()> {
                 }
             }
             IngestFormat::Csv => {
-                miette::bail!(
-                    "CSV ingest requires a local engine. Start akhomed and re-run without --features client-only,\n\
-                     or convert to JSON label format first."
-                );
+                let content = std::fs::read_to_string(&file).into_diagnostic()?;
+                let csv_format_str = match csv_format {
+                    CsvFormat::Spo => "spo",
+                    CsvFormat::Entity => "entity",
+                };
+                let req = akh_medu::api_types::CsvIngestRequest {
+                    content,
+                    format: csv_format_str.into(),
+                };
+                let resp = client.ingest_csv(&req).into_diagnostic()?;
+                println!("{}", resp.message);
             }
             IngestFormat::Text => {
-                miette::bail!(
-                    "Text ingest requires a local engine. Start akhomed and re-run without --features client-only,\n\
-                     or convert to JSON label format first."
-                );
+                let content = std::fs::read_to_string(&file).into_diagnostic()?;
+                let req = akh_medu::api_types::TextIngestRequest {
+                    text: content,
+                    max_sentences,
+                };
+                let resp = client.ingest_text(&req).into_diagnostic()?;
+                println!("{}", resp.message);
             }
         },
 
@@ -4407,10 +4417,10 @@ fn run_client_only(cli: Cli) -> Result<()> {
                     file.display()
                 );
             }
-            CalAction::Sync { .. } => {
-                miette::bail!(
-                    "CalDAV sync requires a local engine. Run without --features client-only."
-                );
+            CalAction::Sync { url, user, pass } => {
+                let req = akh_medu::api_types::CalSyncRequest { url, user, pass };
+                let resp = client.cal_sync(&req).into_diagnostic()?;
+                println!("CalDAV sync: {} events imported.", resp.imported_count);
             }
         },
 
@@ -4925,9 +4935,15 @@ fn run_client_only(cli: Cli) -> Result<()> {
                     );
                     println!("  Ingested: {} (unix timestamp)", doc.ingested_at);
                 }
-                LibraryAction::Watch { .. } => {
-                    miette::bail!(
-                        "Library watch requires a local engine. Run without --features client-only."
+                LibraryAction::Watch { dir } => {
+                    // One-shot scan via server instead of blocking watch loop.
+                    let req = akh_medu::api_types::LibraryScanRequest {
+                        inbox_dir: dir.map(|d| d.to_string_lossy().into_owned()),
+                    };
+                    let resp = client.library_scan(&req).into_diagnostic()?;
+                    println!(
+                        "Library scan: {} file(s) processed, {} failed.",
+                        resp.files_processed, resp.files_failed
                     );
                 }
             }
