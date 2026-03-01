@@ -506,6 +506,8 @@ impl Agent {
 
         // Register multi-valued agent predicates so temporal conflict detection
         // doesn't flag natural one-to-many relations (e.g. episode learns many things).
+        // Global predicates (child-of, doc:*, ingest:*) are registered in Engine::new()
+        // and LibraryPredicates::init() / IngestionPredicates::init() respectively.
         {
             let mut mv = agent.engine.multi_valued_preds_mut();
             mv.declare_multi_valued(agent.predicates.learned);
@@ -513,22 +515,6 @@ impl Agent {
             mv.declare_multi_valued(agent.predicates.child_goal);
             mv.declare_multi_valued(agent.predicates.has_criteria);
             mv.declare_multi_valued(agent.predicates.blocked_by);
-
-            // Global multi-valued predicates (taxonomy, library).
-            for label in &["child-of", "part-of", "similar-to", "has-a"] {
-                if let Ok(sym) = agent.engine.resolve_or_create_relation(label) {
-                    mv.declare_multi_valued(sym);
-                }
-            }
-            for label in &[
-                "doc:mentions", "doc:has_keyword", "doc:has_tag",
-                "doc:has_chapter", "doc:has_section", "doc:has_paragraph",
-                "doc:has_author",
-            ] {
-                if let Ok(sym) = agent.engine.resolve_or_create_relation(label) {
-                    mv.declare_multi_valued(sym);
-                }
-            }
         }
 
         // Initialize causal manager (Phase 15a): try restoring persisted
@@ -2653,7 +2639,8 @@ impl Agent {
         }
 
         // Register multi-valued agent predicates (idempotent — safe even when
-        // the set was already restored from the durable store).
+        // the set was already restored from the durable store). Global predicates
+        // are handled by Engine::new() and subsystem Predicates::init() methods.
         {
             let mut mv = agent.engine.multi_valued_preds_mut();
             mv.declare_multi_valued(agent.predicates.learned);
@@ -2661,22 +2648,6 @@ impl Agent {
             mv.declare_multi_valued(agent.predicates.child_goal);
             mv.declare_multi_valued(agent.predicates.has_criteria);
             mv.declare_multi_valued(agent.predicates.blocked_by);
-
-            // Global multi-valued predicates (taxonomy, library).
-            for label in &["child-of", "part-of", "similar-to", "has-a"] {
-                if let Ok(sym) = agent.engine.resolve_or_create_relation(label) {
-                    mv.declare_multi_valued(sym);
-                }
-            }
-            for label in &[
-                "doc:mentions", "doc:has_keyword", "doc:has_tag",
-                "doc:has_chapter", "doc:has_section", "doc:has_paragraph",
-                "doc:has_author",
-            ] {
-                if let Ok(sym) = agent.engine.resolve_or_create_relation(label) {
-                    mv.declare_multi_valued(sym);
-                }
-            }
         }
 
         // Restore KG dialogue state into ConversationState.

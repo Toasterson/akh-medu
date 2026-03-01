@@ -38,8 +38,11 @@ pub struct LibraryPredicates {
 
 impl LibraryPredicates {
     /// Resolve or create all 15 well-known doc predicates in the engine.
+    ///
+    /// Also registers structurally multi-valued predicates so that
+    /// temporal-conflict detection doesn't fire for one-to-many relations.
     pub fn init(engine: &Engine) -> AkhResult<Self> {
-        Ok(Self {
+        let preds = Self {
             has_chapter: engine.resolve_or_create_relation("doc:has_chapter")?,
             has_section: engine.resolve_or_create_relation("doc:has_section")?,
             has_paragraph: engine.resolve_or_create_relation("doc:has_paragraph")?,
@@ -55,6 +58,18 @@ impl LibraryPredicates {
             chunk_text: engine.resolve_or_create_relation("doc:chunk_text")?,
             chunk_index: engine.resolve_or_create_relation("doc:chunk_index")?,
             mentions: engine.resolve_or_create_relation("doc:mentions")?,
-        })
+        };
+
+        // Register structurally multi-valued predicates (one-to-many).
+        let mut mv = engine.multi_valued_preds_mut();
+        mv.declare_multi_valued(preds.has_chapter);
+        mv.declare_multi_valued(preds.has_section);
+        mv.declare_multi_valued(preds.has_paragraph);
+        mv.declare_multi_valued(preds.has_author);
+        mv.declare_multi_valued(preds.has_keyword);
+        mv.declare_multi_valued(preds.has_tag);
+        mv.declare_multi_valued(preds.mentions);
+
+        Ok(preds)
     }
 }

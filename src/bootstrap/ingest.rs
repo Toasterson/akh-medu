@@ -129,14 +129,22 @@ struct IngestionPredicates {
 
 impl IngestionPredicates {
     fn init(engine: &Engine) -> IngestionResult<Self> {
-        Ok(Self {
+        let preds = Self {
             ingested_from: engine.resolve_or_create_relation("ingest:ingested_from")?,
             extraction_method: engine.resolve_or_create_relation("ingest:extraction_method")?,
             cross_validation_count: engine
                 .resolve_or_create_relation("ingest:cross_validation_count")?,
             curriculum_tier: engine.resolve_or_create_relation("ingest:curriculum_tier")?,
             ingestion_status: engine.resolve_or_create_relation("ingest:ingestion_status")?,
-        })
+        };
+
+        // A concept can be ingested from multiple resources and extracted
+        // by multiple methods — register these as multi-valued.
+        let mut mv = engine.multi_valued_preds_mut();
+        mv.declare_multi_valued(preds.ingested_from);
+        mv.declare_multi_valued(preds.extraction_method);
+
+        Ok(preds)
     }
 }
 

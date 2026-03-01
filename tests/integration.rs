@@ -715,8 +715,10 @@ fn batch_persist_consistent() {
     let dir = tempfile::TempDir::new().unwrap();
 
     // Phase 1: create symbols and persist.
+    let baseline_count;
     {
         let engine = persistent_engine(dir.path());
+        baseline_count = engine.all_symbols().len();
         for i in 0..20 {
             engine
                 .create_symbol(SymbolKind::Entity, format!("Symbol{i}"))
@@ -729,7 +731,7 @@ fn batch_persist_consistent() {
     {
         let engine = persistent_engine(dir.path());
         let all = engine.all_symbols();
-        assert_eq!(all.len(), 20, "all 20 symbols should survive restart");
+        assert_eq!(all.len(), baseline_count + 20, "all 20 symbols should survive restart");
 
         for i in 0..20 {
             let label = format!("Symbol{i}");
@@ -2574,19 +2576,19 @@ fn hieroglyphic_subgraph() {
     let dog = engine.create_symbol(SymbolKind::Entity, "Dog").unwrap();
     let is_a = engine.create_symbol(SymbolKind::Relation, "is-a").unwrap();
     let animal = engine.create_symbol(SymbolKind::Entity, "Animal").unwrap();
-    let has_a = engine.create_symbol(SymbolKind::Relation, "has-a").unwrap();
+    let has_a = engine.resolve_or_create_relation("has-a").unwrap();
     let legs = engine.create_symbol(SymbolKind::Entity, "Legs").unwrap();
 
     engine
         .add_triple(&Triple::new(dog.id, is_a.id, animal.id))
         .unwrap();
     engine
-        .add_triple(&Triple::new(dog.id, has_a.id, legs.id))
+        .add_triple(&Triple::new(dog.id, has_a, legs.id))
         .unwrap();
 
     let triples = vec![
         Triple::new(dog.id, is_a.id, animal.id),
-        Triple::new(dog.id, has_a.id, legs.id),
+        Triple::new(dog.id, has_a, legs.id),
     ];
 
     let config = akh_medu::glyph::NotationConfig {

@@ -318,6 +318,11 @@ impl Engine {
         // Restore Phase 9 registries from persistent storage if available.
         engine.restore_phase9();
 
+        // Register well-known global multi-valued predicates (taxonomy relations
+        // that naturally have many objects per subject). This must happen after
+        // restore_phase9() so it merges with any previously persisted set.
+        engine.register_builtin_multi_valued();
+
         // Auto-load all discovered compartments (psyche, domain, etc.) so their
         // triples and psyche config are available immediately.
         engine.load_discovered_compartments();
@@ -2121,6 +2126,22 @@ impl Engine {
     /// Get a write lock on the multi-valued predicates set.
     pub fn multi_valued_preds_mut(&self) -> std::sync::RwLockWriteGuard<'_, crate::graph::contradiction::MultiValuedPredicates> {
         self.multi_valued_predicates.write().unwrap()
+    }
+
+    /// Register well-known global multi-valued predicates (taxonomy relations).
+    ///
+    /// Called once during `Engine::new()` after `restore_phase9()`. Idempotent —
+    /// `declare_multi_valued` on an already-registered predicate is a no-op.
+    fn register_builtin_multi_valued(&self) {
+        let labels = [
+            "child-of", "part-of", "similar-to", "has-a", "parent-of",
+        ];
+        let mut mv = self.multi_valued_predicates.write().unwrap();
+        for label in labels {
+            if let Ok(sym) = self.resolve_or_create_relation(label) {
+                mv.declare_multi_valued(sym);
+            }
+        }
     }
 
     /// Check a triple for contradictions using the engine's stored registries.
