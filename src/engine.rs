@@ -2130,15 +2130,19 @@ impl Engine {
 
     /// Register well-known global multi-valued predicates (taxonomy relations).
     ///
-    /// Called once during `Engine::new()` after `restore_phase9()`. Idempotent —
-    /// `declare_multi_valued` on an already-registered predicate is a no-op.
+    /// Called once during `Engine::new()` after `restore_phase9()`. Only registers
+    /// predicates that already exist in the symbol table (from a prior session or
+    /// seed loading) — avoids creating symbols in a fresh engine where tests
+    /// expect an empty symbol space. Subsystem `Predicates::init()` methods
+    /// register their own multi-valued predicates when they resolve/create them.
     fn register_builtin_multi_valued(&self) {
         let labels = [
             "child-of", "part-of", "similar-to", "has-a", "parent-of",
+            "is-a",
         ];
         let mut mv = self.multi_valued_predicates.write().unwrap();
         for label in labels {
-            if let Ok(sym) = self.resolve_or_create_relation(label) {
+            if let Some(sym) = self.registry.lookup(label) {
                 mv.declare_multi_valued(sym);
             }
         }

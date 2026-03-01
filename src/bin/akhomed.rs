@@ -3643,6 +3643,7 @@ async fn main() {
 
             // Signal all workspace daemons to stop, then join with timeout.
             let mut daemons = state_for_shutdown.daemons.write().await;
+            let mut aborted = false;
             for (name, mut daemon) in daemons.drain() {
                 tracing::info!(workspace = %name, "stopping workspace daemon");
                 let _ = daemon.shutdown_tx.send(true);
@@ -3652,12 +3653,21 @@ async fn main() {
                     Err(_) => {
                         tracing::warn!(workspace = %name, "daemon did not stop within 5s, aborting");
                         daemon.handle.abort();
+                        aborted = true;
                     }
                 }
             }
             drop(daemons);
 
             akh_medu::client::remove_pid_file(&paths_for_shutdown);
+
+            // abort() only cancels at .await points. Daemon tasks run sync CPU
+            // work that never yields, so abort alone won't stop them. Force exit
+            // after a short grace period to avoid leaving the process hanging.
+            if aborted {
+                tracing::info!("force-exiting after abort (daemon tasks run sync CPU work)");
+                std::process::exit(0);
+            }
         })
         .await
         .expect("server error");

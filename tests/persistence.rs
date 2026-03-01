@@ -23,10 +23,8 @@ fn symbols_survive_restart() {
     let dir = tempfile::TempDir::new().unwrap();
 
     // First session: create symbols and persist.
-    let baseline_count;
     {
         let engine = persistent_engine(dir.path());
-        baseline_count = engine.all_symbols().len();
         engine.create_symbol(SymbolKind::Entity, "Sun").unwrap();
         engine.create_symbol(SymbolKind::Relation, "is-a").unwrap();
         engine.create_symbol(SymbolKind::Entity, "Star").unwrap();
@@ -36,7 +34,7 @@ fn symbols_survive_restart() {
     // Second session: reopen and verify.
     {
         let engine = persistent_engine(dir.path());
-        assert_eq!(engine.all_symbols().len(), baseline_count + 3);
+        assert_eq!(engine.all_symbols().len(), 3);
 
         let sun_id = engine.lookup_symbol("Sun").unwrap();
         let meta = engine.get_symbol_meta(sun_id).unwrap();

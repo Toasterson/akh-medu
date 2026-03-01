@@ -238,15 +238,15 @@ mod tests {
     #[test]
     fn subgraph_block_format() {
         let (engine, dog, is_a, animal) = setup();
-        let has_a = engine.resolve_or_create_relation("has-a").unwrap();
+        let has_a = engine.create_symbol(SymbolKind::Relation, "has-a").unwrap();
         let legs = engine.create_symbol(SymbolKind::Entity, "Legs").unwrap();
         engine
-            .add_triple(&Triple::new(dog, has_a, legs.id))
+            .add_triple(&Triple::new(dog, has_a.id, legs.id))
             .unwrap();
 
         let triples = vec![
             Triple::new(dog, is_a, animal),
-            Triple::new(dog, has_a, legs.id),
+            Triple::new(dog, has_a.id, legs.id),
         ];
 
         let config = NotationConfig {
