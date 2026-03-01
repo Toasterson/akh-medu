@@ -429,6 +429,26 @@ pub struct LibraryScanResponse {
     pub files_failed: usize,
 }
 
+// ── Compartments ─────────────────────────────────────────────────────────
+
+/// A compartment entry for API responses.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompartmentInfo {
+    pub id: String,
+    pub name: String,
+    pub kind: String,
+    pub description: String,
+    pub state: String,
+    pub triple_count: usize,
+    pub tags: Vec<String>,
+}
+
+/// Response for `GET /workspaces/{ws}/compartments`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompartmentListResponse {
+    pub compartments: Vec<CompartmentInfo>,
+}
+
 // ── Awaken ────────────────────────────────────────────────────────────────
 
 /// Request for `POST /workspaces/{ws}/awaken/parse`.
