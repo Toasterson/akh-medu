@@ -71,7 +71,7 @@ dependencies = [
 
 [[package]]
 name = "akh-medu"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "anndists",
  "axum",
