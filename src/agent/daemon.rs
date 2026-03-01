@@ -472,28 +472,149 @@ impl AgentDaemon {
     }
 
     fn run_goal_generation(&mut self) {
-        let mut agent = self.agent.lock().unwrap();
-        match agent.generate_goals() {
-            Ok(result) => {
-                let activated = result.activated.len();
-                let dormant = result.dormant.len();
-                if activated > 0 || dormant > 0 {
-                    agent.sink().emit(&AkhMessage::system(format!(
-                        "[daemon:goals] {activated} activated, {dormant} dormant",
-                    )));
-                }
-                tracing::info!(activated, dormant, "daemon: goal generation complete");
-                // Read goal count while agent is locked, then update status.
-                let goal_count = super::goal::active_goals(agent.goals()).len();
-                drop(agent); // Release agent lock before status lock.
-                if let Some(ref status) = self.status
-                    && let Ok(mut st) = status.try_lock()
-                {
-                    st.last_goal_gen_at = Some(now_secs());
-                    st.active_goals = goal_count;
-                }
+        // Phase 1: Brief lock — snapshot inputs + update drives (needs &WorkingMemory).
+        let (engine, goals_snapshot, drives_snapshot, gen_config, predicates,
+             cycle_count, impasse, reflection, watch_firings, curiosity_config) = {
+            let mut agent = self.agent.lock().unwrap();
+
+            // Update drives while we hold the lock (needs &WorkingMemory which is !Clone).
+            let goal_symbols: Vec<crate::symbol::SymbolId> =
+                super::goal::active_goals(&agent.goals)
+                    .iter()
+                    .map(|g| g.symbol_id)
+                    .collect();
+            agent.drives.update_with_curiosity(
+                &agent.engine,
+                &agent.working_memory,
+                &goal_symbols,
+                agent.cycle_count,
+                Some(&agent.curiosity_config),
+            );
+
+            (
+                agent.engine.clone(),
+                agent.goals.clone(),
+                agent.drives.clone(),
+                agent.config.goal_generation.clone(),
+                agent.predicates.clone(),
+                agent.cycle_count,
+                agent.last_impasse.clone(),
+                agent.last_reflection.clone(),
+                agent.last_watch_firings.clone(),
+                agent.curiosity_config.clone(),
+            )
+        };
+        // Lock released — HTTP handlers can proceed.
+
+        // Phase 2: Expensive computation (no lock held).
+        let curiosity_proposals = super::curiosity::compute_directed_curiosity(
+            &engine,
+            &curiosity_config,
+        )
+        .map(|report| report.proposals)
+        .unwrap_or_default();
+
+        let gen_result = match super::goal_generation::generate_goals(
+            &engine,
+            &goals_snapshot,
+            &drives_snapshot,
+            &gen_config,
+            &predicates,
+            cycle_count,
+            impasse.as_ref(),
+            reflection.as_ref(),
+            &watch_firings,
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::debug!(error = %e, "daemon: goal generation skipped");
+                return;
             }
-            Err(e) => tracing::debug!(error = %e, "daemon: goal generation skipped"),
+        };
+
+        // Merge curiosity proposals.
+        let mut gen_result = gen_result;
+        for cp in curiosity_proposals {
+            if gen_result.activated.len() < gen_config.max_activations {
+                gen_result.activated.push(cp);
+            } else if gen_result.dormant.len() < gen_config.max_dormant {
+                gen_result.dormant.push(cp);
+            }
+        }
+
+        // Phase 3: Brief lock — apply results (push goals, store provenance).
+        let mut agent = self.agent.lock().unwrap();
+
+        for proposal in &gen_result.activated {
+            match super::goal::create_goal(
+                &agent.engine,
+                &proposal.description,
+                proposal.priority_suggestion,
+                &proposal.success_criteria,
+                &agent.predicates,
+            ) {
+                Ok(mut g) => {
+                    g.source = Some(proposal.source.clone());
+                    let (drive_name, drive_strength) =
+                        super::goal_generation::provenance_from_source(&proposal.source);
+                    let mut prov = crate::provenance::ProvenanceRecord::new(
+                        g.symbol_id,
+                        crate::provenance::DerivationKind::AutonomousGoalGeneration {
+                            drive: drive_name,
+                            strength: drive_strength,
+                        },
+                    )
+                    .with_confidence(proposal.feasibility);
+                    if let Err(e) = agent.engine.store_provenance(&mut prov) {
+                        tracing::debug!("failed to store goal provenance: {e}");
+                    }
+                    agent.goals.push(g);
+                }
+                Err(e) => tracing::debug!("failed to create activated goal: {e}"),
+            }
+        }
+
+        for proposal in &gen_result.dormant {
+            match super::goal::create_goal(
+                &agent.engine,
+                &proposal.description,
+                proposal.priority_suggestion,
+                &proposal.success_criteria,
+                &agent.predicates,
+            ) {
+                Ok(mut g) => {
+                    g.source = Some(proposal.source.clone());
+                    let _ = super::goal::update_goal_status(
+                        &agent.engine,
+                        &mut g,
+                        super::goal::GoalStatus::Dormant,
+                        &agent.predicates,
+                    );
+                    agent.goals.push(g);
+                }
+                Err(e) => tracing::debug!("failed to create dormant goal: {e}"),
+            }
+        }
+
+        // Clear impasse after it's been consumed.
+        agent.last_impasse = None;
+
+        let activated = gen_result.activated.len();
+        let dormant = gen_result.dormant.len();
+        if activated > 0 || dormant > 0 {
+            agent.sink().emit(&AkhMessage::system(format!(
+                "[daemon:goals] {activated} activated, {dormant} dormant",
+            )));
+        }
+        tracing::info!(activated, dormant, "daemon: goal generation complete");
+
+        let goal_count = super::goal::active_goals(&agent.goals).len();
+        drop(agent); // Release agent lock before status lock.
+        if let Some(ref status) = self.status
+            && let Ok(mut st) = status.try_lock()
+        {
+            st.last_goal_gen_at = Some(now_secs());
+            st.active_goals = goal_count;
         }
     }
 

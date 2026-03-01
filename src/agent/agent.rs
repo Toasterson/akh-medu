@@ -1768,7 +1768,6 @@ impl Agent {
         let gen_result = goal_generation::generate_goals(
             &self.engine,
             &self.goals,
-            &self.working_memory,
             &self.drives,
             &self.config.goal_generation,
             &self.predicates,

@@ -18,7 +18,6 @@ use super::agent::AgentPredicates;
 use super::drives::{DriveKind, DriveSystem};
 use super::error::AgentResult;
 use super::goal::{self, Goal, GoalSource, GoalStatus};
-use super::memory::WorkingMemory;
 use super::ooda::DecisionImpasse;
 use super::reflect::ReflectionResult;
 use super::watch::{WatchAction, WatchFiring};
@@ -109,7 +108,6 @@ pub struct GoalGenerationResult {
 pub fn generate_goals(
     engine: &Engine,
     goals: &[Goal],
-    _working_memory: &WorkingMemory,
     drives: &DriveSystem,
     config: &GoalGenerationConfig,
     _predicates: &AgentPredicates,
