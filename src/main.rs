@@ -4611,10 +4611,16 @@ fn run_client_only(cli: Cli) -> Result<()> {
             AwakenAction::Status => {
                 let resp: serde_json::Value =
                     client.awaken_status().into_diagnostic()?;
-                let awakened = resp["awakened"].as_bool().unwrap_or(false);
-                if !awakened {
+                let has_psyche = resp["awakened"].as_bool().unwrap_or(false);
+                let ritual_done = resp["ritual_complete"].as_bool().unwrap_or(false);
+                if !has_psyche {
                     println!("No psyche loaded. Run `akh awaken resolve <name>` to awaken.");
                 } else if let Some(psyche) = resp.get("psyche") {
+                    if ritual_done {
+                        println!("Psyche (awakened):");
+                    } else {
+                        println!("Psyche (loaded, ritual not yet completed):");
+                    }
                     println!(
                         "{}",
                         serde_json::to_string_pretty(psyche).unwrap_or_default()

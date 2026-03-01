@@ -986,8 +986,10 @@ impl AkhClient {
                 .filter(|g| matches!(g.status, crate::agent::GoalStatus::Active))
                 .count();
 
+            let ritual_complete = psyche.as_ref().is_some_and(|p| p.is_awakened());
             return Ok(serde_json::json!({
                 "awakened": psyche.is_some(),
+                "ritual_complete": ritual_complete,
                 "psyche": psyche,
                 "active_goals": active_goals,
                 "total_goals": agent.goals().len(),

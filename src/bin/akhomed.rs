@@ -1587,7 +1587,10 @@ async fn audit_get_handler(
 
 #[derive(Serialize)]
 struct AwakenStatusResponse {
+    /// `true` if a psyche is loaded (compartment discovered + loaded).
     awakened: bool,
+    /// `true` if the Ritual of Awakening has been completed (psyche finalized).
+    ritual_complete: bool,
     psyche: Option<akh_medu::compartment::psyche::Psyche>,
     active_goals: usize,
     total_goals: usize,
@@ -1610,8 +1613,10 @@ async fn awaken_status_handler(
         .filter(|g| matches!(g.status, akh_medu::agent::GoalStatus::Active))
         .count();
 
+    let ritual_complete = psyche.as_ref().is_some_and(|p| p.is_awakened());
     Ok(Json(AwakenStatusResponse {
-        awakened: psyche.as_ref().is_some_and(|p| p.is_awakened()),
+        awakened: psyche.is_some(),
+        ritual_complete,
         psyche,
         active_goals,
         total_goals: agent.goals().len(),
@@ -1697,6 +1702,57 @@ async fn seed_status_handler(
     Ok(Json(akh_medu::api_types::SeedStatusResponse {
         workspace: ws_name,
         seeds,
+    }))
+}
+
+/// Workspace-scoped seed list: returns seed packs with their applied status.
+/// Equivalent to `seed_status_handler` but at the `/workspaces/{ws}/seeds` path.
+async fn workspace_seeds_handler(
+    State(state): State<Arc<ServerState>>,
+    Path(ws_name): Path<String>,
+) -> Result<Json<akh_medu::api_types::SeedStatusResponse>, (StatusCode, String)> {
+    let engine = state.get_engine(&ws_name).await?;
+    let seeds_dir = state.paths.seeds_dir();
+    let registry = SeedRegistry::discover(&seeds_dir);
+    let seeds: Vec<akh_medu::api_types::SeedStatusEntry> = registry
+        .list()
+        .into_iter()
+        .map(|p| akh_medu::api_types::SeedStatusEntry {
+            applied: akh_medu::seeds::is_seed_applied_public(&engine, &p.id),
+            id: p.id.clone(),
+        })
+        .collect();
+    Ok(Json(akh_medu::api_types::SeedStatusResponse {
+        workspace: ws_name,
+        seeds,
+    }))
+}
+
+// ── Compartments handler ────────────────────────────────────────────────
+
+async fn compartments_handler(
+    State(state): State<Arc<ServerState>>,
+    Path(ws_name): Path<String>,
+) -> Result<Json<akh_medu::api_types::CompartmentListResponse>, (StatusCode, String)> {
+    let engine = state.get_engine(&ws_name).await?;
+    let compartments = match engine.compartments() {
+        Some(mgr) => mgr
+            .all_compartments()
+            .into_iter()
+            .map(|(m, st, tc)| akh_medu::api_types::CompartmentInfo {
+                id: m.id,
+                name: m.name,
+                kind: format!("{:?}", m.kind),
+                description: m.description,
+                state: st.to_string(),
+                triple_count: tc,
+                tags: m.tags,
+            })
+            .collect(),
+        None => Vec::new(),
+    };
+    Ok(Json(akh_medu::api_types::CompartmentListResponse {
+        compartments,
     }))
 }
 
@@ -2511,6 +2567,33 @@ async fn cal_conflicts_handler(
                 event_b: engine.resolve_label(b),
             })
             .collect())
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(result))
+}
+
+/// All calendar events (not filtered by date range).
+async fn cal_events_handler(
+    State(state): State<Arc<ServerState>>,
+    Path(ws_name): Path<String>,
+) -> Result<Json<akh_medu::api_types::CalEventList>, (StatusCode, String)> {
+    let engine = state.get_engine(&ws_name).await?;
+    let result = tokio::task::spawn_blocking(move || -> Result<_, String> {
+        let agent = create_agent(&engine)?;
+        let events: Vec<akh_medu::api_types::CalEventSummary> = agent
+            .calendar_manager()
+            .events()
+            .values()
+            .map(|e| akh_medu::api_types::CalEventSummary {
+                symbol_id: e.symbol_id.get(),
+                summary: e.summary.clone(),
+                duration_minutes: e.duration_secs() / 60,
+                location: e.location.clone(),
+            })
+            .collect();
+        Ok(akh_medu::api_types::CalEventList { events })
     })
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?
@@ -3338,6 +3421,10 @@ async fn main() {
             "/workspaces/{ws_name}/seeds/status",
             get(seed_status_handler),
         )
+        .route(
+            "/workspaces/{ws_name}/seeds",
+            get(workspace_seeds_handler),
+        )
         // Render.
         .route(
             "/workspaces/{ws_name}/render",
@@ -3412,6 +3499,10 @@ async fn main() {
         )
         // Pref.
         .route(
+            "/workspaces/{ws_name}/preferences",
+            get(pref_status_handler),
+        )
+        .route(
             "/workspaces/{ws_name}/pref/status",
             get(pref_status_handler),
         )
@@ -3432,6 +3523,10 @@ async fn main() {
             get(pref_suggest_handler),
         )
         // Calendar.
+        .route(
+            "/workspaces/{ws_name}/cal/events",
+            get(cal_events_handler),
+        )
         .route(
             "/workspaces/{ws_name}/cal/today",
             get(cal_today_handler),
@@ -3488,6 +3583,11 @@ async fn main() {
         .route(
             "/workspaces/{ws_name}/awaken/bootstrap",
             post(awaken_bootstrap_handler),
+        )
+        // Compartments.
+        .route(
+            "/workspaces/{ws_name}/compartments",
+            get(compartments_handler),
         )
         // WebSocket.
         .route("/ws/{ws_name}", get(ws_handler))
