@@ -343,6 +343,18 @@ impl CompartmentManager {
             .collect()
     }
 
+    /// List all discovered compartments with their current state.
+    pub fn all_compartments(&self) -> Vec<(CompartmentManifest, CompartmentState, usize)> {
+        let compartments = self
+            .compartments
+            .read()
+            .expect("compartments lock poisoned");
+        compartments
+            .values()
+            .map(|c| (c.manifest.clone(), c.state, c.triple_count))
+            .collect()
+    }
+
     /// Get the compartments directory path.
     pub fn compartments_dir(&self) -> &std::path::Path {
         &self.compartments_dir
