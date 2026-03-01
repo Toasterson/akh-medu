@@ -121,6 +121,382 @@ pub enum DerivationKind {
         format: String,
         chunk_index: u32,
     },
+    /// Atomic concept extracted from document text during library ingestion.
+    ConceptExtracted {
+        document_id: String,
+        chunk_index: u32,
+        extraction_method: String,
+    },
+    /// Triple inherited from an ancestor context via `ctx:specializes` chain.
+    ContextInheritance {
+        context: SymbolId,
+        ancestor: SymbolId,
+    },
+    /// Triple propagated from one context to another via a lifting rule.
+    ContextLifting {
+        from_context: SymbolId,
+        to_context: SymbolId,
+        condition: String,
+    },
+    /// Triple inferred via predicate generalization (genlPreds).
+    PredicateGeneralization {
+        specific: SymbolId,
+        general: SymbolId,
+    },
+    /// Triple inferred via predicate inverse (genlInverse).
+    PredicateInverse {
+        predicate: SymbolId,
+        inverse: SymbolId,
+    },
+    /// Triple selected via defeasible override resolution.
+    DefeasibleOverride {
+        winner: SymbolId,
+        loser: SymbolId,
+        reason: String,
+    },
+    /// Record that a reasoner was selected via competitive dispatch (Phase 9f).
+    DispatchRoute {
+        reasoner: String,
+        problem_kind: String,
+    },
+    /// An argumentation verdict was reached (Phase 9e).
+    ArgumentVerdict {
+        winner: SymbolId,
+        pro_count: usize,
+        con_count: usize,
+        decisive_rule: String,
+    },
+    /// A rule macro expanded compact assertions into concrete triples (Phase 9g).
+    RuleMacroExpansion {
+        macro_name: String,
+        expanded_count: usize,
+    },
+    /// Confidence was adjusted via temporal decay (Phase 9k).
+    TemporalDecay {
+        profile: String,
+        original_confidence: f32,
+        decayed_confidence: f32,
+    },
+    /// A contradiction was detected between triples (Phase 9l).
+    ContradictionDetected {
+        kind: String,
+        existing_object: SymbolId,
+        incoming_object: SymbolId,
+    },
+    /// A Skolem symbol was created as an existential witness (Phase 9h).
+    SkolemWitness {
+        existential_relation: SymbolId,
+        bound_var: SymbolId,
+    },
+    /// A Skolem symbol was grounded to a concrete entity (Phase 9h).
+    SkolemGrounding {
+        skolem: SymbolId,
+        concrete_entity: SymbolId,
+    },
+    /// A negation-as-failure query returned negative under CWA (Phase 9m).
+    CwaQuery {
+        context: SymbolId,
+        subject: SymbolId,
+        predicate: SymbolId,
+    },
+    /// A second-order rule was instantiated for a qualifying predicate (Phase 9n).
+    SecondOrderInstantiation {
+        rule_name: String,
+        predicate: SymbolId,
+        inferred_count: usize,
+    },
+    /// A NART (non-atomic reified term) was created (Phase 9o).
+    NartCreation {
+        function: SymbolId,
+        arg_count: usize,
+    },
+
+    // --- Phase 10: Code Generation -------------------------------------------
+
+    /// Code was generated from KG structure (Phase 10b).
+    CodeGenerated {
+        scope: String,
+        source_count: usize,
+    },
+    /// Code was refined after compiler feedback (Phase 10d).
+    CodeRefinement {
+        attempt: u32,
+        error_count: usize,
+    },
+    /// A reusable abstraction was discovered by library learning (Phase 10h).
+    LibraryLearning {
+        pattern_name: String,
+        occurrences: u32,
+        compression: f64,
+    },
+
+    // --- Phase 11: Autonomous Task System -------------------------------------
+
+    /// A goal was autonomously generated from drive observation (Phase 11a).
+    AutonomousGoalGeneration { drive: String, strength: f32 },
+
+    /// A goal was decomposed via HTN method (Phase 11b).
+    HtnDecomposition {
+        method_name: String,
+        strategy: String,
+        subtask_count: usize,
+    },
+
+    /// A goal's priority was re-evaluated via argumentation (Phase 11c).
+    PriorityArgumentation {
+        goal: SymbolId,
+        old_priority: u8,
+        new_priority: u8,
+        audience: String,
+        net_score: f64,
+    },
+
+    /// A project was created to group related goals (Phase 11d).
+    ProjectCreated { name: String },
+
+    /// A world-monitoring watch fired (Phase 11e).
+    WatchFired {
+        watch_id: String,
+        condition_summary: String,
+    },
+
+    /// A metacognitive evaluation was performed on a goal (Phase 11f).
+    MetacognitiveEvaluation {
+        goal: SymbolId,
+        signal: String,
+        improvement_rate: f32,
+        competence: f32,
+    },
+
+    /// A resource/effort assessment was performed on a goal (Phase 11g).
+    ResourceAssessment {
+        goal: SymbolId,
+        voc: f32,
+        opportunity_cost: f32,
+        diminishing_returns: bool,
+    },
+
+    /// A successful strategy was compiled into a reusable method (Phase 11h).
+    ProceduralLearning {
+        source_goal: SymbolId,
+        method_name: String,
+        step_count: usize,
+    },
+
+    // --- Phase 13: Personal Assistant ------------------------------------------
+
+    /// An email was ingested and parsed via the email channel (Phase 13a).
+    EmailIngested {
+        message_id: String,
+        channel_id: String,
+    },
+
+    /// An email thread was constructed or updated via JWZ (Phase 13a).
+    EmailThreaded {
+        thread_root_id: String,
+        message_count: usize,
+    },
+
+    /// Email classified as spam/ham via OnlineHD (Phase 13b).
+    SpamClassification {
+        email_message_id: String,
+        decision: String,
+        vsa_confidence: f32,
+        bayesian_score: f32,
+    },
+
+    /// Email triaged and routed (Phase 13c).
+    EmailTriaged {
+        email_message_id: String,
+        route: String,
+        importance_score: f32,
+    },
+
+    /// Structured information extracted from email message (Phase 13d).
+    EmailExtracted {
+        email_message_id: String,
+        item_count: usize,
+        kinds_found: String,
+    },
+
+    /// PIM task managed (Phase 13e).
+    PimTaskManaged {
+        goal_id_raw: u64,
+        gtd_state: String,
+        quadrant: String,
+    },
+
+    /// Calendar event managed (Phase 13f).
+    CalendarEventManaged {
+        event_summary: String,
+        dtstart: u64,
+        dtend: u64,
+    },
+
+    // --- Phase 13g: Preference Learning & Proactive Assistance ----------
+
+    /// Preference profile updated from feedback signal (Phase 13g).
+    PreferenceLearned {
+        signal_kind: String,
+        entity_id_raw: u64,
+        weight: f32,
+    },
+
+    /// JITIR suggestion surfaced (Phase 13g).
+    JitirSuggestion {
+        entity_id_raw: u64,
+        relevance: f32,
+        serendipitous: bool,
+    },
+
+    /// Proactive assistance event (Phase 13g).
+    ProactiveAssistance {
+        level: String,
+        suggestion_count: u32,
+        acceptance_rate: f32,
+    },
+
+    // --- Phase 15: Causal World Model ----------------------------------------
+
+    /// A causal action schema was learned or updated (Phase 15a).
+    CausalSchemaLearned {
+        action_name: String,
+        precondition_count: u32,
+        effect_count: u32,
+    },
+
+    // --- Phase 14: Identity Bootstrapping ------------------------------------
+
+    /// The Ritual of Awakening was performed — the akh chose its name (Phase 14b).
+    RitualOfAwakening {
+        chosen_name: String,
+        culture: String,
+        vsa_score: f32,
+    },
+
+    /// An identity reference was resolved to structured character knowledge (Phase 14b).
+    IdentityResolved {
+        name: String,
+        entity_type: String,
+        culture: String,
+        trait_count: usize,
+    },
+
+    // --- Phase 14c: Domain Expansion -----------------------------------------
+
+    /// Domain skeleton ontology expanded from seed concepts (Phase 14c).
+    DomainExpansion {
+        seed_label: String,
+        concept_count: u32,
+        relation_count: u32,
+        source: String,
+    },
+
+    // --- Phase 14d: Prerequisite Discovery & ZPD Classification ---------------
+
+    /// A prerequisite relationship was discovered between concepts (Phase 14d).
+    PrerequisiteDiscovered {
+        from_label: String,
+        to_label: String,
+        edge_count: u32,
+        strategy_sources: String,
+    },
+
+    /// A concept was classified into a Vygotsky ZPD zone (Phase 14d).
+    ZpdClassification {
+        concept_label: String,
+        zone: String,
+        prereq_coverage: f32,
+        similarity_to_known: f32,
+        curriculum_tier: u32,
+    },
+
+    // --- Phase 11i: Sleep/Consolidation Cycle ---------------------------------
+
+    /// The agent performed a sleep/consolidation cycle (Phase 11i).
+    SleepConsolidation {
+        phase: String,
+        merged_count: usize,
+        pruned_count: usize,
+    },
+
+    // --- Phase 11j: Directed Curiosity ----------------------------------------
+
+    /// A curiosity target was identified via information-gap analysis (Phase 11j).
+    DirectedCuriosity {
+        concept: SymbolId,
+        gap_score: f32,
+        fill_ratio: f32,
+    },
+
+    // --- Phase 14e: Resource Discovery ----------------------------------------
+
+    /// A learning resource was discovered for a ZPD-proximal concept (Phase 14e).
+    ResourceDiscovery {
+        concept_label: String,
+        resource_count: u32,
+        sources: String,
+        top_title: String,
+    },
+
+    // --- Phase 14f: Curriculum Ingestion --------------------------------------
+
+    /// A curriculum resource was ingested for a concept (Phase 14f).
+    CurriculumIngestion {
+        concept_label: String,
+        resource_title: String,
+        triples_added: u32,
+        extraction_methods: String,
+        tier: u32,
+        cross_validated: bool,
+    },
+
+    // --- Phase 14g: Competence Assessment ------------------------------------
+
+    /// A competence assessment was performed on the akh's domain knowledge (Phase 14g).
+    CompetenceAssessment {
+        overall_score: f32,
+        overall_dreyfus: String,
+        knowledge_area_count: u32,
+        cq_answered: u32,
+        cq_total: u32,
+        recommendation: String,
+    },
+
+    // --- Phase 14h: Bootstrap Orchestration -----------------------------------
+
+    /// A full bootstrap orchestration pipeline was completed or checkpointed (Phase 14h).
+    BootstrapOrchestration {
+        stage: String,
+        learning_cycle: u32,
+        exploration_rate: f32,
+        target_dreyfus: String,
+        current_dreyfus: String,
+        current_score: f32,
+    },
+
+    // --- Continuous Learning (idle task) --------------------------------------
+
+    /// An idle-time continuous learning cycle completed (wires curiosity→bootstrap).
+    ContinuousLearning {
+        targets_explored: usize,
+        resources_found: usize,
+        concepts_ingested: usize,
+        dreyfus_level: String,
+        gap_score_avg: f32,
+    },
+
+    // --- Phase 14j: NLU Parsing ---------------------------------------------------
+
+    /// Input was successfully parsed by the NLU pipeline (Phase 14j).
+    NluParsed {
+        /// Which NLU tier produced the parse (1 = rule parser, 2 = micro-ML, 3 = LLM, 4 = ranker).
+        source_tier: u8,
+        /// Parse confidence from the producing tier.
+        confidence: f32,
+        /// If the VSA parse ranker contributed, the exemplar similarity score.
+        exemplar_similarity: Option<f32>,
+    },
 }
 
 impl DerivationKind {
@@ -148,6 +524,57 @@ impl DerivationKind {
             Self::WasmToolExecution { .. } => 18,
             Self::CliToolExecution { .. } => 19,
             Self::DocumentIngested { .. } => 20,
+            Self::ConceptExtracted { .. } => 21,
+            Self::ContextInheritance { .. } => 22,
+            Self::ContextLifting { .. } => 23,
+            Self::PredicateGeneralization { .. } => 24,
+            Self::PredicateInverse { .. } => 25,
+            Self::DefeasibleOverride { .. } => 26,
+            Self::DispatchRoute { .. } => 27,
+            Self::ArgumentVerdict { .. } => 28,
+            Self::RuleMacroExpansion { .. } => 29,
+            Self::TemporalDecay { .. } => 30,
+            Self::ContradictionDetected { .. } => 31,
+            Self::SkolemWitness { .. } => 32,
+            Self::SkolemGrounding { .. } => 33,
+            Self::CwaQuery { .. } => 34,
+            Self::SecondOrderInstantiation { .. } => 35,
+            Self::NartCreation { .. } => 36,
+            Self::CodeGenerated { .. } => 37,
+            Self::CodeRefinement { .. } => 38,
+            Self::LibraryLearning { .. } => 39,
+            Self::AutonomousGoalGeneration { .. } => 40,
+            Self::HtnDecomposition { .. } => 41,
+            Self::PriorityArgumentation { .. } => 42,
+            Self::ProjectCreated { .. } => 43,
+            Self::WatchFired { .. } => 44,
+            Self::MetacognitiveEvaluation { .. } => 45,
+            Self::ResourceAssessment { .. } => 46,
+            Self::ProceduralLearning { .. } => 47,
+            Self::EmailIngested { .. } => 48,
+            Self::EmailThreaded { .. } => 49,
+            Self::SpamClassification { .. } => 50,
+            Self::EmailTriaged { .. } => 51,
+            Self::EmailExtracted { .. } => 52,
+            Self::PimTaskManaged { .. } => 53,
+            Self::CalendarEventManaged { .. } => 54,
+            Self::PreferenceLearned { .. } => 55,
+            Self::JitirSuggestion { .. } => 56,
+            Self::ProactiveAssistance { .. } => 57,
+            Self::CausalSchemaLearned { .. } => 58,
+            Self::RitualOfAwakening { .. } => 59,
+            Self::IdentityResolved { .. } => 60,
+            Self::DomainExpansion { .. } => 61,
+            Self::PrerequisiteDiscovered { .. } => 62,
+            Self::ZpdClassification { .. } => 63,
+            Self::SleepConsolidation { .. } => 64,
+            Self::DirectedCuriosity { .. } => 65,
+            Self::ResourceDiscovery { .. } => 66,
+            Self::CurriculumIngestion { .. } => 67,
+            Self::CompetenceAssessment { .. } => 68,
+            Self::BootstrapOrchestration { .. } => 69,
+            Self::ContinuousLearning { .. } => 70,
+            Self::NluParsed { .. } => 71,
         }
     }
 }
@@ -274,26 +701,26 @@ impl ProvenanceLedger {
     pub fn open(db: Arc<Database>) -> ProvenanceResult<Self> {
         // Ensure tables exist by opening a write txn.
         {
-            let txn = db.begin_write().map_err(|e| redb_err(e))?;
+            let txn = db.begin_write().map_err(redb_err)?;
             // Opening the tables creates them if absent.
-            txn.open_table(PROVENANCE_TABLE).map_err(|e| redb_err(e))?;
+            txn.open_table(PROVENANCE_TABLE).map_err(redb_err)?;
             txn.open_multimap_table(DERIVED_INDEX)
-                .map_err(|e| redb_err(e))?;
+                .map_err(redb_err)?;
             txn.open_multimap_table(SOURCE_INDEX)
-                .map_err(|e| redb_err(e))?;
+                .map_err(redb_err)?;
             txn.open_multimap_table(KIND_INDEX)
-                .map_err(|e| redb_err(e))?;
-            txn.commit().map_err(|e| redb_err(e))?;
+                .map_err(redb_err)?;
+            txn.commit().map_err(redb_err)?;
         }
 
         // Recover max ID from the primary table.
         let max_id = {
-            let txn = db.begin_read().map_err(|e| redb_err(e))?;
-            let table = txn.open_table(PROVENANCE_TABLE).map_err(|e| redb_err(e))?;
+            let txn = db.begin_read().map_err(redb_err)?;
+            let table = txn.open_table(PROVENANCE_TABLE).map_err(redb_err)?;
             let mut max = 0u64;
-            let iter = table.iter().map_err(|e| redb_err(e))?;
+            let iter = table.iter().map_err(redb_err)?;
             for entry in iter {
-                let (key_guard, _val_guard) = entry.map_err(|e| redb_err(e))?;
+                let (key_guard, _val_guard) = entry.map_err(redb_err)?;
                 let key: u64 = key_guard.value();
                 if key > max {
                     max = key;
@@ -321,36 +748,36 @@ impl ProvenanceLedger {
             })
         })?;
 
-        let txn = self.db.begin_write().map_err(|e| redb_err(e))?;
+        let txn = self.db.begin_write().map_err(redb_err)?;
         {
-            let mut table = txn.open_table(PROVENANCE_TABLE).map_err(|e| redb_err(e))?;
+            let mut table = txn.open_table(PROVENANCE_TABLE).map_err(redb_err)?;
             table
                 .insert(raw_id, encoded.as_slice())
-                .map_err(|e| redb_err(e))?;
+                .map_err(redb_err)?;
         }
         {
             let mut idx = txn
                 .open_multimap_table(DERIVED_INDEX)
-                .map_err(|e| redb_err(e))?;
+                .map_err(redb_err)?;
             idx.insert(record.derived_id.get(), raw_id)
-                .map_err(|e| redb_err(e))?;
+                .map_err(redb_err)?;
         }
         {
             let mut idx = txn
                 .open_multimap_table(SOURCE_INDEX)
-                .map_err(|e| redb_err(e))?;
+                .map_err(redb_err)?;
             for src in &record.sources {
-                idx.insert(src.get(), raw_id).map_err(|e| redb_err(e))?;
+                idx.insert(src.get(), raw_id).map_err(redb_err)?;
             }
         }
         {
             let mut idx = txn
                 .open_multimap_table(KIND_INDEX)
-                .map_err(|e| redb_err(e))?;
+                .map_err(redb_err)?;
             idx.insert(record.kind.tag(), raw_id)
-                .map_err(|e| redb_err(e))?;
+                .map_err(redb_err)?;
         }
-        txn.commit().map_err(|e| redb_err(e))?;
+        txn.commit().map_err(redb_err)?;
 
         Ok(prov_id)
     }
@@ -383,53 +810,53 @@ impl ProvenanceLedger {
             encoded_batch.push((raw_id, encoded));
         }
 
-        let txn = self.db.begin_write().map_err(|e| redb_err(e))?;
+        let txn = self.db.begin_write().map_err(redb_err)?;
         {
-            let mut table = txn.open_table(PROVENANCE_TABLE).map_err(|e| redb_err(e))?;
+            let mut table = txn.open_table(PROVENANCE_TABLE).map_err(redb_err)?;
             for (raw_id, encoded) in &encoded_batch {
                 table
                     .insert(*raw_id, encoded.as_slice())
-                    .map_err(|e| redb_err(e))?;
+                    .map_err(redb_err)?;
             }
         }
         {
             let mut derived_idx = txn
                 .open_multimap_table(DERIVED_INDEX)
-                .map_err(|e| redb_err(e))?;
+                .map_err(redb_err)?;
             let mut source_idx = txn
                 .open_multimap_table(SOURCE_INDEX)
-                .map_err(|e| redb_err(e))?;
+                .map_err(redb_err)?;
             let mut kind_idx = txn
                 .open_multimap_table(KIND_INDEX)
-                .map_err(|e| redb_err(e))?;
+                .map_err(redb_err)?;
 
             for (i, (raw_id, _)) in encoded_batch.iter().enumerate() {
                 let record = &records[i];
                 derived_idx
                     .insert(record.derived_id.get(), *raw_id)
-                    .map_err(|e| redb_err(e))?;
+                    .map_err(redb_err)?;
                 for src in &record.sources {
                     source_idx
                         .insert(src.get(), *raw_id)
-                        .map_err(|e| redb_err(e))?;
+                        .map_err(redb_err)?;
                 }
                 kind_idx
                     .insert(record.kind.tag(), *raw_id)
-                    .map_err(|e| redb_err(e))?;
+                    .map_err(redb_err)?;
             }
         }
-        txn.commit().map_err(|e| redb_err(e))?;
+        txn.commit().map_err(redb_err)?;
 
         Ok(ids)
     }
 
     /// Get a provenance record by its ID.
     pub fn get(&self, id: ProvenanceId) -> ProvenanceResult<ProvenanceRecord> {
-        let txn = self.db.begin_read().map_err(|e| redb_err(e))?;
-        let table = txn.open_table(PROVENANCE_TABLE).map_err(|e| redb_err(e))?;
+        let txn = self.db.begin_read().map_err(redb_err)?;
+        let table = txn.open_table(PROVENANCE_TABLE).map_err(redb_err)?;
         let guard = table
             .get(id.get())
-            .map_err(|e| redb_err(e))?
+            .map_err(redb_err)?
             .ok_or(ProvenanceError::NotFound { id: id.get() })?;
         let record: ProvenanceRecord = bincode::deserialize(guard.value()).map_err(|e| {
             ProvenanceError::Store(StoreError::Serialization {
@@ -458,9 +885,9 @@ impl ProvenanceLedger {
 
     /// Total number of provenance records.
     pub fn len(&self) -> ProvenanceResult<usize> {
-        let txn = self.db.begin_read().map_err(|e| redb_err(e))?;
-        let table = txn.open_table(PROVENANCE_TABLE).map_err(|e| redb_err(e))?;
-        Ok(table.len().map_err(|e| redb_err(e))? as usize)
+        let txn = self.db.begin_read().map_err(redb_err)?;
+        let table = txn.open_table(PROVENANCE_TABLE).map_err(redb_err)?;
+        Ok(table.len().map_err(redb_err)? as usize)
     }
 
     /// Whether the ledger has no records.
@@ -478,20 +905,20 @@ impl ProvenanceLedger {
         table_def: &MultimapTableDefinition<u64, u64>,
         key: u64,
     ) -> ProvenanceResult<Vec<ProvenanceRecord>> {
-        let txn = self.db.begin_read().map_err(|e| redb_err(e))?;
+        let txn = self.db.begin_read().map_err(redb_err)?;
         let idx = txn
             .open_multimap_table(*table_def)
-            .map_err(|e| redb_err(e))?;
-        let primary = txn.open_table(PROVENANCE_TABLE).map_err(|e| redb_err(e))?;
+            .map_err(redb_err)?;
+        let primary = txn.open_table(PROVENANCE_TABLE).map_err(redb_err)?;
 
-        let values = idx.get(key).map_err(|e| redb_err(e))?;
+        let values = idx.get(key).map_err(redb_err)?;
 
         let mut records = Vec::new();
         for entry in values {
-            let raw_id = entry.map_err(|e| redb_err(e))?.value();
+            let raw_id = entry.map_err(redb_err)?.value();
             let guard = primary
                 .get(raw_id)
-                .map_err(|e| redb_err(e))?
+                .map_err(redb_err)?
                 .ok_or(ProvenanceError::NotFound { id: raw_id })?;
             let record: ProvenanceRecord = bincode::deserialize(guard.value()).map_err(|e| {
                 ProvenanceError::Store(StoreError::Serialization {
@@ -505,20 +932,20 @@ impl ProvenanceLedger {
 
     /// Retrieve records given a u8-keyed multimap index (kind).
     fn records_from_kind_index(&self, tag: u8) -> ProvenanceResult<Vec<ProvenanceRecord>> {
-        let txn = self.db.begin_read().map_err(|e| redb_err(e))?;
+        let txn = self.db.begin_read().map_err(redb_err)?;
         let idx = txn
             .open_multimap_table(KIND_INDEX)
-            .map_err(|e| redb_err(e))?;
-        let primary = txn.open_table(PROVENANCE_TABLE).map_err(|e| redb_err(e))?;
+            .map_err(redb_err)?;
+        let primary = txn.open_table(PROVENANCE_TABLE).map_err(redb_err)?;
 
-        let values = idx.get(tag).map_err(|e| redb_err(e))?;
+        let values = idx.get(tag).map_err(redb_err)?;
 
         let mut records = Vec::new();
         for entry in values {
-            let raw_id = entry.map_err(|e| redb_err(e))?.value();
+            let raw_id = entry.map_err(redb_err)?.value();
             let guard = primary
                 .get(raw_id)
-                .map_err(|e| redb_err(e))?
+                .map_err(redb_err)?
                 .ok_or(ProvenanceError::NotFound { id: raw_id })?;
             let record: ProvenanceRecord = bincode::deserialize(guard.value()).map_err(|e| {
                 ProvenanceError::Store(StoreError::Serialization {

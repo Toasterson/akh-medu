@@ -190,6 +190,26 @@ impl AkhPaths {
     pub fn pid_file(&self) -> PathBuf {
         self.runtime_dir.join("akhomed.pid")
     }
+
+    /// macOS log directory: `~/Library/Logs/akh-medu/`.
+    ///
+    /// Used by launchd for stdout/stderr capture. Returns `None` if HOME is
+    /// not set.
+    pub fn macos_log_dir() -> Option<PathBuf> {
+        std::env::var("HOME")
+            .ok()
+            .map(|h| PathBuf::from(h).join("Library/Logs/akh-medu"))
+    }
+
+    /// macOS LaunchAgents directory: `~/Library/LaunchAgents/`.
+    ///
+    /// Where per-user launchd plist files are installed. Returns `None` if
+    /// HOME is not set.
+    pub fn macos_launch_agents_dir() -> Option<PathBuf> {
+        std::env::var("HOME")
+            .ok()
+            .map(|h| PathBuf::from(h).join("Library/LaunchAgents"))
+    }
 }
 
 /// Per-workspace directory layout.

@@ -9,6 +9,12 @@ pub struct TuiSink {
     pending: Mutex<Vec<AkhMessage>>,
 }
 
+impl Default for TuiSink {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TuiSink {
     pub fn new() -> Self {
         Self {

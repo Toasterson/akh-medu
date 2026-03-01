@@ -4,6 +4,13 @@ use strongly typed idiomatic rust. Think to express the function in datatypes
 do error handling
 try to express options on how to handle issues for calling functions
 
+## Documentation Maintenance
+
+- Keep `docs/ai/architecture.md` updated when making structural changes (new modules, protocol changes, phase transitions). Bump the "last updated" date.
+- Create a new timestamped plan in `docs/ai/plans/` before starting a new phase or significant feature.
+- Create a new timestamped ADR in `docs/ai/decisions/` when making meaningful technology or design choices. Number sequentially from the last ADR.
+- Never delete old plans or decisions. Mark superseded plans with status `Superseded` and link to the replacement.
+
 ## Library Usage Patterns
 
 ### Error handling (miette + thiserror)
@@ -55,56 +62,36 @@ try to express options on how to handle issues for calling functions
 
 ## Agent Roadmap
 
-Phases 1–7 are complete (engine + agent scaffold). The agent has working infrastructure
-(memory, goals, tools, consolidation, provenance) but the decision-making core is a
-placeholder. The phases below evolve it into a real autonomous agent.
+Phases 1-7 are complete (engine + agent scaffold). The phases below evolve it into a real autonomous agent.
+Detailed completion checklists for each phase live under `docs/ai/phases/`.
 
-### Phase 8a — Fix wiring bugs (prerequisites for real autonomy) ✓
-- [x] Wire up `reference_count` in Decide phase (increment when WM entries are consulted)
-- [x] Fix status triple accumulation: restore_goals now picks highest SymbolId (most recent) deterministically
-- [x] Connect recalled episodes from Observe to Orient/Decide (full EpisodicEntry data flows through)
-- [x] Enable all 5 tools in `select_tool()` — anti-repetition, memory_recall, kg_mutate, synthesize_triple
-- [x] Fix Act phase: evaluate_goal_progress() checks criteria keywords against non-metadata tool output
-- [x] Fix self-referential criteria match: agent-metadata labels (desc:, status:, criteria:, goal:) filtered out
+### Completed Phases
 
-### Phase 8b — Success criteria & goal autonomy ✓
-- [x] Parse and evaluate success criteria against KG state (pattern matching on triples)
-- [x] Let Act produce Completed/Failed based on criteria evaluation (two-signal: tool output + KG state)
-- [x] Stall detection: track `cycles_worked` and `last_progress_cycle` per goal, `is_stalled()` method
-- [x] Integrate goal decomposition into OODA loop (`decompose_stalled_goals()` auto-fires after each cycle)
-- [x] Goal decomposition splits on commas/"and", suspends parent, creates active children
-- [x] Add `suspend_goal()`, `fail_goal()`, `decompose_stalled_goal()` to Agent public API
-- [x] Metadata label filtering: agent-metadata (desc:, status:, criteria:, goal:, episode:, summary:, tag:) excluded from criteria matching
+| Phase | Description | Details |
+|-------|-------------|---------|
+| 8a-8f | Agent Autonomy (wiring, goals, decisions, persistence, tools, planning) | [phase-8](docs/ai/phases/phase-8-agent-autonomy.md) |
+| 9 | Cyc-Inspired HOL Enhancements (microtheories, TMS, defeasibility, argumentation) | [plan](docs/ai/plans/2026-02-17-phase9-cyc-inspired.md), [gap analysis](docs/ai/decisions/001-cyc-paper-analysis.md) |
+| 10 | Generative Functions (Rust code generation, pattern learning) | [plan](docs/ai/plans/2026-02-17-phase10-code-generation.md), [research](docs/ai/decisions/002-code-generation-research.md) |
+| 11 | Autonomous Task System (drives, HTN, argumentation, metacognition) + 11i-11j lifeform extensions | [plan](docs/ai/plans/2026-02-17-phase11-autonomous-tasks.md), [research](docs/ai/decisions/003-autonomous-tasks-research.md) |
+| 12a-12g | Interaction (channels, grounded dialogue, constraints, social KG, oxifed, explanations, multi-agent) | [phase-12](docs/ai/phases/phase-12-interaction.md), [plan](docs/ai/plans/2026-02-17-phase12-interaction.md) |
+| 13a-13g | Personal Assistant (email, spam, triage, extraction, PIM, calendar, preferences) | [phase-13](docs/ai/phases/phase-13-personal-assistant.md), [plan](docs/ai/plans/2026-02-17-phase13-personal-assistant.md) |
+| 14a-14h | Identity, domain expansion, prerequisite discovery, ZPD classification, resource discovery, curriculum ingestion, competence assessment, bootstrap orchestrator | [phase-14](docs/ai/phases/phase-14-identity.md), [plan](docs/ai/plans/2026-02-17-phase14-bootstrapping.md), [NLU plan](docs/ai/plans/2026-02-24-phase14-nlu-extension.md) |
+| 15a | Causal World Model (schemas, preconditions, effects, VSA encoding) | [phase-15](docs/ai/phases/phase-15-causal.md), [plan](docs/ai/plans/2026-02-22-phase15-causal-world-model.md) |
 
-### Phase 8c — Intelligent decision-making ✓
-- [x] Replace if/else `select_tool()` with utility-based scoring (`ToolCandidate` with `total_score()`)
-- [x] Score each tool by: base_score (state-dependent), recency_penalty, novelty_bonus, episodic_bonus, pressure_bonus
-- [x] Add loop detection: `GoalToolHistory` tracks per-goal (tool, count, recency) from WM Decision entries
-- [x] Strategy rotation: novelty_bonus (+0.15) for tools never used on this goal; recency_penalty (-0.4/-0.2/-0.1) prevents repetition
-- [x] Use recalled episodic memories: `extract_episodic_tool_hints()` parses tool names from episode summaries, applies episodic_bonus (+0.2)
-- [x] Score breakdown in reasoning string for full transparency
+### Upcoming Phases
 
-### Phase 8d — Session persistence & REPL ✓
-- [x] Serialize/deserialize WorkingMemory to engine's durable store (bincode via `put_meta`/`get_meta`)
-- [x] Add agent REPL mode (interactive loop with user input between cycles): `agent repl`
-- [x] Persist cycle_count and restore on agent restart
-- [x] CLI session continuity: `agent resume` picks up where it left off
-- [x] `Agent::persist_session()` and `Agent::resume()` constructors
-- [x] `Agent::has_persisted_session()` static check
-- [x] All agent CLI commands (`cycle`, `run`, `repl`) auto-persist session on exit
-
-### Phase 8e — External tools & world interaction ✓
-- [x] File I/O tool: read/write files with scratch-dir sandboxing, 4KB read truncation
-- [x] HTTP tool: sync GET via ureq with 256KB response limit and configurable timeout
-- [x] Shell exec tool: poll-based timeout (default 30s), 64KB output limit, process kill on timeout
-- [x] User interaction tool: stdout prompt + stdin readline with EOF/empty handling
-- [x] All 9 tools (5 core + 4 external) registered in Agent, wired into OODA utility scoring
-- [x] Keyword-based tool selection for file_io, http_fetch, shell_exec, user_interact
-
-### Phase 8f — Planning & reflection ✓
-- [x] Multi-step planning: Plan type with ordered PlanSteps, auto-generated per goal before OODA cycle
-- [x] Two alternating strategies (explore-first vs reason-first) based on attempt number
-- [x] Reflection: after every N cycles (configurable), reviews tool effectiveness and goal progress
-- [x] Meta-reasoning: auto-adjusts goal priorities (boost progressing, demote stagnant), suggests decomposition
-- [x] Backtracking: on plan step failure, marks plan as failed, generates alternative with incremented attempt
-- [x] CLI commands: `agent plan`, `agent reflect`; REPL commands: `p`/`plan`, `r`/`reflect`
+| Phase | Description | Plan | Research |
+|-------|-------------|------|----------|
+| 14i | Community recipe sharing | [plan](docs/ai/plans/2026-02-17-phase14-bootstrapping.md) | [research](docs/ai/decisions/005-bootstrapping-research.md) |
+| 14j-14m | NLU Extension (rule parser, micro-ML NER, small LLM translator, VSA parse ranker) | [plan](docs/ai/plans/2026-02-24-phase14-nlu-extension.md) | [ADR](docs/ai/decisions/022-nlu-architecture.md) |
+| Release Alpha | Kubernetes-deployed autonomous agent (Docker, Helm, Prometheus, continuous learning) | [plan](docs/ai/plans/2026-02-23-release-alpha.md) | — |
+| 15b-15d | Event calculus, counterfactual reasoning, prediction tracking, temporal experience | [plan](docs/ai/plans/2026-02-22-phase15-causal-world-model.md) | [research](docs/ai/decisions/020-predictive-planning-epistemic-research.md) |
+| 16 | Predictive Multi-Step Planning (MCTS + TD Learning) | [plan](docs/ai/plans/2026-02-22-phase16-predictive-planning.md) | [research](docs/ai/decisions/020-predictive-planning-epistemic-research.md) |
+| 17 | Dempster-Shafer Evidence Theory & Belief Intervals | [plan](docs/ai/plans/2026-02-22-phase17-evidence-theory.md) | [research](docs/ai/decisions/020-predictive-planning-epistemic-research.md) |
+| 18 | Source Reliability, ACH & Credibility Assessment | [plan](docs/ai/plans/2026-02-22-phase18-source-reliability.md) | [research](docs/ai/decisions/020-predictive-planning-epistemic-research.md) |
+| 19 | Epistemic Logic & Theory of Mind | [plan](docs/ai/plans/2026-02-22-phase19-epistemic-reasoning.md) | [research](docs/ai/decisions/020-predictive-planning-epistemic-research.md) |
+| 20 | Active Inference OODA Enhancement + Proprioception | [plan](docs/ai/plans/2026-02-22-phase20-active-inference.md) | [research](docs/ai/decisions/020-predictive-planning-epistemic-research.md) |
+| 21 | Game-Theoretic Social Reasoning | [plan](docs/ai/plans/2026-02-22-phase21-game-theoretic-reasoning.md) | [research](docs/ai/decisions/020-predictive-planning-epistemic-research.md) |
+| 22 | Akhipedia: Internal Knowledge Wiki | [plan](docs/ai/plans/2026-02-23-phase22-akhipedia.md) | [ADR](docs/ai/decisions/021-akhipedia-architecture.md) |
+| 23 | Affective System (emotional valence, mood modulation, felt urgency) | [plan](docs/ai/plans/2026-02-24-phase23-affective-system.md) | — |
+| 24 | Sensory Grounding (image processing, audio, embodied perception) | [plan](docs/ai/plans/2026-02-24-phase24-sensory-grounding.md) | — |

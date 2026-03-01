@@ -40,6 +40,30 @@ pub enum UserIntent {
     RenderHiero { entity: Option<String> },
     /// "Help" — show help information.
     Help,
+    /// "Set detail concise/normal/full" — change response detail level.
+    SetDetail { level: String },
+    /// "Why X?" / "How confident?" / "What do you know about X?" / "Explain X"
+    Explain {
+        query: super::explain::ExplanationQuery,
+    },
+    /// A structured agent-to-agent protocol message (Phase 12g).
+    ///
+    /// These bypass the NLP classifier entirely — they arrive as
+    /// `MessageContent::AgentMessage` and are dispatched to the
+    /// multi-agent handler for capability validation and processing.
+    AgentProtocol {
+        message: super::multi_agent::AgentProtocolMessage,
+    },
+    /// PIM command (Phase 13e): "pim inbox", "pim next", etc.
+    PimCommand { subcommand: String, args: String },
+    /// Calendar command (Phase 13f): "cal today", "cal add ...", etc.
+    CalCommand { subcommand: String, args: String },
+    /// Preference command (Phase 13g): "pref status", "pref train ...", etc.
+    PrefCommand { subcommand: String, args: String },
+    /// Causal reasoning command (Phase 15a): "causal schemas", "causal predict ...", etc.
+    CausalQuery { subcommand: String, args: String },
+    /// Awaken command (Phase 14a+14b): "awaken parse ...", "awaken resolve ...", etc.
+    AwakenCommand { subcommand: String, args: String },
     /// Unrecognized input — pass through.
     Freeform { text: String },
 }
@@ -47,6 +71,12 @@ pub enum UserIntent {
 /// Classify user intent from natural language input using regex patterns.
 ///
 /// Patterns are tried in priority order; first match wins.
+///
+/// **Deprecated**: Use the NLU pipeline → AbsTree dispatch in `ChatProcessor::process_input()`
+/// instead. This function is retained only for the structural command fast-path
+/// during migration and will be removed once all structural commands are parsed
+/// as `AbsTree::StructuralCommand` by the NLU pipeline.
+#[deprecated(note = "Use NLU pipeline → AbsTree dispatch instead (ADR 025)")]
 pub fn classify_intent(input: &str) -> UserIntent {
     let trimmed = input.trim();
     if trimmed.is_empty() {
@@ -56,6 +86,71 @@ pub fn classify_intent(input: &str) -> UserIntent {
     }
 
     let lower = trimmed.to_lowercase();
+
+    // Awaken commands (Phase 14a+14b).
+    if lower == "awaken" || lower.starts_with("awaken ") {
+        let rest = if lower == "awaken" {
+            ""
+        } else {
+            trimmed[7..].trim()
+        };
+        let mut parts = rest.splitn(2, char::is_whitespace);
+        let subcommand = parts.next().unwrap_or("").to_string();
+        let args = parts.next().unwrap_or("").to_string();
+        return UserIntent::AwakenCommand { subcommand, args };
+    }
+
+    // Causal reasoning commands (Phase 15a).
+    if lower == "causal" || lower.starts_with("causal ") {
+        let rest = if lower == "causal" {
+            ""
+        } else {
+            trimmed[7..].trim()
+        };
+        let mut parts = rest.splitn(2, char::is_whitespace);
+        let subcommand = parts.next().unwrap_or("").to_string();
+        let args = parts.next().unwrap_or("").to_string();
+        return UserIntent::CausalQuery { subcommand, args };
+    }
+
+    // Preference commands (Phase 13g) — checked before PIM.
+    if lower == "pref" || lower.starts_with("pref ") {
+        let rest = if lower == "pref" {
+            ""
+        } else {
+            trimmed[5..].trim()
+        };
+        let mut parts = rest.splitn(2, char::is_whitespace);
+        let subcommand = parts.next().unwrap_or("").to_string();
+        let args = parts.next().unwrap_or("").to_string();
+        return UserIntent::PrefCommand { subcommand, args };
+    }
+
+    // PIM commands (Phase 13e).
+    if lower == "pim" || lower.starts_with("pim ") {
+        let rest = if lower == "pim" {
+            ""
+        } else {
+            trimmed[4..].trim()
+        };
+        let mut parts = rest.splitn(2, char::is_whitespace);
+        let subcommand = parts.next().unwrap_or("").to_string();
+        let args = parts.next().unwrap_or("").to_string();
+        return UserIntent::PimCommand { subcommand, args };
+    }
+
+    // Calendar commands (Phase 13f).
+    if lower == "cal" || lower.starts_with("cal ") {
+        let rest = if lower == "cal" {
+            ""
+        } else {
+            trimmed[4..].trim()
+        };
+        let mut parts = rest.splitn(2, char::is_whitespace);
+        let subcommand = parts.next().unwrap_or("").to_string();
+        let args = parts.next().unwrap_or("").to_string();
+        return UserIntent::CalCommand { subcommand, args };
+    }
 
     // Help.
     if lower == "help" || lower == "?" || lower.starts_with("help ") {
@@ -70,6 +165,23 @@ pub fn classify_intent(input: &str) -> UserIntent {
         || lower.starts_with("list goals")
     {
         return UserIntent::ShowStatus;
+    }
+
+    // Explanation queries (Phase 12f): "why X?", "explain X", "how confident", etc.
+    if let Some(query) = super::explain::ExplanationQuery::parse(trimmed) {
+        return UserIntent::Explain { query };
+    }
+
+    // Set detail level.
+    if lower.starts_with("set detail ") || lower.starts_with("detail ") {
+        let rest = if lower.starts_with("set detail ") {
+            trimmed[11..].trim()
+        } else {
+            trimmed[7..].trim()
+        };
+        return UserIntent::SetDetail {
+            level: rest.to_lowercase(),
+        };
     }
 
     // Render hieroglyphic notation.
@@ -99,7 +211,7 @@ pub fn classify_intent(input: &str) -> UserIntent {
     let lexicon = crate::grammar::lexer::Lexicon::for_language(
         crate::grammar::lexer::Language::default(),
     );
-    let question_word = extract_question_word(&lower);
+    let question_word = extract_question_word(&lower, &lexicon);
     let first_word = lower.split_whitespace().next().unwrap_or("");
     if question_word.is_some()
         || lexicon.is_auxiliary_verb(first_word)
@@ -204,27 +316,158 @@ fn extract_number(input: &str) -> Option<usize> {
 }
 
 /// Extract the question word from the beginning of a lowercase query.
-fn extract_question_word(lower: &str) -> Option<QuestionWord> {
-    if lower.starts_with("what ") {
-        Some(QuestionWord::What)
-    } else if lower.starts_with("who ") {
-        Some(QuestionWord::Who)
-    } else if lower.starts_with("where ") {
-        Some(QuestionWord::Where)
-    } else if lower.starts_with("when ") {
-        Some(QuestionWord::When)
-    } else if lower.starts_with("how ") {
-        Some(QuestionWord::How)
-    } else if lower.starts_with("why ") {
-        Some(QuestionWord::Why)
-    } else if lower.starts_with("which ") {
-        Some(QuestionWord::Which)
+///
+/// Uses the [`Lexicon`]'s question-word category mapping so the same logic
+/// works for any supported language.
+fn extract_question_word(lower: &str, lexicon: &crate::grammar::lexer::Lexicon) -> Option<QuestionWord> {
+    let first_word = lower.split_whitespace().next()?;
+    let category = lexicon.classify_question_word(first_word)?;
+    match category {
+        "what" => Some(QuestionWord::What),
+        "who" => Some(QuestionWord::Who),
+        "where" => Some(QuestionWord::Where),
+        "when" => Some(QuestionWord::When),
+        "how" => Some(QuestionWord::How),
+        "why" => Some(QuestionWord::Why),
+        "which" => Some(QuestionWord::Which),
+        "yesno" => Some(QuestionWord::YesNo),
+        _ => None,
+    }
+}
+
+/// Classification of conversational (non-query, non-command) user input.
+///
+/// Used to distinguish greetings, follow-ups, and acknowledgments from
+/// freeform input that should escalate to an autonomous goal.
+///
+/// **Deprecated**: Replaced by `AbsTree` dialogue-act variants (Greeting,
+/// Farewell, Acknowledgment, FollowUpRequest, MetaQuery) produced by the
+/// NLU pipeline (ADR 025).
+#[deprecated(note = "Use AbsTree dialogue-act variants instead (ADR 025)")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConversationalKind {
+    /// "hello", "hi", "hey", "good morning", etc.
+    Greeting,
+    /// "tell me more", "go on", "what else", "elaborate", etc.
+    FollowUp,
+    /// "thanks", "ok", "got it", "interesting", etc.
+    Acknowledgment,
+    /// "what can you do", "describe yourself", "who are you" (sans question mark).
+    MetaQuestion,
+    /// Fallback — still escalate to goal.
+    Unrecognized,
+}
+
+/// Classify freeform text into a conversational kind using keyword-feature scoring.
+///
+/// Uses the language-aware [`Lexicon`] for all word/phrase lookups, so the same
+/// scoring logic works for English, Russian, Arabic, French, Spanish, etc.
+///
+/// Extracts features (keyword presence, position, co-occurrence) and scores each
+/// category. The highest-scoring category wins if it meets the threshold.
+///
+/// **Deprecated**: The NLU pipeline's `try_dialogue_act()` in the rule parser
+/// now produces `AbsTree` dialogue-act variants directly (ADR 025).
+#[deprecated(note = "Use NLU pipeline's try_dialogue_act() instead (ADR 025)")]
+#[allow(deprecated)]
+pub fn classify_conversational(
+    text: &str,
+    lexicon: &crate::grammar::lexer::Lexicon,
+) -> ConversationalKind {
+    let lower = text.trim().to_lowercase();
+    if lower.is_empty() {
+        return ConversationalKind::Unrecognized;
+    }
+
+    let words: Vec<&str> = lower.split_whitespace().collect();
+    if words.is_empty() {
+        return ConversationalKind::Unrecognized;
+    }
+
+    let mut scores = [
+        (ConversationalKind::Greeting, 0i32),
+        (ConversationalKind::FollowUp, 0),
+        (ConversationalKind::Acknowledgment, 0),
+        (ConversationalKind::MetaQuestion, 0),
+    ];
+
+    // ── Greeting features ────────────────────────────────────────────
+    let has_greeting_word = words.iter().any(|w| {
+        let stripped = w.trim_matches(|c: char| c.is_ascii_punctuation());
+        lexicon.is_greeting_word(stripped)
+    });
+    let has_greeting_phrase = lexicon.has_greeting_phrase(&lower);
+    let greeting_at_start = words.first().is_some_and(|w| {
+        let stripped = w.trim_matches(|c: char| c.is_ascii_punctuation());
+        lexicon.is_greeting_word(stripped)
+    }) || has_greeting_phrase;
+
+    if greeting_at_start {
+        scores[0].1 += 3;
+    } else if has_greeting_word {
+        scores[0].1 += 1;
+    }
+
+    // ── Follow-up features ───────────────────────────────────────────
+    let has_followup_phrase = lexicon.has_followup_phrase(&lower);
+    let has_followup_cue = words.iter().any(|w| {
+        let stripped = w.trim_matches(|c: char| c.is_ascii_punctuation());
+        lexicon.is_followup_cue(stripped)
+    });
+    let short_followup = has_followup_cue && words.len() <= 4;
+
+    if has_followup_phrase {
+        scores[1].1 += 3;
+    } else if short_followup {
+        scores[1].1 += 2;
+    }
+
+    // ── Acknowledgment features ──────────────────────────────────────
+    let has_ack_phrase = lexicon.has_ack_phrase(&lower);
+    let has_ack_word = words.iter().any(|w| {
+        let stripped = w.trim_matches(|c: char| c.is_ascii_punctuation());
+        lexicon.is_ack_word(stripped)
+    });
+    let terse_ack = has_ack_word && words.len() <= 3;
+
+    if has_ack_phrase {
+        scores[2].1 += 3;
+    } else if terse_ack {
+        scores[2].1 += 3;
+    } else if has_ack_word {
+        scores[2].1 += 1;
+    }
+
+    // ── Meta-question features ───────────────────────────────────────
+    let has_meta_phrase = lexicon.has_meta_phrase(&lower);
+    let has_self_ref = words.iter().any(|w| {
+        let stripped = w.trim_matches(|c: char| c.is_ascii_punctuation());
+        lexicon.is_meta_self_word(stripped)
+    });
+    let has_capability_ref = words.iter().any(|w| {
+        let stripped = w.trim_matches(|c: char| c.is_ascii_punctuation());
+        lexicon.is_meta_capability_word(stripped)
+    });
+
+    if has_meta_phrase {
+        scores[3].1 += 3;
+    } else if has_self_ref && has_capability_ref {
+        scores[3].1 += 2;
+    }
+
+    // ── Pick winner ──────────────────────────────────────────────────
+    const THRESHOLD: i32 = 2;
+
+    scores.sort_by(|a, b| b.1.cmp(&a.1));
+    if scores[0].1 >= THRESHOLD {
+        scores[0].0
     } else {
-        None
+        ConversationalKind::Unrecognized
     }
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
 
@@ -304,6 +547,18 @@ mod tests {
     }
 
     #[test]
+    fn classify_set_detail() {
+        let intent = classify_intent("set detail concise");
+        assert!(matches!(intent, UserIntent::SetDetail { level } if level == "concise"));
+
+        let intent = classify_intent("detail full");
+        assert!(matches!(intent, UserIntent::SetDetail { level } if level == "full"));
+
+        let intent = classify_intent("set detail Normal");
+        assert!(matches!(intent, UserIntent::SetDetail { level } if level == "normal"));
+    }
+
+    #[test]
     fn question_frame_basic() {
         let lexicon = crate::grammar::lexer::Lexicon::default_english();
         let frame = lexicon.parse_question_frame("What is a dog?");
@@ -326,5 +581,128 @@ mod tests {
         let frame = lexicon.parse_question_frame("Who are you?");
         assert_eq!(frame.subject_tokens.join(" "), "you");
         assert!(!frame.signals_capability);
+    }
+
+    // ── classify_conversational tests ────────────────────────────────────
+
+    fn en() -> crate::grammar::lexer::Lexicon {
+        crate::grammar::lexer::Lexicon::default_english()
+    }
+
+    #[test]
+    fn conversational_greeting_basic() {
+        let lex = en();
+        assert_eq!(classify_conversational("hello", &lex), ConversationalKind::Greeting);
+        assert_eq!(classify_conversational("Hi", &lex), ConversationalKind::Greeting);
+        assert_eq!(classify_conversational("good morning", &lex), ConversationalKind::Greeting);
+        assert_eq!(classify_conversational("Hey there", &lex), ConversationalKind::Greeting);
+    }
+
+    #[test]
+    fn conversational_greeting_natural() {
+        let lex = en();
+        assert_eq!(classify_conversational("hello!", &lex), ConversationalKind::Greeting);
+        assert_eq!(classify_conversational("hey, how's it going", &lex), ConversationalKind::Greeting);
+        assert_eq!(classify_conversational("Good afternoon", &lex), ConversationalKind::Greeting);
+    }
+
+    #[test]
+    fn conversational_follow_up_basic() {
+        let lex = en();
+        assert_eq!(classify_conversational("tell me more", &lex), ConversationalKind::FollowUp);
+        assert_eq!(classify_conversational("go on", &lex), ConversationalKind::FollowUp);
+        assert_eq!(classify_conversational("what else", &lex), ConversationalKind::FollowUp);
+    }
+
+    #[test]
+    fn conversational_follow_up_natural() {
+        let lex = en();
+        assert_eq!(classify_conversational("elaborate please", &lex), ConversationalKind::FollowUp);
+        assert_eq!(classify_conversational("can you expand on that", &lex), ConversationalKind::FollowUp);
+        assert_eq!(classify_conversational("more details", &lex), ConversationalKind::FollowUp);
+    }
+
+    #[test]
+    fn conversational_acknowledgment_basic() {
+        let lex = en();
+        assert_eq!(classify_conversational("thanks", &lex), ConversationalKind::Acknowledgment);
+        assert_eq!(classify_conversational("ok", &lex), ConversationalKind::Acknowledgment);
+        assert_eq!(classify_conversational("got it", &lex), ConversationalKind::Acknowledgment);
+        assert_eq!(classify_conversational("interesting", &lex), ConversationalKind::Acknowledgment);
+    }
+
+    #[test]
+    fn conversational_acknowledgment_natural() {
+        let lex = en();
+        assert_eq!(classify_conversational("thank you!", &lex), ConversationalKind::Acknowledgment);
+        assert_eq!(classify_conversational("cool, thanks", &lex), ConversationalKind::Acknowledgment);
+        assert_eq!(classify_conversational("makes sense", &lex), ConversationalKind::Acknowledgment);
+        assert_eq!(classify_conversational("sounds good", &lex), ConversationalKind::Acknowledgment);
+    }
+
+    #[test]
+    fn conversational_meta_question_basic() {
+        let lex = en();
+        assert_eq!(classify_conversational("what can you do", &lex), ConversationalKind::MetaQuestion);
+        assert_eq!(classify_conversational("describe yourself", &lex), ConversationalKind::MetaQuestion);
+        assert_eq!(classify_conversational("who are you", &lex), ConversationalKind::MetaQuestion);
+    }
+
+    #[test]
+    fn conversational_meta_question_natural() {
+        let lex = en();
+        assert_eq!(classify_conversational("tell me about yourself", &lex), ConversationalKind::MetaQuestion);
+        assert_eq!(classify_conversational("what are you", &lex), ConversationalKind::MetaQuestion);
+        assert_eq!(classify_conversational("your capabilities", &lex), ConversationalKind::MetaQuestion);
+    }
+
+    #[test]
+    fn conversational_unrecognized() {
+        let lex = en();
+        assert_eq!(classify_conversational("the quick brown fox", &lex), ConversationalKind::Unrecognized);
+        assert_eq!(classify_conversational("", &lex), ConversationalKind::Unrecognized);
+        assert_eq!(classify_conversational("photosynthesis in plants", &lex), ConversationalKind::Unrecognized);
+    }
+
+    // ── Multilingual conversational tests ────────────────────────────
+
+    #[test]
+    fn conversational_russian_greeting() {
+        let lex = crate::grammar::lexer::Lexicon::default_russian();
+        assert_eq!(classify_conversational("привет", &lex), ConversationalKind::Greeting);
+        assert_eq!(classify_conversational("доброе утро", &lex), ConversationalKind::Greeting);
+    }
+
+    #[test]
+    fn conversational_russian_ack() {
+        let lex = crate::grammar::lexer::Lexicon::default_russian();
+        assert_eq!(classify_conversational("спасибо", &lex), ConversationalKind::Acknowledgment);
+    }
+
+    #[test]
+    fn conversational_french_greeting() {
+        let lex = crate::grammar::lexer::Lexicon::default_french();
+        assert_eq!(classify_conversational("bonjour", &lex), ConversationalKind::Greeting);
+        assert_eq!(classify_conversational("salut", &lex), ConversationalKind::Greeting);
+    }
+
+    #[test]
+    fn conversational_french_meta() {
+        let lex = crate::grammar::lexer::Lexicon::default_french();
+        assert_eq!(classify_conversational("qui es-tu", &lex), ConversationalKind::MetaQuestion);
+    }
+
+    #[test]
+    fn conversational_spanish_greeting() {
+        let lex = crate::grammar::lexer::Lexicon::default_spanish();
+        assert_eq!(classify_conversational("hola", &lex), ConversationalKind::Greeting);
+        assert_eq!(classify_conversational("buenos días", &lex), ConversationalKind::Greeting);
+    }
+
+    #[test]
+    fn conversational_arabic_greeting() {
+        let lex = crate::grammar::lexer::Lexicon::default_arabic();
+        assert_eq!(classify_conversational("مرحبا", &lex), ConversationalKind::Greeting);
+        assert_eq!(classify_conversational("السلام عليكم", &lex), ConversationalKind::Greeting);
     }
 }

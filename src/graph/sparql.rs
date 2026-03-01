@@ -4,7 +4,7 @@
 //! The in-memory `KnowledgeGraph` can be synced to this store for persistence.
 
 use oxigraph::model::{GraphNameRef, NamedNode, Quad};
-use oxigraph::sparql::QueryResults;
+use oxigraph::sparql::{QueryResults, SparqlEvaluator};
 use oxigraph::store::Store;
 
 use crate::error::GraphError;
@@ -111,6 +111,23 @@ impl SparqlStore {
         self.query_select(&scoped)
     }
 
+    /// Remove a single triple from the default graph.
+    pub fn remove_triple(
+        &self,
+        subject: SymbolId,
+        predicate: SymbolId,
+        object: SymbolId,
+    ) -> GraphResult<()> {
+        let s = Self::symbol_to_iri(subject);
+        let p = Self::symbol_to_iri(predicate);
+        let o = Self::symbol_to_iri(object);
+        let quad = Quad::new(s, p, o, GraphNameRef::DefaultGraph);
+        self.store.remove(&quad).map_err(|e| GraphError::Sparql {
+            message: format!("remove triple failed: {e}"),
+        })?;
+        Ok(())
+    }
+
     /// Remove all triples in a named compartment graph.
     pub fn remove_graph(&self, compartment_id: &str) -> GraphResult<()> {
         let graph_iri = format!("{COMPARTMENT_NS}{compartment_id}");
@@ -131,9 +148,13 @@ impl SparqlStore {
     /// triples will have default confidence of 1.0.
     // TODO: Store confidence via reification or named graphs to preserve across restarts.
     pub fn all_triples(&self) -> GraphResult<Vec<Triple>> {
-        let results = self
-            .store
-            .query("SELECT ?s ?p ?o WHERE { ?s ?p ?o }")
+        let results = SparqlEvaluator::new()
+            .parse_query("SELECT ?s ?p ?o WHERE { ?s ?p ?o }")
+            .map_err(|e| GraphError::Sparql {
+                message: format!("SPARQL parse failed: {e}"),
+            })?
+            .on_store(&self.store)
+            .execute()
             .map_err(|e| GraphError::Sparql {
                 message: format!("SPARQL all_triples query failed: {e}"),
             })?;
@@ -198,9 +219,16 @@ impl SparqlStore {
 
     /// Execute a SPARQL SELECT query and return results as Vec of binding maps.
     pub fn query_select(&self, sparql: &str) -> GraphResult<Vec<Vec<(String, String)>>> {
-        let results = self.store.query(sparql).map_err(|e| GraphError::Sparql {
-            message: format!("SPARQL query failed: {e}"),
-        })?;
+        let results = SparqlEvaluator::new()
+            .parse_query(sparql)
+            .map_err(|e| GraphError::Sparql {
+                message: format!("SPARQL parse failed: {e}"),
+            })?
+            .on_store(&self.store)
+            .execute()
+            .map_err(|e| GraphError::Sparql {
+                message: format!("SPARQL query failed: {e}"),
+            })?;
 
         match results {
             QueryResults::Solutions(solutions) => {
@@ -226,9 +254,16 @@ impl SparqlStore {
 
     /// Execute a SPARQL ASK query.
     pub fn query_ask(&self, sparql: &str) -> GraphResult<bool> {
-        let results = self.store.query(sparql).map_err(|e| GraphError::Sparql {
-            message: format!("SPARQL query failed: {e}"),
-        })?;
+        let results = SparqlEvaluator::new()
+            .parse_query(sparql)
+            .map_err(|e| GraphError::Sparql {
+                message: format!("SPARQL parse failed: {e}"),
+            })?
+            .on_store(&self.store)
+            .execute()
+            .map_err(|e| GraphError::Sparql {
+                message: format!("SPARQL query failed: {e}"),
+            })?;
         match results {
             QueryResults::Boolean(b) => Ok(b),
             _ => Err(GraphError::Sparql {
@@ -240,17 +275,17 @@ impl SparqlStore {
     /// Get the number of triples in the store.
     pub fn len(&self) -> GraphResult<usize> {
         let results = self.query_select("SELECT (COUNT(*) AS ?count) WHERE { ?s ?p ?o }")?;
-        if let Some(row) = results.first() {
-            if let Some((_, val)) = row.first() {
-                // oxigraph returns count as a typed literal like "\"3\"^^<http://...#integer>"
-                let count_str = val
-                    .trim_matches('"')
-                    .split('^')
-                    .next()
-                    .unwrap_or("0")
-                    .trim_matches('"');
-                return Ok(count_str.parse().unwrap_or(0));
-            }
+        if let Some(row) = results.first()
+            && let Some((_, val)) = row.first()
+        {
+            // oxigraph returns count as a typed literal like "\"3\"^^<http://...#integer>"
+            let count_str = val
+                .trim_matches('"')
+                .split('^')
+                .next()
+                .unwrap_or("0")
+                .trim_matches('"');
+            return Ok(count_str.parse().unwrap_or(0));
         }
         Ok(0)
     }

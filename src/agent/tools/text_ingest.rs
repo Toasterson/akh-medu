@@ -64,12 +64,9 @@ impl Tool for TextIngestTool {
         for sentence in sentences.iter().take(max_sentences) {
             let extracted = extract_triples(sentence);
             for (subject, predicate, object, confidence) in &extracted {
-                match ingest_extracted(engine, subject, predicate, object, *confidence) {
-                    Ok(syms) => {
-                        symbols.extend(syms);
-                        total_extracted += 1;
-                    }
-                    Err(_) => {}
+                if let Ok(syms) = ingest_extracted(engine, subject, predicate, object, *confidence) {
+                    symbols.extend(syms);
+                    total_extracted += 1;
                 }
             }
         }
@@ -154,7 +151,7 @@ fn extract_triples(sentence: &str) -> Vec<ExtractedTriple> {
     let mut results = Vec::new();
     let s = sentence
         .trim()
-        .trim_end_matches(|c: char| c == '.' || c == '!' || c == '?');
+        .trim_end_matches(['.', '!', '?']);
 
     // Normalize whitespace.
     let words: Vec<&str> = s.split_whitespace().collect();

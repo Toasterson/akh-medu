@@ -84,6 +84,14 @@ pub fn is_metadata_label(label: &str) -> bool {
         || label.starts_with("role:")
         || label.starts_with("importance:")
         || label.starts_with("semantic:")
+        || label.starts_with("dlg:")
+        || label.starts_with("dialogue:")
+        || label.starts_with("mt:")
+        || label.starts_with("pim:")
+        || label.starts_with("cal:")
+        || label.starts_with("causal:")
+        || label.starts_with("project:")
+        || label.starts_with("watch:")
 }
 
 /// Whether a line references agent metadata labels (even embedded in a sentence).
@@ -124,12 +132,12 @@ fn contains_metadata_ref(line: &str) -> bool {
 
 /// Strip a leading relevance score like `[0.90] ` from a gap line.
 fn strip_leading_score(s: &str) -> &str {
-    if s.starts_with('[') {
-        if let Some(bracket_end) = s.find("] ") {
-            let inner = &s[1..bracket_end];
-            if inner.parse::<f32>().is_ok() {
-                return s[bracket_end + 2..].trim();
-            }
+    if s.starts_with('[')
+        && let Some(bracket_end) = s.find("] ")
+    {
+        let inner = &s[1..bracket_end];
+        if inner.parse::<f32>().is_ok() {
+            return s[bracket_end + 2..].trim();
         }
     }
     s
@@ -174,17 +182,17 @@ const INFERRED_NOISE_PREDICATES: &[&str] = &["child-of", "part-of", "similar-to"
 
 /// Whether a predicate indicates code structure (worth showing).
 pub(crate) fn is_code_predicate(pred: &str) -> bool {
-    CODE_STRUCTURE_PREDICATES.iter().any(|p| pred == *p)
+    CODE_STRUCTURE_PREDICATES.contains(&pred)
 }
 
 /// Whether a predicate is a code annotation to skip.
 pub(crate) fn is_code_annotation(pred: &str) -> bool {
-    CODE_ANNOTATION_PREDICATES.iter().any(|p| pred == *p)
+    CODE_ANNOTATION_PREDICATES.contains(&pred)
 }
 
 /// Whether a predicate is inferred noise (redundant with structural predicates).
 fn is_inferred_noise(pred: &str) -> bool {
-    INFERRED_NOISE_PREDICATES.iter().any(|p| pred == *p)
+    INFERRED_NOISE_PREDICATES.contains(&pred)
 }
 
 /// Whether a predicate is a semantic enrichment annotation (handled by Code Architecture section).
@@ -528,11 +536,10 @@ fn clean_label(s: &str) -> String {
     if let Some(bracket_pos) = s.rfind("  [") {
         // Verify it ends with `]` and the content looks like a float
         let rest = &s[bracket_pos + 3..];
-        if rest.ends_with(']') {
-            let inner = &rest[..rest.len() - 1];
-            if inner.parse::<f32>().is_ok() {
-                s.truncate(bracket_pos);
-            }
+        if let Some(inner) = rest.strip_suffix(']')
+            && inner.parse::<f32>().is_ok()
+        {
+            s.truncate(bracket_pos);
         }
     }
     // Strip surrounding quotes
@@ -658,10 +665,10 @@ fn parse_infer_facts(body: &str, tool: &str, cycle: u64) -> Vec<ExtractedFact> {
             if let Some(n) = parts.first().and_then(|s| s.parse::<usize>().ok()) {
                 count = n;
             }
-            if let Some(pos) = parts.iter().position(|&w| w == "in") {
-                if let Some(i) = parts.get(pos + 1).and_then(|s| s.parse::<usize>().ok()) {
-                    iterations = i;
-                }
+            if let Some(pos) = parts.iter().position(|&w| w == "in")
+                && let Some(i) = parts.get(pos + 1).and_then(|s| s.parse::<usize>().ok())
+            {
+                iterations = i;
             }
         }
         // Also try to parse individual new triples as facts
@@ -1644,6 +1651,7 @@ mod tests {
             relevance: 1.0,
             source_cycle: cycle,
             reference_count: 0,
+            access_timestamps: Vec::new(),
         }
     }
 

@@ -92,6 +92,109 @@ pub enum AgentError {
     )]
     CliToolError { tool_name: String, message: String },
 
+    #[error("psyche is immutable after awakening — use evolve() for gradual change")]
+    #[diagnostic(
+        code(akh::agent::psyche_immutable),
+        help(
+            "The agent's psyche has been finalized by the Ritual of Awakening and cannot be \
+             wholesale-replaced. Use `psyche.evolve()` for gradual adaptation, or \
+             `force_set_psyche()` for admin override."
+        )
+    )]
+    PsycheImmutable,
+
+    #[error("project not found: {project_id}")]
+    #[diagnostic(
+        code(akh::agent::project_not_found),
+        help("The project symbol does not exist. Check active projects with `agent.projects()`.")
+    )]
+    ProjectNotFound { project_id: u64 },
+
+    #[error("watch not found: \"{watch_id}\"")]
+    #[diagnostic(
+        code(akh::agent::watch_not_found),
+        help("The watch ID does not exist. Check active watches with `agent.watches()`.")
+    )]
+    WatchNotFound { watch_id: String },
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Channel(#[from] super::channel::ChannelError),
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    ConstraintCheck(#[from] super::constraint_check::ConstraintCheckError),
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Explain(#[from] super::explain::ExplainError),
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Interlocutor(#[from] super::interlocutor::InterlocutorError),
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    MultiAgent(#[from] super::multi_agent::MultiAgentError),
+
+    #[cfg(feature = "oxifed")]
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Oxifed(#[from] super::oxifed::OxifedError),
+
+    #[cfg(feature = "email")]
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Email(#[from] crate::email::EmailError),
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Pim(#[from] super::pim::PimError),
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Calendar(#[from] super::calendar::CalendarError),
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Preference(#[from] super::preference::PreferenceError),
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Causal(#[from] super::causal::CausalError),
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Bootstrap(#[from] crate::bootstrap::purpose::BootstrapError),
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Identity(#[from] crate::bootstrap::identity::IdentityError),
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    DomainExpand(#[from] crate::bootstrap::expand::DomainExpandError),
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Prerequisite(#[from] crate::bootstrap::prerequisite::PrerequisiteError),
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    ResourceDiscovery(#[from] crate::bootstrap::resources::ResourceDiscoveryError),
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Ingestion(#[from] crate::bootstrap::ingest::IngestionError),
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Competence(#[from] crate::bootstrap::competence::CompetenceError),
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Orchestrator(#[from] crate::bootstrap::orchestrator::OrchestratorError),
+
     #[error("{0}")]
     #[diagnostic(
         code(akh::agent::engine),

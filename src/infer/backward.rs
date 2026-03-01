@@ -77,6 +77,7 @@ pub fn infer_backward(
     Ok(chains)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn backward_recurse(
     engine: &crate::engine::Engine,
     ops: &VsaOps,

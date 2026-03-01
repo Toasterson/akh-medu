@@ -24,7 +24,8 @@ pub struct SkillManager {
     skills: RwLock<HashMap<String, LoadedSkill>>,
     loaded_bytes: AtomicUsize,
     max_bytes: usize,
-    /// Stored rule text per skill: skill_id → Vec<(name, lhs, rhs)>.
+    /// Stored rule text per skill: skill_id -> Vec<(name, lhs, rhs)>.
+    #[allow(clippy::type_complexity)]
     rule_sources: RwLock<HashMap<String, Vec<(String, String, String)>>>,
 }
 
@@ -320,6 +321,35 @@ impl SkillManager {
             .remove(skill_id);
 
         Ok(())
+    }
+
+    /// Get the current state of a skill, or `None` if not discovered.
+    pub fn skill_state(&self, skill_id: &str) -> Option<SkillState> {
+        let skills = self.skills.read().expect("skills lock poisoned");
+        skills.get(skill_id).map(|s| s.state)
+    }
+
+    /// Build an activation summary for an already-Hot skill (idempotent reload).
+    pub fn hot_activation(&self, skill_id: &str) -> Option<SkillActivation> {
+        let skills = self.skills.read().expect("skills lock poisoned");
+        let skill = skills.get(skill_id)?;
+        if skill.state != SkillState::Hot {
+            return None;
+        }
+        Some(SkillActivation {
+            skill_id: skill_id.to_string(),
+            triples_loaded: skill.triple_count,
+            rules_loaded: skill.rule_count,
+            memory_bytes: skill.memory_bytes,
+        })
+    }
+
+    /// Add extra triples to a Hot skill's count (e.g. label triples loaded externally).
+    pub fn add_triple_count(&self, skill_id: &str, extra: usize) {
+        let mut skills = self.skills.write().expect("skills lock poisoned");
+        if let Some(skill) = skills.get_mut(skill_id) {
+            skill.triple_count += extra;
+        }
     }
 
     /// List all known skills with their current state.

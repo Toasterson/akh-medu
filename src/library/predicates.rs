@@ -31,10 +31,13 @@ pub struct LibraryPredicates {
     // Chunk-level relations
     pub chunk_text: SymbolId,
     pub chunk_index: SymbolId,
+
+    // Concept relations
+    pub mentions: SymbolId,
 }
 
 impl LibraryPredicates {
-    /// Resolve or create all 14 well-known doc predicates in the engine.
+    /// Resolve or create all 15 well-known doc predicates in the engine.
     pub fn init(engine: &Engine) -> AkhResult<Self> {
         Ok(Self {
             has_chapter: engine.resolve_or_create_relation("doc:has_chapter")?,
@@ -51,6 +54,7 @@ impl LibraryPredicates {
             has_tag: engine.resolve_or_create_relation("doc:has_tag")?,
             chunk_text: engine.resolve_or_create_relation("doc:chunk_text")?,
             chunk_index: engine.resolve_or_create_relation("doc:chunk_index")?,
+            mentions: engine.resolve_or_create_relation("doc:mentions")?,
         })
     }
 }

@@ -125,12 +125,12 @@ impl PartitionManager {
 
         let mut count = 0;
         for entry in entries.flatten() {
-            if entry.path().is_dir() {
-                if let Some(name) = entry.file_name().to_str() {
-                    let partition = Partition::shared(name, &self.partitions_dir);
-                    self.partitions.insert(name.to_string(), partition);
-                    count += 1;
-                }
+            if entry.path().is_dir()
+                && let Some(name) = entry.file_name().to_str()
+            {
+                let partition = Partition::shared(name, &self.partitions_dir);
+                self.partitions.insert(name.to_string(), partition);
+                count += 1;
             }
         }
 
@@ -189,12 +189,12 @@ impl PartitionManager {
                 name: name.to_string(),
             })?;
 
-        if let PartitionSource::Shared { path } = &partition.source {
-            if path.exists() {
-                std::fs::remove_dir_all(path).map_err(|e| PartitionError::Storage {
-                    message: format!("failed to remove partition dir: {e}"),
-                })?;
-            }
+        if let PartitionSource::Shared { path } = &partition.source
+            && path.exists()
+        {
+            std::fs::remove_dir_all(path).map_err(|e| PartitionError::Storage {
+                message: format!("failed to remove partition dir: {e}"),
+            })?;
         }
 
         Ok(())

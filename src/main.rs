@@ -1,26 +1,77 @@
 //! akh CLI: neuro-symbolic AI engine.
 
-use std::collections::HashSet;
 use std::path::PathBuf;
+#[cfg(not(feature = "client-only"))]
 use std::sync::Arc;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use miette::{IntoDiagnostic, Result};
 
+#[cfg(not(feature = "client-only"))]
 use akh_medu::agent::{Agent, AgentConfig};
-use akh_medu::autonomous::{GapAnalysisConfig, RuleEngineConfig, SchemaDiscoveryConfig};
-use akh_medu::client::{AkhClient, discover_server};
+#[cfg(not(feature = "client-only"))]
+use akh_medu::client::discover_server;
+use akh_medu::client::AkhClient;
+#[cfg(not(feature = "client-only"))]
 use akh_medu::engine::{Engine, EngineConfig};
+#[cfg(not(feature = "client-only"))]
 use akh_medu::error::EngineError;
+#[cfg(not(feature = "client-only"))]
 use akh_medu::glyph;
+#[cfg(not(feature = "client-only"))]
 use akh_medu::grammar::Language;
+#[cfg(not(feature = "client-only"))]
 use akh_medu::graph::Triple;
-use akh_medu::graph::traverse::TraversalConfig;
-use akh_medu::infer::InferenceQuery;
-use akh_medu::pipeline::{Pipeline, PipelineData, PipelineStage, StageConfig, StageKind};
-use akh_medu::provenance::DerivationKind;
+#[cfg(not(feature = "client-only"))]
 use akh_medu::symbol::SymbolId;
+#[cfg(not(feature = "client-only"))]
 use akh_medu::vsa::Dimension;
+
+#[derive(Clone, ValueEnum)]
+enum IngestFormat {
+    Json,
+    Csv,
+    Text,
+}
+
+#[derive(Clone, ValueEnum)]
+enum CsvFormat {
+    Spo,
+    Entity,
+}
+
+#[derive(Clone, ValueEnum)]
+enum EnergyLevel {
+    Low,
+    Medium,
+    High,
+}
+
+#[derive(Clone, ValueEnum)]
+enum GtdState {
+    Inbox,
+    Next,
+    Waiting,
+    Someday,
+    Reference,
+}
+
+#[derive(Clone, ValueEnum)]
+enum ParaCategory {
+    Project,
+    Area,
+    Resource,
+    Archive,
+}
+
+#[derive(Clone, ValueEnum)]
+enum ProactivityLevel {
+    Ambient,
+    Nudge,
+    Offer,
+    Scheduled,
+    Autonomous,
+}
 
 #[derive(Parser)]
 #[command(name = "akh", version, about = "Neuro-symbolic AI engine")]
@@ -62,162 +113,23 @@ enum Commands {
         #[arg(long)]
         file: PathBuf,
 
-        /// File format: "json" (default), "csv", or "text".
+        /// File format: json (default), csv, or text.
         #[arg(long, default_value = "json")]
-        format: String,
+        format: IngestFormat,
 
-        /// CSV format: "spo" (subject,predicate,object) or "entity" (headers=predicates).
+        /// CSV format: spo (subject,predicate,object) or entity (headers=predicates).
         #[arg(long, default_value = "spo")]
-        csv_format: String,
+        csv_format: CsvFormat,
 
         /// Maximum sentences to process for text format.
         #[arg(long, default_value = "100")]
         max_sentences: usize,
     },
 
-    /// Load all bundled skills, run grounding, run inference.
-    Bootstrap,
-
-    /// Query the knowledge base using spreading-activation inference.
-    Query {
-        /// Seed symbols (comma-separated names or IDs, e.g. "Sun,Moon" or "1,2").
-        #[arg(long)]
-        seeds: String,
-
-        /// Number of results to return.
-        #[arg(long, default_value = "10")]
-        top_k: usize,
-
-        /// Maximum inference depth.
-        #[arg(long, default_value = "1")]
-        max_depth: usize,
-    },
-
-    /// Traverse the knowledge graph from seed nodes using BFS.
-    Traverse {
-        /// Seed symbols (comma-separated names or IDs).
-        #[arg(long)]
-        seeds: String,
-
-        /// Maximum traversal depth.
-        #[arg(long, default_value = "3")]
-        max_depth: usize,
-
-        /// Only follow these predicates (comma-separated, optional).
-        #[arg(long)]
-        predicates: Option<String>,
-
-        /// Minimum confidence threshold.
-        #[arg(long, default_value = "0.0")]
-        min_confidence: f32,
-
-        /// Maximum number of triples to collect.
-        #[arg(long, default_value = "1000")]
-        max_results: usize,
-
-        /// Output format: "summary" or "json".
-        #[arg(long, default_value = "summary")]
-        format: String,
-    },
-
-    /// Run a SPARQL query against the knowledge graph.
-    Sparql {
-        /// Inline SPARQL query string.
-        #[arg(long)]
-        query: Option<String>,
-
-        /// Path to a SPARQL query file (.rq).
-        #[arg(long)]
-        file: Option<PathBuf>,
-    },
-
-    /// Simplify a symbolic expression using e-graph rewriting.
-    Reason {
-        /// Expression to simplify (e.g. "(not (not x))").
-        #[arg(long)]
-        expr: String,
-
-        /// Show rule count and extra details.
-        #[arg(long)]
-        verbose: bool,
-    },
-
-    /// Search for symbols similar to a given symbol via VSA.
-    Search {
-        /// Symbol name or numeric ID to search around.
-        #[arg(long)]
-        symbol: String,
-
-        /// Number of results to return.
-        #[arg(long, default_value = "5")]
-        top_k: usize,
-    },
-
-    /// Compute an analogy: A:B :: C:? via VSA bind/unbind.
-    Analogy {
-        /// First symbol (A).
-        #[arg(long)]
-        a: String,
-
-        /// Second symbol (B).
-        #[arg(long)]
-        b: String,
-
-        /// Third symbol (C).
-        #[arg(long)]
-        c: String,
-
-        /// Number of results to return.
-        #[arg(long, default_value = "5")]
-        top_k: usize,
-    },
-
-    /// Recover the filler for a (subject, predicate) pair via VSA unbind.
-    Filler {
-        /// Subject symbol name or ID.
-        #[arg(long)]
-        subject: String,
-
-        /// Predicate symbol name or ID.
-        #[arg(long)]
-        predicate: String,
-
-        /// Number of results to return.
-        #[arg(long, default_value = "5")]
-        top_k: usize,
-    },
-
-    /// Show engine info and statistics.
-    Info,
-
-    /// List and inspect symbols.
-    Symbols {
-        #[command(subcommand)]
-        action: SymbolAction,
-    },
-
-    /// Export engine data as JSON.
-    Export {
-        #[command(subcommand)]
-        action: ExportAction,
-    },
-
     /// Manage skillpacks.
     Skill {
         #[command(subcommand)]
         action: SkillAction,
-    },
-
-    /// Run processing pipelines.
-    Pipeline {
-        #[command(subcommand)]
-        action: PipelineAction,
-    },
-
-    /// Graph analytics: centrality, components, paths.
-    Analytics {
-        #[command(subcommand)]
-        action: AnalyticsAction,
     },
 
     /// Render knowledge in hieroglyphic notation.
@@ -245,6 +157,36 @@ enum Commands {
         action: AgentAction,
     },
 
+    /// Personal information management (Phase 13e).
+    Pim {
+        #[command(subcommand)]
+        action: PimAction,
+    },
+
+    /// Calendar & temporal reasoning (Phase 13f).
+    Cal {
+        #[command(subcommand)]
+        action: CalAction,
+    },
+
+    /// Preference learning & proactive assistance (Phase 13g).
+    Pref {
+        #[command(subcommand)]
+        action: PrefAction,
+    },
+
+    /// Causal world model (Phase 15a).
+    Causal {
+        #[command(subcommand)]
+        action: CausalAction,
+    },
+
+    /// Identity awakening (Phase 14a+14b).
+    Awaken {
+        #[command(subcommand)]
+        action: AwakenAction,
+    },
+
     /// Manage seed packs (knowledge bootstrapping).
     Seed {
         #[command(subcommand)]
@@ -259,76 +201,9 @@ enum Commands {
         /// Headless mode: use plain stdin/stdout instead of TUI.
         #[arg(long)]
         headless: bool,
-    },
-
-    /// Ingest Rust source code into the knowledge graph.
-    CodeIngest {
-        /// File or directory path to ingest.
+        /// Fresh start: ignore persisted session and goals.
         #[arg(long)]
-        path: PathBuf,
-        /// Scan subdirectories recursively (default: true).
-        #[arg(long, default_value = "true")]
-        recursive: bool,
-        /// Run forward-chaining code rules after ingestion.
-        #[arg(long)]
-        run_rules: bool,
-        /// Maximum number of files to process.
-        #[arg(long, default_value = "200")]
-        max_files: usize,
-        /// Run semantic enrichment (role classification, importance, data flow).
-        #[arg(long)]
-        enrich: bool,
-    },
-
-    /// Run semantic enrichment on existing code knowledge.
-    ///
-    /// Classifies module roles, computes importance, and detects data flow.
-    /// Persists results as `semantic:*` triples in the KG.
-    Enrich,
-
-    /// Generate documentation from code knowledge in the KG.
-    DocGen {
-        /// Target: "architecture", "module:<name>", "type:<name>", "dependencies".
-        #[arg(long)]
-        target: String,
-        /// Output format: "markdown" (default), "json", or "both".
-        #[arg(long, default_value = "markdown")]
-        format: String,
-        /// Output file path (stdout if omitted).
-        #[arg(long)]
-        output: Option<PathBuf>,
-        /// Use LLM to polish Markdown output.
-        #[arg(long)]
-        polish: bool,
-    },
-
-    /// Bidirectional grammar system: translate between prose and symbols.
-    Grammar {
-        #[command(subcommand)]
-        action: GrammarAction,
-    },
-
-    /// Pre-process text chunks for the Eleutherios integration pipeline.
-    ///
-    /// Reads JSONL from stdin, extracts entities/claims, writes JSONL to stdout.
-    Preprocess {
-        /// Output format: "jsonl" (default) or "json".
-        #[arg(long, default_value = "jsonl")]
-        format: String,
-
-        /// Override language (en, ru, ar, fr, es). Default: auto-detect.
-        #[arg(long)]
-        language: Option<String>,
-
-        /// Enrich extracted entities with context from the shared content library.
-        #[arg(long)]
-        library_context: bool,
-    },
-
-    /// Manage cross-lingual equivalence mappings.
-    Equivalences {
-        #[command(subcommand)]
-        action: EquivalenceAction,
+        fresh: bool,
     },
 
     /// Manage the shared content library (ingest books, websites, documents).
@@ -336,29 +211,35 @@ enum Commands {
         #[command(subcommand)]
         action: LibraryAction,
     },
-}
 
-#[derive(Subcommand)]
-enum SymbolAction {
-    /// List all registered symbols.
-    List,
-    /// Show details of a specific symbol (by name or ID).
-    Show {
-        /// Symbol name or numeric ID.
-        name_or_id: String,
+    /// Manage akhomed as a macOS launchd service.
+    Service {
+        #[command(subcommand)]
+        action: ServiceAction,
     },
 }
 
 #[derive(Subcommand)]
-enum ExportAction {
-    /// Export the symbol table as JSON.
-    Symbols,
-    /// Export all triples as JSON.
-    Triples,
-    /// Export provenance chain for a symbol as JSON.
-    Provenance {
-        /// Symbol name or numeric ID.
-        name_or_id: String,
+enum ServiceAction {
+    /// Install akhomed as a launchd service (auto-restart, run at login).
+    Install {
+        /// Server port (default: 8200).
+        #[arg(long)]
+        port: Option<u16>,
+    },
+    /// Start the launchd service.
+    Start,
+    /// Stop the launchd service (graceful shutdown).
+    Stop,
+    /// Show launchd service status (PID, loaded state, exit code).
+    Status,
+    /// Uninstall the launchd service (unload + remove plist).
+    Uninstall,
+    /// Print the generated plist XML (dry-run, does not install).
+    Show {
+        /// Server port (default: 8200).
+        #[arg(long)]
+        port: Option<u16>,
     },
 }
 
@@ -394,87 +275,12 @@ enum SkillAction {
 }
 
 #[derive(Subcommand)]
-enum PipelineAction {
-    /// List available built-in pipelines.
-    List,
-    /// Run the query pipeline (Retrieve -> Infer -> Reason).
-    Query {
-        /// Seed symbols (comma-separated names or IDs).
-        #[arg(long)]
-        seeds: String,
-        /// Maximum traversal depth for retrieve stage.
-        #[arg(long, default_value = "3")]
-        max_depth: usize,
-        /// Maximum inference depth.
-        #[arg(long, default_value = "1")]
-        infer_depth: usize,
-        /// Output format: "summary" or "json".
-        #[arg(long, default_value = "summary")]
-        format: String,
-    },
-    /// Run a custom pipeline from named stages.
-    Run {
-        /// Comma-separated stage names: retrieve,infer,reason,extract.
-        #[arg(long)]
-        stages: String,
-        /// Seed symbols (comma-separated names or IDs).
-        #[arg(long)]
-        seeds: String,
-        /// Output format: "summary" or "json".
-        #[arg(long, default_value = "summary")]
-        format: String,
-    },
-}
-
-#[derive(Subcommand)]
-enum AnalyticsAction {
-    /// Compute degree centrality for all nodes.
-    Degree {
-        /// Number of top results.
-        #[arg(long, default_value = "10")]
-        top_k: usize,
-    },
-    /// Compute PageRank scores.
-    Pagerank {
-        /// Damping factor (default 0.85).
-        #[arg(long, default_value = "0.85")]
-        damping: f64,
-        /// Number of iterations.
-        #[arg(long, default_value = "20")]
-        iterations: usize,
-        /// Number of top results.
-        #[arg(long, default_value = "10")]
-        top_k: usize,
-    },
-    /// Find strongly connected components.
-    Components,
-    /// Find shortest path between two symbols.
-    Path {
-        /// Start symbol name or ID.
-        #[arg(long)]
-        from: String,
-        /// End symbol name or ID.
-        #[arg(long)]
-        to: String,
-    },
-}
-
-#[derive(Subcommand)]
 enum AgentAction {
-    /// Run one OODA cycle.
-    Cycle {
-        /// Goal description.
-        #[arg(long)]
-        goal: String,
-        /// Goal priority (0-255).
-        #[arg(long, default_value = "128")]
-        priority: u8,
-    },
     /// Run agent until goals complete or max cycles reached.
     Run {
-        /// Goal descriptions (comma-separated).
-        #[arg(long)]
-        goals: String,
+        /// Goal descriptions.
+        #[arg(long, value_delimiter = ',')]
+        goals: Vec<String>,
         /// Maximum OODA cycles.
         #[arg(long, default_value = "10")]
         max_cycles: usize,
@@ -482,19 +288,6 @@ enum AgentAction {
         #[arg(long)]
         fresh: bool,
     },
-    /// Trigger memory consolidation.
-    Consolidate,
-    /// Recall episodic memories.
-    Recall {
-        /// Query symbols (comma-separated names or IDs).
-        #[arg(long)]
-        query: String,
-        /// Maximum results.
-        #[arg(long, default_value = "5")]
-        top_k: usize,
-    },
-    /// List registered tools.
-    Tools,
     /// Resume a previously persisted session.
     Resume {
         /// Maximum OODA cycles.
@@ -503,45 +296,14 @@ enum AgentAction {
     },
     /// Interactive REPL (launches TUI).
     Repl {
-        /// Goal descriptions (comma-separated). Omit to resume existing goals.
-        #[arg(long)]
-        goals: Option<String>,
+        /// Goal descriptions. Omit to resume existing goals.
+        #[arg(long, value_delimiter = ',')]
+        goals: Option<Vec<String>>,
         /// Headless mode: use plain stdin/stdout instead of TUI.
         #[arg(long)]
         headless: bool,
     },
-    /// Generate and display a plan for a goal.
-    Plan {
-        /// Goal description.
-        #[arg(long)]
-        goal: String,
-        /// Goal priority (0-255).
-        #[arg(long, default_value = "128")]
-        priority: u8,
-    },
-    /// Run reflection on the current agent state.
-    Reflect,
-    /// Run forward-chaining inference rules.
-    Infer {
-        /// Maximum forward-chaining iterations.
-        #[arg(long, default_value = "5")]
-        max_iterations: usize,
-        /// Minimum confidence for derived triples.
-        #[arg(long, default_value = "0.1")]
-        min_confidence: f32,
-    },
-    /// Analyze knowledge gaps around a goal.
-    Gaps {
-        /// Goal symbol name or ID.
-        #[arg(long)]
-        goal: String,
-        /// Maximum gaps to report.
-        #[arg(long, default_value = "10")]
-        max_gaps: usize,
-    },
-    /// Discover schema patterns from the knowledge graph.
-    Schema,
-    /// Interactive chat (launches TUI).
+    /// Interactive chat (launches TUI). DEPRECATED: use `akh chat` instead.
     Chat {
         /// Maximum OODA cycles per question.
         #[arg(long, default_value = "5")]
@@ -582,85 +344,297 @@ enum AgentAction {
 }
 
 #[derive(Subcommand)]
-enum GrammarAction {
-    /// List available grammar archetypes.
-    List,
-    /// Parse prose into abstract syntax and display the result.
-    Parse {
-        /// The prose text to parse.
-        input: String,
-        /// Commit parsed facts to the knowledge graph.
+enum PimAction {
+    /// Show all inbox items.
+    Inbox,
+    /// Show next actions (optionally filtered by context and energy).
+    Next {
+        /// Filter by GTD context (e.g. "computer", "office").
         #[arg(long)]
-        ingest: bool,
+        context: Option<String>,
+        /// Filter by energy level.
+        #[arg(long)]
+        energy: Option<EnergyLevel>,
     },
-    /// Linearize a triple through a grammar archetype.
-    Linearize {
-        /// Subject entity.
-        #[arg(long)]
-        subject: String,
-        /// Predicate relation.
-        #[arg(long)]
-        predicate: String,
-        /// Object entity.
-        #[arg(long)]
-        object: String,
-        /// Grammar archetype to use (default: all three).
-        #[arg(long)]
-        archetype: Option<String>,
-        /// Confidence value (0.0-1.0, optional).
-        #[arg(long)]
-        confidence: Option<f32>,
+    /// Run a GTD weekly review.
+    Review,
+    /// Show tasks for a PARA project.
+    Project {
+        /// Project name.
+        name: String,
     },
-    /// Compare all archetypes side-by-side on the same input.
-    Compare {
-        /// Subject entity.
+    /// Add PIM metadata to an existing goal (by numeric ID).
+    Add {
+        /// Goal symbol ID.
         #[arg(long)]
-        subject: String,
-        /// Predicate relation.
+        goal: u64,
+        /// Initial GTD state.
+        #[arg(long, default_value = "inbox")]
+        gtd: GtdState,
+        /// Urgency (0.0–1.0).
+        #[arg(long, default_value = "0.5")]
+        urgency: f32,
+        /// Importance (0.0–1.0).
+        #[arg(long, default_value = "0.5")]
+        importance: f32,
+        /// PARA category.
         #[arg(long)]
-        predicate: String,
-        /// Object entity.
+        para: Option<ParaCategory>,
+        /// GTD contexts (e.g. "computer,office").
+        #[arg(long, value_delimiter = ',')]
+        contexts: Option<Vec<String>>,
+        /// Recurrence pattern (e.g. "daily", "weekly:mon,fri", "every:3d").
         #[arg(long)]
-        object: String,
-        /// Confidence value (0.0-1.0, optional).
+        recur: Option<String>,
+        /// Deadline (unix timestamp).
         #[arg(long)]
-        confidence: Option<f32>,
+        deadline: Option<u64>,
     },
-    /// Load a custom grammar archetype from a TOML file.
-    Load {
-        /// Path to the TOML grammar definition.
+    /// Transition a task's GTD state.
+    Transition {
+        /// Goal symbol ID.
         #[arg(long)]
-        file: PathBuf,
-        /// Linearize a test triple after loading to verify.
+        goal: u64,
+        /// Target GTD state.
         #[arg(long)]
-        test: bool,
+        to: GtdState,
     },
-    /// Render existing KG triples through a grammar archetype.
-    Render {
-        /// Entity to render triples for (label or ID).
+    /// Show Eisenhower matrix.
+    Matrix,
+    /// Show dependency graph.
+    Deps,
+    /// Show overdue tasks.
+    Overdue,
+}
+
+#[derive(Subcommand)]
+enum CalAction {
+    /// Show today's calendar events.
+    Today,
+    /// Show this week's calendar events (next 7 days).
+    Week,
+    /// Detect scheduling conflicts.
+    Conflicts,
+    /// Add a new calendar event.
+    Add {
+        /// Event summary / title.
         #[arg(long)]
-        entity: String,
-        /// Grammar archetype (default: formal).
-        #[arg(long, default_value = "formal")]
-        archetype: String,
-        /// Maximum triples to render.
-        #[arg(long, default_value = "20")]
-        max_triples: usize,
+        summary: String,
+        /// Start time (UNIX timestamp).
+        #[arg(long)]
+        start: u64,
+        /// End time (UNIX timestamp).
+        #[arg(long)]
+        end: u64,
+        /// Location (optional).
+        #[arg(long)]
+        location: Option<String>,
+    },
+    /// Import events from an iCalendar (.ics) file.
+    Import {
+        /// Path to .ics file.
+        #[arg(long)]
+        file: std::path::PathBuf,
+    },
+    /// Sync from a CalDAV server.
+    Sync {
+        /// CalDAV URL.
+        #[arg(long)]
+        url: String,
+        /// Username.
+        #[arg(long)]
+        user: String,
+        /// Password.
+        #[arg(long)]
+        pass: String,
     },
 }
 
 #[derive(Subcommand)]
-enum EquivalenceAction {
-    /// List all learned equivalences.
-    List,
-    /// Show equivalence statistics (counts by source).
-    Stats,
-    /// Run all learning strategies to discover new equivalences.
-    Learn,
-    /// Export learned equivalences as JSON to stdout.
-    Export,
-    /// Import equivalences from JSON on stdin.
-    Import,
+enum PrefAction {
+    /// Show current preference profile status.
+    Status,
+    /// Train preference profile with explicit feedback on an entity.
+    Train {
+        /// Entity symbol ID.
+        #[arg(long)]
+        entity: u64,
+        /// Weight [-1.0, 1.0]. Positive = interest, negative = disinterest.
+        #[arg(long, default_value = "1.0")]
+        weight: f32,
+    },
+    /// Set proactivity level.
+    Level {
+        /// Level: ambient, nudge, offer, scheduled, autonomous.
+        level: ProactivityLevel,
+    },
+    /// Show top interest topics.
+    Interests {
+        /// Number of interests to show.
+        #[arg(long, default_value = "10")]
+        count: usize,
+    },
+    /// Run JITIR and show suggestions.
+    Suggest,
+}
+
+#[derive(Subcommand)]
+enum CausalAction {
+    /// List all registered action schemas.
+    Schemas,
+    /// Show details of a specific action schema.
+    Schema {
+        /// Schema name (matches tool name).
+        name: String,
+    },
+    /// Predict the effects of executing an action.
+    Predict {
+        /// Action (schema) name.
+        name: String,
+    },
+    /// Show applicable actions in the current KG state.
+    Applicable,
+    /// Bootstrap schemas from the tool registry.
+    Bootstrap,
+}
+
+#[derive(Subcommand)]
+enum AwakenAction {
+    /// Parse a purpose/identity statement from the operator.
+    Parse {
+        /// The purpose statement (e.g., "You are the Architect based on Ptah, expert in systems").
+        statement: String,
+    },
+    /// Resolve an identity reference via static tables or external APIs.
+    Resolve {
+        /// Name of the figure to resolve (e.g., "Ptah", "Gandalf", "Turing").
+        name: String,
+    },
+    /// Show current psyche/identity state.
+    Status,
+    /// Expand seed concepts into a skeleton ontology via external knowledge sources.
+    Expand {
+        /// Seed concepts (e.g., "compiler,optimization,parsing").
+        #[arg(long, value_delimiter = ',')]
+        seeds: Option<Vec<String>>,
+        /// Purpose statement to extract seeds from (e.g., "GCC compiler expert").
+        #[arg(long)]
+        purpose: Option<String>,
+        /// VSA similarity threshold for candidate acceptance (default 0.6).
+        #[arg(long, default_value = "0.6")]
+        threshold: f32,
+        /// Maximum number of concepts to create (default 200).
+        #[arg(long, default_value = "200")]
+        max_concepts: usize,
+        /// Disable ConceptNet queries.
+        #[arg(long)]
+        no_conceptnet: bool,
+    },
+    /// Discover prerequisite relationships and classify concepts by Vygotsky ZPD zones.
+    Prerequisite {
+        /// Seed concepts (e.g., "compiler,optimization,parsing").
+        #[arg(long, value_delimiter = ',')]
+        seeds: Option<Vec<String>>,
+        /// Purpose statement to extract seeds from (e.g., "GCC compiler expert").
+        #[arg(long)]
+        purpose: Option<String>,
+        /// Minimum triple count for a concept to be classified as "Known" (default 5).
+        #[arg(long, default_value = "5")]
+        known_threshold: usize,
+        /// Lower ZPD similarity bound for "Proximal" zone (default 0.3).
+        #[arg(long, default_value = "0.3")]
+        zpd_low: f32,
+        /// Upper ZPD similarity bound for "Proximal" zone (default 0.7).
+        #[arg(long, default_value = "0.7")]
+        zpd_high: f32,
+    },
+    /// Discover learning resources for ZPD-proximal concepts.
+    Resources {
+        /// Seed concepts (e.g., "rust,compiler").
+        #[arg(long, value_delimiter = ',')]
+        seeds: Option<Vec<String>>,
+        /// Purpose statement to extract seeds from.
+        #[arg(long)]
+        purpose: Option<String>,
+        /// Minimum quality score for resources (default 0.2).
+        #[arg(long, default_value = "0.2")]
+        min_quality: f32,
+        /// Maximum API calls across all sources (default 60).
+        #[arg(long, default_value = "60")]
+        max_api_calls: usize,
+        /// Disable Semantic Scholar queries.
+        #[arg(long)]
+        no_semantic_scholar: bool,
+        /// Disable OpenAlex queries.
+        #[arg(long)]
+        no_openalex: bool,
+        /// Disable Open Library queries.
+        #[arg(long)]
+        no_open_library: bool,
+    },
+    /// Ingest discovered resources in curriculum order (expand -> prereq -> resources -> ingest).
+    Ingest {
+        /// Seed concepts (e.g., "rust,compiler").
+        #[arg(long, value_delimiter = ',')]
+        seeds: Option<Vec<String>>,
+        /// Purpose statement to extract seeds from.
+        #[arg(long)]
+        purpose: Option<String>,
+        /// Maximum ingestion cycles (default 500).
+        #[arg(long, default_value = "500")]
+        max_cycles: usize,
+        /// Consecutive zero-triple results to consider a concept saturated (default 3).
+        #[arg(long, default_value = "3")]
+        saturation: usize,
+        /// Cross-validation confidence boost (default 0.15).
+        #[arg(long, default_value = "0.15")]
+        xval_boost: f32,
+        /// Disable URL ingestion for open-access resources.
+        #[arg(long)]
+        no_url: bool,
+        /// Override the library catalog directory.
+        #[arg(long)]
+        catalog_dir: Option<String>,
+    },
+    /// Assess competence: expand -> prereq -> resources -> ingest -> assess.
+    Assess {
+        /// Seed concepts (e.g., "rust,compiler").
+        #[arg(long, value_delimiter = ',')]
+        seeds: Option<Vec<String>>,
+        /// Purpose statement to extract seeds from.
+        #[arg(long)]
+        purpose: Option<String>,
+        /// Minimum triples per concept for "known" classification (default 3).
+        #[arg(long, default_value = "3")]
+        min_triples: usize,
+        /// Maximum Bloom depth to evaluate (1–4, default 4).
+        #[arg(long, default_value = "4")]
+        bloom_depth: usize,
+        /// Print per-knowledge-area breakdown with score components.
+        #[arg(long)]
+        verbose: bool,
+    },
+    /// Full bootstrap pipeline: purpose → identity → expand → learn loop → target competence.
+    Bootstrap {
+        /// Purpose/identity statement (e.g., "You are the Architect based on Ptah, expert in systems").
+        #[arg(conflicts_with_all = ["resume", "status"])]
+        statement: Option<String>,
+        /// Only parse and show the plan — do not execute.
+        #[arg(long)]
+        plan_only: bool,
+        /// Resume an interrupted bootstrap session.
+        #[arg(long, conflicts_with_all = ["statement", "status"])]
+        resume: bool,
+        /// Show current bootstrap session status.
+        #[arg(long, conflicts_with_all = ["statement", "resume"])]
+        status: bool,
+        /// Maximum learning cycles (default 10).
+        #[arg(long, default_value = "10")]
+        max_cycles: usize,
+        /// Separate identity override (e.g., "Gandalf").
+        #[arg(long)]
+        identity: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -753,35 +727,30 @@ enum WorkspaceAction {
 }
 
 /// Resolve an [`AkhClient`]: prefer a running akhomed server, fall back to local engine.
+#[cfg(not(feature = "client-only"))]
 fn resolve_client(
     workspace: &str,
     config: EngineConfig,
     xdg_paths: Option<&akh_medu::paths::AkhPaths>,
 ) -> Result<AkhClient> {
-    if let Some(paths) = xdg_paths {
-        if let Some(server) = discover_server(paths) {
+    if let Some(paths) = xdg_paths
+        && let Some(server) = discover_server(paths) {
             return Ok(AkhClient::remote(&server, workspace));
         }
-    }
     eprintln!("warning: akhomed not running, using local engine");
     let engine = Engine::new(config).into_diagnostic()?;
     Ok(AkhClient::local(Arc::new(engine)))
 }
 
-/// Get a local [`Arc<Engine>`] from an [`AkhClient`], creating one if needed.
-///
-/// Commands that need deep engine access (Agent, TUI, etc.) call this.
-fn require_local_engine(
-    client: &AkhClient,
-    config: EngineConfig,
-) -> Result<Arc<Engine>> {
-    if let Some(engine) = client.engine() {
-        Ok(Arc::clone(engine))
-    } else {
-        eprintln!("warning: this command requires a local engine, ignoring remote server");
-        Ok(Arc::new(Engine::new(config).into_diagnostic()?))
-    }
+/// Resolve an [`AkhClient`]: requires a running akhomed server (client-only mode).
+#[cfg(feature = "client-only")]
+fn resolve_client(
+    workspace: &str,
+    xdg_paths: Option<&akh_medu::paths::AkhPaths>,
+) -> Result<AkhClient> {
+    akh_medu::client::require_server(workspace, xdg_paths).into_diagnostic()
 }
+
 
 fn main() -> Result<()> {
     miette::set_hook(Box::new(|_| {
@@ -806,6 +775,13 @@ fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
+    // In client-only mode, route all commands through a running akhomed server.
+    #[cfg(feature = "client-only")]
+    return run_client_only(cli);
+
+    // Normal mode: resolve paths and engine config, then dispatch locally.
+    #[cfg(not(feature = "client-only"))]
+    {
     let language = Language::from_code(&cli.language).unwrap_or(Language::Auto);
 
     // Resolve data directory: explicit --data-dir wins, otherwise XDG workspace.
@@ -939,11 +915,10 @@ fn main() -> Result<()> {
                         language,
                         ..Default::default()
                     };
-                    if let Ok(engine) = Engine::new(engine_config) {
-                        if let Some(role) = engine.assigned_role() {
+                    if let Ok(engine) = Engine::new(engine_config)
+                        && let Some(role) = engine.assigned_role() {
                             println!("  Role: {role}");
                         }
-                    }
                 }
                 WorkspaceAction::AssignRole { name, role } => {
                     let client = resolve_client(&name, config, Some(mgr.paths()))?;
@@ -1017,8 +992,8 @@ fn main() -> Result<()> {
         } => {
             let engine = Engine::new(config).into_diagnostic()?;
 
-            match format.as_str() {
-                "json" => {
+            match format {
+                IngestFormat::Json => {
                     let content = std::fs::read_to_string(&file).into_diagnostic()?;
                     let triples: Vec<serde_json::Value> =
                         serde_json::from_str(&content).into_diagnostic()?;
@@ -1072,7 +1047,9 @@ fn main() -> Result<()> {
                         let (created, ingested) = engine
                             .ingest_label_triples(&label_triples)
                             .into_diagnostic()?;
-                        let _ = engine.persist();
+                        if let Err(e) = engine.persist() {
+                            eprintln!("warning: failed to persist after label-triple ingest: {e}");
+                        }
                         println!(
                             "Ingested {ingested} triples ({created} new symbols) from {}",
                             file.display()
@@ -1102,32 +1079,33 @@ fn main() -> Result<()> {
                         .into_diagnostic();
                     }
                 }
-                "csv" => {
+                IngestFormat::Csv => {
                     use akh_medu::agent::tool::{Tool, ToolInput};
                     use akh_medu::agent::tools::CsvIngestTool;
 
+                    let csv_format_str = match csv_format {
+                        CsvFormat::Spo => "spo",
+                        CsvFormat::Entity => "entity",
+                    };
                     let input = ToolInput::new()
                         .with_param("path", file.to_str().unwrap_or(""))
-                        .with_param("format", &csv_format);
+                        .with_param("format", csv_format_str);
 
                     let tool = CsvIngestTool;
                     let output = tool.execute(&engine, input).into_diagnostic()?;
                     println!("{}", output.result);
                 }
-                "text" => {
+                IngestFormat::Text => {
                     use akh_medu::agent::tool::{Tool, ToolInput};
                     use akh_medu::agent::tools::TextIngestTool;
 
                     let input = ToolInput::new()
-                        .with_param("text", &format!("file:{}", file.display()))
-                        .with_param("max_sentences", &max_sentences.to_string());
+                        .with_param("text", format!("file:{}", file.display()))
+                        .with_param("max_sentences", max_sentences.to_string());
 
                     let tool = TextIngestTool;
                     let output = tool.execute(&engine, input).into_diagnostic()?;
                     println!("{}", output.result);
-                }
-                other => {
-                    miette::bail!("Unknown format: \"{other}\". Use json, csv, or text.");
                 }
             }
 
@@ -1149,401 +1127,10 @@ fn main() -> Result<()> {
                 }
             }
 
-            let _ = engine.persist();
+            if let Err(e) = engine.persist() {
+                eprintln!("warning: failed to persist after ingest: {e}");
+            }
             println!("{}", engine.info());
-        }
-
-        Commands::Bootstrap => {
-            let engine = Engine::new(config).into_diagnostic()?;
-
-            let skill_names = [
-                "astronomy",
-                "common_sense",
-                "geography",
-                "science",
-                "language",
-            ];
-            let mut total_triples = 0usize;
-            let mut total_rules = 0usize;
-            let mut skills_loaded = 0usize;
-
-            for name in &skill_names {
-                match engine.load_skill(name) {
-                    Ok(activation) => {
-                        println!(
-                            "Loading skill: {}... {} triples, {} rules",
-                            name, activation.triples_loaded, activation.rules_loaded,
-                        );
-                        total_triples += activation.triples_loaded;
-                        total_rules += activation.rules_loaded;
-                        skills_loaded += 1;
-                    }
-                    Err(e) => {
-                        eprintln!("  Skipping {name}: {e}");
-                    }
-                }
-            }
-
-            // Run grounding.
-            let ops = engine.ops();
-            let im = engine.item_memory();
-            let grounding_config = akh_medu::vsa::grounding::GroundingConfig::default();
-            match akh_medu::vsa::grounding::ground_all(&engine, ops, im, &grounding_config) {
-                Ok(result) => {
-                    println!(
-                        "Grounding symbols... {} round(s), {} symbols updated",
-                        result.rounds_completed, result.symbols_updated,
-                    );
-                }
-                Err(e) => {
-                    eprintln!("Grounding warning: {e}");
-                }
-            }
-
-            // Run forward-chaining inference.
-            let rule_config = akh_medu::autonomous::RuleEngineConfig::default();
-            match engine.run_rules(rule_config) {
-                Ok(result) => {
-                    let derived_count = result.derived.len();
-                    println!("Running inference... derived {} new triples", derived_count,);
-                    total_triples += derived_count;
-                }
-                Err(e) => {
-                    eprintln!("Inference warning: {e}");
-                }
-            }
-
-            let _ = engine.persist();
-            println!(
-                "Bootstrap complete: {} base + derived = {} total triples, {} skills, {} rules.",
-                total_triples - total_rules,
-                total_triples,
-                skills_loaded,
-                total_rules,
-            );
-        }
-
-        Commands::Query {
-            seeds,
-            top_k,
-            max_depth,
-        } => {
-            let client = resolve_client(&cli.workspace, config.clone(), xdg_paths.as_ref())?;
-
-            let seed_ids: Vec<SymbolId> = seeds
-                .split(',')
-                .map(|s| client.resolve_symbol(s.trim()))
-                .collect::<std::result::Result<Vec<_>, _>>()
-                .into_diagnostic()?;
-
-            if seed_ids.is_empty() {
-                miette::bail!("no valid seed symbols provided");
-            }
-
-            let query = InferenceQuery {
-                seeds: seed_ids,
-                top_k,
-                max_depth,
-                ..Default::default()
-            };
-
-            let result = client.infer(&query).into_diagnostic()?;
-
-            println!("Inference results (top {top_k}, depth {max_depth}):");
-            for (i, (sym_id, confidence)) in result.activations.iter().enumerate() {
-                let label = client.resolve_label(*sym_id).unwrap_or_else(|_| format!("{sym_id}"));
-                println!(
-                    "  {}. \"{}\" / {} (confidence: {:.4})",
-                    i + 1,
-                    label,
-                    sym_id,
-                    confidence
-                );
-            }
-
-            if !result.provenance.is_empty() {
-                let engine = require_local_engine(&client, config)?;
-                println!("\nProvenance:");
-                for record in &result.provenance {
-                    let derived_label = engine.resolve_label(record.derived_id);
-                    let kind_desc = format_derivation_kind(&record.kind, &engine);
-                    println!(
-                        "  \"{}\" / {} depth={} confidence={:.4} [{}]",
-                        derived_label,
-                        record.derived_id,
-                        record.depth,
-                        record.confidence,
-                        kind_desc
-                    );
-                }
-            }
-        }
-
-        Commands::Traverse {
-            seeds,
-            max_depth,
-            predicates,
-            min_confidence,
-            max_results,
-            format,
-        } => {
-            let client = resolve_client(&cli.workspace, config, xdg_paths.as_ref())?;
-
-            let seed_ids: Vec<SymbolId> = seeds
-                .split(',')
-                .map(|s| client.resolve_symbol(s.trim()))
-                .collect::<std::result::Result<Vec<_>, _>>()
-                .into_diagnostic()?;
-
-            let predicate_filter: HashSet<SymbolId> = if let Some(ref preds) = predicates {
-                preds
-                    .split(',')
-                    .map(|s| client.resolve_symbol(s.trim()))
-                    .collect::<std::result::Result<Vec<_>, _>>()
-                    .into_diagnostic()?
-                    .into_iter()
-                    .collect()
-            } else {
-                HashSet::new()
-            };
-
-            let traverse_config = TraversalConfig {
-                max_depth,
-                predicate_filter,
-                min_confidence,
-                max_results,
-            };
-
-            let result = client
-                .traverse(&seed_ids, traverse_config)
-                .into_diagnostic()?;
-
-            if format == "json" {
-                let json_triples: Vec<serde_json::Value> = result
-                    .triples
-                    .iter()
-                    .map(|t| {
-                        serde_json::json!({
-                            "subject": client.resolve_label(t.subject).unwrap_or_else(|_| format!("{}", t.subject)),
-                            "predicate": client.resolve_label(t.predicate).unwrap_or_else(|_| format!("{}", t.predicate)),
-                            "object": client.resolve_label(t.object).unwrap_or_else(|_| format!("{}", t.object)),
-                            "confidence": t.confidence,
-                        })
-                    })
-                    .collect();
-                let json = serde_json::to_string_pretty(&json_triples).into_diagnostic()?;
-                println!("{json}");
-            } else {
-                println!(
-                    "Traversal: {} triples, {} nodes, depth {}",
-                    result.triples.len(),
-                    result.visited.len(),
-                    result.depth_reached
-                );
-                for t in &result.triples {
-                    println!(
-                        "  \"{}\" -> {} -> \"{}\"  [{:.2}]",
-                        client.resolve_label(t.subject).unwrap_or_else(|_| format!("{}", t.subject)),
-                        client.resolve_label(t.predicate).unwrap_or_else(|_| format!("{}", t.predicate)),
-                        client.resolve_label(t.object).unwrap_or_else(|_| format!("{}", t.object)),
-                        t.confidence,
-                    );
-                }
-            }
-        }
-
-        Commands::Sparql { query, file } => {
-            let client = resolve_client(&cli.workspace, config, xdg_paths.as_ref())?;
-
-            let sparql_str = if let Some(q) = query {
-                q
-            } else if let Some(path) = file {
-                std::fs::read_to_string(&path).into_diagnostic()?
-            } else {
-                miette::bail!("provide either --query or --file for SPARQL");
-            };
-
-            let results = client.sparql_query(&sparql_str).into_diagnostic()?;
-
-            if results.is_empty() {
-                println!("No results.");
-            } else {
-                if let Some(first_row) = results.first() {
-                    let header: Vec<&str> = first_row.iter().map(|(k, _)| k.as_str()).collect();
-                    println!("{}", header.join("\t"));
-                }
-                for row in &results {
-                    let vals: Vec<&str> = row.iter().map(|(_, v)| v.as_str()).collect();
-                    println!("{}", vals.join("\t"));
-                }
-            }
-        }
-
-        Commands::Reason { expr, verbose } => {
-            let client = resolve_client(&cli.workspace, config.clone(), xdg_paths.as_ref())?;
-
-            if verbose {
-                let engine = require_local_engine(&client, config)?;
-                let rules = engine.all_rules();
-                println!("Active rules: {}", rules.len());
-            }
-
-            println!("Input:      {expr}");
-            let simplified = client.simplify_expression(&expr).into_diagnostic()?;
-            println!("Simplified: {simplified}");
-        }
-
-        Commands::Search { symbol, top_k } => {
-            let client = resolve_client(&cli.workspace, config, xdg_paths.as_ref())?;
-            let sym_id = client.resolve_symbol(&symbol).into_diagnostic()?;
-            let label = client.resolve_label(sym_id).unwrap_or_else(|_| symbol.clone());
-
-            let results = client.search_similar_to(sym_id, top_k).into_diagnostic()?;
-
-            println!("Similar to \"{label}\" (top {top_k}):");
-            for (i, sr) in results.iter().enumerate() {
-                let sr_label = client.resolve_label(sr.symbol_id).unwrap_or_else(|_| format!("{}", sr.symbol_id));
-                println!(
-                    "  {}. \"{}\" / {} (similarity: {:.4})",
-                    i + 1,
-                    sr_label,
-                    sr.symbol_id,
-                    sr.similarity
-                );
-            }
-        }
-
-        Commands::Analogy { a, b, c, top_k } => {
-            let client = resolve_client(&cli.workspace, config, xdg_paths.as_ref())?;
-            let a_id = client.resolve_symbol(&a).into_diagnostic()?;
-            let b_id = client.resolve_symbol(&b).into_diagnostic()?;
-            let c_id = client.resolve_symbol(&c).into_diagnostic()?;
-
-            let a_label = client.resolve_label(a_id).unwrap_or_else(|_| a.clone());
-            let b_label = client.resolve_label(b_id).unwrap_or_else(|_| b.clone());
-            let c_label = client.resolve_label(c_id).unwrap_or_else(|_| c.clone());
-
-            let results = client
-                .infer_analogy(a_id, b_id, c_id, top_k)
-                .into_diagnostic()?;
-
-            println!("Analogy: \"{a_label}\" : \"{b_label}\" :: \"{c_label}\" : ?");
-            for (i, (sym_id, confidence)) in results.iter().enumerate() {
-                let label = client.resolve_label(*sym_id).unwrap_or_else(|_| format!("{sym_id}"));
-                println!(
-                    "  {}. \"{}\" / {} (confidence: {:.4})",
-                    i + 1,
-                    label,
-                    sym_id,
-                    confidence
-                );
-            }
-        }
-
-        Commands::Filler {
-            subject,
-            predicate,
-            top_k,
-        } => {
-            let client = resolve_client(&cli.workspace, config, xdg_paths.as_ref())?;
-            let subj_id = client.resolve_symbol(&subject).into_diagnostic()?;
-            let pred_id = client.resolve_symbol(&predicate).into_diagnostic()?;
-
-            let subj_label = client.resolve_label(subj_id).unwrap_or_else(|_| subject.clone());
-            let pred_label = client.resolve_label(pred_id).unwrap_or_else(|_| predicate.clone());
-
-            let results = client
-                .recover_filler(subj_id, pred_id, top_k)
-                .into_diagnostic()?;
-
-            println!("Filler for (\"{subj_label}\", \"{pred_label}\"):");
-            for (i, (sym_id, similarity)) in results.iter().enumerate() {
-                let label = client.resolve_label(*sym_id).unwrap_or_else(|_| format!("{sym_id}"));
-                println!(
-                    "  {}. \"{}\" / {} (similarity: {:.4})",
-                    i + 1,
-                    label,
-                    sym_id,
-                    similarity
-                );
-            }
-        }
-
-        Commands::Info => {
-            let client = resolve_client(&cli.workspace, config, xdg_paths.as_ref())?;
-            let info = client.info().into_diagnostic()?;
-            println!("{info}");
-        }
-
-        Commands::Symbols { action } => {
-            let client = resolve_client(&cli.workspace, config.clone(), xdg_paths.as_ref())?;
-
-            match action {
-                SymbolAction::List => {
-                    let symbols = client.all_symbols().into_diagnostic()?;
-                    if symbols.is_empty() {
-                        println!("No symbols registered.");
-                    } else {
-                        println!("Symbols ({}):", symbols.len());
-                        for meta in &symbols {
-                            println!("  {} / {} [{}]", meta.label, meta.id, meta.kind);
-                        }
-                    }
-                }
-                SymbolAction::Show { name_or_id } => {
-                    let id = client.resolve_symbol(&name_or_id).into_diagnostic()?;
-                    // For Show we need engine-level detail; use local fallback.
-                    let engine = require_local_engine(&client, config.clone())?;
-                    let meta = engine.get_symbol_meta(id).into_diagnostic()?;
-                    println!("Symbol: \"{}\"", meta.label);
-                    println!("  id:         {}", meta.id);
-                    println!("  kind:       {}", meta.kind);
-                    println!("  created_at: {}", meta.created_at);
-
-                    let from = client.triples_from(id).into_diagnostic()?;
-                    if !from.is_empty() {
-                        println!("  outgoing triples ({}):", from.len());
-                        for t in &from {
-                            let pred = client.resolve_label(t.predicate).unwrap_or_else(|_| format!("{}", t.predicate));
-                            let obj = client.resolve_label(t.object).unwrap_or_else(|_| format!("{}", t.object));
-                            println!("    -> {pred} -> \"{obj}\"");
-                        }
-                    }
-
-                    let to = client.triples_to(id).into_diagnostic()?;
-                    if !to.is_empty() {
-                        println!("  incoming triples ({}):", to.len());
-                        for t in &to {
-                            let subj = client.resolve_label(t.subject).unwrap_or_else(|_| format!("{}", t.subject));
-                            let pred = client.resolve_label(t.predicate).unwrap_or_else(|_| format!("{}", t.predicate));
-                            println!("    \"{subj}\" -> {pred} ->");
-                        }
-                    }
-                }
-            }
-        }
-
-        Commands::Export { action } => {
-            let client = resolve_client(&cli.workspace, config, xdg_paths.as_ref())?;
-
-            match action {
-                ExportAction::Symbols => {
-                    let exports = client.export_symbols().into_diagnostic()?;
-                    let json = serde_json::to_string_pretty(&exports).into_diagnostic()?;
-                    println!("{json}");
-                }
-                ExportAction::Triples => {
-                    let exports = client.export_triples().into_diagnostic()?;
-                    let json = serde_json::to_string_pretty(&exports).into_diagnostic()?;
-                    println!("{json}");
-                }
-                ExportAction::Provenance { name_or_id } => {
-                    let id = client.resolve_symbol(&name_or_id).into_diagnostic()?;
-                    let exports = client.export_provenance(id).into_diagnostic()?;
-                    let json = serde_json::to_string_pretty(&exports).into_diagnostic()?;
-                    println!("{json}");
-                }
-            }
         }
 
         Commands::Skill { action } => {
@@ -1696,221 +1283,6 @@ fn main() -> Result<()> {
             }
         }
 
-        Commands::Pipeline { action } => {
-            let engine = Engine::new(config).into_diagnostic()?;
-
-            match action {
-                PipelineAction::List => {
-                    println!("Built-in pipelines:");
-                    println!();
-                    let query = Pipeline::query_pipeline();
-                    println!("  \"{}\" - {} stages:", query.name, query.stages.len());
-                    for (i, stage) in query.stages.iter().enumerate() {
-                        println!("    [{}] {} ({:?})", i + 1, stage.name, stage.kind);
-                    }
-                    println!();
-                    let ingest = Pipeline::ingest_pipeline();
-                    println!("  \"{}\" - {} stage(s):", ingest.name, ingest.stages.len());
-                    for (i, stage) in ingest.stages.iter().enumerate() {
-                        println!("    [{}] {} ({:?})", i + 1, stage.name, stage.kind);
-                    }
-                }
-                PipelineAction::Query {
-                    seeds,
-                    max_depth,
-                    infer_depth,
-                    format,
-                } => {
-                    let seed_ids: std::result::Result<Vec<SymbolId>, _> = seeds
-                        .split(',')
-                        .map(|s| engine.resolve_symbol(s.trim()))
-                        .collect();
-                    let seed_ids = seed_ids.into_diagnostic()?;
-
-                    let mut pipeline = Pipeline::query_pipeline();
-                    // Apply custom config to retrieve stage.
-                    if let Some(stage) = pipeline.stages.first_mut() {
-                        stage.config = StageConfig::Retrieve {
-                            traversal: TraversalConfig {
-                                max_depth,
-                                ..Default::default()
-                            },
-                        };
-                    }
-                    // Apply custom config to infer stage.
-                    if let Some(stage) = pipeline.stages.get_mut(1) {
-                        stage.config = StageConfig::Infer {
-                            query_template: InferenceQuery {
-                                max_depth: infer_depth,
-                                ..Default::default()
-                            },
-                        };
-                    }
-
-                    let output = engine
-                        .run_pipeline(&pipeline, PipelineData::Seeds(seed_ids))
-                        .into_diagnostic()?;
-
-                    if format == "json" {
-                        print_pipeline_output_json(&output, &engine);
-                    } else {
-                        print_pipeline_output_summary(&output, &engine);
-                    }
-                }
-                PipelineAction::Run {
-                    stages,
-                    seeds,
-                    format,
-                } => {
-                    let seed_ids: std::result::Result<Vec<SymbolId>, _> = seeds
-                        .split(',')
-                        .map(|s| engine.resolve_symbol(s.trim()))
-                        .collect();
-                    let seed_ids = seed_ids.into_diagnostic()?;
-
-                    let stage_list: Vec<PipelineStage> = stages
-                        .split(',')
-                        .map(|s| {
-                            let name = s.trim().to_lowercase();
-                            let kind = match name.as_str() {
-                                "retrieve" => StageKind::Retrieve,
-                                "infer" => StageKind::Infer,
-                                "reason" => StageKind::Reason,
-                                "extract" => StageKind::ExtractTriples,
-                                other => {
-                                    eprintln!("Unknown stage: {other}, defaulting to Retrieve");
-                                    StageKind::Retrieve
-                                }
-                            };
-                            PipelineStage {
-                                name: name.clone(),
-                                kind,
-                                config: StageConfig::Default,
-                            }
-                        })
-                        .collect();
-
-                    let pipeline = Pipeline {
-                        name: "custom".into(),
-                        stages: stage_list,
-                    };
-
-                    let output = engine
-                        .run_pipeline(&pipeline, PipelineData::Seeds(seed_ids))
-                        .into_diagnostic()?;
-
-                    if format == "json" {
-                        print_pipeline_output_json(&output, &engine);
-                    } else {
-                        print_pipeline_output_summary(&output, &engine);
-                    }
-                }
-            }
-        }
-
-        Commands::Analytics { action } => {
-            let client = resolve_client(&cli.workspace, config, xdg_paths.as_ref())?;
-
-            match action {
-                AnalyticsAction::Degree { top_k } => {
-                    let results = client.degree_centrality().into_diagnostic()?;
-                    if results.is_empty() {
-                        println!("No nodes in graph.");
-                    } else {
-                        println!("Degree centrality (top {top_k}):");
-                        for (i, dc) in results.iter().take(top_k).enumerate() {
-                            let label = client.resolve_label(dc.symbol).unwrap_or_else(|_| format!("{}", dc.symbol));
-                            println!(
-                                "  {}. \"{}\" / {} — in: {}, out: {}, total: {}",
-                                i + 1,
-                                label,
-                                dc.symbol,
-                                dc.in_degree,
-                                dc.out_degree,
-                                dc.total
-                            );
-                        }
-                    }
-                }
-                AnalyticsAction::Pagerank {
-                    damping,
-                    iterations,
-                    top_k,
-                } => {
-                    let results = client.pagerank(damping, iterations).into_diagnostic()?;
-                    if results.is_empty() {
-                        println!("No nodes in graph.");
-                    } else {
-                        println!(
-                            "PageRank (damping={damping}, iterations={iterations}, top {top_k}):"
-                        );
-                        for (i, pr) in results.iter().take(top_k).enumerate() {
-                            let label = client.resolve_label(pr.symbol).unwrap_or_else(|_| format!("{}", pr.symbol));
-                            println!(
-                                "  {}. \"{}\" / {} — score: {:.6}",
-                                i + 1,
-                                label,
-                                pr.symbol,
-                                pr.score
-                            );
-                        }
-                    }
-                }
-                AnalyticsAction::Components => {
-                    let components = client.strongly_connected_components().into_diagnostic()?;
-                    if components.is_empty() {
-                        println!("No components found.");
-                    } else {
-                        println!("Strongly connected components ({}):", components.len());
-                        for comp in &components {
-                            let labels: Vec<String> = comp
-                                .members
-                                .iter()
-                                .take(10)
-                                .map(|s| client.resolve_label(*s).unwrap_or_else(|_| format!("{s}")))
-                                .collect();
-                            let suffix = if comp.size > 10 {
-                                format!(" ... and {} more", comp.size - 10)
-                            } else {
-                                String::new()
-                            };
-                            println!(
-                                "  Component {} (size {}): [{}]{}",
-                                comp.id,
-                                comp.size,
-                                labels.join(", "),
-                                suffix
-                            );
-                        }
-                    }
-                }
-                AnalyticsAction::Path { from, to } => {
-                    let from_id = client.resolve_symbol(&from).into_diagnostic()?;
-                    let to_id = client.resolve_symbol(&to).into_diagnostic()?;
-
-                    let from_label = client.resolve_label(from_id).unwrap_or_else(|_| from.clone());
-                    let to_label = client.resolve_label(to_id).unwrap_or_else(|_| to.clone());
-
-                    match client.shortest_path(from_id, to_id).into_diagnostic()? {
-                        Some(path) => {
-                            let labels: Vec<String> =
-                                path.iter().map(|s| client.resolve_label(*s).unwrap_or_else(|_| format!("{s}"))).collect();
-                            println!(
-                                "Shortest path from \"{}\" to \"{}\" ({} hops):",
-                                from_label,
-                                to_label,
-                                path.len() - 1
-                            );
-                            println!("  {}", labels.join(" -> "));
-                        }
-                        None => {
-                            println!("No path found from \"{}\" to \"{}\".", from_label, to_label);
-                        }
-                    }
-                }
-            }
-        }
-
         Commands::Render {
             entity,
             depth,
@@ -1984,12 +1356,19 @@ fn main() -> Result<()> {
                         xdg_paths.as_ref(),
                     )?;
                     let status = client.daemon_status().into_diagnostic()?;
-                    println!("Daemon status:");
-                    println!("  Running:    {}", status.running);
-                    println!("  Cycles:     {}", status.total_cycles);
-                    println!("  Started at: {}", status.started_at);
-                    println!("  Triggers:   {}", status.trigger_count);
+                    print_daemon_status(&status);
                     return Ok(());
+                }
+                // Try remote TUI via akhomed for Chat/Repl (non-headless only).
+                #[cfg(feature = "daemon")]
+                AgentAction::Chat { headless: false, .. } | AgentAction::Repl { headless: false, .. } => {
+                    if let Some(ref paths) = xdg_paths
+                        && let Some(server_info) = discover_server(paths)
+                    {
+                        eprintln!("Connecting to akhomed at {}...", server_info.base_url());
+                        return akh_medu::tui::launch_remote(&cli.workspace, &server_info);
+                    }
+                    eprintln!("warning: akhomed not running, using local engine");
                 }
                 _ => {}
             }
@@ -1997,52 +1376,6 @@ fn main() -> Result<()> {
             let engine = Arc::new(Engine::new(config).into_diagnostic()?);
 
             match action {
-                AgentAction::Cycle { goal, priority } => {
-                    let agent_config = AgentConfig::default();
-                    let mut agent =
-                        Agent::new(Arc::clone(&engine), agent_config).into_diagnostic()?;
-
-                    agent
-                        .add_goal(&goal, priority, "Agent-determined completion")
-                        .into_diagnostic()?;
-
-                    let result = agent.run_cycle().into_diagnostic()?;
-
-                    println!("OODA Cycle {}", result.cycle_number);
-                    println!(
-                        "  Observe: {} active goals, {} WM entries",
-                        result.observation.active_goals.len(),
-                        result.observation.working_memory_size,
-                    );
-                    println!(
-                        "  Orient:  {} relevant triples, {} inferences, pressure {:.2}",
-                        result.orientation.relevant_knowledge.len(),
-                        result.orientation.inferences.len(),
-                        result.orientation.memory_pressure,
-                    );
-                    println!(
-                        "  Decide:  tool={}, goal=\"{}\"",
-                        result.decision.chosen_tool,
-                        engine.resolve_label(result.decision.goal_id),
-                    );
-                    println!("  Reason:  {}", result.decision.reasoning);
-                    println!(
-                        "  Act:     success={}, symbols={}",
-                        result.action_result.tool_output.success,
-                        result.action_result.tool_output.symbols_involved.len(),
-                    );
-                    println!(
-                        "  Result:  {}",
-                        if result.action_result.tool_output.result.len() > 120 {
-                            format!("{}...", &result.action_result.tool_output.result[..120])
-                        } else {
-                            result.action_result.tool_output.result.clone()
-                        }
-                    );
-
-                    agent.persist_session().into_diagnostic()?;
-                }
-
                 AgentAction::Run {
                     goals,
                     max_cycles,
@@ -2059,7 +1392,7 @@ fn main() -> Result<()> {
                         agent.clear_goals();
                     }
 
-                    for goal_str in goals.split(',') {
+                    for goal_str in &goals {
                         let goal = goal_str.trim();
                         if !goal.is_empty() {
                             agent
@@ -2096,7 +1429,8 @@ fn main() -> Result<()> {
                     }
 
                     // Synthesize narrative from findings.
-                    let summary = agent.synthesize_findings(&goals);
+                    let goals_joined = goals.join(",");
+                    let summary = agent.synthesize_findings(&goals_joined);
                     println!("\n{}", summary.overview);
                     for section in &summary.sections {
                         println!("\n## {}", section.heading);
@@ -2110,66 +1444,6 @@ fn main() -> Result<()> {
                     }
 
                     agent.persist_session().into_diagnostic()?;
-                }
-
-                AgentAction::Consolidate => {
-                    let agent_config = AgentConfig::default();
-                    let mut agent =
-                        Agent::new(Arc::clone(&engine), agent_config).into_diagnostic()?;
-
-                    let result = agent.consolidate().into_diagnostic()?;
-                    println!("Consolidation complete:");
-                    println!("  entries scored:    {}", result.entries_scored);
-                    println!("  entries persisted: {}", result.entries_persisted);
-                    println!("  entries evicted:   {}", result.entries_evicted);
-                    println!("  episodes created:  {}", result.episodes_created.len());
-                    for ep in &result.episodes_created {
-                        println!("    {}", engine.resolve_label(*ep));
-                    }
-
-                    let _ = engine.persist();
-                }
-
-                AgentAction::Recall { query, top_k } => {
-                    let agent_config = AgentConfig::default();
-                    let agent = Agent::new(Arc::clone(&engine), agent_config).into_diagnostic()?;
-
-                    let query_ids: std::result::Result<Vec<SymbolId>, _> = query
-                        .split(',')
-                        .map(|s| engine.resolve_symbol(s.trim()))
-                        .collect();
-                    let query_ids = query_ids.into_diagnostic()?;
-
-                    let episodes = agent.recall(&query_ids, top_k).into_diagnostic()?;
-                    if episodes.is_empty() {
-                        println!("No episodic memories found.");
-                    } else {
-                        println!("Recalled {} episode(s):", episodes.len());
-                        for ep in &episodes {
-                            println!(
-                                "  {} — \"{}\" (learnings: {}, tags: {})",
-                                engine.resolve_label(ep.symbol_id),
-                                ep.summary,
-                                ep.learnings.len(),
-                                ep.tags.len(),
-                            );
-                        }
-                    }
-                }
-
-                AgentAction::Tools => {
-                    let agent_config = AgentConfig::default();
-                    let agent = Agent::new(Arc::clone(&engine), agent_config).into_diagnostic()?;
-
-                    let tools = agent.list_tools();
-                    println!("Registered tools ({}):", tools.len());
-                    for sig in &tools {
-                        println!("  {} — {}", sig.name, sig.description);
-                        for param in &sig.parameters {
-                            let req = if param.required { " (required)" } else { "" };
-                            println!("    --{}{}: {}", param.name, req, param.description);
-                        }
-                    }
                 }
 
                 AgentAction::Resume { max_cycles } => {
@@ -2238,8 +1512,8 @@ fn main() -> Result<()> {
                         };
 
                         // Add goals if provided.
-                        if let Some(ref goals_str) = goals {
-                            for goal_str in goals_str.split(',') {
+                        if let Some(ref goal_list) = goals {
+                            for goal_str in goal_list {
                                 let goal = goal_str.trim();
                                 if !goal.is_empty() {
                                     agent
@@ -2271,8 +1545,8 @@ fn main() -> Result<()> {
                             Agent::new(Arc::clone(&engine), agent_config).into_diagnostic()?
                         };
 
-                        if let Some(ref goals_str) = goals {
-                            for goal_str in goals_str.split(',') {
+                        if let Some(ref goal_list) = goals {
+                            for goal_str in goal_list {
                                 let goal = goal_str.trim();
                                 if !goal.is_empty() {
                                     agent
@@ -2327,262 +1601,23 @@ fn main() -> Result<()> {
                     }
                 }
 
-                AgentAction::Plan { goal, priority } => {
-                    let agent_config = AgentConfig::default();
-                    let mut agent =
-                        Agent::new(Arc::clone(&engine), agent_config).into_diagnostic()?;
-
-                    let goal_id = agent
-                        .add_goal(&goal, priority, "Agent-determined completion")
-                        .into_diagnostic()?;
-
-                    let plan = agent.plan_goal(goal_id).into_diagnostic()?;
-
-                    println!("Plan for \"{}\" (attempt {}):", goal, plan.attempt + 1);
-                    println!("  Strategy: {}", plan.strategy);
-                    for step in &plan.steps {
-                        let status = match &step.status {
-                            akh_medu::agent::StepStatus::Pending => "pending",
-                            akh_medu::agent::StepStatus::Active => "active",
-                            akh_medu::agent::StepStatus::Completed => "done",
-                            akh_medu::agent::StepStatus::Failed { .. } => "FAILED",
-                            akh_medu::agent::StepStatus::Skipped => "skipped",
-                        };
-                        println!(
-                            "  [{}] Step {}: {} — {}",
-                            status, step.index, step.tool_name, step.rationale,
-                        );
-                    }
-                }
-
-                AgentAction::Reflect => {
-                    let agent_config = AgentConfig::default();
-                    let mut agent = if Agent::has_persisted_session(&engine) {
-                        Agent::resume(Arc::clone(&engine), agent_config).into_diagnostic()?
-                    } else {
-                        Agent::new(Arc::clone(&engine), agent_config).into_diagnostic()?
-                    };
-
-                    let result = agent.reflect().into_diagnostic()?;
-
-                    println!("{}", result.summary);
-                    if !result.tool_insights.is_empty() {
-                        println!("\nTool effectiveness:");
-                        for ti in &result.tool_insights {
-                            let flag = if ti.flagged_ineffective { " [!]" } else { "" };
-                            println!(
-                                "  {} — {}/{} success ({:.0}%){}",
-                                ti.tool_name,
-                                ti.successes,
-                                ti.invocations,
-                                ti.success_rate * 100.0,
-                                flag,
-                            );
-                        }
-                    }
-                    if !result.goal_insights.is_empty() {
-                        println!("\nGoal progress:");
-                        for gi in &result.goal_insights {
-                            let stag = if gi.is_stagnant { " [stagnant]" } else { "" };
-                            println!(
-                                "  {} — {} cycles worked{}",
-                                gi.description, gi.cycles_worked, stag,
-                            );
-                        }
-                    }
-                    if !result.adjustments.is_empty() {
-                        println!("\nRecommended adjustments:");
-                        for adj in &result.adjustments {
-                            match adj {
-                                akh_medu::agent::Adjustment::IncreasePriority {
-                                    from,
-                                    to,
-                                    reason,
-                                    ..
-                                } => println!("  [+] Priority {} → {}: {}", from, to, reason),
-                                akh_medu::agent::Adjustment::DecreasePriority {
-                                    from,
-                                    to,
-                                    reason,
-                                    ..
-                                } => println!("  [-] Priority {} → {}: {}", from, to, reason),
-                                akh_medu::agent::Adjustment::SuggestNewGoal {
-                                    description,
-                                    reason,
-                                    ..
-                                } => println!("  [new] \"{}\": {}", description, reason),
-                                akh_medu::agent::Adjustment::SuggestAbandon { reason, .. } => {
-                                    println!("  [abandon] {}", reason)
-                                }
-                            }
-                        }
-                    }
-                }
-
-                AgentAction::Infer {
-                    max_iterations,
-                    min_confidence,
-                } => {
-                    let rule_config = RuleEngineConfig {
-                        max_iterations,
-                        min_confidence,
-                        ..Default::default()
-                    };
-
-                    let result = engine.run_rules(rule_config).into_diagnostic()?;
-
-                    println!(
-                        "Derived {} new triple(s) in {} iteration(s){}",
-                        result.derived.len(),
-                        result.iterations,
-                        if result.reached_fixpoint {
-                            " (fixpoint reached)"
-                        } else {
-                            ""
-                        },
-                    );
-
-                    for (rule, count) in &result.rule_stats {
-                        if *count > 0 {
-                            println!("  {rule}: {count} derivation(s)");
-                        }
-                    }
-
-                    for dt in &result.derived {
-                        println!(
-                            "  [{}] \"{}\" -> {} -> \"{}\" (conf: {:.2})",
-                            dt.rule_name,
-                            engine.resolve_label(dt.triple.subject),
-                            engine.resolve_label(dt.triple.predicate),
-                            engine.resolve_label(dt.triple.object),
-                            dt.confidence,
-                        );
-                    }
-                }
-
-                AgentAction::Gaps { goal, max_gaps } => {
-                    let goal_id = engine.resolve_symbol(&goal).into_diagnostic()?;
-
-                    let gap_config = GapAnalysisConfig {
-                        max_gaps,
-                        ..Default::default()
-                    };
-
-                    let result = engine
-                        .analyze_gaps(&[goal_id], gap_config)
-                        .into_diagnostic()?;
-
-                    println!(
-                        "Gap analysis for \"{}\": {} entities analyzed, {} dead ends, coverage {:.0}%",
-                        engine.resolve_label(goal_id),
-                        result.entities_analyzed,
-                        result.dead_ends,
-                        result.coverage_score * 100.0,
-                    );
-
-                    for gap in &result.gaps {
-                        println!(
-                            "  [{:.2}] \"{}\" — {}",
-                            gap.severity,
-                            engine.resolve_label(gap.entity),
-                            gap.description,
-                        );
-                        if !gap.suggested_predicates.is_empty() {
-                            let preds: Vec<String> = gap
-                                .suggested_predicates
-                                .iter()
-                                .map(|p| engine.resolve_label(*p))
-                                .collect();
-                            println!("    suggested predicates: {}", preds.join(", "));
-                        }
-                    }
-                }
-
-                AgentAction::Schema => {
-                    let schema_config = SchemaDiscoveryConfig::default();
-
-                    let result = engine.discover_schema(schema_config).into_diagnostic()?;
-
-                    if result.types.is_empty()
-                        && result.co_occurring_predicates.is_empty()
-                        && result.relation_hierarchies.is_empty()
-                    {
-                        println!("No schema patterns discovered (insufficient data).");
-                    } else {
-                        if !result.types.is_empty() {
-                            println!("Discovered types ({}):", result.types.len());
-                            for dt in &result.types {
-                                let name = dt
-                                    .type_symbol
-                                    .map(|s| engine.resolve_label(s))
-                                    .unwrap_or_else(|| {
-                                        format!("cluster({})", engine.resolve_label(dt.exemplar))
-                                    });
-                                println!(
-                                    "  {} — {} members, {} typical predicates",
-                                    name,
-                                    dt.members.len(),
-                                    dt.typical_predicates.len(),
-                                );
-                                for pp in &dt.typical_predicates {
-                                    println!(
-                                        "    {} ({:.0}% coverage)",
-                                        engine.resolve_label(pp.predicate),
-                                        pp.coverage * 100.0,
-                                    );
-                                }
-                            }
-                        }
-
-                        if !result.co_occurring_predicates.is_empty() {
-                            println!(
-                                "\nCo-occurring predicates ({}):",
-                                result.co_occurring_predicates.len()
-                            );
-                            for (p1, p2, strength) in &result.co_occurring_predicates {
-                                println!(
-                                    "  {} <-> {} ({:.0}%)",
-                                    engine.resolve_label(*p1),
-                                    engine.resolve_label(*p2),
-                                    strength * 100.0,
-                                );
-                            }
-                        }
-
-                        if !result.relation_hierarchies.is_empty() {
-                            println!(
-                                "\nRelation hierarchies ({}):",
-                                result.relation_hierarchies.len()
-                            );
-                            for rh in &result.relation_hierarchies {
-                                println!(
-                                    "  {} => {} ({:.0}%)",
-                                    engine.resolve_label(rh.specific),
-                                    engine.resolve_label(rh.general),
-                                    rh.implication_strength * 100.0,
-                                );
-                            }
-                        }
-                    }
-                }
-
                 AgentAction::Chat {
-                    max_cycles,
+                    max_cycles: _,
                     fresh,
                     headless,
                 } => {
+                    eprintln!("warning: `akh agent chat` is deprecated. Use `akh chat` instead.");
+
                     if !headless {
-                        // TUI mode.
                         let agent_config = AgentConfig {
-                            max_cycles,
+                            max_cycles: 20,
                             ..Default::default()
                         };
                         let ws_name = cli.workspace.clone();
                         akh_medu::tui::launch(&ws_name, Arc::clone(&engine), agent_config, fresh)?;
                     } else {
-                        // Headless mode (legacy stdin/stdout).
                         let agent_config = AgentConfig {
-                            max_cycles,
+                            max_cycles: 20,
                             ..Default::default()
                         };
                         let mut agent = if !fresh && Agent::has_persisted_session(&engine) {
@@ -2594,61 +1629,48 @@ fn main() -> Result<()> {
                             agent.clear_goals();
                         }
 
-                        println!("akh agent chat (headless). Type 'quit' to exit.\n");
+                        let data_dir = engine.config().data_dir.as_deref();
+                        let nlu_pipeline = engine
+                            .store()
+                            .get_meta(b"nlu_ranker_state")
+                            .ok()
+                            .flatten()
+                            .and_then(|bytes| akh_medu::nlu::parse_ranker::ParseRanker::from_bytes(&bytes))
+                            .map(|ranker| akh_medu::nlu::NluPipeline::with_ranker_and_models(ranker, data_dir))
+                            .unwrap_or_else(|| akh_medu::nlu::NluPipeline::new_with_models(data_dir));
+                        let mut chat_processor = akh_medu::chat::ChatProcessor::new(&engine, nlu_pipeline);
+
+                        println!("akh chat (headless). Type 'quit' to exit.\n");
                         use std::io::Write as _;
-                        let stdin = std::io::stdin();
-                        let mut input = String::new();
 
                         loop {
-                            input.clear();
                             print!("> ");
                             std::io::stdout().flush().ok();
-                            if stdin.read_line(&mut input).into_diagnostic()? == 0 {
-                                break;
+                            let mut input = String::new();
+                            match std::io::stdin().read_line(&mut input) {
+                                Ok(0) => break,
+                                Ok(_) => {}
+                                Err(e) => {
+                                    eprintln!("Read error: {e}");
+                                    break;
+                                }
                             }
-                            let cmd = input.trim();
-                            if cmd.is_empty() {
+                            let trimmed = input.trim();
+                            if trimmed.is_empty() {
                                 continue;
                             }
-                            if cmd == "quit" || cmd == "exit" || cmd == "q" {
+                            if trimmed == "quit" || trimmed == "exit" || trimmed == "q" {
                                 break;
                             }
 
-                            let question = cmd.to_string();
-                            let goal_desc = format!("chat: {question}");
-                            let goal_id = match agent.add_goal(
-                                &goal_desc,
-                                200,
-                                "Agent-determined completion",
-                            ) {
-                                Ok(id) => id,
-                                Err(e) => {
-                                    eprintln!("Error: {e}");
-                                    continue;
-                                }
-                            };
-
-                            match agent.run_until_complete() {
-                                Ok(_) => {}
-                                Err(e) => eprintln!("(agent stopped: {e})"),
-                            }
-
-                            let summary = agent.synthesize_findings(&question);
-                            println!("\n{}", summary.overview);
-                            for section in &summary.sections {
-                                println!("\n## {}", section.heading);
-                                println!("{}", section.prose);
-                            }
-                            if !summary.gaps.is_empty() {
-                                println!("\nOpen questions:");
-                                for gap in &summary.gaps {
-                                    println!("  - {gap}");
-                                }
+                            let responses = chat_processor.process_input(trimmed, &mut agent, &engine);
+                            for msg in &responses {
+                                println!("{}", msg.to_plain_text());
                             }
                             println!();
-                            let _ = agent.complete_goal(goal_id);
                         }
 
+                        chat_processor.persist_nlu_state(&engine);
                         agent.persist_session().into_diagnostic()?;
                         println!("Session saved.");
                     }
@@ -2664,8 +1686,8 @@ fn main() -> Result<()> {
                     persist_interval,
                 } => {
                     // Try server-mediated daemon first.
-                    if let Some(ref paths) = xdg_paths {
-                        if let Some(server) = discover_server(paths) {
+                    if let Some(ref paths) = xdg_paths
+                        && let Some(server) = discover_server(paths) {
                             let client = AkhClient::remote(&server, &cli.workspace);
                             let config = serde_json::json!({ "max_cycles": max_cycles });
                             match client.start_daemon(Some(config)) {
@@ -2681,7 +1703,6 @@ fn main() -> Result<()> {
                                 }
                             }
                         }
-                    }
 
                     use akh_medu::agent::{AgentDaemon, DaemonConfig};
 
@@ -2714,18 +1735,1671 @@ fn main() -> Result<()> {
             }
         }
 
-        Commands::Chat { skill, headless } => {
+        Commands::Pim { action } => {
+            let engine = Arc::new(Engine::new(config).into_diagnostic()?);
+            let agent_config = akh_medu::agent::AgentConfig::default();
+            let mut agent = if akh_medu::agent::Agent::has_persisted_session(&engine) {
+                akh_medu::agent::Agent::resume(Arc::clone(&engine), agent_config)
+                    .into_diagnostic()?
+            } else {
+                akh_medu::agent::Agent::new(Arc::clone(&engine), agent_config)
+                    .into_diagnostic()?
+            };
+
+            match action {
+                PimAction::Inbox => {
+                    let ids = agent.pim_manager().tasks_by_gtd_state(
+                        akh_medu::agent::GtdState::Inbox,
+                    );
+                    if ids.is_empty() {
+                        println!("Inbox is empty.");
+                    } else {
+                        println!("Inbox ({} items):", ids.len());
+                        for id in &ids {
+                            let label = engine.resolve_label(*id);
+                            let quadrant = agent
+                                .pim_manager()
+                                .get_metadata(id.get())
+                                .map(|m| m.quadrant.to_string())
+                                .unwrap_or_default();
+                            println!("  [{:>5}] {} ({})", id.get(), label, quadrant);
+                        }
+                    }
+                }
+                PimAction::Next { context, energy } => {
+                    let ctx = context.map(akh_medu::agent::PimContext);
+                    let nrg = energy.map(|e| match e {
+                        EnergyLevel::Low => akh_medu::agent::EnergyLevel::Low,
+                        EnergyLevel::Medium => akh_medu::agent::EnergyLevel::Medium,
+                        EnergyLevel::High => akh_medu::agent::EnergyLevel::High,
+                    });
+                    let ids = agent.pim_manager().available_tasks(
+                        ctx.as_ref(),
+                        nrg,
+                        agent.goals(),
+                    );
+                    if ids.is_empty() {
+                        println!("No next actions available.");
+                    } else {
+                        println!("Next actions ({} tasks):", ids.len());
+                        for id in &ids {
+                            let label = engine.resolve_label(*id);
+                            let meta = agent.pim_manager().get_metadata(id.get());
+                            let quadrant = meta
+                                .map(|m| m.quadrant.to_string())
+                                .unwrap_or_default();
+                            let energy_str = meta
+                                .and_then(|m| m.energy)
+                                .map(|e| format!(" [{}]", e))
+                                .unwrap_or_default();
+                            println!(
+                                "  [{:>5}] {} ({}){}",
+                                id.get(),
+                                label,
+                                quadrant,
+                                energy_str
+                            );
+                        }
+                    }
+                }
+                PimAction::Review => {
+                    let review = akh_medu::agent::pim::gtd_weekly_review(
+                        agent.pim_manager(),
+                        agent.goals(),
+                        agent.projects(),
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs(),
+                    );
+                    println!("{}", review.summary);
+                    if !review.overdue.is_empty() {
+                        println!("\nOverdue:");
+                        for id in &review.overdue {
+                            println!("  [{:>5}] {}", id.get(), engine.resolve_label(*id));
+                        }
+                    }
+                    if !review.stale_inbox.is_empty() {
+                        println!("\nStale inbox (>7 days):");
+                        for id in &review.stale_inbox {
+                            println!("  [{:>5}] {}", id.get(), engine.resolve_label(*id));
+                        }
+                    }
+                    if !review.stalled_projects.is_empty() {
+                        println!("\nStalled projects (no Next actions):");
+                        for id in &review.stalled_projects {
+                            println!("  [{:>5}] {}", id.get(), engine.resolve_label(*id));
+                        }
+                    }
+                    if !review.adjustments.is_empty() {
+                        println!("\nRecommended adjustments: {}", review.adjustments.len());
+                    }
+                }
+                PimAction::Project { name } => {
+                    let project = agent
+                        .projects()
+                        .iter()
+                        .find(|p| p.name == name);
+                    match project {
+                        Some(p) => {
+                            println!("Project: {} ({:?})", p.name, p.status);
+                            for gid in &p.goals {
+                                let label = engine.resolve_label(*gid);
+                                let gtd = agent
+                                    .pim_manager()
+                                    .get_metadata(gid.get())
+                                    .map(|m| m.gtd_state.to_string())
+                                    .unwrap_or_else(|| "no-pim".into());
+                                println!("  [{:>5}] {} (GTD: {})", gid.get(), label, gtd);
+                            }
+                        }
+                        None => println!("Project '{}' not found.", name),
+                    }
+                }
+                PimAction::Add {
+                    goal,
+                    gtd,
+                    urgency,
+                    importance,
+                    para,
+                    contexts,
+                    recur,
+                    deadline,
+                } => {
+                    let gtd_state = match gtd {
+                        GtdState::Inbox => akh_medu::agent::GtdState::Inbox,
+                        GtdState::Next => akh_medu::agent::GtdState::Next,
+                        GtdState::Waiting => akh_medu::agent::GtdState::Waiting,
+                        GtdState::Someday => akh_medu::agent::GtdState::Someday,
+                        GtdState::Reference => akh_medu::agent::GtdState::Reference,
+                    };
+                    let goal_sym = akh_medu::symbol::SymbolId::new(goal)
+                        .ok_or_else(|| miette::miette!("invalid goal ID: {goal}"))?;
+
+                    agent
+                        .pim_manager_mut()
+                        .add_task(&engine, goal_sym, gtd_state, urgency, importance)
+                        .into_diagnostic()?;
+
+                    if let Some(ref para_val) = para {
+                        let cat = match para_val {
+                            ParaCategory::Project => akh_medu::agent::ParaCategory::Project,
+                            ParaCategory::Area => akh_medu::agent::ParaCategory::Area,
+                            ParaCategory::Resource => akh_medu::agent::ParaCategory::Resource,
+                            ParaCategory::Archive => akh_medu::agent::ParaCategory::Archive,
+                        };
+                        agent
+                            .pim_manager_mut()
+                            .set_para(&engine, goal_sym, cat)
+                            .into_diagnostic()?;
+                    }
+
+                    if let Some(ref ctx_list) = contexts {
+                        for ctx in ctx_list {
+                            agent
+                                .pim_manager_mut()
+                                .add_context(
+                                    &engine,
+                                    goal_sym,
+                                    akh_medu::agent::PimContext(ctx.trim().to_string()),
+                                )
+                                .into_diagnostic()?;
+                        }
+                    }
+
+                    if let Some(ref recur_str) = recur {
+                        let recurrence = akh_medu::agent::Recurrence::parse(recur_str)
+                            .into_diagnostic()?;
+                        agent
+                            .pim_manager_mut()
+                            .set_recurrence(&engine, goal_sym, recurrence)
+                            .into_diagnostic()?;
+                    }
+
+                    if let Some(dl) = deadline
+                        && let Some(meta) =
+                            agent.pim_manager_mut().get_metadata_mut(goal_sym.get())
+                        {
+                            meta.deadline = Some(dl);
+                        }
+
+                    println!(
+                        "Added PIM metadata to goal {} (GTD: {}, quadrant: {})",
+                        goal,
+                        gtd_state,
+                        akh_medu::agent::EisenhowerQuadrant::classify(urgency, importance),
+                    );
+                }
+                PimAction::Transition { goal, to } => {
+                    let new_state = match to {
+                        GtdState::Inbox => akh_medu::agent::GtdState::Inbox,
+                        GtdState::Next => akh_medu::agent::GtdState::Next,
+                        GtdState::Waiting => akh_medu::agent::GtdState::Waiting,
+                        GtdState::Someday => akh_medu::agent::GtdState::Someday,
+                        GtdState::Reference => akh_medu::agent::GtdState::Reference,
+                    };
+                    let goal_sym = akh_medu::symbol::SymbolId::new(goal)
+                        .ok_or_else(|| miette::miette!("invalid goal ID: {goal}"))?;
+                    agent
+                        .pim_manager_mut()
+                        .transition_gtd(&engine, goal_sym, new_state)
+                        .into_diagnostic()?;
+                    println!("Transitioned goal {} to GTD state: {}", goal, new_state);
+                }
+                PimAction::Matrix => {
+                    for quad in [
+                        akh_medu::agent::EisenhowerQuadrant::Do,
+                        akh_medu::agent::EisenhowerQuadrant::Schedule,
+                        akh_medu::agent::EisenhowerQuadrant::Delegate,
+                        akh_medu::agent::EisenhowerQuadrant::Eliminate,
+                    ] {
+                        let ids = agent.pim_manager().tasks_by_quadrant(quad);
+                        println!(
+                            "{} ({} tasks):",
+                            quad.as_label().to_uppercase(),
+                            ids.len()
+                        );
+                        for id in &ids {
+                            let label = engine.resolve_label(*id);
+                            let gtd = agent
+                                .pim_manager()
+                                .get_metadata(id.get())
+                                .map(|m| m.gtd_state.to_string())
+                                .unwrap_or_default();
+                            println!("  [{:>5}] {} (GTD: {})", id.get(), label, gtd);
+                        }
+                    }
+                }
+                PimAction::Deps => {
+                    match agent.pim_manager().topological_order() {
+                        Ok(topo) => {
+                            println!("Dependency order ({} tasks):", topo.len());
+                            for (i, id) in topo.iter().enumerate() {
+                                let label = engine.resolve_label(*id);
+                                println!("  {}. [{:>5}] {}", i + 1, id.get(), label);
+                            }
+                        }
+                        Err(e) => println!("Dependency cycle detected: {e}"),
+                    }
+                }
+                PimAction::Overdue => {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    let ids = agent.pim_manager().overdue_tasks(now);
+                    if ids.is_empty() {
+                        println!("No overdue tasks.");
+                    } else {
+                        println!("Overdue ({} tasks):", ids.len());
+                        for id in &ids {
+                            let label = engine.resolve_label(*id);
+                            let due = agent
+                                .pim_manager()
+                                .get_metadata(id.get())
+                                .and_then(|m| m.next_due)
+                                .unwrap_or(0);
+                            let overdue_secs = now.saturating_sub(due);
+                            let overdue_days = overdue_secs / 86_400;
+                            println!(
+                                "  [{:>5}] {} (overdue by {} days)",
+                                id.get(),
+                                label,
+                                overdue_days
+                            );
+                        }
+                    }
+                }
+            }
+
+            agent.persist_session().into_diagnostic()?;
+        }
+
+        Commands::Cal { action } => {
+            let engine = Arc::new(Engine::new(config).into_diagnostic()?);
+            let agent_config = akh_medu::agent::AgentConfig::default();
+            let mut agent = if akh_medu::agent::Agent::has_persisted_session(&engine) {
+                akh_medu::agent::Agent::resume(Arc::clone(&engine), agent_config)
+                    .into_diagnostic()?
+            } else {
+                akh_medu::agent::Agent::new(Arc::clone(&engine), agent_config)
+                    .into_diagnostic()?
+            };
+
+            match action {
+                CalAction::Today => {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    let events = agent.calendar_manager().today_events(now);
+                    if events.is_empty() {
+                        println!("No events today.");
+                    } else {
+                        println!("Today ({} events):", events.len());
+                        for e in &events {
+                            let dur_min = e.duration_secs() / 60;
+                            let loc = e
+                                .location
+                                .as_deref()
+                                .map(|l| format!(" @ {l}"))
+                                .unwrap_or_default();
+                            println!(
+                                "  [{:>5}] {} ({} min){}",
+                                e.symbol_id.get(),
+                                e.summary,
+                                dur_min,
+                                loc,
+                            );
+                        }
+                    }
+                }
+                CalAction::Week => {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    let events = agent.calendar_manager().week_events(now);
+                    if events.is_empty() {
+                        println!("No events this week.");
+                    } else {
+                        println!("This week ({} events):", events.len());
+                        for e in &events {
+                            let dur_min = e.duration_secs() / 60;
+                            let loc = e
+                                .location
+                                .as_deref()
+                                .map(|l| format!(" @ {l}"))
+                                .unwrap_or_default();
+                            println!(
+                                "  [{:>5}] {} ({} min){}",
+                                e.symbol_id.get(),
+                                e.summary,
+                                dur_min,
+                                loc,
+                            );
+                        }
+                    }
+                }
+                CalAction::Conflicts => {
+                    let conflicts = agent.calendar_manager().detect_conflicts();
+                    if conflicts.is_empty() {
+                        println!("No scheduling conflicts.");
+                    } else {
+                        println!("Conflicts ({}):", conflicts.len());
+                        for (a, b) in &conflicts {
+                            let a_label = engine.resolve_label(*a);
+                            let b_label = engine.resolve_label(*b);
+                            println!("  {} <-> {}", a_label, b_label);
+                        }
+                    }
+                }
+                CalAction::Add {
+                    summary,
+                    start,
+                    end,
+                    location,
+                } => {
+                    let sym = agent
+                        .calendar_manager_mut()
+                        .add_event(
+                            &engine,
+                            &summary,
+                            start,
+                            end,
+                            location.as_deref(),
+                            None,
+                            None,
+                            None,
+                        )
+                        .into_diagnostic()?;
+                    let dur_min = end.saturating_sub(start) / 60;
+                    println!(
+                        "Added event [{:>5}] '{}' ({} min)",
+                        sym.get(),
+                        summary,
+                        dur_min,
+                    );
+                }
+                CalAction::Import { file } => {
+                    #[cfg(feature = "calendar")]
+                    {
+                        let data = std::fs::read_to_string(&file).into_diagnostic()?;
+                        let imported = akh_medu::agent::calendar::import_ical(
+                            agent.calendar_manager_mut(),
+                            &engine,
+                            &data,
+                        )
+                        .into_diagnostic()?;
+                        println!("Imported {} events from {}", imported.len(), file.display());
+                    }
+                    #[cfg(not(feature = "calendar"))]
+                    {
+                        let _ = file;
+                        println!("iCalendar import requires --features calendar");
+                    }
+                }
+                CalAction::Sync { url, user, pass } => {
+                    #[cfg(feature = "calendar")]
+                    {
+                        let imported = akh_medu::agent::calendar::sync_caldav(
+                            agent.calendar_manager_mut(),
+                            &engine,
+                            &url,
+                            &user,
+                            &pass,
+                        )
+                        .into_diagnostic()?;
+                        println!("Synced {} events from CalDAV", imported.len());
+                    }
+                    #[cfg(not(feature = "calendar"))]
+                    {
+                        let _ = (url, user, pass);
+                        println!("CalDAV sync requires --features calendar");
+                    }
+                }
+            }
+
+            agent.persist_session().into_diagnostic()?;
+        }
+
+        Commands::Pref { action } => {
+            let engine = Arc::new(Engine::new(config).into_diagnostic()?);
+            let agent_config = akh_medu::agent::AgentConfig::default();
+            let mut agent = if akh_medu::agent::Agent::has_persisted_session(&engine) {
+                akh_medu::agent::Agent::resume(Arc::clone(&engine), agent_config)
+                    .into_diagnostic()?
+            } else {
+                akh_medu::agent::Agent::new(Arc::clone(&engine), agent_config)
+                    .into_diagnostic()?
+            };
+
+            match action {
+                PrefAction::Status => {
+                    let pref = agent.preference_manager();
+                    println!("Preference Profile:");
+                    println!("  Interactions: {}", pref.profile.interaction_count);
+                    println!("  Proactivity:  {}", pref.profile.proactivity_level);
+                    println!("  Decay rate:   {}", pref.profile.decay_rate);
+                    println!(
+                        "  Suggestions:  {} offered, {} accepted ({:.0}%)",
+                        pref.profile.suggestions_offered,
+                        pref.profile.suggestions_accepted,
+                        pref.suggestion_acceptance_rate() * 100.0,
+                    );
+                    let prototype_empty = pref.profile.interest_prototype.is_none();
+                    println!(
+                        "  Prototype:    {}",
+                        if prototype_empty { "empty" } else { "active" }
+                    );
+                }
+                PrefAction::Train { entity, weight } => {
+                    let sym = akh_medu::symbol::SymbolId::new(entity).ok_or_else(|| {
+                        miette::miette!("invalid symbol ID: {entity}")
+                    })?;
+                    let signal = akh_medu::agent::FeedbackSignal::ExplicitPreference {
+                        topic: sym,
+                        weight,
+                    };
+                    agent
+                        .preference_manager_mut()
+                        .record_feedback(&signal, &engine)
+                        .into_diagnostic()?;
+                    let label = engine.resolve_label(sym);
+                    println!(
+                        "Recorded preference: '{label}' (weight: {weight:.2}, total interactions: {})",
+                        agent.preference_manager().profile.interaction_count
+                    );
+                }
+                PrefAction::Level { level } => {
+                    let lvl = match level {
+                        ProactivityLevel::Ambient => akh_medu::agent::ProactivityLevel::Ambient,
+                        ProactivityLevel::Nudge => akh_medu::agent::ProactivityLevel::Nudge,
+                        ProactivityLevel::Offer => akh_medu::agent::ProactivityLevel::Offer,
+                        ProactivityLevel::Scheduled => akh_medu::agent::ProactivityLevel::Scheduled,
+                        ProactivityLevel::Autonomous => akh_medu::agent::ProactivityLevel::Autonomous,
+                    };
+                    agent.preference_manager_mut().set_proactivity_level(lvl);
+                    println!("Proactivity level set to: {lvl}");
+                }
+                PrefAction::Interests { count } => {
+                    let interests = agent.preference_manager().top_interests(&engine, count);
+                    if interests.is_empty() {
+                        println!("No interests recorded yet. Use `akh pref train` to add feedback.");
+                    } else {
+                        println!("Top interests ({}):", interests.len());
+                        for (label, sim) in &interests {
+                            println!("  {label:<30} (similarity: {sim:.3})");
+                        }
+                    }
+                }
+                PrefAction::Suggest => {
+                    match agent.preference_manager().jitir_query(
+                        agent.working_memory(),
+                        agent.goals(),
+                        &engine,
+                    ) {
+                        Ok(jitir) => {
+                            if jitir.direct_matches.is_empty()
+                                && jitir.serendipity_matches.is_empty()
+                            {
+                                println!("No suggestions at this time.");
+                            } else {
+                                if !jitir.direct_matches.is_empty() {
+                                    println!("Direct matches:");
+                                    for s in &jitir.direct_matches {
+                                        println!(
+                                            "  [{:>5}] {} (relevance: {:.2})",
+                                            s.entity.get(),
+                                            s.label,
+                                            s.relevance
+                                        );
+                                    }
+                                }
+                                if !jitir.serendipity_matches.is_empty() {
+                                    println!("Serendipity:");
+                                    for s in &jitir.serendipity_matches {
+                                        println!(
+                                            "  [{:>5}] {} — {} (relevance: {:.2})",
+                                            s.entity.get(),
+                                            s.label,
+                                            s.reasoning,
+                                            s.relevance
+                                        );
+                                    }
+                                }
+                            }
+                            println!("Context: {}", jitir.context_summary);
+                        }
+                        Err(e) => {
+                            println!("JITIR query failed: {e}");
+                        }
+                    }
+                }
+            }
+
+            agent.persist_session().into_diagnostic()?;
+        }
+
+        Commands::Causal { action } => {
+            let engine = Arc::new(Engine::new(config).into_diagnostic()?);
+            let agent_config = akh_medu::agent::AgentConfig::default();
+            let mut agent = if akh_medu::agent::Agent::has_persisted_session(&engine) {
+                akh_medu::agent::Agent::resume(Arc::clone(&engine), agent_config)
+                    .into_diagnostic()?
+            } else {
+                akh_medu::agent::Agent::new(Arc::clone(&engine), agent_config)
+                    .into_diagnostic()?
+            };
+
+            match action {
+                CausalAction::Schemas => {
+                    let schemas = agent.causal_manager().list_schemas();
+                    if schemas.is_empty() {
+                        println!("No action schemas registered. Use `akh causal bootstrap` to create from tools.");
+                    } else {
+                        println!("Action schemas ({}):", schemas.len());
+                        for s in &schemas {
+                            println!(
+                                "  {:<25} precond: {} effects: {} success: {:.0}% runs: {}",
+                                s.name,
+                                s.preconditions.len(),
+                                s.effects.len(),
+                                s.success_rate * 100.0,
+                                s.execution_count,
+                            );
+                        }
+                    }
+                }
+                CausalAction::Schema { name } => {
+                    match agent.causal_manager().get_schema(&name) {
+                        Some(s) => {
+                            println!("Schema: {}", s.name);
+                            println!("  Action ID:       {}", s.action_id.get());
+                            println!("  Preconditions:   {}", s.preconditions.len());
+                            println!("  Effects:         {}", s.effects.len());
+                            println!("  Success rate:    {:.1}%", s.success_rate * 100.0);
+                            println!("  Execution count: {}", s.execution_count);
+                        }
+                        None => {
+                            println!("Schema '{name}' not found.");
+                        }
+                    }
+                }
+                CausalAction::Predict { name } => {
+                    match agent.causal_manager().predict_effects(&name, &engine) {
+                        Ok(transition) => {
+                            println!("Predicted transition for '{name}':");
+                            if transition.assertions.is_empty()
+                                && transition.retractions.is_empty()
+                                && transition.confidence_changes.is_empty()
+                            {
+                                println!("  (no predicted effects)");
+                            } else {
+                                for (s, p, o) in &transition.assertions {
+                                    println!(
+                                        "  + {} {} {}",
+                                        engine.resolve_label(*s),
+                                        engine.resolve_label(*p),
+                                        engine.resolve_label(*o),
+                                    );
+                                }
+                                for (s, p, o) in &transition.retractions {
+                                    println!(
+                                        "  - {} {} {}",
+                                        engine.resolve_label(*s),
+                                        engine.resolve_label(*p),
+                                        engine.resolve_label(*o),
+                                    );
+                                }
+                                for (s, p, o, delta) in &transition.confidence_changes {
+                                    println!(
+                                        "  ~ {} {} {} (delta: {:+.2})",
+                                        engine.resolve_label(*s),
+                                        engine.resolve_label(*p),
+                                        engine.resolve_label(*o),
+                                        delta,
+                                    );
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            println!("Prediction failed: {e}");
+                        }
+                    }
+                }
+                CausalAction::Applicable => {
+                    let applicable = agent.causal_manager().applicable_actions(&engine);
+                    if applicable.is_empty() {
+                        println!("No applicable actions in current state.");
+                    } else {
+                        println!("Applicable actions ({}):", applicable.len());
+                        for s in &applicable {
+                            println!(
+                                "  {} (success: {:.0}%, runs: {})",
+                                s.name,
+                                s.success_rate * 100.0,
+                                s.execution_count,
+                            );
+                        }
+                    }
+                }
+                CausalAction::Bootstrap => {
+                    let tool_names: Vec<String> = agent
+                        .list_tools()
+                        .iter()
+                        .map(|s| s.name.clone())
+                        .collect();
+                    match agent
+                        .causal_manager_mut()
+                        .bootstrap_schemas_from_tools(&tool_names, &engine)
+                    {
+                        Ok(count) => {
+                            println!(
+                                "Bootstrapped {count} new schema(s) from {} tool(s).",
+                                tool_names.len()
+                            );
+                        }
+                        Err(e) => {
+                            println!("Bootstrap failed: {e}");
+                        }
+                    }
+                }
+            }
+
+            agent.persist_session().into_diagnostic()?;
+        }
+
+        Commands::Awaken { action } => {
+            let engine = Arc::new(Engine::new(config).into_diagnostic()?);
+            let agent_config = akh_medu::agent::AgentConfig::default();
+            let mut agent = if akh_medu::agent::Agent::has_persisted_session(&engine) {
+                akh_medu::agent::Agent::resume(Arc::clone(&engine), agent_config)
+                    .into_diagnostic()?
+            } else {
+                akh_medu::agent::Agent::new(Arc::clone(&engine), agent_config)
+                    .into_diagnostic()?
+            };
+
+            match action {
+                AwakenAction::Parse { statement } => {
+                    match akh_medu::bootstrap::purpose::parse_purpose(&statement) {
+                        Ok(intent) => {
+                            println!("Parsed bootstrap intent:");
+                            println!("  Domain:      {}", intent.purpose.domain);
+                            println!("  Competence:  {}", intent.purpose.competence_level);
+                            println!("  Seeds:       {:?}", intent.purpose.seed_concepts);
+                            if let Some(ref id) = intent.identity {
+                                println!("  Identity:    {} ({})", id.name, id.entity_type);
+                                println!("  Source:      \"{}\"", id.source_phrase);
+                            } else {
+                                println!("  Identity:    (none)");
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("Parse failed: {e}");
+                        }
+                    }
+                }
+                AwakenAction::Resolve { name } => {
+                    let identity_ref = akh_medu::bootstrap::IdentityRef {
+                        name: name.clone(),
+                        entity_type: akh_medu::bootstrap::purpose::classify_entity_type(&name),
+                        source_phrase: format!("resolve {name}"),
+                    };
+                    match akh_medu::bootstrap::identity::resolve_identity(
+                        &identity_ref,
+                        &engine,
+                    ) {
+                        Ok(knowledge) => {
+                            println!("Resolved identity: {}", knowledge.name);
+                            println!("  Type:        {}", knowledge.entity_type);
+                            println!("  Culture:     {}", knowledge.culture);
+                            println!("  Description: {}", knowledge.description);
+                            println!("  Domains:     {:?}", knowledge.domains);
+                            println!("  Traits:      {:?}", knowledge.traits);
+                            println!("  Archetypes:  {:?}", knowledge.archetypes);
+
+                            // Perform the Ritual of Awakening.
+                            let purpose = akh_medu::bootstrap::PurposeModel {
+                                domain: knowledge.domains.first().cloned().unwrap_or_default(),
+                                competence_level: akh_medu::bootstrap::DreyfusLevel::Competent,
+                                seed_concepts: knowledge.domains.clone(),
+                                description: knowledge.description.clone(),
+                            };
+                            match akh_medu::bootstrap::identity::ritual_of_awakening(
+                                &knowledge,
+                                &purpose,
+                                &engine,
+                            ) {
+                                Ok(ritual) => {
+                                    println!("\nRitual of Awakening complete!");
+                                    println!("  Chosen name: {}", ritual.chosen_name);
+                                    println!(
+                                        "  Persona:     {}",
+                                        ritual.psyche.persona.name
+                                    );
+                                    println!(
+                                        "  Grammar:     {}",
+                                        ritual.psyche.persona.grammar_preference
+                                    );
+                                    println!(
+                                        "  Dominant:    {}",
+                                        ritual.psyche.self_integration.dominant_archetype
+                                    );
+                                    println!(
+                                        "  Provenance:  {} record(s)",
+                                        ritual.provenance_ids.len()
+                                    );
+
+                                    // Set the psyche on the agent (use force: ritual already guards).
+                                    agent.force_set_psyche(ritual.psyche);
+                                }
+                                Err(e) => {
+                                    eprintln!("Ritual failed: {e}");
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("Resolution failed: {e}");
+                        }
+                    }
+                }
+                AwakenAction::Status => {
+                    if let Some(psyche) = agent.psyche() {
+                        println!("Current psyche:");
+                        println!("  Persona:          {}", psyche.persona.name);
+                        println!("  Grammar:          {}", psyche.persona.grammar_preference);
+                        println!("  Traits:           {:?}", psyche.persona.traits);
+                        println!("  Tone:             {:?}", psyche.persona.tone);
+                        println!("  Dominant:         {}", psyche.self_integration.dominant_archetype);
+                        println!("  Individuation:    {:.2}", psyche.self_integration.individuation_level);
+                        println!("  Archetypes:");
+                        println!("    Sage:     {:.2}", psyche.archetypes.sage);
+                        println!("    Explorer: {:.2}", psyche.archetypes.explorer);
+                        println!("    Healer:   {:.2}", psyche.archetypes.healer);
+                        println!("    Guardian: {:.2}", psyche.archetypes.guardian);
+                        println!("  Shadow veto patterns: {}", psyche.shadow.veto_patterns.len());
+                        println!("  Shadow bias patterns: {}", psyche.shadow.bias_patterns.len());
+                    } else {
+                        println!("No psyche loaded. Run `akh awaken resolve <name>` to awaken.");
+                    }
+                }
+                AwakenAction::Expand {
+                    seeds,
+                    purpose: purpose_stmt,
+                    threshold,
+                    max_concepts,
+                    no_conceptnet,
+                } => {
+                    // Resolve seed concepts: either from --seeds or --purpose.
+                    let purpose_model = if let Some(ref seed_list) = seeds {
+                        let seed_list: Vec<String> = seed_list
+                            .iter()
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect();
+                        akh_medu::bootstrap::PurposeModel {
+                            domain: seed_list.first().cloned().unwrap_or_default(),
+                            competence_level: akh_medu::bootstrap::DreyfusLevel::Competent,
+                            seed_concepts: seed_list.clone(),
+                            description: seed_list.join(","),
+                        }
+                    } else if let Some(ref stmt) = purpose_stmt {
+                        match akh_medu::bootstrap::purpose::parse_purpose(stmt) {
+                            Ok(intent) => intent.purpose,
+                            Err(e) => {
+                                eprintln!("Failed to parse purpose: {e}");
+                                return Ok(());
+                            }
+                        }
+                    } else {
+                        eprintln!("Provide --seeds or --purpose for domain expansion.");
+                        return Ok(());
+                    };
+
+                    println!(
+                        "Expanding domain from {} seed(s): {:?}",
+                        purpose_model.seed_concepts.len(),
+                        purpose_model.seed_concepts
+                    );
+
+                    let config = akh_medu::bootstrap::ExpansionConfig {
+                        similarity_threshold: threshold,
+                        max_concepts,
+                        use_conceptnet: !no_conceptnet,
+                        ..Default::default()
+                    };
+
+                    match akh_medu::bootstrap::DomainExpander::new(&engine, config) {
+                        Ok(mut expander) => {
+                            match expander.expand(&purpose_model, &engine) {
+                                Ok(result) => {
+                                    println!("\nDomain expansion complete!");
+                                    println!("  Concepts created: {}", result.concept_count);
+                                    println!("  Relations added:  {}", result.relation_count);
+                                    println!("  Rejected:         {}", result.rejected_count);
+                                    println!("  API calls:        {}", result.api_calls);
+                                    println!("  Provenance:       {} record(s)", result.provenance_ids.len());
+                                    if !result.accepted_labels.is_empty() {
+                                        println!("\n  Accepted concepts:");
+                                        for (i, label) in result.accepted_labels.iter().enumerate().take(20) {
+                                            println!("    {}: {}", i + 1, label);
+                                        }
+                                        if result.accepted_labels.len() > 20 {
+                                            println!("    ... and {} more", result.accepted_labels.len() - 20);
+                                        }
+                                    }
+                                }
+                                Err(e) => eprintln!("Expansion failed: {e}"),
+                            }
+                        }
+                        Err(e) => eprintln!("Failed to initialize expander: {e}"),
+                    }
+                }
+                AwakenAction::Prerequisite {
+                    seeds,
+                    purpose: purpose_stmt,
+                    known_threshold,
+                    zpd_low,
+                    zpd_high,
+                } => {
+                    // Resolve seed concepts: either from --seeds or --purpose.
+                    let purpose_model = if let Some(ref seed_list) = seeds {
+                        let seed_list: Vec<String> = seed_list
+                            .iter()
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect();
+                        akh_medu::bootstrap::PurposeModel {
+                            domain: seed_list.first().cloned().unwrap_or_default(),
+                            competence_level: akh_medu::bootstrap::DreyfusLevel::Competent,
+                            seed_concepts: seed_list.clone(),
+                            description: seed_list.join(","),
+                        }
+                    } else if let Some(ref stmt) = purpose_stmt {
+                        match akh_medu::bootstrap::purpose::parse_purpose(stmt) {
+                            Ok(intent) => intent.purpose,
+                            Err(e) => {
+                                eprintln!("Failed to parse purpose: {e}");
+                                return Ok(());
+                            }
+                        }
+                    } else {
+                        eprintln!("Provide --seeds or --purpose for prerequisite analysis.");
+                        return Ok(());
+                    };
+
+                    // Step 1: Run domain expansion first to populate KG.
+                    println!(
+                        "Expanding domain from {} seed(s): {:?}",
+                        purpose_model.seed_concepts.len(),
+                        purpose_model.seed_concepts
+                    );
+
+                    let expand_config = akh_medu::bootstrap::ExpansionConfig::default();
+                    let expansion_result =
+                        match akh_medu::bootstrap::DomainExpander::new(&engine, expand_config) {
+                            Ok(mut expander) => match expander.expand(&purpose_model, &engine) {
+                                Ok(result) => {
+                                    println!(
+                                        "  Expansion: {} concepts, {} relations",
+                                        result.concept_count, result.relation_count
+                                    );
+                                    result
+                                }
+                                Err(e) => {
+                                    eprintln!("Expansion failed: {e}");
+                                    return Ok(());
+                                }
+                            },
+                            Err(e) => {
+                                eprintln!("Failed to initialize expander: {e}");
+                                return Ok(());
+                            }
+                        };
+
+                    // Step 2: Run prerequisite analysis.
+                    println!("\nAnalyzing prerequisites...");
+                    let prereq_config = akh_medu::bootstrap::PrerequisiteConfig {
+                        known_min_triples: known_threshold,
+                        proximal_similarity_low: zpd_low,
+                        proximal_similarity_high: zpd_high,
+                        ..Default::default()
+                    };
+
+                    match akh_medu::bootstrap::PrerequisiteAnalyzer::new(&engine, prereq_config) {
+                        Ok(analyzer) => {
+                            match analyzer.analyze(&expansion_result, &engine) {
+                                Ok(result) => {
+                                    println!("\nPrerequisite analysis complete!");
+                                    println!("  Concepts analyzed: {}", result.concepts_analyzed);
+                                    println!("  Prerequisite edges: {}", result.edge_count);
+                                    println!("  Cycles broken: {}", result.cycles_broken);
+                                    println!("  Max tier: {}", result.max_tier);
+                                    println!(
+                                        "  Provenance: {} record(s)",
+                                        result.provenance_ids.len()
+                                    );
+
+                                    // Zone distribution.
+                                    println!("\n  ZPD Distribution:");
+                                    for zone in [
+                                        akh_medu::bootstrap::prerequisite::ZpdZone::Known,
+                                        akh_medu::bootstrap::prerequisite::ZpdZone::Proximal,
+                                        akh_medu::bootstrap::prerequisite::ZpdZone::Beyond,
+                                    ] {
+                                        let count =
+                                            result.zone_distribution.get(&zone).unwrap_or(&0);
+                                        println!("    {zone}: {count}");
+                                    }
+
+                                    // Curriculum.
+                                    if !result.curriculum.is_empty() {
+                                        println!("\n  Curriculum (learning order):");
+                                        for (i, entry) in
+                                            result.curriculum.iter().enumerate().take(30)
+                                        {
+                                            println!(
+                                                "    {:3}. [tier {}] ({}) {} (coverage: {:.2}, sim: {:.2})",
+                                                i + 1,
+                                                entry.tier,
+                                                entry.zone,
+                                                entry.label,
+                                                entry.prereq_coverage,
+                                                entry.similarity_to_known,
+                                            );
+                                        }
+                                        if result.curriculum.len() > 30 {
+                                            println!(
+                                                "    ... and {} more",
+                                                result.curriculum.len() - 30
+                                            );
+                                        }
+                                    }
+                                }
+                                Err(e) => eprintln!("Prerequisite analysis failed: {e}"),
+                            }
+                        }
+                        Err(e) => eprintln!("Failed to initialize analyzer: {e}"),
+                    }
+                }
+                AwakenAction::Resources {
+                    seeds,
+                    purpose: purpose_stmt,
+                    min_quality,
+                    max_api_calls,
+                    no_semantic_scholar,
+                    no_openalex,
+                    no_open_library,
+                } => {
+                    // Resolve seed concepts.
+                    let purpose_model = if let Some(ref seed_list) = seeds {
+                        let seed_list: Vec<String> = seed_list
+                            .iter()
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect();
+                        akh_medu::bootstrap::PurposeModel {
+                            domain: seed_list.first().cloned().unwrap_or_default(),
+                            competence_level: akh_medu::bootstrap::DreyfusLevel::Competent,
+                            seed_concepts: seed_list.clone(),
+                            description: seed_list.join(","),
+                        }
+                    } else if let Some(ref stmt) = purpose_stmt {
+                        match akh_medu::bootstrap::purpose::parse_purpose(stmt) {
+                            Ok(intent) => intent.purpose,
+                            Err(e) => {
+                                eprintln!("Failed to parse purpose: {e}");
+                                return Ok(());
+                            }
+                        }
+                    } else {
+                        eprintln!("Provide --seeds or --purpose for resource discovery.");
+                        return Ok(());
+                    };
+
+                    // Step 1: Domain expansion.
+                    println!(
+                        "Expanding domain from {} seed(s): {:?}",
+                        purpose_model.seed_concepts.len(),
+                        purpose_model.seed_concepts
+                    );
+                    let expand_config = akh_medu::bootstrap::ExpansionConfig::default();
+                    let expansion_result =
+                        match akh_medu::bootstrap::DomainExpander::new(&engine, expand_config) {
+                            Ok(mut expander) => match expander.expand(&purpose_model, &engine) {
+                                Ok(result) => {
+                                    println!(
+                                        "  Expansion: {} concepts, {} relations",
+                                        result.concept_count, result.relation_count
+                                    );
+                                    result
+                                }
+                                Err(e) => {
+                                    eprintln!("Expansion failed: {e}");
+                                    return Ok(());
+                                }
+                            },
+                            Err(e) => {
+                                eprintln!("Failed to initialize expander: {e}");
+                                return Ok(());
+                            }
+                        };
+
+                    // Step 2: Prerequisite analysis (fallback to synthetic curriculum if it fails).
+                    println!("\nAnalyzing prerequisites...");
+                    let prereq_config = akh_medu::bootstrap::PrerequisiteConfig::default();
+                    let prereq_result =
+                        match akh_medu::bootstrap::PrerequisiteAnalyzer::new(&engine, prereq_config)
+                        {
+                            Ok(analyzer) => match analyzer.analyze(&expansion_result, &engine) {
+                                Ok(result) => {
+                                    println!(
+                                        "  Prerequisites: {} edges, {} concepts",
+                                        result.edge_count, result.concepts_analyzed
+                                    );
+                                    result
+                                }
+                                Err(e) => {
+                                    eprintln!(
+                                        "  Prerequisite analysis failed: {e}\n  \
+                                         Falling back to synthetic curriculum (all concepts → Proximal)"
+                                    );
+                                    akh_medu::bootstrap::resources::synthetic_curriculum_from_expansion(
+                                        &expansion_result,
+                                        &engine,
+                                    )
+                                }
+                            },
+                            Err(e) => {
+                                eprintln!(
+                                    "  Failed to initialize analyzer: {e}\n  \
+                                     Falling back to synthetic curriculum (all concepts → Proximal)"
+                                );
+                                akh_medu::bootstrap::resources::synthetic_curriculum_from_expansion(
+                                    &expansion_result,
+                                    &engine,
+                                )
+                            }
+                        };
+
+                    // Step 3: Resource discovery.
+                    println!("\nDiscovering resources for proximal concepts...");
+                    let res_config = akh_medu::bootstrap::ResourceDiscoveryConfig {
+                        min_quality,
+                        max_api_calls,
+                        use_semantic_scholar: !no_semantic_scholar,
+                        use_openalex: !no_openalex,
+                        use_open_library: !no_open_library,
+                        ..Default::default()
+                    };
+
+                    match akh_medu::bootstrap::ResourceDiscoverer::new(&engine, res_config) {
+                        Ok(mut discoverer) => {
+                            match discoverer.discover(
+                                &prereq_result,
+                                &expansion_result,
+                                &purpose_model.seed_concepts,
+                                &engine,
+                            ) {
+                                Ok(result) => {
+                                    println!("\nResource discovery complete!");
+                                    println!("  Resources found: {}", result.resources.len());
+                                    println!("  API calls made: {}", result.api_calls_made);
+                                    println!("  Concepts searched: {}", result.concepts_searched);
+                                    println!(
+                                        "  Provenance: {} record(s)",
+                                        result.provenance_ids.len()
+                                    );
+
+                                    if !result.resources.is_empty() {
+                                        println!("\n  Discovered resources:");
+                                        for (i, res) in
+                                            result.resources.iter().enumerate().take(20)
+                                        {
+                                            let oa = if res.open_access { "OA" } else { "--" };
+                                            let year_str = res
+                                                .year
+                                                .map(|y| y.to_string())
+                                                .unwrap_or_else(|| "----".to_string());
+                                            println!(
+                                                "    {:3}. [{:.2}] [{oa}] ({year_str}) [{}] {} — {}",
+                                                i + 1,
+                                                res.quality_score,
+                                                res.difficulty_estimate,
+                                                res.title,
+                                                res.source_api,
+                                            );
+                                        }
+                                        if result.resources.len() > 20 {
+                                            println!(
+                                                "    ... and {} more",
+                                                result.resources.len() - 20
+                                            );
+                                        }
+                                    }
+                                }
+                                Err(e) => eprintln!("Resource discovery failed: {e}"),
+                            }
+                        }
+                        Err(e) => eprintln!("Failed to initialize resource discoverer: {e}"),
+                    }
+                }
+                AwakenAction::Ingest {
+                    seeds,
+                    purpose: purpose_stmt,
+                    max_cycles,
+                    saturation,
+                    xval_boost,
+                    no_url,
+                    catalog_dir,
+                } => {
+                    // Resolve seed concepts.
+                    let purpose_model = if let Some(ref seed_list) = seeds {
+                        let seed_list: Vec<String> = seed_list
+                            .iter()
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect();
+                        akh_medu::bootstrap::PurposeModel {
+                            domain: seed_list.first().cloned().unwrap_or_default(),
+                            competence_level: akh_medu::bootstrap::DreyfusLevel::Competent,
+                            seed_concepts: seed_list.clone(),
+                            description: seed_list.join(","),
+                        }
+                    } else if let Some(ref stmt) = purpose_stmt {
+                        match akh_medu::bootstrap::purpose::parse_purpose(stmt) {
+                            Ok(intent) => intent.purpose,
+                            Err(e) => {
+                                eprintln!("Failed to parse purpose: {e}");
+                                return Ok(());
+                            }
+                        }
+                    } else {
+                        eprintln!("Provide --seeds or --purpose for curriculum ingestion.");
+                        return Ok(());
+                    };
+
+                    // Step 1: Domain expansion.
+                    println!(
+                        "Expanding domain from {} seed(s): {:?}",
+                        purpose_model.seed_concepts.len(),
+                        purpose_model.seed_concepts
+                    );
+                    let expand_config = akh_medu::bootstrap::ExpansionConfig::default();
+                    let expansion_result =
+                        match akh_medu::bootstrap::DomainExpander::new(&engine, expand_config) {
+                            Ok(mut expander) => match expander.expand(&purpose_model, &engine) {
+                                Ok(result) => {
+                                    println!(
+                                        "  Expansion: {} concepts, {} relations",
+                                        result.concept_count, result.relation_count
+                                    );
+                                    result
+                                }
+                                Err(e) => {
+                                    eprintln!("Expansion failed: {e}");
+                                    return Ok(());
+                                }
+                            },
+                            Err(e) => {
+                                eprintln!("Failed to initialize expander: {e}");
+                                return Ok(());
+                            }
+                        };
+
+                    // Step 2: Prerequisite analysis.
+                    println!("\nAnalyzing prerequisites...");
+                    let prereq_config = akh_medu::bootstrap::PrerequisiteConfig::default();
+                    let prereq_result =
+                        match akh_medu::bootstrap::PrerequisiteAnalyzer::new(&engine, prereq_config)
+                        {
+                            Ok(analyzer) => match analyzer.analyze(&expansion_result, &engine) {
+                                Ok(result) => {
+                                    println!(
+                                        "  Prerequisites: {} edges, {} concepts",
+                                        result.edge_count, result.concepts_analyzed
+                                    );
+                                    result
+                                }
+                                Err(e) => {
+                                    eprintln!(
+                                        "  Prerequisite analysis failed: {e}\n  \
+                                         Falling back to synthetic curriculum"
+                                    );
+                                    akh_medu::bootstrap::resources::synthetic_curriculum_from_expansion(
+                                        &expansion_result,
+                                        &engine,
+                                    )
+                                }
+                            },
+                            Err(e) => {
+                                eprintln!(
+                                    "  Failed to initialize analyzer: {e}\n  \
+                                     Falling back to synthetic curriculum"
+                                );
+                                akh_medu::bootstrap::resources::synthetic_curriculum_from_expansion(
+                                    &expansion_result,
+                                    &engine,
+                                )
+                            }
+                        };
+
+                    // Step 3: Resource discovery.
+                    println!("\nDiscovering resources for proximal concepts...");
+                    let res_config = akh_medu::bootstrap::ResourceDiscoveryConfig::default();
+
+                    let resource_result =
+                        match akh_medu::bootstrap::ResourceDiscoverer::new(&engine, res_config) {
+                            Ok(mut discoverer) => {
+                                match discoverer.discover(
+                                    &prereq_result,
+                                    &expansion_result,
+                                    &purpose_model.seed_concepts,
+                                    &engine,
+                                ) {
+                                    Ok(result) => {
+                                        println!(
+                                            "  Resources found: {}, API calls: {}",
+                                            result.resources.len(),
+                                            result.api_calls_made
+                                        );
+                                        result
+                                    }
+                                    Err(e) => {
+                                        eprintln!("Resource discovery failed: {e}");
+                                        return Ok(());
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("Failed to initialize resource discoverer: {e}");
+                                return Ok(());
+                            }
+                        };
+
+                    // Step 4: Curriculum ingestion.
+                    println!("\nIngesting resources in curriculum order...");
+                    let ingest_config = akh_medu::bootstrap::IngestionConfig {
+                        max_cycles,
+                        saturation_threshold: saturation,
+                        cross_validation_boost: xval_boost,
+                        try_url_ingestion: !no_url,
+                        catalog_dir: catalog_dir.map(std::path::PathBuf::from),
+                        ..Default::default()
+                    };
+
+                    match akh_medu::bootstrap::CurriculumIngestor::new(&engine, ingest_config) {
+                        Ok(mut ingestor) => {
+                            match ingestor.ingest(&prereq_result, &resource_result, &engine) {
+                                Ok(result) => {
+                                    println!("\nCurriculum ingestion complete!");
+                                    println!("  Cycles: {}", result.cycles);
+                                    println!("  Triples created: {}", result.total_triples);
+                                    println!(
+                                        "  Concepts extracted: {}",
+                                        result.total_concepts_extracted
+                                    );
+                                    println!(
+                                        "  Concepts ingested: {}",
+                                        result.concepts_ingested
+                                    );
+                                    println!(
+                                        "  Concepts saturated: {}",
+                                        result.concepts_saturated
+                                    );
+                                    println!(
+                                        "  URL attempts/successes: {}/{}",
+                                        result.url_attempts, result.url_successes
+                                    );
+                                    println!(
+                                        "  Cross-validated concepts: {}",
+                                        result.cross_validated_concepts
+                                    );
+                                    println!(
+                                        "  Symbols grounded: {}",
+                                        result.symbols_grounded
+                                    );
+                                    println!(
+                                        "  Provenance: {} record(s)",
+                                        result.provenance_ids.len()
+                                    );
+                                }
+                                Err(e) => eprintln!("Curriculum ingestion failed: {e}"),
+                            }
+                        }
+                        Err(e) => eprintln!("Failed to initialize curriculum ingestor: {e}"),
+                    }
+                }
+                AwakenAction::Assess {
+                    seeds,
+                    purpose: purpose_stmt,
+                    min_triples,
+                    bloom_depth,
+                    verbose,
+                } => {
+                    // Resolve seed concepts (same pattern as Ingest).
+                    let purpose_model = if let Some(ref seed_list) = seeds {
+                        let seed_list: Vec<String> = seed_list
+                            .iter()
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect();
+                        akh_medu::bootstrap::PurposeModel {
+                            domain: seed_list.first().cloned().unwrap_or_default(),
+                            competence_level: akh_medu::bootstrap::DreyfusLevel::Competent,
+                            seed_concepts: seed_list.clone(),
+                            description: seed_list.join(","),
+                        }
+                    } else if let Some(ref stmt) = purpose_stmt {
+                        match akh_medu::bootstrap::purpose::parse_purpose(stmt) {
+                            Ok(intent) => intent.purpose,
+                            Err(e) => {
+                                eprintln!("Failed to parse purpose: {e}");
+                                return Ok(());
+                            }
+                        }
+                    } else {
+                        eprintln!("Provide --seeds or --purpose for competence assessment.");
+                        return Ok(());
+                    };
+
+                    // Step 1: Domain expansion.
+                    println!(
+                        "Expanding domain from {} seed(s): {:?}",
+                        purpose_model.seed_concepts.len(),
+                        purpose_model.seed_concepts
+                    );
+                    let expand_config = akh_medu::bootstrap::ExpansionConfig::default();
+                    let expansion_result =
+                        match akh_medu::bootstrap::DomainExpander::new(&engine, expand_config) {
+                            Ok(mut expander) => match expander.expand(&purpose_model, &engine) {
+                                Ok(result) => {
+                                    println!(
+                                        "  Expansion: {} concepts, {} relations",
+                                        result.concept_count, result.relation_count
+                                    );
+                                    result
+                                }
+                                Err(e) => {
+                                    eprintln!("Expansion failed: {e}");
+                                    return Ok(());
+                                }
+                            },
+                            Err(e) => {
+                                eprintln!("Failed to initialize expander: {e}");
+                                return Ok(());
+                            }
+                        };
+
+                    // Step 2: Prerequisite analysis.
+                    println!("\nAnalyzing prerequisites...");
+                    let prereq_config = akh_medu::bootstrap::PrerequisiteConfig::default();
+                    let prereq_result =
+                        match akh_medu::bootstrap::PrerequisiteAnalyzer::new(&engine, prereq_config)
+                        {
+                            Ok(analyzer) => match analyzer.analyze(&expansion_result, &engine) {
+                                Ok(result) => {
+                                    println!(
+                                        "  Prerequisites: {} edges, {} concepts",
+                                        result.edge_count, result.concepts_analyzed
+                                    );
+                                    result
+                                }
+                                Err(e) => {
+                                    eprintln!(
+                                        "  Prerequisite analysis failed: {e}\n  \
+                                         Falling back to synthetic curriculum"
+                                    );
+                                    akh_medu::bootstrap::resources::synthetic_curriculum_from_expansion(
+                                        &expansion_result,
+                                        &engine,
+                                    )
+                                }
+                            },
+                            Err(e) => {
+                                eprintln!(
+                                    "  Failed to initialize analyzer: {e}\n  \
+                                     Falling back to synthetic curriculum"
+                                );
+                                akh_medu::bootstrap::resources::synthetic_curriculum_from_expansion(
+                                    &expansion_result,
+                                    &engine,
+                                )
+                            }
+                        };
+
+                    // Step 3: Resource discovery.
+                    println!("\nDiscovering resources for proximal concepts...");
+                    let res_config = akh_medu::bootstrap::ResourceDiscoveryConfig::default();
+
+                    let resource_result =
+                        match akh_medu::bootstrap::ResourceDiscoverer::new(&engine, res_config) {
+                            Ok(mut discoverer) => {
+                                match discoverer.discover(
+                                    &prereq_result,
+                                    &expansion_result,
+                                    &purpose_model.seed_concepts,
+                                    &engine,
+                                ) {
+                                    Ok(result) => {
+                                        println!(
+                                            "  Resources found: {}, API calls: {}",
+                                            result.resources.len(),
+                                            result.api_calls_made
+                                        );
+                                        result
+                                    }
+                                    Err(e) => {
+                                        eprintln!("Resource discovery failed: {e}");
+                                        return Ok(());
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("Failed to initialize resource discoverer: {e}");
+                                return Ok(());
+                            }
+                        };
+
+                    // Step 4: Curriculum ingestion.
+                    println!("\nIngesting resources in curriculum order...");
+                    let ingest_config = akh_medu::bootstrap::IngestionConfig::default();
+
+                    match akh_medu::bootstrap::CurriculumIngestor::new(&engine, ingest_config) {
+                        Ok(mut ingestor) => {
+                            match ingestor.ingest(&prereq_result, &resource_result, &engine) {
+                                Ok(result) => {
+                                    println!(
+                                        "  Ingestion: {} triples, {} concepts",
+                                        result.total_triples, result.concepts_ingested
+                                    );
+                                }
+                                Err(e) => {
+                                    eprintln!("Curriculum ingestion failed: {e}");
+                                    // Continue to assessment — may still have partial data.
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("Failed to initialize curriculum ingestor: {e}");
+                            // Continue to assessment — may still have prior data.
+                        }
+                    }
+
+                    // Step 5: Competence assessment.
+                    println!("\nAssessing competence...");
+                    let assess_config = akh_medu::bootstrap::CompetenceConfig {
+                        min_triples_per_concept: min_triples,
+                        bloom_max_depth: bloom_depth,
+                        ..Default::default()
+                    };
+
+                    match akh_medu::bootstrap::CompetenceAssessor::new(&engine, assess_config) {
+                        Ok(assessor) => {
+                            match assessor.assess(&prereq_result, &purpose_model, &engine) {
+                                Ok(report) => {
+                                    println!("\nCompetence Assessment Report");
+                                    println!("============================");
+                                    println!(
+                                        "  Overall Dreyfus level: {}",
+                                        report.overall_dreyfus
+                                    );
+                                    println!(
+                                        "  Overall score:         {:.2}",
+                                        report.overall_score
+                                    );
+                                    println!(
+                                        "  Knowledge areas:       {}",
+                                        report.knowledge_areas.len()
+                                    );
+                                    println!(
+                                        "  Recommendation:        {}",
+                                        report.recommendation
+                                    );
+
+                                    if !report.remaining_gaps.is_empty() {
+                                        println!(
+                                            "\n  Remaining gaps ({}):",
+                                            report.remaining_gaps.len()
+                                        );
+                                        for gap in &report.remaining_gaps {
+                                            println!("    - {gap}");
+                                        }
+                                    }
+
+                                    if verbose {
+                                        println!("\n  Per-area breakdown:");
+                                        for ka in &report.knowledge_areas {
+                                            println!(
+                                                "\n    {} ({})",
+                                                ka.name, ka.dreyfus_level
+                                            );
+                                            println!(
+                                                "      Score: {:.2} | Triples: {} | CQ: {}/{} | Gaps: {} | Density: {:.1}",
+                                                ka.score,
+                                                ka.triple_count,
+                                                ka.cq_answered,
+                                                ka.cq_total,
+                                                ka.gap_count,
+                                                ka.relation_density,
+                                            );
+                                            println!(
+                                                "      Components: coverage={:.2} connectivity={:.2} type_diversity={:.2} relation_density={:.2} cross_domain={:.2}",
+                                                ka.score_components.coverage,
+                                                ka.score_components.connectivity,
+                                                ka.score_components.type_diversity,
+                                                ka.score_components.relation_density,
+                                                ka.score_components.cross_domain,
+                                            );
+                                        }
+                                    }
+
+                                    println!(
+                                        "\n  Provenance: {} record(s)",
+                                        report.provenance_ids.len()
+                                    );
+                                }
+                                Err(e) => eprintln!("Competence assessment failed: {e}"),
+                            }
+                        }
+                        Err(e) => eprintln!("Failed to initialize competence assessor: {e}"),
+                    }
+                }
+                AwakenAction::Bootstrap {
+                    statement,
+                    plan_only,
+                    resume,
+                    status,
+                    max_cycles,
+                    identity: _identity_override,
+                } => {
+                    if status {
+                        // Show session status.
+                        match akh_medu::bootstrap::BootstrapOrchestrator::status(&engine) {
+                            Ok(session) => {
+                                println!("Bootstrap Session Status");
+                                println!("========================");
+                                println!("  Stage:          {}", session.current_stage);
+                                println!("  Learning cycle: {}", session.learning_cycle);
+                                println!("  Purpose:        {}", session.raw_purpose);
+                                if let Some(ref name) = session.chosen_name {
+                                    println!("  Chosen name:    {name}");
+                                }
+                                println!("  Exploration:    {:.2}", session.exploration_rate);
+                                if let Some(ref a) = session.last_assessment {
+                                    println!("  Last score:     {:.2} ({})", a.overall_score, a.overall_dreyfus);
+                                    if !a.focus_areas.is_empty() {
+                                        println!("  Focus areas:    {}", a.focus_areas.join(", "));
+                                    }
+                                }
+                            }
+                            Err(e) => eprintln!("No bootstrap session: {e}"),
+                        }
+                    } else if resume {
+                        // Resume interrupted session.
+                        let config = akh_medu::bootstrap::OrchestratorConfig {
+                            max_learning_cycles: max_cycles,
+                            plan_only,
+                            ..Default::default()
+                        };
+                        match akh_medu::bootstrap::BootstrapOrchestrator::resume(&engine, config) {
+                            Ok(mut orchestrator) => {
+                                println!("Resuming bootstrap session...");
+                                match orchestrator.run(&engine) {
+                                    Ok((result, checkpoints)) => {
+                                        print_bootstrap_checkpoints(&checkpoints);
+                                        print_bootstrap_result(&result);
+                                    }
+                                    Err(e) => eprintln!("Bootstrap failed: {e}"),
+                                }
+                            }
+                            Err(e) => eprintln!("Cannot resume: {e}"),
+                        }
+                    } else if let Some(ref stmt) = statement {
+                        // Fresh bootstrap from purpose statement.
+                        let config = akh_medu::bootstrap::OrchestratorConfig {
+                            max_learning_cycles: max_cycles,
+                            plan_only,
+                            ..Default::default()
+                        };
+                        match akh_medu::bootstrap::BootstrapOrchestrator::new(stmt, config) {
+                            Ok(mut orchestrator) => {
+                                println!("Starting bootstrap pipeline...");
+                                match orchestrator.run(&engine) {
+                                    Ok((result, checkpoints)) => {
+                                        print_bootstrap_checkpoints(&checkpoints);
+                                        print_bootstrap_result(&result);
+                                    }
+                                    Err(e) => eprintln!("Bootstrap failed: {e}"),
+                                }
+                            }
+                            Err(e) => eprintln!("Bootstrap init failed: {e}"),
+                        }
+                    } else {
+                        eprintln!(
+                            "Provide a purpose statement, --resume, or --status.\n\
+                             Example: akh awaken bootstrap \"You are the Architect based on Ptah, expert in systems\""
+                        );
+                    }
+                }
+            }
+
+            agent.persist_session().into_diagnostic()?;
+        }
+
+        Commands::Chat { skill, headless, fresh } => {
             let ws_name = cli.workspace.clone();
 
             // Try remote TUI via akhomed if available (non-headless only).
             #[cfg(feature = "daemon")]
             if !headless {
-                if let Some(ref paths) = xdg_paths {
-                    if let Some(server_info) = akh_medu::client::discover_server(paths) {
+                if let Some(ref paths) = xdg_paths
+                    && let Some(server_info) = akh_medu::client::discover_server(paths) {
                         eprintln!("Connecting to akhomed at {}...", server_info.base_url());
                         return akh_medu::tui::launch_remote(&ws_name, &server_info);
                     }
-                }
                 eprintln!("warning: akhomed not running, using local engine");
             }
 
@@ -2751,14 +3425,12 @@ fn main() -> Result<()> {
                 let grounding_config = akh_medu::vsa::grounding::GroundingConfig::default();
                 if let Ok(result) =
                     akh_medu::vsa::grounding::ground_all(&engine, ops, im, &grounding_config)
-                {
-                    if result.symbols_updated > 0 {
+                    && result.symbols_updated > 0 {
                         println!(
                             "Grounded {} symbols in {} round(s).",
                             result.symbols_updated, result.rounds_completed,
                         );
                     }
-                }
             }
 
             let agent_config = AgentConfig {
@@ -2768,16 +3440,36 @@ fn main() -> Result<()> {
 
             if !headless {
                 // TUI mode (local fallback).
-                akh_medu::tui::launch(&ws_name, engine, agent_config, false)?;
+                akh_medu::tui::launch(&ws_name, engine, agent_config, fresh)?;
             } else {
-                // Headless mode (legacy stdin/stdout).
-                let mut agent = Agent::new(Arc::clone(&engine), agent_config).into_diagnostic()?;
-                let mut conversation = akh_medu::agent::Conversation::new(100);
+                // Headless mode: use ChatProcessor for unified input processing.
+                let mut agent = if !fresh && Agent::has_persisted_session(&engine) {
+                    Agent::resume(Arc::clone(&engine), agent_config).into_diagnostic()?
+                } else {
+                    Agent::new(Arc::clone(&engine), agent_config).into_diagnostic()?
+                };
+                if fresh {
+                    agent.clear_goals();
+                }
+
+                // Create ChatProcessor with NLU pipeline.
+                let data_dir = engine.config().data_dir.as_deref();
+                let nlu_pipeline = engine
+                    .store()
+                    .get_meta(b"nlu_ranker_state")
+                    .ok()
+                    .flatten()
+                    .and_then(|bytes| akh_medu::nlu::parse_ranker::ParseRanker::from_bytes(&bytes))
+                    .map(|ranker| akh_medu::nlu::NluPipeline::with_ranker_and_models(ranker, data_dir))
+                    .unwrap_or_else(|| akh_medu::nlu::NluPipeline::new_with_models(data_dir));
+                let mut chat_processor = akh_medu::chat::ChatProcessor::new(&engine, nlu_pipeline);
 
                 println!("akh chat (headless). Type 'quit' to exit.\n");
+                use std::io::Write as _;
 
                 loop {
-                    eprint!("> ");
+                    print!("> ");
+                    std::io::stdout().flush().ok();
                     let mut input = String::new();
                     match std::io::stdin().read_line(&mut input) {
                         Ok(0) => break,
@@ -2796,664 +3488,16 @@ fn main() -> Result<()> {
                         break;
                     }
 
-                    let intent = akh_medu::agent::classify_intent(trimmed);
-                    let response = match intent {
-                        akh_medu::agent::UserIntent::Help => {
-                            "Commands: <question>? query, <fact> assert, find <topic> goal, status, help, quit"
-                                .to_string()
-                        }
-                        akh_medu::agent::UserIntent::ShowStatus => {
-                            format!(
-                                "Cycle: {}, Goals: {}, WM: {} entries, Triples: {}",
-                                agent.cycle_count(),
-                                agent.goals().len(),
-                                agent.working_memory().len(),
-                                engine.all_triples().len(),
-                            )
-                        }
-                        akh_medu::agent::UserIntent::Query { subject, original_input, question_word, capability_signal } => {
-                            let grammar_name = engine
-                                .compartments()
-                                .and_then(|mgr| mgr.psyche())
-                                .map(|p| p.persona.grammar_preference.clone())
-                                .unwrap_or_else(|| "narrative".to_string());
-
-                            // Try discourse-aware response first.
-                            let discourse_prose = akh_medu::grammar::discourse::resolve_discourse(
-                                &subject,
-                                question_word,
-                                &original_input,
-                                &engine,
-                                capability_signal,
-                            )
-                            .ok()
-                            .and_then(|ctx| {
-                                let from = engine.triples_from(ctx.subject_id);
-                                let to = engine.triples_to(ctx.subject_id);
-                                let mut all = from;
-                                all.extend(to);
-                                akh_medu::grammar::discourse::build_discourse_response(
-                                    &all, &ctx, &engine,
-                                )
-                            })
-                            .and_then(|tree| {
-                                let registry = akh_medu::grammar::GrammarRegistry::new();
-                                registry.linearize(&grammar_name, &tree).ok()
-                            })
-                            .filter(|s| !s.trim().is_empty());
-
-                            if let Some(prose) = discourse_prose {
-                                prose
-                            } else {
-                                // Fallback: existing synthesis path.
-                                match engine.resolve_symbol(&subject) {
-                                    Ok(sym_id) => {
-                                        let from = engine.triples_from(sym_id);
-                                        let to = engine.triples_to(sym_id);
-                                        if from.is_empty() && to.is_empty() {
-                                            format!("No information found for \"{subject}\".")
-                                        } else {
-                                            let mut all_triples = from;
-                                            all_triples.extend(to);
-                                            let summary =
-                                                akh_medu::agent::synthesize::synthesize_from_triples(
-                                                    &subject,
-                                                    &all_triples,
-                                                    &engine,
-                                                    &grammar_name,
-                                                );
-                                            let mut lines = Vec::new();
-                                            if !summary.overview.is_empty() {
-                                                lines.push(summary.overview);
-                                            }
-                                            for section in &summary.sections {
-                                                lines.push(format!(
-                                                    "{}: {}",
-                                                    section.heading, section.prose
-                                                ));
-                                            }
-                                            for gap in &summary.gaps {
-                                                lines.push(format!("(gap) {gap}"));
-                                            }
-                                            if lines.is_empty() {
-                                                format!("No information found for \"{subject}\".")
-                                            } else {
-                                                lines.join("\n")
-                                            }
-                                        }
-                                    }
-                                    Err(_) => format!("Symbol \"{subject}\" not found."),
-                                }
-                            }
-                        }
-                        akh_medu::agent::UserIntent::Assert { text } => {
-                            use akh_medu::agent::tool::Tool;
-                            let tool_input = akh_medu::agent::ToolInput::new().with_param("text", &text);
-                            match akh_medu::agent::tools::TextIngestTool.execute(&engine, tool_input) {
-                                Ok(output) => output.result,
-                                Err(e) => format!("Extraction error: {e}"),
-                            }
-                        }
-                        akh_medu::agent::UserIntent::SetGoal { description } => {
-                            match agent.add_goal(&description, 128, "Agent-determined completion") {
-                                Ok(_) => format!("Goal set: \"{description}\""),
-                                Err(e) => format!("Failed to set goal: {e}"),
-                            }
-                        }
-                        akh_medu::agent::UserIntent::RunAgent { cycles } => {
-                            let n = cycles.unwrap_or(1);
-                            let mut out = Vec::new();
-                            for _ in 0..n {
-                                match agent.run_cycle() {
-                                    Ok(r) => out.push(format!("[{}] {}", r.cycle_number, r.decision.chosen_tool)),
-                                    Err(e) => { out.push(format!("Error: {e}")); break; }
-                                }
-                            }
-                            out.join("\n")
-                        }
-                        akh_medu::agent::UserIntent::RenderHiero { .. } => {
-                            "Hieroglyphic rendering not available in headless mode. Use the TUI.".to_string()
-                        }
-                        akh_medu::agent::UserIntent::Freeform { .. } => {
-                            "I don't understand that. Type 'help' for commands.".to_string()
-                        }
-                    };
-
-                    println!("{response}\n");
-                    conversation.add_turn(trimmed.to_string(), response);
-                }
-
-                agent.persist_session().into_diagnostic()?;
-                if let Ok(bytes) = conversation.to_bytes() {
-                    let _ = engine.store().put_meta(b"chat:conversation", &bytes);
-                }
-                println!("Session saved.");
-            }
-        }
-
-        Commands::CodeIngest {
-            path,
-            recursive,
-            run_rules,
-            max_files,
-            enrich,
-        } => {
-            let engine = Engine::new(config).into_diagnostic()?;
-
-            use akh_medu::agent::tool::{Tool, ToolInput};
-            use akh_medu::agent::tools::CodeIngestTool;
-
-            let input = ToolInput::new()
-                .with_param("path", path.to_str().unwrap_or(""))
-                .with_param("recursive", &recursive.to_string())
-                .with_param("max_files", &max_files.to_string());
-
-            let tool = CodeIngestTool;
-            let output = tool.execute(&engine, input).into_diagnostic()?;
-            println!("{}", output.result);
-
-            if run_rules {
-                let rule_config = RuleEngineConfig::default();
-                let result = engine.run_code_rules(rule_config).into_diagnostic()?;
-                println!(
-                    "Rules: {} derived triple(s) in {} iteration(s){}.",
-                    result.derived.len(),
-                    result.iterations,
-                    if result.reached_fixpoint {
-                        " (fixpoint)"
-                    } else {
-                        ""
-                    },
-                );
-            }
-
-            // Auto-ground after ingestion.
-            let ops = engine.ops();
-            let im = engine.item_memory();
-            let grounding_config = akh_medu::vsa::grounding::GroundingConfig::default();
-            match akh_medu::vsa::grounding::ground_all(&engine, ops, im, &grounding_config) {
-                Ok(result) => {
-                    if result.symbols_updated > 0 {
-                        println!(
-                            "Grounding: {} symbols updated in {} round(s).",
-                            result.symbols_updated, result.rounds_completed,
-                        );
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "grounding skipped");
-                }
-            }
-
-            // Semantic enrichment (optional).
-            if enrich {
-                match akh_medu::agent::semantic_enrichment::enrich(&engine) {
-                    Ok(result) => {
-                        println!(
-                            "Enrichment: {} role(s), {} importance score(s), {} flow edge(s).",
-                            result.roles_enriched,
-                            result.importance_enriched,
-                            result.flows_detected,
-                        );
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "semantic enrichment skipped");
-                    }
-                }
-            }
-
-            let _ = engine.persist();
-            println!("{}", engine.info());
-        }
-
-        Commands::Enrich => {
-            let engine = Engine::new(config).into_diagnostic()?;
-
-            match akh_medu::agent::semantic_enrichment::enrich(&engine) {
-                Ok(result) => {
-                    println!(
-                        "Semantic enrichment complete:\n  Roles classified: {}\n  Importance scores: {}\n  Flow edges: {}",
-                        result.roles_enriched, result.importance_enriched, result.flows_detected,
-                    );
-                }
-                Err(e) => {
-                    eprintln!("Enrichment failed: {e}");
-                    std::process::exit(1);
-                }
-            }
-
-            let _ = engine.persist();
-        }
-
-        Commands::Grammar { action } => {
-            use akh_medu::grammar::AbsTree;
-            use akh_medu::grammar::bridge::triple_to_abs;
-            use akh_medu::grammar::concrete::LinContext;
-            use akh_medu::grammar::parser::ParseResult;
-
-            match action {
-                GrammarAction::List => {
-                    let engine = Engine::new(config).into_diagnostic()?;
-                    let reg = engine.grammar_registry();
-                    println!("Available grammar archetypes:\n");
-                    let mut names = reg.list();
-                    names.sort();
-                    for name in names {
-                        let grammar = reg.get(name).unwrap();
-                        let default_marker = if name == reg.default_name() {
-                            " (default)"
-                        } else {
-                            ""
-                        };
-                        println!("  {}{}", name, default_marker);
-                        println!("    {}", grammar.description());
-                        println!();
-                    }
-                }
-
-                GrammarAction::Parse { input, ingest } => {
-                    let engine = Engine::new(config).into_diagnostic()?;
-
-                    if ingest {
-                        let result = engine.ingest_prose(&input).into_diagnostic()?;
-                        println!(
-                            "Ingested {} triple(s) ({} new symbol(s))",
-                            result.triples_ingested, result.symbols_created,
-                        );
-                        for tree in &result.trees {
-                            if let Ok(prose) = engine.linearize(tree, Some("formal")) {
-                                println!("  {prose}");
-                            }
-                        }
-                        let _ = engine.persist();
-                    } else {
-                        let result = engine.parse(&input);
-                        match &result {
-                            ParseResult::Facts(facts) => {
-                                println!("Parsed {} fact(s):\n", facts.len());
-                                for (i, fact) in facts.iter().enumerate() {
-                                    println!("  {}. [{}]", i + 1, fact.cat());
-                                    for archetype in &["formal", "terse", "narrative"] {
-                                        if let Ok(prose) = engine.linearize(fact, Some(archetype)) {
-                                            println!(
-                                                "     {:<10} {}",
-                                                format!("{archetype}:"),
-                                                prose
-                                            );
-                                        }
-                                    }
-                                    println!();
-                                }
-                            }
-                            ParseResult::Query { subject, .. } => {
-                                println!("Parsed as query: subject = \"{subject}\"");
-                            }
-                            ParseResult::Command(cmd) => {
-                                println!("Parsed as command: {cmd:?}");
-                            }
-                            ParseResult::Goal { description } => {
-                                println!("Parsed as goal: \"{description}\"");
-                            }
-                            ParseResult::Freeform { text, .. } => {
-                                println!("Could not parse into structured form.");
-                                println!("Freeform text: \"{text}\"");
-                            }
-                        }
-                    }
-                }
-
-                GrammarAction::Linearize {
-                    subject,
-                    predicate,
-                    object,
-                    archetype,
-                    confidence,
-                } => {
-                    let engine = Engine::new(config).into_diagnostic()?;
-
-                    let tree = if let Some(conf) = confidence {
-                        AbsTree::triple_with_confidence(
-                            AbsTree::entity(&subject),
-                            AbsTree::relation(&predicate),
-                            AbsTree::entity(&object),
-                            conf,
-                        )
-                    } else {
-                        AbsTree::triple(
-                            AbsTree::entity(&subject),
-                            AbsTree::relation(&predicate),
-                            AbsTree::entity(&object),
-                        )
-                    };
-
-                    if let Some(name) = archetype {
-                        match engine.linearize(&tree, Some(&name)) {
-                            Ok(prose) => println!("{prose}"),
-                            Err(e) => {
-                                eprintln!("Error: {e}");
-                                std::process::exit(1);
-                            }
-                        }
-                    } else {
-                        // Show all archetypes
-                        let reg = engine.grammar_registry();
-                        let mut names = reg.list();
-                        names.sort();
-                        for name in names {
-                            if let Ok(prose) = engine.linearize(&tree, Some(name)) {
-                                println!("{:<10} {}", format!("{name}:"), prose);
-                            }
-                        }
-                    }
-                }
-
-                GrammarAction::Compare {
-                    subject,
-                    predicate,
-                    object,
-                    confidence,
-                } => {
-                    let engine = Engine::new(config).into_diagnostic()?;
-
-                    let tree = if let Some(conf) = confidence {
-                        AbsTree::triple_with_confidence(
-                            AbsTree::entity(&subject),
-                            AbsTree::relation(&predicate),
-                            AbsTree::entity(&object),
-                            conf,
-                        )
-                    } else {
-                        AbsTree::triple(
-                            AbsTree::entity(&subject),
-                            AbsTree::relation(&predicate),
-                            AbsTree::entity(&object),
-                        )
-                    };
-
-                    println!("Triple: ({subject}, {predicate}, {object})");
-                    if let Some(conf) = confidence {
-                        println!("Confidence: {conf:.2}");
+                    let responses = chat_processor.process_input(trimmed, &mut agent, &engine);
+                    for msg in &responses {
+                        println!("{}", msg.to_plain_text());
                     }
                     println!();
-
-                    let reg = engine.grammar_registry();
-                    let mut names = reg.list();
-                    names.sort();
-                    for name in names {
-                        let grammar = reg.get(name).unwrap();
-                        println!("── {} ──", name);
-                        println!("  {}", grammar.description());
-                        let ctx = LinContext::with_registry(engine.registry());
-                        match grammar.linearize(&tree, &ctx) {
-                            Ok(prose) => println!("  → {prose}"),
-                            Err(e) => println!("  ✗ {e}"),
-                        }
-                        println!();
-                    }
                 }
 
-                GrammarAction::Load { file, test } => {
-                    let mut engine = Engine::new(config).into_diagnostic()?;
-                    let content = std::fs::read_to_string(&file).into_diagnostic()?;
-                    let name = engine.load_custom_grammar(&content).into_diagnostic()?;
-                    let grammar = engine.grammar_registry().get(&name).into_diagnostic()?;
-                    let desc = grammar.description().to_string();
-                    println!("Loaded custom grammar: \"{name}\"");
-                    println!("  {desc}");
-
-                    if test {
-                        let tree = AbsTree::triple(
-                            AbsTree::entity("Dog"),
-                            AbsTree::relation("is-a"),
-                            AbsTree::entity("Mammal"),
-                        );
-                        match engine.linearize(&tree, Some(&name)) {
-                            Ok(prose) => println!("\n  Test triple: {prose}"),
-                            Err(e) => println!("\n  Test failed: {e}"),
-                        }
-
-                        let gap = AbsTree::gap(AbsTree::entity("Dog"), "no habitat data");
-                        match engine.linearize(&gap, Some(&name)) {
-                            Ok(prose) => println!("  Test gap:    {prose}"),
-                            Err(e) => println!("  Test failed: {e}"),
-                        }
-
-                        let sim = AbsTree::similarity(
-                            AbsTree::entity("Dog"),
-                            AbsTree::entity("Wolf"),
-                            0.87,
-                        );
-                        match engine.linearize(&sim, Some(&name)) {
-                            Ok(prose) => println!("  Test sim:    {prose}"),
-                            Err(e) => println!("  Test failed: {e}"),
-                        }
-                    }
-                }
-
-                GrammarAction::Render {
-                    entity,
-                    archetype,
-                    max_triples,
-                } => {
-                    let engine = Engine::new(config).into_diagnostic()?;
-
-                    // Resolve the entity
-                    let symbol_id = engine.resolve_symbol(&entity).into_diagnostic()?;
-
-                    // Get triples from and to this entity
-                    let from_triples = engine.triples_from(symbol_id);
-                    let to_triples = engine.triples_to(symbol_id);
-
-                    let mut all_triples: Vec<_> =
-                        from_triples.into_iter().chain(to_triples).collect();
-                    all_triples.truncate(max_triples);
-
-                    if all_triples.is_empty() {
-                        println!("No triples found for '{entity}'.");
-                        return Ok(());
-                    }
-
-                    let entity_label = engine.resolve_label(symbol_id);
-                    println!(
-                        "Rendering {} triple(s) for '{}' via [{}] archetype:\n",
-                        all_triples.len(),
-                        entity_label,
-                        archetype,
-                    );
-
-                    for triple in &all_triples {
-                        let tree = triple_to_abs(triple, engine.registry());
-                        match engine.linearize(&tree, Some(&archetype)) {
-                            Ok(prose) => println!("  {prose}"),
-                            Err(e) => println!("  (error: {e})"),
-                        }
-                    }
-                }
-            }
-        }
-
-        Commands::DocGen {
-            target,
-            format,
-            output,
-            polish,
-        } => {
-            let engine = Engine::new(config).into_diagnostic()?;
-
-            use akh_medu::agent::tool::{Tool, ToolInput};
-            use akh_medu::agent::tools::DocGenTool;
-
-            let input = ToolInput::new()
-                .with_param("target", &target)
-                .with_param("format", &format)
-                .with_param("polish", &polish.to_string());
-
-            let tool = DocGenTool;
-            let tool_output = tool.execute(&engine, input).into_diagnostic()?;
-
-            if let Some(ref out_path) = output {
-                std::fs::write(out_path, &tool_output.result).into_diagnostic()?;
-                println!("Documentation written to {}", out_path.display());
-
-                // Write JSON sidecar if format is "both".
-                if format == "both" {
-                    let json_path = out_path.with_extension("json");
-                    // The result contains both separated by ---
-                    if let Some(json_part) = tool_output.result.split("\n\n---\n\n").nth(1) {
-                        std::fs::write(&json_path, json_part).into_diagnostic()?;
-                        println!("JSON sidecar written to {}", json_path.display());
-                    }
-                }
-            } else {
-                println!("{}", tool_output.result);
-            }
-        }
-
-        Commands::Preprocess {
-            format,
-            language: lang_override,
-            library_context,
-        } => {
-            use akh_medu::grammar::concrete::ParseContext as GrammarParseContext;
-            use akh_medu::grammar::preprocess::{
-                PreProcessResponse, TextChunk, preprocess_batch, preprocess_batch_with_library,
-                preprocess_chunk, preprocess_chunk_with_library,
-            };
-            use std::io::{self, BufRead, Write as IoWrite};
-
-            let engine = Engine::new(config).into_diagnostic()?;
-            let ctx = GrammarParseContext::with_engine(
-                engine.registry(),
-                engine.ops(),
-                engine.item_memory(),
-            );
-
-            let stdin = io::stdin();
-            let stdout = io::stdout();
-            let mut out = stdout.lock();
-
-            if format == "json" {
-                // Read all input as a JSON array of chunks
-                use std::io::Read as _;
-                let mut input = String::new();
-                stdin.lock().read_to_string(&mut input).into_diagnostic()?;
-                let chunks: Vec<TextChunk> = serde_json::from_str(&input).into_diagnostic()?;
-
-                // Apply language override
-                let chunks: Vec<TextChunk> = chunks
-                    .into_iter()
-                    .map(|mut c| {
-                        if let Some(ref lang) = lang_override {
-                            c.language = Some(lang.clone());
-                        }
-                        c
-                    })
-                    .collect();
-
-                let start = std::time::Instant::now();
-                let results = if library_context {
-                    preprocess_batch_with_library(&chunks, &ctx, &engine.entity_resolver(), &engine)
-                } else {
-                    preprocess_batch(&chunks, &ctx)
-                };
-                let elapsed = start.elapsed().as_millis() as u64;
-
-                let response = PreProcessResponse {
-                    results,
-                    processing_time_ms: elapsed,
-                };
-                serde_json::to_writer_pretty(&mut out, &response).into_diagnostic()?;
-                writeln!(out).into_diagnostic()?;
-            } else {
-                // JSONL: one chunk per line in, one result per line out
-                for line in stdin.lock().lines() {
-                    let line = line.into_diagnostic()?;
-                    if line.trim().is_empty() {
-                        continue;
-                    }
-                    let mut chunk: TextChunk = serde_json::from_str(&line).into_diagnostic()?;
-                    if let Some(ref lang) = lang_override {
-                        chunk.language = Some(lang.clone());
-                    }
-                    let result = if library_context {
-                        preprocess_chunk_with_library(
-                            &chunk,
-                            &ctx,
-                            &engine.entity_resolver(),
-                            &engine,
-                        )
-                    } else {
-                        preprocess_chunk(&chunk, &ctx)
-                    };
-                    serde_json::to_writer(&mut out, &result).into_diagnostic()?;
-                    writeln!(out).into_diagnostic()?;
-                }
-            }
-        }
-
-        Commands::Equivalences { action } => {
-            let engine = Engine::new(config).into_diagnostic()?;
-
-            match action {
-                EquivalenceAction::List => {
-                    let equivs = engine.export_equivalences();
-                    if equivs.is_empty() {
-                        println!(
-                            "No learned equivalences yet. Run `equivalences learn` to discover some."
-                        );
-                    } else {
-                        println!(
-                            "{:<30} {:<30} {:<8} {:<6} {}",
-                            "Surface", "Canonical", "Lang", "Conf", "Source"
-                        );
-                        println!("{}", "-".repeat(90));
-                        for e in &equivs {
-                            println!(
-                                "{:<30} {:<30} {:<8} {:<6.2} {}",
-                                e.surface, e.canonical, e.source_language, e.confidence, e.source,
-                            );
-                        }
-                        println!("\nTotal: {} learned equivalences", equivs.len());
-                    }
-                }
-                EquivalenceAction::Stats => {
-                    let stats = engine.equivalence_stats();
-                    println!("Equivalence statistics:");
-                    println!("  runtime aliases:  {}", stats.runtime_aliases);
-                    println!("  learned total:    {}", stats.learned_total);
-                    println!("    kg-structural:  {}", stats.kg_structural);
-                    println!("    vsa-similarity: {}", stats.vsa_similarity);
-                    println!("    co-occurrence:  {}", stats.co_occurrence);
-                    println!("    library-context:{}", stats.library_context);
-                    println!("    manual:         {}", stats.manual);
-                }
-                EquivalenceAction::Learn => {
-                    let count = engine.learn_equivalences().into_diagnostic()?;
-                    println!("Discovered {count} new equivalences.");
-                    let stats = engine.equivalence_stats();
-                    println!("Total learned: {}", stats.learned_total);
-                }
-                EquivalenceAction::Export => {
-                    use std::io::Write as _;
-                    let equivs = engine.export_equivalences();
-                    let json = serde_json::to_string_pretty(&equivs).into_diagnostic()?;
-                    std::io::stdout()
-                        .write_all(json.as_bytes())
-                        .into_diagnostic()?;
-                    std::io::stdout().write_all(b"\n").into_diagnostic()?;
-                }
-                EquivalenceAction::Import => {
-                    use std::io::Read as _;
-                    let mut input = String::new();
-                    std::io::stdin()
-                        .read_to_string(&mut input)
-                        .into_diagnostic()?;
-                    let equivs: Vec<akh_medu::grammar::entity_resolution::LearnedEquivalence> =
-                        serde_json::from_str(&input).into_diagnostic()?;
-                    let count = equivs.len();
-                    engine.import_equivalences(&equivs).into_diagnostic()?;
-                    println!("Imported {count} equivalences.");
-                }
+                chat_processor.persist_nlu_state(&engine);
+                agent.persist_session().into_diagnostic()?;
+                println!("Session saved.");
             }
         }
 
@@ -3486,10 +3530,11 @@ fn main() -> Result<()> {
 
                     let result = client.library_add(&library_dir, &req).into_diagnostic()?;
                     println!("Ingested: {}", result.title);
-                    println!("  ID:      {}", result.id);
-                    println!("  Format:  {}", result.format);
-                    println!("  Chunks:  {}", result.chunk_count);
-                    println!("  Triples: {}", result.triple_count);
+                    println!("  ID:       {}", result.id);
+                    println!("  Format:   {}", result.format);
+                    println!("  Chunks:   {}", result.chunk_count);
+                    println!("  Triples:  {}", result.triple_count);
+                    println!("  Concepts: {}", result.concept_count);
                 }
 
                 LibraryAction::List => {
@@ -3502,8 +3547,8 @@ fn main() -> Result<()> {
                         );
                     } else {
                         println!(
-                            "{:<30} {:<20} {:<8} {:<8} {}",
-                            "ID", "Title", "Format", "Chunks", "Tags"
+                            "{:<30} {:<20} {:<8} {:<8} Tags",
+                            "ID", "Title", "Format", "Chunks"
                         );
                         println!("{}", "-".repeat(80));
                         for doc in &docs {
@@ -3533,7 +3578,7 @@ fn main() -> Result<()> {
                         println!("No matching content found for: \"{query}\"");
                     } else {
                         println!("Search results for \"{query}\":");
-                        println!("{:<8} {:<10} {}", "Rank", "Sim", "Symbol");
+                        println!("{:<8} {:<10} Symbol", "Rank", "Sim");
                         println!("{}", "-".repeat(60));
                         for result in &results {
                             println!(
@@ -3582,12 +3627,1339 @@ fn main() -> Result<()> {
                 }
             }
         }
+
+        // ── Service (launchd) ────────────────────────────────────────────
+        Commands::Service { action } => {
+            dispatch_service(action)?;
+        }
+    }
+
+    Ok(())
+    } // #[cfg(not(feature = "client-only"))]
+}
+
+/// Dispatch `akh service` subcommands. Works without an Engine.
+fn dispatch_service(action: ServiceAction) -> Result<()> {
+    use akh_medu::service;
+
+    match action {
+        ServiceAction::Install { port } => {
+            let config = service::default_config(port).into_diagnostic()?;
+            service::install(&config).into_diagnostic()?;
+            println!("Service installed: {}", config.label);
+            println!("  Plist: {}", config.plist_path.display());
+            println!("  Logs:  {}", config.log_dir.display());
+            println!("\nThe service will start automatically. To start now:");
+            println!("  akh service start");
+        }
+        ServiceAction::Start => {
+            let config = service::default_config(None).into_diagnostic()?;
+            service::start(&config).into_diagnostic()?;
+            println!("Service started: {}", config.label);
+        }
+        ServiceAction::Stop => {
+            let config = service::default_config(None).into_diagnostic()?;
+            service::stop(&config).into_diagnostic()?;
+            println!("Service stopped: {}", config.label);
+        }
+        ServiceAction::Status => {
+            let config = service::default_config(None).into_diagnostic()?;
+            let st = service::status(&config).into_diagnostic()?;
+            println!("Service: {}", config.label);
+            println!("  Loaded:      {}", st.loaded);
+            println!("  Running:     {}", st.running);
+            if let Some(pid) = st.pid {
+                println!("  PID:         {pid}");
+            }
+            if let Some(exit) = st.last_exit_status {
+                println!("  Last exit:   {exit}");
+            }
+            println!("  Plist:       {}", config.plist_path.display());
+        }
+        ServiceAction::Uninstall => {
+            let config = service::default_config(None).into_diagnostic()?;
+            service::uninstall(&config).into_diagnostic()?;
+            println!("Service uninstalled: {}", config.label);
+        }
+        ServiceAction::Show { port } => {
+            let config = service::default_config(port).into_diagnostic()?;
+            let plist = service::generate_plist(&config);
+            println!("{plist}");
+        }
+    }
+
+    Ok(())
+}
+
+/// Pretty-print daemon status with all monitoring fields.
+fn print_daemon_status(status: &akh_medu::client::DaemonStatus) {
+    println!("Daemon status:");
+    println!("  Running:        {}", status.running);
+    println!("  Cycles:         {}", status.total_cycles);
+    println!("  Started at:     {}", format_timestamp(status.started_at));
+    println!("  Triggers:       {}", status.trigger_count);
+    println!("  Active goals:   {}", status.active_goals);
+    println!("  KG symbols:     {}", status.kg_symbols);
+    println!("  KG triples:     {}", status.kg_triples);
+    if let Some(ts) = status.last_persist_at {
+        println!("  Last persist:   {}", format_timestamp(ts));
+    }
+    if let Some(ts) = status.last_learning_at {
+        println!("  Last learning:  {}", format_timestamp(ts));
+    }
+    if let Some(ts) = status.last_sleep_at {
+        println!("  Last sleep:     {}", format_timestamp(ts));
+    }
+    if let Some(ts) = status.last_goal_gen_at {
+        println!("  Last goal gen:  {}", format_timestamp(ts));
+    }
+}
+
+/// Format a unix timestamp as a human-readable relative or absolute string.
+fn format_timestamp(ts: u64) -> String {
+    if ts == 0 {
+        return "never".into();
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    if now >= ts {
+        let ago = now - ts;
+        if ago < 60 {
+            format!("{ago}s ago")
+        } else if ago < 3600 {
+            format!("{}m ago", ago / 60)
+        } else if ago < 86400 {
+            format!("{}h {}m ago", ago / 3600, (ago % 3600) / 60)
+        } else {
+            format!("{}d {}h ago", ago / 86400, (ago % 86400) / 3600)
+        }
+    } else {
+        format!("{ts} (unix)")
+    }
+}
+
+/// Route all commands through a running akhomed server (client-only mode).
+///
+/// This function mirrors the main dispatch but uses [`AkhClient`] remote
+/// methods instead of local Engine/Agent instances.
+#[cfg(feature = "client-only")]
+fn run_client_only(cli: Cli) -> Result<()> {
+    use akh_medu::api_types;
+    use std::path::Path;
+
+    let xdg_paths = akh_medu::paths::AkhPaths::resolve().ok();
+    let client = resolve_client(&cli.workspace, xdg_paths.as_ref())?;
+
+    match cli.command {
+        // ── Init ──────────────────────────────────────────────────────────
+        Commands::Init => {
+            client
+                .workspace_create(&cli.workspace, None)
+                .into_diagnostic()?;
+            println!(
+                "Initialized workspace \"{}\" (via server).",
+                cli.workspace
+            );
+        }
+
+        // ── Workspace ─────────────────────────────────────────────────────
+        Commands::Workspace { action } => match action {
+            WorkspaceAction::List => {
+                let names = client.workspace_list().into_diagnostic()?;
+                if names.is_empty() {
+                    println!(
+                        "No workspaces found. Create one with: akh workspace create <name>"
+                    );
+                } else {
+                    println!("Workspaces:");
+                    for name in &names {
+                        println!("  {name}");
+                    }
+                }
+            }
+            WorkspaceAction::Create { name, role } => {
+                client
+                    .workspace_create(&name, role.as_deref())
+                    .into_diagnostic()?;
+                println!("Created workspace \"{name}\" (via server).");
+                if let Some(ref role_name) = role {
+                    println!("Assigned role \"{role_name}\" to workspace \"{name}\".");
+                }
+            }
+            WorkspaceAction::Delete { name } => {
+                client.workspace_delete(&name).into_diagnostic()?;
+                println!("Deleted workspace \"{name}\".");
+            }
+            WorkspaceAction::Info { name: _ } => {
+                let info = client.info().into_diagnostic()?;
+                println!("{info}");
+            }
+            WorkspaceAction::AssignRole { name, role } => {
+                let ws_client = resolve_client(&name, xdg_paths.as_ref())?;
+                ws_client.assign_role(&role).into_diagnostic()?;
+                println!("Assigned role \"{role}\" to workspace \"{name}\".");
+            }
+        },
+
+        // ── Seeds ─────────────────────────────────────────────────────────
+        Commands::Seed { action } => match action {
+            SeedAction::List => {
+                let packs = client.seed_list().into_diagnostic()?;
+                if packs.is_empty() {
+                    println!("No seed packs available.");
+                } else {
+                    println!("Available seed packs:");
+                    for p in &packs {
+                        println!(
+                            "  {} ({}) — {} [{} triples]",
+                            p.id, p.source, p.description, p.triple_count,
+                        );
+                    }
+                }
+            }
+            SeedAction::Apply { pack } => {
+                let report: serde_json::Value =
+                    client.seed_apply(&pack).into_diagnostic()?;
+                println!("Applied seed \"{pack}\": {report}");
+            }
+            SeedAction::Status => {
+                let status = client.seed_status().into_diagnostic()?;
+                println!("Seed status for workspace \"{}\":", status.workspace);
+                for entry in &status.seeds {
+                    let s = if entry.applied {
+                        "applied"
+                    } else {
+                        "not applied"
+                    };
+                    println!("  {} — {s}", entry.id);
+                }
+            }
+        },
+
+        // ── Ingest ────────────────────────────────────────────────────────
+        Commands::Ingest {
+            file,
+            format,
+            csv_format,
+            max_sentences,
+        } => match format {
+            IngestFormat::Json => {
+                let content = std::fs::read_to_string(&file).into_diagnostic()?;
+                let triples: Vec<serde_json::Value> =
+                    serde_json::from_str(&content).into_diagnostic()?;
+
+                if triples.is_empty() {
+                    println!("No triples found in {}", file.display());
+                    return Ok(());
+                }
+
+                let first = &triples[0];
+                if first.get("subject").is_some() {
+                    // Label-based format.
+                    let mut label_triples = Vec::new();
+                    for (i, val) in triples.iter().enumerate() {
+                        let subject = val["subject"].as_str().ok_or_else(|| {
+                            miette::miette!("triple {i}: missing or non-string 'subject'")
+                        })?;
+                        let predicate = val["predicate"].as_str().ok_or_else(|| {
+                            miette::miette!("triple {i}: missing or non-string 'predicate'")
+                        })?;
+                        let object = val["object"].as_str().ok_or_else(|| {
+                            miette::miette!("triple {i}: missing or non-string 'object'")
+                        })?;
+                        let confidence = val["confidence"].as_f64().unwrap_or(1.0) as f32;
+                        label_triples.push((
+                            subject.to_string(),
+                            predicate.to_string(),
+                            object.to_string(),
+                            confidence,
+                        ));
+                    }
+                    let (created, ingested) = client
+                        .ingest_label_triples(&label_triples)
+                        .into_diagnostic()?;
+                    println!(
+                        "Ingested {ingested} triples ({created} new symbols) from {}",
+                        file.display()
+                    );
+                } else {
+                    miette::bail!(
+                        "numeric-format JSON ingest is not supported in client-only mode.\n\
+                         Use label-based format: {{\"subject\": ..., \"predicate\": ..., \"object\": ...}}"
+                    );
+                }
+            }
+            IngestFormat::Csv => {
+                let content = std::fs::read_to_string(&file).into_diagnostic()?;
+                let csv_format_str = match csv_format {
+                    CsvFormat::Spo => "spo",
+                    CsvFormat::Entity => "entity",
+                };
+                let req = akh_medu::api_types::CsvIngestRequest {
+                    content,
+                    format: csv_format_str.into(),
+                };
+                let resp = client.ingest_csv(&req).into_diagnostic()?;
+                println!("{}", resp.message);
+            }
+            IngestFormat::Text => {
+                let content = std::fs::read_to_string(&file).into_diagnostic()?;
+                let req = akh_medu::api_types::TextIngestRequest {
+                    text: content,
+                    max_sentences,
+                };
+                let resp = client.ingest_text(&req).into_diagnostic()?;
+                println!("{}", resp.message);
+            }
+        },
+
+        // ── Skills ────────────────────────────────────────────────────────
+        Commands::Skill { action } => match action {
+            SkillAction::Scaffold { name } => {
+                // Scaffold writes local template files — no server needed.
+                let skill_base = cli
+                    .data_dir
+                    .as_deref()
+                    .unwrap_or_else(|| Path::new(".akh-medu"));
+                let skill_dir = skill_base.join("skills").join(&name);
+                std::fs::create_dir_all(&skill_dir).into_diagnostic()?;
+
+                let manifest = serde_json::json!({
+                    "id": name,
+                    "name": name,
+                    "version": "0.1.0",
+                    "description": format!("{name} knowledge domain"),
+                    "domains": [&name],
+                    "weight_size_bytes": 0,
+                    "triples_file": "triples.json",
+                    "rules_file": "rules.txt"
+                });
+                std::fs::write(
+                    skill_dir.join("skill.json"),
+                    serde_json::to_string_pretty(&manifest).into_diagnostic()?,
+                )
+                .into_diagnostic()?;
+
+                let triples = serde_json::json!([{
+                    "subject": "ExampleEntity",
+                    "predicate": "is-a",
+                    "object": "Category",
+                    "confidence": 1.0
+                }]);
+                std::fs::write(
+                    skill_dir.join("triples.json"),
+                    serde_json::to_string_pretty(&triples).into_diagnostic()?,
+                )
+                .into_diagnostic()?;
+
+                std::fs::write(
+                    skill_dir.join("rules.txt"),
+                    "# Rewrite rules for this skillpack.\n\
+                     # Format: <lhs-pattern> => <rhs-pattern>\n",
+                )
+                .into_diagnostic()?;
+
+                println!("Scaffolded skill '{}' at {}", name, skill_dir.display());
+            }
+            SkillAction::List => {
+                let skills = client.list_skills().into_diagnostic()?;
+                if skills.is_empty() {
+                    println!("No skillpacks discovered.");
+                } else {
+                    println!("Skillpacks ({}):", skills.len());
+                    for s in &skills {
+                        println!(
+                            "  {} ({}) [{}] - {}",
+                            s.id, s.version, s.state, s.description
+                        );
+                    }
+                }
+            }
+            SkillAction::Load { name } => {
+                let activation = client.load_skill(&name).into_diagnostic()?;
+                println!("Loaded skill: {}", activation.skill_id);
+                println!("  triples: {}", activation.triples_loaded);
+                println!("  rules:   {}", activation.rules_loaded);
+                println!("  memory:  {} bytes", activation.memory_bytes);
+            }
+            SkillAction::Unload { name } => {
+                client.unload_skill(&name).into_diagnostic()?;
+                println!("Unloaded skill: {name}");
+            }
+            SkillAction::Info { name } => {
+                let info = client.skill_info(&name).into_diagnostic()?;
+                println!("Skill: {}", info.id);
+                println!("  name:        {}", info.name);
+                println!("  version:     {}", info.version);
+                println!("  description: {}", info.description);
+                println!("  state:       {}", info.state);
+                println!("  domains:     {}", info.domains.join(", "));
+                println!("  triples:     {}", info.triple_count);
+                println!("  rules:       {}", info.rule_count);
+            }
+            SkillAction::Install { path } => {
+                let skill_path = std::path::Path::new(&path);
+                let manifest_content =
+                    std::fs::read_to_string(skill_path.join("skill.json")).into_diagnostic()?;
+                let manifest: akh_medu::skills::SkillManifest =
+                    serde_json::from_str(&manifest_content).into_diagnostic()?;
+
+                let triples_path = skill_path.join("triples.json");
+                let triples: Vec<akh_medu::skills::LabelTriple> = if triples_path.exists() {
+                    let content = std::fs::read_to_string(&triples_path).into_diagnostic()?;
+                    serde_json::from_str(&content).into_diagnostic()?
+                } else {
+                    vec![]
+                };
+
+                let rules_path = skill_path.join("rules.txt");
+                let rules = if rules_path.exists() {
+                    std::fs::read_to_string(&rules_path).into_diagnostic()?
+                } else {
+                    String::new()
+                };
+
+                let payload = akh_medu::skills::SkillInstallPayload {
+                    manifest,
+                    triples,
+                    rules,
+                };
+                let activation = client.install_skill(&payload).into_diagnostic()?;
+                println!("Installed skill: {}", activation.skill_id);
+                println!("  triples: {}", activation.triples_loaded);
+                println!("  rules:   {}", activation.rules_loaded);
+                println!("  memory:  {} bytes", activation.memory_bytes);
+            }
+        },
+
+        // ── Render ────────────────────────────────────────────────────────
+        Commands::Render {
+            entity,
+            depth,
+            all,
+            legend,
+            no_color: _,
+        } => {
+            let req = api_types::RenderRequest {
+                entity,
+                depth,
+                all,
+                legend,
+            };
+            let resp = client.render(&req).into_diagnostic()?;
+            println!("{}", resp.output);
+        }
+
+        // ── Agent ─────────────────────────────────────────────────────────
+        Commands::Agent { action } => match action {
+            AgentAction::Run {
+                goals,
+                max_cycles,
+                fresh,
+            } => {
+                let req = api_types::AgentRunRequest {
+                    goals,
+                    max_cycles,
+                    fresh,
+                };
+                let resp = client.agent_run(&req).into_diagnostic()?;
+                println!(
+                    "Agent completed: {} cycles, {} goals",
+                    resp.cycles_completed,
+                    resp.goals.len(),
+                );
+                println!("\nGoals:");
+                for g in &resp.goals {
+                    println!("  [{}] {}: {}", g.status, g.label, g.description);
+                }
+                if !resp.overview.is_empty() {
+                    println!("\n{}", resp.overview);
+                }
+            }
+            AgentAction::Resume { max_cycles } => {
+                let req = api_types::AgentResumeRequest { max_cycles };
+                let resp = client.agent_resume(&req).into_diagnostic()?;
+                println!(
+                    "Agent completed: {} cycles, {} goals",
+                    resp.cycles_completed,
+                    resp.goals.len(),
+                );
+                for g in &resp.goals {
+                    println!("  [{}] {}: {}", g.status, g.label, g.description);
+                }
+            }
+            AgentAction::Repl {
+                goals: _,
+                headless,
+            } => {
+                if headless {
+                    miette::bail!(
+                        "Headless REPL is not available in client-only mode.\n\
+                         Use TUI mode (without --headless) to connect to akhomed."
+                    );
+                }
+                #[cfg(feature = "daemon")]
+                {
+                    let paths = xdg_paths.ok_or_else(|| {
+                        miette::miette!("Cannot resolve XDG paths. Set HOME environment variable.")
+                    })?;
+                    let server_info = akh_medu::client::discover_server(&paths).ok_or_else(|| {
+                        miette::miette!("No running akhomed server found.")
+                    })?;
+                    eprintln!("Connecting to akhomed at {}...", server_info.base_url());
+                    return akh_medu::tui::launch_remote(&cli.workspace, &server_info);
+                }
+                #[cfg(not(feature = "daemon"))]
+                miette::bail!(
+                    "TUI requires --features daemon. Build with: cargo build --features client-only,daemon"
+                );
+            }
+            AgentAction::Chat {
+                max_cycles: _,
+                fresh: _,
+                headless,
+            } => {
+                eprintln!("warning: `akh agent chat` is deprecated. Use `akh chat` instead.");
+                if headless {
+                    miette::bail!(
+                        "Headless chat is not available in client-only mode.\n\
+                         Use TUI mode (without --headless) to connect to akhomed."
+                    );
+                }
+                #[cfg(feature = "daemon")]
+                {
+                    let paths = xdg_paths.ok_or_else(|| {
+                        miette::miette!("Cannot resolve XDG paths. Set HOME environment variable.")
+                    })?;
+                    let server_info = akh_medu::client::discover_server(&paths).ok_or_else(|| {
+                        miette::miette!("No running akhomed server found.")
+                    })?;
+                    eprintln!("Connecting to akhomed at {}...", server_info.base_url());
+                    return akh_medu::tui::launch_remote(&cli.workspace, &server_info);
+                }
+                #[cfg(not(feature = "daemon"))]
+                miette::bail!(
+                    "TUI requires --features daemon. Build with: cargo build --features client-only,daemon"
+                );
+            }
+            #[cfg(feature = "daemon")]
+            AgentAction::Daemon {
+                max_cycles,
+                fresh: _,
+                equiv_interval: _,
+                reflect_interval: _,
+                rules_interval: _,
+                persist_interval: _,
+            } => {
+                let config = serde_json::json!({ "max_cycles": max_cycles });
+                let status = client
+                    .start_daemon(Some(config))
+                    .into_diagnostic()?;
+                println!(
+                    "Daemon started via akhomed (cycles: {}, triggers: {})",
+                    status.total_cycles, status.trigger_count
+                );
+            }
+            AgentAction::DaemonStop => {
+                client.stop_daemon().into_diagnostic()?;
+                println!("Daemon stopped.");
+            }
+            AgentAction::DaemonStatus => {
+                let status = client.daemon_status().into_diagnostic()?;
+                print_daemon_status(&status);
+            }
+        },
+
+        // ── PIM ───────────────────────────────────────────────────────────
+        Commands::Pim { action } => match action {
+            PimAction::Inbox => {
+                let resp = client.pim_inbox().into_diagnostic()?;
+                if resp.tasks.is_empty() {
+                    println!("Inbox is empty.");
+                } else {
+                    println!("Inbox ({} items):", resp.tasks.len());
+                    for t in &resp.tasks {
+                        println!("  [{:>5}] {} ({})", t.symbol_id, t.label, t.quadrant);
+                    }
+                }
+            }
+            PimAction::Next { context, energy } => {
+                let req = api_types::PimNextRequest {
+                    context,
+                    energy: energy.map(|e| match e {
+                        EnergyLevel::Low => "low".into(),
+                        EnergyLevel::Medium => "medium".into(),
+                        EnergyLevel::High => "high".into(),
+                    }),
+                };
+                let resp = client.pim_next(&req).into_diagnostic()?;
+                if resp.tasks.is_empty() {
+                    println!("No next actions available.");
+                } else {
+                    println!("Next actions ({} tasks):", resp.tasks.len());
+                    for t in &resp.tasks {
+                        let energy_str = t
+                            .energy
+                            .as_deref()
+                            .map(|e| format!(" [{e}]"))
+                            .unwrap_or_default();
+                        println!(
+                            "  [{:>5}] {} ({}){}",
+                            t.symbol_id, t.label, t.quadrant, energy_str
+                        );
+                    }
+                }
+            }
+            PimAction::Review => {
+                let resp = client.pim_review().into_diagnostic()?;
+                println!("{}", resp.summary);
+                if !resp.overdue.is_empty() {
+                    println!("\nOverdue:");
+                    for t in &resp.overdue {
+                        println!("  [{:>5}] {}", t.symbol_id, t.label);
+                    }
+                }
+                if !resp.stale_inbox.is_empty() {
+                    println!("\nStale inbox (>7 days):");
+                    for t in &resp.stale_inbox {
+                        println!("  [{:>5}] {}", t.symbol_id, t.label);
+                    }
+                }
+                if !resp.stalled_projects.is_empty() {
+                    println!("\nStalled projects (no Next actions):");
+                    for t in &resp.stalled_projects {
+                        println!("  [{:>5}] {}", t.symbol_id, t.label);
+                    }
+                }
+                if resp.adjustment_count > 0 {
+                    println!("\nRecommended adjustments: {}", resp.adjustment_count);
+                }
+            }
+            PimAction::Project { name } => {
+                let resp = client.pim_project(&name).into_diagnostic()?;
+                println!("Project: {} ({})", resp.name, resp.status);
+                for t in &resp.goals {
+                    let gtd = t.gtd_state.as_deref().unwrap_or("no-pim");
+                    println!("  [{:>5}] {} (GTD: {})", t.symbol_id, t.label, gtd);
+                }
+            }
+            PimAction::Add {
+                goal,
+                gtd,
+                urgency,
+                importance,
+                para,
+                contexts,
+                recur,
+                deadline,
+            } => {
+                let gtd_str = match gtd {
+                    GtdState::Inbox => "inbox",
+                    GtdState::Next => "next",
+                    GtdState::Waiting => "waiting",
+                    GtdState::Someday => "someday",
+                    GtdState::Reference => "reference",
+                };
+                let para_str = para.map(|p| match p {
+                    ParaCategory::Project => "project".to_string(),
+                    ParaCategory::Area => "area".to_string(),
+                    ParaCategory::Resource => "resource".to_string(),
+                    ParaCategory::Archive => "archive".to_string(),
+                });
+                let req = api_types::PimAddRequest {
+                    goal,
+                    gtd: gtd_str.to_string(),
+                    urgency,
+                    importance,
+                    para: para_str,
+                    contexts,
+                    recur,
+                    deadline,
+                };
+                let resp = client.pim_add(&req).into_diagnostic()?;
+                println!(
+                    "Added PIM metadata to goal {} (GTD: {}, quadrant: {})",
+                    resp.goal, resp.gtd_state, resp.quadrant,
+                );
+            }
+            PimAction::Transition { goal, to } => {
+                let to_str = match to {
+                    GtdState::Inbox => "inbox",
+                    GtdState::Next => "next",
+                    GtdState::Waiting => "waiting",
+                    GtdState::Someday => "someday",
+                    GtdState::Reference => "reference",
+                };
+                let req = api_types::PimTransitionRequest {
+                    goal,
+                    to: to_str.to_string(),
+                };
+                client.pim_transition(&req).into_diagnostic()?;
+                println!("Transitioned goal {} to GTD state: {}", goal, to_str);
+            }
+            PimAction::Matrix => {
+                let resp = client.pim_matrix().into_diagnostic()?;
+                for (label, tasks) in [
+                    ("DO", &resp.do_tasks),
+                    ("SCHEDULE", &resp.schedule_tasks),
+                    ("DELEGATE", &resp.delegate_tasks),
+                    ("ELIMINATE", &resp.eliminate_tasks),
+                ] {
+                    println!("{} ({} tasks):", label, tasks.len());
+                    for t in tasks {
+                        let gtd = t.gtd_state.as_deref().unwrap_or("");
+                        println!("  [{:>5}] {} (GTD: {})", t.symbol_id, t.label, gtd);
+                    }
+                }
+            }
+            PimAction::Deps => {
+                let resp = client.pim_deps().into_diagnostic()?;
+                println!("Dependency order ({} tasks):", resp.order.len());
+                for (i, t) in resp.order.iter().enumerate() {
+                    println!("  {}. [{:>5}] {}", i + 1, t.symbol_id, t.label);
+                }
+            }
+            PimAction::Overdue => {
+                let resp = client.pim_overdue().into_diagnostic()?;
+                if resp.tasks.is_empty() {
+                    println!("No overdue tasks.");
+                } else {
+                    println!("Overdue ({} tasks):", resp.tasks.len());
+                    for t in &resp.tasks {
+                        let days = t.overdue_days.unwrap_or(0);
+                        println!(
+                            "  [{:>5}] {} (overdue by {} days)",
+                            t.symbol_id, t.label, days
+                        );
+                    }
+                }
+            }
+        },
+
+        // ── Calendar ──────────────────────────────────────────────────────
+        Commands::Cal { action } => match action {
+            CalAction::Today => {
+                let resp = client.cal_today().into_diagnostic()?;
+                if resp.events.is_empty() {
+                    println!("No events today.");
+                } else {
+                    println!("Today ({} events):", resp.events.len());
+                    for e in &resp.events {
+                        let loc = e
+                            .location
+                            .as_deref()
+                            .map(|l| format!(" @ {l}"))
+                            .unwrap_or_default();
+                        println!(
+                            "  [{:>5}] {} ({} min){}",
+                            e.symbol_id, e.summary, e.duration_minutes, loc,
+                        );
+                    }
+                }
+            }
+            CalAction::Week => {
+                let resp = client.cal_week().into_diagnostic()?;
+                if resp.events.is_empty() {
+                    println!("No events this week.");
+                } else {
+                    println!("This week ({} events):", resp.events.len());
+                    for e in &resp.events {
+                        let loc = e
+                            .location
+                            .as_deref()
+                            .map(|l| format!(" @ {l}"))
+                            .unwrap_or_default();
+                        println!(
+                            "  [{:>5}] {} ({} min){}",
+                            e.symbol_id, e.summary, e.duration_minutes, loc,
+                        );
+                    }
+                }
+            }
+            CalAction::Conflicts => {
+                let conflicts = client.cal_conflicts().into_diagnostic()?;
+                if conflicts.is_empty() {
+                    println!("No scheduling conflicts.");
+                } else {
+                    println!("Conflicts ({}):", conflicts.len());
+                    for c in &conflicts {
+                        println!("  {} <-> {}", c.event_a, c.event_b);
+                    }
+                }
+            }
+            CalAction::Add {
+                summary,
+                start,
+                end,
+                location,
+            } => {
+                let req = api_types::CalAddRequest {
+                    summary: summary.clone(),
+                    start,
+                    end,
+                    location,
+                };
+                let resp = client.cal_add(&req).into_diagnostic()?;
+                println!(
+                    "Added event [{:>5}] '{}' ({} min)",
+                    resp.symbol_id, resp.summary, resp.duration_minutes,
+                );
+            }
+            CalAction::Import { file } => {
+                let data = std::fs::read_to_string(&file).into_diagnostic()?;
+                let req = api_types::CalImportRequest { ical_data: data };
+                let resp = client.cal_import(&req).into_diagnostic()?;
+                println!(
+                    "Imported {} events from {}",
+                    resp.imported_count,
+                    file.display()
+                );
+            }
+            CalAction::Sync { url, user, pass } => {
+                let req = akh_medu::api_types::CalSyncRequest { url, user, pass };
+                let resp = client.cal_sync(&req).into_diagnostic()?;
+                println!("CalDAV sync: {} events imported.", resp.imported_count);
+            }
+        },
+
+        // ── Preferences ───────────────────────────────────────────────────
+        Commands::Pref { action } => match action {
+            PrefAction::Status => {
+                let resp = client.pref_status().into_diagnostic()?;
+                println!("Preference Profile:");
+                println!("  Interactions: {}", resp.interaction_count);
+                println!("  Proactivity:  {}", resp.proactivity_level);
+                println!("  Decay rate:   {}", resp.decay_rate);
+                println!(
+                    "  Suggestions:  {} offered, {} accepted ({:.0}%)",
+                    resp.suggestions_offered,
+                    resp.suggestions_accepted,
+                    resp.acceptance_rate * 100.0,
+                );
+                println!(
+                    "  Prototype:    {}",
+                    if resp.prototype_active {
+                        "active"
+                    } else {
+                        "empty"
+                    }
+                );
+            }
+            PrefAction::Train { entity, weight } => {
+                let req = api_types::PrefTrainRequest { entity, weight };
+                let resp = client.pref_train(&req).into_diagnostic()?;
+                println!(
+                    "Recorded preference: '{}' (weight: {:.2}, total interactions: {})",
+                    resp.entity_label, resp.weight, resp.total_interactions,
+                );
+            }
+            PrefAction::Level { level } => {
+                let lvl_str = match level {
+                    ProactivityLevel::Ambient => "ambient",
+                    ProactivityLevel::Nudge => "nudge",
+                    ProactivityLevel::Offer => "offer",
+                    ProactivityLevel::Scheduled => "scheduled",
+                    ProactivityLevel::Autonomous => "autonomous",
+                };
+                let req = api_types::PrefLevelRequest {
+                    level: lvl_str.to_string(),
+                };
+                client.pref_level(&req).into_diagnostic()?;
+                println!("Proactivity level set to: {lvl_str}");
+            }
+            PrefAction::Interests { count } => {
+                let interests = client.pref_interests(count).into_diagnostic()?;
+                if interests.is_empty() {
+                    println!(
+                        "No interests recorded yet. Use `akh pref train` to add feedback."
+                    );
+                } else {
+                    println!("Top interests ({}):", interests.len());
+                    for i in &interests {
+                        println!("  {:<30} (similarity: {:.3})", i.label, i.similarity);
+                    }
+                }
+            }
+            PrefAction::Suggest => {
+                let resp: serde_json::Value =
+                    client.pref_suggest().into_diagnostic()?;
+                println!("{}", serde_json::to_string_pretty(&resp).unwrap_or_default());
+            }
+        },
+
+        // ── Causal ────────────────────────────────────────────────────────
+        Commands::Causal { action } => match action {
+            CausalAction::Schemas => {
+                let schemas = client.causal_schemas().into_diagnostic()?;
+                if schemas.is_empty() {
+                    println!(
+                        "No action schemas registered. Use `akh causal bootstrap` to create from tools."
+                    );
+                } else {
+                    println!("Action schemas ({}):", schemas.len());
+                    for s in &schemas {
+                        println!(
+                            "  {:<25} precond: {} effects: {} success: {:.0}% runs: {}",
+                            s.name,
+                            s.precondition_count,
+                            s.effect_count,
+                            s.success_rate * 100.0,
+                            s.execution_count,
+                        );
+                    }
+                }
+            }
+            CausalAction::Schema { name } => {
+                let s = client.causal_schema(&name).into_diagnostic()?;
+                println!("Schema: {}", s.name);
+                println!("  Action ID:       {}", s.action_id);
+                println!("  Preconditions:   {}", s.precondition_count);
+                println!("  Effects:         {}", s.effect_count);
+                println!("  Success rate:    {:.1}%", s.success_rate * 100.0);
+                println!("  Execution count: {}", s.execution_count);
+            }
+            CausalAction::Predict { name } => {
+                let req = api_types::CausalPredictRequest { name: name.clone() };
+                let resp = client.causal_predict(&req).into_diagnostic()?;
+                println!("Predicted transition for '{name}':");
+                if resp.assertions.is_empty()
+                    && resp.retractions.is_empty()
+                    && resp.confidence_changes.is_empty()
+                {
+                    println!("  (no predicted effects)");
+                } else {
+                    for t in &resp.assertions {
+                        println!("  + {} {} {}", t.subject, t.predicate, t.object);
+                    }
+                    for t in &resp.retractions {
+                        println!("  - {} {} {}", t.subject, t.predicate, t.object);
+                    }
+                    for c in &resp.confidence_changes {
+                        println!(
+                            "  ~ {} {} {} (delta: {:+.2})",
+                            c.subject, c.predicate, c.object, c.delta,
+                        );
+                    }
+                }
+            }
+            CausalAction::Applicable => {
+                let applicable = client.causal_applicable().into_diagnostic()?;
+                if applicable.is_empty() {
+                    println!("No applicable actions in current state.");
+                } else {
+                    println!("Applicable actions ({}):", applicable.len());
+                    for s in &applicable {
+                        println!(
+                            "  {} (success: {:.0}%, runs: {})",
+                            s.name,
+                            s.success_rate * 100.0,
+                            s.execution_count,
+                        );
+                    }
+                }
+            }
+            CausalAction::Bootstrap => {
+                let resp = client.causal_bootstrap().into_diagnostic()?;
+                println!(
+                    "Bootstrapped {} new schema(s) from {} tool(s).",
+                    resp.schemas_created, resp.tools_scanned,
+                );
+            }
+        },
+
+        // ── Awaken ────────────────────────────────────────────────────────
+        Commands::Awaken { action } => match action {
+            AwakenAction::Parse { statement } => {
+                let req = api_types::AwakenParseRequest { statement };
+                let resp = client.awaken_parse(&req).into_diagnostic()?;
+                println!("Parsed bootstrap intent:");
+                println!("  Domain:      {}", resp.domain);
+                println!("  Competence:  {}", resp.competence_level);
+                println!("  Seeds:       {:?}", resp.seed_concepts);
+                if let Some(ref name) = resp.identity_name {
+                    let id_type = resp.identity_type.as_deref().unwrap_or("unknown");
+                    println!("  Identity:    {} ({})", name, id_type);
+                } else {
+                    println!("  Identity:    (none)");
+                }
+            }
+            AwakenAction::Resolve { name } => {
+                let req = api_types::AwakenResolveRequest { name };
+                let resp = client.awaken_resolve(&req).into_diagnostic()?;
+                println!("Resolved identity: {}", resp.name);
+                println!("  Type:        {}", resp.entity_type);
+                println!("  Culture:     {}", resp.culture);
+                println!("  Description: {}", resp.description);
+                println!("  Domains:     {:?}", resp.domains);
+                println!("  Traits:      {:?}", resp.traits);
+                println!("  Archetypes:  {:?}", resp.archetypes);
+                if let Some(ref chosen) = resp.chosen_name {
+                    println!("\nRitual of Awakening complete!");
+                    println!("  Chosen name: {chosen}");
+                }
+                if let Some(ref persona) = resp.persona {
+                    println!("  Persona:     {persona}");
+                }
+            }
+            AwakenAction::Status => {
+                let resp: serde_json::Value =
+                    client.awaken_status().into_diagnostic()?;
+                let awakened = resp["awakened"].as_bool().unwrap_or(false);
+                if !awakened {
+                    println!("No psyche loaded. Run `akh awaken resolve <name>` to awaken.");
+                } else if let Some(psyche) = resp.get("psyche") {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(psyche).unwrap_or_default()
+                    );
+                }
+            }
+            AwakenAction::Expand {
+                seeds,
+                purpose,
+                threshold,
+                max_concepts,
+                no_conceptnet,
+            } => {
+                let req = api_types::AwakenExpandRequest {
+                    seeds,
+                    purpose,
+                    threshold,
+                    max_concepts,
+                    no_conceptnet,
+                };
+                let resp = client.awaken_expand(&req).into_diagnostic()?;
+                println!("\nDomain expansion complete!");
+                println!("  Concepts created: {}", resp.concept_count);
+                println!("  Relations added:  {}", resp.relation_count);
+                println!("  Rejected:         {}", resp.rejected_count);
+                println!("  API calls:        {}", resp.api_calls);
+                if !resp.accepted_labels.is_empty() {
+                    println!("\n  Accepted concepts:");
+                    for (i, label) in resp.accepted_labels.iter().enumerate().take(20) {
+                        println!("    {}: {label}", i + 1);
+                    }
+                    if resp.accepted_labels.len() > 20 {
+                        println!(
+                            "    ... and {} more",
+                            resp.accepted_labels.len() - 20
+                        );
+                    }
+                }
+            }
+            AwakenAction::Prerequisite {
+                seeds,
+                purpose,
+                known_threshold,
+                zpd_low,
+                zpd_high,
+            } => {
+                let req = api_types::AwakenPrerequisiteRequest {
+                    seeds,
+                    purpose,
+                    known_threshold,
+                    zpd_low,
+                    zpd_high,
+                };
+                let resp = client.awaken_prerequisite(&req).into_diagnostic()?;
+                println!("\nPrerequisite analysis complete!");
+                println!("  Concepts analyzed: {}", resp.concepts_analyzed);
+                println!("  Prerequisite edges: {}", resp.edge_count);
+                println!("  Cycles broken: {}", resp.cycles_broken);
+                println!("  Max tier: {}", resp.max_tier);
+                println!("\n  ZPD Distribution:");
+                for (zone, count) in &resp.zone_distribution {
+                    println!("    {zone}: {count}");
+                }
+                if !resp.curriculum.is_empty() {
+                    println!("\n  Curriculum (learning order):");
+                    for (i, entry) in resp.curriculum.iter().enumerate().take(30) {
+                        println!(
+                            "    {:3}. [tier {}] ({}) {} (coverage: {:.2}, sim: {:.2})",
+                            i + 1,
+                            entry.tier,
+                            entry.zone,
+                            entry.label,
+                            entry.prereq_coverage,
+                            entry.similarity_to_known,
+                        );
+                    }
+                    if resp.curriculum.len() > 30 {
+                        println!(
+                            "    ... and {} more",
+                            resp.curriculum.len() - 30
+                        );
+                    }
+                }
+            }
+            AwakenAction::Resources {
+                seeds,
+                purpose,
+                min_quality,
+                max_api_calls,
+                no_semantic_scholar,
+                no_openalex,
+                no_open_library,
+            } => {
+                let req = api_types::AwakenResourcesRequest {
+                    seeds,
+                    purpose,
+                    min_quality,
+                    max_api_calls,
+                    no_semantic_scholar,
+                    no_openalex,
+                    no_open_library,
+                };
+                let resp = client.awaken_resources(&req).into_diagnostic()?;
+                println!("\nResource discovery complete!");
+                println!("  Resources found: {}", resp.resources_discovered);
+                println!("  API calls made: {}", resp.api_calls_used);
+                println!("  Concepts searched: {}", resp.concepts_covered);
+            }
+            AwakenAction::Ingest {
+                seeds,
+                purpose,
+                max_cycles,
+                saturation,
+                xval_boost,
+                no_url,
+                catalog_dir,
+            } => {
+                let req = api_types::AwakenIngestRequest {
+                    seeds,
+                    purpose,
+                    max_cycles,
+                    saturation,
+                    xval_boost,
+                    no_url,
+                    catalog_dir,
+                };
+                let resp = client.awaken_ingest(&req).into_diagnostic()?;
+                println!("\nCurriculum ingestion complete!");
+                println!("  Triples created: {}", resp.triples_added);
+                println!("  Concepts covered: {}", resp.concepts_covered);
+                println!("  Cycles used: {}", resp.cycles_used);
+            }
+            AwakenAction::Assess {
+                seeds,
+                purpose,
+                min_triples,
+                bloom_depth,
+                verbose,
+            } => {
+                let req = api_types::AwakenAssessRequest {
+                    seeds,
+                    purpose,
+                    min_triples,
+                    bloom_depth,
+                    verbose,
+                };
+                let resp = client.awaken_assess(&req).into_diagnostic()?;
+                println!("\nCompetence Assessment Report");
+                println!("============================");
+                println!("  Overall Dreyfus level: {}", resp.overall_dreyfus);
+                println!("  Overall score:         {:.2}", resp.overall_score);
+                println!("  Recommendation:        {}", resp.recommendation);
+                if verbose && !resp.knowledge_areas.is_empty() {
+                    println!("\n  Per-area breakdown:");
+                    for ka in &resp.knowledge_areas {
+                        println!(
+                            "    {} ({}) score: {:.2}",
+                            ka.name, ka.dreyfus_level, ka.score,
+                        );
+                    }
+                }
+            }
+            AwakenAction::Bootstrap {
+                statement,
+                plan_only,
+                resume,
+                status,
+                max_cycles,
+                identity,
+            } => {
+                let req = api_types::AwakenBootstrapRequest {
+                    statement,
+                    plan_only,
+                    resume,
+                    status,
+                    max_cycles,
+                    identity,
+                };
+                let resp = client.awaken_bootstrap(&req).into_diagnostic()?;
+                println!("\nBootstrap Result");
+                println!("================");
+                println!("  Domain:          {}", resp.domain);
+                println!("  Target level:    {}", resp.target_level);
+                if let Some(ref name) = resp.chosen_name {
+                    println!("  Chosen name:     {name}");
+                }
+                println!("  Learning cycles: {}", resp.learning_cycles);
+                println!("  Target reached:  {}", resp.target_reached);
+                if let Some(ref dreyfus) = resp.final_dreyfus {
+                    println!("  Final Dreyfus:   {dreyfus}");
+                }
+                if let Some(score) = resp.final_score {
+                    println!("  Final score:     {score:.2}");
+                }
+                if let Some(ref rec) = resp.recommendation {
+                    println!("  Recommendation:  {rec}");
+                }
+            }
+        },
+
+        // ── Chat ──────────────────────────────────────────────────────────
+        Commands::Chat { skill: _, headless, fresh: _ } => {
+            if headless {
+                miette::bail!(
+                    "Headless chat is not available in client-only mode.\n\
+                     Use TUI mode (without --headless) to connect to akhomed."
+                );
+            }
+            #[cfg(feature = "daemon")]
+            {
+                let paths = xdg_paths.ok_or_else(|| {
+                    miette::miette!("Cannot resolve XDG paths. Set HOME environment variable.")
+                })?;
+                let server_info = akh_medu::client::discover_server(&paths).ok_or_else(|| {
+                    miette::miette!("No running akhomed server found.")
+                })?;
+                eprintln!("Connecting to akhomed at {}...", server_info.base_url());
+                return akh_medu::tui::launch_remote(&cli.workspace, &server_info);
+            }
+            #[cfg(not(feature = "daemon"))]
+            miette::bail!(
+                "TUI requires --features daemon. Build with: cargo build --features client-only,daemon"
+            );
+        }
+
+        // ── Library ───────────────────────────────────────────────────────
+        Commands::Library { action } => {
+            // Remote client ignores library_dir — pass a dummy path.
+            let library_dir = xdg_paths
+                .as_ref()
+                .map(|p| p.library_dir())
+                .unwrap_or_default();
+
+            match action {
+                LibraryAction::Add {
+                    source,
+                    title,
+                    tags,
+                    format,
+                } => {
+                    let tag_list: Vec<String> = tags
+                        .map(|t| t.split(',').map(|s| s.trim().to_string()).collect())
+                        .unwrap_or_default();
+                    let req = akh_medu::library::LibraryAddRequest {
+                        source,
+                        title,
+                        tags: tag_list,
+                        format,
+                    };
+                    let result = client.library_add(&library_dir, &req).into_diagnostic()?;
+                    println!("Ingested: {}", result.title);
+                    println!("  ID:       {}", result.id);
+                    println!("  Format:   {}", result.format);
+                    println!("  Chunks:   {}", result.chunk_count);
+                    println!("  Triples:  {}", result.triple_count);
+                    println!("  Concepts: {}", result.concept_count);
+                }
+                LibraryAction::List => {
+                    let docs = client.library_list(&library_dir).into_diagnostic()?;
+                    if docs.is_empty() {
+                        println!(
+                            "Library is empty. Add a document with: akh library add <file-or-url>"
+                        );
+                    } else {
+                        println!(
+                            "{:<30} {:<20} {:<8} {:<8} Tags",
+                            "ID", "Title", "Format", "Chunks"
+                        );
+                        println!("{}", "-".repeat(80));
+                        for doc in &docs {
+                            let title_short = if doc.title.len() > 18 {
+                                format!("{}...", &doc.title[..18])
+                            } else {
+                                doc.title.clone()
+                            };
+                            println!(
+                                "{:<30} {:<20} {:<8} {:<8} {}",
+                                doc.id,
+                                title_short,
+                                doc.format,
+                                doc.chunk_count,
+                                doc.tags.join(", "),
+                            );
+                        }
+                        println!("\nTotal: {} document(s)", docs.len());
+                    }
+                }
+                LibraryAction::Search { query, top_k } => {
+                    let results = client.library_search(&query, top_k).into_diagnostic()?;
+                    if results.is_empty() {
+                        println!("No matching content found for: \"{query}\"");
+                    } else {
+                        println!("Search results for \"{query}\":");
+                        println!("{:<8} {:<10} Symbol", "Rank", "Sim");
+                        println!("{}", "-".repeat(60));
+                        for r in &results {
+                            println!(
+                                "{:<8} {:<10.4} {}",
+                                r.rank, r.similarity, r.symbol_label,
+                            );
+                        }
+                    }
+                }
+                LibraryAction::Remove { id } => {
+                    let removed = client.library_remove(&library_dir, &id).into_diagnostic()?;
+                    println!("Removed: {} (\"{}\")", removed.id, removed.title);
+                }
+                LibraryAction::Info { id } => {
+                    let doc = client.library_info(&library_dir, &id).into_diagnostic()?;
+                    println!("Document: {}", doc.title);
+                    println!("  ID:       {}", doc.id);
+                    println!("  Format:   {}", doc.format);
+                    println!("  Source:   {}", doc.source);
+                    println!("  Chunks:   {}", doc.chunk_count);
+                    println!("  Triples:  {}", doc.triple_count);
+                    println!(
+                        "  Tags:     {}",
+                        if doc.tags.is_empty() {
+                            "(none)".to_string()
+                        } else {
+                            doc.tags.join(", ")
+                        }
+                    );
+                    println!("  Ingested: {} (unix timestamp)", doc.ingested_at);
+                }
+                LibraryAction::Watch { dir } => {
+                    // One-shot scan via server instead of blocking watch loop.
+                    let req = akh_medu::api_types::LibraryScanRequest {
+                        inbox_dir: dir.map(|d| d.to_string_lossy().into_owned()),
+                    };
+                    let resp = client.library_scan(&req).into_diagnostic()?;
+                    println!(
+                        "Library scan: {} file(s) processed, {} failed.",
+                        resp.files_processed, resp.files_failed
+                    );
+                }
+            }
+        }
+
+        // ── Service (launchd) ────────────────────────────────────────────
+        Commands::Service { action } => {
+            dispatch_service(action)?;
+        }
     }
 
     Ok(())
 }
 
 /// Print agent REPL status line.
+#[cfg(not(feature = "client-only"))]
 fn print_repl_status(agent: &Agent, engine: &Engine) {
     println!(
         "  cycle: {}, WM: {}/{}, goals: {} active / {} total",
@@ -3606,228 +4978,69 @@ fn print_repl_status(agent: &Agent, engine: &Engine) {
     }
 }
 
-/// Print pipeline output in summary format.
-fn print_pipeline_output_summary(output: &akh_medu::pipeline::PipelineOutput, engine: &Engine) {
-    println!("Pipeline — {} stages executed", output.stages_executed);
-    for (i, (name, data)) in output.stage_results.iter().enumerate() {
-        let summary = format_pipeline_data_summary(data, engine);
-        println!(
-            "  [{}/{}] {}: {}",
-            i + 1,
-            output.stages_executed,
-            name,
-            summary
-        );
-    }
-}
-
-/// Print pipeline output in JSON format.
-fn print_pipeline_output_json(output: &akh_medu::pipeline::PipelineOutput, engine: &Engine) {
-    let stages: Vec<serde_json::Value> = output
-        .stage_results
-        .iter()
-        .map(|(name, data)| {
-            serde_json::json!({
-                "stage": name,
-                "summary": format_pipeline_data_summary(data, engine),
-            })
-        })
-        .collect();
-    let json = serde_json::json!({
-        "stages_executed": output.stages_executed,
-        "stages": stages,
-        "result": format_pipeline_data_summary(&output.result, engine),
-    });
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&json).unwrap_or_default()
-    );
-}
-
-/// Format a PipelineData variant as a one-line summary.
-fn format_pipeline_data_summary(
-    data: &akh_medu::pipeline::PipelineData,
-    engine: &Engine,
-) -> String {
-    use akh_medu::pipeline::PipelineData;
-    match data {
-        PipelineData::Seeds(seeds) => {
-            let labels: Vec<String> = seeds
-                .iter()
-                .take(5)
-                .map(|s| engine.resolve_label(*s))
-                .collect();
-            format!("{} seeds [{}]", seeds.len(), labels.join(", "))
-        }
-        PipelineData::Triples(triples) => {
-            format!("{} triples", triples.len())
-        }
-        PipelineData::Traversal(result) => {
-            format!(
-                "{} triples, {} nodes visited, depth {}",
-                result.triples.len(),
-                result.visited.len(),
-                result.depth_reached
-            )
-        }
-        PipelineData::Inference(result) => {
-            if result.activations.is_empty() {
-                "0 activations".to_string()
-            } else {
-                let top = &result.activations[0];
-                format!(
-                    "{} activations (top: \"{}\" {:.4})",
-                    result.activations.len(),
-                    engine.resolve_label(top.0),
-                    top.1
-                )
+#[cfg(not(feature = "client-only"))]
+fn print_bootstrap_checkpoints(checkpoints: &[akh_medu::bootstrap::Checkpoint]) {
+    use akh_medu::bootstrap::Checkpoint;
+    for cp in checkpoints {
+        match cp {
+            Checkpoint::PurposeParsed {
+                domain,
+                competence_level,
+                seed_count,
+                has_identity,
+            } => {
+                println!(
+                    "  [parse] Domain: {domain}, target: {competence_level}, \
+                     seeds: {seed_count}, identity: {has_identity}"
+                );
+            }
+            Checkpoint::IdentityConstructed { chosen_name } => {
+                println!("  [identity] Chosen name: {chosen_name}");
+            }
+            Checkpoint::LearningPlan {
+                concept_count,
+                relation_count,
+            } => {
+                println!(
+                    "  [plan] {concept_count} concepts, {relation_count} relations"
+                );
+            }
+            Checkpoint::AssessmentComplete {
+                cycle,
+                overall_score,
+                overall_dreyfus,
+                recommendation,
+            } => {
+                println!(
+                    "  [assess] Cycle {cycle}: {overall_dreyfus} (score: {overall_score:.2}) \
+                     — {recommendation}"
+                );
             }
         }
-        PipelineData::Reasoning(result) => {
-            format!(
-                "\"{}\" (cost: {}, saturated: {})",
-                result.simplified_expr, result.cost, result.saturated
-            )
-        }
     }
 }
 
-/// Format a DerivationKind with human-readable label resolution.
-fn format_derivation_kind(kind: &DerivationKind, engine: &Engine) -> String {
-    match kind {
-        DerivationKind::Extracted => "extracted".to_string(),
-        DerivationKind::Seed => "seed".to_string(),
-        DerivationKind::GraphEdge { from, predicate } => {
-            format!(
-                "graph edge from \"{}\" via \"{}\"",
-                engine.resolve_label(*from),
-                engine.resolve_label(*predicate)
-            )
-        }
-        DerivationKind::VsaRecovery {
-            from,
-            predicate,
-            similarity,
-        } => {
-            format!(
-                "VSA recovery from \"{}\" via \"{}\" (sim: {:.4})",
-                engine.resolve_label(*from),
-                engine.resolve_label(*predicate),
-                similarity
-            )
-        }
-        DerivationKind::Analogy { a, b, c } => {
-            format!(
-                "analogy \"{}\":\"{}\" :: \"{}\":?",
-                engine.resolve_label(*a),
-                engine.resolve_label(*b),
-                engine.resolve_label(*c)
-            )
-        }
-        DerivationKind::FillerRecovery { subject, predicate } => {
-            format!(
-                "filler recovery (\"{}\", \"{}\")",
-                engine.resolve_label(*subject),
-                engine.resolve_label(*predicate)
-            )
-        }
-        DerivationKind::Reasoned => "reasoned".to_string(),
-        DerivationKind::Aggregated => "aggregated".to_string(),
-        DerivationKind::AgentDecision { goal, cycle } => {
-            format!(
-                "agent decision for \"{}\" at cycle {}",
-                engine.resolve_label(*goal),
-                cycle
-            )
-        }
-        DerivationKind::AgentConsolidation {
-            reason,
-            relevance_score,
-        } => {
-            format!(
-                "agent consolidation (relevance: {:.2}): {}",
-                relevance_score, reason
-            )
-        }
-        DerivationKind::RuleInference {
-            rule_name,
-            antecedents,
-        } => {
-            let ant_labels: Vec<String> = antecedents
-                .iter()
-                .map(|s| engine.resolve_label(*s))
-                .collect();
-            format!(
-                "rule inference [{}] from [{}]",
-                rule_name,
-                ant_labels.join(", ")
-            )
-        }
-        DerivationKind::FusedInference {
-            path_count,
-            interference_signal,
-        } => {
-            format!(
-                "fused inference ({} paths, interference: {:.2})",
-                path_count, interference_signal
-            )
-        }
-        DerivationKind::GapIdentified { gap_kind, severity } => {
-            format!("gap identified [{}] (severity: {:.2})", gap_kind, severity)
-        }
-        DerivationKind::SchemaDiscovered { pattern_type } => {
-            format!("schema discovered [{}]", pattern_type)
-        }
-        DerivationKind::SemanticEnrichment { source } => {
-            format!("semantic enrichment [{}]", source)
-        }
-        DerivationKind::CompartmentLoaded {
-            compartment_id,
-            source_file,
-        } => {
-            format!(
-                "compartment loaded [{}] from \"{}\"",
-                compartment_id, source_file
-            )
-        }
-        DerivationKind::ShadowVeto {
-            pattern_name,
-            severity,
-        } => {
-            format!("shadow veto [{}] (severity: {:.2})", pattern_name, severity)
-        }
-        DerivationKind::PsycheEvolution { trigger, cycle } => {
-            format!("psyche evolution [{}] at cycle {}", trigger, cycle)
-        }
-        DerivationKind::WasmToolExecution {
-            tool_name,
-            skill_id,
-            danger_level,
-        } => {
-            format!(
-                "WASM tool execution [{}] from skill \"{}\" (danger: {})",
-                tool_name, skill_id, danger_level
-            )
-        }
-        DerivationKind::CliToolExecution {
-            tool_name,
-            binary_path,
-            danger_level,
-        } => {
-            format!(
-                "CLI tool execution [{}] via \"{}\" (danger: {})",
-                tool_name, binary_path, danger_level
-            )
-        }
-        DerivationKind::DocumentIngested {
-            document_id,
-            format,
-            chunk_index,
-        } => {
-            format!(
-                "document ingested [{}] format={} chunk={}",
-                document_id, format, chunk_index
-            )
-        }
+#[cfg(not(feature = "client-only"))]
+fn print_bootstrap_result(result: &akh_medu::bootstrap::OrchestrationResult) {
+    println!("\nBootstrap Result");
+    println!("================");
+    println!("  Domain:          {}", result.intent.purpose.domain);
+    println!(
+        "  Target level:    {}",
+        result.intent.purpose.competence_level
+    );
+    if let Some(ref name) = result.chosen_name {
+        println!("  Chosen name:     {name}");
     }
+    println!("  Learning cycles: {}", result.learning_cycles);
+    println!("  Target reached:  {}", result.target_reached);
+    if let Some(ref report) = result.final_report {
+        println!("  Final Dreyfus:   {}", report.overall_dreyfus);
+        println!("  Final score:     {:.2}", report.overall_score);
+        println!("  Recommendation:  {}", report.recommendation);
+    }
+    println!(
+        "  Provenance:      {} record(s)",
+        result.provenance_ids.len()
+    );
 }

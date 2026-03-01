@@ -25,6 +25,10 @@ pub struct Psyche {
     pub archetypes: ArchetypeWeights,
     /// Integrative center — tracks growth and individuation.
     pub self_integration: SelfIntegration,
+    /// Whether the psyche has been finalized by the Ritual of Awakening.
+    /// Once awakened, the psyche cannot be wholesale-replaced — only evolved.
+    #[serde(default)]
+    pub awakened: bool,
 }
 
 /// Persona — the mask the agent presents outward.
@@ -161,6 +165,7 @@ impl Default for Psyche {
                 rebalance_count: 0,
                 dominant_archetype: "sage".into(),
             },
+            awakened: false,
         }
     }
 }
@@ -187,10 +192,10 @@ impl ShadowPattern {
         }
 
         // 2. Danger level threshold.
-        if let Some(threshold) = self.danger_level_threshold {
-            if manifest.danger.level >= threshold {
-                return true;
-            }
+        if let Some(threshold) = self.danger_level_threshold
+            && manifest.danger.level >= threshold
+        {
+            return true;
         }
 
         // 3. Action trigger substring match against tool's shadow_triggers.
@@ -212,6 +217,16 @@ impl ShadowPattern {
 // ---------------------------------------------------------------------------
 
 impl Psyche {
+    /// Whether this psyche has been finalized by the Ritual of Awakening.
+    pub fn is_awakened(&self) -> bool {
+        self.awakened
+    }
+
+    /// Mark this psyche as awakened (post-ritual). Irreversible.
+    pub fn mark_awakened(&mut self) {
+        self.awakened = true;
+    }
+
     /// Returns the name of the highest-weighted archetype.
     pub fn dominant_archetype(&self) -> &str {
         let a = &self.archetypes;

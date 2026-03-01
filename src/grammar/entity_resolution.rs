@@ -156,10 +156,10 @@ impl EntityResolver {
     pub fn add_learned(&mut self, equiv: LearnedEquivalence) {
         let key = equiv.surface.to_lowercase();
         // Only insert if higher confidence than existing, or if new
-        if let Some(existing) = self.learned.get(&key) {
-            if equiv.confidence <= existing.confidence {
-                return;
-            }
+        if let Some(existing) = self.learned.get(&key)
+            && equiv.confidence <= existing.confidence
+        {
+            return;
         }
         self.learned.insert(key, equiv);
     }
@@ -450,7 +450,7 @@ impl EntityResolver {
         }
 
         // For each group with multiple languages, align entities by position
-        for (_prefix, group) in &groups {
+        for group in groups.values() {
             if group.len() < 2 {
                 continue;
             }

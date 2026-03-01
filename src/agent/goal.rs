@@ -9,15 +9,22 @@ use crate::symbol::SymbolId;
 
 use super::agent::AgentPredicates;
 use super::error::AgentResult;
+use super::priority_reasoning::PriorityVerdict;
 
 /// Status of a goal.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum GoalStatus {
     Pending,
     Active,
     Completed,
     Failed { reason: String },
     Suspended,
+    /// Proposed by autonomous goal generation but not yet activated.
+    Proposed,
+    /// Dormant: low-priority or infeasible, kept for opportunity detection.
+    Dormant,
+    /// Reformulated: replaced by a simpler version (Phase 11f).
+    Reformulated { replacement: SymbolId },
 }
 
 impl GoalStatus {
@@ -29,6 +36,9 @@ impl GoalStatus {
             Self::Completed => "completed".into(),
             Self::Failed { reason } => format!("failed:{reason}"),
             Self::Suspended => "suspended".into(),
+            Self::Proposed => "proposed".into(),
+            Self::Dormant => "dormant".into(),
+            Self::Reformulated { replacement } => format!("reformulated:{}", replacement.get()),
         }
     }
 
@@ -38,12 +48,21 @@ impl GoalStatus {
             Self::Failed {
                 reason: reason.into(),
             }
+        } else if let Some(id_str) = label.strip_prefix("reformulated:") {
+            if let Ok(id) = id_str.parse::<u64>()
+                && let Some(sym) = SymbolId::new(id)
+            {
+                return Self::Reformulated { replacement: sym };
+            }
+            Self::Pending
         } else {
             match label {
                 "pending" => Self::Pending,
                 "active" => Self::Active,
                 "completed" => Self::Completed,
                 "suspended" => Self::Suspended,
+                "proposed" => Self::Proposed,
+                "dormant" => Self::Dormant,
                 _ => Self::Pending,
             }
         }
@@ -58,6 +77,78 @@ impl std::fmt::Display for GoalStatus {
             Self::Completed => write!(f, "completed"),
             Self::Failed { reason } => write!(f, "failed: {reason}"),
             Self::Suspended => write!(f, "suspended"),
+            Self::Proposed => write!(f, "proposed"),
+            Self::Dormant => write!(f, "dormant"),
+            Self::Reformulated { replacement } => {
+                write!(f, "reformulated → {replacement}")
+            }
+        }
+    }
+}
+
+/// How a goal was generated (provenance for autonomous goals).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum GoalSource {
+    /// Generated from knowledge gap detection.
+    GapDetection {
+        gap_entity: SymbolId,
+        gap_kind: String,
+        severity: f32,
+    },
+    /// Generated from contradiction detection.
+    ContradictionDetected {
+        existing: Triple,
+        incoming: Triple,
+    },
+    /// Generated from opportunity detection (reactivating a dormant/failed goal).
+    OpportunityDetected {
+        reactivated_goal: SymbolId,
+        newly_satisfied: String,
+    },
+    /// Generated because a drive exceeded its threshold.
+    DriveExceeded {
+        drive: String,
+        strength: f32,
+    },
+    /// Generated because the OODA loop detected a decision impasse.
+    ImpasseDetected {
+        goal_id: SymbolId,
+        impasse_kind: String,
+    },
+    /// Generated from a reflection insight.
+    ReflectionInsight {
+        insight: String,
+    },
+    /// Generated from a world-monitoring watch firing or expectation discrepancy.
+    WorldChange {
+        watch_name: String,
+        discrepancy: String,
+    },
+}
+
+/// Justification for a goal's existence (Phase 11f: AGM belief revision).
+///
+/// Four variants with entrenchment levels determining retraction order.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum GoalJustification {
+    /// Explicitly requested by the user — never auto-suspended (entrenchment 3).
+    UserRequested,
+    /// Decomposed from a parent goal — cascades when parent abandoned (entrenchment 2).
+    DecomposedFrom { parent: SymbolId },
+    /// Inferred from KG state — invalidated when supporting triples retracted (entrenchment 1).
+    InferredFromKG { supporting: Vec<SymbolId> },
+    /// Default assumption — first to be retracted (entrenchment 0).
+    DefaultAssumption { rationale: String },
+}
+
+impl GoalJustification {
+    /// Entrenchment rank (higher = harder to retract).
+    pub fn entrenchment(&self) -> u8 {
+        match self {
+            Self::UserRequested => 3,
+            Self::DecomposedFrom { .. } => 2,
+            Self::InferredFromKG { .. } => 1,
+            Self::DefaultAssumption { .. } => 0,
         }
     }
 }
@@ -66,7 +157,7 @@ impl std::fmt::Display for GoalStatus {
 pub const DEFAULT_STALL_THRESHOLD: u32 = 5;
 
 /// A goal the agent is working toward.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Goal {
     /// The goal's Entity symbol in the KG.
     pub symbol_id: SymbolId,
@@ -88,14 +179,51 @@ pub struct Goal {
     pub cycles_worked: u32,
     /// Last cycle where the goal made meaningful progress (Advanced or Completed).
     pub last_progress_cycle: u64,
+    /// How this goal was generated (None for externally-created goals).
+    pub source: Option<GoalSource>,
+    /// Goals that must complete before this goal can be worked on (HTN dependencies).
+    pub blocked_by: Vec<SymbolId>,
+    /// Argumentation-based priority verdict (Phase 11c).
+    pub priority_rationale: Option<PriorityVerdict>,
+    /// Why this goal exists — for AGM belief revision (Phase 11f).
+    /// `None` for legacy/restored goals.
+    pub justification: Option<GoalJustification>,
+    /// If this goal was created by reformulating another goal (Phase 11f).
+    pub reformulated_from: Option<SymbolId>,
+    /// Estimated effort from CBR (Phase 11g).
+    pub estimated_effort: Option<super::resource::EffortEstimate>,
 }
 
 impl Goal {
+    /// Effective priority: uses argumentation verdict if available, else raw priority.
+    pub fn computed_priority(&self) -> u8 {
+        self.priority_rationale
+            .as_ref()
+            .map(|v| v.computed_priority)
+            .unwrap_or(self.priority)
+    }
+
     /// Whether this goal is stalled: has been worked on for `threshold` cycles
     /// since it last made progress.
     pub fn is_stalled(&self, current_cycle: u64, threshold: u32) -> bool {
         self.cycles_worked >= threshold
             && current_cycle.saturating_sub(self.last_progress_cycle) >= threshold as u64
+    }
+
+    /// Whether this goal is blocked by uncompleted dependencies.
+    ///
+    /// A goal is blocked if any of its `blocked_by` entries refer to goals
+    /// that are not yet `Completed` or `Failed`.
+    pub fn is_blocked(&self, all_goals: &[Goal]) -> bool {
+        if self.blocked_by.is_empty() {
+            return false;
+        }
+        self.blocked_by.iter().any(|blocker_id| {
+            all_goals
+                .iter()
+                .find(|g| g.symbol_id == *blocker_id)
+                .is_some_and(|g| !matches!(g.status, GoalStatus::Completed | GoalStatus::Failed { .. }))
+        })
     }
 }
 
@@ -145,6 +273,12 @@ pub fn create_goal(
         created_at: now,
         cycles_worked: 0,
         last_progress_cycle: 0,
+        source: None,
+        blocked_by: Vec::new(),
+        priority_rationale: None,
+        justification: None,
+        reformulated_from: None,
+        estimated_effort: None,
     })
 }
 
@@ -196,13 +330,15 @@ pub fn update_goal_status(
     Ok(())
 }
 
-/// Filter active goals, sorted by priority (highest first).
+/// Filter active goals, sorted by computed priority (highest first).
+///
+/// Uses argumentation-based priority when available, else raw priority.
 pub fn active_goals(goals: &[Goal]) -> Vec<&Goal> {
     let mut active: Vec<&Goal> = goals
         .iter()
         .filter(|g| matches!(g.status, GoalStatus::Active))
         .collect();
-    active.sort_by(|a, b| b.priority.cmp(&a.priority));
+    active.sort_by_key(|g| std::cmp::Reverse(g.computed_priority()));
     active
 }
 
@@ -246,6 +382,7 @@ pub fn restore_goals(engine: &Engine, predicates: &AgentPredicates) -> AgentResu
         let mut criteria = String::new();
         let mut parent = None;
         let mut children = Vec::new();
+        let mut blocked_by = Vec::new();
 
         for triple in &triples {
             let obj_label = engine.resolve_label(triple.object);
@@ -261,7 +398,7 @@ pub fn restore_goals(engine: &Engine, predicates: &AgentPredicates) -> AgentResu
                     status_sym_id = Some(triple.object);
                 }
             } else if triple.predicate == predicates.has_priority {
-                if let Some(p) = obj_label.trim_start_matches("priority:").parse::<u8>().ok() {
+                if let Ok(p) = obj_label.trim_start_matches("priority:").parse::<u8>() {
                     priority = p;
                 }
             } else if triple.predicate == predicates.has_criteria {
@@ -270,6 +407,8 @@ pub fn restore_goals(engine: &Engine, predicates: &AgentPredicates) -> AgentResu
                 children.push(triple.object);
             } else if triple.predicate == predicates.parent_goal {
                 parent = Some(triple.object);
+            } else if triple.predicate == predicates.blocked_by {
+                blocked_by.push(triple.object);
             }
         }
 
@@ -284,6 +423,12 @@ pub fn restore_goals(engine: &Engine, predicates: &AgentPredicates) -> AgentResu
             created_at: meta.created_at,
             cycles_worked: 0,
             last_progress_cycle: 0,
+            source: None,
+            blocked_by,
+            priority_rationale: None,
+            justification: None,
+            reformulated_from: None,
+            estimated_effort: None,
         });
     }
 
@@ -345,6 +490,39 @@ pub fn generate_sub_goal_descriptions(description: &str) -> Vec<(String, u8, Str
     ]
 }
 
+/// Reformulate a goal: create a replacement with relaxed criteria.
+///
+/// The new goal inherits the original's priority and parent. The original
+/// goal's status is set to `Reformulated { replacement: new_id }`.
+/// The replacement has `reformulated_from` pointing to the original and
+/// a `DecomposedFrom` justification.
+pub fn reformulate_goal(
+    engine: &Engine,
+    original: &mut Goal,
+    relaxed_criteria: &str,
+    predicates: &AgentPredicates,
+) -> AgentResult<Goal> {
+    let desc = format!("(reformulated) {}", original.description);
+    let mut replacement = create_goal(engine, &desc, original.priority, relaxed_criteria, predicates)?;
+    replacement.parent = original.parent;
+    replacement.reformulated_from = Some(original.symbol_id);
+    replacement.justification = Some(GoalJustification::DecomposedFrom {
+        parent: original.symbol_id,
+    });
+
+    // Mark original as reformulated.
+    update_goal_status(
+        engine,
+        original,
+        GoalStatus::Reformulated {
+            replacement: replacement.symbol_id,
+        },
+        predicates,
+    )?;
+
+    Ok(replacement)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -359,6 +537,8 @@ mod tests {
                 reason: "timeout".into(),
             },
             GoalStatus::Suspended,
+            GoalStatus::Proposed,
+            GoalStatus::Dormant,
         ];
         for status in statuses {
             let label = status.as_label();
@@ -423,6 +603,12 @@ mod tests {
             created_at: 0,
             cycles_worked: 0,
             last_progress_cycle: 0,
+            source: None,
+            blocked_by: Vec::new(),
+            priority_rationale: None,
+            justification: None,
+            reformulated_from: None,
+            estimated_effort: None,
         }];
         clear_goals(&mut goals);
         assert!(goals.is_empty());
@@ -442,6 +628,12 @@ mod tests {
                 created_at: 0,
                 cycles_worked: 0,
                 last_progress_cycle: 0,
+                source: None,
+                blocked_by: Vec::new(),
+                priority_rationale: None,
+                justification: None,
+                reformulated_from: None,
+            estimated_effort: None,
             },
             Goal {
                 symbol_id: SymbolId::new(2).unwrap(),
@@ -454,6 +646,12 @@ mod tests {
                 created_at: 0,
                 cycles_worked: 0,
                 last_progress_cycle: 0,
+                source: None,
+                blocked_by: Vec::new(),
+                priority_rationale: None,
+                justification: None,
+                reformulated_from: None,
+            estimated_effort: None,
             },
             Goal {
                 symbol_id: SymbolId::new(3).unwrap(),
@@ -466,6 +664,12 @@ mod tests {
                 created_at: 0,
                 cycles_worked: 0,
                 last_progress_cycle: 0,
+                source: None,
+                blocked_by: Vec::new(),
+                priority_rationale: None,
+                justification: None,
+                reformulated_from: None,
+            estimated_effort: None,
             },
         ];
 
@@ -473,5 +677,148 @@ mod tests {
         assert_eq!(active.len(), 2);
         assert_eq!(active[0].priority, 200);
         assert_eq!(active[1].priority, 10);
+    }
+
+    #[test]
+    fn is_blocked_with_active_blocker() {
+        let goals = vec![
+            Goal {
+                symbol_id: SymbolId::new(1).unwrap(),
+                description: "blocker".into(),
+                status: GoalStatus::Active,
+                priority: 200,
+                success_criteria: String::new(),
+                parent: None,
+                children: Vec::new(),
+                created_at: 0,
+                cycles_worked: 0,
+                last_progress_cycle: 0,
+                source: None,
+                blocked_by: Vec::new(),
+                priority_rationale: None,
+                justification: None,
+                reformulated_from: None,
+            estimated_effort: None,
+            },
+            Goal {
+                symbol_id: SymbolId::new(2).unwrap(),
+                description: "blocked".into(),
+                status: GoalStatus::Active,
+                priority: 100,
+                success_criteria: String::new(),
+                parent: None,
+                children: Vec::new(),
+                created_at: 0,
+                cycles_worked: 0,
+                last_progress_cycle: 0,
+                source: None,
+                blocked_by: vec![SymbolId::new(1).unwrap()],
+                priority_rationale: None,
+                justification: None,
+                reformulated_from: None,
+            estimated_effort: None,
+            },
+        ];
+
+        // Goal 2 is blocked because goal 1 is still Active.
+        assert!(goals[1].is_blocked(&goals));
+        // Goal 1 is not blocked.
+        assert!(!goals[0].is_blocked(&goals));
+    }
+
+    #[test]
+    fn is_blocked_cleared_when_blocker_completed() {
+        let goals = vec![
+            Goal {
+                symbol_id: SymbolId::new(1).unwrap(),
+                description: "blocker".into(),
+                status: GoalStatus::Completed,
+                priority: 200,
+                success_criteria: String::new(),
+                parent: None,
+                children: Vec::new(),
+                created_at: 0,
+                cycles_worked: 0,
+                last_progress_cycle: 0,
+                source: None,
+                blocked_by: Vec::new(),
+                priority_rationale: None,
+                justification: None,
+                reformulated_from: None,
+            estimated_effort: None,
+            },
+            Goal {
+                symbol_id: SymbolId::new(2).unwrap(),
+                description: "blocked".into(),
+                status: GoalStatus::Active,
+                priority: 100,
+                success_criteria: String::new(),
+                parent: None,
+                children: Vec::new(),
+                created_at: 0,
+                cycles_worked: 0,
+                last_progress_cycle: 0,
+                source: None,
+                blocked_by: vec![SymbolId::new(1).unwrap()],
+                priority_rationale: None,
+                justification: None,
+                reformulated_from: None,
+            estimated_effort: None,
+            },
+        ];
+
+        // Goal 2 is NOT blocked because goal 1 is Completed.
+        assert!(!goals[1].is_blocked(&goals));
+    }
+
+    #[test]
+    fn is_blocked_empty_blocked_by() {
+        let goals = vec![Goal {
+            symbol_id: SymbolId::new(1).unwrap(),
+            description: "free".into(),
+            status: GoalStatus::Active,
+            priority: 128,
+            success_criteria: String::new(),
+            parent: None,
+            children: Vec::new(),
+            created_at: 0,
+            cycles_worked: 0,
+            last_progress_cycle: 0,
+            source: None,
+            blocked_by: Vec::new(),
+            priority_rationale: None,
+            justification: None,
+            reformulated_from: None,
+            estimated_effort: None,
+        }];
+
+        assert!(!goals[0].is_blocked(&goals));
+    }
+
+    #[test]
+    fn status_reformulated_roundtrip() {
+        let sym = SymbolId::new(42).unwrap();
+        let status = GoalStatus::Reformulated { replacement: sym };
+        let label = status.as_label();
+        assert_eq!(label, "reformulated:42");
+        let restored = GoalStatus::from_label(&label);
+        assert_eq!(restored, status);
+    }
+
+    #[test]
+    fn justification_entrenchment_ordering() {
+        let user = GoalJustification::UserRequested;
+        let decomp = GoalJustification::DecomposedFrom {
+            parent: SymbolId::new(1).unwrap(),
+        };
+        let inferred = GoalJustification::InferredFromKG {
+            supporting: vec![],
+        };
+        let default = GoalJustification::DefaultAssumption {
+            rationale: "test".into(),
+        };
+        assert!(user.entrenchment() > decomp.entrenchment());
+        assert!(decomp.entrenchment() > inferred.entrenchment());
+        assert!(inferred.entrenchment() > default.entrenchment());
     }
 }

@@ -30,9 +30,19 @@
 //! ```
 
 pub mod agent;
+pub mod api_types;
+pub mod argumentation;
+pub mod audit;
+pub mod bootstrap;
+pub mod chat;
+#[cfg(feature = "email")]
+pub mod email;
 pub mod autonomous;
 pub mod client;
 pub mod compartment;
+#[cfg(feature = "daemon")]
+pub mod config;
+pub mod dispatch;
 pub mod engine;
 pub mod error;
 pub mod export;
@@ -42,17 +52,23 @@ pub mod graph;
 pub mod infer;
 pub mod library;
 pub mod message;
+pub mod nlu;
 pub mod partition;
 pub mod paths;
 pub mod pipeline;
 pub mod provenance;
 pub mod reason;
 pub mod registry;
+pub mod rule_macro;
 pub mod seeds;
+pub mod service;
+pub mod skolem;
 pub mod simd;
 pub mod skills;
 pub mod store;
 pub mod symbol;
+pub mod temporal;
+pub mod tms;
 pub mod tui;
 pub mod vsa;
 pub mod workspace;

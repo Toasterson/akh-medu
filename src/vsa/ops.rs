@@ -66,10 +66,10 @@ impl VsaOps {
         rng.fill_bytes(&mut data);
         // Mask out unused trailing bits
         let used_bits = self.dim.0 % 8;
-        if used_bits != 0 {
-            if let Some(last) = data.last_mut() {
-                *last &= (1u8 << used_bits) - 1;
-            }
+        if used_bits != 0
+            && let Some(last) = data.last_mut()
+        {
+            *last &= (1u8 << used_bits) - 1;
         }
         HyperVec::from_raw(data, self.dim, self.encoding)
     }
@@ -114,16 +114,16 @@ impl VsaOps {
         let mut acc = vec![0i16; n_components];
 
         for &v in vectors {
-            for i in 0..n_components {
+            for (i, a) in acc.iter_mut().enumerate() {
                 let bit = v.get_bit(i);
-                acc[i] += if bit { 1 } else { -1 };
+                *a += if bit { 1 } else { -1 };
             }
         }
 
         // Threshold: positive → 1, negative → 0, tie → random (break with bit position parity)
         let mut result = HyperVec::zero(dim, encoding);
-        for i in 0..n_components {
-            let val = acc[i] > 0 || (acc[i] == 0 && i % 2 == 0);
+        for (i, &a) in acc.iter().enumerate() {
+            let val = a > 0 || (a == 0 && i % 2 == 0);
             result.set_bit(i, val);
         }
 

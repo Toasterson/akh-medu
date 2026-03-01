@@ -351,6 +351,48 @@ impl CustomGrammar {
 
             // Discourse frames: delegate to inner content.
             AbsTree::DiscourseFrame { inner, .. } => self.linearize_inner(inner, ctx),
+
+            // NLU extensions: fall through to inner content
+            AbsTree::Negation { inner }
+            | AbsTree::Quantified { scope: inner, .. }
+            | AbsTree::Temporal { inner, .. }
+            | AbsTree::Modal { inner, .. } => {
+                let text = self.linearize_inner(inner, ctx)?;
+                Ok(text)
+            }
+            AbsTree::Conditional {
+                condition,
+                consequent,
+            } => {
+                let cond = self.linearize_inner(condition, ctx)?;
+                let cons = self.linearize_inner(consequent, ctx)?;
+                Ok(format!("If {cond}, then {cons}."))
+            }
+            AbsTree::Comparison {
+                entity_a,
+                entity_b,
+                property,
+                ..
+            } => {
+                let a = self.linearize_inner(entity_a, ctx)?;
+                let b = self.linearize_inner(entity_b, ctx)?;
+                Ok(format!("{a} vs {b} ({property})."))
+            }
+            AbsTree::RelativeClause { head, clause } => {
+                let h = self.linearize_inner(head, ctx)?;
+                let c = self.linearize_inner(clause, ctx)?;
+                Ok(format!("{h}, which {c}."))
+            }
+
+            // Dialogue acts — these are handled by the ChatProcessor dispatch,
+            // not by grammar linearization. Return empty string if we reach here.
+            AbsTree::Greeting { .. }
+            | AbsTree::Farewell { .. }
+            | AbsTree::Acknowledgment { .. }
+            | AbsTree::FollowUpRequest { .. }
+            | AbsTree::MetaQuery { .. }
+            | AbsTree::GoalRequest { .. }
+            | AbsTree::StructuralCommand { .. } => Ok(String::new()),
         }
     }
 }

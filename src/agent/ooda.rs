@@ -81,6 +81,8 @@ pub struct ActionResult {
     pub goal_progress: GoalProgress,
     /// WM entries created during this cycle.
     pub new_wm_entries: Vec<u64>,
+    /// Discrepancy between expected and actual effects (Phase 11e).
+    pub discrepancy: Option<super::watch::Discrepancy>,
 }
 
 /// How a goal progressed as a result of the action.
@@ -90,6 +92,34 @@ pub enum GoalProgress {
     Advanced { detail: String },
     Completed,
     Failed { reason: String },
+}
+
+// ---------------------------------------------------------------------------
+// Impasse detection
+// ---------------------------------------------------------------------------
+
+/// A decision impasse: the agent couldn't choose a tool with confidence.
+#[derive(Debug, Clone)]
+pub struct DecisionImpasse {
+    /// Which goal was being targeted.
+    pub goal_id: SymbolId,
+    /// What kind of impasse occurred.
+    pub kind: ImpasseKind,
+    /// Best score among all candidates.
+    pub best_score: f32,
+}
+
+/// What kind of decision impasse occurred.
+#[derive(Debug, Clone)]
+pub enum ImpasseKind {
+    /// All tool candidates scored below the usability threshold.
+    AllBelowThreshold { threshold: f32 },
+    /// Top two candidates tied (within epsilon).
+    Tie {
+        tool_a: String,
+        tool_b: String,
+        epsilon: f32,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -137,21 +167,48 @@ fn observe(agent: &mut Agent, cycle: u64) -> AgentResult<Observation> {
 
     // Recall relevant episodes if we have active goals.
     let mut recalled = Vec::new();
-    if !active_goals.is_empty() {
-        if let Ok(episodes) =
+    if !active_goals.is_empty()
+        && let Ok(episodes) =
             super::memory::recall_episodes(&agent.engine, &active_goals, &agent.predicates, 3)
-        {
-            recalled = episodes;
-        }
+    {
+        recalled = episodes;
+    }
+
+    // JITIR query (Phase 13g): if the preference profile has recorded interactions,
+    // run a just-in-time information retrieval query and push ambient suggestions to WM.
+    let mut jitir_summary = String::new();
+    if agent.preference_manager.profile.interaction_count > 0
+        && let Ok(jitir) = agent.preference_manager.jitir_query(
+            &agent.working_memory,
+            &agent.goals,
+            &agent.engine,
+        )
+    {
+            let total = jitir.direct_matches.len() + jitir.serendipity_matches.len();
+            if total > 0 {
+                let labels: Vec<&str> = jitir
+                    .direct_matches
+                    .iter()
+                    .chain(jitir.serendipity_matches.iter())
+                    .take(3)
+                    .map(|s| s.label.as_str())
+                    .collect();
+                jitir_summary = format!(
+                    " | JITIR: {} suggestions ({})",
+                    total,
+                    labels.join(", ")
+                );
+            }
     }
 
     // Push observation to WM.
     let obs_content = format!(
-        "Cycle {}: {} active goals, {} WM entries, {} recalled episodes",
+        "Cycle {}: {} active goals, {} WM entries, {} recalled episodes{}",
         cycle,
         active_goals.len(),
         wm_size,
-        recalled.len()
+        recalled.len(),
+        jitir_summary,
     );
     let _ = agent.working_memory.push(WorkingMemoryEntry {
         id: 0,
@@ -162,6 +219,7 @@ fn observe(agent: &mut Agent, cycle: u64) -> AgentResult<Observation> {
         relevance: 0.6,
         source_cycle: cycle,
         reference_count: 0,
+        access_timestamps: Vec::new(),
     });
 
     Ok(Observation {
@@ -227,6 +285,7 @@ fn orient(agent: &mut Agent, observation: &Observation) -> AgentResult<Orientati
             relevance: 0.5,
             source_cycle: agent.cycle_count,
             reference_count: 0,
+            access_timestamps: Vec::new(),
         });
     }
 
@@ -244,19 +303,86 @@ fn decide(
     orientation: &Orientation,
     cycle: u64,
 ) -> AgentResult<Decision> {
-    // Get the top-priority active goal.
+    // Get the top-priority active goal, scoped to the active project when available.
     let active = goal::active_goals(&agent.goals);
-    let top_goal = active.first().ok_or(AgentError::NoGoals)?;
+
+    // Build the set of goals belonging to the active project (if any).
+    let project_goal_set: Option<std::collections::HashSet<SymbolId>> =
+        agent.agenda.active_project.and_then(|pid| {
+            agent
+                .projects
+                .iter()
+                .find(|p| p.id == pid)
+                .map(|p| p.goals.iter().copied().collect())
+        });
+
+    // Prefer goals in the active project, fall back to any active goal.
+    let top_goal = if let Some(ref pg) = project_goal_set {
+        active
+            .iter()
+            .find(|g| pg.contains(&g.symbol_id) && !g.is_blocked(&agent.goals))
+            .or_else(|| active.iter().find(|g| !g.is_blocked(&agent.goals)))
+    } else {
+        active.iter().find(|g| !g.is_blocked(&agent.goals))
+    }
+    .or(active.first())
+    .ok_or(AgentError::NoGoals)?;
+
+    // VOC-based goal switching (Phase 11g): if the top goal has negative VOC,
+    // see if a higher-marginal-value alternative exists.
+    let top_goal = {
+        let voc = super::resource::compute_voc(
+            top_goal,
+            &agent.goals,
+            &agent.competence_model,
+            &agent.improvement_history,
+            cycle,
+            5,
+        );
+        if voc <= 0.0 {
+            let ranked = super::resource::rank_goals_by_marginal_value(
+                &agent.goals,
+                &agent.competence_model,
+                &agent.improvement_history,
+                cycle,
+                5,
+            );
+            if let Some((better_id, _, better_voc)) = ranked.first() {
+                if *better_voc > voc {
+                    let alternative = Some(top_goal.symbol_id);
+                    super::resource::record_opportunity_cost(
+                        &agent.engine,
+                        cycle,
+                        *better_id,
+                        voc.abs(),
+                        alternative,
+                    );
+                    // Switch to the better goal.
+                    active
+                        .iter()
+                        .find(|g| g.symbol_id == *better_id)
+                        .unwrap_or(top_goal)
+                } else {
+                    top_goal
+                }
+            } else {
+                top_goal
+            }
+        } else {
+            top_goal
+        }
+    };
+
     let goal_id = top_goal.symbol_id;
     let goal_desc = &top_goal.description;
 
     // Increment reference counts on WM entries we're consulting for this decision.
     for entry_id in &observation.recent_entries {
-        agent.working_memory.increment_reference(*entry_id);
+        agent.working_memory.increment_reference(*entry_id, cycle);
     }
 
     // Rule-based strategy to select tool + build input.
-    let (tool_name, tool_input, reasoning) = select_tool(
+    let (tool_name, tool_input, reasoning, impasse) = select_tool(
         top_goal,
         observation,
         orientation,
@@ -265,6 +391,9 @@ fn decide(
         agent.psyche.as_ref(),
         &agent.tool_registry,
     );
+
+    // Store impasse on agent for goal generation to pick up.
+    agent.last_impasse = impasse;
 
     // Record decision in WM.
     let dec_content =
@@ -278,6 +407,7 @@ fn decide(
         relevance: 0.7,
         source_cycle: cycle,
         reference_count: 0,
+        access_timestamps: Vec::new(),
     });
 
     // Store provenance for the decision.
@@ -377,18 +507,22 @@ struct ToolCandidate {
     pressure_bonus: f32,
     /// Bonus from the Jungian psyche archetype weights.
     archetype_bonus: f32,
+    /// ACT-R utility scaling: computed_priority / 255.0 (Phase 11c).
+    goal_value_factor: f32,
     /// Why this tool was considered.
     reasoning: String,
 }
 
 impl ToolCandidate {
     fn total_score(&self) -> f32 {
-        (self.base_score - self.recency_penalty
+        let raw = (self.base_score - self.recency_penalty
             + self.novelty_bonus
             + self.episodic_bonus
             + self.pressure_bonus
             + self.archetype_bonus)
-            .max(0.0)
+            .max(0.0);
+        // ACT-R utility scaling: 0.5× at priority 0, 1.0× at priority 255.
+        raw * (0.5 + 0.5 * self.goal_value_factor)
     }
 
     fn new(name: &str, input: ToolInput, base_score: f32, reasoning: String) -> Self {
@@ -401,6 +535,7 @@ impl ToolCandidate {
             episodic_bonus: 0.0,
             pressure_bonus: 0.0,
             archetype_bonus: 0.0,
+            goal_value_factor: 1.0, // default: no scaling
             reasoning,
         }
     }
@@ -509,7 +644,7 @@ fn select_tool(
     working_memory: &WorkingMemory,
     psyche: Option<&crate::compartment::psyche::Psyche>,
     tool_registry: &super::tool::ToolRegistry,
-) -> (String, ToolInput, String) {
+) -> (String, ToolInput, String, Option<DecisionImpasse>) {
     let history = GoalToolHistory::from_working_memory(working_memory, goal.symbol_id);
     let episodic_tools = extract_episodic_tool_hints(&observation.recalled_episodes);
     let pressure = orientation.memory_pressure;
@@ -602,24 +737,24 @@ fn select_tool(
     }
 
     // ── kg_mutate: only when we can synthesize a new triple ──
-    if has_knowledge && has_inferences {
-        if let Some((subj, pred, obj)) = synthesize_triple(goal, orientation, engine) {
-            candidates.push(apply_modifiers(
-                ToolCandidate::new(
-                    "kg_mutate",
-                    ToolInput::new()
-                        .with_param("subject", &subj)
-                        .with_param("predicate", &pred)
-                        .with_param("object", &obj)
-                        .with_param("confidence", "0.7"),
-                    0.7,
-                    format!("Synthesizing new triple: {subj} -> {pred} -> {obj}."),
-                ),
-                &history,
-                &episodic_tools,
-                pressure,
-            ));
-        }
+    if has_knowledge && has_inferences
+        && let Some((subj, pred, obj)) = synthesize_triple(goal, orientation, engine)
+    {
+        candidates.push(apply_modifiers(
+            ToolCandidate::new(
+                "kg_mutate",
+                ToolInput::new()
+                    .with_param("subject", &subj)
+                    .with_param("predicate", &pred)
+                    .with_param("object", &obj)
+                    .with_param("confidence", "0.7"),
+                0.7,
+                format!("Synthesizing new triple: {subj} -> {pred} -> {obj}."),
+            ),
+            &history,
+            &episodic_tools,
+            pressure,
+        ));
     }
 
     // ── memory_recall: only when episodes exist ──
@@ -887,7 +1022,7 @@ fn select_tool(
                             semantic_score * 0.75,
                             ToolInput::new().with_param("action", "read").with_param(
                                 "path",
-                                &format!("{}.txt", goal_label.replace(' ', "_")),
+                                format!("{}.txt", goal_label.replace(' ', "_")),
                             ),
                             format!("VSA semantic match for file I/O: {semantic_score:.3}"),
                         )
@@ -925,7 +1060,7 @@ fn select_tool(
                             0.1
                         } else {
                             // Always-available reasoning tool: use VSA score with a floor
-                            (semantic_score * 0.7 + context_boost).max(0.35).min(0.75)
+                            (semantic_score * 0.7 + context_boost).clamp(0.35, 0.75)
                         };
                         (
                             base,
@@ -943,7 +1078,7 @@ fn select_tool(
                             0.1
                         } else {
                             // Always-available analysis tool: use VSA score with a floor
-                            (semantic_score * 0.7 + stall_boost).max(0.3).min(0.75)
+                            (semantic_score * 0.7 + stall_boost).clamp(0.3, 0.75)
                         };
                         (
                             base,
@@ -961,7 +1096,7 @@ fn select_tool(
                             semantic_score * 0.75,
                             ToolInput::new().with_param(
                                 "question",
-                                &format!("What should I know about: {}?", goal.description),
+                                format!("What should I know about: {}?", goal.description),
                             ),
                             format!("VSA semantic match for user interaction: {semantic_score:.3}"),
                         )
@@ -1087,6 +1222,12 @@ fn select_tool(
         }
     }
 
+    // Apply ACT-R goal-value scaling from computed priority.
+    let gvf = goal.computed_priority() as f32 / 255.0;
+    for candidate in &mut candidates {
+        candidate.goal_value_factor = gvf;
+    }
+
     // Pick the highest-scored candidate.
     candidates.sort_by(|a, b| {
         b.total_score()
@@ -1094,10 +1235,13 @@ fn select_tool(
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
+    // Detect impasse before consuming candidates.
+    let impasse = detect_impasse(&candidates, goal.symbol_id);
+
     if let Some(best) = candidates.into_iter().next() {
         let score = best.total_score();
         let reasoning = format!(
-            "{} [score={:.2}: base={:.2} recency=-{:.2} novelty=+{:.2} episodic=+{:.2} pressure=+{:.2} archetype={:+.3}]",
+            "{} [score={:.2}: base={:.2} recency=-{:.2} novelty=+{:.2} episodic=+{:.2} pressure=+{:.2} archetype={:+.3} gvf={:.2}]",
             best.reasoning,
             score,
             best.base_score,
@@ -1106,8 +1250,9 @@ fn select_tool(
             best.episodic_bonus,
             best.pressure_bonus,
             best.archetype_bonus,
+            best.goal_value_factor,
         );
-        (best.name, best.input, reasoning)
+        (best.name, best.input, reasoning, impasse)
     } else {
         // Absolute fallback (no candidates at all — shouldn't happen).
         (
@@ -1116,8 +1261,54 @@ fn select_tool(
                 .with_param("symbol", &goal_label)
                 .with_param("direction", "both"),
             "No candidates scored — falling back to KG query.".into(),
+            impasse,
         )
     }
+}
+
+/// Detect whether the tool selection is in an impasse state.
+///
+/// Returns `Some(DecisionImpasse)` if:
+/// - All candidates scored below 0.15 (nothing seems useful)
+/// - Top two candidates are within 0.02 of each other (can't decide)
+fn detect_impasse(candidates: &[ToolCandidate], goal_id: SymbolId) -> Option<DecisionImpasse> {
+    if candidates.is_empty() {
+        return Some(DecisionImpasse {
+            goal_id,
+            kind: ImpasseKind::AllBelowThreshold { threshold: 0.15 },
+            best_score: 0.0,
+        });
+    }
+
+    let best_score = candidates[0].total_score();
+
+    // All below usability threshold.
+    if best_score < 0.15 {
+        return Some(DecisionImpasse {
+            goal_id,
+            kind: ImpasseKind::AllBelowThreshold { threshold: 0.15 },
+            best_score,
+        });
+    }
+
+    // Top two tied (within epsilon).
+    if candidates.len() >= 2 {
+        let second_score = candidates[1].total_score();
+        let epsilon = 0.02;
+        if (best_score - second_score).abs() < epsilon {
+            return Some(DecisionImpasse {
+                goal_id,
+                kind: ImpasseKind::Tie {
+                    tool_a: candidates[0].name.clone(),
+                    tool_b: candidates[1].name.clone(),
+                    epsilon,
+                },
+                best_score,
+            });
+        }
+    }
+
+    None
 }
 
 /// Act: execute the selected tool and update goal status.
@@ -1174,6 +1365,7 @@ fn act(agent: &mut Agent, decision: &Decision, cycle: u64) -> AgentResult<Action
                         relevance: 0.8,
                         source_cycle: cycle,
                         reference_count: 0,
+                        access_timestamps: Vec::new(),
                     })
                     .ok();
 
@@ -1183,6 +1375,7 @@ fn act(agent: &mut Agent, decision: &Decision, cycle: u64) -> AgentResult<Action
                         reason: format!("Shadow veto: {}", veto_name),
                     },
                     new_wm_entries: wm_id.into_iter().collect(),
+                    discrepancy: None,
                 });
             }
 
@@ -1233,6 +1426,7 @@ fn act(agent: &mut Agent, decision: &Decision, cycle: u64) -> AgentResult<Action
             relevance: 0.6,
             source_cycle: cycle,
             reference_count: 0,
+            access_timestamps: Vec::new(),
         })
         .ok();
 
@@ -1284,6 +1478,7 @@ fn act(agent: &mut Agent, decision: &Decision, cycle: u64) -> AgentResult<Action
         tool_output,
         goal_progress,
         new_wm_entries: wm_id.into_iter().collect(),
+        discrepancy: None,
     })
 }
 
@@ -1397,13 +1592,12 @@ fn find_unexplored_code_child(
 
             queried_subjects.insert(subject);
 
-            if code_child_predicates.iter().any(|&p| p == predicate) {
-                if !object.is_empty()
-                    && !super::synthesize::is_metadata_label(&object)
-                    && object != "tests"
-                {
-                    discovered_children.push(object);
-                }
+            if code_child_predicates.contains(&predicate)
+                && !object.is_empty()
+                && !super::synthesize::is_metadata_label(&object)
+                && object != "tests"
+            {
+                discovered_children.push(object);
             }
         }
     }
@@ -1515,7 +1709,7 @@ fn find_code_entity_for_query(engine: &crate::engine::Engine, description: &str)
 
         for desc_word in &desc_words {
             // Exact word match in label (e.g., "vsa" matches label word "vsa")
-            if label_words.iter().any(|lw| *lw == desc_word.as_str()) {
+            if label_words.contains(&desc_word.as_str()) {
                 score += 3; // Strong signal: exact word boundary match
             }
             // Whole label equals the word (e.g., label "Vsa" == word "vsa")
@@ -1792,5 +1986,50 @@ fn evaluate_goal_progress_keyword_fallback(
         }
     } else {
         GoalProgress::NoChange
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::tool::ToolInput;
+
+    fn make_candidate(name: &str, base_score: f32) -> ToolCandidate {
+        ToolCandidate::new(name, ToolInput::new(), base_score, "test".into())
+    }
+
+    #[test]
+    fn detect_impasse_none_for_clear_winner() {
+        let candidates = vec![make_candidate("kg_query", 0.8), make_candidate("reason", 0.3)];
+        let impasse = detect_impasse(&candidates, SymbolId::new(1).unwrap());
+        assert!(impasse.is_none());
+    }
+
+    #[test]
+    fn detect_impasse_all_below_threshold() {
+        let candidates = vec![make_candidate("kg_query", 0.10), make_candidate("reason", 0.05)];
+        let impasse = detect_impasse(&candidates, SymbolId::new(1).unwrap());
+        assert!(impasse.is_some());
+        let imp = impasse.unwrap();
+        assert!(matches!(imp.kind, ImpasseKind::AllBelowThreshold { .. }));
+    }
+
+    #[test]
+    fn detect_impasse_tie() {
+        let candidates = vec![
+            make_candidate("kg_query", 0.50),
+            make_candidate("reason", 0.495),
+        ];
+        let impasse = detect_impasse(&candidates, SymbolId::new(1).unwrap());
+        assert!(impasse.is_some());
+        let imp = impasse.unwrap();
+        assert!(matches!(imp.kind, ImpasseKind::Tie { .. }));
+    }
+
+    #[test]
+    fn detect_impasse_empty_candidates() {
+        let candidates: Vec<ToolCandidate> = Vec::new();
+        let impasse = detect_impasse(&candidates, SymbolId::new(1).unwrap());
+        assert!(impasse.is_some());
     }
 }

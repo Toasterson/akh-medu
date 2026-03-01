@@ -3,6 +3,9 @@
 //! Defines AkhLang for the e-graph language and provides rewrite rules
 //! for symbolic reasoning over the knowledge graph. Full implementation in Phase 2.
 
+pub mod anti_unify;
+pub mod second_order;
+
 use egg::define_language;
 
 define_language! {
@@ -53,6 +56,46 @@ pub fn builtin_rules() -> Vec<egg::Rewrite<AkhLang, ()>> {
         egg::rewrite!("or-commute"; "(or ?a ?b)" => "(or ?b ?a)"),
         // Double negation elimination
         egg::rewrite!("double-neg"; "(not (not ?a))" => "?a"),
+    ]
+}
+
+/// PIM-specific rewrite rules (Phase 13e).
+///
+/// - `pim-unblock`: when a blocker is done, the blocked task becomes next.
+/// - `pim-deadline-chain`: earliest-start constraint from blocker's deadline.
+pub fn pim_rules() -> Vec<egg::Rewrite<AkhLang, ()>> {
+    vec![
+        // If triple(blocked, blocked-by, blocker) and triple(blocker, gtd-state, done)
+        // then triple(blocked, gtd-state, next).
+        egg::rewrite!("pim-unblock";
+            "(and (triple ?blocked ?blocked_by ?blocker) (triple ?blocker ?gtd_state ?done))"
+            => "(triple ?blocked ?gtd_state ?done)"
+        ),
+        // Deadline chain: triple(A, deadline, D) and triple(B, blocked-by, A) implies
+        // triple(B, deadline, D) as earliest-start.
+        egg::rewrite!("pim-deadline-chain";
+            "(and (triple ?a ?deadline ?d) (triple ?b ?blocked_by ?a))"
+            => "(and (triple ?a ?deadline ?d) (and (triple ?b ?blocked_by ?a) (triple ?b ?deadline ?d)))"
+        ),
+    ]
+}
+
+/// Calendar-specific rewrite rules (Phase 13f).
+///
+/// - `before-trans`: the "before" relation is transitive.
+/// - `cal-conflict`: overlapping events that require the same resource conflict.
+pub fn calendar_rules() -> Vec<egg::Rewrite<AkhLang, ()>> {
+    vec![
+        // Transitivity of "before": if A before B and B before C then A before C.
+        egg::rewrite!("before-trans";
+            "(and (triple ?a ?before ?b) (triple ?b ?before ?c))"
+            => "(and (triple ?a ?before ?b) (and (triple ?b ?before ?c) (triple ?a ?before ?c)))"
+        ),
+        // Conflict: if two events overlap and require the same resource, they conflict.
+        egg::rewrite!("cal-conflict";
+            "(and (triple ?e1 ?overlaps ?e2) (and (triple ?e1 ?requires ?r) (triple ?e2 ?requires ?r)))"
+            => "(and (triple ?e1 ?overlaps ?e2) (and (triple ?e1 ?requires ?r) (and (triple ?e2 ?requires ?r) (triple ?e1 ?conflicts ?e2))))"
+        ),
     ]
 }
 

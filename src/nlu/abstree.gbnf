@@ -1,0 +1,100 @@
+# GBNF grammar for AbsTree JSON output.
+#
+# Constrains LLM generation to valid AbsTree JSON matching serde's
+# externally-tagged enum representation. Used by LlmTranslator (Tier 3).
+#
+# Only covers the NLU-relevant variants: EntityRef, RelationRef, Freeform,
+# Triple, Negation, Quantified, Comparison, Conditional, Temporal, Modal,
+# Conjunction, RelativeClause.
+
+root ::= abstree
+
+abstree ::= entity-ref | relation-ref | freeform | triple | negation | quantified | comparison | conditional | temporal | modal | conjunction | relative-clause | dialogue-act
+
+# ── Leaf nodes ──────────────────────────────────────────────────────────
+
+entity-ref ::= "{\"EntityRef\":{\"label\":" ws string ws ",\"symbol_id\":null}}"
+
+relation-ref ::= "{\"RelationRef\":{\"label\":" ws string ws ",\"symbol_id\":null}}"
+
+freeform ::= "{\"Freeform\":" ws string ws "}"
+
+# ── Composite nodes ─────────────────────────────────────────────────────
+
+triple ::= "{\"Triple\":{\"subject\":" ws abstree ws ",\"predicate\":" ws abstree ws ",\"object\":" ws abstree ws "}}"
+
+negation ::= "{\"Negation\":{\"inner\":" ws abstree ws "}}"
+
+quantified ::= "{\"Quantified\":{\"quantifier\":" ws quantifier ws ",\"scope\":" ws abstree ws "}}"
+
+comparison ::= "{\"Comparison\":{\"entity_a\":" ws abstree ws ",\"entity_b\":" ws abstree ws ",\"property\":" ws string ws ",\"ordering\":" ws compare-ord ws "}}"
+
+conditional ::= "{\"Conditional\":{\"condition\":" ws abstree ws ",\"consequent\":" ws abstree ws "}}"
+
+temporal ::= "{\"Temporal\":{\"time_expr\":" ws temporal-expr ws ",\"inner\":" ws abstree ws "}}"
+
+modal ::= "{\"Modal\":{\"modality\":" ws modality ws ",\"inner\":" ws abstree ws "}}"
+
+conjunction ::= "{\"Conjunction\":{\"items\":[" ws abstree-list ws "],\"is_and\":" ws boolean ws "}}"
+
+relative-clause ::= "{\"RelativeClause\":{\"head\":" ws abstree ws ",\"clause\":" ws abstree ws "}}"
+
+# ── Enum types ──────────────────────────────────────────────────────────
+
+quantifier ::= "\"Universal\"" | "\"Existential\"" | "\"Most\"" | "\"None\"" | specific-quantifier
+
+specific-quantifier ::= "{\"Specific\":" ws [0-9]+ ws "}"
+
+compare-ord ::= "\"GreaterThan\"" | "\"LessThan\"" | "\"Equal\""
+
+temporal-expr ::= temporal-absolute | temporal-relative | temporal-named | temporal-recurring
+
+temporal-absolute ::= "{\"Absolute\":" ws [0-9]+ ws "}"
+
+temporal-relative ::= "{\"Relative\":" ws "-"? [0-9]+ ws "}"
+
+temporal-named ::= "{\"Named\":" ws string ws "}"
+
+temporal-recurring ::= "{\"Recurring\":" ws string ws "}"
+
+modality ::= "\"Want\"" | "\"Can\"" | "\"Should\"" | "\"Must\"" | "\"May\""
+
+boolean ::= "true" | "false"
+
+# ── Dialogue acts ──────────────────────────────────────────────────────
+
+dialogue-act ::= greeting | farewell | acknowledgment | follow-up-request | meta-query | goal-request | structural-command
+
+greeting ::= "{\"Greeting\":{\"addressee\":" ws (abstree | "null") ws "}}"
+
+farewell ::= "{\"Farewell\":{\"addressee\":" ws (abstree | "null") ws "}}"
+
+acknowledgment ::= "{\"Acknowledgment\":{\"referent\":" ws (abstree | "null") ws "}}"
+
+follow-up-request ::= "{\"FollowUpRequest\":{\"topic\":" ws (abstree | "null") ws "}}"
+
+meta-query ::= "{\"MetaQuery\":{\"about\":" ws abstree ws "}}"
+
+goal-request ::= "{\"GoalRequest\":{\"description\":" ws abstree ws "}}"
+
+structural-command ::= "{\"StructuralCommand\":{\"command\":" ws string ws ",\"args\":[" ws string-list? ws "]}}"
+
+string-list ::= string (ws "," ws string)*
+
+# ── Lists ───────────────────────────────────────────────────────────────
+
+abstree-list ::= abstree (ws "," ws abstree)*
+
+# ── Primitives ──────────────────────────────────────────────────────────
+
+string ::= "\"" characters "\""
+
+characters ::= "" | character characters
+
+character ::= [^"\\] | "\\" escape-char
+
+escape-char ::= ["\\bfnrt/] | "u" hex hex hex hex
+
+hex ::= [0-9a-fA-F]
+
+ws ::= [ \t\n]*

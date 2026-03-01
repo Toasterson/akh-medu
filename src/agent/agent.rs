@@ -6,19 +6,38 @@
 use std::sync::Arc;
 
 use crate::engine::Engine;
+use crate::provenance::{DerivationKind, ProvenanceRecord};
 use crate::symbol::SymbolId;
 
 // Re-used for session persistence serialization.
 use bincode;
 
+use super::channel::{ChannelRegistry, ChannelResult};
+use super::channel_message::{ConstraintCheckStatus, InboundMessage};
+use super::constraint_check::{ConstraintChecker, EmissionDecision, emission_decision};
+use super::conversation::{ConversationState, ResponseDetail};
+use super::interlocutor::InterlocutorRegistry;
+use super::operator_channel::InboundHandle;
+use super::decomposition::{self, DecompositionOutput, MethodRegistry, MethodStats};
+use super::drives::DriveSystem;
 use super::error::{AgentError, AgentResult};
-use super::goal::{self, DEFAULT_STALL_THRESHOLD, Goal, GoalStatus};
+use super::goal::{self, Goal, GoalStatus};
+use super::goal_generation::{self, GoalGenerationConfig, GoalGenerationResult};
+use super::metacognition::{self, CompetenceModel, FailureCase, FailureIndex, MetacognitionConfig};
+use super::chunking::{self, ChunkingConfig, MethodIndex};
+use super::resource::{self, EffortIndex, ImprovementHistory};
+use super::watch::{self, Watch, WatchFiring};
 use super::memory::{
-    ConsolidationConfig, ConsolidationResult, EpisodicEntry, WorkingMemory, WorkingMemoryEntry,
-    WorkingMemoryKind, consolidate, recall_episodes,
+    ConsolidationConfig, ConsolidationResult, EpisodicEntry, SessionSummary, WorkingMemory,
+    WorkingMemoryEntry, WorkingMemoryKind, consolidate, generate_session_summary, recall_episodes,
+    restore_session_summary,
 };
-use super::ooda::{self, OodaCycleResult};
+use super::ooda::{self, DecisionImpasse, OodaCycleResult};
 use super::plan::{self, Plan, PlanStatus};
+use super::priority_reasoning::Audience;
+use super::project::{
+    self, Agenda, Project, ProjectPredicates, ProjectStatus, project_progress, update_project_status,
+};
 use super::reflect::{self, Adjustment, ReflectionConfig, ReflectionResult};
 use super::tool::{ToolRegistry, ToolSignature};
 use super::tools;
@@ -42,6 +61,16 @@ pub struct AgentConfig {
     pub reflection: ReflectionConfig,
     /// Maximum backtrack attempts per goal before giving up (default: 3).
     pub max_backtrack_attempts: u32,
+    /// Autonomous goal generation settings.
+    pub goal_generation: GoalGenerationConfig,
+    /// Metacognitive monitoring/control settings (Phase 11f).
+    pub metacognition: MetacognitionConfig,
+    /// Procedural learning (chunking) settings (Phase 11h).
+    pub chunking: ChunkingConfig,
+    /// Sleep/consolidation cycle settings (Phase 11i).
+    pub sleep: super::sleep::SleepConfig,
+    /// Directed curiosity settings (Phase 11j).
+    pub curiosity: super::curiosity::DirectedCuriosityConfig,
 }
 
 impl Default for AgentConfig {
@@ -53,6 +82,11 @@ impl Default for AgentConfig {
             auto_consolidate: true,
             reflection: ReflectionConfig::default(),
             max_backtrack_attempts: 3,
+            goal_generation: GoalGenerationConfig::default(),
+            metacognition: MetacognitionConfig::default(),
+            chunking: ChunkingConfig::default(),
+            sleep: super::sleep::SleepConfig::default(),
+            curiosity: super::curiosity::DirectedCuriosityConfig::default(),
         }
     }
 }
@@ -78,11 +112,13 @@ pub struct AgentPredicates {
     pub consolidation_reason: SymbolId,
     pub from_cycle: SymbolId,
     pub memory_type: SymbolId,
+    /// HTN dependency: the object goal must complete before the subject goal.
+    pub blocked_by: SymbolId,
 }
 
 impl AgentPredicates {
     /// Resolve or create all well-known predicates in the engine.
-    fn init(engine: &Engine) -> AgentResult<Self> {
+    pub(crate) fn init(engine: &Engine) -> AgentResult<Self> {
         Ok(Self {
             has_status: engine.resolve_or_create_relation("agent:has_status")?,
             has_priority: engine.resolve_or_create_relation("agent:has_priority")?,
@@ -97,6 +133,7 @@ impl AgentPredicates {
                 .resolve_or_create_relation("agent:consolidation_reason")?,
             from_cycle: engine.resolve_or_create_relation("agent:from_cycle")?,
             memory_type: engine.resolve_or_create_relation("agent:memory_type")?,
+            blocked_by: engine.resolve_or_create_relation("agent:blocked_by")?,
         })
     }
 }
@@ -123,6 +160,62 @@ pub struct Agent {
     pub(crate) sink: Arc<dyn crate::message::MessageSink>,
     /// Optional Jungian psyche (loaded from the psyche compartment).
     pub(crate) psyche: Option<crate::compartment::psyche::Psyche>,
+    /// Motivational drive system for autonomous goal generation.
+    pub(crate) drives: DriveSystem,
+    /// Value ordering for argumentation-based priority reasoning (Phase 11c).
+    pub(crate) audience: Audience,
+    /// HTN decomposition method registry.
+    pub(crate) method_registry_htn: MethodRegistry,
+    /// Most recent decision impasse (consumed by goal generation).
+    pub(crate) last_impasse: Option<DecisionImpasse>,
+    /// Active projects (groups of related goals backed by microtheories).
+    pub(crate) projects: Vec<Project>,
+    /// Project-related KG predicates.
+    pub(crate) project_predicates: ProjectPredicates,
+    /// Ordered project list persisted across sessions.
+    pub(crate) agenda: Agenda,
+    /// Cycle count at the start of this session (for session summary).
+    pub(crate) session_start_cycle: u64,
+    /// World-monitoring watches (Phase 11e).
+    pub(crate) watches: Vec<Watch>,
+    /// Most recent watch firings (consumed by goal generation).
+    pub(crate) last_watch_firings: Vec<WatchFiring>,
+    /// Cumulative competence tracker (Phase 11f).
+    pub(crate) competence_model: CompetenceModel,
+    /// HNSW-backed failure pattern index (Phase 11f).
+    pub(crate) failure_index: FailureIndex,
+    /// CBR-backed effort estimation index (Phase 11g).
+    pub(crate) effort_index: EffortIndex,
+    /// Per-goal improvement rate history (Phase 11g).
+    pub(crate) improvement_history: ImprovementHistory,
+    /// HNSW-backed learned method index (Phase 11h).
+    pub(crate) method_index: MethodIndex,
+    /// Procedural learning configuration (Phase 11h).
+    pub(crate) chunking_config: ChunkingConfig,
+    /// Communication channel registry (Phase 12a).
+    pub(crate) channel_registry: ChannelRegistry,
+    /// Conversation state for grounded dialogue (Phase 12b).
+    pub(crate) conversation_state: ConversationState,
+    /// Pre-communication constraint checker (Phase 12c).
+    pub(crate) constraint_checker: ConstraintChecker,
+    /// Interlocutor registry — social KG and theory of mind (Phase 12d).
+    pub(crate) interlocutor_registry: InterlocutorRegistry,
+    /// Capability token registry for multi-agent communication (Phase 12g).
+    pub(crate) token_registry: super::multi_agent::TokenRegistry,
+    /// Personal information manager (Phase 13e).
+    pub(crate) pim_manager: super::pim::PimManager,
+    /// Calendar & temporal reasoning manager (Phase 13f).
+    pub(crate) calendar_manager: super::calendar::CalendarManager,
+    /// Preference learning & proactive assistance manager (Phase 13g).
+    pub(crate) preference_manager: super::preference::PreferenceManager,
+    /// Causal world model manager (Phase 15a).
+    pub(crate) causal_manager: super::causal::CausalManager,
+    /// Dialogue state manager backed by KG microtheories.
+    pub(crate) dialogue_manager: super::dialogue::DialogueManager,
+    /// Sleep/consolidation cycle state (Phase 11i).
+    pub(crate) sleep_cycle: super::sleep::SleepCycle,
+    /// Directed curiosity configuration (Phase 11j).
+    pub(crate) curiosity_config: super::curiosity::DirectedCuriosityConfig,
     /// Optional WASM tool runtime (only when `wasm-tools` feature is enabled).
     #[cfg(feature = "wasm-tools")]
     pub(crate) wasm_runtime: Option<super::wasm_runtime::WasmToolRuntime>,
@@ -165,6 +258,11 @@ impl Agent {
         // Documentation generation.
         registry.register(Box::new(tools::DocGenTool));
 
+        // Code generation, validation, and pattern mining.
+        registry.register(Box::new(tools::CodeGenTool));
+        registry.register(Box::new(tools::CompileFeedbackTool));
+        registry.register(Box::new(tools::PatternMineTool));
+
         // Agent management (multi-agent orchestration).
         registry.register(Box::new(tools::AgentListTool));
         registry.register(Box::new(tools::AgentSpawnTool));
@@ -173,6 +271,16 @@ impl Agent {
 
         // Trigger management.
         registry.register(Box::new(tools::TriggerManageTool));
+
+        // Audit log.
+        registry.register(Box::new(tools::AuditLogTool));
+    }
+
+    /// Attach the audit ledger to the tool registry if persistence is configured.
+    fn wire_audit_ledger(registry: &mut ToolRegistry, engine: &Engine) {
+        if let Some(ledger) = engine.audit_ledger() {
+            registry.set_audit_ledger(Arc::clone(ledger));
+        }
     }
 
     /// Load CLI and WASM tools from active skills.
@@ -281,9 +389,13 @@ impl Agent {
     /// optionally restores goals from the KG.
     pub fn new(engine: Arc<Engine>, config: AgentConfig) -> AgentResult<Self> {
         let predicates = AgentPredicates::init(&engine)?;
+        let project_predicates = ProjectPredicates::init(&engine)?;
+        let dialogue_predicates = super::dialogue::DialoguePredicates::init(&engine)?;
+        let dialogue_manager = super::dialogue::DialogueManager::new(dialogue_predicates, "operator");
 
         let mut tool_registry = ToolRegistry::new();
         Self::register_builtin_tools(&mut tool_registry, &predicates, &engine);
+        Self::wire_audit_ledger(&mut tool_registry, &engine);
 
         let working_memory = WorkingMemory::new(config.working_memory_capacity);
 
@@ -292,6 +404,14 @@ impl Agent {
 
         // Load psyche from compartment manager if available.
         let psyche = engine.compartments().and_then(|cm| cm.psyche());
+
+        let drives = DriveSystem::with_thresholds(config.goal_generation.drive_thresholds);
+        let chunking_config = config.chunking.clone();
+        let sleep_cycle = super::sleep::SleepCycle::new(config.sleep.clone());
+        let curiosity_config = config.curiosity.clone();
+
+        let mut htn_registry = MethodRegistry::new();
+        decomposition::register_builtin_methods(&mut htn_registry);
 
         let mut agent = Self {
             engine,
@@ -305,9 +425,67 @@ impl Agent {
             last_reflection: None,
             sink: Arc::new(crate::message::StdoutSink),
             psyche,
+            drives,
+            audience: Audience::exploration(),
+            method_registry_htn: htn_registry,
+            last_impasse: None,
+            projects: Vec::new(),
+            project_predicates,
+            agenda: Agenda::new(),
+            session_start_cycle: 0,
+            watches: Vec::new(),
+            last_watch_firings: Vec::new(),
+            competence_model: CompetenceModel::default(),
+            failure_index: FailureIndex::new(),
+            effort_index: EffortIndex::new(),
+            improvement_history: ImprovementHistory::default(),
+            method_index: MethodIndex::new(),
+            chunking_config,
+            channel_registry: ChannelRegistry::new(),
+            conversation_state: ConversationState::default(),
+            constraint_checker: ConstraintChecker::new(),
+            interlocutor_registry: InterlocutorRegistry::new(),
+            token_registry: super::multi_agent::TokenRegistry::new(),
+            pim_manager: super::pim::PimManager::default(),
+            calendar_manager: super::calendar::CalendarManager::default(),
+            preference_manager: super::preference::PreferenceManager::default(),
+            causal_manager: super::causal::CausalManager::default(),
+            dialogue_manager,
+            sleep_cycle,
+            curiosity_config,
             #[cfg(feature = "wasm-tools")]
             wasm_runtime: super::wasm_runtime::WasmToolRuntime::new().ok(),
         };
+
+        // Initialize interlocutor predicates.
+        if let Err(e) = agent.interlocutor_registry.init_predicates(&agent.engine) {
+            tracing::warn!("failed to init interlocutor predicates: {e}");
+        }
+
+        // Initialize PIM predicates.
+        if let Err(e) = agent.pim_manager.ensure_init(&agent.engine) {
+            tracing::warn!("failed to init PIM predicates: {e}");
+        }
+
+        // Initialize calendar predicates (Phase 13f).
+        if let Err(e) = agent.calendar_manager.ensure_init(&agent.engine) {
+            tracing::warn!("failed to init calendar predicates: {e}");
+        }
+
+        // Initialize preference predicates (Phase 13g).
+        if let Err(e) = agent.preference_manager.ensure_init(&agent.engine) {
+            tracing::warn!("failed to init preference predicates: {e}");
+        }
+
+        // Initialize causal predicates (Phase 15a).
+        if let Err(e) = agent.causal_manager.ensure_init(&agent.engine) {
+            tracing::warn!("failed to init causal predicates: {e}");
+        }
+
+        // Restore KG dialogue state into ConversationState.
+        if let Some(topic_id) = agent.dialogue_manager.query_active_topic(&agent.engine) {
+            agent.conversation_state.active_topic = Some(topic_id);
+        }
 
         // Load tools from active skills.
         agent.load_skill_tools();
@@ -343,11 +521,27 @@ impl Agent {
             return Err(AgentError::NoGoals);
         }
 
+        // Phase 11i: Check if the agent should enter a sleep cycle before OODA.
+        let wm_pressure = self.working_memory.len() as f32
+            / self.config.working_memory_capacity.max(1) as f32;
+        if super::sleep::should_sleep(&self.sleep_cycle, self.cycle_count, wm_pressure)
+            && let Err(e) = super::sleep::run_sleep_cycle(
+                &self.engine,
+                &self.working_memory,
+                &mut self.sleep_cycle,
+                self.cycle_count,
+            )
+        {
+            tracing::debug!("sleep cycle failed: {e}");
+        }
+
         // Before the OODA cycle, ensure the top-priority goal has a plan.
         let active = goal::active_goals(&self.goals);
         if let Some(top_goal) = active.first() {
             let gid = top_goal.symbol_id;
-            let _ = self.plan_goal(gid);
+            if let Err(e) = self.plan_goal(gid) {
+                tracing::debug!("failed to plan goal: {e}");
+            }
         }
 
         let result = ooda::run_ooda_cycle(self)?;
@@ -356,52 +550,351 @@ impl Agent {
         let goal_id = result.decision.goal_id;
         let key = goal_id.get();
         let mut should_backtrack = false;
-        if let Some(plan) = self.plans.get_mut(&key) {
-            if let Some(idx) = plan.next_step_index() {
-                match &result.action_result.goal_progress {
-                    ooda::GoalProgress::Failed { reason } => {
-                        plan.fail_step(idx, reason);
-                        should_backtrack = true;
-                    }
-                    _ => {
-                        plan.complete_step(idx);
-                    }
+        if let Some(plan) = self.plans.get_mut(&key)
+            && let Some(idx) = plan.next_step_index()
+        {
+            match &result.action_result.goal_progress {
+                ooda::GoalProgress::Failed { reason } => {
+                    plan.fail_step(idx, reason);
+                    should_backtrack = true;
+                }
+                _ => {
+                    plan.complete_step(idx);
                 }
             }
         }
-        if should_backtrack {
-            let _ = self.backtrack_goal(goal_id);
+        if should_backtrack
+            && let Err(e) = self.backtrack_goal(goal_id)
+        {
+            tracing::warn!("failed to backtrack goal: {e}");
+        }
+
+        // ── Metacognition: update competence model ──────────────────────
+        {
+            let tool_name = &result.decision.chosen_tool;
+            let tool_success = !matches!(
+                result.action_result.goal_progress,
+                ooda::GoalProgress::Failed { .. }
+            );
+            self.competence_model.update_tool(tool_name, tool_success);
+
+            // Update goal category competence if goal completed/failed.
+            let goal_completed = matches!(
+                result.action_result.goal_progress,
+                ooda::GoalProgress::Completed
+            );
+            let goal_failed = matches!(
+                result.action_result.goal_progress,
+                ooda::GoalProgress::Failed { .. }
+            );
+            if goal_completed || goal_failed {
+                if let Some(g) = self.goals.iter().find(|g| g.symbol_id == goal_id) {
+                    let category = metacognition::categorize_goal(g);
+                    self.competence_model.update_category(&category, goal_completed);
+                }
+                // Mark resolved failures if a goal completed.
+                if goal_completed
+                    && let Some(g) = self.goals.iter().find(|g| g.symbol_id == goal_id)
+                {
+                    self.failure_index
+                        .mark_resolved(&g.description, tool_name);
+                }
+                // Record effort case for CBR (Phase 11g).
+                if let Some(g) = self.goals.iter().find(|g| g.symbol_id == goal_id) {
+                    let case = resource::create_effort_case(g, &self.working_memory, &self.engine);
+                    self.effort_index.insert(case);
+                }
+
+                // Procedural learning: compile successful traces into methods (Phase 11h).
+                if goal_completed
+                    && let Some(g) = self.goals.iter().find(|g| g.symbol_id == goal_id)
+                {
+                    let g_clone = g.clone();
+                    if let Some(learned) = chunking::chunk_completed_goal(
+                        &g_clone,
+                        &self.working_memory,
+                        &self.engine,
+                        &self.chunking_config,
+                        self.cycle_count,
+                    ) {
+                        // Register as HTN decomposition method.
+                        let dm = chunking::to_decomposition_method(&learned);
+                        self.method_registry_htn.register(dm);
+
+                        // Record provenance.
+                        let step_count = learned.steps.len();
+                        let method_name = learned.name.clone();
+                        let source_goal = learned.id;
+                        let mut prov = ProvenanceRecord::new(
+                            goal_id,
+                            DerivationKind::ProceduralLearning {
+                                source_goal,
+                                method_name,
+                                step_count,
+                            },
+                        );
+                        if let Err(e) = self.engine.store_provenance(&mut prov) {
+                            tracing::debug!("failed to store procedural learning provenance: {e}");
+                        }
+
+                        // Add to method index.
+                        self.method_index.insert(learned);
+                    }
+                }
+            }
+
+            // Record improvement rate for all active goals (Phase 11g).
+            for g in &self.goals {
+                if matches!(g.status, GoalStatus::Active) {
+                    let rate = if g.cycles_worked == 0 {
+                        0.5
+                    } else {
+                        let cycles_since = self.cycle_count.saturating_sub(g.last_progress_cycle);
+                        if cycles_since == 0 { 1.0 } else { (1.0 / cycles_since as f32).min(1.0) }
+                    };
+                    resource::record_improvement(
+                        &mut self.improvement_history,
+                        g.symbol_id,
+                        self.cycle_count,
+                        rate,
+                        20,
+                    );
+                }
+            }
+
+            // Record failure in failure index.
+            if !tool_success
+                && let Some(g) = self.goals.iter().find(|g| g.symbol_id == goal_id)
+            {
+                let error_msg = match &result.action_result.goal_progress {
+                    ooda::GoalProgress::Failed { reason } => reason.clone(),
+                    _ => "unknown".to_string(),
+                };
+                let query = format!("{} {} {}", g.description, tool_name, error_msg);
+                let vector = super::metacognition::simple_text_hash(&query);
+                self.failure_index.insert(FailureCase {
+                    goal_description: g.description.clone(),
+                    tool_name: tool_name.clone(),
+                    error_message: error_msg,
+                    cycle: self.cycle_count,
+                    resolved: false,
+                    resolution_tool: None,
+                    vector,
+                });
+            }
         }
 
         // Periodic reflection.
         let reflect_interval = self.config.reflection.reflect_every_n_cycles;
-        if reflect_interval > 0 && self.cycle_count % reflect_interval == 0 {
+        if reflect_interval > 0 && self.cycle_count.is_multiple_of(reflect_interval) {
             if let Ok(reflection) = self.reflect() {
-                // Auto-apply non-destructive adjustments (priority changes only).
-                let safe_adjustments: Vec<Adjustment> = reflection
+                // Apply structural adjustments (abandon, decompose) from compute_adjustments().
+                // Priority changes are now handled by argumentation below.
+                let structural_adjustments: Vec<Adjustment> = reflection
                     .adjustments
                     .iter()
                     .filter(|a| {
                         matches!(
                             a,
-                            Adjustment::IncreasePriority { .. }
-                                | Adjustment::DecreasePriority { .. }
+                            Adjustment::SuggestAbandon { .. }
+                                | Adjustment::SuggestNewGoal { .. }
                         )
                     })
                     .cloned()
                     .collect();
-                let _ = self.apply_adjustments(&safe_adjustments);
+                if let Err(e) = self.apply_adjustments(&structural_adjustments) {
+                    tracing::warn!("failed to apply structural adjustments: {e}");
+                }
             }
+
+            // Argumentation-based reprioritization replaces raw ±30 adjustments.
+            let stall_threshold = self.config.reflection.stagnation_threshold;
+            let reprioritizations = reflect::reprioritize_goals(
+                &self.goals,
+                self.cycle_count,
+                stall_threshold,
+                &self.audience,
+            );
+            for (goal_id, old_priority, verdict) in reprioritizations {
+                if let Some(g) = self.goals.iter_mut().find(|g| g.symbol_id == goal_id) {
+                    let new_priority = verdict.computed_priority;
+                    g.priority_rationale = Some(verdict);
+
+                    // Record provenance for priority change.
+                    let mut prov = ProvenanceRecord::new(
+                        goal_id,
+                        DerivationKind::PriorityArgumentation {
+                            goal: goal_id,
+                            old_priority,
+                            new_priority,
+                            audience: self.audience.name.clone(),
+                            net_score: g
+                                .priority_rationale
+                                .as_ref()
+                                .map(|v| v.net_score)
+                                .unwrap_or(0.0),
+                        },
+                    )
+                    .with_confidence(0.9);
+                    if let Err(e) = self.engine.store_provenance(&mut prov) {
+                        tracing::debug!("failed to store priority argumentation provenance: {e}");
+                    }
+                }
+            }
+
+            // ── Metacognitive goal relevance evaluation (Phase 11f) ──
+            let meta_adjustments = reflect::evaluate_goal_relevance(
+                &self.goals,
+                &self.working_memory,
+                &self.competence_model,
+                &self.failure_index,
+                &self.config.metacognition,
+                self.cycle_count,
+                &self.engine,
+            );
+            if !meta_adjustments.is_empty()
+                && let Err(e) = self.apply_adjustments(&meta_adjustments)
+            {
+                tracing::warn!("failed to apply metacognitive adjustments: {e}");
+            }
+        }
+
+        // Periodic library learning (4x less frequent than reflection).
+        let library_learn_interval = reflect_interval.saturating_mul(4).max(1);
+        if library_learn_interval > 0
+            && self.cycle_count.is_multiple_of(library_learn_interval)
+            && let Err(e) = self.run_library_learning()
+        {
+            tracing::debug!("library learning cycle failed: {e}");
+        }
+
+        // Evaluate watches against world delta (Phase 11e).
+        {
+            let snap_before = watch::take_snapshot(
+                &self.engine,
+                self.cycle_count.saturating_sub(1),
+            );
+            let snap_after = watch::take_snapshot(&self.engine, self.cycle_count);
+            let firings = watch::evaluate_watches(
+                &mut self.watches,
+                &snap_before,
+                &snap_after,
+                &self.engine,
+                self.cycle_count,
+            );
+
+            // Record watch firings as WM observations + provenance.
+            for firing in &firings {
+                if let Err(e) = self.working_memory.push(WorkingMemoryEntry {
+                    id: 0,
+                    content: format!(
+                        "Watch '{}' fired: {}",
+                        firing.watch_name, firing.condition_summary
+                    ),
+                    symbols: vec![],
+                    kind: WorkingMemoryKind::Observation,
+                    timestamp: 0,
+                    relevance: 0.7,
+                    source_cycle: self.cycle_count,
+                    reference_count: 0,
+                    access_timestamps: Vec::new(),
+                }) {
+                    tracing::debug!("failed to push watch firing to WM: {e}");
+                }
+
+                // Store provenance for the firing.
+                let derived_id = self
+                    .engine
+                    .resolve_or_create_relation("agent:watch_event")
+                    .unwrap_or(self.predicates.has_status);
+                let mut prov = ProvenanceRecord::new(
+                    derived_id,
+                    DerivationKind::WatchFired {
+                        watch_id: firing.watch_name.clone(),
+                        condition_summary: firing.condition_summary.clone(),
+                    },
+                )
+                .with_confidence(0.8);
+                if let Err(e) = self.engine.store_provenance(&mut prov) {
+                    tracing::debug!("failed to store watch firing provenance: {e}");
+                }
+            }
+
+            self.last_watch_firings = firings;
+        }
+
+        // Periodic autonomous goal generation.
+        let gen_interval = self.config.goal_generation.generate_every_n_cycles;
+        if gen_interval > 0
+            && self.cycle_count.is_multiple_of(gen_interval)
+            && let Err(e) = self.generate_goals()
+        {
+            tracing::debug!("autonomous goal generation failed: {e}");
         }
 
         // Auto-decompose stalled goals.
         self.decompose_stalled_goals();
 
+        // Consume a cycle from the active project's budget (Phase 11g).
+        if let Some(active_pid) = self.agenda.active_project
+            && let Some(proj) = self.projects.iter_mut().find(|p| p.id == active_pid)
+        {
+            proj.consume_cycle();
+        }
+
+        // Auto-project-completion: check if active project's goals are all done.
+        if let Some(active_pid) = self.agenda.active_project
+            && let Some(proj) = self.projects.iter().find(|p| p.id == active_pid)
+            && !proj.goals.is_empty()
+            && project_progress(proj, &self.goals) >= 1.0
+        {
+            // Mark project completed and switch to the next one.
+            if let Some(proj_mut) = self.projects.iter_mut().find(|p| p.id == active_pid)
+                && let Err(e) = update_project_status(
+                    &self.engine,
+                    proj_mut,
+                    ProjectStatus::Completed,
+                    &self.project_predicates,
+                )
+            {
+                tracing::warn!("failed to update project status to completed: {e}");
+            }
+            self.agenda.select_active(&self.projects);
+
+            // Log context switch in WM.
+            let switch_msg = match self.agenda.active_project {
+                Some(new_pid) => {
+                    let new_name = self
+                        .projects
+                        .iter()
+                        .find(|p| p.id == new_pid)
+                        .map(|p| p.name.as_str())
+                        .unwrap_or("?");
+                    format!("Project completed, switching to \"{new_name}\"")
+                }
+                None => "Project completed, no more projects in agenda".to_string(),
+            };
+            if let Err(e) = self.working_memory.push(WorkingMemoryEntry {
+                id: 0,
+                content: switch_msg,
+                symbols: vec![],
+                kind: WorkingMemoryKind::GoalUpdate,
+                timestamp: 0,
+                relevance: 0.9,
+                source_cycle: self.cycle_count,
+                reference_count: 0,
+                access_timestamps: Vec::new(),
+            }) {
+                tracing::debug!("failed to push project switch to WM: {e}");
+            }
+        }
+
         // Auto-consolidate if enabled and WM pressure is high.
         if self.config.auto_consolidate
             && self.working_memory.len() >= self.config.consolidation.auto_consolidate_at
+            && let Err(e) = self.consolidate()
         {
-            let _ = self.consolidate();
+            tracing::warn!("auto-consolidation failed: {e}");
         }
 
         Ok(result)
@@ -427,8 +920,9 @@ impl Agent {
             // Auto-consolidate.
             if self.config.auto_consolidate
                 && self.working_memory.len() >= self.config.consolidation.auto_consolidate_at
+                && let Err(e) = self.consolidate()
             {
-                let _ = self.consolidate();
+                tracing::warn!("auto-consolidation failed: {e}");
             }
         }
 
@@ -448,6 +942,7 @@ impl Agent {
             &self.goals,
             &self.config.consolidation,
             &self.predicates,
+            self.cycle_count,
         )
     }
 
@@ -507,8 +1002,213 @@ impl Agent {
     }
 
     /// Set or replace the agent's psyche.
-    pub fn set_psyche(&mut self, psyche: crate::compartment::psyche::Psyche) {
+    ///
+    /// Returns `PsycheImmutable` if the existing psyche is awakened.
+    /// Use [`force_set_psyche`] for admin override.
+    pub fn set_psyche(
+        &mut self,
+        psyche: crate::compartment::psyche::Psyche,
+    ) -> super::error::AgentResult<()> {
+        if let Some(ref existing) = self.psyche {
+            if existing.is_awakened() {
+                return Err(super::error::AgentError::PsycheImmutable);
+            }
+        }
         self.psyche = Some(psyche);
+        Ok(())
+    }
+
+    /// Unconditionally replace the agent's psyche (admin override).
+    pub fn force_set_psyche(&mut self, psyche: crate::compartment::psyche::Psyche) {
+        self.psyche = Some(psyche);
+    }
+
+    // ── Channel registry (Phase 12a) ────────────────────────────────────
+
+    /// Get a shared reference to the channel registry.
+    pub fn channel_registry(&self) -> &ChannelRegistry {
+        &self.channel_registry
+    }
+
+    /// Get a mutable reference to the channel registry.
+    pub fn channel_registry_mut(&mut self) -> &mut ChannelRegistry {
+        &mut self.channel_registry
+    }
+
+    /// Register a communication channel.
+    pub fn register_channel(
+        &mut self,
+        channel: Box<dyn super::channel::CommChannel>,
+    ) -> ChannelResult<()> {
+        self.channel_registry.register(channel)
+    }
+
+    /// Create and register an operator channel wrapping the current sink,
+    /// and return an `InboundHandle` for the UI event loop.
+    pub fn setup_operator_channel(&mut self) -> InboundHandle {
+        let op = super::operator_channel::OperatorChannel::new(Arc::clone(&self.sink));
+        let handle = op.inbound_handle();
+        // Registration cannot fail here: we are creating the first operator channel.
+        let _ = self.channel_registry.register(Box::new(op));
+        handle
+    }
+
+    /// Drain all pending inbound messages from all registered channels.
+    pub fn drain_inbound(&mut self) -> Vec<InboundMessage> {
+        self.channel_registry
+            .drain_all()
+            .into_iter()
+            .map(|(_id, msg)| msg)
+            .collect()
+    }
+
+    // ── Conversation state (Phase 12b) ─────────────────────────────────
+
+    /// Get a shared reference to the conversation state.
+    pub fn conversation_state(&self) -> &ConversationState {
+        &self.conversation_state
+    }
+
+    /// Get a mutable reference to the conversation state.
+    pub fn conversation_state_mut(&mut self) -> &mut ConversationState {
+        &mut self.conversation_state
+    }
+
+    /// Set the response detail level for grounded dialogue.
+    pub fn set_response_detail(&mut self, detail: ResponseDetail) {
+        self.conversation_state.response_detail = detail;
+    }
+
+    // ── Dialogue manager ─────────────────────────────────────────────
+
+    /// Get a shared reference to the dialogue manager.
+    pub fn dialogue_manager(&self) -> &super::dialogue::DialogueManager {
+        &self.dialogue_manager
+    }
+
+    /// Get a mutable reference to the dialogue manager.
+    pub fn dialogue_manager_mut(&mut self) -> &mut super::dialogue::DialogueManager {
+        &mut self.dialogue_manager
+    }
+
+    // ── Constraint checking (Phase 12c) ────────────────────────────────
+
+    /// Get a shared reference to the constraint checker.
+    pub fn constraint_checker(&self) -> &ConstraintChecker {
+        &self.constraint_checker
+    }
+
+    /// Get a mutable reference to the constraint checker.
+    pub fn constraint_checker_mut(&mut self) -> &mut ConstraintChecker {
+        &mut self.constraint_checker
+    }
+
+    /// Get a reference to the interlocutor registry.
+    pub fn interlocutor_registry(&self) -> &InterlocutorRegistry {
+        &self.interlocutor_registry
+    }
+
+    /// Get a mutable reference to the interlocutor registry.
+    pub fn interlocutor_registry_mut(&mut self) -> &mut InterlocutorRegistry {
+        &mut self.interlocutor_registry
+    }
+
+    /// Get a reference to the capability token registry.
+    pub fn token_registry(&self) -> &super::multi_agent::TokenRegistry {
+        &self.token_registry
+    }
+
+    /// Get a mutable reference to the capability token registry.
+    pub fn token_registry_mut(&mut self) -> &mut super::multi_agent::TokenRegistry {
+        &mut self.token_registry
+    }
+
+    /// Get a reference to the PIM manager.
+    pub fn pim_manager(&self) -> &super::pim::PimManager {
+        &self.pim_manager
+    }
+
+    /// Get a mutable reference to the PIM manager.
+    pub fn pim_manager_mut(&mut self) -> &mut super::pim::PimManager {
+        &mut self.pim_manager
+    }
+
+    /// Get a reference to the calendar manager.
+    pub fn calendar_manager(&self) -> &super::calendar::CalendarManager {
+        &self.calendar_manager
+    }
+
+    /// Get a mutable reference to the calendar manager.
+    pub fn calendar_manager_mut(&mut self) -> &mut super::calendar::CalendarManager {
+        &mut self.calendar_manager
+    }
+
+    /// Get a reference to the preference manager.
+    pub fn preference_manager(&self) -> &super::preference::PreferenceManager {
+        &self.preference_manager
+    }
+
+    /// Get a mutable reference to the preference manager.
+    pub fn preference_manager_mut(&mut self) -> &mut super::preference::PreferenceManager {
+        &mut self.preference_manager
+    }
+
+    /// Get a reference to the causal manager.
+    pub fn causal_manager(&self) -> &super::causal::CausalManager {
+        &self.causal_manager
+    }
+
+    /// Get a mutable reference to the causal manager.
+    pub fn causal_manager_mut(&mut self) -> &mut super::causal::CausalManager {
+        &mut self.causal_manager
+    }
+
+    /// Ensure an interlocutor is registered, auto-creating on first interaction.
+    ///
+    /// Returns a reference to their profile. If the interlocutor already exists,
+    /// updates their channel list and interaction count.
+    pub fn ensure_interlocutor(
+        &mut self,
+        interlocutor_id: &super::channel_message::InterlocutorId,
+        channel_id: &str,
+        channel_kind: super::channel::ChannelKind,
+    ) -> AgentResult<()> {
+        self.interlocutor_registry
+            .register(interlocutor_id, channel_id, channel_kind, &self.engine)?;
+        Ok(())
+    }
+
+    /// Run constraint checks on a grounded response and produce an
+    /// `OutboundMessage` with the check status populated.
+    ///
+    /// Returns `(OutboundMessage, EmissionDecision)` — the caller should
+    /// respect the decision (emit or suppress) based on channel kind.
+    pub fn check_and_wrap_grounded(
+        &mut self,
+        response: &super::conversation::GroundedResponse,
+        channel_id: &str,
+        channel_kind: super::channel::ChannelKind,
+    ) -> (super::channel_message::OutboundMessage, EmissionDecision) {
+        let detail = self.conversation_state.response_detail;
+        let grammar = self.conversation_state.grammar.clone();
+
+        // Run the constraint pipeline.
+        let outcome = self.constraint_checker.check_grounded(
+            response, channel_id, channel_kind, &self.engine,
+        );
+
+        let decision = emission_decision(channel_kind, &outcome);
+
+        // Build the outbound message with constraint status.
+        let mut msg = super::channel_message::OutboundMessage::grounded(response, detail, grammar);
+        msg.constraint_check = ConstraintCheckStatus::from_outcome(&outcome);
+
+        // Record emission in the budget.
+        if decision == EmissionDecision::Emit {
+            self.constraint_checker.record_emission(channel_id);
+        }
+
+        (msg, decision)
     }
 
     /// Synthesize human-readable narrative from the agent's working memory findings.
@@ -590,22 +1290,31 @@ impl Agent {
             .filter(|g| {
                 matches!(g.status, GoalStatus::Active)
                     && g.children.is_empty()
-                    && g.is_stalled(self.cycle_count, DEFAULT_STALL_THRESHOLD)
+                    && g.is_stalled(
+                        self.cycle_count,
+                        resource::dynamic_stall_threshold(
+                            g.estimated_effort.as_ref(),
+                        ),
+                    )
             })
             .map(|g| g.symbol_id)
             .collect();
 
         for goal_id in stalled_ids {
-            let _ = self.decompose_stalled_goal(goal_id);
+            if let Err(e) = self.decompose_stalled_goal(goal_id) {
+                tracing::debug!("failed to decompose stalled goal: {e}");
+            }
         }
     }
 
-    /// Decompose a stalled goal into sub-goals.
+    /// Decompose a stalled goal into sub-goals using HTN methods.
     ///
-    /// Suspends the parent goal and creates active child goals derived from
-    /// the parent's description. Returns the new sub-goal symbol IDs.
+    /// Selects the best decomposition method from the registry, instantiates it
+    /// to produce a TaskTree DAG, creates child goals with `blocked_by` relations,
+    /// suspends the parent, and records `HtnDecomposition` provenance. Falls back
+    /// to comma/and splitting if no HTN method matches.
     pub fn decompose_stalled_goal(&mut self, goal_id: SymbolId) -> AgentResult<Vec<SymbolId>> {
-        let (description, parent_idx) = {
+        let (goal_clone, parent_idx) = {
             let (idx, goal) = self
                 .goals
                 .iter()
@@ -614,11 +1323,15 @@ impl Agent {
                 .ok_or(AgentError::GoalNotFound {
                     goal_id: goal_id.get(),
                 })?;
-            (goal.description.clone(), idx)
+            (goal.clone(), idx)
         };
 
-        let sub_descs = goal::generate_sub_goal_descriptions(&description);
-        let sub_tuples: Vec<(&str, u8, &str)> = sub_descs
+        // HTN decomposition: select method, build DAG, extract sub-goals + deps.
+        let output: DecompositionOutput =
+            decomposition::decompose_goal_htn(&goal_clone, &self.engine, &self.method_registry_htn);
+
+        let sub_tuples: Vec<(&str, u8, &str)> = output
+            .sub_goals
             .iter()
             .map(|(d, p, c)| (d.as_str(), *p, c.as_str()))
             .collect();
@@ -628,6 +1341,23 @@ impl Agent {
 
         let child_ids: Vec<SymbolId> = children.iter().map(|c| c.symbol_id).collect();
 
+        // Apply dependency edges: set `blocked_by` on child goals.
+        for &(blocker_idx, blocked_idx) in &output.dependencies {
+            if blocker_idx < child_ids.len() && blocked_idx < child_ids.len() {
+                let blocker_id = child_ids[blocker_idx];
+                let blocked_id = child_ids[blocked_idx];
+
+                // Persist in KG.
+                if let Err(e) = self.engine.add_triple(&crate::graph::Triple::new(
+                    blocked_id,
+                    self.predicates.blocked_by,
+                    blocker_id,
+                )) {
+                    tracing::debug!("failed to add blocked_by triple: {e}");
+                }
+            }
+        }
+
         // Suspend the parent.
         goal::update_goal_status(
             &self.engine,
@@ -636,8 +1366,42 @@ impl Agent {
             &self.predicates,
         )?;
 
-        // Add children to the goals list.
-        self.goals.extend(children);
+        // Add children to the goals list, attaching blocked_by info.
+        for (i, mut child) in children.into_iter().enumerate() {
+            // Gather blockers for this child from the dependency list.
+            let blockers: Vec<SymbolId> = output
+                .dependencies
+                .iter()
+                .filter(|&&(_, blocked)| blocked == i)
+                .filter_map(|&(blocker, _)| child_ids.get(blocker).copied())
+                .collect();
+            child.blocked_by = blockers;
+            self.goals.push(child);
+        }
+
+        // Record HTN provenance.
+        let mut prov = ProvenanceRecord::new(
+            goal_id,
+            crate::provenance::DerivationKind::HtnDecomposition {
+                method_name: output.tree.method_name.clone(),
+                strategy: output.tree.strategy.to_string(),
+                subtask_count: output.sub_goals.len(),
+            },
+        )
+        .with_confidence(0.9);
+        if let Err(e) = self.engine.store_provenance(&mut prov) {
+            tracing::debug!("failed to store HTN decomposition provenance: {e}");
+        }
+
+        // Update method stats.
+        if let Some(method) = self
+            .method_registry_htn
+            .methods_mut()
+            .iter_mut()
+            .find(|m| m.name == output.tree.method_name)
+        {
+            method.usage_count += 1;
+        }
 
         Ok(child_ids)
     }
@@ -677,7 +1441,7 @@ impl Agent {
         let new_plan = plan::generate_plan(&goal, &self.engine, &self.working_memory, attempt)?;
 
         // Record plan creation in WM.
-        let _ = self.working_memory.push(WorkingMemoryEntry {
+        if let Err(e) = self.working_memory.push(WorkingMemoryEntry {
             id: 0,
             content: format!(
                 "Plan generated for \"{}\": {} steps, strategy: {}",
@@ -691,7 +1455,10 @@ impl Agent {
             relevance: 0.7,
             source_cycle: self.cycle_count,
             reference_count: 0,
-        });
+            access_timestamps: Vec::new(),
+        }) {
+            tracing::debug!("failed to push plan creation to WM: {e}");
+        }
 
         self.plans.insert(key, new_plan);
         Ok(&self.plans[&key])
@@ -723,7 +1490,7 @@ impl Agent {
 
         let new_plan = plan::generate_plan(&goal, &self.engine, &self.working_memory, attempt)?;
 
-        let _ = self.working_memory.push(WorkingMemoryEntry {
+        if let Err(e) = self.working_memory.push(WorkingMemoryEntry {
             id: 0,
             content: format!(
                 "Backtrack: new plan (attempt {}) for \"{}\": {}",
@@ -737,7 +1504,10 @@ impl Agent {
             relevance: 0.7,
             source_cycle: self.cycle_count,
             reference_count: 0,
-        });
+            access_timestamps: Vec::new(),
+        }) {
+            tracing::debug!("failed to push backtrack plan to WM: {e}");
+        }
 
         self.plans.insert(key, new_plan);
         Ok(Some(&self.plans[&key]))
@@ -755,10 +1525,13 @@ impl Agent {
             self.cycle_count,
             &self.config.reflection,
             self.psyche.as_mut(),
+            Some(&self.pim_manager),
+            Some(&self.projects),
+            Some((&self.preference_manager, &self.engine)),
         )?;
 
         // Record reflection in WM.
-        let _ = self.working_memory.push(WorkingMemoryEntry {
+        if let Err(e) = self.working_memory.push(WorkingMemoryEntry {
             id: 0,
             content: result.summary.clone(),
             symbols: vec![],
@@ -767,7 +1540,10 @@ impl Agent {
             relevance: 0.8,
             source_cycle: self.cycle_count,
             reference_count: 0,
-        });
+            access_timestamps: Vec::new(),
+        }) {
+            tracing::debug!("failed to push reflection to WM: {e}");
+        }
 
         self.last_reflection = Some(result.clone());
         Ok(result)
@@ -794,11 +1570,92 @@ impl Agent {
                     priority,
                     ..
                 } => {
-                    let _ = self.add_goal(description, *priority, description)?;
+                    self.add_goal(description, *priority, description)?;
                     applied += 1;
                 }
                 Adjustment::SuggestAbandon { goal_id, reason } => {
-                    let _ = self.fail_goal(*goal_id, reason);
+                    if let Err(e) = self.fail_goal(*goal_id, reason) {
+                        tracing::warn!("failed to abandon goal: {e}");
+                    }
+                    applied += 1;
+                }
+                Adjustment::ReformulateGoal {
+                    goal_id,
+                    relaxed_criteria,
+                    reason: _,
+                } => {
+                    // Find the goal, reformulate it, add the replacement.
+                    if let Some(idx) = self.goals.iter().position(|g| g.symbol_id == *goal_id) {
+                        let original = &mut self.goals[idx];
+                        if let Ok(replacement) = goal::reformulate_goal(
+                            &self.engine,
+                            original,
+                            relaxed_criteria,
+                            &self.predicates,
+                        ) {
+                            let category = metacognition::categorize_goal(&replacement);
+                            let competence = self.competence_model.category_competence(&category);
+
+                            // Record metacognitive provenance.
+                            let mut prov = ProvenanceRecord::new(
+                                *goal_id,
+                                DerivationKind::MetacognitiveEvaluation {
+                                    goal: *goal_id,
+                                    signal: "reformulated".to_string(),
+                                    improvement_rate: 0.0,
+                                    competence,
+                                },
+                            )
+                            .with_confidence(0.8);
+                            if let Err(e) = self.engine.store_provenance(&mut prov) {
+                                tracing::debug!("failed to store reformulation provenance: {e}");
+                            }
+
+                            self.goals.push(replacement);
+                            applied += 1;
+                        }
+                    }
+                }
+                Adjustment::SuspendGoal { goal_id, reason: _ } => {
+                    if let Some(g) = self.goals.iter_mut().find(|g| g.symbol_id == *goal_id) {
+                        let category = metacognition::categorize_goal(g);
+                        let competence = self.competence_model.category_competence(&category);
+                        if let Err(e) = goal::update_goal_status(
+                            &self.engine,
+                            g,
+                            GoalStatus::Suspended,
+                            &self.predicates,
+                        ) {
+                            tracing::warn!("failed to suspend goal: {e}");
+                        }
+
+                        // Record metacognitive provenance.
+                        let mut prov = ProvenanceRecord::new(
+                            *goal_id,
+                            DerivationKind::MetacognitiveEvaluation {
+                                goal: *goal_id,
+                                signal: "suspended".to_string(),
+                                improvement_rate: 0.0,
+                                competence,
+                            },
+                        )
+                        .with_confidence(0.8);
+                        if let Err(e) = self.engine.store_provenance(&mut prov) {
+                            tracing::debug!("failed to store suspension provenance: {e}");
+                        }
+
+                        applied += 1;
+                    }
+                }
+                Adjustment::ReviseBeliefs {
+                    goal_id: _,
+                    retract: _,
+                    assert_syms: _,
+                } => {
+                    // Belief revision: retract/assert triples.
+                    // The current KG does not support triple removal, so we
+                    // just record the intent. Assertions are added as triples.
+                    // Full retraction support will come with TMS integration.
                     applied += 1;
                 }
             }
@@ -810,6 +1667,322 @@ impl Agent {
     /// Get the most recent reflection result.
     pub fn last_reflection(&self) -> Option<&ReflectionResult> {
         self.last_reflection.as_ref()
+    }
+
+    // -----------------------------------------------------------------------
+    // Library learning
+    // -----------------------------------------------------------------------
+
+    /// Run a library learning cycle: discover reusable abstractions from recent code.
+    ///
+    /// Collects code entities from the KG, anti-unifies them, scores candidates,
+    /// and stores the top abstractions as learned templates.
+    pub fn run_library_learning(
+        &self,
+    ) -> AgentResult<super::library_learn::LibraryLearningResult> {
+        let learner = super::library_learn::LibraryLearner::with_defaults();
+        learner.run_cycle(&self.engine)
+    }
+
+    // -----------------------------------------------------------------------
+    // Autonomous goal generation
+    // -----------------------------------------------------------------------
+
+    /// Run the autonomous goal generation pipeline.
+    ///
+    /// Updates drives from current engine/WM state, collects signals from
+    /// multiple sources, deduplicates, and activates the top proposals.
+    pub fn generate_goals(&mut self) -> AgentResult<GoalGenerationResult> {
+        let goal_symbols: Vec<SymbolId> = goal::active_goals(&self.goals)
+            .iter()
+            .map(|g| g.symbol_id)
+            .collect();
+
+        // Update drive strengths with directed curiosity (Phase 11j).
+        self.drives.update_with_curiosity(
+            &self.engine,
+            &self.working_memory,
+            &goal_symbols,
+            self.cycle_count,
+            Some(&self.curiosity_config),
+        );
+
+        // Phase 11j: Generate curiosity proposals alongside drive signals.
+        let curiosity_proposals = super::curiosity::compute_directed_curiosity(
+            &self.engine,
+            &self.curiosity_config,
+        )
+        .map(|report| report.proposals)
+        .unwrap_or_default();
+
+        // Run the three-phase pipeline.
+        let gen_result = goal_generation::generate_goals(
+            &self.engine,
+            &self.goals,
+            &self.working_memory,
+            &self.drives,
+            &self.config.goal_generation,
+            &self.predicates,
+            self.cycle_count,
+            self.last_impasse.as_ref(),
+            self.last_reflection.as_ref(),
+            &self.last_watch_firings,
+        )?;
+
+        // Merge curiosity proposals into the activated set (Phase 11j).
+        let mut gen_result = gen_result;
+        for cp in curiosity_proposals {
+            // Don't exceed max activations.
+            if gen_result.activated.len() < self.config.goal_generation.max_activations {
+                gen_result.activated.push(cp);
+            } else if gen_result.dormant.len() < self.config.goal_generation.max_dormant {
+                gen_result.dormant.push(cp);
+            }
+        }
+
+        // Activate generated goals by creating them in the goals list.
+        for proposal in &gen_result.activated {
+            let mut g = goal::create_goal(
+                &self.engine,
+                &proposal.description,
+                proposal.priority_suggestion,
+                &proposal.success_criteria,
+                &self.predicates,
+            )?;
+            g.source = Some(proposal.source.clone());
+
+            // Record provenance for autonomously generated goals.
+            let (drive_name, drive_strength) =
+                goal_generation::provenance_from_source(&proposal.source);
+            let mut prov = ProvenanceRecord::new(
+                g.symbol_id,
+                DerivationKind::AutonomousGoalGeneration {
+                    drive: drive_name,
+                    strength: drive_strength,
+                },
+            )
+            .with_confidence(proposal.feasibility);
+            if let Err(e) = self.engine.store_provenance(&mut prov) {
+                tracing::debug!("failed to store goal generation provenance: {e}");
+            }
+
+            self.goals.push(g);
+        }
+
+        // Store dormant proposals as goals with Dormant status.
+        for proposal in &gen_result.dormant {
+            let mut g = goal::create_goal(
+                &self.engine,
+                &proposal.description,
+                proposal.priority_suggestion,
+                &proposal.success_criteria,
+                &self.predicates,
+            )?;
+            g.source = Some(proposal.source.clone());
+            goal::update_goal_status(
+                &self.engine,
+                &mut g,
+                GoalStatus::Dormant,
+                &self.predicates,
+            )?;
+            self.goals.push(g);
+        }
+
+        // Log generation result to WM.
+        if let Err(e) = self.working_memory.push(WorkingMemoryEntry {
+            id: 0,
+            content: format!(
+                "Goal generation: {} activated, {} dormant, {} deduplicated, {} infeasible. Drives: curiosity={:.2} coherence={:.2} completeness={:.2} efficiency={:.2}",
+                gen_result.activated.len(),
+                gen_result.dormant.len(),
+                gen_result.deduplicated,
+                gen_result.infeasible,
+                gen_result.drive_strengths[0],
+                gen_result.drive_strengths[1],
+                gen_result.drive_strengths[2],
+                gen_result.drive_strengths[3],
+            ),
+            symbols: vec![],
+            kind: WorkingMemoryKind::Inference,
+            timestamp: 0,
+            relevance: 0.8,
+            source_cycle: self.cycle_count,
+            reference_count: 0,
+            access_timestamps: Vec::new(),
+        }) {
+            tracing::debug!("failed to push goal generation result to WM: {e}");
+        }
+
+        // Clear impasse after it's been consumed.
+        self.last_impasse = None;
+
+        Ok(gen_result)
+    }
+
+    /// Get the current drive system state.
+    pub fn drives(&self) -> &DriveSystem {
+        &self.drives
+    }
+
+    /// Get the current argumentation audience.
+    pub fn audience(&self) -> &Audience {
+        &self.audience
+    }
+
+    /// Set the argumentation audience (operational mode).
+    pub fn set_audience(&mut self, audience: Audience) {
+        self.audience = audience;
+    }
+
+    // -----------------------------------------------------------------------
+    // Watches (Phase 11e)
+    // -----------------------------------------------------------------------
+
+    /// Add a new world-monitoring watch. Returns the watch ID.
+    pub fn add_watch(
+        &mut self,
+        name: &str,
+        condition: super::watch::WatchCondition,
+        action: super::watch::WatchAction,
+        cooldown_cycles: u64,
+    ) -> AgentResult<String> {
+        let id = watch::generate_watch_id();
+        self.watches.push(Watch {
+            id: id.clone(),
+            name: name.to_string(),
+            condition,
+            action,
+            enabled: true,
+            cooldown_cycles,
+            last_fired_cycle: 0,
+        });
+        Ok(id)
+    }
+
+    /// Remove a watch by ID.
+    pub fn remove_watch(&mut self, id: &str) -> AgentResult<()> {
+        let idx = self
+            .watches
+            .iter()
+            .position(|w| w.id == id)
+            .ok_or_else(|| AgentError::WatchNotFound {
+                watch_id: id.to_string(),
+            })?;
+        self.watches.remove(idx);
+        Ok(())
+    }
+
+    /// Get all registered watches.
+    pub fn watches(&self) -> &[Watch] {
+        &self.watches
+    }
+
+    // -----------------------------------------------------------------------
+    // Resource awareness (Phase 11g)
+    // -----------------------------------------------------------------------
+
+    /// Estimate effort for a goal using the CBR case base.
+    pub fn estimate_goal_effort(&self, goal_id: SymbolId) -> AgentResult<resource::EffortEstimate> {
+        let goal = self
+            .goals
+            .iter()
+            .find(|g| g.symbol_id == goal_id)
+            .ok_or(AgentError::GoalNotFound {
+                goal_id: goal_id.get(),
+            })?;
+        resource::estimate_effort(goal, &self.effort_index, &self.engine, 3)
+            .map_err(|e| AgentError::ConsolidationFailed {
+                message: e.to_string(),
+            })
+    }
+
+    /// Prune dormant learned methods from the method index (Phase 11h).
+    pub fn prune_methods(&mut self) -> Vec<SymbolId> {
+        let session_cycles = self.cycle_count.saturating_sub(self.session_start_cycle).max(1);
+        let mut methods: Vec<chunking::LearnedMethod> =
+            self.method_index.methods().to_vec();
+        let pruned = chunking::prune_dormant(
+            &mut methods,
+            self.cycle_count,
+            session_cycles,
+            self.chunking_config.dormant_sessions,
+        );
+        // Rebuild the index from remaining methods.
+        if !pruned.is_empty() {
+            self.method_index = MethodIndex::from_methods(methods);
+        }
+        pruned
+    }
+
+    /// Get a snapshot of all learned methods (Phase 11h).
+    pub fn learned_methods(&self) -> &[chunking::LearnedMethod] {
+        self.method_index.methods()
+    }
+
+    // -----------------------------------------------------------------------
+    // Projects & Agenda
+    // -----------------------------------------------------------------------
+
+    /// Create a new project backed by a KG microtheory.
+    ///
+    /// Returns the project's symbol ID. The project is added to the agenda
+    /// with the given priority.
+    pub fn create_project(
+        &mut self,
+        name: &str,
+        description: &str,
+        scope_concepts: &[&str],
+        priority: u8,
+    ) -> AgentResult<SymbolId> {
+        let proj = project::create_project(
+            &self.engine,
+            name,
+            description,
+            scope_concepts,
+            &self.project_predicates,
+            &self.predicates,
+        )?;
+        let id = proj.id;
+        self.agenda.add_project(id, priority);
+        self.projects.push(proj);
+        Ok(id)
+    }
+
+    /// Get all projects (read-only).
+    pub fn projects(&self) -> &[Project] {
+        &self.projects
+    }
+
+    /// Get the agenda (read-only).
+    pub fn agenda(&self) -> &Agenda {
+        &self.agenda
+    }
+
+    /// Set the active project by ID.
+    pub fn set_active_project(&mut self, project_id: SymbolId) -> AgentResult<()> {
+        if !self.projects.iter().any(|p| p.id == project_id) {
+            return Err(AgentError::ProjectNotFound {
+                project_id: project_id.get(),
+            });
+        }
+        self.agenda.active_project = Some(project_id);
+        Ok(())
+    }
+
+    /// Add an existing goal to a project.
+    pub fn assign_goal_to_project(
+        &mut self,
+        goal_id: SymbolId,
+        project_id: SymbolId,
+    ) -> AgentResult<()> {
+        let proj = self
+            .projects
+            .iter_mut()
+            .find(|p| p.id == project_id)
+            .ok_or(AgentError::ProjectNotFound {
+                project_id: project_id.get(),
+            })?;
+        project::add_goal_to_project(&self.engine, proj, goal_id, &self.project_predicates)
     }
 
     // -----------------------------------------------------------------------
@@ -853,6 +2026,40 @@ impl Agent {
                 message: format!("failed to persist cycle count: {e}"),
             })?;
 
+        // Persist drive system.
+        let drive_bytes =
+            bincode::serialize(&self.drives).map_err(|e| AgentError::ConsolidationFailed {
+                message: format!("failed to serialize drive system: {e}"),
+            })?;
+        store
+            .put_meta(b"agent:drive_system", &drive_bytes)
+            .map_err(|e| AgentError::ConsolidationFailed {
+                message: format!("failed to persist drive system: {e}"),
+            })?;
+
+        // Persist HTN method stats.
+        let method_stats = self.method_registry_htn.export_stats();
+        let stats_bytes =
+            bincode::serialize(&method_stats).map_err(|e| AgentError::ConsolidationFailed {
+                message: format!("failed to serialize method stats: {e}"),
+            })?;
+        store
+            .put_meta(b"agent:method_stats", &stats_bytes)
+            .map_err(|e| AgentError::ConsolidationFailed {
+                message: format!("failed to persist method stats: {e}"),
+            })?;
+
+        // Persist audience.
+        let audience_bytes =
+            bincode::serialize(&self.audience).map_err(|e| AgentError::ConsolidationFailed {
+                message: format!("failed to serialize audience: {e}"),
+            })?;
+        store
+            .put_meta(b"agent:audience", &audience_bytes)
+            .map_err(|e| AgentError::ConsolidationFailed {
+                message: format!("failed to persist audience: {e}"),
+            })?;
+
         // Persist psyche if loaded.
         if let Some(ref psyche) = self.psyche {
             let psyche_bytes =
@@ -865,6 +2072,188 @@ impl Agent {
                     message: format!("failed to persist psyche: {e}"),
                 })?;
         }
+
+        // Generate and persist session summary.
+        let active_project_name = self
+            .agenda
+            .active_project
+            .and_then(|pid| self.projects.iter().find(|p| p.id == pid))
+            .map(|p| p.name.as_str());
+        let summary = generate_session_summary(
+            &self.working_memory,
+            &self.goals,
+            active_project_name,
+            self.session_start_cycle,
+            self.cycle_count,
+        );
+        let summary_bytes =
+            bincode::serialize(&summary).map_err(|e| AgentError::ConsolidationFailed {
+                message: format!("failed to serialize session summary: {e}"),
+            })?;
+        store
+            .put_meta(b"agent:session_summary", &summary_bytes)
+            .map_err(|e| AgentError::ConsolidationFailed {
+                message: format!("failed to persist session summary: {e}"),
+            })?;
+
+        // Persist agenda.
+        let agenda_bytes =
+            bincode::serialize(&self.agenda).map_err(|e| AgentError::ConsolidationFailed {
+                message: format!("failed to serialize agenda: {e}"),
+            })?;
+        store
+            .put_meta(b"agent:agenda", &agenda_bytes)
+            .map_err(|e| AgentError::ConsolidationFailed {
+                message: format!("failed to persist agenda: {e}"),
+            })?;
+
+        // Persist competence model (Phase 11f).
+        let competence_bytes = bincode::serialize(&self.competence_model).map_err(|e| {
+            AgentError::ConsolidationFailed {
+                message: format!("failed to serialize competence model: {e}"),
+            }
+        })?;
+        store
+            .put_meta(b"agent:competence_model", &competence_bytes)
+            .map_err(|e| AgentError::ConsolidationFailed {
+                message: format!("failed to persist competence model: {e}"),
+            })?;
+
+        // Persist failure cases for HNSW rebuild (Phase 11f).
+        let failure_bytes = bincode::serialize(self.failure_index.cases()).map_err(|e| {
+            AgentError::ConsolidationFailed {
+                message: format!("failed to serialize failure cases: {e}"),
+            }
+        })?;
+        store
+            .put_meta(b"agent:failure_cases", &failure_bytes)
+            .map_err(|e| AgentError::ConsolidationFailed {
+                message: format!("failed to persist failure cases: {e}"),
+            })?;
+
+        // Persist effort cases for HNSW rebuild (Phase 11g).
+        let effort_bytes = bincode::serialize(self.effort_index.cases()).map_err(|e| {
+            AgentError::ConsolidationFailed {
+                message: format!("failed to serialize effort cases: {e}"),
+            }
+        })?;
+        store
+            .put_meta(b"agent:effort_cases", &effort_bytes)
+            .map_err(|e| AgentError::ConsolidationFailed {
+                message: format!("failed to persist effort cases: {e}"),
+            })?;
+
+        // Persist improvement history (Phase 11g).
+        let history_bytes =
+            bincode::serialize(&self.improvement_history).map_err(|e| {
+                AgentError::ConsolidationFailed {
+                    message: format!("failed to serialize improvement history: {e}"),
+                }
+            })?;
+        store
+            .put_meta(b"agent:improvement_history", &history_bytes)
+            .map_err(|e| AgentError::ConsolidationFailed {
+                message: format!("failed to persist improvement history: {e}"),
+            })?;
+
+        // Persist learned methods for HNSW rebuild (Phase 11h).
+        let methods_bytes =
+            bincode::serialize(self.method_index.methods()).map_err(|e| {
+                AgentError::ConsolidationFailed {
+                    message: format!("failed to serialize learned methods: {e}"),
+                }
+            })?;
+        store
+            .put_meta(b"agent:learned_methods", &methods_bytes)
+            .map_err(|e| AgentError::ConsolidationFailed {
+                message: format!("failed to persist learned methods: {e}"),
+            })?;
+
+        // Store competence as KG triples for SPARQL queryability.
+        let success_rate_pred = self
+            .engine
+            .resolve_or_create_relation("agent:success_rate")
+            .unwrap_or(self.predicates.has_status);
+        if let Err(e) = self
+            .competence_model
+            .store_competence_triples(&self.engine, success_rate_pred)
+        {
+            tracing::warn!("failed to persist competence triples: {e}");
+        }
+
+        // Persist watches.
+        watch::persist_watches(&self.engine, &self.watches)?;
+
+        // Persist PIM manager (Phase 13e).
+        let pim_bytes = bincode::serialize(&self.pim_manager).map_err(|e| {
+            AgentError::ConsolidationFailed {
+                message: format!("failed to serialize PIM manager: {e}"),
+            }
+        })?;
+        store
+            .put_meta(b"agent:pim_manager", &pim_bytes)
+            .map_err(|e| AgentError::ConsolidationFailed {
+                message: format!("failed to persist PIM manager: {e}"),
+            })?;
+
+        // Persist calendar manager (Phase 13f).
+        let cal_bytes = bincode::serialize(&self.calendar_manager).map_err(|e| {
+            AgentError::ConsolidationFailed {
+                message: format!("failed to serialize calendar manager: {e}"),
+            }
+        })?;
+        store
+            .put_meta(b"agent:calendar_manager", &cal_bytes)
+            .map_err(|e| AgentError::ConsolidationFailed {
+                message: format!("failed to persist calendar manager: {e}"),
+            })?;
+
+        // Persist preference manager (Phase 13g).
+        let pref_bytes = bincode::serialize(&self.preference_manager).map_err(|e| {
+            AgentError::ConsolidationFailed {
+                message: format!("failed to serialize preference manager: {e}"),
+            }
+        })?;
+        store
+            .put_meta(b"agent:preference_manager", &pref_bytes)
+            .map_err(|e| AgentError::ConsolidationFailed {
+                message: format!("failed to persist preference manager: {e}"),
+            })?;
+
+        // Persist causal manager (Phase 15a).
+        let causal_bytes = bincode::serialize(&self.causal_manager).map_err(|e| {
+            AgentError::ConsolidationFailed {
+                message: format!("failed to serialize causal manager: {e}"),
+            }
+        })?;
+        store
+            .put_meta(b"agent:causal_manager", &causal_bytes)
+            .map_err(|e| AgentError::ConsolidationFailed {
+                message: format!("failed to persist causal manager: {e}"),
+            })?;
+
+        // Persist sleep cycle state (Phase 11i).
+        let sleep_bytes =
+            bincode::serialize(&self.sleep_cycle).map_err(|e| AgentError::ConsolidationFailed {
+                message: format!("failed to serialize sleep cycle: {e}"),
+            })?;
+        store
+            .put_meta(b"agent:sleep_cycle", &sleep_bytes)
+            .map_err(|e| AgentError::ConsolidationFailed {
+                message: format!("failed to persist sleep cycle: {e}"),
+            })?;
+
+        // Persist curiosity config (Phase 11j).
+        let curiosity_bytes = bincode::serialize(&self.curiosity_config).map_err(|e| {
+            AgentError::ConsolidationFailed {
+                message: format!("failed to serialize curiosity config: {e}"),
+            }
+        })?;
+        store
+            .put_meta(b"agent:curiosity_config", &curiosity_bytes)
+            .map_err(|e| AgentError::ConsolidationFailed {
+                message: format!("failed to persist curiosity config: {e}"),
+            })?;
 
         // Flush the engine's durable store.
         self.engine
@@ -882,14 +2271,18 @@ impl Agent {
     /// rebuilds goals from the knowledge graph.
     pub fn resume(engine: Arc<Engine>, config: AgentConfig) -> AgentResult<Self> {
         let predicates = AgentPredicates::init(&engine)?;
+        let project_predicates = ProjectPredicates::init(&engine)?;
+        let dialogue_predicates = super::dialogue::DialoguePredicates::init(&engine)?;
+        let dialogue_manager = super::dialogue::DialogueManager::new(dialogue_predicates, "operator");
 
         let mut tool_registry = ToolRegistry::new();
         Self::register_builtin_tools(&mut tool_registry, &predicates, &engine);
+        Self::wire_audit_ledger(&mut tool_registry, &engine);
 
         let store = engine.store();
 
         // Restore working memory.
-        let working_memory = match (
+        let mut working_memory = match (
             store.get_meta(b"agent:wm_entries").ok().flatten(),
             store.get_meta(b"agent:wm_next_id").ok().flatten(),
         ) {
@@ -921,6 +2314,146 @@ impl Agent {
             })
             .or_else(|| engine.compartments().and_then(|cm| cm.psyche()));
 
+        // Restore drive system: prefer persisted state, fall back to config defaults.
+        let drives = store
+            .get_meta(b"agent:drive_system")
+            .ok()
+            .flatten()
+            .and_then(|bytes| bincode::deserialize::<DriveSystem>(&bytes).ok())
+            .unwrap_or_else(|| DriveSystem::with_thresholds(config.goal_generation.drive_thresholds));
+
+        // Restore audience: prefer persisted state, fall back to exploration default.
+        let audience = store
+            .get_meta(b"agent:audience")
+            .ok()
+            .flatten()
+            .and_then(|bytes| bincode::deserialize::<Audience>(&bytes).ok())
+            .unwrap_or_else(Audience::exploration);
+
+        // Initialize HTN method registry and restore persisted stats.
+        let mut htn_registry = MethodRegistry::new();
+        decomposition::register_builtin_methods(&mut htn_registry);
+        if let Some(stats_bytes) = store.get_meta(b"agent:method_stats").ok().flatten()
+            && let Ok(stats) = bincode::deserialize::<Vec<MethodStats>>(&stats_bytes)
+        {
+            htn_registry.import_stats(&stats);
+        }
+
+        // Restore projects from KG.
+        let projects =
+            project::restore_projects(&engine, &project_predicates, &predicates).unwrap_or_default();
+
+        // Restore agenda from durable store.
+        let agenda = store
+            .get_meta(b"agent:agenda")
+            .ok()
+            .flatten()
+            .and_then(|bytes| bincode::deserialize::<Agenda>(&bytes).ok())
+            .unwrap_or_default();
+
+        // Restore session summary and inject into WM for cross-session continuity.
+        if let Some(summary_bytes) = store.get_meta(b"agent:session_summary").ok().flatten()
+            && let Ok(summary) = bincode::deserialize::<SessionSummary>(&summary_bytes)
+            && let Err(e) = restore_session_summary(&mut working_memory, &summary, cycle_count)
+        {
+            tracing::warn!("failed to restore session summary: {e}");
+        }
+
+        // Restore competence model (Phase 11f).
+        let competence_model = store
+            .get_meta(b"agent:competence_model")
+            .ok()
+            .flatten()
+            .and_then(|bytes| bincode::deserialize::<CompetenceModel>(&bytes).ok())
+            .unwrap_or_default();
+
+        // Restore failure index from persisted cases (Phase 11f).
+        let failure_index = store
+            .get_meta(b"agent:failure_cases")
+            .ok()
+            .flatten()
+            .and_then(|bytes| bincode::deserialize::<Vec<FailureCase>>(&bytes).ok())
+            .map(FailureIndex::from_cases)
+            .unwrap_or_default();
+
+        // Restore effort index from persisted cases (Phase 11g).
+        let effort_index = store
+            .get_meta(b"agent:effort_cases")
+            .ok()
+            .flatten()
+            .and_then(|bytes| {
+                bincode::deserialize::<Vec<resource::EffortCase>>(&bytes).ok()
+            })
+            .map(EffortIndex::from_cases)
+            .unwrap_or_default();
+
+        // Restore improvement history (Phase 11g).
+        let improvement_history = store
+            .get_meta(b"agent:improvement_history")
+            .ok()
+            .flatten()
+            .and_then(|bytes| bincode::deserialize::<ImprovementHistory>(&bytes).ok())
+            .unwrap_or_default();
+
+        // Restore learned methods from persisted cases (Phase 11h).
+        let method_index = store
+            .get_meta(b"agent:learned_methods")
+            .ok()
+            .flatten()
+            .and_then(|bytes| {
+                bincode::deserialize::<Vec<chunking::LearnedMethod>>(&bytes).ok()
+            })
+            .map(MethodIndex::from_methods)
+            .unwrap_or_default();
+
+        // Restore watches from durable store.
+        let watches = watch::restore_watches(&engine).unwrap_or_default();
+
+        // Restore PIM manager (Phase 13e).
+        let pim_manager = super::pim::PimManager::restore(&engine)
+            .unwrap_or_else(|_| {
+                super::pim::PimManager::new(&engine).unwrap_or_default()
+            });
+
+        // Restore calendar manager (Phase 13f).
+        let calendar_manager = super::calendar::CalendarManager::restore(&engine)
+            .unwrap_or_else(|_| {
+                super::calendar::CalendarManager::new(&engine).unwrap_or_default()
+            });
+
+        // Restore preference manager (Phase 13g).
+        let preference_manager = super::preference::PreferenceManager::restore(&engine)
+            .unwrap_or_else(|_| {
+                super::preference::PreferenceManager::new(&engine).unwrap_or_default()
+            });
+
+        // Restore causal manager (Phase 15a).
+        let causal_manager = super::causal::CausalManager::restore(&engine)
+            .unwrap_or_else(|_| {
+                super::causal::CausalManager::new(&engine).unwrap_or_default()
+            });
+
+        // Restore sleep cycle state (Phase 11i).
+        let sleep_cycle = store
+            .get_meta(b"agent:sleep_cycle")
+            .ok()
+            .flatten()
+            .and_then(|bytes| bincode::deserialize::<super::sleep::SleepCycle>(&bytes).ok())
+            .unwrap_or_else(|| super::sleep::SleepCycle::new(config.sleep.clone()));
+
+        // Restore curiosity config (Phase 11j).
+        let curiosity_config = store
+            .get_meta(b"agent:curiosity_config")
+            .ok()
+            .flatten()
+            .and_then(|bytes| {
+                bincode::deserialize::<super::curiosity::DirectedCuriosityConfig>(&bytes).ok()
+            })
+            .unwrap_or_else(|| config.curiosity.clone());
+
+        let session_start_cycle = cycle_count;
+        let chunking_config = config.chunking.clone();
+
         let mut agent = Self {
             engine,
             config,
@@ -933,9 +2466,47 @@ impl Agent {
             last_reflection: None,
             sink: Arc::new(crate::message::StdoutSink),
             psyche,
+            drives,
+            audience,
+            method_registry_htn: htn_registry,
+            last_impasse: None,
+            projects,
+            project_predicates,
+            agenda,
+            session_start_cycle,
+            watches,
+            last_watch_firings: Vec::new(),
+            competence_model,
+            failure_index,
+            effort_index,
+            improvement_history,
+            method_index,
+            chunking_config,
+            channel_registry: ChannelRegistry::new(),
+            conversation_state: ConversationState::default(),
+            constraint_checker: ConstraintChecker::new(),
+            interlocutor_registry: InterlocutorRegistry::new(),
+            token_registry: super::multi_agent::TokenRegistry::new(),
+            pim_manager,
+            calendar_manager,
+            preference_manager,
+            causal_manager,
+            dialogue_manager,
+            sleep_cycle,
+            curiosity_config,
             #[cfg(feature = "wasm-tools")]
             wasm_runtime: super::wasm_runtime::WasmToolRuntime::new().ok(),
         };
+
+        // Initialize interlocutor predicates.
+        if let Err(e) = agent.interlocutor_registry.init_predicates(&agent.engine) {
+            tracing::warn!("failed to init interlocutor predicates on resume: {e}");
+        }
+
+        // Restore KG dialogue state into ConversationState.
+        if let Some(topic_id) = agent.dialogue_manager.query_active_topic(&agent.engine) {
+            agent.conversation_state.active_topic = Some(topic_id);
+        }
 
         // Load tools from active skills.
         agent.load_skill_tools();
@@ -964,6 +2535,20 @@ impl std::fmt::Debug for Agent {
             .field("active_plans", &self.plans.len())
             .field("has_reflection", &self.last_reflection.is_some())
             .field("has_psyche", &self.psyche.is_some())
+            .field("has_impasse", &self.last_impasse.is_some())
+            .field("projects", &self.projects.len())
+            .field("active_project", &self.agenda.active_project)
+            .field("watches", &self.watches.len())
+            .field(
+                "calibration_error",
+                &self.competence_model.calibration_error(),
+            )
+            .field("failure_index_size", &self.failure_index.len())
+            .field("learned_methods", &self.method_index.len())
+            .field("channels", &self.channel_registry)
+            .field("response_detail", &self.conversation_state.response_detail)
+            .field("constraint_checker", &self.constraint_checker)
+            .field("interlocutors", &self.interlocutor_registry.len())
             .finish()
     }
 }

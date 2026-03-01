@@ -15,6 +15,7 @@ struct LoadedCompartment {
     state: CompartmentState,
     triple_count: usize,
     /// Named graph IRI for this compartment's triples.
+    #[allow(dead_code)] // Will be used when SPARQL named graph routing is implemented
     graph_name: String,
 }
 
@@ -98,17 +99,14 @@ impl CompartmentManager {
                 })?;
 
             let id = manifest.id.clone();
-            if !compartments.contains_key(&id) {
-                let graph_name = format!("{COMPARTMENT_NS}{id}");
-                compartments.insert(
-                    id,
-                    LoadedCompartment {
-                        manifest,
-                        state: CompartmentState::Dormant,
-                        triple_count: 0,
-                        graph_name,
-                    },
-                );
+            if let std::collections::hash_map::Entry::Vacant(entry) = compartments.entry(id) {
+                let graph_name = format!("{COMPARTMENT_NS}{}", entry.key());
+                entry.insert(LoadedCompartment {
+                    manifest,
+                    state: CompartmentState::Dormant,
+                    triple_count: 0,
+                    graph_name,
+                });
                 count += 1;
             }
         }
@@ -313,8 +311,36 @@ impl CompartmentManager {
     }
 
     /// Update the stored psyche (after evolution).
-    pub fn set_psyche(&self, psyche: Psyche) {
+    ///
+    /// Returns `PsycheImmutable` if the existing psyche is awakened.
+    /// Use [`force_set_psyche`] for admin override.
+    pub fn set_psyche(&self, psyche: Psyche) -> CompartmentResult<()> {
+        let mut guard = self.psyche.write().expect("psyche lock poisoned");
+        if let Some(ref existing) = *guard {
+            if existing.is_awakened() {
+                return Err(CompartmentError::PsycheImmutable);
+            }
+        }
+        *guard = Some(psyche);
+        Ok(())
+    }
+
+    /// Unconditionally replace the stored psyche (admin override).
+    pub fn force_set_psyche(&self, psyche: Psyche) {
         *self.psyche.write().expect("psyche lock poisoned") = Some(psyche);
+    }
+
+    /// List the IDs of all discovered but not-yet-loaded (Dormant) compartments.
+    pub fn dormant_ids(&self) -> Vec<String> {
+        let compartments = self
+            .compartments
+            .read()
+            .expect("compartments lock poisoned");
+        compartments
+            .iter()
+            .filter(|(_, c)| c.state == CompartmentState::Dormant)
+            .map(|(id, _)| id.clone())
+            .collect()
     }
 
     /// Get the compartments directory path.

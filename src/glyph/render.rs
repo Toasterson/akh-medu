@@ -67,7 +67,7 @@ pub fn render_to_terminal(engine: &Engine, triples: &[Triple], config: &RenderCo
 
     let mut output = Vec::new();
 
-    for (_, group_triples) in &groups {
+    for group_triples in groups.values() {
         let subject = group_triples[0].subject;
 
         if group_triples.len() == 1 {

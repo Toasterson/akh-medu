@@ -89,7 +89,7 @@ pub fn render_subgraph(engine: &Engine, triples: &[Triple], config: &NotationCon
 
     let mut output = Vec::new();
 
-    for (_, group_triples) in &groups {
+    for group_triples in groups.values() {
         let subject = group_triples[0].subject;
         let subj_str = render_entity(engine, subject, config);
 

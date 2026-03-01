@@ -84,6 +84,20 @@ pub struct VsaRoleSymbols {
     pub role_entity: SymbolId,
     pub role_similar_to: SymbolId,
     pub role_heading: SymbolId,
+    // NLU extension roles (Phase 14j)
+    pub role_negation: SymbolId,
+    pub role_quantifier: SymbolId,
+    pub role_scope: SymbolId,
+    pub role_entity_a: SymbolId,
+    pub role_entity_b: SymbolId,
+    pub role_property: SymbolId,
+    pub role_ordering: SymbolId,
+    pub role_condition: SymbolId,
+    pub role_consequent: SymbolId,
+    pub role_temporal: SymbolId,
+    pub role_modality: SymbolId,
+    pub role_head: SymbolId,
+    pub role_clause: SymbolId,
 }
 
 impl VsaRoleSymbols {
@@ -96,6 +110,19 @@ impl VsaRoleSymbols {
             role_entity: synthetic_id("vsa-role:entity"),
             role_similar_to: synthetic_id("vsa-role:similar-to"),
             role_heading: synthetic_id("vsa-role:heading"),
+            role_negation: synthetic_id("vsa-role:negation"),
+            role_quantifier: synthetic_id("vsa-role:quantifier"),
+            role_scope: synthetic_id("vsa-role:scope"),
+            role_entity_a: synthetic_id("vsa-role:entity-a"),
+            role_entity_b: synthetic_id("vsa-role:entity-b"),
+            role_property: synthetic_id("vsa-role:property"),
+            role_ordering: synthetic_id("vsa-role:ordering"),
+            role_condition: synthetic_id("vsa-role:condition"),
+            role_consequent: synthetic_id("vsa-role:consequent"),
+            role_temporal: synthetic_id("vsa-role:temporal"),
+            role_modality: synthetic_id("vsa-role:modality"),
+            role_head: synthetic_id("vsa-role:head"),
+            role_clause: synthetic_id("vsa-role:clause"),
         }
     }
 }
@@ -111,6 +138,43 @@ impl Default for VsaRoleSymbols {
 pub struct DataFlowStep {
     pub name: String,
     pub via_type: Option<String>,
+}
+
+/// Logical quantifier for quantified expressions.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum Quantifier {
+    Universal,
+    Existential,
+    Most,
+    None,
+    Specific(u32),
+}
+
+/// Comparison ordering direction.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum CompareOrd {
+    GreaterThan,
+    LessThan,
+    Equal,
+}
+
+/// Temporal expression types.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum TemporalExpr {
+    Absolute(u64),
+    Relative(i64),
+    Named(String),
+    Recurring(String),
+}
+
+/// Deontic/epistemic modality.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum Modality {
+    Want,
+    Can,
+    Should,
+    Must,
+    May,
 }
 
 /// Abstract syntax tree node — the shared semantic representation.
@@ -230,6 +294,66 @@ pub enum AbsTree {
         focus: super::discourse::QueryFocus,
         inner: Box<AbsTree>,
     },
+
+    // ── NLU extensions (Phase 14j) ──────────────────────────────────────
+
+    /// Logical negation of an inner expression.
+    Negation { inner: Box<AbsTree> },
+
+    /// Quantified expression (universal, existential, etc.).
+    Quantified {
+        quantifier: Quantifier,
+        scope: Box<AbsTree>,
+    },
+
+    /// Comparison between two entities on a property.
+    Comparison {
+        entity_a: Box<AbsTree>,
+        entity_b: Box<AbsTree>,
+        property: String,
+        ordering: CompareOrd,
+    },
+
+    /// Conditional: if condition then consequent.
+    Conditional {
+        condition: Box<AbsTree>,
+        consequent: Box<AbsTree>,
+    },
+
+    /// Temporal scoping of an inner expression.
+    Temporal {
+        time_expr: TemporalExpr,
+        inner: Box<AbsTree>,
+    },
+
+    /// Modal scoping (want, can, should, must, may).
+    Modal {
+        modality: Modality,
+        inner: Box<AbsTree>,
+    },
+
+    /// Relative clause: head noun modified by a subordinate clause.
+    RelativeClause {
+        head: Box<AbsTree>,
+        clause: Box<AbsTree>,
+    },
+
+    // ── Dialogue acts ──────────────────────────────────────────────────
+
+    /// Greeting speech act ("hello", "good morning").
+    Greeting { addressee: Option<Box<AbsTree>> },
+    /// Farewell speech act ("goodbye", "see you").
+    Farewell { addressee: Option<Box<AbsTree>> },
+    /// Acknowledgment ("ok", "thanks", "got it").
+    Acknowledgment { referent: Option<Box<AbsTree>> },
+    /// Follow-up request ("tell me more", "go on", "elaborate").
+    FollowUpRequest { topic: Option<Box<AbsTree>> },
+    /// Meta-query about self/capabilities ("who are you", "what can you do").
+    MetaQuery { about: Box<AbsTree> },
+    /// Goal-setting request ("find X", "learn about Y", "investigate Z").
+    GoalRequest { description: Box<AbsTree> },
+    /// Structural command ("help", "status", "run 5", "show Dog", "pim inbox").
+    StructuralCommand { command: String, args: Vec<String> },
 }
 
 impl AbsTree {
@@ -253,6 +377,20 @@ impl AbsTree {
             AbsTree::Section { .. } => Cat::Section,
             AbsTree::Document { .. } => Cat::Document,
             AbsTree::DiscourseFrame { .. } => Cat::DiscourseFrame,
+            AbsTree::Negation { .. } => Cat::Negation,
+            AbsTree::Quantified { .. } => Cat::Quantifier,
+            AbsTree::Comparison { .. } => Cat::Comparison,
+            AbsTree::Conditional { .. } => Cat::Conditional,
+            AbsTree::Temporal { .. } => Cat::Temporal,
+            AbsTree::Modal { .. } => Cat::Modal,
+            AbsTree::RelativeClause { .. } => Cat::RelativeClause,
+            AbsTree::Greeting { .. } => Cat::Greeting,
+            AbsTree::Farewell { .. } => Cat::Farewell,
+            AbsTree::Acknowledgment { .. } => Cat::Acknowledgment,
+            AbsTree::FollowUpRequest { .. } => Cat::FollowUpRequest,
+            AbsTree::MetaQuery { .. } => Cat::MetaQuery,
+            AbsTree::GoalRequest { .. } => Cat::GoalRequest,
+            AbsTree::StructuralCommand { .. } => Cat::StructuralCommand,
         }
     }
 
@@ -342,6 +480,42 @@ impl AbsTree {
                 Ok(())
             }
             AbsTree::DiscourseFrame { inner, .. } => inner.validate(),
+            AbsTree::Negation { inner } => inner.validate(),
+            AbsTree::Quantified { scope, .. } => scope.validate(),
+            AbsTree::Comparison {
+                entity_a, entity_b, ..
+            } => {
+                entity_a.validate()?;
+                entity_b.validate()
+            }
+            AbsTree::Conditional {
+                condition,
+                consequent,
+            } => {
+                condition.validate()?;
+                consequent.validate()
+            }
+            AbsTree::Temporal { inner, .. } => inner.validate(),
+            AbsTree::Modal { inner, .. } => inner.validate(),
+            AbsTree::RelativeClause { head, clause } => {
+                head.validate()?;
+                clause.validate()
+            }
+            AbsTree::MetaQuery { about } | AbsTree::GoalRequest { description: about } => {
+                about.validate()
+            }
+            AbsTree::Greeting { addressee } | AbsTree::Farewell { addressee } => {
+                if let Some(inner) = addressee {
+                    inner.validate()?;
+                }
+                Ok(())
+            }
+            AbsTree::Acknowledgment { referent } | AbsTree::FollowUpRequest { topic: referent } => {
+                if let Some(inner) = referent {
+                    inner.validate()?;
+                }
+                Ok(())
+            }
             // Leaves and simple nodes are always valid.
             _ => Ok(()),
         }
@@ -412,6 +586,35 @@ impl AbsTree {
                     + sections.iter().map(|s| s.node_count()).sum::<usize>()
                     + gaps.iter().map(|g| g.node_count()).sum::<usize>()
             }
+
+            AbsTree::Negation { inner }
+            | AbsTree::Quantified { scope: inner, .. }
+            | AbsTree::Temporal { inner, .. }
+            | AbsTree::Modal { inner, .. } => 1 + inner.node_count(),
+
+            AbsTree::Comparison {
+                entity_a, entity_b, ..
+            } => 1 + entity_a.node_count() + entity_b.node_count(),
+
+            AbsTree::Conditional {
+                condition,
+                consequent,
+            } => 1 + condition.node_count() + consequent.node_count(),
+
+            AbsTree::RelativeClause { head, clause } => {
+                1 + head.node_count() + clause.node_count()
+            }
+
+            AbsTree::Greeting { addressee } | AbsTree::Farewell { addressee } => {
+                1 + addressee.as_ref().map_or(0, |a| a.node_count())
+            }
+            AbsTree::Acknowledgment { referent } | AbsTree::FollowUpRequest { topic: referent } => {
+                1 + referent.as_ref().map_or(0, |r| r.node_count())
+            }
+            AbsTree::MetaQuery { about } | AbsTree::GoalRequest { description: about } => {
+                1 + about.node_count()
+            }
+            AbsTree::StructuralCommand { .. } => 1,
         }
     }
 
@@ -477,6 +680,42 @@ impl AbsTree {
                 for g in gaps {
                     g.collect_labels_inner(out);
                 }
+            }
+            AbsTree::Negation { inner }
+            | AbsTree::Quantified { scope: inner, .. }
+            | AbsTree::Temporal { inner, .. }
+            | AbsTree::Modal { inner, .. } => {
+                inner.collect_labels_inner(out);
+            }
+            AbsTree::Comparison {
+                entity_a, entity_b, ..
+            } => {
+                entity_a.collect_labels_inner(out);
+                entity_b.collect_labels_inner(out);
+            }
+            AbsTree::Conditional {
+                condition,
+                consequent,
+            } => {
+                condition.collect_labels_inner(out);
+                consequent.collect_labels_inner(out);
+            }
+            AbsTree::RelativeClause { head, clause } => {
+                head.collect_labels_inner(out);
+                clause.collect_labels_inner(out);
+            }
+            AbsTree::Greeting { addressee } | AbsTree::Farewell { addressee } => {
+                if let Some(inner) = addressee {
+                    inner.collect_labels_inner(out);
+                }
+            }
+            AbsTree::Acknowledgment { referent } | AbsTree::FollowUpRequest { topic: referent } => {
+                if let Some(inner) = referent {
+                    inner.collect_labels_inner(out);
+                }
+            }
+            AbsTree::MetaQuery { about } | AbsTree::GoalRequest { description: about } => {
+                about.collect_labels_inner(out);
             }
             _ => {}
         }
@@ -607,6 +846,143 @@ impl AbsTree {
     pub fn data_flow(steps: Vec<DataFlowStep>) -> Self {
         AbsTree::DataFlow { steps }
     }
+
+    /// Create a negation wrapper.
+    pub fn negation(inner: AbsTree) -> Self {
+        AbsTree::Negation {
+            inner: Box::new(inner),
+        }
+    }
+
+    /// Create a quantified expression.
+    pub fn quantified(quantifier: Quantifier, scope: AbsTree) -> Self {
+        AbsTree::Quantified {
+            quantifier,
+            scope: Box::new(scope),
+        }
+    }
+
+    /// Create a comparison.
+    pub fn comparison(
+        entity_a: AbsTree,
+        entity_b: AbsTree,
+        property: impl Into<String>,
+        ordering: CompareOrd,
+    ) -> Self {
+        AbsTree::Comparison {
+            entity_a: Box::new(entity_a),
+            entity_b: Box::new(entity_b),
+            property: property.into(),
+            ordering,
+        }
+    }
+
+    /// Create a conditional.
+    pub fn conditional(condition: AbsTree, consequent: AbsTree) -> Self {
+        AbsTree::Conditional {
+            condition: Box::new(condition),
+            consequent: Box::new(consequent),
+        }
+    }
+
+    /// Create a temporal scoping.
+    pub fn temporal(time_expr: TemporalExpr, inner: AbsTree) -> Self {
+        AbsTree::Temporal {
+            time_expr,
+            inner: Box::new(inner),
+        }
+    }
+
+    /// Create a modal expression.
+    pub fn modal(modality: Modality, inner: AbsTree) -> Self {
+        AbsTree::Modal {
+            modality,
+            inner: Box::new(inner),
+        }
+    }
+
+    /// Create a relative clause.
+    pub fn relative_clause(head: AbsTree, clause: AbsTree) -> Self {
+        AbsTree::RelativeClause {
+            head: Box::new(head),
+            clause: Box::new(clause),
+        }
+    }
+
+    /// Create a greeting speech act.
+    pub fn greeting(addressee: Option<AbsTree>) -> Self {
+        AbsTree::Greeting { addressee: addressee.map(Box::new) }
+    }
+
+    /// Create a farewell speech act.
+    pub fn farewell(addressee: Option<AbsTree>) -> Self {
+        AbsTree::Farewell { addressee: addressee.map(Box::new) }
+    }
+
+    /// Create an acknowledgment.
+    pub fn acknowledgment(referent: Option<AbsTree>) -> Self {
+        AbsTree::Acknowledgment { referent: referent.map(Box::new) }
+    }
+
+    /// Create a follow-up request.
+    pub fn follow_up_request(topic: Option<AbsTree>) -> Self {
+        AbsTree::FollowUpRequest { topic: topic.map(Box::new) }
+    }
+
+    /// Create a meta-query about self/capabilities.
+    pub fn meta_query(about: AbsTree) -> Self {
+        AbsTree::MetaQuery { about: Box::new(about) }
+    }
+
+    /// Create a goal-setting request.
+    pub fn goal_request(description: AbsTree) -> Self {
+        AbsTree::GoalRequest { description: Box::new(description) }
+    }
+
+    /// Create a structural command.
+    pub fn structural_command(command: impl Into<String>, args: Vec<String>) -> Self {
+        AbsTree::StructuralCommand { command: command.into(), args }
+    }
+
+    /// Whether this tree contains assertable relational content (triples,
+    /// comparisons, conditionals, etc.) vs being a bare entity/query.
+    ///
+    /// Used by ChatProcessor to decide whether an NLU parse should be
+    /// ingested as a fact or routed through the query/intent handler.
+    pub fn is_assertable(&self) -> bool {
+        match self {
+            // Relational structures are assertable.
+            AbsTree::Triple { .. }
+            | AbsTree::Similarity { .. }
+            | AbsTree::Comparison { .. }
+            | AbsTree::Conditional { .. }
+            | AbsTree::Negation { .. }
+            | AbsTree::Quantified { .. }
+            | AbsTree::Modal { .. }
+            | AbsTree::Temporal { .. }
+            | AbsTree::RelativeClause { .. }
+            | AbsTree::CodeFact { .. } => true,
+
+            // Wrappers — check the inner node.
+            AbsTree::WithConfidence { inner, .. }
+            | AbsTree::WithProvenance { inner, .. } => inner.is_assertable(),
+
+            // Conjunction/disjunction — assertable if any child is.
+            AbsTree::Conjunction { items, .. } => items.iter().any(|i| i.is_assertable()),
+
+            // Dialogue acts are performative, not assertable.
+            AbsTree::Greeting { .. }
+            | AbsTree::Farewell { .. }
+            | AbsTree::Acknowledgment { .. }
+            | AbsTree::FollowUpRequest { .. }
+            | AbsTree::MetaQuery { .. }
+            | AbsTree::GoalRequest { .. }
+            | AbsTree::StructuralCommand { .. } => false,
+
+            // Bare entities, relations, freeform, gaps, etc. are not assertable.
+            _ => false,
+        }
+    }
 }
 
 // ── Grounding & VSA encoding ────────────────────────────────────────────
@@ -728,6 +1104,65 @@ impl AbsTree {
                 focus: focus.clone(),
                 inner: Box::new(inner.ground(registry)),
             },
+            AbsTree::Negation { inner } => AbsTree::Negation {
+                inner: Box::new(inner.ground(registry)),
+            },
+            AbsTree::Quantified { quantifier, scope } => AbsTree::Quantified {
+                quantifier: quantifier.clone(),
+                scope: Box::new(scope.ground(registry)),
+            },
+            AbsTree::Comparison {
+                entity_a,
+                entity_b,
+                property,
+                ordering,
+            } => AbsTree::Comparison {
+                entity_a: Box::new(entity_a.ground(registry)),
+                entity_b: Box::new(entity_b.ground(registry)),
+                property: property.clone(),
+                ordering: ordering.clone(),
+            },
+            AbsTree::Conditional {
+                condition,
+                consequent,
+            } => AbsTree::Conditional {
+                condition: Box::new(condition.ground(registry)),
+                consequent: Box::new(consequent.ground(registry)),
+            },
+            AbsTree::Temporal { time_expr, inner } => AbsTree::Temporal {
+                time_expr: time_expr.clone(),
+                inner: Box::new(inner.ground(registry)),
+            },
+            AbsTree::Modal { modality, inner } => AbsTree::Modal {
+                modality: modality.clone(),
+                inner: Box::new(inner.ground(registry)),
+            },
+            AbsTree::RelativeClause { head, clause } => AbsTree::RelativeClause {
+                head: Box::new(head.ground(registry)),
+                clause: Box::new(clause.ground(registry)),
+            },
+            AbsTree::Greeting { addressee } => AbsTree::Greeting {
+                addressee: addressee.as_ref().map(|a| Box::new(a.ground(registry))),
+            },
+            AbsTree::Farewell { addressee } => AbsTree::Farewell {
+                addressee: addressee.as_ref().map(|a| Box::new(a.ground(registry))),
+            },
+            AbsTree::Acknowledgment { referent } => AbsTree::Acknowledgment {
+                referent: referent.as_ref().map(|r| Box::new(r.ground(registry))),
+            },
+            AbsTree::FollowUpRequest { topic } => AbsTree::FollowUpRequest {
+                topic: topic.as_ref().map(|t| Box::new(t.ground(registry))),
+            },
+            AbsTree::MetaQuery { about } => AbsTree::MetaQuery {
+                about: Box::new(about.ground(registry)),
+            },
+            AbsTree::GoalRequest { description } => AbsTree::GoalRequest {
+                description: Box::new(description.ground(registry)),
+            },
+            AbsTree::StructuralCommand { command, args } => AbsTree::StructuralCommand {
+                command: command.clone(),
+                args: args.clone(),
+            },
         }
     }
 
@@ -769,6 +1204,20 @@ impl AbsTree {
                 overview.unresolved_count()
                     + sections.iter().map(|s| s.unresolved_count()).sum::<usize>()
                     + gaps.iter().map(|g| g.unresolved_count()).sum::<usize>()
+            }
+            AbsTree::Negation { inner }
+            | AbsTree::Quantified { scope: inner, .. }
+            | AbsTree::Temporal { inner, .. }
+            | AbsTree::Modal { inner, .. } => inner.unresolved_count(),
+            AbsTree::Comparison {
+                entity_a, entity_b, ..
+            } => entity_a.unresolved_count() + entity_b.unresolved_count(),
+            AbsTree::Conditional {
+                condition,
+                consequent,
+            } => condition.unresolved_count() + consequent.unresolved_count(),
+            AbsTree::RelativeClause { head, clause } => {
+                head.unresolved_count() + clause.unresolved_count()
             }
             _ => 0,
         }
@@ -815,6 +1264,25 @@ impl AbsTree {
                 .first_unresolved()
                 .or_else(|| sections.iter().find_map(|s| s.first_unresolved()))
                 .or_else(|| gaps.iter().find_map(|g| g.first_unresolved())),
+            AbsTree::Negation { inner }
+            | AbsTree::Quantified { scope: inner, .. }
+            | AbsTree::Temporal { inner, .. }
+            | AbsTree::Modal { inner, .. } => inner.first_unresolved(),
+            AbsTree::Comparison {
+                entity_a, entity_b, ..
+            } => entity_a
+                .first_unresolved()
+                .or_else(|| entity_b.first_unresolved()),
+            AbsTree::Conditional {
+                condition,
+                consequent,
+            } => condition
+                .first_unresolved()
+                .or_else(|| consequent.first_unresolved()),
+            AbsTree::RelativeClause { head, clause } => {
+                head.first_unresolved()
+                    .or_else(|| clause.first_unresolved())
+            }
             _ => None,
         }
     }
@@ -950,6 +1418,112 @@ impl AbsTree {
             | AbsTree::WithProvenance { inner, .. }
             | AbsTree::DiscourseFrame { inner, .. } => inner.to_vsa(ops, item_memory, roles),
 
+            // ── NLU extensions ────────────────────────────────────────
+            AbsTree::Negation { inner } => {
+                let inner_vec = inner.to_vsa(ops, item_memory, roles)?;
+                let role_neg = vsa_encode_symbol(ops, roles.role_negation);
+                ops.bind(&role_neg, &inner_vec).map_err(vsa_err)
+            }
+
+            AbsTree::Quantified { quantifier, scope } => {
+                let scope_vec = scope.to_vsa(ops, item_memory, roles)?;
+                let q_label = match quantifier {
+                    Quantifier::Universal => "universal",
+                    Quantifier::Existential => "existential",
+                    Quantifier::Most => "most",
+                    Quantifier::None => "none",
+                    Quantifier::Specific(n) => {
+                        // Encode the number as a string for simplicity
+                        let _ = n;
+                        "specific"
+                    }
+                };
+                let q_vec = encode_token(ops, q_label);
+                let role_q = vsa_encode_symbol(ops, roles.role_quantifier);
+                let role_s = vsa_encode_symbol(ops, roles.role_scope);
+                let bound_q = ops.bind(&role_q, &q_vec).map_err(vsa_err)?;
+                let bound_s = ops.bind(&role_s, &scope_vec).map_err(vsa_err)?;
+                ops.bundle(&[&bound_q, &bound_s]).map_err(vsa_err)
+            }
+
+            AbsTree::Comparison {
+                entity_a,
+                entity_b,
+                property,
+                ordering,
+            } => {
+                let a_vec = entity_a.to_vsa(ops, item_memory, roles)?;
+                let b_vec = entity_b.to_vsa(ops, item_memory, roles)?;
+                let p_vec = encode_token(ops, property);
+                let ord_label = match ordering {
+                    CompareOrd::GreaterThan => "greater",
+                    CompareOrd::LessThan => "less",
+                    CompareOrd::Equal => "equal",
+                };
+                let o_vec = encode_token(ops, ord_label);
+                let role_a = vsa_encode_symbol(ops, roles.role_entity_a);
+                let role_b = vsa_encode_symbol(ops, roles.role_entity_b);
+                let role_p = vsa_encode_symbol(ops, roles.role_property);
+                let role_o = vsa_encode_symbol(ops, roles.role_ordering);
+                let bound_a = ops.bind(&role_a, &a_vec).map_err(vsa_err)?;
+                let bound_b = ops.bind(&role_b, &b_vec).map_err(vsa_err)?;
+                let bound_p = ops.bind(&role_p, &p_vec).map_err(vsa_err)?;
+                let bound_o = ops.bind(&role_o, &o_vec).map_err(vsa_err)?;
+                ops.bundle(&[&bound_a, &bound_b, &bound_p, &bound_o])
+                    .map_err(vsa_err)
+            }
+
+            AbsTree::Conditional {
+                condition,
+                consequent,
+            } => {
+                let cond_vec = condition.to_vsa(ops, item_memory, roles)?;
+                let cons_vec = consequent.to_vsa(ops, item_memory, roles)?;
+                let role_c = vsa_encode_symbol(ops, roles.role_condition);
+                let role_cs = vsa_encode_symbol(ops, roles.role_consequent);
+                let bound_c = ops.bind(&role_c, &cond_vec).map_err(vsa_err)?;
+                let bound_cs = ops.bind(&role_cs, &cons_vec).map_err(vsa_err)?;
+                ops.bundle(&[&bound_c, &bound_cs]).map_err(vsa_err)
+            }
+
+            AbsTree::Temporal { time_expr, inner } => {
+                let inner_vec = inner.to_vsa(ops, item_memory, roles)?;
+                let t_label = match time_expr {
+                    TemporalExpr::Named(n) => n.as_str(),
+                    TemporalExpr::Recurring(r) => r.as_str(),
+                    _ => "temporal",
+                };
+                let t_vec = encode_token(ops, t_label);
+                let role_t = vsa_encode_symbol(ops, roles.role_temporal);
+                let bound_t = ops.bind(&role_t, &t_vec).map_err(vsa_err)?;
+                ops.bundle(&[&bound_t, &inner_vec]).map_err(vsa_err)
+            }
+
+            AbsTree::Modal { modality, inner } => {
+                let inner_vec = inner.to_vsa(ops, item_memory, roles)?;
+                let m_label = match modality {
+                    Modality::Want => "want",
+                    Modality::Can => "can",
+                    Modality::Should => "should",
+                    Modality::Must => "must",
+                    Modality::May => "may",
+                };
+                let m_vec = encode_token(ops, m_label);
+                let role_m = vsa_encode_symbol(ops, roles.role_modality);
+                let bound_m = ops.bind(&role_m, &m_vec).map_err(vsa_err)?;
+                ops.bundle(&[&bound_m, &inner_vec]).map_err(vsa_err)
+            }
+
+            AbsTree::RelativeClause { head, clause } => {
+                let h_vec = head.to_vsa(ops, item_memory, roles)?;
+                let c_vec = clause.to_vsa(ops, item_memory, roles)?;
+                let role_h = vsa_encode_symbol(ops, roles.role_head);
+                let role_c = vsa_encode_symbol(ops, roles.role_clause);
+                let bound_h = ops.bind(&role_h, &h_vec).map_err(vsa_err)?;
+                let bound_c = ops.bind(&role_c, &c_vec).map_err(vsa_err)?;
+                ops.bundle(&[&bound_h, &bound_c]).map_err(vsa_err)
+            }
+
             // ── Structure ───────────────────────────────────────────────
             AbsTree::Conjunction { items, .. } => {
                 if items.is_empty() {
@@ -992,6 +1566,62 @@ impl AbsTree {
                 }
                 let refs: Vec<&HyperVec> = all_vecs.iter().collect();
                 ops.bundle(&refs).map_err(vsa_err)
+            }
+
+            // ── Dialogue acts ──────────────────────────────────────────
+            // Dialogue acts encode their act-type label plus any inner content.
+            AbsTree::Greeting { addressee } => {
+                let act_vec = encode_token(ops, "dlg:greeting");
+                match addressee {
+                    Some(inner) => {
+                        let inner_vec = inner.to_vsa(ops, item_memory, roles)?;
+                        ops.bundle(&[&act_vec, &inner_vec]).map_err(vsa_err)
+                    }
+                    None => Ok(act_vec),
+                }
+            }
+            AbsTree::Farewell { addressee } => {
+                let act_vec = encode_token(ops, "dlg:farewell");
+                match addressee {
+                    Some(inner) => {
+                        let inner_vec = inner.to_vsa(ops, item_memory, roles)?;
+                        ops.bundle(&[&act_vec, &inner_vec]).map_err(vsa_err)
+                    }
+                    None => Ok(act_vec),
+                }
+            }
+            AbsTree::Acknowledgment { referent } => {
+                let act_vec = encode_token(ops, "dlg:ack");
+                match referent {
+                    Some(inner) => {
+                        let inner_vec = inner.to_vsa(ops, item_memory, roles)?;
+                        ops.bundle(&[&act_vec, &inner_vec]).map_err(vsa_err)
+                    }
+                    None => Ok(act_vec),
+                }
+            }
+            AbsTree::FollowUpRequest { topic } => {
+                let act_vec = encode_token(ops, "dlg:followup");
+                match topic {
+                    Some(inner) => {
+                        let inner_vec = inner.to_vsa(ops, item_memory, roles)?;
+                        ops.bundle(&[&act_vec, &inner_vec]).map_err(vsa_err)
+                    }
+                    None => Ok(act_vec),
+                }
+            }
+            AbsTree::MetaQuery { about } => {
+                let act_vec = encode_token(ops, "dlg:meta-query");
+                let inner_vec = about.to_vsa(ops, item_memory, roles)?;
+                ops.bundle(&[&act_vec, &inner_vec]).map_err(vsa_err)
+            }
+            AbsTree::GoalRequest { description } => {
+                let act_vec = encode_token(ops, "dlg:goal-request");
+                let inner_vec = description.to_vsa(ops, item_memory, roles)?;
+                ops.bundle(&[&act_vec, &inner_vec]).map_err(vsa_err)
+            }
+            AbsTree::StructuralCommand { command, .. } => {
+                Ok(encode_token(ops, &format!("dlg:cmd:{command}")))
             }
         }
     }

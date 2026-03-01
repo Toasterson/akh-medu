@@ -55,6 +55,13 @@ pub enum AkhMessage {
     },
     /// Prompt for user input.
     Prompt { question: String },
+    /// Audit ledger entry (tool call, ingestion, or agent log).
+    AuditLog {
+        id: u64,
+        kind: String,
+        summary: String,
+        timestamp: u64,
+    },
 }
 
 // ── MessageSink trait ───────────────────────────────────────────────────
@@ -144,6 +151,14 @@ impl MessageSink for StdoutSink {
             }
             AkhMessage::Prompt { question } => {
                 println!("{question}");
+            }
+            AkhMessage::AuditLog {
+                id,
+                kind,
+                summary,
+                ..
+            } => {
+                println!("[audit:{kind}] #{id} {summary}");
             }
         }
     }
@@ -249,10 +264,101 @@ impl AkhMessage {
         }
     }
 
+    pub fn audit_log(
+        id: u64,
+        kind: impl Into<String>,
+        summary: impl Into<String>,
+    ) -> Self {
+        Self::AuditLog {
+            id,
+            kind: kind.into(),
+            summary: summary.into(),
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        }
+    }
+
     pub fn gap(entity: impl Into<String>, description: impl Into<String>) -> Self {
         Self::Gap {
             entity: entity.into(),
             description: description.into(),
+        }
+    }
+
+    /// Wrap this message in an `OutboundMessage` for the channel protocol.
+    pub fn into_outbound(self) -> crate::agent::channel_message::OutboundMessage {
+        crate::agent::channel_message::OutboundMessage::single(self)
+    }
+
+    /// Render this message as plain text for headless (non-TUI) output.
+    pub fn to_plain_text(&self) -> String {
+        match self {
+            AkhMessage::Fact {
+                text,
+                confidence,
+                provenance,
+            } => {
+                let mut s = text.clone();
+                if let Some(c) = confidence {
+                    s.push_str(&format!(" (confidence: {c:.2})"));
+                }
+                if let Some(p) = provenance {
+                    s.push_str(&format!(" [via {p}]"));
+                }
+                s
+            }
+            AkhMessage::Reasoning { step, expression } => {
+                if let Some(expr) = expression {
+                    format!("{step} :: {expr}")
+                } else {
+                    step.clone()
+                }
+            }
+            AkhMessage::Gap {
+                entity,
+                description,
+            } => format!("[gap] {entity}: {description}"),
+            AkhMessage::ToolResult {
+                tool,
+                success,
+                output,
+            } => {
+                let status = if *success { "ok" } else { "FAIL" };
+                format!("[{tool}:{status}] {output}")
+            }
+            AkhMessage::Narrative { text, .. } => text.clone(),
+            AkhMessage::System { text } => text.clone(),
+            AkhMessage::Error {
+                code,
+                message,
+                help,
+            } => {
+                let mut s = format!("[error:{code}] {message}");
+                if let Some(h) = help {
+                    s.push_str(&format!("\n  help: {h}"));
+                }
+                s
+            }
+            AkhMessage::GoalProgress {
+                goal,
+                status,
+                detail,
+            } => {
+                let mut s = format!("[goal] {goal} — {status}");
+                if let Some(d) = detail {
+                    s.push_str(&format!(": {d}"));
+                }
+                s
+            }
+            AkhMessage::Prompt { question } => question.clone(),
+            AkhMessage::AuditLog {
+                id,
+                kind,
+                summary,
+                ..
+            } => format!("[audit:{kind}] #{id} {summary}"),
         }
     }
 }

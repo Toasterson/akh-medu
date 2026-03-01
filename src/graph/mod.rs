@@ -8,7 +8,13 @@
 //! Both layers share the same [`Triple`] data model and can be synchronized.
 
 pub mod analytics;
+pub mod arity;
+pub mod argumentation_truth;
+pub mod contradiction;
+pub mod defeasible;
 pub mod index;
+pub mod nart;
+pub mod predicate_hierarchy;
 pub mod sparql;
 pub mod traverse;
 

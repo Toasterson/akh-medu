@@ -11,7 +11,7 @@
 //! - Gap → "? Dog: no habitat data"
 //! - Similarity → "Dog ~ Wolf (0.87)"
 
-use super::abs::{AbsTree, ProvenanceTag};
+use super::abs::{AbsTree, CompareOrd, Modality, ProvenanceTag, Quantifier, TemporalExpr};
 use super::cat::Cat;
 use super::concrete::{ConcreteGrammar, LinContext, ParseContext};
 use super::error::GrammarResult;
@@ -192,6 +192,93 @@ impl TerseGrammar {
 
             // Discourse frames: delegate to inner content.
             AbsTree::DiscourseFrame { inner, .. } => self.linearize_inner(inner, ctx),
+
+            // ── NLU extensions ────────────────────────────────────────
+            AbsTree::Negation { inner } => {
+                let text = self.linearize_inner(inner, ctx)?;
+                Ok(format!("NOT({text})"))
+            }
+            AbsTree::Quantified { quantifier, scope } => {
+                let text = self.linearize_inner(scope, ctx)?;
+                let q = match quantifier {
+                    Quantifier::Universal => "ALL",
+                    Quantifier::Existential => "SOME",
+                    Quantifier::Most => "MOST",
+                    Quantifier::None => "NONE",
+                    Quantifier::Specific(n) => return Ok(format!("{n}x{{{text}}}")),
+                };
+                Ok(format!("{q}{{{text}}}"))
+            }
+            AbsTree::Comparison {
+                entity_a,
+                entity_b,
+                property,
+                ordering,
+            } => {
+                let a = self.linearize_inner(entity_a, ctx)?;
+                let b = self.linearize_inner(entity_b, ctx)?;
+                let op = match ordering {
+                    CompareOrd::GreaterThan => ">",
+                    CompareOrd::LessThan => "<",
+                    CompareOrd::Equal => "=",
+                };
+                Ok(format!("{a} {op}{property} {b}"))
+            }
+            AbsTree::Conditional {
+                condition,
+                consequent,
+            } => {
+                let cond = self.linearize_inner(condition, ctx)?;
+                let cons = self.linearize_inner(consequent, ctx)?;
+                Ok(format!("IF({cond}) THEN({cons})"))
+            }
+            AbsTree::Temporal { time_expr, inner } => {
+                let text = self.linearize_inner(inner, ctx)?;
+                let t = match time_expr {
+                    TemporalExpr::Named(n) => n.clone(),
+                    TemporalExpr::Recurring(r) => r.clone(),
+                    TemporalExpr::Absolute(ts) => format!("t:{ts}"),
+                    TemporalExpr::Relative(delta) => format!("t:{delta:+}"),
+                };
+                Ok(format!("@{t} {text}"))
+            }
+            AbsTree::Modal { modality, inner } => {
+                let text = self.linearize_inner(inner, ctx)?;
+                let m = match modality {
+                    Modality::Want => "WANT",
+                    Modality::Can => "CAN",
+                    Modality::Should => "SHOULD",
+                    Modality::Must => "MUST",
+                    Modality::May => "MAY",
+                };
+                Ok(format!("{m}({text})"))
+            }
+            AbsTree::RelativeClause { head, clause } => {
+                let h = self.linearize_inner(head, ctx)?;
+                let c = self.linearize_inner(clause, ctx)?;
+                Ok(format!("{h} WHERE({c})"))
+            }
+
+            // ── Dialogue acts ────────────────────────────────────────
+            AbsTree::Greeting { .. } => Ok("GREET".to_string()),
+            AbsTree::Farewell { .. } => Ok("BYE".to_string()),
+            AbsTree::Acknowledgment { .. } => Ok("ACK".to_string()),
+            AbsTree::FollowUpRequest { .. } => Ok("MORE?".to_string()),
+            AbsTree::MetaQuery { about } => {
+                let a = self.linearize_inner(about, ctx)?;
+                Ok(format!("META({a})"))
+            }
+            AbsTree::GoalRequest { description } => {
+                let d = self.linearize_inner(description, ctx)?;
+                Ok(format!("GOAL({d})"))
+            }
+            AbsTree::StructuralCommand { command, args } => {
+                if args.is_empty() {
+                    Ok(format!("CMD:{command}"))
+                } else {
+                    Ok(format!("CMD:{command}({})", args.join(",")))
+                }
+            }
         }
     }
 }
@@ -296,13 +383,13 @@ fn try_parse_arrow(input: &str) -> Option<AbsTree> {
 /// Parse trailing confidence like "[0.95]" from the end of a string.
 fn parse_trailing_confidence(s: &str) -> (&str, Option<f32>) {
     let trimmed = s.trim();
-    if let Some(bracket_start) = trimmed.rfind('[') {
-        if trimmed.ends_with(']') {
-            let inner = &trimmed[bracket_start + 1..trimmed.len() - 1];
-            if let Ok(conf) = inner.parse::<f32>() {
-                let before = trimmed[..bracket_start].trim();
-                return (before, Some(conf));
-            }
+    if let Some(bracket_start) = trimmed.rfind('[')
+        && trimmed.ends_with(']')
+    {
+        let inner = &trimmed[bracket_start + 1..trimmed.len() - 1];
+        if let Ok(conf) = inner.parse::<f32>() {
+            let before = trimmed[..bracket_start].trim();
+            return (before, Some(conf));
         }
     }
     (trimmed, None)

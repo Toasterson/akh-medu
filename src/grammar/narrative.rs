@@ -13,7 +13,7 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use super::abs::{AbsTree, ProvenanceTag};
+use super::abs::{AbsTree, CompareOrd, Modality, ProvenanceTag, Quantifier, TemporalExpr};
 use super::cat::Cat;
 use super::concrete::{ConcreteGrammar, LinContext, ParseContext};
 use super::discourse::{PointOfView, QueryFocus};
@@ -47,6 +47,12 @@ const GAP_OPENERS: &[&str] = &[
 /// producing varied and engaging prose.
 pub struct NarrativeGrammar {
     transition_counter: AtomicUsize,
+}
+
+impl Default for NarrativeGrammar {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl NarrativeGrammar {
@@ -324,6 +330,108 @@ impl NarrativeGrammar {
                 PointOfView::SecondPerson => self.linearize_second_person(inner, ctx),
                 PointOfView::ThirdPerson => self.linearize_inner(inner, ctx),
             },
+
+            // ── NLU extensions ────────────────────────────────────────
+            AbsTree::Negation { inner } => {
+                let transition = self.next_transition();
+                let text = self.linearize_inner(inner, ctx)?;
+                Ok(format!("{transition}That is not the case: {text}"))
+            }
+            AbsTree::Quantified { quantifier, scope } => {
+                let transition = self.next_transition();
+                let text = self.linearize_inner(scope, ctx)?;
+                match quantifier {
+                    Quantifier::Universal => Ok(format!("{transition}In every case, {text}")),
+                    Quantifier::Existential => {
+                        Ok(format!("{transition}There are cases where {text}"))
+                    }
+                    Quantifier::Most => Ok(format!("{transition}In most cases, {text}")),
+                    Quantifier::None => Ok(format!("{transition}In no case {text}")),
+                    Quantifier::Specific(n) => {
+                        Ok(format!("{transition}In {n} specific instances, {text}"))
+                    }
+                }
+            }
+            AbsTree::Comparison {
+                entity_a,
+                entity_b,
+                property,
+                ordering,
+            } => {
+                let transition = self.next_transition();
+                let a = self.linearize_inner(entity_a, ctx)?;
+                let b = self.linearize_inner(entity_b, ctx)?;
+                match ordering {
+                    CompareOrd::GreaterThan => {
+                        Ok(format!("{transition}{a} is more {property} than {b}."))
+                    }
+                    CompareOrd::LessThan => {
+                        Ok(format!("{transition}{a} is less {property} than {b}."))
+                    }
+                    CompareOrd::Equal => {
+                        Ok(format!("{transition}{a} is equally {property} as {b}."))
+                    }
+                }
+            }
+            AbsTree::Conditional {
+                condition,
+                consequent,
+            } => {
+                let transition = self.next_transition();
+                let cond = self.linearize_inner(condition, ctx)?;
+                let cons = self.linearize_inner(consequent, ctx)?;
+                Ok(format!("{transition}If {cond}, then {cons}."))
+            }
+            AbsTree::Temporal { time_expr, inner } => {
+                let transition = self.next_transition();
+                let text = self.linearize_inner(inner, ctx)?;
+                let t = match time_expr {
+                    TemporalExpr::Named(n) => n.clone(),
+                    TemporalExpr::Recurring(r) => format!("on a recurring basis ({r})"),
+                    TemporalExpr::Absolute(ts) => format!("at time {ts}"),
+                    TemporalExpr::Relative(delta) if *delta > 0 => format!("in {delta} units"),
+                    TemporalExpr::Relative(delta) => format!("{} units ago", delta.unsigned_abs()),
+                };
+                Ok(format!("{transition}{t}, {text}"))
+            }
+            AbsTree::Modal { modality, inner } => {
+                let transition = self.next_transition();
+                let text = self.linearize_inner(inner, ctx)?;
+                let m = match modality {
+                    Modality::Want => "wants to",
+                    Modality::Can => "is able to",
+                    Modality::Should => "should",
+                    Modality::Must => "must",
+                    Modality::May => "may",
+                };
+                Ok(format!("{transition}One {m} {text}."))
+            }
+            AbsTree::RelativeClause { head, clause } => {
+                let h = self.linearize_inner(head, ctx)?;
+                let c = self.linearize_inner(clause, ctx)?;
+                Ok(format!("{h}, which {c}."))
+            }
+
+            // ── Dialogue acts ────────────────────────────────────────
+            AbsTree::Greeting { .. } => Ok("Hello.".to_string()),
+            AbsTree::Farewell { .. } => Ok("Farewell.".to_string()),
+            AbsTree::Acknowledgment { .. } => Ok("Understood.".to_string()),
+            AbsTree::FollowUpRequest { .. } => Ok("Tell me more.".to_string()),
+            AbsTree::MetaQuery { about } => {
+                let a = self.linearize_inner(about, ctx)?;
+                Ok(format!("About {a}:"))
+            }
+            AbsTree::GoalRequest { description } => {
+                let d = self.linearize_inner(description, ctx)?;
+                Ok(format!("Goal: {d}"))
+            }
+            AbsTree::StructuralCommand { command, args } => {
+                if args.is_empty() {
+                    Ok(format!("[command: {command}]"))
+                } else {
+                    Ok(format!("[command: {command} {}]", args.join(" ")))
+                }
+            }
         }
     }
 
@@ -333,7 +441,7 @@ impl NarrativeGrammar {
     fn linearize_first_person(
         &self,
         tree: &AbsTree,
-        focus: &QueryFocus,
+        _focus: &QueryFocus,
         ctx: &LinContext,
     ) -> GrammarResult<String> {
         match tree {
@@ -366,14 +474,14 @@ impl NarrativeGrammar {
             AbsTree::Conjunction { items, .. } => {
                 let mut sentences = Vec::new();
                 for item in items {
-                    let s = self.linearize_first_person(item, focus, ctx)?;
+                    let s = self.linearize_first_person(item, _focus, ctx)?;
                     sentences.push(s);
                 }
                 Ok(join_first_person_sentences(&sentences))
             }
 
             AbsTree::WithConfidence { inner, confidence } => {
-                let text = self.linearize_first_person(inner, focus, ctx)?;
+                let text = self.linearize_first_person(inner, _focus, ctx)?;
                 let qualifier = if *confidence > 0.9 {
                     "with high confidence"
                 } else if *confidence > 0.7 {
@@ -391,7 +499,7 @@ impl NarrativeGrammar {
             }
 
             AbsTree::WithProvenance { inner, .. } => {
-                self.linearize_first_person(inner, focus, ctx)
+                self.linearize_first_person(inner, _focus, ctx)
             }
 
             // For non-triple nodes, fall back to standard linearization.
@@ -477,15 +585,13 @@ fn merge_i_am_clauses(clauses: &[String]) -> String {
     }
 
     // Join with commas.
-    let joined = if parts.len() == 2 {
+    if parts.len() == 2 {
         format!("{}, {}.", parts[0], parts[1])
     } else {
         let last = parts.last().unwrap();
         let rest = &parts[..parts.len() - 1];
         format!("{}, and {last}.", rest.join(", "))
-    };
-
-    joined
+    }
 }
 
 fn format_provenance_narrative(tag: &ProvenanceTag) -> String {

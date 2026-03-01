@@ -235,6 +235,7 @@ mod inner {
         component: Component,
         engine: Arc<Engine>,
         /// Skill that provided this tool (used for provenance tracking).
+        #[allow(dead_code)] // Will be used when WASM tools emit provenance records
         pub(crate) skill_id: String,
         config: HashMap<String, String>,
     }

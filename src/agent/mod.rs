@@ -8,20 +8,48 @@
 //! - **OODA loop** (Observe → Orient → Decide → Act cycle)
 //! - **Consolidation** (deliberate reasoning about what to remember)
 
+#[allow(clippy::module_inception)]
 pub mod agent;
+pub mod calendar;
+pub mod causal;
+pub mod channel;
+pub mod channel_message;
 pub mod chat;
+pub mod constraint_check;
+pub mod conversation;
+pub mod chunking;
+pub mod dialogue;
 pub mod cli_tool;
+pub mod continuous_learning;
+pub mod curiosity;
+pub mod explain;
 #[cfg(feature = "daemon")]
 pub mod daemon;
+pub mod decomposition;
+pub mod drives;
 pub mod error;
 pub mod goal;
+pub mod interlocutor;
+pub mod operator_channel;
+#[cfg(feature = "oxifed")]
+pub mod oxifed;
+pub mod goal_generation;
 pub mod idle;
+pub mod library_learn;
 pub mod memory;
+pub mod metacognition;
+pub mod multi_agent;
 pub mod nlp;
 pub mod ooda;
+pub mod pim;
 pub mod plan;
+pub mod preference;
+pub mod priority_reasoning;
+pub mod project;
 pub mod reflect;
+pub mod resource;
 pub mod semantic_enrichment;
+pub mod sleep;
 pub mod synthesize;
 pub mod synthesize_abs;
 pub mod tool;
@@ -29,26 +57,92 @@ pub mod tool_manifest;
 pub mod tool_semantics;
 pub mod tools;
 pub mod trigger;
+pub mod watch;
 #[cfg(feature = "wasm-tools")]
 pub mod wasm_runtime;
 
 pub use agent::{Agent, AgentConfig, AgentPredicates};
+pub use channel::{ChannelCapabilities, ChannelError, ChannelKind, ChannelRegistry, ChannelResult, CommChannel};
+pub use channel_message::{
+    ConstraintCheckStatus, InboundMessage, InterlocutorId, MessageContent, OutboundMessage,
+    ResponseContent,
+};
 pub use chat::{Conversation, Participant, ParticipantSource, discover_ssh_fingerprint};
+pub use constraint_check::{
+    CheckOutcome, CommunicationBudget, ConstraintChecker, ConstraintConfig, ConstraintViolation,
+    ConstraintWarning, EmissionDecision, SensitivityLevel, emission_decision,
+};
+pub use conversation::{ConversationState, ConversationTurn, GroundedResponse, GroundedTriple, ResponseDetail, Speaker};
+pub use interlocutor::{InterlocutorPredicates, InterlocutorProfile, InterlocutorRegistry, InterlocutorError, InterlocutorResult, interest_overlap};
+pub use multi_agent::{
+    AgentProtocolMessage, CapabilityScope, CapabilityToken, InterlocutorKind, MultiAgentError,
+    MultiAgentResult, TokenRegistry, initial_trust_for_agent, should_promote_trust,
+};
+#[cfg(feature = "oxifed")]
+pub use oxifed::{OxifedChannel, OxifedConfig, OxifedError, OxifedInboundHandle, OxifedResult};
 #[cfg(feature = "daemon")]
 pub use daemon::{AgentDaemon, DaemonConfig};
-pub use error::{AgentError, AgentResult};
-pub use goal::{Goal, GoalStatus};
-pub use idle::{IdleScheduler, IdleTaskResult};
-pub use memory::{
-    ConsolidationConfig, ConsolidationResult, EpisodicEntry, WorkingMemory, WorkingMemoryEntry,
-    WorkingMemoryKind,
+pub use decomposition::{
+    DecompositionMethod, DecompositionOutput, DecompositionStrategy, DependencyEdge, MethodRegistry,
+    TaskNode, TaskNodeKind, TaskTree,
 };
-pub use nlp::{QuestionWord, UserIntent, classify_intent};
-pub use ooda::{ActionResult, Decision, GoalProgress, Observation, OodaCycleResult, Orientation};
+pub use drives::{DriveKind, DriveSystem};
+pub use error::{AgentError, AgentResult};
+pub use explain::{
+    DerivationNode, ExplainError, ExplainResult, ExplanationQuery, build_derivation_tree,
+    derivation_kind_prose, execute_query, explain_changes, explain_confidence, explain_entity,
+    explain_known, render_derivation_prose, render_derivation_tree,
+};
+pub use operator_channel::{InboundHandle, OperatorChannel};
+pub use goal::{Goal, GoalJustification, GoalSource, GoalStatus};
+pub use metacognition::{CompetenceModel, FailureIndex, GoalEvaluation, MetacognitionConfig, MetacognitiveControl};
+pub use goal_generation::{GoalGenerationConfig, GoalGenerationResult, GoalProposal};
+pub use idle::{IdleScheduler, IdleTaskResult};
+pub use library_learn::{LibraryLearner, LibraryLearningResult};
+pub use memory::{
+    ConsolidationConfig, ConsolidationResult, EpisodicEntry, SessionSummary, WorkingMemory,
+    WorkingMemoryEntry, WorkingMemoryKind,
+};
+pub use conversation::ConversationalResponse;
+pub use dialogue::{DialogueManager, DialoguePredicates};
+#[allow(deprecated)]
+pub use nlp::{ConversationalKind, QuestionWord, UserIntent, classify_conversational, classify_intent};
+pub use ooda::{
+    ActionResult, Decision, DecisionImpasse, GoalProgress, ImpasseKind, Observation,
+    OodaCycleResult, Orientation,
+};
+pub use calendar::{
+    AllenRelation, CalendarError, CalendarEvent, CalendarManager, CalendarPredicates,
+    CalendarResult, CalendarRoleVectors,
+};
+pub use causal::{
+    ActionSchema, CausalEffect, CausalError, CausalManager, CausalPattern, CausalPredicates,
+    CausalRelation, CausalResult, CausalRoleVectors, EffectKind, PatternElement, StateTransition,
+};
+pub use pim::{
+    DependencyEdge as PimDependencyEdge, EisenhowerQuadrant, EnergyLevel, GtdReviewResult,
+    GtdState, ParaCategory, PimContext, PimError, PimManager, PimMetadata, PimPredicates,
+    PimResult, Recurrence,
+};
 pub use plan::{Plan, PlanStatus, PlanStep, StepStatus};
+pub use preference::{
+    FeedbackSignal, JitirResult, PreferenceError, PreferenceManager, PreferencePredicates,
+    PreferenceResult, PreferenceReview, PreferenceRoleVectors, ProactivityLevel, Suggestion,
+};
+pub use priority_reasoning::{Audience, PriorityArgument, PriorityVerdict, Value};
+pub use project::{Agenda, Project, ProjectAssignment, ProjectPredicates, ProjectStatus};
 pub use reflect::{Adjustment, ReflectionConfig, ReflectionResult};
+pub use chunking::{ChunkingConfig, GeneralizedStep, LearnedMethod, MethodIndex};
+pub use continuous_learning::{ContinuousLearningConfig, ContinuousLearningRunResult};
+pub use curiosity::{CuriosityReport, CuriosityTarget, DirectedCuriosityConfig};
+pub use resource::{EffortCase, EffortEstimate, EffortIndex, ImprovementHistory, ResourceReport};
 pub use semantic_enrichment::{EnrichmentResult, SemanticPredicates};
+pub use sleep::{ConsolidationPhase, SleepConfig, SleepCycle, SleepMetrics};
 pub use synthesize::NarrativeSummary;
 pub use tool::{Tool, ToolInput, ToolOutput, ToolRegistry, ToolSignature};
 pub use tool_manifest::{Capability, DangerInfo, DangerLevel, ToolManifest, ToolSource};
 pub use trigger::{Trigger, TriggerAction, TriggerCondition, TriggerStore};
+pub use watch::{
+    Discrepancy, Expectation, TriplePattern, Watch, WatchAction, WatchCondition, WatchFiring,
+    WorldSnapshot,
+};

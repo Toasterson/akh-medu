@@ -103,10 +103,10 @@ impl CliTool {
                 }
                 (CliArgType::FlagBool, Some(v)) => {
                     let truthy = matches!(v, "true" | "1" | "yes");
-                    if truthy {
-                        if let Some(ref flag) = schema.flag {
-                            args.push(flag.clone());
-                        }
+                    if truthy
+                        && let Some(ref flag) = schema.flag
+                    {
+                        args.push(flag.clone());
                     }
                 }
                 (_, None) if schema.required => {

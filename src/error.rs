@@ -71,6 +71,10 @@ pub enum AkhError {
 
     #[error(transparent)]
     #[diagnostic(transparent)]
+    Dispatch(#[from] crate::dispatch::DispatchError),
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
     Compartment(#[from] crate::compartment::CompartmentError),
 
     #[error(transparent)]
@@ -80,6 +84,62 @@ pub enum AkhError {
     #[error(transparent)]
     #[diagnostic(transparent)]
     Workspace(#[from] crate::workspace::WorkspaceError),
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    RuleMacro(#[from] crate::rule_macro::RuleMacroError),
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Temporal(#[from] crate::temporal::TemporalError),
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Arity(#[from] crate::graph::arity::ArityError),
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Contradiction(#[from] crate::graph::contradiction::ContradictionError),
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Skolem(#[from] crate::skolem::SkolemError),
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Cwa(#[from] crate::compartment::cwa::CwaError),
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    SecondOrder(#[from] crate::reason::second_order::SecondOrderError),
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Nart(#[from] crate::graph::nart::NartError),
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    ResourceDiscovery(#[from] crate::bootstrap::resources::ResourceDiscoveryError),
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Ingestion(#[from] crate::bootstrap::ingest::IngestionError),
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Competence(#[from] crate::bootstrap::competence::CompetenceError),
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Orchestrator(#[from] crate::bootstrap::orchestrator::OrchestratorError),
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Audit(#[from] crate::audit::AuditError),
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Nlu(#[from] crate::nlu::error::NluError),
 }
 
 // ---------------------------------------------------------------------------
@@ -629,6 +689,18 @@ pub enum EngineError {
         )
     )]
     IngestFormat { message: String },
+
+    #[error("contradiction detected: {message}")]
+    #[diagnostic(
+        code(akh::engine::contradiction_rejected),
+        help(
+            "The triple was rejected because it contradicts existing knowledge \
+             and the engine's contradiction policy is set to Reject. \
+             Use ContradictionPolicy::Warn to insert anyway, or \
+             ContradictionPolicy::Replace to overwrite the existing triple."
+        )
+    )]
+    ContradictionRejected { message: String },
 }
 
 /// Convenience alias for functions returning akh-medu results.
@@ -642,6 +714,9 @@ pub type PipelineResult<T> = std::result::Result<T, PipelineError>;
 
 /// Result type for skill operations.
 pub type SkillResult<T> = std::result::Result<T, SkillError>;
+
+/// Result type for audit operations.
+pub type AuditResult<T> = std::result::Result<T, crate::audit::AuditError>;
 
 #[cfg(test)]
 mod tests {

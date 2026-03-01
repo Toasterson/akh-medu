@@ -63,6 +63,38 @@ pub enum CompartmentError {
     )]
     KindMismatch { expected: String, actual: String },
 
+    #[error("disjoint context conflict: {ctx_a} and {ctx_b} are declared disjoint")]
+    #[diagnostic(
+        code(akh::compartment::disjoint_conflict),
+        help(
+            "Contexts \"{ctx_a}\" and \"{ctx_b}\" are declared disjoint via `ctx:disjoint`. \
+             A triple cannot belong to both. Choose one context or remove the disjointness \
+             declaration."
+        )
+    )]
+    DisjointConflict { ctx_a: String, ctx_b: String },
+
+    #[error("context cycle detected: {context} eventually specializes itself")]
+    #[diagnostic(
+        code(akh::compartment::context_cycle),
+        help(
+            "Adding `ctx:specializes` from \"{context}\" would create a cycle in the \
+             context hierarchy. Microtheory inheritance must be acyclic."
+        )
+    )]
+    ContextCycle { context: String },
+
+    #[error("psyche is immutable after awakening — use evolve() for gradual change")]
+    #[diagnostic(
+        code(akh::compartment::psyche_immutable),
+        help(
+            "The psyche has been finalized by the Ritual of Awakening and cannot be \
+             wholesale-replaced. Use `psyche.evolve()` for gradual adaptation, or \
+             `force_set_psyche()` for admin override."
+        )
+    )]
+    PsycheImmutable,
+
     #[error(transparent)]
     #[diagnostic(transparent)]
     Store(#[from] StoreError),

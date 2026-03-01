@@ -52,6 +52,8 @@ pub mod morpho;
 pub mod narrative;
 pub mod parser;
 pub mod preprocess;
+pub mod rust_gen;
+pub mod templates;
 pub mod terse;
 
 use std::collections::HashMap;
@@ -65,7 +67,7 @@ pub use parser::ParseResult;
 
 /// Runtime registry of available concrete grammars.
 ///
-/// Ships with three built-in archetypes (formal, terse, narrative).
+/// Ships with four built-in archetypes (formal, terse, narrative, rust-gen).
 /// Users can register custom grammars at runtime.
 pub struct GrammarRegistry {
     grammars: HashMap<String, Box<dyn ConcreteGrammar>>,
@@ -81,6 +83,10 @@ impl GrammarRegistry {
         grammars.insert(
             "narrative".into(),
             Box::new(narrative::NarrativeGrammar::new()),
+        );
+        grammars.insert(
+            "rust-gen".into(),
+            Box::new(rust_gen::RustCodeGrammar),
         );
 
         Self {

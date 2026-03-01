@@ -8,6 +8,7 @@
 //! - [`ItemMemory`] — symbol-to-vector mapping with ANN search
 //! - Encoding from symbols to vectors
 
+pub mod code_encode;
 pub mod encode;
 pub mod grounding;
 pub mod item_memory;
@@ -31,7 +32,7 @@ impl Dimension {
     /// Number of bytes needed to store a binary vector at this dimension.
     /// Each bit is one component, packed into bytes.
     pub fn binary_byte_len(self) -> usize {
-        (self.0 + 7) / 8
+        self.0.div_ceil(8)
     }
 
     /// Number of bytes for an i8 vector (one byte per component).
@@ -47,18 +48,13 @@ impl Default for Dimension {
 }
 
 /// Encoding scheme for hypervectors.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub enum Encoding {
     /// Binary bipolar: each component is ±1, stored as bits (1 = +1, 0 = -1).
     /// Bind = XOR, Bundle = majority vote, Similarity = Hamming distance.
+    #[default]
     Bipolar,
     // Future: FHRR, SSP
-}
-
-impl Default for Encoding {
-    fn default() -> Self {
-        Self::Bipolar
-    }
 }
 
 impl std::fmt::Display for Encoding {

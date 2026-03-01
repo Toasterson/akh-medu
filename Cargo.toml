@@ -40,10 +40,11 @@ rayon = "1"
 hnsw_rs = "0.3"
 anndists = "0.1"
 petgraph = "0.7"
-oxigraph = "0.4"
+oxigraph = "0.5"
 
 # Code analysis
 syn = { version = "2", features = ["full", "visit"] }
+quote = "1"
 
 # Document parsing
 scraper = "0.23"
@@ -65,6 +66,7 @@ rand = "0.8"
 # TUI
 ratatui = "0.29"
 crossterm = "0.28"
+signal-hook = "0.3"
 
 # Infrastructure
 tracing = "0.1"
@@ -83,10 +85,41 @@ futures-util = { version = "0.3", optional = true }
 # WASM tool runtime (feature-gated)
 wasmtime = { version = "29", features = ["component-model"], optional = true }
 
+# Federation via oxifed (feature-gated)
+lapin = { version = "2", optional = true }
+deadpool-lapin = { version = "0.12", optional = true }
+reqwest = { version = "0.12", features = ["json"], optional = true }
+
+# Email channel (feature-gated)
+mail-parser = { version = "0.11", optional = true }
+imap = { version = "2", optional = true }
+native-tls = { version = "0.2", optional = true }
+lettre = { version = "0.11", optional = true, default-features = false, features = ["builder", "smtp-transport", "rustls-tls"] }
+regex = "1"
+
+# NLU Tier 2: Micro-ML NER (feature-gated)
+ort = { version = "2.0.0-rc.11", optional = true, default-features = false, features = ["std", "download-binaries", "copy-dylibs", "tls-native"] }
+tokenizers = { version = "0.22", optional = true, default-features = false, features = ["progressbar", "fancy-regex"] }
+
+# NLU Tier 3: Small LLM translator (feature-gated)
+llama-cpp-2 = { version = "0.1", optional = true, features = ["sampler"] }
+encoding_rs = { version = "0.8", optional = true }
+
+# Calendar (feature-gated)
+icalendar = { version = "0.16", optional = true, features = ["parser"] }
+chrono = { version = "0.4", optional = true, features = ["serde"] }
+
 [features]
+client-only = [ "daemon" ]  # Strips local engine from akh binary; requires running akhomed server
 daemon = ["tokio", "tokio-tungstenite", "futures-util"]
 server = ["daemon", "axum", "tower-http"]
+oxifed = ["daemon", "lapin", "deadpool-lapin", "reqwest"]
+email = ["mail-parser", "imap", "native-tls", "lettre"]
+calendar = ["icalendar", "chrono"]
 wasm-tools = ["wasmtime"]
+nlu-ml = ["ort", "tokenizers"]
+nlu-llm = ["llama-cpp-2", "encoding_rs"]
+nlu-full = ["nlu-ml", "nlu-llm"]
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

@@ -9,6 +9,7 @@
 
 pub mod catalog;
 pub mod chunker;
+pub mod concepts;
 pub mod error;
 pub mod inbox;
 pub mod ingest;
@@ -46,6 +47,7 @@ pub struct LibraryAddResponse {
     pub format: String,
     pub chunk_count: usize,
     pub triple_count: usize,
+    pub concept_count: usize,
 }
 
 /// Request body for `POST /library/search`.

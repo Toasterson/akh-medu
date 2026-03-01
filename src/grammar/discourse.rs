@@ -17,11 +17,13 @@ use miette::Diagnostic;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::agent::conversation::ConversationState;
 use crate::agent::nlp::QuestionWord;
 use crate::agent::synthesize::is_metadata_label;
 use crate::engine::Engine;
 use crate::grammar::abs::AbsTree;
 use crate::grammar::bridge::triple_to_abs;
+use crate::grammar::lexer::Lexicon;
 use crate::graph::Triple;
 use crate::symbol::SymbolId;
 
@@ -219,12 +221,25 @@ pub fn resolve_discourse(
     original_input: &str,
     engine: &Engine,
     capability_signal: bool,
+    conversation: Option<&ConversationState>,
+    lexicon: Option<&Lexicon>,
 ) -> DiscourseResult<DiscourseContext> {
     let original_subject = subject.to_string();
 
-    // Step 1: Try to resolve the subject directly.
-    let (resolved_label, subject_id, pronoun_resolved) =
-        resolve_pronoun_chain(subject, engine)?;
+    // Step 1: Try to resolve the subject via KG pronoun chain.
+    let resolve_result = resolve_pronoun_chain(subject, engine);
+
+    // Step 1b: If KG resolution failed and we have conversation history,
+    // try anaphora resolution from conversation context.
+    let (resolved_label, subject_id, pronoun_resolved) = match resolve_result {
+        Ok(triple) => triple,
+        Err(DiscourseError::SubjectNotFound { .. })
+            if conversation.is_some() && lexicon.is_some() =>
+        {
+            resolve_from_conversation(subject, engine, conversation.unwrap(), lexicon.unwrap())?
+        }
+        Err(e) => return Err(e),
+    };
 
     // Step 2: Determine POV.
     let pov = determine_pov(&resolved_label, pronoun_resolved);
@@ -241,6 +256,41 @@ pub fn resolve_discourse(
         focus,
         question_word,
         original_input: original_input.to_string(),
+    })
+}
+
+/// Attempt to resolve a pronoun from conversation history.
+///
+/// Uses the [`Lexicon`] to identify singular/plural anaphoric pronouns in a
+/// language-independent way:
+/// - Singular anaphora (e.g., "it", "это", "ça") → `conversation.active_topic`
+/// - Plural anaphora (e.g., "them", "их", "les") → `conversation.active_referents[0]`
+///
+/// Falls through to [`DiscourseError::SubjectNotFound`] if no referent is available.
+fn resolve_from_conversation(
+    subject: &str,
+    engine: &Engine,
+    conversation: &ConversationState,
+    lexicon: &Lexicon,
+) -> DiscourseResult<(String, SymbolId, bool)> {
+    let lower = subject.to_lowercase();
+
+    if lexicon.is_singular_anaphora(&lower) {
+        if let Some(topic_id) = conversation.active_topic {
+            let label = engine.resolve_label(topic_id);
+            return Ok((label, topic_id, true));
+        }
+    }
+
+    if lexicon.is_plural_anaphora(&lower) {
+        if let Some(&referent_id) = conversation.active_referents.first() {
+            let label = engine.resolve_label(referent_id);
+            return Ok((label, referent_id, true));
+        }
+    }
+
+    Err(DiscourseError::SubjectNotFound {
+        subject: subject.to_string(),
     })
 }
 
@@ -426,11 +476,9 @@ pub fn build_discourse_response(
 fn score_triple_for_focus(predicate_label: &str, focus: &QueryFocus) -> i32 {
     let base = match focus {
         QueryFocus::Identity => {
-            if IDENTITY_PREDICATES.iter().any(|p| predicate_label == *p) {
+            if IDENTITY_PREDICATES.contains(&predicate_label) {
                 10
-            } else if DEPRIORITIZED_PREDICATES
-                .iter()
-                .any(|p| predicate_label == *p)
+            } else if DEPRIORITIZED_PREDICATES.contains(&predicate_label)
             {
                 -5
             } else {
@@ -457,11 +505,9 @@ fn score_triple_for_focus(predicate_label: &str, focus: &QueryFocus) -> i32 {
         QueryFocus::Capability => {
             if predicate_label == "has-capability" {
                 10
-            } else if IDENTITY_PREDICATES.iter().any(|p| predicate_label == *p) {
+            } else if IDENTITY_PREDICATES.contains(&predicate_label) {
                 3
-            } else if DEPRIORITIZED_PREDICATES
-                .iter()
-                .any(|p| predicate_label == *p)
+            } else if DEPRIORITIZED_PREDICATES.contains(&predicate_label)
             {
                 -5
             } else {
@@ -753,5 +799,135 @@ mod tests {
             is_a_pos < cap_pos,
             "is-a ({is_a_pos:?}) should come before has-capability ({cap_pos:?})"
         );
+    }
+
+    // ── Anaphora resolution from conversation history ────────────────
+
+    fn en_lexicon() -> Lexicon {
+        Lexicon::default_english()
+    }
+
+    #[test]
+    fn resolve_it_from_conversation_topic() {
+        let engine = test_engine();
+        let lex = en_lexicon();
+        let dog = engine.create_symbol(SymbolKind::Entity, "dog").unwrap();
+        let mut conv = ConversationState::new("test", "narrative");
+        conv.add_turn(
+            crate::agent::conversation::Speaker::Operator,
+            "what is a dog",
+            vec![dog.id],
+        );
+
+        let result = resolve_from_conversation("it", &engine, &conv, &lex).unwrap();
+        assert_eq!(result.0, "dog");
+        assert_eq!(result.1, dog.id);
+        assert!(result.2); // pronoun_resolved
+    }
+
+    #[test]
+    fn resolve_that_from_conversation_topic() {
+        let engine = test_engine();
+        let lex = en_lexicon();
+        let cat = engine.create_symbol(SymbolKind::Entity, "cat").unwrap();
+        let mut conv = ConversationState::new("test", "narrative");
+        conv.add_turn(
+            crate::agent::conversation::Speaker::Operator,
+            "what is a cat",
+            vec![cat.id],
+        );
+
+        let result = resolve_from_conversation("that", &engine, &conv, &lex).unwrap();
+        assert_eq!(result.0, "cat");
+    }
+
+    #[test]
+    fn resolve_them_from_conversation_referents() {
+        let engine = test_engine();
+        let lex = en_lexicon();
+        let dog = engine.create_symbol(SymbolKind::Entity, "dog").unwrap();
+        let mut conv = ConversationState::new("test", "narrative");
+        conv.add_turn(
+            crate::agent::conversation::Speaker::Operator,
+            "tell me about dogs",
+            vec![dog.id],
+        );
+
+        let result = resolve_from_conversation("them", &engine, &conv, &lex).unwrap();
+        assert_eq!(result.0, "dog");
+    }
+
+    #[test]
+    fn resolve_pronoun_no_topic_fails() {
+        let engine = test_engine();
+        let lex = en_lexicon();
+        let conv = ConversationState::new("test", "narrative");
+
+        let result = resolve_from_conversation("it", &engine, &conv, &lex);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn resolve_discourse_with_conversation_fallback() {
+        let engine = test_engine();
+        let lex = en_lexicon();
+        let dog = engine.create_symbol(SymbolKind::Entity, "dog").unwrap();
+        let mut conv = ConversationState::new("test", "narrative");
+        conv.add_turn(
+            crate::agent::conversation::Speaker::Operator,
+            "what is a dog",
+            vec![dog.id],
+        );
+
+        // "it" is not in the KG as a symbol, but should resolve via conversation.
+        let ctx = resolve_discourse("it", Some(QuestionWord::What), "what about it?", &engine, false, Some(&conv), Some(&lex));
+        assert!(ctx.is_ok());
+        let ctx = ctx.unwrap();
+        assert_eq!(ctx.resolved_subject, "dog");
+        assert!(ctx.pronoun_resolved);
+    }
+
+    #[test]
+    fn resolve_discourse_without_conversation_fails() {
+        let engine = test_engine();
+        // "it" is not in the KG, and no conversation context provided.
+        let ctx = resolve_discourse("it", Some(QuestionWord::What), "what is it?", &engine, false, None, None);
+        assert!(ctx.is_err());
+    }
+
+    #[test]
+    fn resolve_russian_anaphora_from_conversation() {
+        let engine = test_engine();
+        let lex = Lexicon::default_russian();
+        let dog = engine.create_symbol(SymbolKind::Entity, "собака").unwrap();
+        let mut conv = ConversationState::new("test", "narrative");
+        conv.add_turn(
+            crate::agent::conversation::Speaker::Operator,
+            "что такое собака",
+            vec![dog.id],
+        );
+
+        // "это" (Russian "it/this") should resolve to active topic.
+        let result = resolve_from_conversation("это", &engine, &conv, &lex).unwrap();
+        assert_eq!(result.0, "собака");
+        assert!(result.2);
+    }
+
+    #[test]
+    fn resolve_french_anaphora_from_conversation() {
+        let engine = test_engine();
+        let lex = Lexicon::default_french();
+        let chat = engine.create_symbol(SymbolKind::Entity, "chat").unwrap();
+        let mut conv = ConversationState::new("test", "narrative");
+        conv.add_turn(
+            crate::agent::conversation::Speaker::Operator,
+            "qu'est-ce qu'un chat",
+            vec![chat.id],
+        );
+
+        // "ça" (French "it/that") should resolve to active topic.
+        let result = resolve_from_conversation("ça", &engine, &conv, &lex).unwrap();
+        assert_eq!(result.0, "chat");
+        assert!(result.2);
     }
 }
