@@ -18,6 +18,14 @@ use super::error::AgentResult;
 use crate::client::DaemonStatus;
 use crate::message::AkhMessage;
 
+/// Current unix timestamp in seconds.
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
@@ -412,9 +420,14 @@ impl AgentDaemon {
                     dreyfus = %result.dreyfus_level,
                     "daemon: continuous learning complete",
                 );
+                if let Some(ref status) = self.status
+                    && let Ok(mut st) = status.try_lock()
+                {
+                    st.last_learning_at = Some(now_secs());
+                }
             }
             Err(e) => {
-                tracing::debug!(error = %e, "daemon: continuous learning skipped");
+                tracing::info!(error = %e, "daemon: continuous learning skipped");
             }
         }
     }
@@ -430,6 +443,12 @@ impl AgentDaemon {
                     )));
                 }
                 tracing::info!(activated, dormant, "daemon: goal generation complete");
+                if let Some(ref status) = self.status
+                    && let Ok(mut st) = status.try_lock()
+                {
+                    st.last_goal_gen_at = Some(now_secs());
+                    st.active_goals = super::goal::active_goals(self.agent.goals()).len();
+                }
             }
             Err(e) => tracing::debug!(error = %e, "daemon: goal generation skipped"),
         }
@@ -451,6 +470,11 @@ impl AgentDaemon {
                     metrics.dream_connections_found,
                 )));
                 tracing::info!(?metrics, "daemon: sleep cycle complete");
+                if let Some(ref status) = self.status
+                    && let Ok(mut st) = status.try_lock()
+                {
+                    st.last_sleep_at = Some(now_secs());
+                }
             }
             Err(e) => tracing::debug!(error = %e, "daemon: sleep cycle skipped"),
         }
@@ -535,6 +559,11 @@ impl AgentDaemon {
             tracing::warn!(error = %e, "daemon: session persist failed");
         } else {
             tracing::debug!("daemon: session persisted");
+            if let Some(ref status) = self.status
+                && let Ok(mut st) = status.try_lock()
+            {
+                st.last_persist_at = Some(now_secs());
+            }
         }
     }
 }

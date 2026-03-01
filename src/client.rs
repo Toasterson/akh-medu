@@ -175,6 +175,27 @@ pub struct DaemonStatus {
     pub total_cycles: usize,
     pub started_at: u64,
     pub trigger_count: usize,
+    /// Unix timestamp of last successful session persist.
+    #[serde(default)]
+    pub last_persist_at: Option<u64>,
+    /// Unix timestamp of last continuous learning run.
+    #[serde(default)]
+    pub last_learning_at: Option<u64>,
+    /// Unix timestamp of last sleep/consolidation cycle.
+    #[serde(default)]
+    pub last_sleep_at: Option<u64>,
+    /// Unix timestamp of last goal generation run.
+    #[serde(default)]
+    pub last_goal_gen_at: Option<u64>,
+    /// Number of currently active goals.
+    #[serde(default)]
+    pub active_goals: usize,
+    /// Total symbols in knowledge graph.
+    #[serde(default)]
+    pub kg_symbols: usize,
+    /// Total triples in knowledge graph.
+    #[serde(default)]
+    pub kg_triples: usize,
 }
 
 // ---------------------------------------------------------------------------

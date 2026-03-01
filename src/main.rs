@@ -211,6 +211,36 @@ enum Commands {
         #[command(subcommand)]
         action: LibraryAction,
     },
+
+    /// Manage akhomed as a macOS launchd service.
+    Service {
+        #[command(subcommand)]
+        action: ServiceAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum ServiceAction {
+    /// Install akhomed as a launchd service (auto-restart, run at login).
+    Install {
+        /// Server port (default: 8200).
+        #[arg(long)]
+        port: Option<u16>,
+    },
+    /// Start the launchd service.
+    Start,
+    /// Stop the launchd service (graceful shutdown).
+    Stop,
+    /// Show launchd service status (PID, loaded state, exit code).
+    Status,
+    /// Uninstall the launchd service (unload + remove plist).
+    Uninstall,
+    /// Print the generated plist XML (dry-run, does not install).
+    Show {
+        /// Server port (default: 8200).
+        #[arg(long)]
+        port: Option<u16>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1326,11 +1356,7 @@ fn main() -> Result<()> {
                         xdg_paths.as_ref(),
                     )?;
                     let status = client.daemon_status().into_diagnostic()?;
-                    println!("Daemon status:");
-                    println!("  Running:    {}", status.running);
-                    println!("  Cycles:     {}", status.total_cycles);
-                    println!("  Started at: {}", status.started_at);
-                    println!("  Triggers:   {}", status.trigger_count);
+                    print_daemon_status(&status);
                     return Ok(());
                 }
                 // Try remote TUI via akhomed for Chat/Repl (non-headless only).
@@ -3601,10 +3627,117 @@ fn main() -> Result<()> {
                 }
             }
         }
+
+        // ── Service (launchd) ────────────────────────────────────────────
+        Commands::Service { action } => {
+            dispatch_service(action)?;
+        }
     }
 
     Ok(())
     } // #[cfg(not(feature = "client-only"))]
+}
+
+/// Dispatch `akh service` subcommands. Works without an Engine.
+fn dispatch_service(action: ServiceAction) -> Result<()> {
+    use akh_medu::service;
+
+    match action {
+        ServiceAction::Install { port } => {
+            let config = service::default_config(port).into_diagnostic()?;
+            service::install(&config).into_diagnostic()?;
+            println!("Service installed: {}", config.label);
+            println!("  Plist: {}", config.plist_path.display());
+            println!("  Logs:  {}", config.log_dir.display());
+            println!("\nThe service will start automatically. To start now:");
+            println!("  akh service start");
+        }
+        ServiceAction::Start => {
+            let config = service::default_config(None).into_diagnostic()?;
+            service::start(&config).into_diagnostic()?;
+            println!("Service started: {}", config.label);
+        }
+        ServiceAction::Stop => {
+            let config = service::default_config(None).into_diagnostic()?;
+            service::stop(&config).into_diagnostic()?;
+            println!("Service stopped: {}", config.label);
+        }
+        ServiceAction::Status => {
+            let config = service::default_config(None).into_diagnostic()?;
+            let st = service::status(&config).into_diagnostic()?;
+            println!("Service: {}", config.label);
+            println!("  Loaded:      {}", st.loaded);
+            println!("  Running:     {}", st.running);
+            if let Some(pid) = st.pid {
+                println!("  PID:         {pid}");
+            }
+            if let Some(exit) = st.last_exit_status {
+                println!("  Last exit:   {exit}");
+            }
+            println!("  Plist:       {}", config.plist_path.display());
+        }
+        ServiceAction::Uninstall => {
+            let config = service::default_config(None).into_diagnostic()?;
+            service::uninstall(&config).into_diagnostic()?;
+            println!("Service uninstalled: {}", config.label);
+        }
+        ServiceAction::Show { port } => {
+            let config = service::default_config(port).into_diagnostic()?;
+            let plist = service::generate_plist(&config);
+            println!("{plist}");
+        }
+    }
+
+    Ok(())
+}
+
+/// Pretty-print daemon status with all monitoring fields.
+fn print_daemon_status(status: &akh_medu::client::DaemonStatus) {
+    println!("Daemon status:");
+    println!("  Running:        {}", status.running);
+    println!("  Cycles:         {}", status.total_cycles);
+    println!("  Started at:     {}", format_timestamp(status.started_at));
+    println!("  Triggers:       {}", status.trigger_count);
+    println!("  Active goals:   {}", status.active_goals);
+    println!("  KG symbols:     {}", status.kg_symbols);
+    println!("  KG triples:     {}", status.kg_triples);
+    if let Some(ts) = status.last_persist_at {
+        println!("  Last persist:   {}", format_timestamp(ts));
+    }
+    if let Some(ts) = status.last_learning_at {
+        println!("  Last learning:  {}", format_timestamp(ts));
+    }
+    if let Some(ts) = status.last_sleep_at {
+        println!("  Last sleep:     {}", format_timestamp(ts));
+    }
+    if let Some(ts) = status.last_goal_gen_at {
+        println!("  Last goal gen:  {}", format_timestamp(ts));
+    }
+}
+
+/// Format a unix timestamp as a human-readable relative or absolute string.
+fn format_timestamp(ts: u64) -> String {
+    if ts == 0 {
+        return "never".into();
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    if now >= ts {
+        let ago = now - ts;
+        if ago < 60 {
+            format!("{ago}s ago")
+        } else if ago < 3600 {
+            format!("{}m ago", ago / 60)
+        } else if ago < 86400 {
+            format!("{}h {}m ago", ago / 3600, (ago % 3600) / 60)
+        } else {
+            format!("{}d {}h ago", ago / 86400, (ago % 86400) / 3600)
+        }
+    } else {
+        format!("{ts} (unix)")
+    }
 }
 
 /// Route all commands through a running akhomed server (client-only mode).
@@ -4025,11 +4158,7 @@ fn run_client_only(cli: Cli) -> Result<()> {
             }
             AgentAction::DaemonStatus => {
                 let status = client.daemon_status().into_diagnostic()?;
-                println!("Daemon status:");
-                println!("  Running:    {}", status.running);
-                println!("  Cycles:     {}", status.total_cycles);
-                println!("  Started at: {}", status.started_at);
-                println!("  Triggers:   {}", status.trigger_count);
+                print_daemon_status(&status);
             }
         },
 
@@ -4802,6 +4931,11 @@ fn run_client_only(cli: Cli) -> Result<()> {
                     );
                 }
             }
+        }
+
+        // ── Service (launchd) ────────────────────────────────────────────
+        Commands::Service { action } => {
+            dispatch_service(action)?;
         }
     }
 

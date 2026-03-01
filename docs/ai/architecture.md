@@ -1,6 +1,6 @@
 # Akh-medu Architecture
 
-> Last updated: 2026-02-28 (VSA-Native Dialogue System: AbsTree dialogue-act variants replace regex classifiers, KG-backed DialogueManager, NLU-first dispatch)
+> Last updated: 2026-03-01 (macOS launchd service management, enhanced daemon monitoring)
 
 ## Overview
 
@@ -48,6 +48,7 @@ src/
 ├── tms.rs                         — truth maintenance system (Phase 9c): support sets, retraction cascades
 ├── symbol.rs                      — SymbolId (NonZeroU64), SymbolKind, allocator
 ├── pipeline.rs                    — composable stage pipelines
+├── service.rs                     — macOS launchd service management (plist generation, install/uninstall/start/stop/status)
 └── main.rs                        — CLI (clap) with 50+ subcommands
 ```
 
@@ -402,3 +403,47 @@ Phase 14a–14i: Purpose-driven bootstrapping with identity (9 sub-phases):
 - **Assessment**: 14g competence assessment (Dreyfus model, competency questions, graph completeness, VSA structural analysis)
 - **Orchestration**: 14h bootstrap orchestrator (meta-OODA loop, personality shapes exploration style, Dreyfus-adaptive exploration), 14i community recipe sharing (TOML purpose recipes with identity section, ActivityPub federation, skillpack export)
 - **NLU Extension**: 14j extended rule parser (negation, quantifiers, comparatives, conditionals, temporal, modals — all 5 langs), 14k micro-ML NER (DistilBERT multilingual via ONNX, feature-gated), 14l small LLM translator (Qwen2.5-1.5B + GBNF constrained decoding, feature-gated), 14m VSA parse ranker (exemplar memory, self-improving disambiguation)
+
+## Deployment Topology
+
+### Binaries
+
+| Binary | Purpose | Features |
+|--------|---------|----------|
+| `akh` | CLI client | default (full) or `client-only` (thin HTTP client) |
+| `akhomed` | Background server/daemon | `server`, `daemon` |
+
+### Daemon Mode (Primary)
+
+`akhomed` is the primary deployment path. It runs as an HTTP server (axum) with per-workspace agent daemons that execute 12 background tasks on independent tokio intervals:
+
+- Equivalence learning, reflection, consolidation, schema discovery, rule inference, gap analysis
+- Session persistence, idle OODA cycles, continuous learning (Semantic Scholar / OpenAlex / Open Library)
+- Goal generation, sleep/consolidation cycles, trigger evaluation
+
+### macOS Service Management (ADR-026)
+
+`akh service` manages akhomed as a launchd user agent:
+
+```
+~/Library/LaunchAgents/dev.akh-medu.akhomed.plist
+  ├── KeepAlive: true        (auto-restart on crash)
+  ├── RunAtLoad: true        (start on login)
+  ├── ExitTimeOut: 30        (graceful shutdown window)
+  ├── ThrottleInterval: 10   (prevent restart loops)
+  ├── Nice: 10               (low CPU priority)
+  └── ProcessType: Background
+```
+
+Logs: `~/Library/Logs/akh-medu/akhomed.{stdout,stderr}.log`
+
+### Monitoring
+
+`DaemonStatus` (GET `/workspaces/{ws}/daemon`) provides:
+- Core: running, total_cycles, started_at, trigger_count
+- Task timestamps: last_persist_at, last_learning_at, last_sleep_at, last_goal_gen_at
+- KG stats: active_goals, kg_symbols, kg_triples
+
+Scripts:
+- `scripts/smoke-test.sh` — HTTP endpoint verification (~20 endpoints)
+- `scripts/stability-monitor.sh` — CSV logging (RSS, KG size, cycles) for overnight monitoring

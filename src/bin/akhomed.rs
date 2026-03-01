@@ -1016,6 +1016,13 @@ async fn start_daemon_handler(
         total_cycles: 0,
         started_at: now,
         trigger_count,
+        last_persist_at: None,
+        last_learning_at: None,
+        last_sleep_at: None,
+        last_goal_gen_at: None,
+        active_goals: 0,
+        kg_symbols: 0,
+        kg_triples: 0,
     }));
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
@@ -1070,14 +1077,26 @@ async fn daemon_status_handler(
 ) -> Result<Json<DaemonStatus>, (StatusCode, String)> {
     let daemons = state.daemons.read().await;
     if let Some(d) = daemons.get(&ws_name) {
-        let st = d.status.lock().await;
-        Ok(Json(st.clone()))
+        let mut st = d.status.lock().await.clone();
+        // Enrich with live KG stats from the engine.
+        if let Ok(engine) = state.get_engine(&ws_name).await {
+            st.kg_symbols = engine.all_symbols().len();
+            st.kg_triples = engine.all_triples().len();
+        }
+        Ok(Json(st))
     } else {
         Ok(Json(DaemonStatus {
             running: false,
             total_cycles: 0,
             started_at: 0,
             trigger_count: 0,
+            last_persist_at: None,
+            last_learning_at: None,
+            last_sleep_at: None,
+            last_goal_gen_at: None,
+            active_goals: 0,
+            kg_symbols: 0,
+            kg_triples: 0,
         }))
     }
 }
@@ -2912,6 +2931,13 @@ async fn main() {
                         total_cycles: 0,
                         started_at: now,
                         trigger_count,
+                        last_persist_at: None,
+                        last_learning_at: None,
+                        last_sleep_at: None,
+                        last_goal_gen_at: None,
+                        active_goals: 0,
+                        kg_symbols: 0,
+                        kg_triples: 0,
                     }));
                     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
                     let daemon_status = Arc::clone(&status);
