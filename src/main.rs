@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 #[cfg(not(feature = "client-only"))]
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use clap::{Parser, Subcommand, ValueEnum};
 use miette::{IntoDiagnostic, Result};
@@ -1726,7 +1726,8 @@ fn main() -> Result<()> {
                     };
 
                     let rt = tokio::runtime::Runtime::new().into_diagnostic()?;
-                    let mut daemon = AgentDaemon::new(agent, daemon_config);
+                    let shared_agent = Arc::new(Mutex::new(agent));
+                    let mut daemon = AgentDaemon::new(shared_agent, daemon_config);
                     rt.block_on(daemon.run()).into_diagnostic()?;
                 }
 

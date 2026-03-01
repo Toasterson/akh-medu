@@ -8,7 +8,7 @@
 //! See `docs/ai/decisions/023-client-only-mode.md` for the full endpoint inventory.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use axum::extract::ws::{Message, WebSocket};
@@ -50,6 +50,9 @@ struct ServerState {
     config: RwLock<AkhomedConfig>,
     workspaces: RwLock<HashMap<String, Arc<Engine>>>,
     daemons: RwLock<HashMap<String, WorkspaceDaemon>>,
+    /// One shared Agent per workspace — daemon, HTTP handlers, and WS sessions
+    /// all operate on the same instance. See ADR-027.
+    agents: RwLock<HashMap<String, Arc<Mutex<Agent>>>>,
     /// Broadcast channel for audit entries — WS clients subscribe to this.
     audit_broadcast: tokio::sync::broadcast::Sender<akh_medu::audit::AuditEntry>,
 }
@@ -69,6 +72,7 @@ impl ServerState {
             config: RwLock::new(config),
             workspaces: RwLock::new(HashMap::new()),
             daemons: RwLock::new(HashMap::new()),
+            agents: RwLock::new(HashMap::new()),
             audit_broadcast: audit_tx,
         }
     }
@@ -115,19 +119,55 @@ impl ServerState {
         map.insert(name.to_string(), Arc::clone(&engine));
         Ok(engine)
     }
-}
 
-/// Create or resume an Agent for the given engine.
-///
-/// Tries to resume a persisted session; falls back to a fresh agent.
-fn create_agent(engine: &Arc<Engine>) -> Result<Agent, String> {
-    let config = AgentConfig::default();
-    if Agent::has_persisted_session(engine) {
-        Agent::resume(Arc::clone(engine), config)
-    } else {
-        Agent::new(Arc::clone(engine), config)
+    /// Get or lazily create a shared Agent for the given workspace.
+    ///
+    /// One Agent per workspace — daemon, HTTP handlers, and WS sessions all
+    /// share the same instance. Construction is heavy (Agent::resume
+    /// deserializes + rebuilds KG state), so we cache in `self.agents`.
+    async fn get_agent(&self, name: &str) -> Result<Arc<Mutex<Agent>>, (StatusCode, String)> {
+        // Fast path: already cached.
+        {
+            let agents = self.agents.read().await;
+            if let Some(agent) = agents.get(name) {
+                return Ok(Arc::clone(agent));
+            }
+        }
+
+        // Slow path: create agent (heavy sync work inside spawn_blocking).
+        let engine = self.get_engine(name).await?;
+        let agent = tokio::task::spawn_blocking({
+            let engine = Arc::clone(&engine);
+            move || {
+                let config = AgentConfig::default();
+                if Agent::has_persisted_session(&engine) {
+                    Agent::resume(engine, config)
+                } else {
+                    Agent::new(engine, config)
+                }
+            }
+        })
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("agent task panicked: {e}"),
+            )
+        })?
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to create agent: {e}"),
+            )
+        })?;
+
+        tracing::info!(workspace = %name, "shared agent created");
+        let shared = Arc::new(Mutex::new(agent));
+        let mut agents = self.agents.write().await;
+        // Another request may have raced us — keep the first one.
+        let entry = agents.entry(name.to_string()).or_insert(Arc::clone(&shared));
+        Ok(Arc::clone(entry))
     }
-    .map_err(|e| format!("failed to create agent: {e}"))
 }
 
 // ── Response types ────────────────────────────────────────────────────────
@@ -280,10 +320,14 @@ async fn delete_workspace(
     State(state): State<Arc<ServerState>>,
     Path(name): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    // Remove from loaded engines.
+    // Remove from loaded engines and agents.
     {
         let mut map = state.workspaces.write().await;
         map.remove(&name);
+    }
+    {
+        let mut agents = state.agents.write().await;
+        agents.remove(&name);
     }
 
     let manager = WorkspaceManager::new(state.paths.clone());
@@ -561,8 +605,9 @@ async fn cal_sync_handler(
     Json(req): Json<akh_medu::api_types::CalSyncRequest>,
 ) -> Result<Json<akh_medu::api_types::CalImportResponse>, (StatusCode, String)> {
     let engine = state.get_engine(&ws_name).await?;
+    let shared_agent = state.get_agent(&ws_name).await?;
     let result = tokio::task::spawn_blocking(move || -> Result<_, String> {
-        let mut agent = create_agent(&engine)?;
+        let mut agent = shared_agent.lock().unwrap();
         let imported = akh_medu::agent::calendar::sync_caldav(
             agent.calendar_manager_mut(),
             &engine,
@@ -1174,6 +1219,7 @@ async fn start_daemon_handler(
     }
 
     let engine = state.get_engine(&ws_name).await?;
+    let shared_agent = state.get_agent(&ws_name).await?;
     let max_cycles = body.map(|b| b.max_cycles).unwrap_or(0);
 
     // Build DaemonConfig from global config with request-level override.
@@ -1206,12 +1252,11 @@ async fn start_daemon_handler(
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
     let daemon_status = Arc::clone(&status);
-    let daemon_engine = Arc::clone(&engine);
     let daemon_ws_name = ws_name.clone();
 
     let handle = tokio::task::spawn(async move {
         run_daemon_task(
-            daemon_engine,
+            shared_agent,
             daemon_status,
             shutdown_rx,
             daemon_config,
@@ -1284,7 +1329,7 @@ async fn daemon_status_handler(
 /// learning, reflection, consolidation, schema discovery, rule inference,
 /// gap analysis, continuous learning, sleep cycles, and trigger evaluation).
 async fn run_daemon_task(
-    engine: Arc<Engine>,
+    shared_agent: Arc<Mutex<Agent>>,
     status: Arc<tokio::sync::Mutex<DaemonStatus>>,
     shutdown_rx: tokio::sync::watch::Receiver<bool>,
     daemon_config: akh_medu::agent::DaemonConfig,
@@ -1292,35 +1337,7 @@ async fn run_daemon_task(
 ) {
     use akh_medu::agent::AgentDaemon;
 
-    // Create agent (heavy sync work).
-    let agent_config = AgentConfig::default();
-    let agent_result = tokio::task::spawn_blocking({
-        let engine = Arc::clone(&engine);
-        move || {
-            if Agent::has_persisted_session(&engine) {
-                Agent::resume(engine, agent_config)
-            } else {
-                Agent::new(engine, agent_config)
-            }
-        }
-    })
-    .await;
-
-    let agent = match agent_result {
-        Ok(Ok(a)) => a,
-        Ok(Err(e)) => {
-            tracing::error!(error = %e, ws = %ws_name, "daemon: failed to create agent");
-            status.lock().await.running = false;
-            return;
-        }
-        Err(e) => {
-            tracing::error!(error = %e, ws = %ws_name, "daemon: agent task panicked");
-            status.lock().await.running = false;
-            return;
-        }
-    };
-
-    let mut daemon = AgentDaemon::new(agent, daemon_config)
+    let mut daemon = AgentDaemon::new(shared_agent, daemon_config)
         .with_shutdown(shutdown_rx)
         .with_status(Arc::clone(&status));
 
@@ -1388,11 +1405,14 @@ async fn ws_handler(
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
     let engine_result = state.get_engine(&ws_name).await;
+    let agent_result = state.get_agent(&ws_name).await;
     let audit_rx = state.audit_broadcast.subscribe();
     ws.on_upgrade(move |socket| async move {
-        match engine_result {
-            Ok(engine) => handle_ws_session(socket, engine, ws_name, audit_rx).await,
-            Err((_, msg)) => {
+        match (engine_result, agent_result) {
+            (Ok(engine), Ok(shared_agent)) => {
+                handle_ws_session(socket, shared_agent, engine, ws_name, audit_rx).await;
+            }
+            (Err((_, msg)), _) | (_, Err((_, msg))) => {
                 let err = AkhMessage::error("ws", msg);
                 let _ = send_message(&err, &mut None::<&mut WebSocket>).await;
             }
@@ -1402,22 +1422,12 @@ async fn ws_handler(
 
 async fn handle_ws_session(
     mut socket: WebSocket,
+    shared_agent: Arc<Mutex<Agent>>,
     engine: Arc<Engine>,
     ws_name: String,
     mut audit_rx: tokio::sync::broadcast::Receiver<akh_medu::audit::AuditEntry>,
 ) {
-    // Create an agent for this session.
-    let agent_config = AgentConfig::default();
-    let mut agent = match Agent::new(Arc::clone(&engine), agent_config) {
-        Ok(a) => a,
-        Err(e) => {
-            let err = AkhMessage::error("init", format!("failed to create agent: {e}"));
-            let _ = send_akh_message(&mut socket, &err).await;
-            return;
-        }
-    };
-
-    // Initialise the unified ChatProcessor for this session.
+    // ChatProcessor is session-local (owns NLU pipeline state).
     let data_dir = engine.config().data_dir.as_deref();
     let nlu_pipeline = engine
         .store()
@@ -1454,20 +1464,24 @@ async fn handle_ws_session(
                             }
                         };
 
-                        let responses = match input.msg_type.as_str() {
-                            "input" => {
-                                chat_processor.process_input(&input.text, &mut agent, &engine)
+                        // Lock agent, process synchronously, unlock before async send.
+                        let responses = {
+                            let mut agent = shared_agent.lock().unwrap();
+                            match input.msg_type.as_str() {
+                                "input" => {
+                                    chat_processor.process_input(&input.text, &mut agent, &engine)
+                                }
+                                "command" => {
+                                    process_ws_command(&input.text, &agent, &engine)
+                                }
+                                _ => {
+                                    vec![AkhMessage::error(
+                                        "protocol",
+                                        format!("unknown message type: \"{}\"", input.msg_type),
+                                    )]
+                                }
                             }
-                            "command" => {
-                                process_ws_command(&input.text, &agent, &engine)
-                            }
-                            _ => {
-                                vec![AkhMessage::error(
-                                    "protocol",
-                                    format!("unknown message type: \"{}\"", input.msg_type),
-                                )]
-                            }
-                        };
+                        }; // MutexGuard dropped — lock released before async send.
                         for msg in &responses {
                             if send_akh_message(&mut socket, msg).await.is_err() {
                                 break;
@@ -1489,8 +1503,10 @@ async fn handle_ws_session(
         }
     }
 
-    // Persist ChatProcessor NLU state and agent session on disconnect.
+    // Persist ChatProcessor NLU state on disconnect.
     chat_processor.persist_nlu_state(&engine);
+    // Brief lock to persist agent session.
+    let agent = shared_agent.lock().unwrap();
     let _ = agent.persist_session();
 }
 
@@ -1604,8 +1620,8 @@ async fn awaken_status_handler(
     let engine = state.get_engine(&ws_name).await?;
     let psyche = engine.compartments().and_then(|m| m.psyche());
 
-    let agent = Agent::new(Arc::clone(&engine), AgentConfig::default())
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?;
+    let shared_agent = state.get_agent(&ws_name).await?;
+    let agent = shared_agent.lock().unwrap();
 
     let active_goals = agent
         .goals()
@@ -1630,12 +1646,8 @@ async fn goals_handler(
     State(state): State<Arc<ServerState>>,
     Path(ws_name): Path<String>,
 ) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, String)> {
-    let engine = state.get_engine(&ws_name).await?;
-
-    // Create a temporary agent to restore persisted goals from the KG.
-    let agent_config = AgentConfig::default();
-    let agent = Agent::new(Arc::clone(&engine), agent_config)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?;
+    let shared_agent = state.get_agent(&ws_name).await?;
+    let agent = shared_agent.lock().unwrap();
 
     let goals: Vec<serde_json::Value> = agent
         .goals()
@@ -1805,19 +1817,12 @@ async fn agent_run_handler(
     Json(req): Json<akh_medu::api_types::AgentRunRequest>,
 ) -> Result<Json<akh_medu::api_types::AgentRunResponse>, (StatusCode, String)> {
     let engine = state.get_engine(&ws_name).await?;
+    let shared_agent = state.get_agent(&ws_name).await?;
     let result = tokio::task::spawn_blocking(move || -> Result<akh_medu::api_types::AgentRunResponse, String> {
-        let agent_config = AgentConfig {
-            max_cycles: req.max_cycles,
-            ..Default::default()
-        };
-        let mut agent = if req.fresh {
-            Agent::new(Arc::clone(&engine), agent_config)
-        } else if Agent::has_persisted_session(&engine) {
-            Agent::resume(Arc::clone(&engine), agent_config)
-        } else {
-            Agent::new(Arc::clone(&engine), agent_config)
-        }
-        .map_err(|e| format!("{e}"))?;
+        let mut agent = shared_agent.lock().unwrap();
+
+        // Override max_cycles for this run.
+        agent.set_max_cycles(req.max_cycles);
 
         if req.fresh {
             agent.clear_goals();
@@ -1865,17 +1870,12 @@ async fn agent_resume_handler(
     Json(req): Json<akh_medu::api_types::AgentResumeRequest>,
 ) -> Result<Json<akh_medu::api_types::AgentResumeResponse>, (StatusCode, String)> {
     let engine = state.get_engine(&ws_name).await?;
+    let shared_agent = state.get_agent(&ws_name).await?;
     let result = tokio::task::spawn_blocking(move || -> Result<akh_medu::api_types::AgentResumeResponse, String> {
-        let agent_config = AgentConfig {
-            max_cycles: req.max_cycles,
-            ..Default::default()
-        };
-        let mut agent = if Agent::has_persisted_session(&engine) {
-            Agent::resume(Arc::clone(&engine), agent_config)
-        } else {
-            return Err("no persisted session to resume".into());
-        }
-        .map_err(|e| format!("{e}"))?;
+        let mut agent = shared_agent.lock().unwrap();
+
+        // Override max_cycles for this run.
+        agent.set_max_cycles(req.max_cycles);
 
         let _ = agent.run_until_complete();
 
@@ -1911,8 +1911,9 @@ async fn pim_inbox_handler(
     Path(ws_name): Path<String>,
 ) -> Result<Json<akh_medu::api_types::PimTaskList>, (StatusCode, String)> {
     let engine = state.get_engine(&ws_name).await?;
+    let shared_agent = state.get_agent(&ws_name).await?;
     let result = tokio::task::spawn_blocking(move || -> Result<_, String> {
-        let agent = create_agent(&engine)?;
+        let agent = shared_agent.lock().unwrap();
         let ids = agent
             .pim_manager()
             .tasks_by_gtd_state(akh_medu::agent::GtdState::Inbox);
@@ -1934,8 +1935,9 @@ async fn pim_next_handler(
     Json(req): Json<akh_medu::api_types::PimNextRequest>,
 ) -> Result<Json<akh_medu::api_types::PimTaskList>, (StatusCode, String)> {
     let engine = state.get_engine(&ws_name).await?;
+    let shared_agent = state.get_agent(&ws_name).await?;
     let result = tokio::task::spawn_blocking(move || -> Result<_, String> {
-        let agent = create_agent(&engine)?;
+        let agent = shared_agent.lock().unwrap();
         let ctx = req
             .context
             .as_deref()
@@ -1964,8 +1966,9 @@ async fn pim_review_handler(
     Path(ws_name): Path<String>,
 ) -> Result<Json<akh_medu::api_types::PimReviewResponse>, (StatusCode, String)> {
     let engine = state.get_engine(&ws_name).await?;
+    let shared_agent = state.get_agent(&ws_name).await?;
     let result = tokio::task::spawn_blocking(move || -> Result<_, String> {
-        let agent = create_agent(&engine)?;
+        let agent = shared_agent.lock().unwrap();
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -2010,8 +2013,9 @@ async fn pim_project_handler(
     Path((ws_name, project_name)): Path<(String, String)>,
 ) -> Result<Json<akh_medu::api_types::PimProjectResponse>, (StatusCode, String)> {
     let engine = state.get_engine(&ws_name).await?;
+    let shared_agent = state.get_agent(&ws_name).await?;
     let result = tokio::task::spawn_blocking(move || -> Result<_, String> {
-        let agent = create_agent(&engine)?;
+        let agent = shared_agent.lock().unwrap();
         let project = agent
             .projects()
             .iter()
@@ -2040,8 +2044,9 @@ async fn pim_add_handler(
     Json(req): Json<akh_medu::api_types::PimAddRequest>,
 ) -> Result<Json<akh_medu::api_types::PimAddResponse>, (StatusCode, String)> {
     let engine = state.get_engine(&ws_name).await?;
+    let shared_agent = state.get_agent(&ws_name).await?;
     let result = tokio::task::spawn_blocking(move || -> Result<_, String> {
-        let mut agent = create_agent(&engine)?;
+        let mut agent = shared_agent.lock().unwrap();
         let goal_sym = SymbolId::new(req.goal)
             .ok_or_else(|| "invalid goal symbol id".to_string())?;
         let gtd = akh_medu::api_types::parse_gtd_state(&req.gtd)
@@ -2095,8 +2100,9 @@ async fn pim_transition_handler(
     Json(req): Json<akh_medu::api_types::PimTransitionRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let engine = state.get_engine(&ws_name).await?;
+    let shared_agent = state.get_agent(&ws_name).await?;
     let result = tokio::task::spawn_blocking(move || -> Result<_, String> {
-        let mut agent = create_agent(&engine)?;
+        let mut agent = shared_agent.lock().unwrap();
         let goal_sym = SymbolId::new(req.goal)
             .ok_or_else(|| "invalid goal symbol id".to_string())?;
         let new_state = akh_medu::api_types::parse_gtd_state(&req.to)
@@ -2119,8 +2125,9 @@ async fn pim_matrix_handler(
     Path(ws_name): Path<String>,
 ) -> Result<Json<akh_medu::api_types::PimMatrixResponse>, (StatusCode, String)> {
     let engine = state.get_engine(&ws_name).await?;
+    let shared_agent = state.get_agent(&ws_name).await?;
     let result = tokio::task::spawn_blocking(move || -> Result<_, String> {
-        let agent = create_agent(&engine)?;
+        let agent = shared_agent.lock().unwrap();
         let make_items = |quad: akh_medu::agent::EisenhowerQuadrant| -> Vec<akh_medu::api_types::PimTaskItem> {
             agent
                 .pim_manager()
@@ -2147,8 +2154,9 @@ async fn pim_deps_handler(
     Path(ws_name): Path<String>,
 ) -> Result<Json<akh_medu::api_types::PimDepsResponse>, (StatusCode, String)> {
     let engine = state.get_engine(&ws_name).await?;
+    let shared_agent = state.get_agent(&ws_name).await?;
     let result = tokio::task::spawn_blocking(move || -> Result<_, String> {
-        let agent = create_agent(&engine)?;
+        let agent = shared_agent.lock().unwrap();
         let order = agent
             .pim_manager()
             .topological_order()
@@ -2170,8 +2178,9 @@ async fn pim_overdue_handler(
     Path(ws_name): Path<String>,
 ) -> Result<Json<akh_medu::api_types::PimTaskList>, (StatusCode, String)> {
     let engine = state.get_engine(&ws_name).await?;
+    let shared_agent = state.get_agent(&ws_name).await?;
     let result = tokio::task::spawn_blocking(move || -> Result<_, String> {
-        let agent = create_agent(&engine)?;
+        let agent = shared_agent.lock().unwrap();
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -2203,9 +2212,9 @@ async fn causal_schemas_handler(
     State(state): State<Arc<ServerState>>,
     Path(ws_name): Path<String>,
 ) -> Result<Json<Vec<akh_medu::api_types::CausalSchemaSummary>>, (StatusCode, String)> {
-    let engine = state.get_engine(&ws_name).await?;
+    let shared_agent = state.get_agent(&ws_name).await?;
     let result = tokio::task::spawn_blocking(move || -> Result<_, String> {
-        let agent = create_agent(&engine)?;
+        let agent = shared_agent.lock().unwrap();
         let schemas = agent.causal_manager().list_schemas();
         Ok(schemas
             .iter()
@@ -2228,9 +2237,9 @@ async fn causal_schema_handler(
     State(state): State<Arc<ServerState>>,
     Path((ws_name, schema_name)): Path<(String, String)>,
 ) -> Result<Json<akh_medu::api_types::CausalSchemaDetail>, (StatusCode, String)> {
-    let engine = state.get_engine(&ws_name).await?;
+    let shared_agent = state.get_agent(&ws_name).await?;
     let result = tokio::task::spawn_blocking(move || -> Result<_, String> {
-        let agent = create_agent(&engine)?;
+        let agent = shared_agent.lock().unwrap();
         let s = agent
             .causal_manager()
             .get_schema(&schema_name)
@@ -2256,8 +2265,9 @@ async fn causal_predict_handler(
     Json(req): Json<akh_medu::api_types::CausalPredictRequest>,
 ) -> Result<Json<akh_medu::api_types::CausalPredictResponse>, (StatusCode, String)> {
     let engine = state.get_engine(&ws_name).await?;
+    let shared_agent = state.get_agent(&ws_name).await?;
     let result = tokio::task::spawn_blocking(move || -> Result<_, String> {
-        let agent = create_agent(&engine)?;
+        let agent = shared_agent.lock().unwrap();
         let transition = agent
             .causal_manager()
             .predict_effects(&req.name, &engine)
@@ -2305,8 +2315,9 @@ async fn causal_applicable_handler(
     Path(ws_name): Path<String>,
 ) -> Result<Json<Vec<akh_medu::api_types::CausalSchemaSummary>>, (StatusCode, String)> {
     let engine = state.get_engine(&ws_name).await?;
+    let shared_agent = state.get_agent(&ws_name).await?;
     let result = tokio::task::spawn_blocking(move || -> Result<_, String> {
-        let agent = create_agent(&engine)?;
+        let agent = shared_agent.lock().unwrap();
         let schemas = agent.causal_manager().applicable_actions(&engine);
         Ok(schemas
             .iter()
@@ -2330,8 +2341,9 @@ async fn causal_bootstrap_handler(
     Path(ws_name): Path<String>,
 ) -> Result<Json<akh_medu::api_types::CausalBootstrapResponse>, (StatusCode, String)> {
     let engine = state.get_engine(&ws_name).await?;
+    let shared_agent = state.get_agent(&ws_name).await?;
     let result = tokio::task::spawn_blocking(move || -> Result<_, String> {
-        let mut agent = create_agent(&engine)?;
+        let mut agent = shared_agent.lock().unwrap();
         let tool_names: Vec<String> = agent.list_tools().iter().map(|t| t.name.clone()).collect();
         let tools_scanned = tool_names.len();
         let count = agent
@@ -2356,9 +2368,9 @@ async fn pref_status_handler(
     State(state): State<Arc<ServerState>>,
     Path(ws_name): Path<String>,
 ) -> Result<Json<akh_medu::api_types::PrefStatusResponse>, (StatusCode, String)> {
-    let engine = state.get_engine(&ws_name).await?;
+    let shared_agent = state.get_agent(&ws_name).await?;
     let result = tokio::task::spawn_blocking(move || -> Result<_, String> {
-        let agent = create_agent(&engine)?;
+        let agent = shared_agent.lock().unwrap();
         let pref = agent.preference_manager();
         Ok(akh_medu::api_types::PrefStatusResponse {
             interaction_count: pref.profile.interaction_count as usize,
@@ -2382,8 +2394,9 @@ async fn pref_train_handler(
     Json(req): Json<akh_medu::api_types::PrefTrainRequest>,
 ) -> Result<Json<akh_medu::api_types::PrefTrainResponse>, (StatusCode, String)> {
     let engine = state.get_engine(&ws_name).await?;
+    let shared_agent = state.get_agent(&ws_name).await?;
     let result = tokio::task::spawn_blocking(move || -> Result<_, String> {
-        let mut agent = create_agent(&engine)?;
+        let mut agent = shared_agent.lock().unwrap();
         let sym = SymbolId::new(req.entity)
             .ok_or_else(|| "invalid entity symbol id".to_string())?;
         let signal = akh_medu::agent::FeedbackSignal::ExplicitPreference {
@@ -2414,9 +2427,9 @@ async fn pref_level_handler(
     Path(ws_name): Path<String>,
     Json(req): Json<akh_medu::api_types::PrefLevelRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let engine = state.get_engine(&ws_name).await?;
+    let shared_agent = state.get_agent(&ws_name).await?;
     let result = tokio::task::spawn_blocking(move || -> Result<_, String> {
-        let mut agent = create_agent(&engine)?;
+        let mut agent = shared_agent.lock().unwrap();
         let level = akh_medu::api_types::parse_proactivity_level(&req.level)
             .ok_or_else(|| format!("invalid proactivity level: {}", req.level))?;
         agent.preference_manager_mut().set_proactivity_level(level);
@@ -2439,8 +2452,9 @@ async fn pref_interests_handler(
         .get("count")
         .and_then(|s| s.parse().ok())
         .unwrap_or(10);
+    let shared_agent = state.get_agent(&ws_name).await?;
     let result = tokio::task::spawn_blocking(move || -> Result<_, String> {
-        let agent = create_agent(&engine)?;
+        let agent = shared_agent.lock().unwrap();
         let interests = agent.preference_manager().top_interests(&engine, count);
         Ok(interests
             .into_iter()
@@ -2461,8 +2475,9 @@ async fn pref_suggest_handler(
     Path(ws_name): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let engine = state.get_engine(&ws_name).await?;
+    let shared_agent = state.get_agent(&ws_name).await?;
     let result = tokio::task::spawn_blocking(move || -> Result<_, String> {
-        let agent = create_agent(&engine)?;
+        let agent = shared_agent.lock().unwrap();
         let jitir = agent
             .preference_manager()
             .jitir_query(agent.working_memory(), agent.goals(), &engine)
@@ -2496,9 +2511,9 @@ async fn cal_today_handler(
     State(state): State<Arc<ServerState>>,
     Path(ws_name): Path<String>,
 ) -> Result<Json<akh_medu::api_types::CalEventList>, (StatusCode, String)> {
-    let engine = state.get_engine(&ws_name).await?;
+    let shared_agent = state.get_agent(&ws_name).await?;
     let result = tokio::task::spawn_blocking(move || -> Result<_, String> {
-        let agent = create_agent(&engine)?;
+        let agent = shared_agent.lock().unwrap();
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -2526,9 +2541,9 @@ async fn cal_week_handler(
     State(state): State<Arc<ServerState>>,
     Path(ws_name): Path<String>,
 ) -> Result<Json<akh_medu::api_types::CalEventList>, (StatusCode, String)> {
-    let engine = state.get_engine(&ws_name).await?;
+    let shared_agent = state.get_agent(&ws_name).await?;
     let result = tokio::task::spawn_blocking(move || -> Result<_, String> {
-        let agent = create_agent(&engine)?;
+        let agent = shared_agent.lock().unwrap();
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -2557,8 +2572,9 @@ async fn cal_conflicts_handler(
     Path(ws_name): Path<String>,
 ) -> Result<Json<Vec<akh_medu::api_types::CalConflict>>, (StatusCode, String)> {
     let engine = state.get_engine(&ws_name).await?;
+    let shared_agent = state.get_agent(&ws_name).await?;
     let result = tokio::task::spawn_blocking(move || -> Result<_, String> {
-        let agent = create_agent(&engine)?;
+        let agent = shared_agent.lock().unwrap();
         let conflicts = agent.calendar_manager().detect_conflicts();
         Ok(conflicts
             .iter()
@@ -2579,9 +2595,9 @@ async fn cal_events_handler(
     State(state): State<Arc<ServerState>>,
     Path(ws_name): Path<String>,
 ) -> Result<Json<akh_medu::api_types::CalEventList>, (StatusCode, String)> {
-    let engine = state.get_engine(&ws_name).await?;
+    let shared_agent = state.get_agent(&ws_name).await?;
     let result = tokio::task::spawn_blocking(move || -> Result<_, String> {
-        let agent = create_agent(&engine)?;
+        let agent = shared_agent.lock().unwrap();
         let events: Vec<akh_medu::api_types::CalEventSummary> = agent
             .calendar_manager()
             .events()
@@ -2607,8 +2623,9 @@ async fn cal_add_handler(
     Json(req): Json<akh_medu::api_types::CalAddRequest>,
 ) -> Result<Json<akh_medu::api_types::CalAddResponse>, (StatusCode, String)> {
     let engine = state.get_engine(&ws_name).await?;
+    let shared_agent = state.get_agent(&ws_name).await?;
     let result = tokio::task::spawn_blocking(move || -> Result<_, String> {
-        let mut agent = create_agent(&engine)?;
+        let mut agent = shared_agent.lock().unwrap();
         let sym = agent
             .calendar_manager_mut()
             .add_event(
@@ -2643,8 +2660,9 @@ async fn cal_import_handler(
     Json(req): Json<akh_medu::api_types::CalImportRequest>,
 ) -> Result<Json<akh_medu::api_types::CalImportResponse>, (StatusCode, String)> {
     let engine = state.get_engine(&ws_name).await?;
+    let shared_agent = state.get_agent(&ws_name).await?;
     let result = tokio::task::spawn_blocking(move || -> Result<_, String> {
-        let mut agent = create_agent(&engine)?;
+        let mut agent = shared_agent.lock().unwrap();
         let imported = akh_medu::agent::calendar::import_ical(
             agent.calendar_manager_mut(),
             &engine,
@@ -3180,8 +3198,9 @@ async fn main() {
         let daemon_config = state.config.read().await.daemon.to_daemon_config();
         for ws_name in &auto_start {
             tracing::info!(workspace = %ws_name, "auto-starting daemon");
-            match state.get_engine(ws_name).await {
-                Ok(engine) => {
+            match state.get_agent(ws_name).await {
+                Ok(shared_agent) => {
+                    let engine = state.get_engine(ws_name).await.unwrap();
                     let now = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()
@@ -3202,12 +3221,11 @@ async fn main() {
                     }));
                     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
                     let daemon_status = Arc::clone(&status);
-                    let daemon_engine = Arc::clone(&engine);
                     let daemon_ws = ws_name.clone();
                     let dc = daemon_config.clone();
                     let handle = tokio::task::spawn(async move {
                         run_daemon_task(
-                            daemon_engine,
+                            shared_agent,
                             daemon_status,
                             shutdown_rx,
                             dc,

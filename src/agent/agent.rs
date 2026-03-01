@@ -906,6 +906,11 @@ impl Agent {
         Ok(result)
     }
 
+    /// Override the maximum number of OODA cycles for `run_until_complete`.
+    pub fn set_max_cycles(&mut self, max: usize) {
+        self.config.max_cycles = max;
+    }
+
     /// Run cycles until all goals are complete or max_cycles is reached.
     pub fn run_until_complete(&mut self) -> AgentResult<Vec<OodaCycleResult>> {
         let mut results = Vec::new();
