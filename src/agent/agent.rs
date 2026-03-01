@@ -477,7 +477,13 @@ impl Agent {
             tracing::warn!("failed to init preference predicates: {e}");
         }
 
-        // Initialize causal predicates (Phase 15a).
+        // Initialize causal manager (Phase 15a): try restoring persisted
+        // schemas first so a fresh Agent picks up bootstrapped schemas.
+        if let Ok(restored) = super::causal::CausalManager::restore(&agent.engine) {
+            if !restored.schemas.is_empty() {
+                agent.causal_manager = restored;
+            }
+        }
         if let Err(e) = agent.causal_manager.ensure_init(&agent.engine) {
             tracing::warn!("failed to init causal predicates: {e}");
         }
@@ -2221,16 +2227,21 @@ impl Agent {
             })?;
 
         // Persist causal manager (Phase 15a).
-        let causal_bytes = bincode::serialize(&self.causal_manager).map_err(|e| {
-            AgentError::ConsolidationFailed {
-                message: format!("failed to serialize causal manager: {e}"),
-            }
-        })?;
-        store
-            .put_meta(b"agent:causal_manager", &causal_bytes)
-            .map_err(|e| AgentError::ConsolidationFailed {
-                message: format!("failed to persist causal manager: {e}"),
+        // Only overwrite if this agent actually has schemas; an empty causal
+        // manager should not clobber a bootstrapped one written by another
+        // agent instance (e.g., the HTTP handler while the daemon is running).
+        if !self.causal_manager.schemas.is_empty() {
+            let causal_bytes = bincode::serialize(&self.causal_manager).map_err(|e| {
+                AgentError::ConsolidationFailed {
+                    message: format!("failed to serialize causal manager: {e}"),
+                }
             })?;
+            store
+                .put_meta(b"agent:causal_manager", &causal_bytes)
+                .map_err(|e| AgentError::ConsolidationFailed {
+                    message: format!("failed to persist causal manager: {e}"),
+                })?;
+        }
 
         // Persist sleep cycle state (Phase 11i).
         let sleep_bytes =
