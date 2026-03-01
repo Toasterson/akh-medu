@@ -163,10 +163,11 @@ impl AgentDaemon {
             "daemon started — background learning active",
         ));
 
-        // Startup burst: seed goals and kick off learning immediately so the
-        // akh doesn't sit idle waiting for the first timer fire.
+        // Startup burst: seed goals so the akh can start acting immediately.
+        // Continuous learning is deliberately NOT run at startup — it holds the
+        // agent mutex for 30-120s (network I/O + ingestion), blocking all HTTP
+        // handlers.  The interval timer will kick it off naturally.
         self.run_goal_generation();
-        self.run_continuous_learning();
 
         loop {
             tokio::select! {
@@ -265,13 +266,15 @@ impl AgentDaemon {
     // -----------------------------------------------------------------------
 
     fn run_equivalence_learning(&mut self) {
-        let agent = self.agent.lock().unwrap();
-        match agent.engine().learn_equivalences() {
+        let engine = self.agent.lock().unwrap().engine.clone();
+        match engine.learn_equivalences() {
             Ok(count) => {
                 if count > 0 {
-                    agent.sink().emit(&AkhMessage::system(format!(
-                        "[daemon:equivalence] {count} new equivalences discovered",
-                    )));
+                    if let Ok(agent) = self.agent.lock() {
+                        agent.sink().emit(&AkhMessage::system(format!(
+                            "[daemon:equivalence] {count} new equivalences discovered",
+                        )));
+                    }
                 }
                 tracing::info!(count, "daemon: equivalence learning complete");
             }
@@ -341,16 +344,18 @@ impl AgentDaemon {
     }
 
     fn run_schema_discovery(&self) {
-        let agent = self.agent.lock().unwrap();
+        let engine = self.agent.lock().unwrap().engine.clone();
         let config = crate::autonomous::schema::SchemaDiscoveryConfig::default();
-        match agent.engine().discover_schema(config) {
+        match engine.discover_schema(config) {
             Ok(result) => {
                 let types = result.types.len();
                 let hierarchies = result.relation_hierarchies.len();
                 if types > 0 || hierarchies > 0 {
-                    agent.sink().emit(&AkhMessage::system(format!(
-                        "[daemon:schema] discovered {types} types, {hierarchies} relation hierarchies",
-                    )));
+                    if let Ok(agent) = self.agent.lock() {
+                        agent.sink().emit(&AkhMessage::system(format!(
+                            "[daemon:schema] discovered {types} types, {hierarchies} relation hierarchies",
+                        )));
+                    }
                 }
                 tracing::info!(types, hierarchies, "daemon: schema discovery complete");
             }
@@ -361,16 +366,18 @@ impl AgentDaemon {
     }
 
     fn run_rule_inference(&self) {
-        let agent = self.agent.lock().unwrap();
+        let engine = self.agent.lock().unwrap().engine.clone();
         let config = crate::autonomous::rule_engine::RuleEngineConfig::default();
-        match agent.engine().run_rules(config) {
+        match engine.run_rules(config) {
             Ok(result) => {
                 let derived_count = result.derived.len();
                 if derived_count > 0 {
-                    agent.sink().emit(&AkhMessage::system(format!(
-                        "[daemon:rules] {} new triples from {} iterations",
-                        derived_count, result.iterations,
-                    )));
+                    if let Ok(agent) = self.agent.lock() {
+                        agent.sink().emit(&AkhMessage::system(format!(
+                            "[daemon:rules] {} new triples from {} iterations",
+                            derived_count, result.iterations,
+                        )));
+                    }
                 }
                 tracing::info!(
                     triples = derived_count,
@@ -387,21 +394,26 @@ impl AgentDaemon {
     fn run_gap_analysis(&self) {
         use super::goal;
 
-        let agent = self.agent.lock().unwrap();
-        let active = goal::active_goals(agent.goals());
-        if active.is_empty() {
-            return;
-        }
+        let (engine, goal_ids) = {
+            let agent = self.agent.lock().unwrap();
+            let active = goal::active_goals(agent.goals());
+            if active.is_empty() {
+                return;
+            }
+            let ids: Vec<_> = active.iter().map(|g| g.symbol_id).collect();
+            (agent.engine.clone(), ids)
+        };
 
-        let goal_ids: Vec<_> = active.iter().map(|g| g.symbol_id).collect();
         let config = crate::autonomous::gap::GapAnalysisConfig::default();
-        match agent.engine().analyze_gaps(&goal_ids, config) {
+        match engine.analyze_gaps(&goal_ids, config) {
             Ok(result) => {
                 let gaps = result.gaps.len();
                 if gaps > 0 {
-                    agent.sink().emit(&AkhMessage::system(format!(
-                        "[daemon:gaps] {gaps} knowledge gaps identified around active goals",
-                    )));
+                    if let Ok(agent) = self.agent.lock() {
+                        agent.sink().emit(&AkhMessage::system(format!(
+                            "[daemon:gaps] {gaps} knowledge gaps identified around active goals",
+                        )));
+                    }
                 }
                 tracing::info!(gaps, "daemon: gap analysis complete");
             }
@@ -412,23 +424,34 @@ impl AgentDaemon {
     }
 
     fn run_continuous_learning(&self) {
-        let agent = self.agent.lock().unwrap();
-        // Reborrow through the guard so partial field access works.
-        let agent_ref: &Agent = &agent;
+        // Extract what we need from the agent, then DROP the lock before the
+        // expensive learning pipeline runs.  `run_continuous_learning` only
+        // needs an `&Arc<Engine>` and a curiosity config — it does not mutate
+        // the Agent, so holding the mutex during network I/O + ingestion would
+        // needlessly block every HTTP handler for 30-120s.
+        let (engine, curiosity_cfg) = {
+            let agent = self.agent.lock().unwrap();
+            (agent.engine.clone(), agent.curiosity_config.clone())
+        };
+        // Lock is released here — HTTP handlers can proceed.
+
         let config = super::continuous_learning::ContinuousLearningConfig::default();
         match super::continuous_learning::run_continuous_learning(
-            &agent_ref.engine,
-            &agent_ref.curiosity_config,
+            &engine,
+            &curiosity_cfg,
             &config,
         ) {
             Ok(result) => {
-                agent.sink().emit(&AkhMessage::system(format!(
-                    "[daemon:learning] {} targets, {} resources, {} ingested, Dreyfus: {}",
-                    result.targets_found,
-                    result.resources_discovered,
-                    result.concepts_ingested,
-                    result.dreyfus_level,
-                )));
+                // Re-acquire lock briefly just for the status message.
+                if let Ok(agent) = self.agent.lock() {
+                    agent.sink().emit(&AkhMessage::system(format!(
+                        "[daemon:learning] {} targets, {} resources, {} ingested, Dreyfus: {}",
+                        result.targets_found,
+                        result.resources_discovered,
+                        result.concepts_ingested,
+                        result.dreyfus_level,
+                    )));
+                }
                 tracing::info!(
                     targets = result.targets_found,
                     resources = result.resources_discovered,
