@@ -3642,13 +3642,16 @@ async fn main() {
 
             // Signal all workspace daemons to stop, then join with timeout.
             let mut daemons = state_for_shutdown.daemons.write().await;
-            for (name, daemon) in daemons.drain() {
+            for (name, mut daemon) in daemons.drain() {
                 tracing::info!(workspace = %name, "stopping workspace daemon");
                 let _ = daemon.shutdown_tx.send(true);
-                match tokio::time::timeout(Duration::from_secs(5), daemon.handle).await {
+                match tokio::time::timeout(Duration::from_secs(5), &mut daemon.handle).await {
                     Ok(Ok(())) => tracing::info!(workspace = %name, "daemon stopped cleanly"),
                     Ok(Err(e)) => tracing::warn!(workspace = %name, error = %e, "daemon task panicked"),
-                    Err(_) => tracing::warn!(workspace = %name, "daemon did not stop within 5s, abandoning"),
+                    Err(_) => {
+                        tracing::warn!(workspace = %name, "daemon did not stop within 5s, aborting");
+                        daemon.handle.abort();
+                    }
                 }
             }
             drop(daemons);

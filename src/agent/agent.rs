@@ -513,6 +513,18 @@ impl Agent {
             mv.declare_multi_valued(agent.predicates.child_goal);
             mv.declare_multi_valued(agent.predicates.has_criteria);
             mv.declare_multi_valued(agent.predicates.blocked_by);
+
+            // Global multi-valued predicates (taxonomy, library).
+            for label in &["child-of", "part-of", "similar-to", "has-a"] {
+                if let Ok(sym) = agent.engine.resolve_or_create_relation(label) {
+                    mv.declare_multi_valued(sym);
+                }
+            }
+            for label in &["doc:mentions", "doc:has_keyword", "doc:has_tag"] {
+                if let Ok(sym) = agent.engine.resolve_or_create_relation(label) {
+                    mv.declare_multi_valued(sym);
+                }
+            }
         }
 
         // Initialize causal manager (Phase 15a): try restoring persisted
@@ -2645,6 +2657,18 @@ impl Agent {
             mv.declare_multi_valued(agent.predicates.child_goal);
             mv.declare_multi_valued(agent.predicates.has_criteria);
             mv.declare_multi_valued(agent.predicates.blocked_by);
+
+            // Global multi-valued predicates (taxonomy, library).
+            for label in &["child-of", "part-of", "similar-to", "has-a"] {
+                if let Ok(sym) = agent.engine.resolve_or_create_relation(label) {
+                    mv.declare_multi_valued(sym);
+                }
+            }
+            for label in &["doc:mentions", "doc:has_keyword", "doc:has_tag"] {
+                if let Ok(sym) = agent.engine.resolve_or_create_relation(label) {
+                    mv.declare_multi_valued(sym);
+                }
+            }
         }
 
         // Restore KG dialogue state into ConversationState.

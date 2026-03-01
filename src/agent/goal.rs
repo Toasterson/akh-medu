@@ -246,6 +246,20 @@ pub fn create_goal(
         .unwrap_or_default()
         .as_secs();
 
+    // Remove any stale property triples from a previous generation cycle
+    // (resolve_or_create_entity reuses the same goal_id for the same label).
+    let kg = engine.knowledge_graph();
+    for pred in [predicates.has_description, predicates.has_status, predicates.has_priority] {
+        let old: Vec<_> = kg
+            .triples_from(goal_id)
+            .into_iter()
+            .filter(|t| t.predicate == pred)
+            .collect();
+        for o in &old {
+            let _ = kg.remove_triple(o.subject, o.predicate, o.object);
+        }
+    }
+
     // Store description.
     let desc_sym = engine.resolve_or_create_entity(&format!("desc:{description}"))?;
     let _ = engine.add_triple(&Triple::new(goal_id, predicates.has_description, desc_sym));
@@ -319,6 +333,17 @@ pub fn update_goal_status(
     new_status: GoalStatus,
     predicates: &AgentPredicates,
 ) -> AgentResult<()> {
+    // Remove the old status triple so we don't accumulate stale values.
+    let kg = engine.knowledge_graph();
+    let old_status_triples: Vec<_> = kg
+        .triples_from(goal.symbol_id)
+        .into_iter()
+        .filter(|t| t.predicate == predicates.has_status)
+        .collect();
+    for old in &old_status_triples {
+        let _ = kg.remove_triple(old.subject, old.predicate, old.object);
+    }
+
     let status_label = format!("status:{}", new_status.as_label());
     let status_sym = engine.resolve_or_create_entity(&status_label)?;
     let _ = engine.add_triple(&Triple::new(
