@@ -471,10 +471,33 @@ impl Engine {
             if !contradictions.is_empty() {
                 match self.phase9_config.contradiction_policy {
                     ContradictionPolicy::Warn => {
-                        for c in &contradictions {
+                        let max_logged = 3;
+                        for (i, c) in contradictions.iter().enumerate() {
+                            if i < max_logged {
+                                tracing::warn!(
+                                    kind = ?c.kind,
+                                    incoming = %format!(
+                                        "({}, {}, {})",
+                                        self.resolve_label(c.incoming.subject),
+                                        self.resolve_label(c.incoming.predicate),
+                                        self.resolve_label(c.incoming.object),
+                                    ),
+                                    existing = %format!(
+                                        "({}, {}, {})",
+                                        self.resolve_label(c.existing.subject),
+                                        self.resolve_label(c.existing.predicate),
+                                        self.resolve_label(c.existing.object),
+                                    ),
+                                    "contradiction detected during add_triple (policy: Warn)"
+                                );
+                            }
+                        }
+                        if contradictions.len() > max_logged {
                             tracing::warn!(
-                                kind = ?c.kind,
-                                "contradiction detected during add_triple (policy: Warn)"
+                                total = contradictions.len(),
+                                shown = max_logged,
+                                "... and {} more contradictions suppressed",
+                                contradictions.len() - max_logged,
                             );
                         }
                     }
