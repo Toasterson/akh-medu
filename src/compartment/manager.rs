@@ -321,13 +321,70 @@ impl CompartmentManager {
                 return Err(CompartmentError::PsycheImmutable);
             }
         }
+        self.persist_psyche_to_disk(&psyche)?;
         *guard = Some(psyche);
         Ok(())
     }
 
     /// Unconditionally replace the stored psyche (admin override).
     pub fn force_set_psyche(&self, psyche: Psyche) {
+        if let Err(e) = self.persist_psyche_to_disk(&psyche) {
+            tracing::warn!(error = %e, "failed to persist psyche to disk");
+        }
         *self.psyche.write().expect("psyche lock poisoned") = Some(psyche);
+    }
+
+    /// Persist the psyche to `compartments/psyche/psyche.toml` on disk.
+    ///
+    /// Creates the compartment directory and manifest if they don't exist,
+    /// ensuring the psyche survives process restarts.
+    fn persist_psyche_to_disk(&self, psyche: &Psyche) -> CompartmentResult<()> {
+        let psyche_dir = self.compartments_dir.join("psyche");
+        std::fs::create_dir_all(&psyche_dir).map_err(|e| CompartmentError::Io {
+            id: "psyche".into(),
+            source: e,
+        })?;
+
+        // Ensure compartment.toml manifest exists so discover() finds it.
+        let manifest_path = psyche_dir.join("compartment.toml");
+        if !manifest_path.exists() {
+            let manifest = CompartmentManifest {
+                id: "psyche".into(),
+                name: "Psyche".into(),
+                kind: CompartmentKind::Core,
+                description: "Jungian psyche configuration — persona, shadow, archetypes."
+                    .into(),
+                triples_file: None,
+                rules_file: None,
+                grammar_ref: None,
+                tags: vec!["identity".into(), "core".into()],
+            };
+            let toml_str = toml::to_string_pretty(&manifest).map_err(|e| {
+                CompartmentError::InvalidManifest {
+                    path: manifest_path.display().to_string(),
+                    message: e.to_string(),
+                }
+            })?;
+            std::fs::write(&manifest_path, toml_str).map_err(|e| CompartmentError::Io {
+                id: "psyche".into(),
+                source: e,
+            })?;
+        }
+
+        // Write psyche.toml.
+        let psyche_path = psyche_dir.join("psyche.toml");
+        let toml_str =
+            toml::to_string_pretty(psyche).map_err(|e| CompartmentError::InvalidManifest {
+                path: psyche_path.display().to_string(),
+                message: e.to_string(),
+            })?;
+        std::fs::write(&psyche_path, toml_str).map_err(|e| CompartmentError::Io {
+            id: "psyche".into(),
+            source: e,
+        })?;
+
+        tracing::info!("persisted psyche to {}", psyche_path.display());
+        Ok(())
     }
 
     /// List the IDs of all discovered but not-yet-loaded (Dormant) compartments.
