@@ -15,6 +15,11 @@ pub mod causal;
 pub mod channel;
 pub mod channel_message;
 pub mod chat;
+pub mod contact;
+pub mod contact_calendar;
+pub mod contact_memory;
+pub mod contact_rel;
+pub mod contact_style;
 pub mod constraint_check;
 pub mod conversation;
 pub mod chunking;
@@ -114,6 +119,18 @@ pub use ooda::{
 pub use calendar::{
     AllenRelation, CalendarError, CalendarEvent, CalendarManager, CalendarPredicates,
     CalendarResult, CalendarRoleVectors,
+};
+pub use contact::{
+    Contact, ContactError, ContactManager, ContactPredicates, ContactResult,
+};
+pub use contact_rel::{
+    Relationship, RelationshipGraph, RelationshipKind, RelationshipPredicates, SocialCircle,
+};
+pub use contact_calendar::{CalendarContactPredicates, ContactCalendar};
+pub use contact_memory::PersonMemoryIndex;
+pub use contact_style::{
+    CommunicationStyle, StyleManager, StyleObservation, StylePredicates, score_formality,
+    score_verbosity,
 };
 pub use causal::{
     ActionSchema, CausalEffect, CausalError, CausalManager, CausalPattern, CausalPredicates,

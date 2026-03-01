@@ -77,6 +77,7 @@ Detailed completion checklists for each phase live under `docs/ai/phases/`.
 | 13a-13g | Personal Assistant (email, spam, triage, extraction, PIM, calendar, preferences) | [phase-13](docs/ai/phases/phase-13-personal-assistant.md), [plan](docs/ai/plans/2026-02-17-phase13-personal-assistant.md) |
 | 14a-14h | Identity, domain expansion, prerequisite discovery, ZPD classification, resource discovery, curriculum ingestion, competence assessment, bootstrap orchestrator | [phase-14](docs/ai/phases/phase-14-identity.md), [plan](docs/ai/plans/2026-02-17-phase14-bootstrapping.md), [NLU plan](docs/ai/plans/2026-02-24-phase14-nlu-extension.md) |
 | 15a | Causal World Model (schemas, preconditions, effects, VSA encoding) | [phase-15](docs/ai/phases/phase-15-causal.md), [plan](docs/ai/plans/2026-02-22-phase15-causal-world-model.md) |
+| 25a-25e | People & Contacts (identity resolution, relationships, per-person memory, style profiles, calendar integration) | [phase-25](docs/ai/phases/phase-25-people-contacts.md), [ADR](docs/ai/decisions/028-people-contacts-architecture.md) |
 
 ### Upcoming Phases
 

@@ -1,6 +1,6 @@
 # Akh-medu Architecture
 
-> Last updated: 2026-03-01 (macOS launchd service management, enhanced daemon monitoring)
+> Last updated: 2026-03-01 (Phase 25: People & Contacts — identity resolution, relationships, per-person memory, style profiles, calendar integration)
 
 ## Overview
 
@@ -395,6 +395,16 @@ Phase 13a–13i: Personal assistant (9 sub-phases):
 - [x] `AgentError::Calendar` transparent variant
 - [x] Feature: `calendar = ["icalendar", "chrono"]` — core module compiles without feature, only iCal import/CalDAV sync are feature-gated
 - [x] 32 new unit tests (13 Allen relations + boundary cases, inverse symmetry, is_overlapping, label roundtrip, event duration/overlaps, manager CRUD, conflict detection, range queries, today/week, persist/restore, iCal import + dedup)
+
+### Phase 25 — People & Contacts ✓
+
+5 sub-phases building unified people-awareness:
+- **25a — Contact Entity & Identity Resolution**: `ContactManager` with alias-based O(1) identity resolution, merge support, 13 KG predicates. `ContactError` (4 variants). Provenance: ContactResolved (72), ContactMerged (73).
+- **25b — Relationship Graph**: `RelationshipGraph` with 10 `RelationshipKind` variants, strength reinforcement + exponential decay, VSA-based social circle detection. Provenance: RelationshipRecorded (74).
+- **25c — Per-Person Conversation Memory**: `PersonMemoryIndex` mapping contacts to episodic memories and discussed topics. Recall by person, by person+topic, shared context between contacts.
+- **25d — Communication Style Profiles**: `StyleManager` with rule-based formality/verbosity heuristics (no LLM), EMA tracking (alpha=0.3), VSA prototype similarity search. Provenance: StyleObserved (75).
+- **25e — Calendar-Contact Integration**: `ContactCalendar` stateless utility — attendee management, co-attendance, meeting frequency, availability heatmap. Provenance: CalendarAttendeeLinked (76).
+- 33 unit tests across all sub-phases.
 
 Phase 14a–14i: Purpose-driven bootstrapping with identity (9 sub-phases):
 - **Identity**: 14a purpose + identity parser (NL → PurposeModel + IdentityRef, character reference extraction), 14b identity resolution (Wikidata + DBpedia + Wikipedia cascade → 12 Jungian archetypes → OCEAN → Psyche construction, Ritual of Awakening: self-naming via cultural morphemes)

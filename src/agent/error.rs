@@ -165,6 +165,10 @@ pub enum AgentError {
 
     #[error(transparent)]
     #[diagnostic(transparent)]
+    Contact(#[from] super::contact::ContactError),
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
     Bootstrap(#[from] crate::bootstrap::purpose::BootstrapError),
 
     #[error(transparent)]

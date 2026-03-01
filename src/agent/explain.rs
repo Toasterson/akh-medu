@@ -951,6 +951,33 @@ pub fn derivation_kind_prose(kind: &DerivationKind) -> String {
                 .unwrap_or_default();
             format!("NLU parsed (tier {source_tier}, confidence: {confidence:.2}{sim})")
         }
+        DerivationKind::ContactResolved {
+            contact_id,
+            alias_count,
+        } => {
+            format!("contact resolved: \"{contact_id}\" ({alias_count} aliases)")
+        }
+        DerivationKind::ContactMerged { kept, discarded } => {
+            format!("contacts merged: kept \"{kept}\", discarded \"{discarded}\"")
+        }
+        DerivationKind::RelationshipRecorded { from, to, kind } => {
+            format!("relationship recorded: {from} --{kind}--> {to}")
+        }
+        DerivationKind::StyleObserved {
+            contact_id,
+            formality,
+            verbosity,
+        } => {
+            format!(
+                "style observed for \"{contact_id}\": formality={formality:.2}, verbosity={verbosity:.2}"
+            )
+        }
+        DerivationKind::CalendarAttendeeLinked {
+            event_id,
+            contact_id,
+        } => {
+            format!("calendar attendee linked: event {event_id} ↔ contact \"{contact_id}\"")
+        }
     }
 }
 

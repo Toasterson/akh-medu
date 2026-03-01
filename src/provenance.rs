@@ -497,6 +497,40 @@ pub enum DerivationKind {
         /// If the VSA parse ranker contributed, the exemplar similarity score.
         exemplar_similarity: Option<f32>,
     },
+
+    // --- Phase 25: People & Contacts -----------------------------------------
+
+    /// A contact was resolved or created via identity resolution (Phase 25a).
+    ContactResolved {
+        contact_id: String,
+        alias_count: u32,
+    },
+
+    /// Two contacts were merged into one (Phase 25a).
+    ContactMerged {
+        kept: String,
+        discarded: String,
+    },
+
+    /// A relationship was recorded between two contacts (Phase 25b).
+    RelationshipRecorded {
+        from: String,
+        to: String,
+        kind: String,
+    },
+
+    /// A communication style observation was recorded (Phase 25d).
+    StyleObserved {
+        contact_id: String,
+        formality: f32,
+        verbosity: f32,
+    },
+
+    /// A calendar attendee was linked to a contact (Phase 25e).
+    CalendarAttendeeLinked {
+        event_id: u64,
+        contact_id: String,
+    },
 }
 
 impl DerivationKind {
@@ -575,6 +609,11 @@ impl DerivationKind {
             Self::BootstrapOrchestration { .. } => 69,
             Self::ContinuousLearning { .. } => 70,
             Self::NluParsed { .. } => 71,
+            Self::ContactResolved { .. } => 72,
+            Self::ContactMerged { .. } => 73,
+            Self::RelationshipRecorded { .. } => 74,
+            Self::StyleObserved { .. } => 75,
+            Self::CalendarAttendeeLinked { .. } => 76,
         }
     }
 }

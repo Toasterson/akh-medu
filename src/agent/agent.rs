@@ -210,6 +210,14 @@ pub struct Agent {
     pub(crate) preference_manager: super::preference::PreferenceManager,
     /// Causal world model manager (Phase 15a).
     pub(crate) causal_manager: super::causal::CausalManager,
+    /// Contact manager — unified people/identity resolution (Phase 25a).
+    pub(crate) contact_manager: super::contact::ContactManager,
+    /// Relationship graph — interpersonal relationships between contacts (Phase 25b).
+    pub(crate) relationship_graph: super::contact_rel::RelationshipGraph,
+    /// Per-person conversation memory index (Phase 25c).
+    pub(crate) person_memory: super::contact_memory::PersonMemoryIndex,
+    /// Communication style profile manager (Phase 25d).
+    pub(crate) style_manager: super::contact_style::StyleManager,
     /// Dialogue state manager backed by KG microtheories.
     pub(crate) dialogue_manager: super::dialogue::DialogueManager,
     /// Sleep/consolidation cycle state (Phase 11i).
@@ -450,6 +458,10 @@ impl Agent {
             calendar_manager: super::calendar::CalendarManager::default(),
             preference_manager: super::preference::PreferenceManager::default(),
             causal_manager: super::causal::CausalManager::default(),
+            contact_manager: super::contact::ContactManager::default(),
+            relationship_graph: super::contact_rel::RelationshipGraph::default(),
+            person_memory: super::contact_memory::PersonMemoryIndex::new(100),
+            style_manager: super::contact_style::StyleManager::default(),
             dialogue_manager,
             sleep_cycle,
             curiosity_config,
@@ -475,6 +487,21 @@ impl Agent {
         // Initialize preference predicates (Phase 13g).
         if let Err(e) = agent.preference_manager.ensure_init(&agent.engine) {
             tracing::warn!("failed to init preference predicates: {e}");
+        }
+
+        // Initialize contact manager (Phase 25a).
+        if let Err(e) = agent.contact_manager.ensure_init(&agent.engine) {
+            tracing::warn!("failed to init contact predicates: {e}");
+        }
+
+        // Initialize relationship graph (Phase 25b).
+        if let Err(e) = agent.relationship_graph.ensure_init(&agent.engine) {
+            tracing::warn!("failed to init relationship graph predicates: {e}");
+        }
+
+        // Initialize style manager (Phase 25d).
+        if let Err(e) = agent.style_manager.ensure_init(&agent.engine) {
+            tracing::warn!("failed to init style manager predicates: {e}");
         }
 
         // Initialize causal manager (Phase 15a): try restoring persisted
@@ -2248,6 +2275,54 @@ impl Agent {
                 })?;
         }
 
+        // Persist contact manager (Phase 25a).
+        let contact_bytes = bincode::serialize(&self.contact_manager).map_err(|e| {
+            AgentError::ConsolidationFailed {
+                message: format!("failed to serialize contact manager: {e}"),
+            }
+        })?;
+        store
+            .put_meta(b"agent:contact_manager", &contact_bytes)
+            .map_err(|e| AgentError::ConsolidationFailed {
+                message: format!("failed to persist contact manager: {e}"),
+            })?;
+
+        // Persist relationship graph (Phase 25b).
+        let rel_bytes = bincode::serialize(&self.relationship_graph).map_err(|e| {
+            AgentError::ConsolidationFailed {
+                message: format!("failed to serialize relationship graph: {e}"),
+            }
+        })?;
+        store
+            .put_meta(b"agent:relationship_graph", &rel_bytes)
+            .map_err(|e| AgentError::ConsolidationFailed {
+                message: format!("failed to persist relationship graph: {e}"),
+            })?;
+
+        // Persist person memory index (Phase 25c).
+        let person_mem_bytes = bincode::serialize(&self.person_memory).map_err(|e| {
+            AgentError::ConsolidationFailed {
+                message: format!("failed to serialize person memory index: {e}"),
+            }
+        })?;
+        store
+            .put_meta(b"agent:person_memory", &person_mem_bytes)
+            .map_err(|e| AgentError::ConsolidationFailed {
+                message: format!("failed to persist person memory index: {e}"),
+            })?;
+
+        // Persist style manager (Phase 25d).
+        let style_bytes = bincode::serialize(&self.style_manager).map_err(|e| {
+            AgentError::ConsolidationFailed {
+                message: format!("failed to serialize style manager: {e}"),
+            }
+        })?;
+        store
+            .put_meta(b"agent:style_manager", &style_bytes)
+            .map_err(|e| AgentError::ConsolidationFailed {
+                message: format!("failed to persist style manager: {e}"),
+            })?;
+
         // Persist sleep cycle state (Phase 11i).
         let sleep_bytes =
             bincode::serialize(&self.sleep_cycle).map_err(|e| AgentError::ConsolidationFailed {
@@ -2449,6 +2524,34 @@ impl Agent {
                 super::causal::CausalManager::new(&engine).unwrap_or_default()
             });
 
+        // Restore contact manager (Phase 25a).
+        let contact_manager = super::contact::ContactManager::restore(&engine)
+            .unwrap_or_else(|_| {
+                super::contact::ContactManager::new(&engine).unwrap_or_default()
+            });
+
+        // Restore relationship graph (Phase 25b).
+        let relationship_graph = super::contact_rel::RelationshipGraph::restore(&engine)
+            .unwrap_or_else(|_| {
+                super::contact_rel::RelationshipGraph::new(&engine).unwrap_or_default()
+            });
+
+        // Restore person memory index (Phase 25c).
+        let person_memory = store
+            .get_meta(b"agent:person_memory")
+            .ok()
+            .flatten()
+            .and_then(|bytes| {
+                bincode::deserialize::<super::contact_memory::PersonMemoryIndex>(&bytes).ok()
+            })
+            .unwrap_or_else(|| super::contact_memory::PersonMemoryIndex::new(100));
+
+        // Restore style manager (Phase 25d).
+        let style_manager = super::contact_style::StyleManager::restore(&engine)
+            .unwrap_or_else(|_| {
+                super::contact_style::StyleManager::new(&engine).unwrap_or_default()
+            });
+
         // Restore sleep cycle state (Phase 11i).
         let sleep_cycle = store
             .get_meta(b"agent:sleep_cycle")
@@ -2507,6 +2610,10 @@ impl Agent {
             calendar_manager,
             preference_manager,
             causal_manager,
+            contact_manager,
+            relationship_graph,
+            person_memory,
+            style_manager,
             dialogue_manager,
             sleep_cycle,
             curiosity_config,
