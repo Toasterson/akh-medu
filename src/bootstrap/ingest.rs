@@ -525,7 +525,7 @@ impl CurriculumIngestor {
                 ..Default::default()
             };
 
-            match ingest_url(engine, catalog, &resource.url, url_config, None) {
+            match ingest_url(engine, catalog, &resource.url, url_config, None, self.config.url_timeout_secs) {
                 Ok(ingest_result) => {
                     outcome.triples_added += ingest_result.triple_count;
                     outcome.concepts_extracted += ingest_result.concept_count;
@@ -540,11 +540,11 @@ impl CurriculumIngestor {
                         tier,
                     );
                 }
-                Err(_) => {
+                Err(e) => {
                     // URL ingestion is best-effort — log and continue.
                     eprintln!(
-                        "  Warning: URL ingestion failed for '{}' ({})",
-                        resource.title, resource.url
+                        "  Warning: URL ingestion failed for '{}' ({}): {}",
+                        resource.title, resource.url, e
                     );
                 }
             }

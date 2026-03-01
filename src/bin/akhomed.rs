@@ -1099,6 +1099,7 @@ async fn library_add_handler(
             &req.source,
             ingest_config,
             Some(&mut nlu_pipeline),
+            30,
         )
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?
     } else {

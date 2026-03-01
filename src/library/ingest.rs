@@ -291,19 +291,27 @@ pub fn ingest_file(
 }
 
 /// Ingest a document from a URL via HTTP GET.
+///
+/// `timeout_secs` caps the total fetch time (including redirects).
+/// Pass `0` to use ureq's default (no explicit timeout — not recommended).
 pub fn ingest_url(
     engine: &Engine,
     catalog: &mut LibraryCatalog,
     url: &str,
     config: IngestConfig,
     nlu: Option<&mut NluPipeline>,
+    timeout_secs: u64,
 ) -> LibraryResult<IngestResult> {
-    let response = ureq::get(url)
-        .call()
-        .map_err(|e| LibraryError::FetchError {
-            url: url.into(),
-            message: e.to_string(),
-        })?;
+    let mut req = ureq::get(url)
+        .set("User-Agent", "akh-medu/0.5 (+https://github.com/Toasterson/akh-medu)")
+        .set("Accept", "text/html,application/xhtml+xml,application/pdf,text/plain,*/*");
+    if timeout_secs > 0 {
+        req = req.timeout(std::time::Duration::from_secs(timeout_secs));
+    }
+    let response = req.call().map_err(|e| LibraryError::FetchError {
+        url: url.into(),
+        message: e.to_string(),
+    })?;
 
     // Detect format from Content-Type.
     let content_type = response.content_type().to_string();
