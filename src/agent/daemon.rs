@@ -475,7 +475,9 @@ impl AgentDaemon {
         // Phase 1: Brief lock — snapshot inputs + update drives (needs &WorkingMemory).
         let (engine, goals_snapshot, drives_snapshot, gen_config, predicates,
              cycle_count, impasse, reflection, watch_firings, curiosity_config) = {
-            let mut agent = self.agent.lock().unwrap();
+            let mut guard = self.agent.lock().unwrap();
+            // Explicit reborrow so the borrow checker can split field access.
+            let agent: &mut Agent = &mut *guard;
 
             // Update drives while we hold the lock (needs &WorkingMemory which is !Clone).
             let goal_symbols: Vec<crate::symbol::SymbolId> =
