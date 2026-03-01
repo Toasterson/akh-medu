@@ -3749,6 +3749,11 @@ fn run_client_only(cli: Cli) -> Result<()> {
     use akh_medu::api_types;
     use std::path::Path;
 
+    // Service commands work without a running server.
+    if let Commands::Service { action } = cli.command {
+        return dispatch_service(action);
+    }
+
     let xdg_paths = akh_medu::paths::AkhPaths::resolve().ok();
     let client = resolve_client(&cli.workspace, xdg_paths.as_ref())?;
 
