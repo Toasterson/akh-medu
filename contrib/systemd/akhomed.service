@@ -9,11 +9,13 @@ Type=simple
 ExecStart=%h/.local/bin/akhomed
 Restart=on-failure
 RestartSec=5
+TimeoutStopSec=10
 
 # Environment
 Environment=RUST_LOG=info,egg=warn,hnsw_rs=warn
 Environment=AKH_SERVER_BIND=127.0.0.1
 Environment=AKH_SERVER_PORT=8200
+Environment=ORT_DYLIB_PATH=%h/.local/lib/onnxruntime/libonnxruntime.so
 
 # XDG paths are resolved automatically; override if needed:
 # Environment=XDG_CONFIG_HOME=%h/.config
