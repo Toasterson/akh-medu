@@ -51,6 +51,8 @@ pub mod grammar;
 pub mod graph;
 pub mod infer;
 pub mod library;
+#[cfg(feature = "mcp")]
+pub mod mcp;
 pub mod message;
 pub mod nlu;
 pub mod partition;

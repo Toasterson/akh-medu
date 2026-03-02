@@ -1,6 +1,6 @@
 # Akh-medu Architecture
 
-> Last updated: 2026-03-01 (Phase 25: People & Contacts — identity resolution, relationships, per-person memory, style profiles, calendar integration)
+> Last updated: 2026-03-02 (MCP server embedded in akhomed — ADR-029)
 
 ## Overview
 
@@ -48,6 +48,7 @@ src/
 ├── tms.rs                         — truth maintenance system (Phase 9c): support sets, retraction cascades
 ├── symbol.rs                      — SymbolId (NonZeroU64), SymbolKind, allocator
 ├── pipeline.rs                    — composable stage pipelines
+├── mcp/                 1 module  — MCP server (feature-gated): AkhMcpServer with 13 tools for Claude Code integration (ADR-029)
 ├── service.rs                     — macOS launchd service management (plist generation, install/uninstall/start/stop/status)
 └── main.rs                        — CLI (clap) with 50+ subcommands
 ```

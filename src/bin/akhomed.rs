@@ -1769,6 +1769,107 @@ async fn compartments_handler(
     }))
 }
 
+async fn compartment_discover_handler(
+    State(state): State<Arc<ServerState>>,
+    Path(ws_name): Path<String>,
+) -> Result<Json<akh_medu::api_types::CompartmentDiscoverResponse>, (StatusCode, String)> {
+    let engine = state.get_engine(&ws_name).await?;
+    let mgr = engine.compartments().ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            "compartment manager not available (no data dir)".to_string(),
+        )
+    })?;
+    let discovered = mgr
+        .discover()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?;
+    let total = mgr.all_compartments().len();
+    Ok(Json(akh_medu::api_types::CompartmentDiscoverResponse {
+        discovered,
+        total,
+    }))
+}
+
+async fn compartment_load_handler(
+    State(state): State<Arc<ServerState>>,
+    Path((ws_name, comp_id)): Path<(String, String)>,
+) -> Result<Json<akh_medu::api_types::CompartmentActionResponse>, (StatusCode, String)> {
+    let engine = state.get_engine(&ws_name).await?;
+    let mgr = engine.compartments().ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            "compartment manager not available".to_string(),
+        )
+    })?;
+    mgr.load(&comp_id, &engine)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("{e}")))?;
+    Ok(Json(akh_medu::api_types::CompartmentActionResponse {
+        id: comp_id,
+        action: "loaded".to_string(),
+        success: true,
+    }))
+}
+
+async fn compartment_unload_handler(
+    State(state): State<Arc<ServerState>>,
+    Path((ws_name, comp_id)): Path<(String, String)>,
+) -> Result<Json<akh_medu::api_types::CompartmentActionResponse>, (StatusCode, String)> {
+    let engine = state.get_engine(&ws_name).await?;
+    let mgr = engine.compartments().ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            "compartment manager not available".to_string(),
+        )
+    })?;
+    mgr.unload(&comp_id, &engine)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("{e}")))?;
+    Ok(Json(akh_medu::api_types::CompartmentActionResponse {
+        id: comp_id,
+        action: "unloaded".to_string(),
+        success: true,
+    }))
+}
+
+async fn compartment_activate_handler(
+    State(state): State<Arc<ServerState>>,
+    Path((ws_name, comp_id)): Path<(String, String)>,
+) -> Result<Json<akh_medu::api_types::CompartmentActionResponse>, (StatusCode, String)> {
+    let engine = state.get_engine(&ws_name).await?;
+    let mgr = engine.compartments().ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            "compartment manager not available".to_string(),
+        )
+    })?;
+    mgr.activate(&comp_id)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("{e}")))?;
+    Ok(Json(akh_medu::api_types::CompartmentActionResponse {
+        id: comp_id,
+        action: "activated".to_string(),
+        success: true,
+    }))
+}
+
+async fn compartment_deactivate_handler(
+    State(state): State<Arc<ServerState>>,
+    Path((ws_name, comp_id)): Path<(String, String)>,
+) -> Result<Json<akh_medu::api_types::CompartmentActionResponse>, (StatusCode, String)> {
+    let engine = state.get_engine(&ws_name).await?;
+    let mgr = engine.compartments().ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            "compartment manager not available".to_string(),
+        )
+    })?;
+    mgr.deactivate(&comp_id)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("{e}")))?;
+    Ok(Json(akh_medu::api_types::CompartmentActionResponse {
+        id: comp_id,
+        action: "deactivated".to_string(),
+        success: true,
+    }))
+}
+
 // ── Render handler ──────────────────────────────────────────────────────
 
 async fn render_handler(
@@ -3608,10 +3709,76 @@ async fn main() {
             "/workspaces/{ws_name}/compartments",
             get(compartments_handler),
         )
+        .route(
+            "/workspaces/{ws_name}/compartments/discover",
+            post(compartment_discover_handler),
+        )
+        .route(
+            "/workspaces/{ws_name}/compartments/{comp_id}/load",
+            post(compartment_load_handler),
+        )
+        .route(
+            "/workspaces/{ws_name}/compartments/{comp_id}/unload",
+            post(compartment_unload_handler),
+        )
+        .route(
+            "/workspaces/{ws_name}/compartments/{comp_id}/activate",
+            post(compartment_activate_handler),
+        )
+        .route(
+            "/workspaces/{ws_name}/compartments/{comp_id}/deactivate",
+            post(compartment_deactivate_handler),
+        )
         // WebSocket.
         .route("/ws/{ws_name}", get(ws_handler))
         .layer(CorsLayer::permissive())
         .with_state(Arc::clone(&state));
+
+    // ── MCP server (feature-gated) ──────────────────────────────────
+    #[cfg(feature = "mcp")]
+    let app = {
+        use rmcp::transport::streamable_http_server::{
+            StreamableHttpService, session::local::LocalSessionManager,
+        };
+
+        let mcp_workspace =
+            std::env::var("AKH_MCP_WORKSPACE").unwrap_or_else(|_| "default".into());
+        tracing::info!(workspace = %mcp_workspace, "initializing MCP server at /mcp");
+
+        // Pre-warm the engine and agent so the MCP server can use them.
+        let mcp_ready = match (
+            state.get_engine(&mcp_workspace).await,
+            state.get_agent(&mcp_workspace).await,
+        ) {
+            (Ok(engine), Ok(agent)) => Some((engine, agent)),
+            (Err((_, msg)), _) | (_, Err((_, msg))) => {
+                tracing::warn!(
+                    workspace = %mcp_workspace,
+                    error = %msg,
+                    "MCP workspace/agent not available — MCP endpoint disabled"
+                );
+                None
+            }
+        };
+
+        if let Some((mcp_engine, mcp_agent)) = mcp_ready {
+            let mcp_state = Arc::new(akh_medu::mcp::McpState {
+                engine: mcp_engine,
+                agent: mcp_agent,
+            });
+
+            let mcp_service = StreamableHttpService::new(
+                move || Ok(akh_medu::mcp::AkhMcpServer::new(Arc::clone(&mcp_state))),
+                LocalSessionManager::default().into(),
+                Default::default(),
+            );
+
+            tracing::info!("MCP server mounted at /mcp");
+            app.nest_service("/mcp", mcp_service)
+        } else {
+            app
+        }
+    };
 
     tracing::info!("akhomed listening on {addr}");
 
