@@ -48,11 +48,11 @@ use akh_medu::workspace::WorkspaceManager;
 struct ServerState {
     paths: AkhPaths,
     config: RwLock<AkhomedConfig>,
-    workspaces: RwLock<HashMap<String, Arc<Engine>>>,
+    workspaces: Arc<RwLock<HashMap<String, Arc<Engine>>>>,
     daemons: RwLock<HashMap<String, WorkspaceDaemon>>,
     /// One shared Agent per workspace — daemon, HTTP handlers, and WS sessions
     /// all operate on the same instance. See ADR-027.
-    agents: RwLock<HashMap<String, Arc<Mutex<Agent>>>>,
+    agents: Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>,
     /// Broadcast channel for audit entries — WS clients subscribe to this.
     audit_broadcast: tokio::sync::broadcast::Sender<akh_medu::audit::AuditEntry>,
 }
@@ -70,9 +70,9 @@ impl ServerState {
         Self {
             paths,
             config: RwLock::new(config),
-            workspaces: RwLock::new(HashMap::new()),
+            workspaces: Arc::new(RwLock::new(HashMap::new())),
             daemons: RwLock::new(HashMap::new()),
-            agents: RwLock::new(HashMap::new()),
+            agents: Arc::new(RwLock::new(HashMap::new())),
             audit_broadcast: audit_tx,
         }
     }
@@ -3741,43 +3741,20 @@ async fn main() {
             StreamableHttpService, session::local::LocalSessionManager,
         };
 
-        let mcp_workspace =
-            std::env::var("AKH_MCP_WORKSPACE").unwrap_or_else(|_| "default".into());
-        tracing::info!(workspace = %mcp_workspace, "initializing MCP server at /mcp");
+        let mcp_state = Arc::new(akh_medu::mcp::McpState::new(
+            paths.clone(),
+            Arc::clone(&state.workspaces),
+            Arc::clone(&state.agents),
+        ));
 
-        // Pre-warm the engine and agent so the MCP server can use them.
-        let mcp_ready = match (
-            state.get_engine(&mcp_workspace).await,
-            state.get_agent(&mcp_workspace).await,
-        ) {
-            (Ok(engine), Ok(agent)) => Some((engine, agent)),
-            (Err((_, msg)), _) | (_, Err((_, msg))) => {
-                tracing::warn!(
-                    workspace = %mcp_workspace,
-                    error = %msg,
-                    "MCP workspace/agent not available — MCP endpoint disabled"
-                );
-                None
-            }
-        };
+        let mcp_service = StreamableHttpService::new(
+            move || Ok(akh_medu::mcp::AkhMcpServer::new(Arc::clone(&mcp_state))),
+            LocalSessionManager::default().into(),
+            Default::default(),
+        );
 
-        if let Some((mcp_engine, mcp_agent)) = mcp_ready {
-            let mcp_state = Arc::new(akh_medu::mcp::McpState {
-                engine: mcp_engine,
-                agent: mcp_agent,
-            });
-
-            let mcp_service = StreamableHttpService::new(
-                move || Ok(akh_medu::mcp::AkhMcpServer::new(Arc::clone(&mcp_state))),
-                LocalSessionManager::default().into(),
-                Default::default(),
-            );
-
-            tracing::info!("MCP server mounted at /mcp");
-            app.nest_service("/mcp", mcp_service)
-        } else {
-            app
-        }
+        tracing::info!("MCP server mounted at /mcp");
+        app.nest_service("/mcp", mcp_service)
     };
 
     tracing::info!("akhomed listening on {addr}");

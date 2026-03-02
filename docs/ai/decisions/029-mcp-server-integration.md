@@ -19,8 +19,11 @@ This gives:
 - **Zero overhead**: MCP tool calls are in-process Rust function calls to the
   engine and agent — no HTTP proxy or subprocess.
 - **Single process**: No separate MCP bridge to deploy or monitor.
-- **Shared state**: MCP tools use the same `Arc<Engine>` and
-  `Arc<Mutex<Agent>>` as the daemon and REST handlers (see ADR-027).
+- **Shared state**: MCP tools use the same `Arc<RwLock<HashMap<_, Arc<Engine>>>>` and
+  `Arc<RwLock<HashMap<_, Arc<Mutex<Agent>>>>>` maps as the daemon and REST
+  handlers (see ADR-027). Workspaces are lazy-loaded on first access.
+- **Multi-workspace**: All workspace-scoped tools accept an optional `workspace`
+  parameter (default: `"default"`). No pre-warming or env var needed.
 
 ### Feature gate
 
@@ -40,11 +43,15 @@ Building without `--features mcp` excludes all MCP code.
 | Compartments | `list_compartments`, `discover_compartments`, `load_compartment`, `unload_compartment`, `activate_compartment`, `deactivate_compartment` |
 | Agent | `run_agent` |
 | Status | `status` |
+| Workspace | `list_workspaces`, `create_workspace`, `delete_workspace` |
+| Seeds | `apply_seed`, `list_seeds` |
+| Bootstrap | `awaken`, `awaken_parse` |
+| Chat | `chat` |
 
 ### Configuration
 
-- `AKH_MCP_WORKSPACE` env var (default: `"default"`) selects which workspace
-  the MCP interface targets.
+- All workspace-scoped tools accept an optional `workspace` parameter that
+  defaults to `"default"`. No env var needed.
 - `.mcp.json` in the project root auto-registers with Claude Code.
 
 ## Alternatives Considered
@@ -58,7 +65,8 @@ Building without `--features mcp` excludes all MCP code.
 
 ## Consequences
 
-- akhomed gains ~400 lines in `src/mcp/mod.rs` (feature-gated).
+- akhomed gains ~800 lines in `src/mcp/mod.rs` (feature-gated).
 - `rmcp` + `schemars` v1 added as optional dependencies (~50 crates).
 - Claude Code can now interact with akh-medu's knowledge graph natively.
+- Full workspace management, bootstrap, and chat surface — 22 tools total.
 - Compartment REST endpoints added for completeness (discover/load/unload/activate/deactivate).
