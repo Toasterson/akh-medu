@@ -1,0 +1,30 @@
+[Unit]
+Description=akh-medu daemon — neuro-symbolic reasoning server
+Documentation=https://akh-medu.dev
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/akhomed
+Restart=on-failure
+RestartSec=5
+
+# Environment
+Environment=RUST_LOG=info,egg=warn,hnsw_rs=warn
+Environment=AKH_SERVER_BIND=127.0.0.1
+Environment=AKH_SERVER_PORT=8200
+
+# XDG paths are resolved automatically; override if needed:
+# Environment=XDG_CONFIG_HOME=%h/.config
+# Environment=XDG_DATA_HOME=%h/.local/share
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.local/share/akh-medu %h/.config/akh-medu %h/.cache/akh-medu
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

@@ -114,7 +114,7 @@ let all = engine.all_triples();
 For complex queries, use SPARQL against the Oxigraph store:
 
 ```bash
-akh-medu sparql "SELECT ?animal WHERE {
+akh sparql "SELECT ?animal WHERE {
   ?animal <https://akh-medu.dev/sym/is-a> <https://akh-medu.dev/sym/mammal>
 }"
 ```

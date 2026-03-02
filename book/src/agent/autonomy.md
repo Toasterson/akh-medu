@@ -32,7 +32,7 @@ consolidating memories, and adjusting goal priorities -- all while idle.
 
 ## TUI Idle Learning
 
-When using the TUI (`akh-medu agent chat` or `akh-medu agent repl`), the
+When using the TUI (`akh agent chat` or `akh agent repl`), the
 event loop polls for keyboard input every 100ms. When no key is pressed,
 the idle scheduler checks if any background task is overdue and runs
 exactly one -- the most overdue task -- to avoid blocking the interface.
@@ -102,16 +102,16 @@ cargo build --features daemon
 
 ```bash
 # Start with defaults
-akh-medu agent daemon
+akh agent daemon
 
 # Custom intervals
-akh-medu agent daemon --equiv-interval 600 --reflect-interval 300
+akh agent daemon --equiv-interval 600 --reflect-interval 300
 
 # Fresh start with cycle limit
-akh-medu agent daemon --fresh --max-cycles 100
+akh agent daemon --fresh --max-cycles 100
 
 # Tune persistence frequency
-akh-medu agent daemon --persist-interval 120
+akh agent daemon --persist-interval 120
 ```
 
 ### Default Intervals
@@ -271,9 +271,9 @@ restored on resume. This means:
 
 ```bash
 # Start daemon, let it run overnight
-akh-medu agent daemon --max-cycles 500
+akh agent daemon --max-cycles 500
 
 # Next morning, resume in TUI
-akh-medu agent chat
+akh agent chat
 # All daemon-discovered knowledge is available
 ```

@@ -6,6 +6,7 @@
 
 - [Installation](getting-started/installation.md)
 - [Quick Start Tutorial](getting-started/quickstart.md)
+- [Deployment and Awakening](getting-started/bootstrap.md)
 - [Seed Packs](getting-started/seed-packs.md)
 
 # Concepts

@@ -1,6 +1,6 @@
 # OODA Loop
 
-The akh-medu agent operates on a continuous Observe-Orient-Decide-Act (OODA)
+The akh agent operates on a continuous Observe-Orient-Decide-Act (OODA)
 loop. Each cycle gathers state, builds context, selects a tool, executes it,
 and evaluates progress toward goals.
 
@@ -182,10 +182,10 @@ is serialized to the durable store on exit and restored on resume:
 
 ```bash
 # Persists automatically on exit
-akh-medu agent run --goals "..." --max-cycles 20
+akh agent run --goals "..." --max-cycles 20
 
 # Resume where you left off
-akh-medu agent resume --max-cycles 50
+akh agent resume --max-cycles 50
 ```
 
 Session persistence also underpins [autonomous background learning](autonomy.md):
@@ -196,32 +196,32 @@ sessions.
 
 ```bash
 # Single cycle
-akh-medu agent cycle --goal "Find mammals"
+akh agent cycle --goal "Find mammals"
 
 # Multi-cycle
-akh-medu agent run --goals "Discover planet properties" --max-cycles 20
+akh agent run --goals "Discover planet properties" --max-cycles 20
 
 # Fresh start (ignores persisted session)
-akh-medu agent run --goals "..." --max-cycles 10 --fresh
+akh agent run --goals "..." --max-cycles 10 --fresh
 
 # Interactive REPL
-akh-medu agent repl
+akh agent repl
 
 # Interactive TUI chat (with idle background learning)
-akh-medu agent chat
+akh agent chat
 
 # Resume persisted session
-akh-medu agent resume
+akh agent resume
 
 # Background daemon (requires --features daemon)
-akh-medu agent daemon
-akh-medu agent daemon --equiv-interval 600 --fresh
+akh agent daemon
+akh agent daemon --equiv-interval 600 --fresh
 
 # Trigger consolidation
-akh-medu agent consolidate
+akh agent consolidate
 
 # Recall episodic memories
-akh-medu agent recall --query "mammals" --top-k 5
+akh agent recall --query "mammals" --top-k 5
 ```
 
 See [Autonomous Background Learning](autonomy.md) for details on the

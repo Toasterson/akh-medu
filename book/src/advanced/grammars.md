@@ -70,25 +70,25 @@ mammal has warm blood [0.85]
 
 ```bash
 # Parse prose into abstract syntax
-akh-medu grammar parse "Dogs are mammals"
+akh grammar parse "Dogs are mammals"
 
 # Parse and ingest into the knowledge graph
-akh-medu grammar parse "Dogs are mammals" --ingest
+akh grammar parse "Dogs are mammals" --ingest
 
 # Linearize a triple back to prose
-akh-medu grammar linearize --subject Dog --predicate is-a --object mammal
+akh grammar linearize --subject Dog --predicate is-a --object mammal
 
 # Compare a triple against the KG
-akh-medu grammar compare --subject Dog --predicate is-a --object mammal
+akh grammar compare --subject Dog --predicate is-a --object mammal
 
 # List available archetypes
-akh-medu grammar list
+akh grammar list
 
 # Load a custom grammar from TOML
-akh-medu grammar load --file /path/to/grammar.toml
+akh grammar load --file /path/to/grammar.toml
 
 # Render an entity's KG neighborhood
-akh-medu grammar render --entity Dog
+akh grammar render --entity Dog
 ```
 
 ### In the TUI
@@ -118,7 +118,7 @@ pub trait ConcreteGrammar: Send + Sync {
 Or load a TOML-defined grammar at runtime:
 
 ```bash
-akh-medu grammar load --file my-grammar.toml
+akh grammar load --file my-grammar.toml
 ```
 
 Register custom grammars programmatically:
@@ -145,10 +145,10 @@ or can be forced:
 
 ```bash
 # Auto-detect
-akh-medu grammar parse "Собаки являются млекопитающими"
+akh grammar parse "Собаки являются млекопитающими"
 
 # Force Russian
-akh-medu --language ru grammar parse "Собаки являются млекопитающими"
+akh --language ru grammar parse "Собаки являются млекопитающими"
 ```
 
 All languages map to the same 9 canonical predicates: `is-a`, `has-a`,

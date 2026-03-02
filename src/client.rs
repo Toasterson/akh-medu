@@ -88,7 +88,7 @@ pub fn discover_server(paths: &AkhPaths) -> Option<ServerInfo> {
 
     // Health-check the server.
     let url = format!("{}/health", info.base_url());
-    match ureq::get(&url).timeout(std::time::Duration::from_secs(2)).call() {
+    match ureq::get(&url).timeout(std::time::Duration::from_secs(10)).call() {
         Ok(resp) if resp.status() == 200 => Some(info),
         Ok(resp) => {
             tracing::warn!(

@@ -87,10 +87,10 @@ ID (slug), title, format, source path/URL, tags, and chunk count.
 Add a document to the library from a file path or URL.
 
 ```bash
-akh-medu library add paper.pdf
-akh-medu library add https://example.com/article.html --title "My Article"
-akh-medu library add book.epub --tags "physics,textbook"
-akh-medu library add notes.txt --format text
+akh library add paper.pdf
+akh library add https://example.com/article.html --title "My Article"
+akh library add book.epub --tags "physics,textbook"
+akh library add notes.txt --format text
 ```
 
 | Option | Description |
@@ -104,7 +104,7 @@ akh-medu library add notes.txt --format text
 List all documents in the library.
 
 ```bash
-akh-medu library list
+akh library list
 ```
 
 ### library search
@@ -112,7 +112,7 @@ akh-medu library list
 Search library content by text similarity.
 
 ```bash
-akh-medu library search --query "quantum entanglement" --top-k 10
+akh library search --query "quantum entanglement" --top-k 10
 ```
 
 | Option | Description | Default |
@@ -125,7 +125,7 @@ akh-medu library search --query "quantum entanglement" --top-k 10
 Show detailed information about a document.
 
 ```bash
-akh-medu library info quantum-mechanics-textbook
+akh library info quantum-mechanics-textbook
 ```
 
 ### library remove
@@ -133,7 +133,7 @@ akh-medu library info quantum-mechanics-textbook
 Remove a document from the library.
 
 ```bash
-akh-medu library remove quantum-mechanics-textbook
+akh library remove quantum-mechanics-textbook
 ```
 
 ### library watch
@@ -142,8 +142,8 @@ Watch a directory for new files and auto-ingest them. Defaults to the
 library inbox directory (`~/.local/share/akh-medu/library/inbox/`).
 
 ```bash
-akh-medu library watch
-akh-medu library watch --dir /path/to/papers/
+akh library watch
+akh library watch --dir /path/to/papers/
 ```
 
 ## Agent Integration

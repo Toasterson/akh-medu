@@ -1,6 +1,6 @@
 # Inference Engine
 
-The akh-medu inference engine discovers implicit knowledge from existing symbol
+The akh inference engine discovers implicit knowledge from existing symbol
 associations. It combines three complementary strategies — spreading activation,
 backward chaining, and superposition reasoning — all operating on the same
 hypervector (VSA) substrate. Every inference produces a full provenance trail
@@ -380,16 +380,16 @@ selection.
 
 ```bash
 # Spreading activation
-akh-medu query --seeds "Dog,Cat" --depth 3 --top-k 20
+akh query --seeds "Dog,Cat" --depth 3 --top-k 20
 
 # Analogy
-akh-medu analogy --a "King" --b "Man" --c "Queen" --top-k 5
+akh analogy --a "King" --b "Man" --c "Queen" --top-k 5
 
 # Forward-chaining inference rules
-akh-medu infer
+akh infer
 
 # Pipeline with custom inference depth
-akh-medu pipeline run --infer-depth 3 --stages retrieve,infer,reason
+akh pipeline run --infer-depth 3 --stages retrieve,infer,reason
 ```
 
 ---

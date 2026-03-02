@@ -246,13 +246,13 @@ Skill packs can register additional tools:
 
 ```bash
 # List all registered tools (built-in + skill-provided)
-akh-medu agent tools
+akh agent tools
 ```
 
 ## Listing Tools
 
 ```bash
-akh-medu agent tools
+akh agent tools
 ```
 
 This shows all registered tools with their names, descriptions, parameters,

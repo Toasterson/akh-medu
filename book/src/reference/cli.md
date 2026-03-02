@@ -16,8 +16,8 @@
 Initialize a new workspace with XDG directory structure.
 
 ```bash
-akh-medu init
-akh-medu -w my-project init
+akh init
+akh -w my-project init
 ```
 
 ### workspace
@@ -25,10 +25,10 @@ akh-medu -w my-project init
 Manage workspaces.
 
 ```bash
-akh-medu workspace list
-akh-medu workspace create <NAME>
-akh-medu workspace delete <NAME>
-akh-medu workspace info <NAME>
+akh workspace list
+akh workspace create <NAME>
+akh workspace delete <NAME>
+akh workspace info <NAME>
 ```
 
 ### seed
@@ -36,9 +36,9 @@ akh-medu workspace info <NAME>
 Manage seed packs.
 
 ```bash
-akh-medu seed list              # List available packs
-akh-medu seed apply <PACK>      # Apply a seed pack
-akh-medu seed status            # Show applied seeds
+akh seed list              # List available packs
+akh seed apply <PACK>      # Apply a seed pack
+akh seed status            # Show applied seeds
 ```
 
 ### ingest
@@ -46,10 +46,10 @@ akh-medu seed status            # Show applied seeds
 Load triples from files.
 
 ```bash
-akh-medu ingest --file <PATH>
-akh-medu ingest --file <PATH> --format csv --csv-format spo
-akh-medu ingest --file <PATH> --format csv --csv-format entity
-akh-medu ingest --file <PATH> --format text --max-sentences 100
+akh ingest --file <PATH>
+akh ingest --file <PATH> --format csv --csv-format spo
+akh ingest --file <PATH> --format csv --csv-format entity
+akh ingest --file <PATH> --format text --max-sentences 100
 ```
 
 | Option | Description | Default |
@@ -64,7 +64,7 @@ akh-medu ingest --file <PATH> --format text --max-sentences 100
 Load bundled skills, run grounding, and run inference.
 
 ```bash
-akh-medu bootstrap
+akh bootstrap
 ```
 
 ### query
@@ -72,7 +72,7 @@ akh-medu bootstrap
 Spreading-activation inference.
 
 ```bash
-akh-medu query --seeds "Dog,Cat" --depth 2 --top-k 10
+akh query --seeds "Dog,Cat" --depth 2 --top-k 10
 ```
 
 | Option | Description | Default |
@@ -86,8 +86,8 @@ akh-medu query --seeds "Dog,Cat" --depth 2 --top-k 10
 BFS graph traversal.
 
 ```bash
-akh-medu traverse --seeds Dog --max-depth 2
-akh-medu traverse --seeds Dog --predicates is-a --format json
+akh traverse --seeds Dog --max-depth 2
+akh traverse --seeds Dog --predicates is-a --format json
 ```
 
 | Option | Description | Default |
@@ -103,8 +103,8 @@ akh-medu traverse --seeds Dog --predicates is-a --format json
 Run SPARQL queries.
 
 ```bash
-akh-medu sparql "SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 10"
-akh-medu sparql --file query.sparql
+akh sparql "SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 10"
+akh sparql --file query.sparql
 ```
 
 ### reason
@@ -112,8 +112,8 @@ akh-medu sparql --file query.sparql
 Simplify expressions via e-graph rewriting.
 
 ```bash
-akh-medu reason --expr "unbind(bind(Dog, is-a), is-a)"
-akh-medu reason --expr "..." --verbose
+akh reason --expr "unbind(bind(Dog, is-a), is-a)"
+akh reason --expr "..." --verbose
 ```
 
 ### search
@@ -121,7 +121,7 @@ akh-medu reason --expr "..." --verbose
 Find similar symbols via VSA.
 
 ```bash
-akh-medu search --symbol Dog --top-k 5
+akh search --symbol Dog --top-k 5
 ```
 
 ### analogy
@@ -129,7 +129,7 @@ akh-medu search --symbol Dog --top-k 5
 A:B :: C:? analogical reasoning.
 
 ```bash
-akh-medu analogy --a King --b Man --c Queen --top-k 5
+akh analogy --a King --b Man --c Queen --top-k 5
 ```
 
 ### filler
@@ -137,7 +137,7 @@ akh-medu analogy --a King --b Man --c Queen --top-k 5
 Recover role-filler for (subject, predicate) pairs.
 
 ```bash
-akh-medu filler --subject Dog --predicate is-a --top-k 5
+akh filler --subject Dog --predicate is-a --top-k 5
 ```
 
 ### info
@@ -145,7 +145,7 @@ akh-medu filler --subject Dog --predicate is-a --top-k 5
 Show engine statistics.
 
 ```bash
-akh-medu info
+akh info
 ```
 
 ### symbols
@@ -153,9 +153,9 @@ akh-medu info
 List and inspect symbols.
 
 ```bash
-akh-medu symbols list
-akh-medu symbols show Dog
-akh-medu symbols show 42
+akh symbols list
+akh symbols show Dog
+akh symbols show 42
 ```
 
 ### export
@@ -163,9 +163,9 @@ akh-medu symbols show 42
 Export engine data.
 
 ```bash
-akh-medu export symbols
-akh-medu export triples
-akh-medu export provenance --symbol Dog
+akh export symbols
+akh export triples
+akh export provenance --symbol Dog
 ```
 
 ### skill
@@ -173,11 +173,11 @@ akh-medu export provenance --symbol Dog
 Manage skill packs.
 
 ```bash
-akh-medu skill list
-akh-medu skill load <NAME>
-akh-medu skill unload <NAME>
-akh-medu skill info <NAME>
-akh-medu skill scaffold <NAME>     # Create a new skill template
+akh skill list
+akh skill load <NAME>
+akh skill unload <NAME>
+akh skill info <NAME>
+akh skill scaffold <NAME>     # Create a new skill template
 ```
 
 ### pipeline
@@ -185,8 +185,8 @@ akh-medu skill scaffold <NAME>     # Create a new skill template
 Run processing pipelines.
 
 ```bash
-akh-medu pipeline query --seeds "Dog"
-akh-medu pipeline run --stages retrieve,infer,reason --infer-depth 3
+akh pipeline query --seeds "Dog"
+akh pipeline run --stages retrieve,infer,reason --infer-depth 3
 ```
 
 ### analytics
@@ -194,10 +194,10 @@ akh-medu pipeline run --stages retrieve,infer,reason --infer-depth 3
 Graph analytics.
 
 ```bash
-akh-medu analytics degree --top-k 10
-akh-medu analytics pagerank --top-k 10
-akh-medu analytics components
-akh-medu analytics path --from Dog --to Cat
+akh analytics degree --top-k 10
+akh analytics pagerank --top-k 10
+akh analytics components
+akh analytics path --from Dog --to Cat
 ```
 
 ### render
@@ -205,11 +205,11 @@ akh-medu analytics path --from Dog --to Cat
 Hieroglyphic notation rendering.
 
 ```bash
-akh-medu render --entity Dog
-akh-medu render --entity Dog --depth 3
-akh-medu render --all
-akh-medu render --legend
-akh-medu render --no-color
+akh render --entity Dog
+akh render --entity Dog --depth 3
+akh render --all
+akh render --legend
+akh render --no-color
 ```
 
 ### grammar
@@ -217,13 +217,13 @@ akh-medu render --no-color
 Bidirectional grammar system.
 
 ```bash
-akh-medu grammar list
-akh-medu grammar parse "Dogs are mammals"
-akh-medu grammar parse "Dogs are mammals" --ingest
-akh-medu grammar linearize --subject Dog --predicate is-a --object mammal
-akh-medu grammar compare --subject Dog --predicate is-a --object mammal
-akh-medu grammar load --file grammar.toml
-akh-medu grammar render --entity Dog
+akh grammar list
+akh grammar parse "Dogs are mammals"
+akh grammar parse "Dogs are mammals" --ingest
+akh grammar linearize --subject Dog --predicate is-a --object mammal
+akh grammar compare --subject Dog --predicate is-a --object mammal
+akh grammar load --file grammar.toml
+akh grammar render --entity Dog
 ```
 
 ### chat
@@ -231,9 +231,9 @@ akh-medu grammar render --entity Dog
 Interactive TUI.
 
 ```bash
-akh-medu chat
-akh-medu chat --skill my-skill
-akh-medu chat --headless         # No TUI, plain text
+akh chat
+akh chat --skill my-skill
+akh chat --headless         # No TUI, plain text
 ```
 
 ### preprocess
@@ -241,10 +241,10 @@ akh-medu chat --headless         # No TUI, plain text
 Pre-process text for the Eleutherios pipeline.
 
 ```bash
-cat chunks.jsonl | akh-medu preprocess --format jsonl
-cat chunks.json  | akh-medu preprocess --format json
-cat chunks.jsonl | akh-medu preprocess --format jsonl --language ru
-cat chunks.jsonl | akh-medu preprocess --format jsonl --library-context
+cat chunks.jsonl | akh preprocess --format jsonl
+cat chunks.json  | akh preprocess --format json
+cat chunks.jsonl | akh preprocess --format jsonl --language ru
+cat chunks.jsonl | akh preprocess --format jsonl --library-context
 ```
 
 | Option | Description | Default |
@@ -258,11 +258,11 @@ cat chunks.jsonl | akh-medu preprocess --format jsonl --library-context
 Cross-lingual equivalence mappings.
 
 ```bash
-akh-medu equivalences list
-akh-medu equivalences stats
-akh-medu equivalences learn
-akh-medu equivalences export > equivs.json
-akh-medu equivalences import < equivs.json
+akh equivalences list
+akh equivalences stats
+akh equivalences learn
+akh equivalences export > equivs.json
+akh equivalences import < equivs.json
 ```
 
 ### library
@@ -270,13 +270,13 @@ akh-medu equivalences import < equivs.json
 Manage the shared content library. See [Shared Content Library](../library/overview.md).
 
 ```bash
-akh-medu library add paper.pdf
-akh-medu library add https://example.com/article --title "My Article" --tags "physics"
-akh-medu library list
-akh-medu library search --query "quantum entanglement" --top-k 10
-akh-medu library info <ID>
-akh-medu library remove <ID>
-akh-medu library watch --dir /path/to/papers/
+akh library add paper.pdf
+akh library add https://example.com/article --title "My Article" --tags "physics"
+akh library list
+akh library search --query "quantum entanglement" --top-k 10
+akh library info <ID>
+akh library remove <ID>
+akh library watch --dir /path/to/papers/
 ```
 
 ### code-ingest
@@ -284,9 +284,9 @@ akh-medu library watch --dir /path/to/papers/
 Ingest Rust source code.
 
 ```bash
-akh-medu code-ingest --path src/
-akh-medu code-ingest --path src/ --recursive --run-rules --enrich
-akh-medu code-ingest --path src/main.rs --max-files 50
+akh code-ingest --path src/
+akh code-ingest --path src/ --recursive --run-rules --enrich
+akh code-ingest --path src/main.rs --max-files 50
 ```
 
 ### enrich
@@ -294,7 +294,7 @@ akh-medu code-ingest --path src/main.rs --max-files 50
 Semantic enrichment on existing code knowledge.
 
 ```bash
-akh-medu enrich
+akh enrich
 ```
 
 ### docgen
@@ -302,21 +302,21 @@ akh-medu enrich
 Generate documentation from code.
 
 ```bash
-akh-medu docgen --target Engine --format markdown --output docs/
-akh-medu docgen --target Engine --format json --polish
+akh docgen --target Engine --format markdown --output docs/
+akh docgen --target Engine --format json --polish
 ```
 
 ## Agent Commands
 
-All agent commands are subcommands of `akh-medu agent`.
+All agent commands are subcommands of `akh agent`.
 
 ### agent cycle
 
 Run one OODA cycle.
 
 ```bash
-akh-medu agent cycle --goal "Find mammals"
-akh-medu agent cycle --goal "..." --priority 200
+akh agent cycle --goal "Find mammals"
+akh agent cycle --goal "..." --priority 200
 ```
 
 ### agent run
@@ -324,8 +324,8 @@ akh-medu agent cycle --goal "..." --priority 200
 Run until completion or max cycles.
 
 ```bash
-akh-medu agent run --goals "Discover planets" --max-cycles 20
-akh-medu agent run --goals "..." --fresh    # Ignore persisted session
+akh agent run --goals "Discover planets" --max-cycles 20
+akh agent run --goals "..." --fresh    # Ignore persisted session
 ```
 
 ### agent repl
@@ -333,9 +333,9 @@ akh-medu agent run --goals "..." --fresh    # Ignore persisted session
 Interactive agent REPL.
 
 ```bash
-akh-medu agent repl
-akh-medu agent repl --goals "Initial goal"
-akh-medu agent repl --headless
+akh agent repl
+akh agent repl --goals "Initial goal"
+akh agent repl --headless
 ```
 
 REPL commands: `p`/`plan`, `r`/`reflect`, `q`/`quit`.
@@ -345,8 +345,8 @@ REPL commands: `p`/`plan`, `r`/`reflect`, `q`/`quit`.
 Resume a persisted session.
 
 ```bash
-akh-medu agent resume
-akh-medu agent resume --max-cycles 50
+akh agent resume
+akh agent resume --max-cycles 50
 ```
 
 ### agent chat
@@ -354,8 +354,8 @@ akh-medu agent resume --max-cycles 50
 Agent chat mode.
 
 ```bash
-akh-medu agent chat
-akh-medu agent chat --max-cycles 10 --fresh --headless
+akh agent chat
+akh agent chat --max-cycles 10 --fresh --headless
 ```
 
 ### agent tools
@@ -363,7 +363,7 @@ akh-medu agent chat --max-cycles 10 --fresh --headless
 List registered tools.
 
 ```bash
-akh-medu agent tools
+akh agent tools
 ```
 
 ### agent consolidate
@@ -371,7 +371,7 @@ akh-medu agent tools
 Trigger memory consolidation.
 
 ```bash
-akh-medu agent consolidate
+akh agent consolidate
 ```
 
 ### agent recall
@@ -379,7 +379,7 @@ akh-medu agent consolidate
 Recall episodic memories.
 
 ```bash
-akh-medu agent recall --query "mammals" --top-k 5
+akh agent recall --query "mammals" --top-k 5
 ```
 
 ### agent plan
@@ -387,7 +387,7 @@ akh-medu agent recall --query "mammals" --top-k 5
 Generate and display a goal plan.
 
 ```bash
-akh-medu agent plan
+akh agent plan
 ```
 
 ### agent reflect
@@ -395,7 +395,7 @@ akh-medu agent plan
 Trigger reflection.
 
 ```bash
-akh-medu agent reflect
+akh agent reflect
 ```
 
 ### agent infer
@@ -403,7 +403,7 @@ akh-medu agent reflect
 Run forward-chaining rules.
 
 ```bash
-akh-medu agent infer --max-iterations 10 --min-confidence 0.5
+akh agent infer --max-iterations 10 --min-confidence 0.5
 ```
 
 ### agent gaps
@@ -411,7 +411,7 @@ akh-medu agent infer --max-iterations 10 --min-confidence 0.5
 Analyze knowledge gaps.
 
 ```bash
-akh-medu agent gaps --goal "Explore biology" --max-gaps 10
+akh agent gaps --goal "Explore biology" --max-gaps 10
 ```
 
 ### agent schema
@@ -419,7 +419,7 @@ akh-medu agent gaps --goal "Explore biology" --max-gaps 10
 Discover schema patterns.
 
 ```bash
-akh-medu agent schema
+akh agent schema
 ```
 
 ### agent daemon
@@ -433,10 +433,10 @@ OODA cycles. It persists the session at a configurable interval and shuts
 down cleanly on Ctrl+C.
 
 ```bash
-akh-medu agent daemon
-akh-medu agent daemon --equiv-interval 600 --reflect-interval 300
-akh-medu agent daemon --fresh --max-cycles 100
-akh-medu agent daemon --persist-interval 120 --rules-interval 900
+akh agent daemon
+akh agent daemon --equiv-interval 600 --reflect-interval 300
+akh agent daemon --fresh --max-cycles 100
+akh agent daemon --persist-interval 120 --rules-interval 900
 ```
 
 | Option | Description | Default |
@@ -454,7 +454,7 @@ The agent supports two forms of autonomous background learning:
 
 ### TUI Idle Learning
 
-When using the TUI (`akh-medu agent chat` or `akh-medu agent repl`), the
+When using the TUI (`akh agent chat` or `akh agent repl`), the
 agent automatically runs background tasks during idle time (when you are
 not typing). No setup is required — it works out of the box.
 

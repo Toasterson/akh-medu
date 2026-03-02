@@ -12,33 +12,44 @@
 git clone https://github.com/Toasterson/akh-medu.git
 cd akh-medu
 
-# Core CLI binary
-cargo build --release
+# Full server with NLU (recommended)
+cargo build --release --features server,nlu-full --bin akhomed
 
-# The binary is at target/release/akh-medu
+# Thin client (talks to akhomed over HTTP/WS)
+cargo build --release --features client-only --bin akh
+
+# Both binaries land in target/release/
 ```
 
 ## Feature Flags
 
 | Feature | Flag | What It Adds |
 |---------|------|--------------|
-| **Server** | `--features server` | REST + WebSocket server binary (`akh-medu-server`) |
+| **Server** | `--features server` | REST + WebSocket daemon binary (`akhomed`) |
+| **Client-only** | `--features client-only` | Thin CLI that delegates to a running `akhomed` |
+| **NLU (ML)** | `--features nlu-ml` | ONNX-based NER model for natural language understanding |
+| **NLU (LLM)** | `--features nlu-llm` | Local LLM translator (Qwen2.5-1.5B) |
+| **NLU (Full)** | `--features nlu-full` | Both `nlu-ml` and `nlu-llm` |
 | **WASM Tools** | `--features wasm-tools` | Wasmtime runtime for WASM-based agent tools |
 
 ```bash
-# Build with server support
-cargo build --release --features server
+# Build server with all NLU tiers
+cargo build --release --features server,nlu-full --bin akhomed
 
-# Build with everything
-cargo build --release --features "server wasm-tools"
+# Build thin client
+cargo build --release --features client-only --bin akh
+
+# Build standalone CLI (embedded engine, no server needed)
+cargo build --release --bin akh
 ```
 
 ## Binary Targets
 
-| Binary | Path | Feature Gate |
-|--------|------|--------------|
-| `akh-medu` | `src/main.rs` | None (always built) |
-| `akh-medu-server` | `src/bin/akh-medu-server.rs` | `server` |
+| Binary | Path | Feature Gate | Description |
+|--------|------|--------------|-------------|
+| `akh` | `src/main.rs` | None (always built) | CLI with embedded engine |
+| `akh` | `src/main.rs` | `client-only` | Thin client (requires running `akhomed`) |
+| `akhomed` | `src/bin/akhomed.rs` | `server` | Multi-workspace daemon |
 
 ## Initialize a Workspace
 
@@ -46,10 +57,10 @@ akh-medu uses XDG directory conventions for data, config, and state:
 
 ```bash
 # Create the default workspace
-akh-medu init
+akh init
 
 # Create a named workspace
-akh-medu -w my-project init
+akh -w my-project init
 ```
 
 This creates:
@@ -73,10 +84,10 @@ This creates:
 
 ```bash
 # Show engine info (in-memory, no persistence)
-akh-medu info
+akh info
 
 # Show engine info with persistence
-akh-medu -w default info
+akh -w default info
 ```
 
 ## Run Tests
