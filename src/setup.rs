@@ -158,7 +158,7 @@ pub fn check_setup(paths: &AkhPaths) -> SetupResult<()> {
         let path = ner_dir.join(local_name);
         let status = if path.exists() {
             let meta = fs::metadata(&path)?;
-            format!("ok ({:.1} MB)", meta.len() as f64 / 1_048_576.0)
+            format!("ok ({})", format_size(meta.len()))
         } else {
             "MISSING".to_string()
         };
@@ -170,7 +170,7 @@ pub fn check_setup(paths: &AkhPaths) -> SetupResult<()> {
     println!("\nTier 3 — LLM (Qwen2.5-1.5B GGUF):");
     let llm_status = if llm_path.exists() {
         let meta = fs::metadata(&llm_path)?;
-        format!("ok ({:.1} MB)", meta.len() as f64 / 1_048_576.0)
+        format!("ok ({})", format_size(meta.len()))
     } else {
         "MISSING".to_string()
     };
@@ -179,39 +179,52 @@ pub fn check_setup(paths: &AkhPaths) -> SetupResult<()> {
     // ONNX Runtime
     println!("\nONNX Runtime:");
     let ort_env = std::env::var("ORT_DYLIB_PATH").ok();
-    match ort_env {
+    let ort_ok = match ort_env {
         Some(ref p) if Path::new(p).exists() => {
-            println!("  ORT_DYLIB_PATH={p} (found)");
+            let meta = fs::metadata(Path::new(p))?;
+            println!("  ORT_DYLIB_PATH={p} (ok, {})", format_size(meta.len()));
+            true
         }
         Some(ref p) => {
             println!("  ORT_DYLIB_PATH={p} (FILE NOT FOUND)");
+            false
         }
         None => {
             // Check default install location
             if let Ok(dir) = ort_install_dir() {
                 let lib = dir.join(ort_lib_name());
                 if lib.exists() {
-                    println!("  Found at default path: {}", lib.display());
+                    let meta = fs::metadata(&lib)?;
+                    println!(
+                        "  Found at default path: {} ({})",
+                        lib.display(),
+                        format_size(meta.len())
+                    );
                     println!("  Set: export ORT_DYLIB_PATH=\"{}\"", lib.display());
+                    true
                 } else {
                     println!("  NOT CONFIGURED — run `akh setup onnx-runtime`");
+                    false
                 }
             } else {
                 println!("  NOT CONFIGURED — run `akh setup onnx-runtime`");
+                false
             }
         }
-    }
+    };
 
-    println!("\nTo download missing components, run:");
-    if !ner_dir.join("model.onnx").exists() || !llm_path.exists() {
-        println!("  akh setup models");
-    }
-    if ort_env
-        .as_ref()
-        .map(|p| !Path::new(p).exists())
-        .unwrap_or(true)
-    {
-        println!("  akh setup onnx-runtime");
+    // Only show remediation steps if something is missing.
+    let models_missing = !ner_dir.join("model.onnx").exists() || !llm_path.exists();
+    if models_missing || !ort_ok {
+        println!("\nTo download missing components, run:");
+        if models_missing {
+            println!("  akh setup models");
+        }
+        if !ort_ok {
+            println!("  akh setup onnx-runtime");
+        }
+    } else {
+        println!("\nAll components installed.");
     }
 
     Ok(())
@@ -223,6 +236,17 @@ pub fn default_ort_version() -> &'static str {
 }
 
 // ── Internals ──────────────────────────────────────────────────────────────
+
+/// Format a byte count as a human-readable size string.
+fn format_size(bytes: u64) -> String {
+    if bytes >= 1_048_576 {
+        format!("{:.1} MB", bytes as f64 / 1_048_576.0)
+    } else if bytes >= 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{bytes} B")
+    }
+}
 
 /// Download a file from `url` to `dest`, printing progress to stderr.
 fn download_file(url: &str, dest: &Path) -> SetupResult<()> {
@@ -262,7 +286,7 @@ fn download_file(url: &str, dest: &Path) -> SetupResult<()> {
         if let Some(total) = content_length {
             let pct = ((downloaded * 100) / total) as u8;
             if pct >= last_pct + 5 {
-                eprint!("\r  {filename}: {pct}% ({:.1} MB)", downloaded as f64 / 1_048_576.0);
+                eprint!("\r  {filename}: {pct}% ({})", format_size(downloaded));
                 last_pct = pct;
             }
         }
@@ -270,15 +294,9 @@ fn download_file(url: &str, dest: &Path) -> SetupResult<()> {
     out.flush()?;
 
     if content_length.is_some() {
-        eprintln!(
-            "\r  {filename}: 100% ({:.1} MB)    ",
-            downloaded as f64 / 1_048_576.0
-        );
+        eprintln!("\r  {filename}: 100% ({})    ", format_size(downloaded));
     } else {
-        eprintln!(
-            "  {filename}: {:.1} MB",
-            downloaded as f64 / 1_048_576.0
-        );
+        eprintln!("  {filename}: {}", format_size(downloaded));
     }
 
     Ok(())
@@ -355,12 +373,25 @@ fn ort_lib_name() -> &'static str {
 }
 
 /// Extract the ONNX Runtime shared library from a `.tgz` archive.
+///
+/// The archive contains both a symlink (`libonnxruntime.dylib` →
+/// `libonnxruntime.1.x.y.dylib`) and the versioned real file. We prefer
+/// the largest regular file whose name starts with `libonnxruntime` and
+/// lives under `lib/`, which is always the actual shared library.
 fn extract_ort_lib(tarball: &[u8], dest: &Path, lib_name: &str) -> SetupResult<()> {
     use flate2::read::GzDecoder;
     use tar::Archive;
 
+    // Strip the extension suffix to get the stem we match against.
+    // e.g. "libonnxruntime" from "libonnxruntime.dylib" or "libonnxruntime.so".
+    let stem = lib_name.split('.').next().unwrap_or(lib_name);
+
     let gz = GzDecoder::new(tarball);
     let mut archive = Archive::new(gz);
+
+    // Collect candidate entries — we want the largest regular file whose
+    // name starts with the library stem and lives under lib/.
+    let mut best: Option<(String, Vec<u8>)> = None;
 
     for entry in archive.entries().map_err(|e| SetupError::Http {
         reason: format!("tar read: {e}"),
@@ -368,30 +399,44 @@ fn extract_ort_lib(tarball: &[u8], dest: &Path, lib_name: &str) -> SetupResult<(
         let mut entry = entry.map_err(|e| SetupError::Http {
             reason: format!("tar entry: {e}"),
         })?;
+
+        // Skip symlinks — they have no real content.
+        if entry.header().entry_type().is_symlink() {
+            continue;
+        }
+
         let path = entry.path().map_err(|e| SetupError::Http {
             reason: format!("tar path: {e}"),
         })?;
-        let path_str = path.to_string_lossy();
+        let path_str = path.to_string_lossy().to_string();
 
-        // Look for lib/libonnxruntime.{dylib,so} inside the archive
-        if path_str.ends_with(lib_name) && path_str.contains("lib/") {
+        let file_name = path
+            .file_name()
+            .map(|f| f.to_string_lossy().to_string())
+            .unwrap_or_default();
+
+        if path_str.contains("lib/") && file_name.starts_with(stem) {
             let mut data = Vec::new();
             entry.read_to_end(&mut data).map_err(|e| SetupError::Http {
                 reason: format!("tar extract: {e}"),
             })?;
-            fs::write(dest, &data)?;
-            eprintln!(
-                "  Extracted {} ({:.1} MB)",
-                lib_name,
-                data.len() as f64 / 1_048_576.0
-            );
-            return Ok(());
+            let is_larger = best.as_ref().map_or(true, |(_, d)| data.len() > d.len());
+            if is_larger {
+                best = Some((file_name, data));
+            }
         }
     }
 
-    Err(SetupError::Http {
-        reason: format!("{lib_name} not found in archive"),
-    })
+    match best {
+        Some((name, data)) => {
+            eprintln!("  Extracted {name} ({})", format_size(data.len() as u64));
+            fs::write(dest, &data)?;
+            Ok(())
+        }
+        None => Err(SetupError::Http {
+            reason: format!("{lib_name} not found in archive"),
+        }),
+    }
 }
 
 #[cfg(test)]
