@@ -126,7 +126,7 @@ impl LlmTranslator {
         use llama_cpp_2::context::params::LlamaContextParams;
         use llama_cpp_2::llama_batch::LlamaBatch;
         use llama_cpp_2::model::AddBos;
-        use llama_cpp_2::token::LlamaToken;
+        use llama_cpp_2::sampling::LlamaSampler;
 
         let prompt = build_prompt(input);
 
@@ -139,6 +139,16 @@ impl LlmTranslator {
                 reason: format!("Context creation: {e}"),
             })?;
 
+        // Create grammar-constrained sampler: GBNF grammar → greedy selection
+        let mut sampler = LlamaSampler::chain_simple([
+            LlamaSampler::grammar(&self.model, ABSTREE_GBNF, "root").map_err(|e| {
+                NluError::GrammarInitFailed {
+                    reason: format!("{e}"),
+                }
+            })?,
+            LlamaSampler::greedy(),
+        ]);
+
         // Tokenize the prompt
         let tokens = self
             .model
@@ -146,6 +156,8 @@ impl LlmTranslator {
             .map_err(|e| NluError::LlmGenerationFailed {
                 reason: format!("Tokenization: {e}"),
             })?;
+
+        tracing::debug!(prompt_tokens = tokens.len(), "LLM prompt tokenized");
 
         // Feed prompt tokens
         let mut batch = LlamaBatch::new(tokens.len().max(512), 1);
@@ -163,36 +175,26 @@ impl LlmTranslator {
                 reason: format!("Decode: {e}"),
             })?;
 
-        // Generate tokens with sampling
+        // Generate tokens with grammar-constrained sampling
         let mut output_tokens = Vec::new();
         let mut n_generated = 0u32;
 
-        // Simple greedy sampling loop
         while n_generated < self.max_tokens {
-            let logits = ctx.get_logits_ith((batch.n_tokens() - 1) as i32);
-
-            // Greedy: pick highest logit
-            let mut best_token = LlamaToken(0);
-            let mut best_logit = f32::NEG_INFINITY;
-            for (i, &logit) in logits.iter().enumerate() {
-                if logit > best_logit {
-                    best_logit = logit;
-                    best_token = LlamaToken(i as i32);
-                }
-            }
+            let token = sampler.sample(&ctx, (batch.n_tokens() - 1) as i32);
 
             // Check for EOS
-            if best_token == self.model.token_eos() {
+            if token == self.model.token_eos() {
                 break;
             }
 
-            output_tokens.push(best_token);
+            sampler.accept(token);
+            output_tokens.push(token);
             n_generated += 1;
 
             // Feed the new token for next iteration
             batch.clear();
             batch
-                .add(best_token, (tokens.len() + n_generated as usize - 1) as i32, &[0], true)
+                .add(token, (tokens.len() + n_generated as usize - 1) as i32, &[0], true)
                 .map_err(|_| NluError::LlmGenerationFailed {
                     reason: "Batch add failed".to_string(),
                 })?;
@@ -203,12 +205,16 @@ impl LlmTranslator {
                 })?;
         }
 
+        tracing::debug!(tokens_generated = n_generated, "LLM generation complete");
+
         // Detokenize output
         let mut decoder = encoding_rs::UTF_8.new_decoder();
         let json: String = output_tokens
             .iter()
             .filter_map(|t| self.model.token_to_piece(*t, &mut decoder, false, None).ok())
             .collect();
+
+        tracing::debug!(json_len = json.len(), "attempting AbsTree JSON parse");
 
         let tree = parse_abstree_json(&json)?;
 

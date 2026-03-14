@@ -2,7 +2,9 @@
 
 use std::path::PathBuf;
 #[cfg(not(feature = "client-only"))]
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+#[cfg(feature = "daemon")]
+use std::sync::Mutex;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use miette::{IntoDiagnostic, Result};
@@ -217,6 +219,33 @@ enum Commands {
         #[command(subcommand)]
         action: ServiceAction,
     },
+
+    /// Download and configure NLU models and ONNX Runtime.
+    Setup {
+        #[command(subcommand)]
+        action: SetupAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum SetupAction {
+    /// Download NLU models (NER ~130MB, LLM ~1.1GB).
+    Models {
+        /// Only download the NER model (skip LLM).
+        #[arg(long)]
+        ner_only: bool,
+        /// Only download the LLM model (skip NER).
+        #[arg(long)]
+        llm_only: bool,
+    },
+    /// Download and install ONNX Runtime for the current platform.
+    OnnxRuntime {
+        /// Target version (default: 1.23.2).
+        #[arg(long)]
+        version: Option<String>,
+    },
+    /// Check the current NLU setup status.
+    Check,
 }
 
 #[derive(Subcommand)]
@@ -3633,6 +3662,11 @@ fn main() -> Result<()> {
         Commands::Service { action } => {
             dispatch_service(action)?;
         }
+
+        // ── Setup (models & runtime) ────────────────────────────────────
+        Commands::Setup { action } => {
+            dispatch_setup(action)?;
+        }
     }
 
     Ok(())
@@ -3686,6 +3720,37 @@ fn dispatch_service(action: ServiceAction) -> Result<()> {
             let config = service::default_config(port).into_diagnostic()?;
             let plist = service::generate_plist(&config);
             println!("{plist}");
+        }
+    }
+
+    Ok(())
+}
+
+/// Dispatch `akh setup` subcommands. Works without an Engine.
+fn dispatch_setup(action: SetupAction) -> Result<()> {
+    use akh_medu::setup;
+
+    let paths = akh_medu::paths::AkhPaths::resolve().into_diagnostic()?;
+
+    match action {
+        SetupAction::Models { ner_only, llm_only } => {
+            if !llm_only {
+                eprintln!("=== Downloading NER models (Tier 2) ===");
+                setup::download_ner_models(&paths).into_diagnostic()?;
+            }
+            if !ner_only {
+                eprintln!("=== Downloading LLM model (Tier 3) ===");
+                setup::download_llm_model(&paths).into_diagnostic()?;
+            }
+            eprintln!("\nDone. Models installed to: {}", paths.models_dir().display());
+        }
+        SetupAction::OnnxRuntime { version } => {
+            let v = version.as_deref().unwrap_or(setup::default_ort_version());
+            eprintln!("=== Installing ONNX Runtime v{v} ===");
+            setup::install_onnx_runtime(v).into_diagnostic()?;
+        }
+        SetupAction::Check => {
+            setup::check_setup(&paths).into_diagnostic()?;
         }
     }
 
@@ -3750,9 +3815,12 @@ fn run_client_only(cli: Cli) -> Result<()> {
     use akh_medu::api_types;
     use std::path::Path;
 
-    // Service commands work without a running server.
+    // Service and Setup commands work without a running server.
     if let Commands::Service { action } = cli.command {
         return dispatch_service(action);
+    }
+    if let Commands::Setup { action } = cli.command {
+        return dispatch_setup(action);
     }
 
     let xdg_paths = akh_medu::paths::AkhPaths::resolve().ok();
@@ -4965,6 +5033,9 @@ fn run_client_only(cli: Cli) -> Result<()> {
         Commands::Service { action } => {
             dispatch_service(action)?;
         }
+
+        // ── Setup (handled by early return, unreachable) ────────────────
+        Commands::Setup { .. } => unreachable!("handled by early return"),
     }
 
     Ok(())

@@ -70,6 +70,15 @@ impl ChatProcessor {
 
         let lexicon = Lexicon::for_language(crate::grammar::lexer::Language::default());
 
+        let status = nlu_pipeline.tier_status();
+        tracing::info!(%status, "NLU pipeline initialized");
+        if !status.tier3_llm {
+            tracing::warn!(
+                "LLM translator not loaded — complex queries will fall through to OODA. \
+                 Run `akh setup models` to download."
+            );
+        }
+
         Self {
             nlu_pipeline,
             config: ChatProcessorConfig {

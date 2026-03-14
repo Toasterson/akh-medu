@@ -97,6 +97,10 @@ native-tls = { version = "0.2", optional = true }
 lettre = { version = "0.11", optional = true, default-features = false, features = ["builder", "smtp-transport", "rustls-tls"] }
 regex = "1"
 
+# Archive extraction (for ONNX Runtime setup)
+flate2 = "1"
+tar = "0.4"
+
 # NLU Tier 2: Micro-ML NER (feature-gated)
 ort = { version = "2.0.0-rc.11", optional = true, default-features = false, features = ["std", "load-dynamic"] }
 tokenizers = { version = "0.22", optional = true, default-features = false, features = ["progressbar", "fancy-regex"] }

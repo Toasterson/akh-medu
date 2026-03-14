@@ -1,6 +1,6 @@
 # Akh-medu Architecture
 
-> Last updated: 2026-03-02 (MCP server embedded in akhomed — ADR-029)
+> Last updated: 2026-03-14 (LLM integration fixes, setup command — ADR-030)
 
 ## Overview
 

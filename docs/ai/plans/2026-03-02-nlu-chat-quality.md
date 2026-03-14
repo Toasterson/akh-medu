@@ -63,11 +63,17 @@
 - Find and increase the truncation limit, or make it configurable
 - Better: rank triples by relevance/importance before truncating
 
-## Already Fixed (this session)
+## Already Fixed (2026-03-02)
 
 - **Metadata filter missing bootstrap prefixes**: Added `expand:`, `ingest:`, `xval:`, `wd:`, `resource:`, `prereq:`, `assess:` to `is_metadata_label()` in `src/agent/synthesize.rs`
 - **ONNX Runtime version mismatch**: Upgraded from 1.21.0 to 1.23.2 (ort 2.0.0-rc.11 requires >= 1.23.x)
 - **Slow graceful shutdown**: Added `TimeoutStopSec=10` to systemd service (SSE connections block drain)
+
+## Fixed (2026-03-14, ADR-030)
+
+- **Issue 1 — LLM tier not activating**: Root cause was missing GBNF grammar enforcement in `translate()`. Replaced manual greedy sampling with `LlamaSampler::grammar()` + `LlamaSampler::greedy()` chain. Added tracing to all NLU tiers.
+- **Issue 6 — No ONNX Runtime setup**: Added `akh setup onnx-runtime` command that detects platform, downloads, and installs the correct ONNX Runtime version.
+- **Issue 7 — No model download**: Added `akh setup models` command for NER (~130MB) and LLM (~1.1GB) downloads with progress. Added `akh setup check` for status verification. Models stored in shared XDG dir with workspace fallback.
 
 ### 6. No installation routine for ONNX Runtime
 

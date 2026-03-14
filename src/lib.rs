@@ -64,6 +64,7 @@ pub mod registry;
 pub mod rule_macro;
 pub mod seeds;
 pub mod service;
+pub mod setup;
 pub mod skolem;
 pub mod simd;
 pub mod skills;
