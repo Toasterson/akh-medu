@@ -357,6 +357,102 @@ impl NluPipeline {
         })
     }
 
+    // ── Output boundary: generate natural language from facts ────────
+
+    /// Generate a natural language response from symbolic facts + persona context.
+    ///
+    /// Uses the LLM (if available) to rewrite linearized facts as flowing prose
+    /// influenced by the persona's traits and tone. Returns `None` if the LLM
+    /// is not loaded — caller should fall back to template-based output.
+    pub fn generate_response(
+        &self,
+        facts: &[String],
+        persona_name: &str,
+        traits: &[String],
+        tone: &[String],
+        context: Option<&str>,
+    ) -> Option<String> {
+        if facts.is_empty() {
+            return None;
+        }
+
+        #[cfg(feature = "nlu-llm")]
+        if let Some(ref llm_arc) = self.llm_translator {
+            let llm = std::sync::Arc::clone(llm_arc);
+            let prompt = llm_translator::build_response_prompt(facts, persona_name, traits, tone, context);
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                llm.generate(&prompt, 256)
+            }));
+            match result {
+                Ok(Ok(text)) if !text.is_empty() => {
+                    tracing::info!(len = text.len(), "LLM response generation succeeded");
+                    return Some(text);
+                }
+                Ok(Ok(_)) => {
+                    tracing::debug!("LLM generated empty response, falling back");
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!(error = %e, "LLM response generation failed");
+                }
+                Err(_) => {
+                    tracing::error!("LLM response generation panicked");
+                }
+            }
+        }
+        None
+    }
+
+    /// Generate a brief dialogue act response (greeting, farewell, etc.)
+    /// using the LLM with persona context. Returns `None` if LLM unavailable.
+    pub fn generate_dialogue(
+        &self,
+        act: &str,
+        persona_name: &str,
+        traits: &[String],
+        context: Option<&str>,
+    ) -> Option<String> {
+        #[cfg(feature = "nlu-llm")]
+        if let Some(ref llm_arc) = self.llm_translator {
+            let llm = std::sync::Arc::clone(llm_arc);
+            let prompt = llm_translator::build_dialogue_prompt(act, persona_name, traits, context);
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                llm.generate(&prompt, 64)
+            }));
+            match result {
+                Ok(Ok(text)) if !text.is_empty() => {
+                    return Some(text);
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// Generate a brief investigation framing sentence.
+    /// Returns `None` if LLM unavailable.
+    pub fn generate_investigation_frame(
+        &self,
+        topic: &str,
+        persona_name: &str,
+        traits: &[String],
+    ) -> Option<String> {
+        #[cfg(feature = "nlu-llm")]
+        if let Some(ref llm_arc) = self.llm_translator {
+            let llm = std::sync::Arc::clone(llm_arc);
+            let prompt = llm_translator::build_investigation_prompt(topic, persona_name, traits);
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                llm.generate(&prompt, 48)
+            }));
+            match result {
+                Ok(Ok(text)) if !text.is_empty() => {
+                    return Some(text);
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
     /// Report which NLU tiers are currently available.
     pub fn tier_status(&self) -> NluTierStatus {
         NluTierStatus {

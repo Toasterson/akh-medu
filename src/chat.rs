@@ -266,44 +266,55 @@ impl ChatProcessor {
     // ── Dialogue act handlers ───────────────────────────────────────
 
     fn handle_dialogue_greeting(
-        &self,
+        &mut self,
         msgs: &mut Vec<AkhMessage>,
         agent: &mut Agent,
         engine: &Arc<Engine>,
         grammar: &str,
     ) {
         let (name, traits) = Self::persona_name_and_traits(engine);
-        let text = agent.dialogue_manager().handle_greeting(
-            engine,
-            &name,
-            &traits,
-        );
+        let active_topic = Self::active_topic_label(agent, engine);
+        // Try LLM-generated greeting first
+        let text = self
+            .nlu_pipeline
+            .generate_dialogue("greeting", &name, &traits, active_topic.as_deref())
+            .unwrap_or_else(|| {
+                agent
+                    .dialogue_manager()
+                    .handle_greeting(engine, &name, &traits)
+            });
         msgs.push(AkhMessage::narrative(&text, grammar));
         agent.conversation_state_mut().record_agent_turn(&text);
     }
 
     fn handle_dialogue_farewell(
-        &self,
+        &mut self,
         msgs: &mut Vec<AkhMessage>,
         agent: &mut Agent,
         engine: &Arc<Engine>,
         grammar: &str,
     ) {
-        let (name, _) = Self::persona_name_and_traits(engine);
-        let text = agent.dialogue_manager().handle_farewell(&name);
+        let (name, traits) = Self::persona_name_and_traits(engine);
+        let text = self
+            .nlu_pipeline
+            .generate_dialogue("farewell", &name, &traits, None)
+            .unwrap_or_else(|| agent.dialogue_manager().handle_farewell(&name));
         msgs.push(AkhMessage::narrative(&text, grammar));
         agent.conversation_state_mut().record_agent_turn(&text);
     }
 
     fn handle_dialogue_ack(
-        &self,
+        &mut self,
         msgs: &mut Vec<AkhMessage>,
         agent: &mut Agent,
         engine: &Arc<Engine>,
         grammar: &str,
     ) {
-        let (_, traits) = Self::persona_name_and_traits(engine);
-        let text = agent.dialogue_manager().handle_ack(&traits);
+        let (name, traits) = Self::persona_name_and_traits(engine);
+        let text = self
+            .nlu_pipeline
+            .generate_dialogue("acknowledgment", &name, &traits, None)
+            .unwrap_or_else(|| agent.dialogue_manager().handle_ack(&traits));
         msgs.push(AkhMessage::narrative(&text, grammar));
         agent.conversation_state_mut().record_agent_turn(&text);
     }
@@ -559,28 +570,33 @@ impl ChatProcessor {
     // ── Intent handlers ─────────────────────────────────────────────
 
     fn handle_set_goal(
-        &self,
+        &mut self,
         msgs: &mut Vec<AkhMessage>,
         agent: &mut Agent,
         engine: &Arc<Engine>,
         description: &str,
         grammar: &str,
     ) {
+        let (name, traits) = Self::persona_name_and_traits(engine);
+        let tone = Self::persona_tone(engine);
         let wm_before = agent.working_memory().len();
 
         match agent.add_goal(description, 128, "User-directed goal") {
             Ok(id) => {
-                msgs.push(AkhMessage::system(format!(
-                    "Goal added: \"{description}\" (id: {})",
-                    id.get()
-                )));
+                // Goal creation → audit log only
+                msgs.push(AkhMessage::audit_log(
+                    id.get(),
+                    "goal",
+                    format!("Added: {description}"),
+                ));
                 // Run a few cycles.
                 for _ in 0..5 {
                     match agent.run_cycle() {
                         Ok(result) => {
-                            msgs.push(AkhMessage::tool_result(
+                            // Tool results → audit log only
+                            msgs.push(AkhMessage::audit_log(
+                                0,
                                 &result.decision.chosen_tool,
-                                result.action_result.tool_output.success,
                                 &result.action_result.tool_output.result,
                             ));
                         }
@@ -603,7 +619,8 @@ impl ChatProcessor {
                     agent.engine(),
                     grammar,
                 );
-                Self::push_summary(msgs, &summary, grammar);
+                let turn_ctx = Self::recent_topic_context(agent, description);
+                self.push_summary(msgs, &summary, grammar, &name, &traits, &tone, turn_ctx.as_deref());
             }
             Err(e) => {
                 msgs.push(AkhMessage::error("goal", e.to_string()));
@@ -614,7 +631,7 @@ impl ChatProcessor {
 
     /// Handle a query derived from an AbsTree parse (entity ref, etc.).
     fn handle_query_from_tree(
-        &self,
+        &mut self,
         msgs: &mut Vec<AkhMessage>,
         agent: &mut Agent,
         engine: &Arc<Engine>,
@@ -716,7 +733,9 @@ impl ChatProcessor {
                                 engine,
                                 grammar,
                             );
-                        Self::push_summary(msgs, &summary, grammar);
+                        let (pn, pt) = Self::persona_name_and_traits(engine);
+                        let tone = Self::persona_tone(engine);
+                        self.push_summary(msgs, &summary, grammar, &pn, &pt, &tone, None);
                     }
                 }
                 Err(_) => {
@@ -893,19 +912,26 @@ impl ChatProcessor {
 
     /// Escalate unresolved input to a goal, run OODA cycles, and synthesize findings.
     ///
-    /// Only synthesizes from working memory entries added during the escalation
-    /// cycles, avoiding stale entries from previous goals or sessions.
+    /// Tool results and goal metadata are routed to audit log — only the
+    /// persona-framed investigation message and final narrative appear in chat.
     fn escalate_to_goal(
-        &self,
+        &mut self,
         msgs: &mut Vec<AkhMessage>,
         agent: &mut Agent,
         grammar: &str,
         description: &str,
-        display_prefix: &str,
+        _display_prefix: &str,
     ) {
-        msgs.push(AkhMessage::system(format!(
-            "{display_prefix} Investigating..."
-        )));
+        let engine = agent.engine();
+        let (name, traits) = Self::persona_name_and_traits(&engine);
+        let tone = Self::persona_tone(&engine);
+
+        // Persona-flavored investigation framing (LLM or fallback)
+        let framing = self
+            .nlu_pipeline
+            .generate_investigation_frame(description, &name, &traits)
+            .unwrap_or_else(|| format!("Let me look into {description} for you."));
+        msgs.push(AkhMessage::narrative(&framing, grammar));
 
         // Snapshot WM size before adding the goal so we can scope synthesis.
         let wm_before = agent.working_memory().len();
@@ -922,10 +948,12 @@ impl ChatProcessor {
             }
         };
 
-        msgs.push(AkhMessage::system(format!(
-            "Goal created (id: {})",
-            goal_id.get()
-        )));
+        // Goal creation → audit log only
+        msgs.push(AkhMessage::audit_log(
+            goal_id.get(),
+            "goal",
+            format!("Created: {description}"),
+        ));
 
         let max = agent
             .config
@@ -934,9 +962,10 @@ impl ChatProcessor {
         for _ in 0..max {
             match agent.run_cycle() {
                 Ok(result) => {
-                    msgs.push(AkhMessage::tool_result(
+                    // Tool results → audit log only
+                    msgs.push(AkhMessage::audit_log(
+                        0,
                         &result.decision.chosen_tool,
-                        result.action_result.tool_output.success,
                         &result.action_result.tool_output.result,
                     ));
                 }
@@ -960,22 +989,23 @@ impl ChatProcessor {
             agent.engine(),
             grammar,
         );
-        Self::push_summary(msgs, &summary, grammar);
+
+        // Get turn context for threading
+        let turn_ctx = Self::recent_topic_context(agent, description);
+
+        self.push_summary(msgs, &summary, grammar, &name, &traits, &tone, turn_ctx.as_deref());
     }
 
     /// Handle an unknown subject: friendly message then escalate.
     fn handle_unknown_subject(
-        &self,
+        &mut self,
         msgs: &mut Vec<AkhMessage>,
         agent: &mut Agent,
         grammar: &str,
-        subject: &str,
+        _subject: &str,
         original_input: &str,
     ) {
-        msgs.push(AkhMessage::narrative(
-            &format!("I don't know about \"{subject}\" yet. Let me investigate."),
-            grammar,
-        ));
+        // The investigation framing in escalate_to_goal handles the message
         self.escalate_to_goal(msgs, agent, grammar, original_input, "");
     }
 
@@ -985,14 +1015,62 @@ impl ChatProcessor {
             .compartments()
             .and_then(|cm| cm.psyche())
             .map(|p| (p.persona.name.clone(), p.persona.traits.clone()))
-            .unwrap_or_else(|| ("Akh".to_string(), Vec::new()))
+            .unwrap_or_else(|| {
+                // Default Psyche name is "Scholar" — "Akh" is the species, not the name.
+                ("Scholar".to_string(), vec!["precise".to_string(), "curious".to_string()])
+            })
     }
 
-    /// Push a NarrativeSummary's overview, sections, and gaps onto a message vec.
+    /// Extract persona tone adjectives from the engine's Psyche compartment.
+    fn persona_tone(engine: &Engine) -> Vec<String> {
+        engine
+            .compartments()
+            .and_then(|cm| cm.psyche())
+            .map(|p| p.persona.tone.clone())
+            .unwrap_or_default()
+    }
+
+    /// Get the label of the active dialogue topic (if any).
+    fn active_topic_label(agent: &Agent, engine: &Engine) -> Option<String> {
+        agent
+            .dialogue_manager()
+            .query_active_topic(engine)
+            .map(|tid| engine.resolve_label(tid))
+    }
+
+    /// Check if the topic appears in recent conversation turns.
+    fn recent_topic_context(agent: &Agent, topic: &str) -> Option<String> {
+        let state = agent.conversation_state();
+        let topic_lower = topic.to_lowercase();
+        let recent_mention = state
+            .turns
+            .iter()
+            .rev()
+            .take(3)
+            .any(|t| {
+                t.speaker == crate::agent::conversation::Speaker::Operator
+                    && t.text.to_lowercase().contains(&topic_lower)
+            });
+        if state.len() > 2 && recent_mention {
+            Some(topic.to_string())
+        } else {
+            None
+        }
+    }
+
+    /// Push a NarrativeSummary as a single cohesive narrative message.
+    ///
+    /// Tries the LLM output boundary first (facts → persona-flavored prose).
+    /// Falls back to collapsing overview + sections + gaps into one message.
     fn push_summary(
+        &mut self,
         msgs: &mut Vec<AkhMessage>,
         summary: &crate::agent::NarrativeSummary,
         grammar: &str,
+        persona_name: &str,
+        traits: &[String],
+        tone: &[String],
+        context: Option<&str>,
     ) {
         let has_content = !summary.overview.is_empty()
             || !summary.sections.is_empty()
@@ -1007,18 +1085,65 @@ impl ChatProcessor {
             return;
         }
 
-        if !summary.overview.is_empty() {
-            msgs.push(AkhMessage::narrative(&summary.overview, grammar));
-        }
+        // Collect substantive facts for LLM polishing.
+        // Skip the meta-overview ("Explored X over N cycles...") — it's not a fact.
+        let mut facts = Vec::new();
         for section in &summary.sections {
-            msgs.push(AkhMessage::narrative(
-                format!("## {}\n{}", section.heading, section.prose),
-                grammar,
-            ));
+            if !section.prose.is_empty() {
+                facts.push(section.prose.clone());
+            }
         }
         for gap in &summary.gaps {
-            msgs.push(AkhMessage::gap("(unknown)", gap));
+            facts.push(format!("Unknown: {gap}"));
         }
+        // If no section content, use overview as last resort
+        if facts.is_empty() && !summary.overview.is_empty() {
+            facts.push(summary.overview.clone());
+        }
+
+        // Try LLM output boundary: facts → natural conversational prose
+        if let Some(polished) = self.nlu_pipeline.generate_response(
+            &facts,
+            persona_name,
+            traits,
+            tone,
+            context,
+        ) {
+            msgs.push(AkhMessage::narrative(&polished, grammar));
+            return;
+        }
+
+        // Fallback: collapse into a single flowing message (no markdown headings)
+        let mut parts = Vec::new();
+        // Only include the meta-overview if there are no sections
+        if !summary.overview.is_empty() && summary.sections.is_empty() {
+            parts.push(summary.overview.clone());
+        }
+        for section in &summary.sections {
+            if section.heading.to_lowercase() != "overview" && !section.prose.is_empty() {
+                parts.push(format!(
+                    "Regarding {}: {}",
+                    section.heading.to_lowercase(),
+                    section.prose
+                ));
+            } else if !section.prose.is_empty() {
+                parts.push(section.prose.clone());
+            }
+        }
+        if !summary.gaps.is_empty() {
+            let gap_text = if summary.gaps.len() == 1 {
+                format!("I'm not sure about {} yet.", summary.gaps[0])
+            } else {
+                format!(
+                    "There are a few things I don't know yet: {}.",
+                    summary.gaps.join(", ")
+                )
+            };
+            parts.push(gap_text);
+        }
+
+        let combined = parts.join("\n\n");
+        msgs.push(AkhMessage::narrative(&combined, grammar));
     }
 }
 

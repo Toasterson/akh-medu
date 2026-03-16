@@ -247,6 +247,12 @@
 </div>
 
 <script>
+function isInternalSystemMsg(text) {
+    return /^Goal (created|added)/.test(text)
+        || /^\[constraint check/.test(text)
+        || /^Exploring ".*"\. Investigating/.test(text);
+}
+
 document.addEventListener('alpine:init', () => {
     Alpine.data('akh', () => ({
         // ── State ──
@@ -485,9 +491,23 @@ document.addEventListener('alpine:init', () => {
             socket.onmessage = (event) => {
                 try {
                     const msg = JSON.parse(event.data);
+                    const ts = Math.floor(Date.now() / 1000);
                     if (msg.type === 'AuditLog') {
+                        // Audit entries go to the audit panel
                         self.auditEntries.unshift(msg);
                         if (self.auditEntries.length > 200) self.auditEntries.length = 200;
+                    } else if (msg.type === 'ToolResult') {
+                        // Route stray tool results to audit panel
+                        self.auditEntries.unshift({
+                            type: 'AuditLog', kind: msg.tool,
+                            summary: msg.output, timestamp: ts,
+                        });
+                    } else if (msg.type === 'System' && isInternalSystemMsg(msg.text)) {
+                        // Suppress internal noise to audit panel
+                        self.auditEntries.unshift({
+                            type: 'AuditLog', kind: 'system',
+                            summary: msg.text, timestamp: ts,
+                        });
                     } else {
                         self.messages.push(msg);
                         self.$nextTick(() => self.scrollChat());
