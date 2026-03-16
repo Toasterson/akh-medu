@@ -7,6 +7,12 @@
 //!
 //! See `docs/ai/decisions/023-client-only-mode.md` for the full endpoint inventory.
 
+// ── Embedded web UI assets ────────────────────────────────────────────────
+const INDEX_HTML: &str = include_str!("../../data/web/index.html");
+const STYLE_CSS: &str = include_str!("../../data/web/style.css");
+const HTMX_JS: &[u8] = include_bytes!("../../data/web/vendor/htmx.min.js");
+const ALPINE_JS: &[u8] = include_bytes!("../../data/web/vendor/alpine.min.js");
+
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -53,6 +59,9 @@ struct ServerState {
     /// One shared Agent per workspace — daemon, HTTP handlers, and WS sessions
     /// all operate on the same instance. See ADR-027.
     agents: Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>,
+    /// Cached NLU pipeline per workspace — avoids reloading 1GB+ LLM model on
+    /// every WS connection or MCP chat call.
+    nlu_pipelines: RwLock<HashMap<String, Arc<Mutex<akh_medu::nlu::NluPipeline>>>>,
     /// Broadcast channel for audit entries — WS clients subscribe to this.
     audit_broadcast: tokio::sync::broadcast::Sender<akh_medu::audit::AuditEntry>,
 }
@@ -73,6 +82,7 @@ impl ServerState {
             workspaces: Arc::new(RwLock::new(HashMap::new())),
             daemons: RwLock::new(HashMap::new()),
             agents: Arc::new(RwLock::new(HashMap::new())),
+            nlu_pipelines: RwLock::new(HashMap::new()),
             audit_broadcast: audit_tx,
         }
     }
@@ -168,6 +178,50 @@ impl ServerState {
         let entry = agents.entry(name.to_string()).or_insert(Arc::clone(&shared));
         Ok(Arc::clone(entry))
     }
+
+    /// Get or lazily create a shared NLU pipeline for the given workspace.
+    /// This avoids reloading the 1GB+ LLM model on every WS/MCP session.
+    async fn get_nlu_pipeline(
+        &self,
+        name: &str,
+        engine: &Engine,
+    ) -> Arc<Mutex<akh_medu::nlu::NluPipeline>> {
+        // Fast path: already cached.
+        {
+            let pipelines = self.nlu_pipelines.read().await;
+            if let Some(pipeline) = pipelines.get(name) {
+                return Arc::clone(pipeline);
+            }
+        }
+
+        // Slow path: create pipeline (loads models from disk).
+        let data_dir = engine.config().data_dir.clone();
+        let ranker_bytes = engine
+            .store()
+            .get_meta(b"nlu_ranker_state")
+            .ok()
+            .flatten();
+
+        let pipeline = tokio::task::spawn_blocking(move || {
+            let data_dir_ref = data_dir.as_deref();
+            ranker_bytes
+                .and_then(|bytes| akh_medu::nlu::parse_ranker::ParseRanker::from_bytes(&bytes))
+                .map(|ranker| {
+                    akh_medu::nlu::NluPipeline::with_ranker_and_models(ranker, data_dir_ref)
+                })
+                .unwrap_or_else(|| akh_medu::nlu::NluPipeline::new_with_models(data_dir_ref))
+        })
+        .await
+        .unwrap_or_else(|_| akh_medu::nlu::NluPipeline::new());
+
+        tracing::info!(workspace = %name, "shared NLU pipeline created");
+        let shared = Arc::new(Mutex::new(pipeline));
+        let mut pipelines = self.nlu_pipelines.write().await;
+        let entry = pipelines
+            .entry(name.to_string())
+            .or_insert(Arc::clone(&shared));
+        Arc::clone(entry)
+    }
 }
 
 // ── Response types ────────────────────────────────────────────────────────
@@ -221,6 +275,39 @@ async fn health(State(state): State<Arc<ServerState>>) -> Json<HealthResponse> {
         version: env!("CARGO_PKG_VERSION").to_string(),
         workspaces_loaded: map.len(),
     })
+}
+
+// ── Web UI handlers ─────────────────────────────────────────────────────
+
+async fn homepage_handler() -> axum::response::Html<&'static str> {
+    axum::response::Html(INDEX_HTML)
+}
+
+async fn style_handler() -> impl IntoResponse {
+    (
+        [(axum::http::header::CONTENT_TYPE, "text/css; charset=utf-8")],
+        STYLE_CSS,
+    )
+}
+
+async fn htmx_handler() -> impl IntoResponse {
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "application/javascript; charset=utf-8",
+        )],
+        HTMX_JS,
+    )
+}
+
+async fn alpine_handler() -> impl IntoResponse {
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "application/javascript; charset=utf-8",
+        )],
+        ALPINE_JS,
+    )
 }
 
 // ── Config handlers ──────────────────────────────────────────────────────
@@ -1407,14 +1494,24 @@ async fn ws_handler(
 ) -> impl IntoResponse {
     let engine_result = state.get_engine(&ws_name).await;
     let agent_result = state.get_agent(&ws_name).await;
+    // Get cached NLU pipeline (loads models once, shares via Arc).
+    let nlu_result = match &engine_result {
+        Ok(engine) => Some(state.get_nlu_pipeline(&ws_name, engine).await),
+        Err(_) => None,
+    };
     let audit_rx = state.audit_broadcast.subscribe();
     ws.on_upgrade(move |socket| async move {
-        match (engine_result, agent_result) {
-            (Ok(engine), Ok(shared_agent)) => {
-                handle_ws_session(socket, shared_agent, engine, ws_name, audit_rx).await;
+        match (engine_result, agent_result, nlu_result) {
+            (Ok(engine), Ok(shared_agent), Some(nlu_pipeline)) => {
+                handle_ws_session(socket, shared_agent, engine, nlu_pipeline, ws_name, audit_rx)
+                    .await;
             }
-            (Err((_, msg)), _) | (_, Err((_, msg))) => {
+            (Err((_, msg)), _, _) | (_, Err((_, msg)), _) => {
                 let err = AkhMessage::error("ws", msg);
+                let _ = send_message(&err, &mut None::<&mut WebSocket>).await;
+            }
+            _ => {
+                let err = AkhMessage::error("ws", "failed to initialize NLU pipeline");
                 let _ = send_message(&err, &mut None::<&mut WebSocket>).await;
             }
         }
@@ -1425,20 +1522,14 @@ async fn handle_ws_session(
     mut socket: WebSocket,
     shared_agent: Arc<Mutex<Agent>>,
     engine: Arc<Engine>,
+    nlu_pipeline: Arc<Mutex<akh_medu::nlu::NluPipeline>>,
     ws_name: String,
     mut audit_rx: tokio::sync::broadcast::Receiver<akh_medu::audit::AuditEntry>,
 ) {
-    // ChatProcessor is session-local (owns NLU pipeline state).
-    let data_dir = engine.config().data_dir.as_deref();
-    let nlu_pipeline = engine
-        .store()
-        .get_meta(b"nlu_ranker_state")
-        .ok()
-        .flatten()
-        .and_then(|bytes| akh_medu::nlu::parse_ranker::ParseRanker::from_bytes(&bytes))
-        .map(|ranker| akh_medu::nlu::NluPipeline::with_ranker_and_models(ranker, data_dir))
-        .unwrap_or_else(|| akh_medu::nlu::NluPipeline::new_with_models(data_dir));
-    let mut chat_processor = akh_medu::chat::ChatProcessor::new(&engine, nlu_pipeline);
+    // Clone the shared pipeline — models are Arc-shared (cheap), ranker is
+    // cloned by value for per-session learning.
+    let session_pipeline = nlu_pipeline.lock().unwrap().clone();
+    let mut chat_processor = akh_medu::chat::ChatProcessor::new(&engine, session_pipeline);
 
     let welcome = AkhMessage::system(format!(
         "Connected to workspace \"{ws_name}\". {} symbols, {} triples.",
@@ -3357,6 +3448,11 @@ async fn main() {
     }
 
     let app = Router::new()
+        // Web UI.
+        .route("/", get(homepage_handler))
+        .route("/assets/style.css", get(style_handler))
+        .route("/assets/htmx.min.js", get(htmx_handler))
+        .route("/assets/alpine.min.js", get(alpine_handler))
         // Health.
         .route("/health", get(health))
         // Global config.

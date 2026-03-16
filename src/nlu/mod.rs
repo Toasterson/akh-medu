@@ -48,14 +48,31 @@ pub struct NluParseResult {
 /// ML and LLM tiers are feature-gated and degrade gracefully when models
 /// are absent.
 pub struct NluPipeline {
-    /// VSA parse ranker (Tier 4) — always available.
+    /// VSA parse ranker (Tier 4) — always available, per-session (cloned).
     ranker: ParseRanker,
     /// Micro-ML NER layer (Tier 2) — loaded if model files present.
+    /// Wrapped in Arc<Mutex<>> because loading is expensive (~130MB) and we
+    /// want to share the model across WS/MCP sessions.
     #[cfg(feature = "nlu-ml")]
-    ml_layer: Option<micro_ml::MicroMlLayer>,
+    ml_layer: Option<std::sync::Arc<std::sync::Mutex<micro_ml::MicroMlLayer>>>,
     /// Small LLM translator (Tier 3) — loaded if model file present.
+    /// Wrapped in Arc because loading is expensive (~1GB GGUF).
     #[cfg(feature = "nlu-llm")]
-    llm_translator: Option<llm_translator::LlmTranslator>,
+    llm_translator: Option<std::sync::Arc<llm_translator::LlmTranslator>>,
+}
+
+impl Clone for NluPipeline {
+    /// Clone the pipeline: ranker is cloned by value (per-session learning),
+    /// model layers are shared via Arc (cheap).
+    fn clone(&self) -> Self {
+        Self {
+            ranker: self.ranker.clone(),
+            #[cfg(feature = "nlu-ml")]
+            ml_layer: self.ml_layer.clone(),
+            #[cfg(feature = "nlu-llm")]
+            llm_translator: self.llm_translator.clone(),
+        }
+    }
 }
 
 impl NluPipeline {
@@ -112,28 +129,55 @@ impl NluPipeline {
 
         #[cfg(feature = "nlu-ml")]
         {
-            // Try workspace-local, then shared.
-            let result = micro_ml::MicroMlLayer::load(_data_dir).or_else(|_| {
-                if let Some(ref shared) = _shared_dir {
-                    micro_ml::MicroMlLayer::load(shared)
-                } else {
-                    micro_ml::MicroMlLayer::load(_data_dir) // re-run to get error
+            // Auto-detect ONNX Runtime if ORT_DYLIB_PATH is not set.
+            if std::env::var("ORT_DYLIB_PATH").is_err() {
+                let candidates = crate::setup::ort_lib_candidates();
+                for candidate in &candidates {
+                    if candidate.exists() {
+                        tracing::info!(path = %candidate.display(), "auto-detected ONNX Runtime library");
+                        // SAFETY: set_var is called during single-threaded pipeline init,
+                        // before any ONNX threads are spawned. The `ort` crate reads this
+                        // variable only once during its lazy init.
+                        unsafe { std::env::set_var("ORT_DYLIB_PATH", candidate); }
+                        break;
+                    }
                 }
-            });
+            }
+
+            // The `ort` crate panics if it cannot dlopen libonnxruntime.
+            // Catch the panic so we degrade gracefully instead of crashing.
+            let data_dir_owned = _data_dir.to_path_buf();
+            let shared_owned = _shared_dir.clone();
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                micro_ml::MicroMlLayer::load(&data_dir_owned).or_else(|_| {
+                    if let Some(ref shared) = shared_owned {
+                        micro_ml::MicroMlLayer::load(shared)
+                    } else {
+                        micro_ml::MicroMlLayer::load(&data_dir_owned)
+                    }
+                })
+            }));
             match result {
-                Ok(layer) => {
+                Ok(Ok(layer)) => {
                     tracing::info!(tier = 2, "ONNX NER model loaded");
-                    self.ml_layer = Some(layer);
+                    self.ml_layer = Some(std::sync::Arc::new(std::sync::Mutex::new(layer)));
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     tracing::warn!(tier = 2, error = %e, "ONNX NER model not loaded");
+                    self.ml_layer = None;
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        tier = 2,
+                        "ONNX Runtime not available (dlopen failed). Run `akh setup onnx-runtime` to install."
+                    );
                     self.ml_layer = None;
                 }
             }
         }
         #[cfg(feature = "nlu-llm")]
         {
-            let llm_file = "models/llm/qwen2.5-1.5b-instruct-q4_k_m.gguf";
+            let llm_file = "llm/qwen2.5-1.5b-instruct-q4_k_m.gguf";
             let result = llm_translator::LlmTranslator::load(&_data_dir.join(llm_file))
                 .or_else(|_| {
                     if let Some(ref shared) = _shared_dir {
@@ -147,7 +191,7 @@ impl NluPipeline {
             match result {
                 Ok(translator) => {
                     tracing::info!(tier = 3, "LLM translator model loaded");
-                    self.llm_translator = Some(translator);
+                    self.llm_translator = Some(std::sync::Arc::new(translator));
                 }
                 Err(e) => {
                     tracing::warn!(tier = 3, error = %e, "LLM translator model not loaded");
@@ -229,8 +273,9 @@ impl NluPipeline {
 
         // Tier 2: Micro-ML NER (feature-gated)
         #[cfg(feature = "nlu-ml")]
-        if let Some(ref mut ml) = self.ml_layer {
+        if let Some(ref ml_arc) = self.ml_layer {
             tracing::debug!(tier = 2, "attempting ML NER augmentation");
+            let mut ml = ml_arc.lock().unwrap();
             match ml.augment_parse(input, ctx) {
                 Ok(augmented) => {
                     if let Some(tree) = augmented.tree {
@@ -253,11 +298,17 @@ impl NluPipeline {
         }
 
         // Tier 3: Small LLM translator (feature-gated)
+        // Wrapped in catch_unwind because llama.cpp can GGML_ASSERT → abort().
         #[cfg(feature = "nlu-llm")]
-        if let Some(ref llm) = self.llm_translator {
+        if let Some(ref llm_arc) = self.llm_translator {
+            let llm = std::sync::Arc::clone(llm_arc);
+            let input_owned = input.to_string();
             tracing::debug!(tier = 3, "attempting LLM translation");
-            match llm.translate(input) {
-                Ok(translation) => {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                llm.translate(&input_owned)
+            }));
+            match result {
+                Ok(Ok(translation)) => {
                     tracing::info!(
                         tier = 3,
                         confidence = 0.70,
@@ -273,8 +324,11 @@ impl NluPipeline {
                         exemplar_similarity: None,
                     });
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     tracing::warn!(tier = 3, error = %e, "LLM translation failed");
+                }
+                Err(_) => {
+                    tracing::error!(tier = 3, "LLM translation panicked (llama.cpp assertion failure)");
                 }
             }
         }

@@ -303,6 +303,16 @@ fn download_file(url: &str, dest: &Path) -> SetupResult<()> {
 }
 
 /// ONNX Runtime install directory.
+/// Return candidate paths where the ONNX Runtime shared library may be installed.
+/// Used by the NLU pipeline to auto-detect the library when `ORT_DYLIB_PATH` is not set.
+pub fn ort_lib_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Ok(dir) = ort_install_dir() {
+        candidates.push(dir.join(ort_lib_name()));
+    }
+    candidates
+}
+
 fn ort_install_dir() -> SetupResult<PathBuf> {
     let home =
         std::env::var("HOME").map_err(|_| SetupError::Io(io::Error::other("HOME not set")))?;

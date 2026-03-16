@@ -42,6 +42,8 @@ pub struct McpState {
     pub paths: AkhPaths,
     pub workspaces: Arc<RwLock<HashMap<String, Arc<Engine>>>>,
     pub agents: Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>,
+    /// Cached NLU pipelines per workspace — avoids reloading 1GB+ LLM on every chat call.
+    pub nlu_pipelines: RwLock<HashMap<String, Arc<Mutex<crate::nlu::NluPipeline>>>>,
 }
 
 impl McpState {
@@ -54,7 +56,49 @@ impl McpState {
             paths,
             workspaces,
             agents,
+            nlu_pipelines: RwLock::new(HashMap::new()),
         }
+    }
+
+    /// Get or lazily create a shared NLU pipeline for the given workspace.
+    pub async fn get_nlu_pipeline(
+        &self,
+        name: &str,
+        engine: &Engine,
+    ) -> Arc<Mutex<crate::nlu::NluPipeline>> {
+        {
+            let pipelines = self.nlu_pipelines.read().await;
+            if let Some(pipeline) = pipelines.get(name) {
+                return Arc::clone(pipeline);
+            }
+        }
+
+        let data_dir = engine.config().data_dir.clone();
+        let ranker_bytes = engine
+            .store()
+            .get_meta(b"nlu_ranker_state")
+            .ok()
+            .flatten();
+
+        let pipeline = tokio::task::spawn_blocking(move || {
+            let data_dir_ref = data_dir.as_deref();
+            ranker_bytes
+                .and_then(|bytes| crate::nlu::parse_ranker::ParseRanker::from_bytes(&bytes))
+                .map(|ranker| {
+                    crate::nlu::NluPipeline::with_ranker_and_models(ranker, data_dir_ref)
+                })
+                .unwrap_or_else(|| crate::nlu::NluPipeline::new_with_models(data_dir_ref))
+        })
+        .await
+        .unwrap_or_else(|_| crate::nlu::NluPipeline::new());
+
+        tracing::info!(workspace = %name, "shared NLU pipeline created (MCP)");
+        let shared = Arc::new(Mutex::new(pipeline));
+        let mut pipelines = self.nlu_pipelines.write().await;
+        let entry = pipelines
+            .entry(name.to_string())
+            .or_insert(Arc::clone(&shared));
+        Arc::clone(entry)
     }
 
     /// Get or lazily open an engine for the given workspace.
@@ -1094,26 +1138,16 @@ impl AkhMcpServer {
     ) -> Result<CallToolResult, McpError> {
         let engine = self.state.get_engine(&params.workspace).await?;
         let agent = self.state.get_agent(&params.workspace).await?;
+        let nlu_cached = self.state.get_nlu_pipeline(&params.workspace, &engine).await;
         let message = params.message;
 
         let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
-            // Build NLU pipeline with persisted ranker state.
-            let data_dir = engine.config().data_dir.as_deref();
-            let nlu_pipeline = engine
-                .store()
-                .get_meta(b"nlu_ranker_state")
-                .ok()
-                .flatten()
-                .and_then(|bytes| {
-                    crate::nlu::parse_ranker::ParseRanker::from_bytes(&bytes)
-                })
-                .map(|ranker| {
-                    crate::nlu::NluPipeline::with_ranker_and_models(ranker, data_dir)
-                })
-                .unwrap_or_else(|| crate::nlu::NluPipeline::new_with_models(data_dir));
+            // Clone the shared pipeline — models are Arc-shared (cheap),
+            // ranker is cloned by value for per-session learning.
+            let session_pipeline = nlu_cached.lock().unwrap().clone();
 
             let mut chat_processor =
-                crate::chat::ChatProcessor::new(&engine, nlu_pipeline);
+                crate::chat::ChatProcessor::new(&engine, session_pipeline);
 
             let mut agent = agent.lock().map_err(|e| format!("agent lock: {e}"))?;
             let responses = chat_processor.process_input(&message, &mut agent, &engine);

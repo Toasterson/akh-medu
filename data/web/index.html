@@ -1,0 +1,559 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>akh-medu</title>
+    <link rel="stylesheet" href="/assets/style.css">
+    <script defer src="/assets/alpine.min.js"></script>
+    <script src="/assets/htmx.min.js"></script>
+</head>
+<body>
+<div class="app" x-data="akh">
+
+    <!-- ═══ Phase: Loading ═══ -->
+    <template x-if="phase === 'loading'">
+        <div class="phase-entry">
+            <h1>akh-medu</h1>
+            <p style="color: var(--text-muted); font-family: var(--mono); font-size: 0.8rem;">
+                connecting<span class="loading-dots"></span>
+            </p>
+        </div>
+    </template>
+
+    <!-- ═══ Phase: Select workspace or create new ═══ -->
+    <template x-if="phase === 'select'">
+        <div class="phase-entry">
+            <h1>akh-medu</h1>
+
+            <!-- Existing workspaces -->
+            <template x-if="workspaces.length > 0">
+                <div>
+                    <div class="workspace-list">
+                        <template x-for="ws in workspaces" :key="ws.name">
+                            <div class="workspace-card" @click="enterWorkspace(ws.name)">
+                                <span class="name" x-text="ws.name"></span>
+                                <span class="status"
+                                    :class="ws.awakened ? 'awakened' : ''"
+                                    x-text="ws.awakened ? (ws.akhName || 'awakened') : 'dormant'">
+                                </span>
+                            </div>
+                        </template>
+                    </div>
+                    <div class="divider">or</div>
+                </div>
+            </template>
+
+            <!-- Create new -->
+            <p class="prompt-label">Speak your purpose.</p>
+            <input class="name-input"
+                type="text"
+                placeholder="workspace name"
+                x-model="workspaceName"
+                @keydown.enter="$refs.purposeArea && $refs.purposeArea.focus()">
+            <textarea class="purpose-input"
+                x-ref="purposeArea"
+                placeholder="What domain should this akh master? What is its calling?"
+                x-model="purposeStatement"
+                @keydown.ctrl.enter="createAndAwaken()"
+                @keydown.meta.enter="createAndAwaken()"></textarea>
+            <button class="btn"
+                :disabled="!workspaceName.trim() || !purposeStatement.trim() || creating"
+                @click="createAndAwaken()">
+                <span x-text="creating ? 'Creating...' : 'Awaken'"></span>
+            </button>
+            <p class="error-text" x-show="errorText" x-text="errorText"></p>
+        </div>
+    </template>
+
+    <!-- ═══ Phase: Awakening ceremony ═══ -->
+    <template x-if="phase === 'awakening'">
+        <div class="phase-awakening">
+            <p class="awakening-title">Awakening</p>
+
+            <!-- Stage timeline -->
+            <div class="stage-timeline">
+                <template x-for="(stage, i) in stages" :key="i">
+                    <div>
+                        <div class="stage"
+                            :class="{
+                                'active': bootstrapRunning && !bootstrapResult && i === currentStageHint,
+                                'done': bootstrapResult !== null
+                            }">
+                            <div class="stage-icon">
+                                <template x-if="bootstrapResult !== null">
+                                    <span>&#10003;</span>
+                                </template>
+                            </div>
+                            <span x-text="stage"></span>
+                        </div>
+                        <div x-show="i < stages.length - 1"
+                            class="stage-line"
+                            :class="{ 'done': bootstrapResult !== null }">
+                        </div>
+                    </div>
+                </template>
+            </div>
+
+            <!-- Reveal -->
+            <template x-if="bootstrapResult">
+                <div class="awakening-reveal">
+                    <div class="name" x-text="bootstrapResult.chosen_name || activeWorkspace"></div>
+                    <div class="subtitle">is awake.</div>
+                    <div class="domain">
+                        <span x-text="bootstrapResult.domain"></span>
+                        <template x-if="bootstrapResult.final_dreyfus">
+                            <span> &middot; <span x-text="bootstrapResult.final_dreyfus"></span></span>
+                        </template>
+                    </div>
+                    <button class="btn" style="margin-top: 1.5rem;" @click="enterChat()">Enter</button>
+                </div>
+            </template>
+
+            <!-- Live audit feed during awakening -->
+            <div class="awakening-audit" x-ref="awakeningAudit">
+                <template x-for="(entry, i) in auditEntries.slice(0, 30)" :key="i">
+                    <div x-text="entry.summary"></div>
+                </template>
+            </div>
+        </div>
+    </template>
+
+    <!-- ═══ Phase: Chat ═══ -->
+    <template x-if="phase === 'chat'">
+        <div style="display:flex; flex-direction:column; height:100vh;">
+            <!-- Header -->
+            <div class="chat-header">
+                <div class="identity">
+                    <span class="name" x-text="akhName || activeWorkspace"></span>
+                    <template x-if="akhDomain">
+                        <span>
+                            <span class="sep">&middot;</span>
+                            <span class="domain" x-text="akhDomain"></span>
+                        </span>
+                    </template>
+                </div>
+                <span class="workspace" @click="backToSelect()" x-text="activeWorkspace"></span>
+            </div>
+
+            <!-- Messages -->
+            <div class="chat-messages" x-ref="chatMessages">
+                <template x-for="(msg, i) in messages" :key="i">
+                    <div class="msg" :class="msgClass(msg)">
+                        <!-- User -->
+                        <template x-if="msg.type === 'User'">
+                            <div class="msg-user" x-text="msg.text"></div>
+                        </template>
+                        <!-- Fact -->
+                        <template x-if="msg.type === 'Fact'">
+                            <div class="msg-fact">
+                                <span x-text="msg.text"></span>
+                                <span class="confidence" x-show="msg.confidence"
+                                    x-text="msg.confidence ? Math.round(msg.confidence * 100) + '%' : ''"></span>
+                                <span class="provenance" x-show="msg.provenance"
+                                    x-text="msg.provenance ? 'via ' + msg.provenance : ''"></span>
+                            </div>
+                        </template>
+                        <!-- Reasoning -->
+                        <template x-if="msg.type === 'Reasoning'">
+                            <div class="msg-reasoning">
+                                <span x-text="msg.step"></span>
+                                <template x-if="msg.expression">
+                                    <span style="font-family:var(--mono); font-style:normal; font-size:0.8rem; color:var(--text-muted);"> :: <span x-text="msg.expression"></span></span>
+                                </template>
+                            </div>
+                        </template>
+                        <!-- System -->
+                        <template x-if="msg.type === 'System'">
+                            <div class="msg-system" x-text="msg.text"></div>
+                        </template>
+                        <!-- Error -->
+                        <template x-if="msg.type === 'Error'">
+                            <div class="msg-error">
+                                <span x-text="'[' + msg.code + '] ' + msg.message"></span>
+                                <template x-if="msg.help">
+                                    <div class="help" x-text="msg.help"></div>
+                                </template>
+                            </div>
+                        </template>
+                        <!-- GoalProgress -->
+                        <template x-if="msg.type === 'GoalProgress'">
+                            <div class="msg-goal">
+                                <span class="status-badge" x-text="msg.status"></span>
+                                <span x-text="msg.goal"></span>
+                                <template x-if="msg.detail">
+                                    <span style="color:var(--text-muted);"> &mdash; <span x-text="msg.detail"></span></span>
+                                </template>
+                            </div>
+                        </template>
+                        <!-- ToolResult -->
+                        <template x-if="msg.type === 'ToolResult'">
+                            <div class="msg-tool">
+                                <span :class="msg.success ? 'ok' : 'fail'" x-text="'[' + msg.tool + ']'"></span>
+                                <span x-text="msg.output"></span>
+                            </div>
+                        </template>
+                        <!-- Gap -->
+                        <template x-if="msg.type === 'Gap'">
+                            <div class="msg-gap" x-text="msg.entity + ': ' + msg.description"></div>
+                        </template>
+                        <!-- Narrative -->
+                        <template x-if="msg.type === 'Narrative'">
+                            <div class="msg-narrative" x-text="msg.text"></div>
+                        </template>
+                        <!-- Prompt -->
+                        <template x-if="msg.type === 'Prompt'">
+                            <div class="msg-prompt" x-text="msg.question"></div>
+                        </template>
+                    </div>
+                </template>
+            </div>
+
+            <!-- Input -->
+            <div class="chat-input-bar">
+                <input class="chat-input"
+                    type="text"
+                    placeholder="Message..."
+                    x-model="inputText"
+                    @keydown.enter="sendMessage()"
+                    x-ref="chatInput">
+                <button class="chat-send"
+                    :disabled="!inputText.trim() || !wsConnected"
+                    @click="sendMessage()">Send</button>
+            </div>
+
+            <!-- Audit panel -->
+            <div class="audit-panel" :class="auditCollapsed ? 'collapsed' : ''">
+                <div class="audit-toggle" @click="auditCollapsed = !auditCollapsed">
+                    <span class="arrow">&#9662;</span>
+                    <span>Audit Log</span>
+                    <span style="margin-left:auto; opacity:0.5;" x-text="auditEntries.length"></span>
+                </div>
+                <div class="audit-entries" x-show="!auditCollapsed">
+                    <template x-for="(entry, i) in auditEntries.slice(0, 100)" :key="i">
+                        <div class="audit-entry">
+                            <div>
+                                <span class="kind" x-text="'[' + entry.kind + ']'"></span>
+                                <span x-text="entry.summary"></span>
+                            </div>
+                            <span class="time" x-text="formatTime(entry.timestamp)"></span>
+                        </div>
+                    </template>
+                </div>
+            </div>
+        </div>
+    </template>
+
+</div>
+
+<script>
+document.addEventListener('alpine:init', () => {
+    Alpine.data('akh', () => ({
+        // ── State ──
+        phase: 'loading',
+        workspaces: [],
+        activeWorkspace: null,
+        akhName: null,
+        akhDomain: null,
+
+        // Creation
+        workspaceName: '',
+        purposeStatement: '',
+        creating: false,
+        errorText: '',
+
+        // Awakening
+        bootstrapRunning: false,
+        bootstrapResult: null,
+        currentStageHint: 0,
+        stageTimer: null,
+        stages: [
+            'Parse Purpose',
+            'Resolve Identity',
+            'Ritual of Awakening',
+            'Domain Expansion',
+            'Prerequisite Discovery',
+            'Resource Discovery',
+            'Curriculum Ingestion',
+            'Competence Assessment',
+        ],
+
+        // Chat
+        ws: null,
+        wsConnected: false,
+        messages: [],
+        inputText: '',
+        auditEntries: [],
+        auditCollapsed: false,
+
+        // ── Init ──
+        async init() {
+            try {
+                const res = await fetch('/workspaces');
+                if (!res.ok) throw new Error('Failed to fetch workspaces');
+                const data = await res.json();
+                const names = data.workspaces || [];
+
+                // Fetch awaken status for each workspace
+                const detailed = await Promise.all(names.map(async (name) => {
+                    const info = { name, awakened: false, akhName: null };
+                    try {
+                        const sr = await fetch(`/workspaces/${encodeURIComponent(name)}/awaken/bootstrap`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ status: true }),
+                        });
+                        if (sr.ok) {
+                            const sd = await sr.json();
+                            if (sd.chosen_name) {
+                                info.awakened = true;
+                                info.akhName = sd.chosen_name;
+                            }
+                        }
+                    } catch (_) {}
+                    return info;
+                }));
+
+                this.workspaces = detailed;
+                this.phase = 'select';
+            } catch (e) {
+                console.error('Init failed:', e);
+                this.phase = 'select';
+            }
+        },
+
+        // ── Create workspace and start awakening ──
+        async createAndAwaken() {
+            if (!this.workspaceName.trim() || !this.purposeStatement.trim()) return;
+            this.creating = true;
+            this.errorText = '';
+
+            try {
+                const name = this.workspaceName.trim();
+                const res = await fetch(`/workspaces/${encodeURIComponent(name)}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({}),
+                });
+
+                if (!res.ok) {
+                    const text = await res.text();
+                    throw new Error(text || 'Failed to create workspace');
+                }
+
+                this.activeWorkspace = name;
+                this.phase = 'awakening';
+                this.$nextTick(() => this.startAwakening());
+            } catch (e) {
+                this.errorText = e.message;
+            } finally {
+                this.creating = false;
+            }
+        },
+
+        // ── Run the awakening bootstrap ──
+        async startAwakening() {
+            this.bootstrapRunning = true;
+            this.bootstrapResult = null;
+            this.currentStageHint = 0;
+            this.auditEntries = [];
+
+            // Connect WS first to receive audit entries during bootstrap
+            this.connectWebSocket();
+
+            // Animate stage hints while waiting
+            this.stageTimer = setInterval(() => {
+                if (this.currentStageHint < this.stages.length - 1) {
+                    this.currentStageHint++;
+                }
+            }, 3000);
+
+            try {
+                const res = await fetch(
+                    `/workspaces/${encodeURIComponent(this.activeWorkspace)}/awaken/bootstrap`,
+                    {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            statement: this.purposeStatement,
+                        }),
+                    }
+                );
+
+                if (!res.ok) {
+                    const text = await res.text();
+                    throw new Error(text || 'Bootstrap failed');
+                }
+
+                const result = await res.json();
+                this.bootstrapResult = result;
+                this.akhName = result.chosen_name || this.activeWorkspace;
+                this.akhDomain = result.domain || null;
+            } catch (e) {
+                this.bootstrapResult = {
+                    domain: 'error',
+                    chosen_name: null,
+                    error: e.message,
+                };
+            } finally {
+                this.bootstrapRunning = false;
+                if (this.stageTimer) {
+                    clearInterval(this.stageTimer);
+                    this.stageTimer = null;
+                }
+            }
+        },
+
+        // ── Enter an existing workspace ──
+        async enterWorkspace(name) {
+            this.activeWorkspace = name;
+            const ws = this.workspaces.find(w => w.name === name);
+            if (ws && ws.akhName) this.akhName = ws.akhName;
+
+            // Check awaken status
+            try {
+                const res = await fetch(
+                    `/workspaces/${encodeURIComponent(name)}/awaken/bootstrap`,
+                    {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ status: true }),
+                    }
+                );
+                if (res.ok) {
+                    const data = await res.json();
+                    if (data.chosen_name) {
+                        this.akhName = data.chosen_name;
+                        this.akhDomain = data.domain || null;
+                    }
+                }
+            } catch (_) {}
+
+            this.phase = 'chat';
+            this.$nextTick(() => {
+                this.connectWebSocket();
+                if (this.$refs.chatInput) this.$refs.chatInput.focus();
+            });
+        },
+
+        // ── Enter chat after awakening ──
+        enterChat() {
+            this.messages = [];
+            this.phase = 'chat';
+            this.$nextTick(() => {
+                // WS already connected from awakening phase
+                if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+                    this.connectWebSocket();
+                }
+                if (this.$refs.chatInput) this.$refs.chatInput.focus();
+            });
+        },
+
+        // ── Back to workspace list ──
+        backToSelect() {
+            if (this.ws) {
+                this.ws.close();
+                this.ws = null;
+                this.wsConnected = false;
+            }
+            this.messages = [];
+            this.auditEntries = [];
+            this.activeWorkspace = null;
+            this.akhName = null;
+            this.akhDomain = null;
+            this.bootstrapResult = null;
+            this.phase = 'loading';
+            this.$nextTick(() => this.init());
+        },
+
+        // ── WebSocket ──
+        connectWebSocket() {
+            if (this.ws && this.ws.readyState === WebSocket.OPEN) return;
+
+            const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const url = `${proto}//${location.host}/ws/${encodeURIComponent(this.activeWorkspace)}`;
+            const socket = new WebSocket(url);
+            // Capture `this` as `self` for use inside callbacks — ensures
+            // Alpine.js reactive proxy is properly referenced.
+            const self = this;
+
+            socket.onopen = () => {
+                console.log('[akh] WebSocket connected');
+                self.wsConnected = true;
+            };
+
+            socket.onmessage = (event) => {
+                try {
+                    const msg = JSON.parse(event.data);
+                    if (msg.type === 'AuditLog') {
+                        self.auditEntries.unshift(msg);
+                        if (self.auditEntries.length > 200) self.auditEntries.length = 200;
+                    } else {
+                        self.messages.push(msg);
+                        self.$nextTick(() => self.scrollChat());
+                    }
+                } catch (e) {
+                    console.error('[akh] WS parse error:', e);
+                }
+            };
+
+            socket.onclose = () => {
+                console.log('[akh] WebSocket closed');
+                self.wsConnected = false;
+            };
+
+            socket.onerror = (e) => {
+                console.error('[akh] WS error:', e);
+                self.wsConnected = false;
+            };
+
+            this.ws = socket;
+        },
+
+        // ── Send chat message ──
+        sendMessage() {
+            const text = (this.inputText || '').trim();
+            if (!text) return;
+            if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+                console.warn('[akh] WebSocket not connected, reconnecting...');
+                this.connectWebSocket();
+                return;
+            }
+            this.ws.send(JSON.stringify({ type: 'input', text }));
+            this.messages.push({ type: 'User', text });
+            this.inputText = '';
+            this.$nextTick(() => this.scrollChat());
+        },
+
+        // ── Helpers ──
+        scrollChat() {
+            const el = this.$refs.chatMessages;
+            if (el) el.scrollTop = el.scrollHeight;
+        },
+
+        msgClass(msg) {
+            const map = {
+                User: 'msg-user-wrap',
+                Fact: '',
+                Reasoning: '',
+                System: '',
+                Error: '',
+                GoalProgress: '',
+                ToolResult: '',
+                Gap: '',
+                Narrative: '',
+                Prompt: '',
+            };
+            return map[msg.type] || '';
+        },
+
+        formatTime(ts) {
+            if (!ts) return '';
+            const d = new Date(ts * 1000);
+            return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+        },
+    }));
+});
+</script>
+</body>
+</html>

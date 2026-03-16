@@ -1,6 +1,6 @@
 # Akh-medu Architecture
 
-> Last updated: 2026-03-14 (LLM integration fixes, setup command — ADR-030)
+> Last updated: 2026-03-16 (Web UI: homepage with chat + awakening ceremony)
 
 ## Overview
 
@@ -51,6 +51,11 @@ src/
 ├── mcp/                 1 module  — MCP server (feature-gated): AkhMcpServer with 13 tools for Claude Code integration (ADR-029)
 ├── service.rs                     — macOS launchd service management (plist generation, install/uninstall/start/stop/status)
 └── main.rs                        — CLI (clap) with 50+ subcommands
+
+data/web/                          — embedded web UI (htmx + Alpine.js SPA)
+├── index.html                     — single-page app: workspace select, awakening ceremony, chat + audit log
+├── style.css                      — dark theme, message type styling, stage timeline animations
+└── vendor/                        — bundled JS (htmx 2.x, Alpine.js 3.x) — no CDN dependency
 ```
 
 ## Core Data Model

@@ -130,8 +130,12 @@ impl LlmTranslator {
 
         let prompt = build_prompt(input);
 
-        // Create context for generation
-        let ctx_params = LlamaContextParams::default();
+        // Create context with enough room for the prompt (few-shot examples
+        // can easily exceed 512 tokens) plus generation headroom.
+        let ctx_params = LlamaContextParams::default()
+            .with_n_ctx(std::num::NonZeroU32::new(2048))
+            .with_n_batch(2048)
+            .with_n_ubatch(512);
         let mut ctx = self
             .model
             .new_context(&self.backend, ctx_params)
@@ -139,13 +143,12 @@ impl LlmTranslator {
                 reason: format!("Context creation: {e}"),
             })?;
 
-        // Create grammar-constrained sampler: GBNF grammar → greedy selection
+        // Use greedy sampling without GBNF grammar constraint.
+        // GBNF enforcement is disabled because llama.cpp's grammar sampler
+        // can hit GGML_ASSERT(!stacks.empty()) → C abort() which kills the
+        // entire process and cannot be caught from Rust. We validate the
+        // JSON output after generation instead.
         let mut sampler = LlamaSampler::chain_simple([
-            LlamaSampler::grammar(&self.model, ABSTREE_GBNF, "root").map_err(|e| {
-                NluError::GrammarInitFailed {
-                    reason: format!("{e}"),
-                }
-            })?,
             LlamaSampler::greedy(),
         ]);
 
@@ -159,8 +162,17 @@ impl LlmTranslator {
 
         tracing::debug!(prompt_tokens = tokens.len(), "LLM prompt tokenized");
 
+        if tokens.len() > 1800 {
+            return Err(NluError::LlmGenerationFailed {
+                reason: format!(
+                    "Prompt too long ({} tokens, max 1800). Input may be too complex for LLM tier.",
+                    tokens.len()
+                ),
+            });
+        }
+
         // Feed prompt tokens
-        let mut batch = LlamaBatch::new(tokens.len().max(512), 1);
+        let mut batch = LlamaBatch::new(tokens.len().max(2048), 1);
         for (i, &token) in tokens.iter().enumerate() {
             let is_last = i == tokens.len() - 1;
             batch
@@ -175,9 +187,13 @@ impl LlmTranslator {
                 reason: format!("Decode: {e}"),
             })?;
 
-        // Generate tokens with grammar-constrained sampling
+        // Generate tokens with greedy sampling. Without GBNF grammar we
+        // track brace depth to stop as soon as the top-level JSON object closes.
         let mut output_tokens = Vec::new();
         let mut n_generated = 0u32;
+        let mut brace_depth: i32 = 0;
+        let mut saw_open_brace = false;
+        let mut decoder = encoding_rs::UTF_8.new_decoder();
 
         while n_generated < self.max_tokens {
             let token = sampler.sample(&ctx, (batch.n_tokens() - 1) as i32);
@@ -190,6 +206,22 @@ impl LlmTranslator {
             sampler.accept(token);
             output_tokens.push(token);
             n_generated += 1;
+
+            // Track brace depth to detect end of JSON object
+            if let Ok(piece) = self.model.token_to_piece(token, &mut decoder, false, None) {
+                for ch in piece.chars() {
+                    if ch == '{' {
+                        brace_depth += 1;
+                        saw_open_brace = true;
+                    } else if ch == '}' {
+                        brace_depth -= 1;
+                    }
+                }
+                // Stop once the top-level JSON object closes
+                if saw_open_brace && brace_depth <= 0 {
+                    break;
+                }
+            }
 
             // Feed the new token for next iteration
             batch.clear();
@@ -207,19 +239,31 @@ impl LlmTranslator {
 
         tracing::debug!(tokens_generated = n_generated, "LLM generation complete");
 
-        // Detokenize output
-        let mut decoder = encoding_rs::UTF_8.new_decoder();
+        // Detokenize output (fresh decoder for clean state)
+        let mut detok_decoder = encoding_rs::UTF_8.new_decoder();
         let json: String = output_tokens
             .iter()
-            .filter_map(|t| self.model.token_to_piece(*t, &mut decoder, false, None).ok())
+            .filter_map(|t| self.model.token_to_piece(*t, &mut detok_decoder, false, None).ok())
             .collect();
 
-        tracing::debug!(json_len = json.len(), "attempting AbsTree JSON parse");
+        // Extract the JSON object (trim anything before first '{' or after last '}')
+        let json = json.trim();
+        let json = if let Some(start) = json.find('{') {
+            if let Some(end) = json.rfind('}') {
+                &json[start..=end]
+            } else {
+                json
+            }
+        } else {
+            json
+        };
 
-        let tree = parse_abstree_json(&json)?;
+        tracing::debug!(json_len = json.len(), raw = %json, "attempting AbsTree JSON parse");
+
+        let tree = parse_abstree_json(json)?;
 
         Ok(LlmTranslation {
-            json,
+            json: json.to_string(),
             tree,
             tokens_generated: n_generated,
         })
