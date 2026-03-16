@@ -274,10 +274,12 @@ impl ChatProcessor {
     ) {
         let (name, traits) = Self::persona_name_and_traits(engine);
         let active_topic = Self::active_topic_label(agent, engine);
-        // Try LLM-generated greeting first
+        // Try LLM-generated greeting — but validate it mentions the persona name.
+        // Small LLMs often ignore the system prompt and produce generic greetings.
         let text = self
             .nlu_pipeline
             .generate_dialogue("greeting", &name, &traits, active_topic.as_deref())
+            .filter(|t| t.to_lowercase().contains(&name.to_lowercase()))
             .unwrap_or_else(|| {
                 agent
                     .dialogue_manager()

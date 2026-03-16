@@ -238,29 +238,56 @@ impl DialogueManager {
         &self,
         engine: &Engine,
         persona_name: &str,
-        _traits: &[String],
+        traits: &[String],
     ) -> String {
-        if self.query_turn_count(engine) == 0 {
-            format!(
-                "Hello. I am {persona_name}. Ask me a question or tell me something to learn."
-            )
+        let is_first = self.query_turn_count(engine) == 0;
+
+        // Select greeting based on dominant trait and first/returning visit.
+        let has_trait = |t: &str| traits.iter().any(|tr| tr.eq_ignore_ascii_case(t));
+
+        if is_first {
+            if has_trait("creative") || has_trait("curious") {
+                format!("Hello! I'm {persona_name}. Tell me what you're curious about.")
+            } else if has_trait("wise") || has_trait("precise") {
+                format!("Greetings. I am {persona_name}. What shall we explore?")
+            } else if has_trait("warm") || has_trait("supportive") {
+                format!("Welcome! I'm {persona_name}. How can I help you today?")
+            } else {
+                format!("Hello. I am {persona_name}. Ask me a question or tell me something to learn.")
+            }
         } else {
-            "Hello again. What would you like to explore?".to_string()
+            // Returning user — check for active topic.
+            let topic = self
+                .query_active_topic(engine)
+                .map(|tid| engine.resolve_label(tid));
+
+            if let Some(ref topic_label) = topic {
+                if !topic_label.starts_with("dialogue:") && !topic_label.starts_with("dlg:") {
+                    return format!(
+                        "Welcome back. Last we discussed {topic_label} — shall we continue, or explore something new?"
+                    );
+                }
+            }
+            format!("Hello again. {persona_name} is ready — what would you like to explore?")
         }
     }
 
     /// Generate a farewell response.
     pub fn handle_farewell(&self, persona_name: &str) -> String {
-        format!("Farewell. {persona_name} will be here when you return.")
+        format!("Until next time. {persona_name} will be here when you return.")
     }
 
     /// Generate an acknowledgment response.
     pub fn handle_ack(&self, traits: &[String]) -> String {
-        let warm = traits.iter().any(|t| t.eq_ignore_ascii_case("warm"));
-        if warm {
+        let has_trait = |t: &str| traits.iter().any(|tr| tr.eq_ignore_ascii_case(t));
+        if has_trait("warm") || has_trait("supportive") {
             "You're welcome! Let me know if there's more.".to_string()
+        } else if has_trait("curious") || has_trait("creative") {
+            "Got it — that's an interesting area.".to_string()
+        } else if has_trait("precise") || has_trait("methodical") {
+            "Noted.".to_string()
         } else {
-            "Understood.".to_string()
+            "Understood. Ready for the next question.".to_string()
         }
     }
 
