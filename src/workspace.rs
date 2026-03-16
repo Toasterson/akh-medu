@@ -164,6 +164,7 @@ impl WorkspaceConfig {
             dimension: Dimension(self.dimension),
             encoding,
             data_dir: Some(ws_paths.kg_dir.clone()),
+            compartments_dir: Some(ws_paths.compartments_dir.clone()),
             max_memory_mb: self.max_memory_mb,
             max_symbols: self.max_symbols as usize,
             language,

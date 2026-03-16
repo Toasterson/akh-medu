@@ -814,22 +814,24 @@ fn main() -> Result<()> {
     let language = Language::from_code(&cli.language).unwrap_or(Language::Auto);
 
     // Resolve data directory: explicit --data-dir wins, otherwise XDG workspace.
-    let (data_dir, xdg_paths) = if let Some(ref explicit) = cli.data_dir {
-        (Some(explicit.clone()), None)
+    let (data_dir, compartments_dir, xdg_paths) = if let Some(ref explicit) = cli.data_dir {
+        (Some(explicit.clone()), None, None)
     } else {
         match akh_medu::paths::AkhPaths::resolve() {
             Ok(paths) => {
                 let ws = paths.workspace(&cli.workspace);
                 let dir = ws.kg_dir.clone();
-                (Some(dir), Some(paths))
+                let comp_dir = ws.compartments_dir.clone();
+                (Some(dir), Some(comp_dir), Some(paths))
             }
-            Err(_) => (None, None),
+            Err(_) => (None, None, None),
         }
     };
 
     let config = EngineConfig {
         dimension: Dimension(cli.dimension),
         data_dir: data_dir.clone(),
+        compartments_dir: compartments_dir.clone(),
         language,
         ..Default::default()
     };
@@ -905,6 +907,7 @@ fn main() -> Result<()> {
                         let engine_config = EngineConfig {
                             dimension: Dimension(cli.dimension),
                             data_dir: Some(ws_paths.kg_dir.clone()),
+                            compartments_dir: Some(ws_paths.compartments_dir.clone()),
                             language,
                             ..Default::default()
                         };
@@ -941,6 +944,7 @@ fn main() -> Result<()> {
                     let engine_config = EngineConfig {
                         dimension: Dimension(cli.dimension),
                         data_dir: Some(ws_paths.kg_dir.clone()),
+                        compartments_dir: Some(ws_paths.compartments_dir.clone()),
                         language,
                         ..Default::default()
                     };

@@ -123,6 +123,7 @@ impl McpState {
         let config = EngineConfig {
             dimension: Dimension::DEFAULT,
             data_dir: Some(ws_paths.kg_dir.clone()),
+            compartments_dir: Some(ws_paths.compartments_dir.clone()),
             ..Default::default()
         };
 

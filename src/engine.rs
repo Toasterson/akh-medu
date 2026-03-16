@@ -49,6 +49,10 @@ pub struct EngineConfig {
     pub encoding: Encoding,
     /// Data directory for persistence. `None` for memory-only mode.
     pub data_dir: Option<PathBuf>,
+    /// Explicit compartments directory. When `None`, defaults to
+    /// `{data_dir}/compartments`. Set this when `data_dir` points to a
+    /// subdirectory (e.g. `kg/`) and compartments live at the workspace root.
+    pub compartments_dir: Option<PathBuf>,
     /// Maximum memory budget in MB for skillpacks.
     pub max_memory_mb: usize,
     /// Maximum expected symbols (capacity hint for item memory).
@@ -63,6 +67,7 @@ impl Default for EngineConfig {
             dimension: Dimension::DEFAULT,
             encoding: Encoding::Bipolar,
             data_dir: None,
+            compartments_dir: None,
             max_memory_mb: 1024,
             max_symbols: 1_000_000,
             language: Language::Auto,
@@ -276,9 +281,18 @@ impl Engine {
         // Restore learned equivalences from persistent storage.
         let entity_resolver = RwLock::new(EntityResolver::load_from_store(&store));
 
-        // Initialize compartment manager if data_dir has a compartments/ subdir.
-        let compartment_manager = config.data_dir.as_ref().map(|dir| {
-            let compartments_dir = dir.join("compartments");
+        // Initialize compartment manager. Use explicit compartments_dir if set,
+        // otherwise default to {data_dir}/compartments.
+        let compartment_manager = config
+            .compartments_dir
+            .as_ref()
+            .or(config.data_dir.as_ref())
+            .map(|dir| {
+            let compartments_dir = if config.compartments_dir.is_some() {
+                dir.clone()
+            } else {
+                dir.join("compartments")
+            };
             let mgr = crate::compartment::CompartmentManager::new(compartments_dir);
             if let Err(e) = mgr.discover() {
                 tracing::debug!(error = %e, "compartment discovery skipped");
