@@ -1,0 +1,477 @@
+[seed]
+id = "computing"
+name = "Computing & Programming"
+version = "1.0.0"
+description = "Programming languages, paradigms, tools, data structures, and software taxonomy"
+
+# ── Type hierarchy ───────────────────────────────────────────────────────
+
+[[triples]]
+subject = "library"
+predicate = "subclass-of"
+object = "software"
+
+[[triples]]
+subject = "framework"
+predicate = "subclass-of"
+object = "software"
+
+[[triples]]
+subject = "compiler"
+predicate = "subclass-of"
+object = "tool"
+
+[[triples]]
+subject = "software"
+predicate = "subclass-of"
+object = "artifact"
+
+[[triples]]
+subject = "programming-language"
+predicate = "subclass-of"
+object = "language"
+
+[[triples]]
+subject = "package"
+predicate = "subclass-of"
+object = "software"
+
+[[triples]]
+subject = "crate"
+predicate = "subclass-of"
+object = "package"
+
+[[triples]]
+subject = "api"
+predicate = "subclass-of"
+object = "interface"
+
+[[triples]]
+subject = "protocol"
+predicate = "subclass-of"
+object = "standard"
+
+[[triples]]
+subject = "database"
+predicate = "subclass-of"
+object = "software"
+
+[[triples]]
+subject = "operating-system"
+predicate = "subclass-of"
+object = "software"
+
+[[triples]]
+subject = "algorithm"
+predicate = "is-a"
+object = "concept"
+
+[[triples]]
+subject = "data-structure"
+predicate = "is-a"
+object = "concept"
+
+[[triples]]
+subject = "design-pattern"
+predicate = "is-a"
+object = "concept"
+
+[[triples]]
+subject = "paradigm"
+predicate = "is-a"
+object = "concept"
+
+# ── Programming languages ────────────────────────────────────────────────
+
+[[triples]]
+subject = "rust"
+predicate = "is-a"
+object = "programming-language"
+
+[[triples]]
+subject = "python"
+predicate = "is-a"
+object = "programming-language"
+
+[[triples]]
+subject = "javascript"
+predicate = "is-a"
+object = "programming-language"
+
+[[triples]]
+subject = "typescript"
+predicate = "is-a"
+object = "programming-language"
+
+[[triples]]
+subject = "java"
+predicate = "is-a"
+object = "programming-language"
+
+[[triples]]
+subject = "go"
+predicate = "is-a"
+object = "programming-language"
+
+[[triples]]
+subject = "c"
+predicate = "is-a"
+object = "programming-language"
+
+[[triples]]
+subject = "cpp"
+predicate = "is-a"
+object = "programming-language"
+
+[[triples]]
+subject = "haskell"
+predicate = "is-a"
+object = "programming-language"
+
+[[triples]]
+subject = "ruby"
+predicate = "is-a"
+object = "programming-language"
+
+[[triples]]
+subject = "swift"
+predicate = "is-a"
+object = "programming-language"
+
+[[triples]]
+subject = "kotlin"
+predicate = "is-a"
+object = "programming-language"
+
+[[triples]]
+subject = "scala"
+predicate = "is-a"
+object = "programming-language"
+
+[[triples]]
+subject = "elixir"
+predicate = "is-a"
+object = "programming-language"
+
+[[triples]]
+subject = "zig"
+predicate = "is-a"
+object = "programming-language"
+
+# ── Language properties ──────────────────────────────────────────────────
+
+[[triples]]
+subject = "rust"
+predicate = "has-property"
+object = "systems-programming"
+
+[[triples]]
+subject = "rust"
+predicate = "has-property"
+object = "memory-safe"
+
+[[triples]]
+subject = "python"
+predicate = "has-property"
+object = "interpreted"
+
+[[triples]]
+subject = "python"
+predicate = "has-property"
+object = "dynamically-typed"
+
+[[triples]]
+subject = "haskell"
+predicate = "has-property"
+object = "functional"
+
+[[triples]]
+subject = "haskell"
+predicate = "has-property"
+object = "statically-typed"
+
+[[triples]]
+subject = "javascript"
+predicate = "has-property"
+object = "dynamically-typed"
+
+[[triples]]
+subject = "typescript"
+predicate = "has-property"
+object = "statically-typed"
+
+[[triples]]
+subject = "c"
+predicate = "has-property"
+object = "systems-programming"
+
+[[triples]]
+subject = "go"
+predicate = "has-property"
+object = "garbage-collected"
+
+[[triples]]
+subject = "java"
+predicate = "has-property"
+object = "object-oriented"
+
+[[triples]]
+subject = "elixir"
+predicate = "has-property"
+object = "functional"
+
+# ── Paradigms ────────────────────────────────────────────────────────────
+
+[[triples]]
+subject = "object-oriented"
+predicate = "is-a"
+object = "paradigm"
+
+[[triples]]
+subject = "functional"
+predicate = "is-a"
+object = "paradigm"
+
+[[triples]]
+subject = "imperative"
+predicate = "is-a"
+object = "paradigm"
+
+[[triples]]
+subject = "declarative"
+predicate = "is-a"
+object = "paradigm"
+
+[[triples]]
+subject = "concurrent"
+predicate = "is-a"
+object = "paradigm"
+
+[[triples]]
+subject = "reactive"
+predicate = "is-a"
+object = "paradigm"
+
+[[triples]]
+subject = "event-driven"
+predicate = "is-a"
+object = "paradigm"
+
+[[triples]]
+subject = "logic-programming"
+predicate = "is-a"
+object = "paradigm"
+
+# ── Package ecosystems ───────────────────────────────────────────────────
+
+[[triples]]
+subject = "cargo"
+predicate = "part-of"
+object = "rust"
+
+[[triples]]
+subject = "npm"
+predicate = "part-of"
+object = "javascript"
+
+[[triples]]
+subject = "pip"
+predicate = "part-of"
+object = "python"
+
+[[triples]]
+subject = "maven"
+predicate = "part-of"
+object = "java"
+
+[[triples]]
+subject = "gem"
+predicate = "part-of"
+object = "ruby"
+
+[[triples]]
+subject = "hex"
+predicate = "part-of"
+object = "elixir"
+
+[[triples]]
+subject = "nuget"
+predicate = "part-of"
+object = "csharp"
+
+[[triples]]
+subject = "pub"
+predicate = "part-of"
+object = "dart"
+
+# ── Data structures ──────────────────────────────────────────────────────
+
+[[triples]]
+subject = "array"
+predicate = "is-a"
+object = "data-structure"
+
+[[triples]]
+subject = "linked-list"
+predicate = "is-a"
+object = "data-structure"
+
+[[triples]]
+subject = "hash-map"
+predicate = "is-a"
+object = "data-structure"
+
+[[triples]]
+subject = "tree"
+predicate = "is-a"
+object = "data-structure"
+
+[[triples]]
+subject = "graph"
+predicate = "is-a"
+object = "data-structure"
+
+[[triples]]
+subject = "stack"
+predicate = "is-a"
+object = "data-structure"
+
+[[triples]]
+subject = "queue"
+predicate = "is-a"
+object = "data-structure"
+
+[[triples]]
+subject = "heap"
+predicate = "is-a"
+object = "data-structure"
+
+# ── Key tools & platforms ────────────────────────────────────────────────
+
+[[triples]]
+subject = "git"
+predicate = "is-a"
+object = "tool"
+
+[[triples]]
+subject = "docker"
+predicate = "is-a"
+object = "tool"
+
+[[triples]]
+subject = "kubernetes"
+predicate = "is-a"
+object = "platform"
+
+[[triples]]
+subject = "linux"
+predicate = "is-a"
+object = "operating-system"
+
+[[triples]]
+subject = "windows"
+predicate = "is-a"
+object = "operating-system"
+
+[[triples]]
+subject = "macos"
+predicate = "is-a"
+object = "operating-system"
+
+[[triples]]
+subject = "github"
+predicate = "is-a"
+object = "platform"
+
+[[triples]]
+subject = "gitlab"
+predicate = "is-a"
+object = "platform"
+
+[[triples]]
+subject = "postgresql"
+predicate = "is-a"
+object = "database"
+
+[[triples]]
+subject = "redis"
+predicate = "is-a"
+object = "database"
+
+# ── Well-known libraries ─────────────────────────────────────────────────
+
+[[triples]]
+subject = "tokio"
+predicate = "is-a"
+object = "library"
+
+[[triples]]
+subject = "tokio"
+predicate = "part-of"
+object = "rust"
+
+[[triples]]
+subject = "serde"
+predicate = "is-a"
+object = "library"
+
+[[triples]]
+subject = "serde"
+predicate = "part-of"
+object = "rust"
+
+[[triples]]
+subject = "react"
+predicate = "is-a"
+object = "framework"
+
+[[triples]]
+subject = "react"
+predicate = "part-of"
+object = "javascript"
+
+[[triples]]
+subject = "django"
+predicate = "is-a"
+object = "framework"
+
+[[triples]]
+subject = "django"
+predicate = "part-of"
+object = "python"
+
+[[triples]]
+subject = "flask"
+predicate = "is-a"
+object = "framework"
+
+[[triples]]
+subject = "flask"
+predicate = "part-of"
+object = "python"
+
+# ── New relations ────────────────────────────────────────────────────────
+
+[[triples]]
+subject = "implements"
+predicate = "is-a"
+object = "relation"
+confidence = 1.0
+
+[[triples]]
+subject = "written-in"
+predicate = "is-a"
+object = "relation"
+confidence = 1.0
+
+[[triples]]
+subject = "depends-on"
+predicate = "is-a"
+object = "relation"
+confidence = 1.0
+
+[[triples]]
+subject = "interoperates-with"
+predicate = "is-a"
+object = "relation"
+confidence = 1.0

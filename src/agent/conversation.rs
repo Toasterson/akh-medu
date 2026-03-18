@@ -324,18 +324,7 @@ impl GroundedResponse {
                     .to_string()
             }
             ResponseDetail::Normal => {
-                if self.supporting_triples.is_empty() {
-                    return self.prose.clone();
-                }
-                let triple_count = self.supporting_triples.len();
-                let conf_str = self
-                    .confidence
-                    .map(|c| format!(" (confidence: {c:.2})"))
-                    .unwrap_or_default();
-                format!(
-                    "{}\n[grounded in {triple_count} triple(s){conf_str}]",
-                    self.prose,
-                )
+                self.prose.clone()
             }
             ResponseDetail::Full => {
                 let mut lines = vec![self.prose.clone()];
@@ -391,7 +380,16 @@ pub fn ground_query(
     grammar_name: &str,
 ) -> Option<GroundedResponse> {
     // Step 1: Resolve the subject entity.
-    let sym_id = engine.resolve_symbol(subject).ok()?;
+    // Try exact match first, then fall back to last token (head-final heuristic)
+    // to handle compound subjects like "rust library miette" → try "miette".
+    let sym_id = engine.resolve_symbol(subject).ok().or_else(|| {
+        let last = subject.split_whitespace().last()?;
+        if last != subject {
+            engine.resolve_symbol(last).ok()
+        } else {
+            None
+        }
+    })?;
 
     // Step 2: Collect all triples involving this entity.
     let from_triples = engine.triples_from(sym_id);
@@ -444,6 +442,14 @@ pub fn ground_query(
         return None;
     }
 
+    // Step 3b: Reject thin knowledge — too few triples with only provisional
+    // confidence signals "we barely know this entity" and a grounded response
+    // would be unhelpful. Let downstream decomposition + escalation handle it.
+    let high_conf_count = grounded.iter().filter(|g| g.confidence.unwrap_or(1.0) > 0.70).count();
+    if grounded.len() <= 3 && high_conf_count == 0 {
+        return None;
+    }
+
     // Step 4: Compute aggregate confidence.
     let confidence = if grounded.is_empty() {
         None
@@ -462,18 +468,18 @@ pub fn ground_query(
 
     // Step 6: Also try discourse-aware rendering for richer prose.
     let prose = if summary.overview.is_empty() {
-        // Fallback: concise manual composition, capped to avoid overwhelming output.
+        // Fallback: compose natural-language prose from triples.
         const MAX_FALLBACK_TRIPLES: usize = 8;
         let capped: Vec<_> = grounded.iter().take(MAX_FALLBACK_TRIPLES).collect();
         let mut lines: Vec<String> = capped
             .iter()
-            .map(|g| format!("{} {} {}", g.subject_label, g.predicate_label, g.object_label))
+            .map(|g| triple_to_prose(&g.subject_label, &g.predicate_label, &g.object_label))
             .collect();
         let remaining = grounded.len().saturating_sub(MAX_FALLBACK_TRIPLES);
         if remaining > 0 {
-            lines.push(format!("...and {remaining} more relation(s)."));
+            lines.push(format!("There are {remaining} additional relation(s) on record."));
         }
-        lines.join(". ")
+        format!("Regarding {subject}: {}", lines.join(". "))
     } else {
         let mut parts = vec![summary.overview];
         for section in &summary.sections {
@@ -491,6 +497,33 @@ pub fn ground_query(
         provenance_ids,
         gaps,
     })
+}
+
+/// Render a single triple as natural language prose.
+///
+/// Maps well-known predicates to sentence fragments:
+/// `("rust", "is-a", "language")` → `"rust is a language"`.
+fn triple_to_prose(subject: &str, predicate: &str, object: &str) -> String {
+    match predicate {
+        "is-a" => format!("{subject} is a {object}"),
+        "subclass-of" => format!("{subject} is a kind of {object}"),
+        "part-of" => format!("{subject} is part of {object}"),
+        "has-a" | "has-part" => format!("{subject} has {object}"),
+        "has-property" => format!("{subject} is {object}"),
+        "located-in" => format!("{subject} is located in {object}"),
+        "causes" => format!("{subject} causes {object}"),
+        "depends-on" => format!("{subject} depends on {object}"),
+        "similar-to" => format!("{subject} is similar to {object}"),
+        "contains" => format!("{subject} contains {object}"),
+        "created-by" => format!("{subject} was created by {object}"),
+        "member-of" => format!("{subject} is a member of {object}"),
+        "composed-of" => format!("{subject} is composed of {object}"),
+        "implements" => format!("{subject} implements {object}"),
+        "defines" => format!("{subject} defines {object}"),
+        "written-in" => format!("{subject} is written in {object}"),
+        "instance-of" => format!("{subject} is an instance of {object}"),
+        _ => format!("{subject} {predicate} {object}"),
+    }
 }
 
 /// Derive a human-readable tag for how a triple was derived.
@@ -696,9 +729,7 @@ mod tests {
             gaps: vec![],
         };
         let rendered = resp.render(ResponseDetail::Normal);
-        assert!(rendered.contains("Dogs are mammals."));
-        assert!(rendered.contains("1 triple(s)"));
-        assert!(rendered.contains("0.95"));
+        assert_eq!(rendered, "Dogs are mammals.");
     }
 
     #[test]

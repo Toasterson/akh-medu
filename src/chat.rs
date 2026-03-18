@@ -12,15 +12,23 @@
 use std::sync::Arc;
 
 use crate::agent::Agent;
+use crate::agent::nlp::QuestionWord;
 #[allow(deprecated)]
 use crate::agent::{classify_intent, UserIntent};
 use crate::agent::conversation::Speaker;
 use crate::engine::Engine;
 use crate::grammar::abs::AbsTree;
 use crate::grammar::concrete::ParseContext;
+use crate::grammar::discourse::{QueryFocus, build_discourse_response, classify_focus_with_modal, resolve_discourse};
 use crate::grammar::lexer::Lexicon;
+use crate::graph::Triple;
+use crate::infer::InferenceQuery;
+use crate::infer::backward::{BackwardConfig, infer_backward};
 use crate::message::AkhMessage;
 use crate::nlu::NluPipeline;
+use crate::symbol::SymbolId;
+
+// ── Query decomposition ─────────────────────────────────────────────────
 
 // ── Configuration ───────────────────────────────────────────────────────
 
@@ -356,29 +364,16 @@ impl ChatProcessor {
     }
 
     fn handle_dialogue_meta_query(
-        &self,
+        &mut self,
         msgs: &mut Vec<AkhMessage>,
         agent: &mut Agent,
         engine: &Arc<Engine>,
         grammar: &str,
     ) {
-        let result = agent.dialogue_manager().handle_meta_query(engine, grammar);
-        match result {
-            Some(text) => {
-                msgs.push(AkhMessage::narrative(&text, grammar));
-                agent.conversation_state_mut().record_agent_turn(&text);
-            }
-            None => {
-                // Fallback: generic self-description.
-                let (name, _) = Self::persona_name_and_traits(engine);
-                let text = format!(
-                    "I am {name}. I can answer questions about what I know, \
-                     learn new facts, and investigate topics autonomously."
-                );
-                msgs.push(AkhMessage::narrative(&text, grammar));
-                agent.conversation_state_mut().record_agent_turn(&text);
-            }
-        }
+        // Route through the standard query pipeline with subject "self".
+        // This produces a first-person, discourse-ranked response from the KG
+        // using the same grammar pipeline as any other query.
+        self.handle_query_from_tree(msgs, agent, engine, "self", "who are you?", grammar);
     }
 
     fn handle_structural_command(
@@ -579,8 +574,6 @@ impl ChatProcessor {
         description: &str,
         grammar: &str,
     ) {
-        let (name, traits) = Self::persona_name_and_traits(engine);
-        let tone = Self::persona_tone(engine);
         let wm_before = agent.working_memory().len();
 
         match agent.add_goal(description, 128, "User-directed goal") {
@@ -621,8 +614,7 @@ impl ChatProcessor {
                     agent.engine(),
                     grammar,
                 );
-                let turn_ctx = Self::recent_topic_context(agent, description);
-                self.push_summary(msgs, &summary, grammar, &name, &traits, &tone, turn_ctx.as_deref());
+                self.push_summary(msgs, &summary, grammar);
             }
             Err(e) => {
                 msgs.push(AkhMessage::error("goal", e.to_string()));
@@ -675,82 +667,291 @@ impl ChatProcessor {
             return;
         }
 
-        // Fallback: discourse-aware response, then synthesis.
-        let discourse_result = crate::grammar::discourse::resolve_discourse(
+        // ── Step 1: Classify query focus from raw input ──────────────────
+        let question_word = Self::extract_question_word(original_input, &self.lexicon);
+        let capability_signal = Self::detect_capability_signal(original_input, &self.lexicon);
+        let focus = classify_focus_with_modal(question_word, capability_signal);
+
+        // ── Step 2: Resolve discourse context (pronoun resolution, POV) ──
+        let discourse_result = resolve_discourse(
             subject,
-            None, // question_word no longer extracted from regex
+            question_word,
             original_input,
             engine,
-            false,
+            capability_signal,
             Some(agent.conversation_state()),
             Some(&self.lexicon),
         );
-        let handled = if let Ok(ref ctx) = discourse_result {
-            let from_triples = engine.triples_from(ctx.subject_id);
-            let to_triples = engine.triples_to(ctx.subject_id);
-            let mut all_triples = from_triples;
-            all_triples.extend(to_triples);
-            if let Some(discourse_tree) =
-                crate::grammar::discourse::build_discourse_response(&all_triples, ctx, engine)
-            {
-                let registry = crate::grammar::GrammarRegistry::new();
-                if let Ok(prose) = registry.linearize(grammar, &discourse_tree) {
-                    if !prose.trim().is_empty() {
-                        msgs.push(AkhMessage::narrative(&prose, grammar));
-                        true
-                    } else {
-                        false
-                    }
-                } else {
-                    false
-                }
-            } else {
-                false
-            }
+
+        // Determine the subject symbol ID (from discourse or direct resolution).
+        let subject_id = discourse_result
+            .as_ref()
+            .ok()
+            .map(|ctx| ctx.subject_id)
+            .or_else(|| engine.resolve_symbol(subject).ok());
+
+        // If exact resolution failed, try compound subject decomposition.
+        let (subject_id, was_provisional) = if let Some(id) = subject_id {
+            (Some(id), false)
         } else {
-            false
+            self.try_decomposed_resolution(subject, engine)
+                .map(|(id, prov)| (Some(id), prov))
+                .unwrap_or((None, false))
         };
 
-        if !handled {
-            // Fallback: existing synthesis path.
-            match engine.resolve_symbol(subject) {
-                Ok(sym_id) => {
-                    let from_triples = engine.triples_from(sym_id);
-                    let to_triples = engine.triples_to(sym_id);
-                    if from_triples.is_empty() && to_triples.is_empty() {
-                        self.handle_unknown_subject(
-                            msgs,
-                            agent,
-                            grammar,
-                            subject,
-                            original_input,
-                        );
-                    } else {
-                        let mut all_triples = from_triples;
-                        all_triples.extend(to_triples);
-                        let summary =
-                            crate::agent::synthesize::synthesize_from_triples(
-                                subject,
-                                &all_triples,
-                                engine,
-                                grammar,
-                            );
-                        let (pn, pt) = Self::persona_name_and_traits(engine);
-                        let tone = Self::persona_tone(engine);
-                        self.push_summary(msgs, &summary, grammar, &pn, &pt, &tone, None);
-                    }
+        let Some(sym_id) = subject_id else {
+            // Subject unknown even after decomposition — escalate to goal.
+            self.handle_unknown_subject(msgs, agent, grammar, subject, original_input);
+            return;
+        };
+
+        // ── Step 3: Collect base triples from KG ─────────────────────────
+        let from_triples = engine.triples_from(sym_id);
+        let to_triples = engine.triples_to(sym_id);
+        let mut all_triples: Vec<Triple> = from_triples;
+        all_triples.extend(to_triples);
+
+        // ── Step 4: Spreading activation — discover related facts ────────
+        let infer_query = InferenceQuery::default()
+            .with_seeds(vec![sym_id])
+            .with_max_depth(2)
+            .with_min_confidence(0.3);
+
+        if let Ok(infer_result) = engine.infer(&infer_query) {
+            let activation_count = infer_result.activations.len();
+            for (activated_sym, _confidence) in &infer_result.activations {
+                // Skip the seed itself — we already have its triples.
+                if *activated_sym == sym_id {
+                    continue;
                 }
-                Err(_) => {
-                    self.handle_unknown_subject(
-                        msgs,
-                        agent,
-                        grammar,
-                        subject,
-                        original_input,
+                let activated_triples = engine.triples_from(*activated_sym);
+                all_triples.extend(activated_triples);
+            }
+            if activation_count > 0 {
+                tracing::info!(
+                    subject = %subject,
+                    activations = activation_count,
+                    "Spreading activation discovered related concepts"
+                );
+            }
+        }
+
+        // ── Step 5: For why/how focus — backward chaining ────────────────
+        if matches!(focus, QueryFocus::Cause | QueryFocus::Method) {
+            let bc_config = BackwardConfig {
+                max_depth: 3,
+                min_confidence: 0.1,
+                vsa_verify: true,
+            };
+            if let Ok(chains) = infer_backward(engine, sym_id, &bc_config) {
+                let chain_count = chains.len();
+                for chain in &chains {
+                    all_triples.extend(chain.supporting_triples.iter().cloned());
+                }
+                if chain_count > 0 {
+                    tracing::info!(
+                        subject = %subject,
+                        chains = chain_count,
+                        "Backward chaining found supporting evidence"
                     );
                 }
             }
         }
+
+        // Escalate when knowledge is too thin to give a useful answer:
+        // - No triples at all
+        // - Only provisional triples from decomposition
+        // - Only low-confidence triples (≤ 0.70) suggesting provisional-only knowledge
+        let is_thin_knowledge = if all_triples.is_empty() {
+            true
+        } else if was_provisional && all_triples.len() <= 2 {
+            true
+        } else {
+            let high_conf = all_triples.iter().any(|t| t.confidence > 0.70);
+            !high_conf && all_triples.len() <= 3
+        };
+
+        if is_thin_knowledge {
+            let primary = subject.split_whitespace().last().unwrap_or(subject);
+            self.handle_unknown_subject(msgs, agent, grammar, primary, original_input);
+            return;
+        }
+
+        // ── Step 6: Discourse-ranked response via grammar ────────────────
+        // If discourse resolved, use it for focus-ranked, POV-aware AbsTree.
+        if let Ok(ref ctx) = discourse_result {
+            if let Some(discourse_tree) = build_discourse_response(&all_triples, ctx, engine) {
+                let registry = crate::grammar::GrammarRegistry::new();
+                if let Ok(prose) = registry.linearize(grammar, &discourse_tree) {
+                    if !prose.trim().is_empty() {
+                        // Grammar output is the final answer — no LLM involvement.
+                        msgs.push(AkhMessage::narrative(&prose, grammar));
+                        return;
+                    }
+                }
+            }
+        }
+
+        // ── Step 7: Fallback — synthesize_from_triples + push_summary ────
+        let summary = crate::agent::synthesize::synthesize_from_triples(
+            subject,
+            &all_triples,
+            engine,
+            grammar,
+        );
+        self.push_summary(msgs, &summary, grammar);
+    }
+
+    /// Extract question word from raw input using the lexicon.
+    fn extract_question_word(input: &str, lexicon: &Lexicon) -> Option<QuestionWord> {
+        let lower = input.trim().to_lowercase();
+        let first_word = lower.split_whitespace().next()?;
+        let category = lexicon.classify_question_word(first_word)?;
+        match category {
+            "what" => Some(QuestionWord::What),
+            "who" => Some(QuestionWord::Who),
+            "where" => Some(QuestionWord::Where),
+            "when" => Some(QuestionWord::When),
+            "how" => Some(QuestionWord::How),
+            "why" => Some(QuestionWord::Why),
+            "which" => Some(QuestionWord::Which),
+            "yesno" => Some(QuestionWord::YesNo),
+            _ => None,
+        }
+    }
+
+    /// Detect capability modal signal ("can", "could", etc.) in raw input.
+    fn detect_capability_signal(input: &str, lexicon: &Lexicon) -> bool {
+        let lower = input.trim().to_lowercase();
+        // Check if any word in the input is a capability modal.
+        lower.split_whitespace().any(|w| lexicon.is_capability_modal(w))
+    }
+
+    // ── KG-based query decomposition ──────────────────────────────────
+
+    /// Try to resolve a compound subject via KG-based token classification.
+    ///
+    /// Algorithm:
+    /// 1. Split into tokens, filter void words
+    /// 2. Resolve each token against the KG (known vs unknown)
+    /// 3. Pick primary entity: single unknown → it; else head-final (last token)
+    /// 4. For known tokens, assert context triples (`is-a` or `part-of`)
+    /// 5. If nothing resolves at all → last token as escalation target (no triples)
+    fn try_decomposed_resolution(
+        &self,
+        subject: &str,
+        engine: &Arc<Engine>,
+    ) -> Option<(SymbolId, bool)> {
+        let tokens: Vec<String> = subject
+            .split_whitespace()
+            .filter(|t| !self.lexicon.is_void(t))
+            .map(|t| t.to_lowercase())
+            .collect();
+
+        if tokens.len() <= 1 {
+            return None;
+        }
+
+        // Partition tokens into known (resolves in KG) and unknown.
+        let mut known: Vec<(usize, SymbolId)> = Vec::new();
+        let mut unknown: Vec<usize> = Vec::new();
+
+        for (i, token) in tokens.iter().enumerate() {
+            if let Ok(sym_id) = engine.resolve_symbol(token) {
+                known.push((i, sym_id));
+            } else {
+                unknown.push(i);
+            }
+        }
+
+        // If nothing resolves at all, use last token as escalation target.
+        if known.is_empty() && unknown.len() == tokens.len() {
+            return None;
+        }
+
+        // Primary entity selection.
+        let primary_idx = match unknown.len() {
+            1 => unknown[0],                   // single unknown → it's the primary
+            0 => tokens.len() - 1,             // all known → head-final
+            _ => *unknown.last().unwrap(),      // multiple unknowns → head-final among unknowns
+        };
+
+        let primary_label = &tokens[primary_idx];
+
+        // Resolve or create the primary entity.
+        let primary_id = if let Some((_, sym_id)) = known.iter().find(|(i, _)| *i == primary_idx) {
+            *sym_id
+        } else {
+            engine.resolve_or_create_entity(primary_label).ok()?
+        };
+
+        // Assert context triples for known tokens that are NOT the primary.
+        let mut created = false;
+        for &(i, known_id) in &known {
+            if i == primary_idx {
+                continue;
+            }
+            if let Some(pred_id) = Self::pick_context_predicate(engine, known_id) {
+                let triple = Triple::new(primary_id, pred_id, known_id).with_confidence(0.65);
+                let _ = engine.add_triple(&triple);
+                created = true;
+            }
+        }
+
+        if created {
+            let known_labels: Vec<&str> = known
+                .iter()
+                .filter(|(i, _)| *i != primary_idx)
+                .map(|(i, _)| tokens[*i].as_str())
+                .collect();
+            tracing::info!(
+                primary = %primary_label,
+                context = ?known_labels,
+                "KG-based decomposition — provisional triples created"
+            );
+        }
+
+        Some((primary_id, created))
+    }
+
+    /// Determine the context predicate for a known token relative to a primary entity.
+    ///
+    /// Walks `is-a` / `subclass-of` ancestors of `known_id`:
+    /// - If any ancestor is `artifact`, `tool`, `concept`, or `abstract-thing` → `is-a`
+    /// - Otherwise → `part-of` (generic ecosystem/context relation)
+    fn pick_context_predicate(engine: &Arc<Engine>, known_id: SymbolId) -> Option<SymbolId> {
+        let type_ancestors = ["artifact", "tool", "concept", "abstract-thing"];
+        let triples = engine.triples_from(known_id);
+
+        // Walk up to 3 levels of is-a/subclass-of.
+        let mut frontier: Vec<SymbolId> = Vec::new();
+        for t in &triples {
+            let pred_label = engine.resolve_label(t.predicate);
+            if pred_label == "is-a" || pred_label == "subclass-of" {
+                let obj_label = engine.resolve_label(t.object);
+                if type_ancestors.contains(&obj_label.as_str()) {
+                    return engine.resolve_or_create_relation("is-a").ok();
+                }
+                frontier.push(t.object);
+            }
+        }
+
+        // Second hop.
+        for hop_id in &frontier {
+            let hop_triples = engine.triples_from(*hop_id);
+            for t in &hop_triples {
+                let pred_label = engine.resolve_label(t.predicate);
+                if pred_label == "is-a" || pred_label == "subclass-of" {
+                    let obj_label = engine.resolve_label(t.object);
+                    if type_ancestors.contains(&obj_label.as_str()) {
+                        return engine.resolve_or_create_relation("is-a").ok();
+                    }
+                }
+            }
+        }
+
+        // Default: generic context relation.
+        engine.resolve_or_create_relation("part-of").ok()
     }
 
     fn handle_run_agent(msgs: &mut Vec<AkhMessage>, agent: &mut Agent, cycles: Option<usize>) {
@@ -924,15 +1125,9 @@ impl ChatProcessor {
         description: &str,
         _display_prefix: &str,
     ) {
-        let engine = agent.engine();
-        let (name, traits) = Self::persona_name_and_traits(&engine);
-        let tone = Self::persona_tone(&engine);
-
-        // Persona-flavored investigation framing (LLM or fallback)
-        let framing = self
-            .nlu_pipeline
-            .generate_investigation_frame(description, &name, &traits)
-            .unwrap_or_else(|| format!("Let me look into {description} for you."));
+        // Investigation framing — always use template. The LLM hallucinates
+        // answers instead of acknowledgments, so we don't use it here.
+        let framing = format!("Let me look into {description} for you.");
         msgs.push(AkhMessage::narrative(&framing, grammar));
 
         // Snapshot WM size before adding the goal so we can scope synthesis.
@@ -992,10 +1187,7 @@ impl ChatProcessor {
             grammar,
         );
 
-        // Get turn context for threading
-        let turn_ctx = Self::recent_topic_context(agent, description);
-
-        self.push_summary(msgs, &summary, grammar, &name, &traits, &tone, turn_ctx.as_deref());
+        self.push_summary(msgs, &summary, grammar);
     }
 
     /// Handle an unknown subject: friendly message then escalate.
@@ -1023,15 +1215,6 @@ impl ChatProcessor {
             })
     }
 
-    /// Extract persona tone adjectives from the engine's Psyche compartment.
-    fn persona_tone(engine: &Engine) -> Vec<String> {
-        engine
-            .compartments()
-            .and_then(|cm| cm.psyche())
-            .map(|p| p.persona.tone.clone())
-            .unwrap_or_default()
-    }
-
     /// Get the label of the active dialogue topic (if any).
     fn active_topic_label(agent: &Agent, engine: &Engine) -> Option<String> {
         agent
@@ -1040,39 +1223,15 @@ impl ChatProcessor {
             .map(|tid| engine.resolve_label(tid))
     }
 
-    /// Check if the topic appears in recent conversation turns.
-    fn recent_topic_context(agent: &Agent, topic: &str) -> Option<String> {
-        let state = agent.conversation_state();
-        let topic_lower = topic.to_lowercase();
-        let recent_mention = state
-            .turns
-            .iter()
-            .rev()
-            .take(3)
-            .any(|t| {
-                t.speaker == crate::agent::conversation::Speaker::Operator
-                    && t.text.to_lowercase().contains(&topic_lower)
-            });
-        if state.len() > 2 && recent_mention {
-            Some(topic.to_string())
-        } else {
-            None
-        }
-    }
-
     /// Push a NarrativeSummary as a single cohesive narrative message.
     ///
-    /// Tries the LLM output boundary first (facts → persona-flavored prose).
-    /// Falls back to collapsing overview + sections + gaps into one message.
+    /// Uses grammar output directly — no LLM involvement. The narrative grammar
+    /// already produces correct, focused prose.
     fn push_summary(
-        &mut self,
+        &self,
         msgs: &mut Vec<AkhMessage>,
         summary: &crate::agent::NarrativeSummary,
         grammar: &str,
-        persona_name: &str,
-        traits: &[String],
-        tone: &[String],
-        context: Option<&str>,
     ) {
         let has_content = !summary.overview.is_empty()
             || !summary.sections.is_empty()
@@ -1087,37 +1246,9 @@ impl ChatProcessor {
             return;
         }
 
-        // Collect substantive facts for LLM polishing.
-        // Skip the meta-overview ("Explored X over N cycles...") — it's not a fact.
-        let mut facts = Vec::new();
-        for section in &summary.sections {
-            if !section.prose.is_empty() {
-                facts.push(section.prose.clone());
-            }
-        }
-        for gap in &summary.gaps {
-            facts.push(format!("Unknown: {gap}"));
-        }
-        // If no section content, use overview as last resort
-        if facts.is_empty() && !summary.overview.is_empty() {
-            facts.push(summary.overview.clone());
-        }
-
-        // Try LLM output boundary: facts → natural conversational prose
-        if let Some(polished) = self.nlu_pipeline.generate_response(
-            &facts,
-            persona_name,
-            traits,
-            tone,
-            context,
-        ) {
-            msgs.push(AkhMessage::narrative(&polished, grammar));
-            return;
-        }
-
-        // Fallback: collapse into a single flowing message (no markdown headings)
+        // Build grammar prose from sections (the grammar already did the thinking).
         let mut parts = Vec::new();
-        // Only include the meta-overview if there are no sections
+        // Only include meta-overview if there are no sections.
         if !summary.overview.is_empty() && summary.sections.is_empty() {
             parts.push(summary.overview.clone());
         }
@@ -1144,8 +1275,18 @@ impl ChatProcessor {
             parts.push(gap_text);
         }
 
-        let combined = parts.join("\n\n");
-        msgs.push(AkhMessage::narrative(&combined, grammar));
+        let grammar_prose = parts.join(" ");
+
+        if grammar_prose.trim().is_empty() {
+            msgs.push(AkhMessage::narrative(
+                "I couldn't find enough information to answer that. \
+                 Try teaching me about it first, or rephrase your question.",
+                grammar,
+            ));
+            return;
+        }
+
+        msgs.push(AkhMessage::narrative(&grammar_prose, grammar));
     }
 }
 

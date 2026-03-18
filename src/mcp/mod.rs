@@ -335,6 +335,145 @@ pub struct ChatParams {
     pub message: String,
 }
 
+// ── Phase 1: Bootstrap Stage Tools ──────────────────────────────────────
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ResolveIdentityParams {
+    #[schemars(description = "Target workspace (default: \"default\")")]
+    #[serde(default = "default_workspace")]
+    pub workspace: String,
+    #[schemars(description = "Name of the figure to resolve (e.g. 'Ptah', 'Gandalf', 'Turing')")]
+    pub name: String,
+    #[schemars(
+        description = "Optional entity type hint: 'deity', 'fictional_character', 'historical_figure'"
+    )]
+    pub entity_type: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct RitualOfAwakeningParams {
+    #[schemars(description = "Target workspace (default: \"default\")")]
+    #[serde(default = "default_workspace")]
+    pub workspace: String,
+    #[schemars(description = "Character name (must match a previously resolved identity)")]
+    pub name: String,
+    #[schemars(description = "Culture of origin: 'egyptian', 'greek', 'norse', 'latin', 'fictional'")]
+    pub culture: String,
+    #[schemars(description = "Character personality traits (e.g. ['creative', 'precise', 'wise'])")]
+    pub traits: Vec<String>,
+    #[schemars(description = "Jungian archetypes (e.g. ['creator', 'ruler'])")]
+    pub archetypes: Vec<String>,
+    #[schemars(description = "Primary domain (e.g. 'architecture')")]
+    pub domain: String,
+    #[schemars(
+        description = "Target competence level: 'novice', 'advanced_beginner', 'competent', 'proficient', 'expert'"
+    )]
+    pub competence_level: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ExpandDomainParams {
+    #[schemars(description = "Target workspace (default: \"default\")")]
+    #[serde(default = "default_workspace")]
+    pub workspace: String,
+    #[schemars(description = "Seed concepts to expand from (e.g. ['architecture', 'creation', 'craftsmanship'])")]
+    pub seed_concepts: Vec<String>,
+    #[schemars(description = "Domain name for the expansion")]
+    pub domain: String,
+    #[schemars(description = "VSA similarity threshold for candidate acceptance (default: 0.6)")]
+    pub similarity_threshold: Option<f32>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct AnalyzePrerequisitesParams {
+    #[schemars(description = "Target workspace (default: \"default\")")]
+    #[serde(default = "default_workspace")]
+    pub workspace: String,
+    #[schemars(description = "Domain to analyze prerequisites for")]
+    pub domain: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct AssessCompetenceParams {
+    #[schemars(description = "Target workspace (default: \"default\")")]
+    #[serde(default = "default_workspace")]
+    pub workspace: String,
+    #[schemars(description = "Domain to assess")]
+    pub domain: String,
+    #[schemars(
+        description = "Target Dreyfus level: 'novice', 'advanced_beginner', 'competent', 'proficient', 'expert' (default: 'competent')"
+    )]
+    pub target_level: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct RemoveTripleParams {
+    #[schemars(description = "Target workspace (default: \"default\")")]
+    #[serde(default = "default_workspace")]
+    pub workspace: String,
+    #[schemars(description = "Subject entity label")]
+    pub subject: String,
+    #[schemars(description = "Predicate relation label")]
+    pub predicate: String,
+    #[schemars(description = "Object entity label")]
+    pub object: String,
+}
+
+// ── Phase 2: Agent Introspection Tools ──────────────────────────────────
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct AgentRunCycleParams {
+    #[schemars(description = "Target workspace (default: \"default\")")]
+    #[serde(default = "default_workspace")]
+    pub workspace: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct AgentRecallParams {
+    #[schemars(description = "Target workspace (default: \"default\")")]
+    #[serde(default = "default_workspace")]
+    pub workspace: String,
+    #[schemars(description = "Query terms to search episodic memory for")]
+    pub query: Vec<String>,
+    #[schemars(description = "Maximum number of results (default: 5)")]
+    pub top_k: Option<usize>,
+}
+
+// ── Phase 3: Knowledge Introspection Tools ──────────────────────────────
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct TriplesOfParams {
+    #[schemars(description = "Target workspace (default: \"default\")")]
+    #[serde(default = "default_workspace")]
+    pub workspace: String,
+    #[schemars(description = "Entity label to get triples for")]
+    pub entity: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ProvenanceOfParams {
+    #[schemars(description = "Target workspace (default: \"default\")")]
+    #[serde(default = "default_workspace")]
+    pub workspace: String,
+    #[schemars(description = "Entity label to trace provenance for")]
+    pub entity: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct InferAnalogyParams {
+    #[schemars(description = "Target workspace (default: \"default\")")]
+    #[serde(default = "default_workspace")]
+    pub workspace: String,
+    #[schemars(description = "First term (A in 'A is to B as C is to ?')")]
+    pub a: String,
+    #[schemars(description = "Second term (B)")]
+    pub b: String,
+    #[schemars(description = "Third term (C)")]
+    pub c: String,
+    #[schemars(description = "Number of results to return (default: 5)")]
+    pub top_k: Option<usize>,
+}
+
 // ── Helpers ─────────────────────────────────────────────────────────────
 
 /// Format a `Vec<AkhMessage>` into human-readable text for MCP tool output.
@@ -1127,6 +1266,870 @@ impl AkhMcpServer {
         Ok(CallToolResult::success(vec![Content::text(result)]))
     }
 
+    // ── Phase 1: Bootstrap Stage Tools ────────────────────────────
+
+    #[tool(
+        name = "resolve_identity",
+        description = "Resolve a cultural/historical/fictional figure to structured CharacterKnowledge (traits, archetypes, culture, domains). Use this to preview identity data before ritual_of_awakening, or to fill gaps when the monolithic awaken tool fails identity resolution."
+    )]
+    async fn resolve_identity(
+        &self,
+        Parameters(params): Parameters<ResolveIdentityParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let engine = self.state.get_engine(&params.workspace).await?;
+        let name = params.name;
+        let entity_type_hint = params.entity_type;
+
+        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            use crate::bootstrap::identity::resolve_identity;
+            use crate::bootstrap::purpose::{EntityType, IdentityRef};
+
+            let entity_type = entity_type_hint
+                .as_deref()
+                .and_then(|t| match t.to_lowercase().as_str() {
+                    "deity" => Some(EntityType::Deity),
+                    "fictional_character" | "fictional" => Some(EntityType::FictionalCharacter),
+                    "historical_figure" | "historical" => Some(EntityType::HistoricalFigure),
+                    _ => None,
+                })
+                .unwrap_or(EntityType::Deity);
+
+            let identity_ref = IdentityRef {
+                name: name.clone(),
+                entity_type,
+                source_phrase: name.clone(),
+            };
+
+            let knowledge = resolve_identity(&identity_ref, &engine)
+                .map_err(|e| format!("{e}"))?;
+
+            let json = serde_json::to_string_pretty(&knowledge)
+                .map_err(|e| format!("json: {e}"))?;
+            Ok(json)
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("task panicked: {e}"), None))?
+        .map_err(|e| McpError::internal_error(e, None))?;
+
+        Ok(CallToolResult::success(vec![Content::text(result)]))
+    }
+
+    #[tool(
+        name = "ritual_of_awakening",
+        description = "Perform the Ritual of Awakening: construct a Psyche with Jungian archetypes, OCEAN personality, shadow patterns, and a culture-specific self-name. Requires CharacterKnowledge data (from resolve_identity or manually provided)."
+    )]
+    async fn ritual_of_awakening(
+        &self,
+        Parameters(params): Parameters<RitualOfAwakeningParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let engine = self.state.get_engine(&params.workspace).await?;
+
+        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            use crate::bootstrap::identity::{
+                ritual_of_awakening, CharacterKnowledge, CultureOrigin,
+            };
+            use crate::bootstrap::purpose::{DreyfusLevel, EntityType, PurposeModel};
+
+            let culture = CultureOrigin::from_label(&params.culture)
+                .unwrap_or(CultureOrigin::Unknown);
+
+            let entity_type = match culture {
+                CultureOrigin::Egyptian | CultureOrigin::Greek | CultureOrigin::Norse => {
+                    EntityType::Deity
+                }
+                CultureOrigin::Fictional => EntityType::FictionalCharacter,
+                _ => EntityType::HistoricalFigure,
+            };
+
+            let character = CharacterKnowledge {
+                name: params.name.clone(),
+                entity_type,
+                culture,
+                description: format!("Identity for {}", params.name),
+                domains: vec![params.domain.clone()],
+                traits: params.traits,
+                archetypes: params.archetypes,
+            };
+
+            let competence_level = params
+                .competence_level
+                .as_deref()
+                .and_then(|l| match l.to_lowercase().as_str() {
+                    "novice" => Some(DreyfusLevel::Novice),
+                    "advanced_beginner" => Some(DreyfusLevel::AdvancedBeginner),
+                    "competent" => Some(DreyfusLevel::Competent),
+                    "proficient" => Some(DreyfusLevel::Proficient),
+                    "expert" => Some(DreyfusLevel::Expert),
+                    _ => None,
+                })
+                .unwrap_or(DreyfusLevel::Competent);
+
+            let purpose = PurposeModel {
+                domain: params.domain,
+                description: format!("Awakening as {}", params.name),
+                seed_concepts: character.domains.clone(),
+                competence_level,
+            };
+
+            let ritual_result =
+                ritual_of_awakening(&character, &purpose, &engine).map_err(|e| format!("{e}"))?;
+
+            let _ = engine.persist();
+
+            let shadow_names: Vec<&str> = ritual_result
+                .psyche
+                .shadow
+                .veto_patterns
+                .iter()
+                .chain(ritual_result.psyche.shadow.bias_patterns.iter())
+                .map(|p| p.name.as_str())
+                .collect();
+
+            let lines = vec![
+                format!("Chosen name: {}", ritual_result.chosen_name),
+                format!("Persona: {}", ritual_result.psyche.persona.name),
+                format!("Traits: {}", ritual_result.psyche.persona.traits.join(", ")),
+                format!(
+                    "Archetypes: healer={:.1} sage={:.1} guardian={:.1} explorer={:.1}",
+                    ritual_result.psyche.archetypes.healer,
+                    ritual_result.psyche.archetypes.sage,
+                    ritual_result.psyche.archetypes.guardian,
+                    ritual_result.psyche.archetypes.explorer,
+                ),
+                format!("Shadow: {}", shadow_names.join(", ")),
+                format!(
+                    "Self-integration: {:.2}",
+                    ritual_result.psyche.self_integration.individuation_level
+                ),
+                format!("Provenance: {} records", ritual_result.provenance_ids.len()),
+            ];
+
+            Ok(lines.join("\n"))
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("task panicked: {e}"), None))?
+        .map_err(|e| McpError::internal_error(e, None))?;
+
+        Ok(CallToolResult::success(vec![Content::text(result)]))
+    }
+
+    #[tool(
+        name = "expand_domain",
+        description = "Expand seed concepts into a skeleton ontology by querying external knowledge sources (Wikidata, Wikipedia, ConceptNet) and filtering by VSA similarity. Persists concepts and relations to the KG."
+    )]
+    async fn expand_domain(
+        &self,
+        Parameters(params): Parameters<ExpandDomainParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let engine = self.state.get_engine(&params.workspace).await?;
+
+        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            use crate::bootstrap::expand::{DomainExpander, ExpansionConfig};
+            use crate::bootstrap::purpose::{DreyfusLevel, PurposeModel};
+
+            let purpose = PurposeModel {
+                domain: params.domain.clone(),
+                description: format!("Domain expansion for {}", params.domain),
+                seed_concepts: params.seed_concepts,
+                competence_level: DreyfusLevel::Competent,
+            };
+
+            let config = ExpansionConfig {
+                similarity_threshold: params.similarity_threshold.unwrap_or(0.6),
+                ..Default::default()
+            };
+
+            let mut expander =
+                DomainExpander::new(&engine, config).map_err(|e| format!("{e}"))?;
+            let result = expander
+                .expand(&purpose, &engine)
+                .map_err(|e| format!("{e}"))?;
+
+            let _ = engine.persist();
+
+            let mut lines = vec![
+                format!("Concepts added: {}", result.concept_count),
+                format!("Relations added: {}", result.relation_count),
+                format!("Candidates rejected: {}", result.rejected_count),
+                format!("API calls: {}", result.api_calls),
+            ];
+
+            if !result.accepted_labels.is_empty() {
+                lines.push(format!(
+                    "Accepted: {}",
+                    result.accepted_labels.join(", ")
+                ));
+            }
+            if !result.boundary_rejects.is_empty() {
+                lines.push(format!(
+                    "Boundary rejects: {}",
+                    result.boundary_rejects.join(", ")
+                ));
+            }
+
+            Ok(lines.join("\n"))
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("task panicked: {e}"), None))?
+        .map_err(|e| McpError::internal_error(e, None))?;
+
+        Ok(CallToolResult::success(vec![Content::text(result)]))
+    }
+
+    #[tool(
+        name = "analyze_prerequisites",
+        description = "Discover prerequisite relationships between domain concepts, classify by Vygotsky ZPD zones (Known/Proximal/Beyond), and generate a curriculum ordering. Requires prior domain expansion."
+    )]
+    async fn analyze_prerequisites(
+        &self,
+        Parameters(params): Parameters<AnalyzePrerequisitesParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let engine = self.state.get_engine(&params.workspace).await?;
+
+        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            use crate::bootstrap::expand::ExpansionResult;
+            use crate::bootstrap::prerequisite::{PrerequisiteAnalyzer, PrerequisiteConfig};
+
+            // Find domain concepts: entities that participate in expand:* triples
+            let expand_preds: Vec<(&str, Option<crate::symbol::SymbolId>)> = vec![
+                ("expand:expanded_from", engine.resolve_symbol("expand:expanded_from").ok()),
+                ("expand:subclass_of", engine.resolve_symbol("expand:subclass_of").ok()),
+                ("expand:instance_of", engine.resolve_symbol("expand:instance_of").ok()),
+                ("expand:part_of", engine.resolve_symbol("expand:part_of").ok()),
+                ("expand:has_prerequisite", engine.resolve_symbol("expand:has_prerequisite").ok()),
+                ("expand:related_to", engine.resolve_symbol("expand:related_to").ok()),
+            ];
+
+            let mut domain_ids = std::collections::HashSet::new();
+            for (_name, pred_opt) in &expand_preds {
+                if let Some(pred) = pred_opt {
+                    let pairs = engine.knowledge_graph().triples_for_predicate(*pred);
+                    for (subj, obj) in &pairs {
+                        domain_ids.insert(*subj);
+                        domain_ids.insert(*obj);
+                    }
+                }
+            }
+
+            // Filter out prototype/microtheory meta-symbols
+            let accepted_labels: Vec<String> = domain_ids
+                .iter()
+                .map(|id| engine.resolve_label(*id))
+                .filter(|label| !label.starts_with("expand:"))
+                .collect();
+
+            if accepted_labels.is_empty() {
+                return Ok("No domain expansion concepts found. Run expand_domain first.".to_string());
+            }
+
+            let expansion_result = ExpansionResult {
+                concept_count: accepted_labels.len(),
+                relation_count: 0,
+                rejected_count: 0,
+                api_calls: 0,
+                domain_prototype_id: None,
+                microtheory_id: None,
+                provenance_ids: vec![],
+                accepted_labels,
+                boundary_rejects: vec![],
+            };
+
+            // Lower min_edge_confidence for standalone use — the orchestrator
+            // combines ConceptNet + structural + VSA edges so the default 0.3
+            // works there, but standalone structural edges are 0.6 * 0.3 = 0.18.
+            let config = PrerequisiteConfig {
+                min_edge_confidence: 0.15,
+                ..Default::default()
+            };
+            let analyzer =
+                PrerequisiteAnalyzer::new(&engine, config).map_err(|e| format!("{e}"))?;
+            let result = analyzer
+                .analyze(&expansion_result, &engine)
+                .map_err(|e| format!("{e}"))?;
+
+            let _ = engine.persist();
+
+            let mut lines = vec![
+                format!("Concepts analyzed: {}", result.concepts_analyzed),
+                format!("Prerequisite edges: {}", result.edge_count),
+                format!("Cycles broken: {}", result.cycles_broken),
+                format!("Curriculum entries: {}", result.curriculum.len()),
+            ];
+
+            if !result.curriculum.is_empty() {
+                lines.push("Curriculum (top 20):".to_string());
+                for entry in result.curriculum.iter().take(20) {
+                    lines.push(format!(
+                        "  tier={} zone={:?}: {}",
+                        entry.tier, entry.zone, entry.label
+                    ));
+                }
+            }
+
+            Ok(lines.join("\n"))
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("task panicked: {e}"), None))?
+        .map_err(|e| McpError::internal_error(e, None))?;
+
+        Ok(CallToolResult::success(vec![Content::text(result)]))
+    }
+
+    #[tool(
+        name = "assess_competence",
+        description = "Evaluate how well the workspace knows its domain. Runs gap analysis, schema discovery, Bloom's taxonomy evaluation, and produces a Dreyfus-level assessment report."
+    )]
+    async fn assess_competence(
+        &self,
+        Parameters(params): Parameters<AssessCompetenceParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let engine = self.state.get_engine(&params.workspace).await?;
+
+        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            use crate::bootstrap::competence::{CompetenceAssessor, CompetenceConfig};
+            use crate::bootstrap::expand::ExpansionResult;
+            use crate::bootstrap::prerequisite::{PrerequisiteAnalyzer, PrerequisiteConfig};
+            use crate::bootstrap::purpose::{DreyfusLevel, PurposeModel};
+
+            let target_level = params
+                .target_level
+                .as_deref()
+                .and_then(|l| match l.to_lowercase().as_str() {
+                    "novice" => Some(DreyfusLevel::Novice),
+                    "advanced_beginner" => Some(DreyfusLevel::AdvancedBeginner),
+                    "competent" => Some(DreyfusLevel::Competent),
+                    "proficient" => Some(DreyfusLevel::Proficient),
+                    "expert" => Some(DreyfusLevel::Expert),
+                    _ => None,
+                })
+                .unwrap_or(DreyfusLevel::Competent);
+
+            let purpose = PurposeModel {
+                domain: params.domain.clone(),
+                description: format!("Assessment for {}", params.domain),
+                seed_concepts: vec![],
+                competence_level: target_level,
+            };
+
+            // Find domain concepts: entities that participate in expand:* triples
+            let expand_preds: Vec<Option<crate::symbol::SymbolId>> = vec![
+                engine.resolve_symbol("expand:expanded_from").ok(),
+                engine.resolve_symbol("expand:subclass_of").ok(),
+                engine.resolve_symbol("expand:instance_of").ok(),
+                engine.resolve_symbol("expand:part_of").ok(),
+                engine.resolve_symbol("expand:has_prerequisite").ok(),
+                engine.resolve_symbol("expand:related_to").ok(),
+            ];
+
+            let mut domain_ids = std::collections::HashSet::new();
+            for pred_opt in &expand_preds {
+                if let Some(pred) = pred_opt {
+                    let pairs = engine.knowledge_graph().triples_for_predicate(*pred);
+                    for (subj, obj) in &pairs {
+                        domain_ids.insert(*subj);
+                        domain_ids.insert(*obj);
+                    }
+                }
+            }
+
+            let accepted_labels: Vec<String> = domain_ids
+                .iter()
+                .map(|id| engine.resolve_label(*id))
+                .filter(|label| !label.starts_with("expand:"))
+                .collect();
+
+            if accepted_labels.is_empty() {
+                return Err("No domain expansion concepts found. Run expand_domain first.".to_string());
+            }
+
+            let expansion_result = ExpansionResult {
+                concept_count: accepted_labels.len(),
+                relation_count: 0,
+                rejected_count: 0,
+                api_calls: 0,
+                domain_prototype_id: None,
+                microtheory_id: None,
+                provenance_ids: vec![],
+                accepted_labels,
+                boundary_rejects: vec![],
+            };
+
+            let prereq_config = PrerequisiteConfig {
+                min_edge_confidence: 0.15,
+                ..Default::default()
+            };
+            let prereq_analyzer =
+                PrerequisiteAnalyzer::new(&engine, prereq_config).map_err(|e| format!("{e}"))?;
+            let prereq_result = prereq_analyzer
+                .analyze(&expansion_result, &engine)
+                .map_err(|e| format!("{e}"))?;
+
+            let comp_config = CompetenceConfig::default();
+            let assessor =
+                CompetenceAssessor::new(&engine, comp_config).map_err(|e| format!("{e}"))?;
+            let report = assessor
+                .assess(&prereq_result, &purpose, &engine)
+                .map_err(|e| format!("{e}"))?;
+
+            let _ = engine.persist();
+
+            let mut lines = vec![
+                format!("Overall Dreyfus level: {}", report.overall_dreyfus),
+                format!("Overall score: {:.2}", report.overall_score),
+                format!("Recommendation: {}", report.recommendation),
+            ];
+
+            if !report.knowledge_areas.is_empty() {
+                lines.push("Knowledge areas:".to_string());
+                for ka in &report.knowledge_areas {
+                    lines.push(format!(
+                        "  {} — {} ({:.2}), triples={}, gaps={}",
+                        ka.name, ka.dreyfus_level, ka.score, ka.triple_count, ka.gap_count
+                    ));
+                }
+            }
+
+            if !report.remaining_gaps.is_empty() {
+                lines.push("Remaining gaps:".to_string());
+                for gap in &report.remaining_gaps {
+                    lines.push(format!("  - {gap}"));
+                }
+            }
+
+            Ok(lines.join("\n"))
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("task panicked: {e}"), None))?
+        .map_err(|e| McpError::internal_error(e, None))?;
+
+        Ok(CallToolResult::success(vec![Content::text(result)]))
+    }
+
+    #[tool(
+        name = "remove_triple",
+        description = "Remove a specific triple from the knowledge graph and SPARQL store. Triggers TMS retraction cascade if enabled."
+    )]
+    async fn remove_triple(
+        &self,
+        Parameters(params): Parameters<RemoveTripleParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let engine = self.state.get_engine(&params.workspace).await?;
+
+        let s = engine
+            .resolve_symbol(&params.subject)
+            .map_err(|e| McpError::invalid_params(format!("subject: {e}"), None))?;
+        let p = engine
+            .resolve_symbol(&params.predicate)
+            .map_err(|e| McpError::invalid_params(format!("predicate: {e}"), None))?;
+        let o = engine
+            .resolve_symbol(&params.object)
+            .map_err(|e| McpError::invalid_params(format!("object: {e}"), None))?;
+
+        let retraction = engine
+            .remove_triple(s, p, o)
+            .map_err(|e| McpError::internal_error(format!("{e}"), None))?;
+
+        let _ = engine.persist();
+
+        let msg = if retraction.retracted.is_empty() {
+            format!(
+                "No triple found: {} {} {}",
+                params.subject, params.predicate, params.object
+            )
+        } else {
+            format!(
+                "Removed: {} {} {} (cascade: {} retracted, {} re-evaluated, depth={})",
+                params.subject,
+                params.predicate,
+                params.object,
+                retraction.retracted.len(),
+                retraction.re_evaluated.len(),
+                retraction.cascade_depth
+            )
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(msg)]))
+    }
+
+    // ── Phase 2: Agent Introspection Tools ─────────────────────────
+
+    #[tool(
+        name = "agent_run_cycle",
+        description = "Run a single OODA cycle (Observe → Orient → Decide → Act) instead of the full agent loop. Returns detailed cycle results. Agent must have active goals."
+    )]
+    async fn agent_run_cycle(
+        &self,
+        Parameters(params): Parameters<AgentRunCycleParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let agent = self.state.get_agent(&params.workspace).await?;
+
+        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            let mut agent = agent.lock().map_err(|e| format!("agent lock: {e}"))?;
+            let cycle = agent.run_cycle().map_err(|e| format!("{e}"))?;
+            let _ = agent.persist_session();
+
+            let lines = vec![
+                format!("Cycle #{}", cycle.cycle_number),
+                format!("Observation: {:?}", cycle.observation),
+                format!("Orientation: {:?}", cycle.orientation),
+                format!("Decision: {:?}", cycle.decision),
+                format!("Action result: {:?}", cycle.action_result),
+            ];
+            Ok(lines.join("\n"))
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("task panicked: {e}"), None))?
+        .map_err(|e| McpError::internal_error(e, None))?;
+
+        Ok(CallToolResult::success(vec![Content::text(result)]))
+    }
+
+    #[tool(
+        name = "agent_goals",
+        description = "List the agent's current goals with their status, priority, and success criteria."
+    )]
+    async fn agent_goals(
+        &self,
+        Parameters(params): Parameters<WorkspaceParam>,
+    ) -> Result<CallToolResult, McpError> {
+        let agent = self.state.get_agent(&params.workspace).await?;
+
+        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            let agent = agent.lock().map_err(|e| format!("agent lock: {e}"))?;
+            let goals = agent.goals();
+
+            if goals.is_empty() {
+                return Ok("No goals.".to_string());
+            }
+
+            let lines: Vec<String> = goals
+                .iter()
+                .map(|g| {
+                    format!(
+                        "- [{}] \"{}\" (priority={}, criteria=\"{}\")",
+                        format!("{:?}", g.status),
+                        g.description,
+                        g.priority,
+                        g.success_criteria
+                    )
+                })
+                .collect();
+
+            Ok(format!("Goals ({}):\n{}", goals.len(), lines.join("\n")))
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("task panicked: {e}"), None))?
+        .map_err(|e| McpError::internal_error(e, None))?;
+
+        Ok(CallToolResult::success(vec![Content::text(result)]))
+    }
+
+    #[tool(
+        name = "agent_recall",
+        description = "Search the agent's episodic memory by query terms. Returns matching episodes with summaries and learnings."
+    )]
+    async fn agent_recall(
+        &self,
+        Parameters(params): Parameters<AgentRecallParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let engine = self.state.get_engine(&params.workspace).await?;
+        let agent = self.state.get_agent(&params.workspace).await?;
+        let query_terms = params.query;
+        let top_k = params.top_k.unwrap_or(5);
+
+        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            let agent = agent.lock().map_err(|e| format!("agent lock: {e}"))?;
+
+            // Resolve query terms to symbol IDs
+            let query_ids: Vec<crate::symbol::SymbolId> = query_terms
+                .iter()
+                .filter_map(|term| engine.resolve_symbol(term).ok())
+                .collect();
+
+            if query_ids.is_empty() {
+                return Ok("No query terms could be resolved to known symbols.".to_string());
+            }
+
+            let episodes = agent.recall(&query_ids, top_k).map_err(|e| format!("{e}"))?;
+
+            if episodes.is_empty() {
+                return Ok("No matching episodes found.".to_string());
+            }
+
+            let lines: Vec<String> = episodes
+                .iter()
+                .map(|ep| {
+                    let learnings: Vec<String> = ep
+                        .learnings
+                        .iter()
+                        .map(|l| engine.resolve_label(*l))
+                        .collect();
+                    format!(
+                        "- {} (learnings: {})",
+                        ep.summary,
+                        if learnings.is_empty() {
+                            "none".to_string()
+                        } else {
+                            learnings.join(", ")
+                        }
+                    )
+                })
+                .collect();
+
+            Ok(format!(
+                "Episodes ({}):\n{}",
+                episodes.len(),
+                lines.join("\n")
+            ))
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("task panicked: {e}"), None))?
+        .map_err(|e| McpError::internal_error(e, None))?;
+
+        Ok(CallToolResult::success(vec![Content::text(result)]))
+    }
+
+    #[tool(
+        name = "agent_psyche",
+        description = "Read the agent's current psyche state: persona, archetypes, OCEAN profile, shadow patterns, and self-integration."
+    )]
+    async fn agent_psyche(
+        &self,
+        Parameters(params): Parameters<WorkspaceParam>,
+    ) -> Result<CallToolResult, McpError> {
+        let agent = self.state.get_agent(&params.workspace).await?;
+
+        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            let agent = agent.lock().map_err(|e| format!("agent lock: {e}"))?;
+
+            match agent.psyche() {
+                Some(psyche) => {
+                    let mut lines = vec![
+                        format!("Persona: {}", psyche.persona.name),
+                        format!("Traits: {}", psyche.persona.traits.join(", ")),
+                        format!(
+                            "Archetypes: healer={:.1} sage={:.1} guardian={:.1} explorer={:.1}",
+                            psyche.archetypes.healer,
+                            psyche.archetypes.sage,
+                            psyche.archetypes.guardian,
+                            psyche.archetypes.explorer,
+                        ),
+                    ];
+
+                    let shadow_names: Vec<&str> = psyche
+                        .shadow
+                        .veto_patterns
+                        .iter()
+                        .chain(psyche.shadow.bias_patterns.iter())
+                        .map(|p| p.name.as_str())
+                        .collect();
+                    if !shadow_names.is_empty() {
+                        lines.push(format!("Shadow patterns: {}", shadow_names.join(", ")));
+                    }
+
+                    lines.push(format!(
+                        "Self-integration: {:.2} (dominant: {})",
+                        psyche.self_integration.individuation_level,
+                        psyche.self_integration.dominant_archetype,
+                    ));
+
+                    Ok(lines.join("\n"))
+                }
+                None => Ok("No psyche awakened. Run ritual_of_awakening first.".to_string()),
+            }
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("task panicked: {e}"), None))?
+        .map_err(|e| McpError::internal_error(e, None))?;
+
+        Ok(CallToolResult::success(vec![Content::text(result)]))
+    }
+
+    // ── Phase 3: Knowledge Introspection Tools ─────────────────────
+
+    #[tool(
+        name = "triples_of",
+        description = "Get all triples involving a symbol (both outgoing and incoming). Returns subject-predicate-object with confidence."
+    )]
+    async fn triples_of(
+        &self,
+        Parameters(params): Parameters<TriplesOfParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let engine = self.state.get_engine(&params.workspace).await?;
+
+        let sym_id = engine
+            .resolve_symbol(&params.entity)
+            .map_err(|e| McpError::invalid_params(format!("entity: {e}"), None))?;
+
+        let outgoing = engine.triples_from(sym_id);
+        let incoming = engine.triples_to(sym_id);
+
+        let mut lines = Vec::new();
+
+        if !outgoing.is_empty() {
+            lines.push(format!("Outgoing ({}):", outgoing.len()));
+            for t in &outgoing {
+                lines.push(format!(
+                    "  {} → {} → {} (conf={:.2})",
+                    engine.resolve_label(t.subject),
+                    engine.resolve_label(t.predicate),
+                    engine.resolve_label(t.object),
+                    t.confidence
+                ));
+            }
+        }
+
+        if !incoming.is_empty() {
+            lines.push(format!("Incoming ({}):", incoming.len()));
+            for t in &incoming {
+                lines.push(format!(
+                    "  {} → {} → {} (conf={:.2})",
+                    engine.resolve_label(t.subject),
+                    engine.resolve_label(t.predicate),
+                    engine.resolve_label(t.object),
+                    t.confidence
+                ));
+            }
+        }
+
+        if lines.is_empty() {
+            lines.push(format!("No triples involving \"{}\"", params.entity));
+        }
+
+        Ok(CallToolResult::success(vec![Content::text(
+            lines.join("\n"),
+        )]))
+    }
+
+    #[tool(
+        name = "provenance_of",
+        description = "Trace the derivation chain for a symbol: how it was derived, from what sources, at what confidence."
+    )]
+    async fn provenance_of(
+        &self,
+        Parameters(params): Parameters<ProvenanceOfParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let engine = self.state.get_engine(&params.workspace).await?;
+
+        let sym_id = engine
+            .resolve_symbol(&params.entity)
+            .map_err(|e| McpError::invalid_params(format!("entity: {e}"), None))?;
+
+        let records = engine
+            .provenance_of(sym_id)
+            .map_err(|e| McpError::internal_error(format!("{e}"), None))?;
+
+        if records.is_empty() {
+            return Ok(CallToolResult::success(vec![Content::text(format!(
+                "No provenance records for \"{}\"",
+                params.entity
+            ))]));
+        }
+
+        let lines: Vec<String> = records
+            .iter()
+            .map(|r| {
+                let sources: Vec<String> =
+                    r.sources.iter().map(|s| format!("{}", s.get())).collect();
+                format!(
+                    "- id={} kind={:?} confidence={:.2} depth={} sources=[{}] ts={}",
+                    r.id.map(|id| id.get()).unwrap_or(0),
+                    r.kind,
+                    r.confidence,
+                    r.depth,
+                    sources.join(", "),
+                    r.timestamp
+                )
+            })
+            .collect();
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Provenance for \"{}\" ({} records):\n{}",
+            params.entity,
+            records.len(),
+            lines.join("\n")
+        ))]))
+    }
+
+    #[tool(
+        name = "export_symbols",
+        description = "Export the full symbol table with IDs, labels, kinds, and creation timestamps."
+    )]
+    async fn export_symbols(
+        &self,
+        Parameters(params): Parameters<WorkspaceParam>,
+    ) -> Result<CallToolResult, McpError> {
+        let engine = self.state.get_engine(&params.workspace).await?;
+        let symbols = engine.export_symbol_table();
+
+        if symbols.is_empty() {
+            return Ok(CallToolResult::success(vec![Content::text(
+                "No symbols in workspace.",
+            )]));
+        }
+
+        let json = serde_json::to_string_pretty(&symbols)
+            .map_err(|e| McpError::internal_error(format!("json: {e}"), None))?;
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "{} symbols:\n{}",
+            symbols.len(),
+            json
+        ))]))
+    }
+
+    #[tool(
+        name = "infer_analogy",
+        description = "VSA analogy inference: 'A is to B as C is to ?' Returns ranked candidate symbols with similarity scores."
+    )]
+    async fn infer_analogy(
+        &self,
+        Parameters(params): Parameters<InferAnalogyParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let engine = self.state.get_engine(&params.workspace).await?;
+
+        let a = engine
+            .resolve_symbol(&params.a)
+            .map_err(|e| McpError::invalid_params(format!("a: {e}"), None))?;
+        let b = engine
+            .resolve_symbol(&params.b)
+            .map_err(|e| McpError::invalid_params(format!("b: {e}"), None))?;
+        let c = engine
+            .resolve_symbol(&params.c)
+            .map_err(|e| McpError::invalid_params(format!("c: {e}"), None))?;
+
+        let top_k = params.top_k.unwrap_or(5);
+
+        let results = engine
+            .infer_analogy(a, b, c, top_k)
+            .map_err(|e| McpError::internal_error(format!("{e}"), None))?;
+
+        if results.is_empty() {
+            return Ok(CallToolResult::success(vec![Content::text(
+                "No analogy candidates found.",
+            )]));
+        }
+
+        let lines: Vec<String> = results
+            .iter()
+            .map(|(sym_id, score)| {
+                format!(
+                    "  {} (similarity={:.3})",
+                    engine.resolve_label(*sym_id),
+                    score
+                )
+            })
+            .collect();
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "{} is to {} as {} is to:\n{}",
+            params.a,
+            params.b,
+            params.c,
+            lines.join("\n")
+        ))]))
+    }
+
     // ── Chat ────────────────────────────────────────────────────────
 
     #[tool(
@@ -1197,7 +2200,16 @@ impl rmcp::handler::server::ServerHandler for AkhMcpServer {
                  `list_workspaces` to see available workspaces, or `create_workspace` to make one. \
                  Use `status` to see the current state. Use `chat` for natural-language interaction \
                  through the full NLU pipeline, or `ask` for autonomous investigation. Use \
-                 `awaken` to bootstrap a workspace with domain knowledge."
+                 `awaken` to bootstrap a workspace with domain knowledge.\n\n\
+                 For fine-grained orchestration, use the granular bootstrap tools: \
+                 `resolve_identity` → `ritual_of_awakening` → `expand_domain` → \
+                 `analyze_prerequisites` → `assess_competence`. These let you control each stage \
+                 independently, handle errors per-stage, and fill gaps (e.g. provide identity data \
+                 when resolution fails).\n\n\
+                 Agent introspection: `agent_run_cycle` (single OODA step), `agent_goals`, \
+                 `agent_recall` (episodic memory), `agent_psyche`.\n\n\
+                 Knowledge introspection: `triples_of`, `provenance_of`, `export_symbols`, \
+                 `infer_analogy`, `remove_triple`."
                     .to_string(),
             ),
         }

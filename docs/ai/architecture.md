@@ -1,6 +1,6 @@
 # Akh-medu Architecture
 
-> Last updated: 2026-03-16 (Web UI: homepage with chat + awakening ceremony)
+> Last updated: 2026-03-18 (MCP: fine-grained orchestration surface — 36 tools)
 
 ## Overview
 
@@ -48,7 +48,7 @@ src/
 ├── tms.rs                         — truth maintenance system (Phase 9c): support sets, retraction cascades
 ├── symbol.rs                      — SymbolId (NonZeroU64), SymbolKind, allocator
 ├── pipeline.rs                    — composable stage pipelines
-├── mcp/                 1 module  — MCP server (feature-gated): AkhMcpServer with 13 tools for Claude Code integration (ADR-029)
+├── mcp/                 1 module  — MCP server (feature-gated): AkhMcpServer with 36 tools for Claude Code integration (ADR-029). Phase 1: granular bootstrap (resolve_identity, ritual_of_awakening, expand_domain, analyze_prerequisites, assess_competence, remove_triple). Phase 2: agent introspection (agent_run_cycle, agent_goals, agent_recall, agent_psyche). Phase 3: knowledge introspection (triples_of, provenance_of, export_symbols, infer_analogy).
 ├── service.rs                     — macOS launchd service management (plist generation, install/uninstall/start/stop/status)
 └── main.rs                        — CLI (clap) with 50+ subcommands
 

@@ -131,7 +131,7 @@ impl Default for WorkspaceConfig {
             language: default_language(),
             max_memory_mb: default_max_memory_mb(),
             max_symbols: default_max_symbols(),
-            seed_packs: vec!["identity".into(), "ontology".into(), "common-sense".into()],
+            seed_packs: vec!["identity".into(), "ontology".into(), "common-sense".into(), "computing".into()],
             shared_partitions: Vec::new(),
         }
     }

@@ -470,51 +470,10 @@ Output: "#
     )
 }
 
-// ── Output boundary prompt ─────────────────────────────────────────────────
-
-/// Build a prompt for the output boundary: facts + persona → natural prose.
-///
-/// Uses Qwen2.5-Instruct chat template format for reliable instruction following.
-pub fn build_response_prompt(
-    facts: &[String],
-    persona_name: &str,
-    traits: &[String],
-    tone: &[String],
-    context: Option<&str>,
-) -> String {
-    let traits_str = if traits.is_empty() {
-        "knowledgeable".to_string()
-    } else {
-        traits.join(", ")
-    };
-
-    let tone_str = if tone.is_empty() {
-        "concise and helpful".to_string()
-    } else {
-        tone.join(", ")
-    };
-
-    let facts_block: String = facts
-        .iter()
-        .map(|f| format!("- {f}"))
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    let context_line = context
-        .map(|c| format!("The user previously asked about {c}. "))
-        .unwrap_or_default();
-
-    format!(
-        "<|im_start|>system\n\
-         You are {persona_name}. You are {traits_str}. Be {tone_str}.\n\
-         Rewrite facts as 2-4 sentences of natural prose. Say nothing not in the facts.\n\
-         No lists, no numbering, no hashtags. Always refer to yourself as {persona_name}.<|im_end|>\n\
-         <|im_start|>user\n\
-         {context_line}Summarize these facts conversationally:\n\
-         {facts_block}<|im_end|>\n\
-         <|im_start|>assistant\n"
-    )
-}
+// ── Output boundary prompt — dialogue acts only ───────────────────────────
+//
+// The LLM is NOT used for knowledge responses (the narrative grammar handles
+// that). Only short dialogue acts (greeting, farewell) use LLM generation.
 
 /// Build a short prompt for dialogue acts (greeting, farewell, etc.).
 ///
@@ -541,30 +500,6 @@ pub fn build_dialogue_prompt(
          Respond with exactly one sentence. No hashtags. Always introduce yourself as {persona_name}.<|im_end|>\n\
          <|im_start|>user\n\
          Generate a {act} response.{context_line}<|im_end|>\n\
-         <|im_start|>assistant\n"
-    )
-}
-
-/// Build a prompt for framing an investigation.
-///
-/// Uses Qwen2.5-Instruct chat template format.
-pub fn build_investigation_prompt(
-    topic: &str,
-    persona_name: &str,
-    traits: &[String],
-) -> String {
-    let traits_str = if traits.is_empty() {
-        "knowledgeable".to_string()
-    } else {
-        traits.join(", ")
-    };
-
-    format!(
-        "<|im_start|>system\n\
-         You are {persona_name}, a knowledge engine that is {traits_str}.\n\
-         Respond with exactly one sentence. No hashtags.<|im_end|>\n\
-         <|im_start|>user\n\
-         Acknowledge that you'll investigate: {topic}<|im_end|>\n\
          <|im_start|>assistant\n"
     )
 }
@@ -626,35 +561,11 @@ mod tests {
     }
 
     #[test]
-    fn response_prompt_contains_facts() {
-        let facts = vec!["miette is an error library".to_string(), "miette uses diagnostic trait".to_string()];
-        let prompt = build_response_prompt(&facts, "Akh", &["curious".into()], &["warm".into()], None);
-        assert!(prompt.contains("miette is an error library"));
-        assert!(prompt.contains("miette uses diagnostic trait"));
-        assert!(prompt.contains("Akh"));
-        assert!(prompt.contains("curious"));
-    }
-
-    #[test]
-    fn response_prompt_with_context() {
-        let facts = vec!["rust is a language".to_string()];
-        let prompt = build_response_prompt(&facts, "Akh", &[], &[], Some("error handling"));
-        assert!(prompt.contains("error handling"));
-    }
-
-    #[test]
     fn dialogue_prompt_contains_act() {
         let prompt = build_dialogue_prompt("greeting", "Akh", &["warm".into()], None);
         assert!(prompt.contains("greeting"));
         assert!(prompt.contains("Akh"));
         assert!(prompt.contains("warm"));
-    }
-
-    #[test]
-    fn investigation_prompt_contains_topic() {
-        let prompt = build_investigation_prompt("miette", "Akh", &["curious".into()]);
-        assert!(prompt.contains("miette"));
-        assert!(prompt.contains("Akh"));
     }
 
     // ── JSON → AbsTree parsing ─────────────────────────────────────────
