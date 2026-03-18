@@ -311,8 +311,19 @@ pub fn resolve_identity(
         return Ok(knowledge);
     }
 
+    // The regex may capture preamble like "the Egyptian god Ptah" — try extracting
+    // just the proper noun (last capitalized word) as a fallback for static lookup.
+    let short_name = extract_proper_noun(&identity_ref.name);
+    if let Some(ref short) = short_name {
+        if let Some(knowledge) = resolve_from_static_tables(short) {
+            return Ok(knowledge);
+        }
+    }
+
+    let lookup_name = short_name.as_deref().unwrap_or(&identity_ref.name);
+
     // Try Wikidata.
-    if let Some((description, categories)) = resolve_from_wikidata(&identity_ref.name) {
+    if let Some((description, categories)) = resolve_from_wikidata(lookup_name) {
         let culture = classify_culture(&identity_ref.name, &description);
         let traits = extract_traits_from_description(&description);
         let archetypes = traits_to_archetypes(&traits);
@@ -328,8 +339,8 @@ pub fn resolve_identity(
     }
 
     // Try Wikipedia.
-    if let Some(description) = resolve_from_wikipedia(&identity_ref.name) {
-        let culture = classify_culture(&identity_ref.name, &description);
+    if let Some(description) = resolve_from_wikipedia(lookup_name) {
+        let culture = classify_culture(lookup_name, &description);
         let traits = extract_traits_from_description(&description);
         let archetypes = traits_to_archetypes(&traits);
         return Ok(CharacterKnowledge {
@@ -348,6 +359,48 @@ pub fn resolve_identity(
         name: identity_ref.name.clone(),
         reason: "not found in static tables, Wikidata, or Wikipedia".to_string(),
     })
+}
+
+/// Extract the proper noun from a descriptive phrase like "the Egyptian god Ptah".
+///
+/// Strips leading articles and common descriptor patterns to find the core name.
+/// Returns `None` if the input is already a single word or no proper noun is found.
+fn extract_proper_noun(phrase: &str) -> Option<String> {
+    let words: Vec<&str> = phrase.split_whitespace().collect();
+    if words.len() <= 1 {
+        return None;
+    }
+
+    // Try the last word if it starts uppercase (most common: "the X god Ptah")
+    if let Some(last) = words.last() {
+        if last.chars().next().is_some_and(|c| c.is_uppercase()) {
+            return Some(last.to_string());
+        }
+    }
+
+    // Try stripping leading "the/a/an" and common descriptors
+    let skip = &["the", "a", "an"];
+    let descriptors = &[
+        "god", "goddess", "deity", "hero", "character", "figure", "spirit",
+        "titan", "king", "queen", "prince", "princess", "saint", "prophet",
+        "egyptian", "greek", "roman", "norse", "celtic", "hindu", "japanese",
+        "chinese", "sumerian", "babylonian", "aztec", "mayan",
+    ];
+
+    let remaining: Vec<&str> = words
+        .iter()
+        .filter(|w| {
+            let lower = w.to_lowercase();
+            !skip.contains(&lower.as_str()) && !descriptors.contains(&lower.as_str())
+        })
+        .copied()
+        .collect();
+
+    if remaining.is_empty() || remaining.len() == words.len() {
+        return None;
+    }
+
+    Some(remaining.join(" "))
 }
 
 /// Resolve from Wikidata search API.
