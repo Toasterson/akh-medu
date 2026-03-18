@@ -1,0 +1,29 @@
+{
+  "description": "Akh-medu knowledge graph session hooks for context loading and consolidation",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/session-context.sh",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "prompt",
+            "prompt": "The akh-medu knowledge graph is available for persisting session insights. If important architectural decisions, bug discoveries, or design patterns were discussed in this conversation, note them briefly so they can be stored later. Return {\"decision\": \"approve\", \"reason\": \"session complete\"} as valid JSON.",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

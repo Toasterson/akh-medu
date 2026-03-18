@@ -51,14 +51,21 @@ impl DurableStore {
         Ok(())
     }
 
-    /// Read a value by key. Returns `Ok(None)` if the key doesn't exist.
+    /// Read a value by key. Returns `Ok(None)` if the key doesn't exist
+    /// or if the table hasn't been created yet (fresh database).
     pub fn get(&self, key: &[u8]) -> StoreResult<Option<Vec<u8>>> {
         let txn = self.db.begin_read().map_err(|e| StoreError::Redb {
             message: format!("begin_read failed: {e}"),
         })?;
-        let table = txn.open_table(META_TABLE).map_err(|e| StoreError::Redb {
-            message: format!("open_table failed: {e}"),
-        })?;
+        let table = match txn.open_table(META_TABLE) {
+            Ok(t) => t,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
+            Err(e) => {
+                return Err(StoreError::Redb {
+                    message: format!("open_table failed: {e}"),
+                });
+            }
+        };
         let result = table.get(key).map_err(|e| StoreError::Redb {
             message: format!("get failed: {e}"),
         })?;
@@ -71,9 +78,15 @@ impl DurableStore {
             message: format!("begin_write failed: {e}"),
         })?;
         let existed = {
-            let mut table = txn.open_table(META_TABLE).map_err(|e| StoreError::Redb {
-                message: format!("open_table failed: {e}"),
-            })?;
+            let mut table = match txn.open_table(META_TABLE) {
+                Ok(t) => t,
+                Err(redb::TableError::TableDoesNotExist(_)) => return Ok(false),
+                Err(e) => {
+                    return Err(StoreError::Redb {
+                        message: format!("open_table failed: {e}"),
+                    });
+                }
+            };
             let result = table.remove(key).map_err(|e| StoreError::Redb {
                 message: format!("remove failed: {e}"),
             })?;
@@ -119,9 +132,15 @@ impl DurableStore {
         let txn = self.db.begin_read().map_err(|e| StoreError::Redb {
             message: format!("begin_read failed: {e}"),
         })?;
-        let table = txn.open_table(META_TABLE).map_err(|e| StoreError::Redb {
-            message: format!("open_table failed: {e}"),
-        })?;
+        let table = match txn.open_table(META_TABLE) {
+            Ok(t) => t,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
+            Err(e) => {
+                return Err(StoreError::Redb {
+                    message: format!("open_table failed: {e}"),
+                });
+            }
+        };
 
         // Compute the exclusive upper bound by incrementing the last byte.
         // If the last byte is 0xFF, try the second-to-last, etc.

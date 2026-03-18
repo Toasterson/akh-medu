@@ -64,6 +64,10 @@ impl KnowledgeGraph {
     ///
     /// Creates nodes for subject and object if they don't exist.
     /// Adds an edge from subject → object with the predicate as edge data.
+    ///
+    /// **Idempotent**: if an edge with the same (subject, predicate, object)
+    /// already exists, updates its confidence (max of old and new) and
+    /// provenance instead of creating a duplicate edge.
     pub fn insert_triple(&self, triple: &Triple) -> GraphResult<()> {
         let subj_idx = self.ensure_node(triple.subject);
         let obj_idx = self.ensure_node(triple.object);
@@ -73,6 +77,25 @@ impl KnowledgeGraph {
 
         {
             let mut graph = self.graph.write().expect("graph lock poisoned");
+
+            // Check for existing edge with same predicate between these nodes
+            let existing = graph
+                .edges_directed(subj_idx, Direction::Outgoing)
+                .find(|e| e.target() == obj_idx && e.weight().predicate == triple.predicate)
+                .map(|e| e.id());
+
+            if let Some(edge_id) = existing {
+                // Update existing edge: take max confidence, update provenance
+                if let Some(weight) = graph.edge_weight_mut(edge_id) {
+                    weight.confidence = weight.confidence.max(edge_data.confidence);
+                    if edge_data.provenance_id.is_some() {
+                        weight.provenance_id = edge_data.provenance_id;
+                    }
+                    weight.timestamp = edge_data.timestamp;
+                }
+                return Ok(());
+            }
+
             graph.add_edge(subj_idx, obj_idx, edge_data);
         }
 
@@ -555,5 +578,46 @@ mod tests {
         let pairs = kg.triples_for_predicate(r);
         assert_eq!(pairs.len(), 1);
         assert_eq!(pairs[0], (a, c));
+    }
+
+    #[test]
+    fn insert_triple_is_idempotent() {
+        let kg = KnowledgeGraph::new();
+        let sun = sym(1);
+        let is_a = sym(2);
+        let star = sym(3);
+
+        // Insert the same triple 100 times
+        for _ in 0..100 {
+            kg.insert_triple(&Triple::new(sun, is_a, star)).unwrap();
+        }
+
+        // Should have exactly 1 triple, not 100
+        assert_eq!(kg.triple_count(), 1);
+        assert_eq!(kg.objects_of(sun, is_a), vec![star]);
+        assert_eq!(kg.triples_for_predicate(is_a).len(), 1);
+    }
+
+    #[test]
+    fn idempotent_insert_takes_max_confidence() {
+        let kg = KnowledgeGraph::new();
+        let a = sym(1);
+        let r = sym(2);
+        let b = sym(3);
+
+        let mut t1 = Triple::new(a, r, b);
+        t1.confidence = 0.5;
+        kg.insert_triple(&t1).unwrap();
+
+        let mut t2 = Triple::new(a, r, b);
+        t2.confidence = 0.9;
+        kg.insert_triple(&t2).unwrap();
+
+        // Still one triple, but confidence should be max(0.5, 0.9) = 0.9
+        assert_eq!(kg.triple_count(), 1);
+
+        let triples = kg.triples_from(a);
+        assert_eq!(triples.len(), 1);
+        assert!((triples[0].confidence - 0.9).abs() < f32::EPSILON);
     }
 }

@@ -62,37 +62,30 @@ try to express options on how to handle issues for calling functions
 
 ## Agent Roadmap
 
-Phases 1-7 are complete (engine + agent scaffold). The phases below evolve it into a real autonomous agent.
-Detailed completion checklists for each phase live under `docs/ai/phases/`.
+Phases 1-15a + 25a-25e are complete. Detailed completion checklists live under `docs/ai/phases/`.
+Plans live under `docs/ai/plans/`, ADRs under `docs/ai/decisions/`.
 
 ### Completed Phases
 
-| Phase | Description | Details |
-|-------|-------------|---------|
-| 8a-8f | Agent Autonomy (wiring, goals, decisions, persistence, tools, planning) | [phase-8](docs/ai/phases/phase-8-agent-autonomy.md) |
-| 9 | Cyc-Inspired HOL Enhancements (microtheories, TMS, defeasibility, argumentation) | [plan](docs/ai/plans/2026-02-17-phase9-cyc-inspired.md), [gap analysis](docs/ai/decisions/001-cyc-paper-analysis.md) |
-| 10 | Generative Functions (Rust code generation, pattern learning) | [plan](docs/ai/plans/2026-02-17-phase10-code-generation.md), [research](docs/ai/decisions/002-code-generation-research.md) |
-| 11 | Autonomous Task System (drives, HTN, argumentation, metacognition) + 11i-11j lifeform extensions | [plan](docs/ai/plans/2026-02-17-phase11-autonomous-tasks.md), [research](docs/ai/decisions/003-autonomous-tasks-research.md) |
-| 12a-12g | Interaction (channels, grounded dialogue, constraints, social KG, oxifed, explanations, multi-agent) | [phase-12](docs/ai/phases/phase-12-interaction.md), [plan](docs/ai/plans/2026-02-17-phase12-interaction.md) |
-| 13a-13g | Personal Assistant (email, spam, triage, extraction, PIM, calendar, preferences) | [phase-13](docs/ai/phases/phase-13-personal-assistant.md), [plan](docs/ai/plans/2026-02-17-phase13-personal-assistant.md) |
-| 14a-14h | Identity, domain expansion, prerequisite discovery, ZPD classification, resource discovery, curriculum ingestion, competence assessment, bootstrap orchestrator | [phase-14](docs/ai/phases/phase-14-identity.md), [plan](docs/ai/plans/2026-02-17-phase14-bootstrapping.md), [NLU plan](docs/ai/plans/2026-02-24-phase14-nlu-extension.md) |
-| 15a | Causal World Model (schemas, preconditions, effects, VSA encoding) | [phase-15](docs/ai/phases/phase-15-causal.md), [plan](docs/ai/plans/2026-02-22-phase15-causal-world-model.md) |
-| 25a-25e | People & Contacts (identity resolution, relationships, per-person memory, style profiles, calendar integration) | [phase-25](docs/ai/phases/phase-25-people-contacts.md), [ADR](docs/ai/decisions/028-people-contacts-architecture.md) |
+- **1-7**: Engine + agent scaffold
+- **8a-8f**: Agent Autonomy — [phase](docs/ai/phases/phase-8-agent-autonomy.md), [plan](docs/ai/plans/2026-02-17-phase8-agent-autonomy.md)
+- **9**: Cyc-Inspired HOL — [plan](docs/ai/plans/2026-02-17-phase9-cyc-inspired.md), [ADR 001](docs/ai/decisions/001-cyc-paper-analysis.md)
+- **10**: Generative Functions — [plan](docs/ai/plans/2026-02-17-phase10-code-generation.md), [ADR 002](docs/ai/decisions/002-code-generation-research.md)
+- **11 + 11i-11j**: Autonomous Tasks + lifeform extensions — [plan](docs/ai/plans/2026-02-17-phase11-autonomous-tasks.md), [ADR 003](docs/ai/decisions/003-autonomous-tasks-research.md)
+- **12a-12g**: Interaction — [phase](docs/ai/phases/phase-12-interaction.md), [plan](docs/ai/plans/2026-02-17-phase12-interaction.md)
+- **13a-13g**: Personal Assistant — [phase](docs/ai/phases/phase-13-personal-assistant.md), [plan](docs/ai/plans/2026-02-17-phase13-personal-assistant.md)
+- **14a-14m**: Identity, bootstrapping, NLU (all 4 tiers) — [phase](docs/ai/phases/phase-14-identity.md), [bootstrap plan](docs/ai/plans/2026-02-17-phase14-bootstrapping.md), [NLU plan](docs/ai/plans/2026-02-24-phase14-nlu-extension.md), [ADR 022](docs/ai/decisions/022-nlu-architecture.md)
+- **15a**: Causal World Model — [phase](docs/ai/phases/phase-15-causal.md), [plan](docs/ai/plans/2026-02-22-phase15-causal-world-model.md)
+- **25a-25e**: People & Contacts — [phase](docs/ai/phases/phase-25-people-contacts.md), [ADR 028](docs/ai/decisions/028-people-contacts-architecture.md)
 
 ### Upcoming Phases
 
-| Phase | Description | Plan | Research |
-|-------|-------------|------|----------|
-| 14i | Community recipe sharing | [plan](docs/ai/plans/2026-02-17-phase14-bootstrapping.md) | [research](docs/ai/decisions/005-bootstrapping-research.md) |
-| 14j-14m | NLU Extension (rule parser, micro-ML NER, small LLM translator, VSA parse ranker) | [plan](docs/ai/plans/2026-02-24-phase14-nlu-extension.md) | [ADR](docs/ai/decisions/022-nlu-architecture.md) |
-| Release Alpha | Kubernetes-deployed autonomous agent (Docker, Helm, Prometheus, continuous learning) | [plan](docs/ai/plans/2026-02-23-release-alpha.md) | — |
-| 15b-15d | Event calculus, counterfactual reasoning, prediction tracking, temporal experience | [plan](docs/ai/plans/2026-02-22-phase15-causal-world-model.md) | [research](docs/ai/decisions/020-predictive-planning-epistemic-research.md) |
-| 16 | Predictive Multi-Step Planning (MCTS + TD Learning) | [plan](docs/ai/plans/2026-02-22-phase16-predictive-planning.md) | [research](docs/ai/decisions/020-predictive-planning-epistemic-research.md) |
-| 17 | Dempster-Shafer Evidence Theory & Belief Intervals | [plan](docs/ai/plans/2026-02-22-phase17-evidence-theory.md) | [research](docs/ai/decisions/020-predictive-planning-epistemic-research.md) |
-| 18 | Source Reliability, ACH & Credibility Assessment | [plan](docs/ai/plans/2026-02-22-phase18-source-reliability.md) | [research](docs/ai/decisions/020-predictive-planning-epistemic-research.md) |
-| 19 | Epistemic Logic & Theory of Mind | [plan](docs/ai/plans/2026-02-22-phase19-epistemic-reasoning.md) | [research](docs/ai/decisions/020-predictive-planning-epistemic-research.md) |
-| 20 | Active Inference OODA Enhancement + Proprioception | [plan](docs/ai/plans/2026-02-22-phase20-active-inference.md) | [research](docs/ai/decisions/020-predictive-planning-epistemic-research.md) |
-| 21 | Game-Theoretic Social Reasoning | [plan](docs/ai/plans/2026-02-22-phase21-game-theoretic-reasoning.md) | [research](docs/ai/decisions/020-predictive-planning-epistemic-research.md) |
-| 22 | Akhipedia: Internal Knowledge Wiki | [plan](docs/ai/plans/2026-02-23-phase22-akhipedia.md) | [ADR](docs/ai/decisions/021-akhipedia-architecture.md) |
-| 23 | Affective System (emotional valence, mood modulation, felt urgency) | [plan](docs/ai/plans/2026-02-24-phase23-affective-system.md) | — |
-| 24 | Sensory Grounding (image processing, audio, embodied perception) | [plan](docs/ai/plans/2026-02-24-phase24-sensory-grounding.md) | — |
+See individual plan docs for details. Phases are ordered by dependency, not priority.
+
+- **14i**: Community recipe sharing — [plan](docs/ai/plans/2026-02-17-phase14-bootstrapping.md) *(not blocking Release Alpha)*
+- **Release Alpha**: K8s deployment — [plan](docs/ai/plans/2026-02-23-release-alpha.md)
+- **15b-15d**: Event calculus, counterfactuals, temporal experience — [plan](docs/ai/plans/2026-02-22-phase15-causal-world-model.md)
+- **16-21**: Predictive planning, evidence theory, source reliability, epistemic logic, active inference, game theory — [research](docs/ai/decisions/020-predictive-planning-epistemic-research.md)
+- **22**: Akhipedia — [plan](docs/ai/plans/2026-02-23-phase22-akhipedia.md), [ADR 021](docs/ai/decisions/021-akhipedia-architecture.md)
+- **23**: Affective System — [plan](docs/ai/plans/2026-02-24-phase23-affective-system.md)
+- **24**: Sensory Grounding — [plan](docs/ai/plans/2026-02-24-phase24-sensory-grounding.md)
