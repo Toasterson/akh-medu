@@ -1022,6 +1022,13 @@ pub fn derivation_kind_prose(kind: &DerivationKind) -> String {
                 "evidence combined: {source_count} sources, conflict={conflict_degree:.2}, Bel={belief:.2}, Pl={plausibility:.2}"
             )
         }
+        DerivationKind::SourceReliabilityAssessed {
+            reliability,
+            credibility,
+            ..
+        } => {
+            format!("source reliability: {reliability}{credibility}")
+        }
     }
 }
 

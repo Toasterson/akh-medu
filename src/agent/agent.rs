@@ -218,6 +218,8 @@ pub struct Agent {
     pub(crate) value_function: super::state_value::ValueFunction,
     /// Evidence manager — Dempster-Shafer belief intervals (Phase 17).
     pub(crate) evidence_manager: super::evidence::EvidenceManager,
+    /// Source reliability manager — Admiralty ratings + Bayesian trust (Phase 18a).
+    pub(crate) reliability_manager: super::source_reliability::SourceReliabilityManager,
     /// Contact manager — unified people/identity resolution (Phase 25a).
     pub(crate) contact_manager: super::contact::ContactManager,
     /// Relationship graph — interpersonal relationships between contacts (Phase 25b).
@@ -470,6 +472,7 @@ impl Agent {
             prediction_tracker: super::counterfactual::PredictionTracker::default(),
             value_function: super::state_value::ValueFunction::default(),
             evidence_manager: super::evidence::EvidenceManager::new(),
+            reliability_manager: super::source_reliability::SourceReliabilityManager::new(),
             contact_manager: super::contact::ContactManager::default(),
             relationship_graph: super::contact_rel::RelationshipGraph::default(),
             person_memory: super::contact_memory::PersonMemoryIndex::new(100),
@@ -1271,6 +1274,16 @@ impl Agent {
     /// Get a mutable reference to the evidence manager.
     pub fn evidence_manager_mut(&mut self) -> &mut super::evidence::EvidenceManager {
         &mut self.evidence_manager
+    }
+
+    /// Get a reference to the source reliability manager.
+    pub fn reliability_manager(&self) -> &super::source_reliability::SourceReliabilityManager {
+        &self.reliability_manager
+    }
+
+    /// Get a mutable reference to the source reliability manager.
+    pub fn reliability_manager_mut(&mut self) -> &mut super::source_reliability::SourceReliabilityManager {
+        &mut self.reliability_manager
     }
 
     /// Ensure an interlocutor is registered, auto-creating on first interaction.
@@ -2346,6 +2359,11 @@ impl Agent {
                 })?;
         }
 
+        // Persist reliability manager (Phase 18a).
+        if !self.reliability_manager.sources.is_empty() {
+            let _ = self.reliability_manager.persist(&self.engine);
+        }
+
         // Persist evidence manager (Phase 17).
         if self.evidence_manager.claim_count() > 0 {
             let _ = self.evidence_manager.persist(&self.engine);
@@ -2639,6 +2657,9 @@ impl Agent {
                 super::event_calculus::EventCalculusEngine::new(&engine).unwrap_or_default()
             });
 
+        // Restore reliability manager (Phase 18a).
+        let reliability_manager = super::source_reliability::SourceReliabilityManager::restore(&engine);
+
         // Restore evidence manager (Phase 17).
         let evidence_manager = super::evidence::EvidenceManager::restore(&engine);
 
@@ -2744,6 +2765,7 @@ impl Agent {
             prediction_tracker,
             value_function,
             evidence_manager,
+            reliability_manager,
             contact_manager,
             relationship_graph,
             person_memory,

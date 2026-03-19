@@ -60,6 +60,7 @@ pub mod reflect;
 pub mod resource;
 pub mod semantic_enrichment;
 pub mod sleep;
+pub mod source_reliability;
 pub mod state_value;
 pub mod synthesize;
 pub mod synthesize_abs;
@@ -176,6 +177,10 @@ pub use resource::{EffortCase, EffortEstimate, EffortIndex, ImprovementHistory, 
 pub use semantic_enrichment::{EnrichmentResult, SemanticPredicates};
 pub use mcts::{MctsConfig, MctsNode, MctsPlanner, MctsReflection, MctsResult, prune_tree};
 pub use sleep::{ConsolidationPhase, SleepConfig, SleepCycle, SleepMetrics};
+pub use source_reliability::{
+    AdmiraltyRating, BetaDistribution, InformationCredibility, ReliabilityError,
+    ReliabilityResult, SourceReliability, SourceReliabilityManager, TrustDimension, TrustModel,
+};
 pub use state_value::{
     AgentState, Reward, StateRoleVectors, ValueFunction, encode_state, encode_state_with_vsa,
 };

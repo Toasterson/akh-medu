@@ -585,6 +585,28 @@ pub struct CounterfactualParams {
     pub hypothetical_action: String,
 }
 
+// ── Source Reliability Parameter Structs (Phase 18a) ─────────────────────
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct RateSourceParams {
+    #[schemars(description = "Target workspace (default: \"default\")")]
+    #[serde(default = "default_workspace")]
+    pub workspace: String,
+    #[schemars(description = "Source entity label to rate")]
+    pub source: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct VerifySourceClaimParams {
+    #[schemars(description = "Target workspace (default: \"default\")")]
+    #[serde(default = "default_workspace")]
+    pub workspace: String,
+    #[schemars(description = "Source entity label")]
+    pub source: String,
+    #[schemars(description = "Was the claim true?")]
+    pub was_true: bool,
+}
+
 // ── Evidence Parameter Structs (Phase 17) ────────────────────────────────
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -2946,6 +2968,112 @@ impl AkhMcpServer {
         Ok(CallToolResult::success(vec![Content::text(result)]))
     }
 
+    // ── Source Reliability (Phase 18a) ─────────────────────────────
+
+    #[tool(
+        name = "rate_source",
+        description = "Get the Admiralty reliability rating for a source. Shows NATO source reliability (A-F) derived from Bayesian trust model (competence, benevolence, integrity dimensions)."
+    )]
+    async fn rate_source(
+        &self,
+        Parameters(params): Parameters<RateSourceParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let engine = self.state.get_engine(&params.workspace).await?;
+        let agent = self.state.get_agent(&params.workspace).await?;
+        let source_label = params.source.clone();
+
+        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            let source_id = engine
+                .resolve_or_create_entity(&source_label)
+                .map_err(|e| format!("{e}"))?;
+
+            let agent = agent.lock().map_err(|e| format!("agent lock: {e}"))?;
+            let rating = agent.reliability_manager().rate_source(source_id);
+            let trust = agent.reliability_manager().sources.get(&source_id.get());
+
+            let mut lines = Vec::new();
+            lines.push(format!(
+                "Source \"{source_label}\": {} ({})",
+                rating.label(),
+                rating.source.description()
+            ));
+
+            if let Some(t) = trust {
+                lines.push(format!(
+                    "  Trust: competence={:.2}, benevolence={:.2}, integrity={:.2}",
+                    t.competence.expected(),
+                    t.benevolence.expected(),
+                    t.integrity.expected()
+                ));
+                lines.push(format!(
+                    "  Overall: {:.2} ({} observations)",
+                    t.overall_trust(),
+                    t.observation_count
+                ));
+            } else {
+                lines.push("  No trust data — source not yet observed".into());
+            }
+
+            Ok(lines.join("\n"))
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("task panicked: {e}"), None))?
+        .map_err(|e| McpError::internal_error(e, None))?;
+
+        Ok(CallToolResult::success(vec![Content::text(result)]))
+    }
+
+    #[tool(
+        name = "verify_source_claim",
+        description = "Record that a claim from a source was verified as true or false. Updates the source's Bayesian trust model (competence and integrity dimensions)."
+    )]
+    async fn verify_source_claim(
+        &self,
+        Parameters(params): Parameters<VerifySourceClaimParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let engine = self.state.get_engine(&params.workspace).await?;
+        let agent = self.state.get_agent(&params.workspace).await?;
+        let source_label = params.source.clone();
+        let was_true = params.was_true;
+
+        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            let source_id = engine
+                .resolve_or_create_entity(&source_label)
+                .map_err(|e| format!("{e}"))?;
+
+            let mut agent = agent.lock().map_err(|e| format!("agent lock: {e}"))?;
+            agent.reliability_manager_mut().verify_claim(source_id, was_true);
+
+            let rating = agent.reliability_manager().rate_source(source_id);
+            let trust = agent.reliability_manager().sources.get(&source_id.get());
+
+            let verdict = if was_true { "TRUE" } else { "FALSE" };
+            let mut lines = Vec::new();
+            lines.push(format!(
+                "Claim from \"{source_label}\" verified as {verdict}"
+            ));
+            lines.push(format!(
+                "  Updated rating: {} ({})",
+                rating.label(),
+                rating.source.description()
+            ));
+            if let Some(t) = trust {
+                lines.push(format!(
+                    "  Trust: overall={:.2}, {} observations",
+                    t.overall_trust(),
+                    t.observation_count
+                ));
+            }
+
+            Ok(lines.join("\n"))
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("task panicked: {e}"), None))?
+        .map_err(|e| McpError::internal_error(e, None))?;
+
+        Ok(CallToolResult::success(vec![Content::text(result)]))
+    }
+
     // ── Planning (Phase 16) ────────────────────────────────────────
 
     #[tool(
@@ -3101,7 +3229,9 @@ impl rmcp::handler::server::ServerHandler for AkhMcpServer {
                  of X?), `prediction_accuracy` (causal model accuracy stats and refinement suggestions).\n\n\
                  Planning: `mcts_plan` (multi-step MCTS planning using causal world model and TD values).\n\n\
                  Evidence theory: `add_evidence` (submit evidence for/against a claim from a source), \
-                 `assess_evidence` (Dempster-Shafer belief interval assessment with conflict detection)."
+                 `assess_evidence` (Dempster-Shafer belief interval assessment with conflict detection).\n\n\
+                 Source reliability: `rate_source` (NATO Admiralty rating from Bayesian trust model), \
+                 `verify_source_claim` (update trust when claim verified true/false)."
                     .to_string(),
             ),
         }

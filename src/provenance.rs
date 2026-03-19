@@ -575,6 +575,15 @@ pub enum DerivationKind {
         belief: f32,
         plausibility: f32,
     },
+
+    // --- Phase 18: Source Reliability ------------------------------------------
+
+    /// A source's reliability was assessed (Phase 18a).
+    SourceReliabilityAssessed {
+        source_id_raw: u64,
+        reliability: String,
+        credibility: String,
+    },
 }
 
 impl DerivationKind {
@@ -663,6 +672,7 @@ impl DerivationKind {
             Self::CounterfactualReasoning { .. } => 79,
             Self::MctsPlanning { .. } => 80,
             Self::EvidenceCombination { .. } => 81,
+            Self::SourceReliabilityAssessed { .. } => 82,
         }
     }
 }
