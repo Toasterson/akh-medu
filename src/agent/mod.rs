@@ -51,6 +51,7 @@ pub mod nlp;
 pub mod ooda;
 pub mod pim;
 pub mod plan;
+pub mod plan_monitor;
 pub mod preference;
 pub mod priority_reasoning;
 pub mod project;
@@ -154,6 +155,7 @@ pub use pim::{
     PimResult, Recurrence,
 };
 pub use plan::{Plan, PlanStatus, PlanStep, StepStatus};
+pub use plan_monitor::{DeviationSeverity, PlanMonitor, plan_from_mcts, post_action_update};
 pub use preference::{
     FeedbackSignal, JitirResult, PreferenceError, PreferenceManager, PreferencePredicates,
     PreferenceResult, PreferenceReview, PreferenceRoleVectors, ProactivityLevel, Suggestion,
