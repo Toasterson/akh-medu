@@ -1059,6 +1059,15 @@ pub fn derivation_kind_prose(kind: &DerivationKind) -> String {
                 "active inference: surprise={surprise:.2}, pragmatic={pragmatic:.2}, epistemic={epistemic:.2}, EFE={efe:.2}"
             )
         }
+        DerivationKind::GameTheoreticModel {
+            game_type,
+            equilibria_count,
+            recommended_strategy,
+        } => {
+            format!(
+                "game theory: {game_type}, {equilibria_count} equilibria, strategy: {recommended_strategy}"
+            )
+        }
     }
 }
 

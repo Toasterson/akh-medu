@@ -62,7 +62,7 @@ try to express options on how to handle issues for calling functions
 
 ## Agent Roadmap
 
-Phases 1-20 + 25a-25e are complete. Detailed completion checklists live under `docs/ai/phases/`.
+Phases 1-21 + 25a-25e are complete. Detailed completion checklists live under `docs/ai/phases/`.
 Plans live under `docs/ai/plans/`, ADRs under `docs/ai/decisions/`.
 
 ### Completed Phases
@@ -90,7 +90,7 @@ See individual plan docs for details. Phases are ordered by dependency, not prio
 - **15d**: Temporal experience (lifeform extension) — [plan](docs/ai/plans/2026-02-22-phase15-causal-world-model.md)
 - **19**: Epistemic Logic & Theory of Mind — [plan](docs/ai/plans/2026-02-22-phase19-epistemic-reasoning.md)
 - **20**: Active Inference — [plan](docs/ai/plans/2026-02-22-phase20-active-inference.md)
-- **21**: Game theory — [research](docs/ai/decisions/020-predictive-planning-epistemic-research.md)
+- **21**: Game-Theoretic Social Reasoning — [plan](docs/ai/plans/2026-02-22-phase21-game-theory.md)
 - **22**: Akhipedia — [plan](docs/ai/plans/2026-02-23-phase22-akhipedia.md), [ADR 021](docs/ai/decisions/021-akhipedia-architecture.md)
 - **23**: Affective System — [plan](docs/ai/plans/2026-02-24-phase23-affective-system.md)
 - **24**: Sensory Grounding — [plan](docs/ai/plans/2026-02-24-phase24-sensory-grounding.md)

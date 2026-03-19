@@ -40,6 +40,7 @@ pub mod drives;
 pub mod epistemic;
 pub mod error;
 pub mod evidence;
+pub mod game_theory;
 pub mod goal;
 pub mod interlocutor;
 pub mod operator_channel;
@@ -125,6 +126,13 @@ pub use explain::{
     explain_known, render_derivation_prose, render_derivation_tree,
 };
 pub use operator_channel::{InboundHandle, OperatorChannel};
+pub use game_theory::{
+    CheapTalkAnalysis, Coalition, GameType, InteractionGame, LevelKModel, PayoffFactors,
+    PlanImpact, PredictedResponse, SignalType, SignalingAnalysis, SignalingResponse,
+    SocialDynamics, SocialEnvironment, SocialOutcome, Strategy,
+    analyze_cheap_talk, analyze_signal, classify_game, detect_dynamics, find_nash_equilibria,
+    is_prisoners_dilemma, recommend_strategy, should_cooperate,
+};
 pub use goal::{Goal, GoalJustification, GoalSource, GoalStatus};
 pub use metacognition::{CompetenceModel, FailureIndex, GoalEvaluation, MetacognitionConfig, MetacognitiveControl};
 pub use goal_generation::{GoalGenerationConfig, GoalGenerationResult, GoalProposal};

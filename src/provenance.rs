@@ -616,6 +616,15 @@ pub enum DerivationKind {
         epistemic: f32,
         efe: f32,
     },
+
+    // --- Phase 21: Game Theory ------------------------------------------------
+
+    /// A game-theoretic interaction model was built (Phase 21).
+    GameTheoreticModel {
+        game_type: String,
+        equilibria_count: u32,
+        recommended_strategy: String,
+    },
 }
 
 impl DerivationKind {
@@ -709,6 +718,7 @@ impl DerivationKind {
             Self::EpistemicUpdate { .. } => 84,
             Self::TheoryOfMind { .. } => 85,
             Self::ActiveInferenceCycle { .. } => 86,
+            Self::GameTheoreticModel { .. } => 87,
         }
     }
 }
