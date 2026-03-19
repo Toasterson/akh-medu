@@ -62,7 +62,7 @@ try to express options on how to handle issues for calling functions
 
 ## Agent Roadmap
 
-Phases 1-15b + 25a-25e are complete. Detailed completion checklists live under `docs/ai/phases/`.
+Phases 1-15c + 25a-25e are complete. Detailed completion checklists live under `docs/ai/phases/`.
 Plans live under `docs/ai/plans/`, ADRs under `docs/ai/decisions/`.
 
 ### Completed Phases
@@ -75,7 +75,7 @@ Plans live under `docs/ai/plans/`, ADRs under `docs/ai/decisions/`.
 - **12a-12g**: Interaction — [phase](docs/ai/phases/phase-12-interaction.md), [plan](docs/ai/plans/2026-02-17-phase12-interaction.md)
 - **13a-13g**: Personal Assistant — [phase](docs/ai/phases/phase-13-personal-assistant.md), [plan](docs/ai/plans/2026-02-17-phase13-personal-assistant.md)
 - **14a-14m**: Identity, bootstrapping, NLU (all 4 tiers) — [phase](docs/ai/phases/phase-14-identity.md), [bootstrap plan](docs/ai/plans/2026-02-17-phase14-bootstrapping.md), [NLU plan](docs/ai/plans/2026-02-24-phase14-nlu-extension.md), [ADR 022](docs/ai/decisions/022-nlu-architecture.md)
-- **15a-15b**: Causal World Model + Event Calculus — [phase](docs/ai/phases/phase-15-causal.md), [plan](docs/ai/plans/2026-02-22-phase15-causal-world-model.md), [ADR 032](docs/ai/decisions/032-event-calculus-engine.md)
+- **15a-15c**: Causal World Model + Event Calculus + Counterfactuals — [phase](docs/ai/phases/phase-15-causal.md), [plan](docs/ai/plans/2026-02-22-phase15-causal-world-model.md), [ADR 032](docs/ai/decisions/032-event-calculus-engine.md), [ADR 033](docs/ai/decisions/033-counterfactual-reasoning.md)
 - **25a-25e**: People & Contacts — [phase](docs/ai/phases/phase-25-people-contacts.md), [ADR 028](docs/ai/decisions/028-people-contacts-architecture.md)
 
 ### Upcoming Phases
@@ -84,7 +84,7 @@ See individual plan docs for details. Phases are ordered by dependency, not prio
 
 - **14i**: Community recipe sharing — [plan](docs/ai/plans/2026-02-17-phase14-bootstrapping.md) *(not blocking Release Alpha)*
 - **Release Alpha**: K8s deployment — [plan](docs/ai/plans/2026-02-23-release-alpha.md)
-- **15c-15d**: Counterfactuals, temporal experience — [plan](docs/ai/plans/2026-02-22-phase15-causal-world-model.md)
+- **15d**: Temporal experience (lifeform extension) — [plan](docs/ai/plans/2026-02-22-phase15-causal-world-model.md)
 - **16-21**: Predictive planning, evidence theory, source reliability, epistemic logic, active inference, game theory — [research](docs/ai/decisions/020-predictive-planning-epistemic-research.md)
 - **22**: Akhipedia — [plan](docs/ai/plans/2026-02-23-phase22-akhipedia.md), [ADR 021](docs/ai/decisions/021-akhipedia-architecture.md)
 - **23**: Affective System — [plan](docs/ai/plans/2026-02-24-phase23-affective-system.md)

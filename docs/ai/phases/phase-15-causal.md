@@ -1,6 +1,6 @@
 # Phase 15 — Causal World Model & Event Calculus
 
-Status: **In Progress** (15a-15b complete, 15c-15d pending)
+Status: **In Progress** (15a-15c complete, 15d pending)
 
 Explicit causal model of the world: cause-and-effect predicates (causes, enables, prevents),
 action schemas with preconditions and effects, event calculus engine (Initiates/Terminates/
@@ -57,3 +57,24 @@ for causal transitivity and do-calculus. VSA encoding for state-action similarit
 - [x] 6 MCP tools: record_event, holds_at, project_state, simulate_actions, what_changed_since, fluent_history
 - [x] ADR 032: Event Calculus Engine
 - [x] 13 unit tests (event_calculus) + 4 new reason tests (EC rules, causal transitivity)
+
+## Phase 15c — Counterfactual Reasoning & Prediction Tracking
+
+- [x] `CounterfactualError` miette diagnostic enum (3 variants: SchemaNotFound, PredictionNotFound, Engine) with `CfResult<T>`
+- [x] `CounterfactualQuery` — actual_action, hypothetical_action, timestamp
+- [x] `CounterfactualResult` — actual/hypothetical outcomes, divergent fluents, hypothetical_better, confidence
+- [x] `PredictionTracker` — predictions_made/correct/incorrect, per-action accuracy HashMap, accuracy EMA, pending records
+- [x] `PredictionRecord` — id, action_id, predicted_transition, timestamp, verified, correct
+- [x] `log_prediction()` — record before execution, returns prediction ID
+- [x] `verify_prediction()` — compare after execution, update EMA + per-action stats
+- [x] `prediction_accuracy()` — overall accuracy (0.0–1.0)
+- [x] `per_action_accuracy()` — per-action accuracy with uninformed prior
+- [x] `refinement_suggestions()` — actions below threshold with min_samples
+- [x] `counterfactual_query()` — Pearl Level 3: abduct → intervene → predict → compare
+- [x] `record_counterfactual_provenance()` — provenance recording
+- [x] `DerivationKind::CounterfactualReasoning` (tag 79) provenance variant
+- [x] `derivation_kind_prose` arm in `explain.rs`
+- [x] `Agent.prediction_tracker` field with init/resume/persist lifecycle
+- [x] 2 MCP tools: counterfactual, prediction_accuracy
+- [x] ADR 033: Counterfactual Reasoning
+- [x] 8 unit tests

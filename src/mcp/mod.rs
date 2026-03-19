@@ -572,6 +572,19 @@ pub struct FluentHistoryParams {
     pub fluent: String,
 }
 
+// ── Counterfactual Parameter Structs (Phase 15c) ────────────────────────
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CounterfactualParams {
+    #[schemars(description = "Target workspace (default: \"default\")")]
+    #[serde(default = "default_workspace")]
+    pub workspace: String,
+    #[schemars(description = "The action that was actually taken (tool name)")]
+    pub actual_action: String,
+    #[schemars(description = "The hypothetical alternative action (tool name)")]
+    pub hypothetical_action: String,
+}
+
 // ── Helpers ─────────────────────────────────────────────────────────────
 
 /// Format a `Vec<AkhMessage>` into human-readable text for MCP tool output.
@@ -2619,6 +2632,153 @@ impl AkhMcpServer {
         Ok(CallToolResult::success(vec![Content::text(result)]))
     }
 
+    // ── Counterfactual Reasoning (Phase 15c) ────────────────────────
+
+    #[tool(
+        name = "counterfactual",
+        description = "Pearl Level 3 counterfactual reasoning: 'What would have happened if I had done action Y instead of action X?' Compares predicted outcomes and identifies divergent fluents. Both actions must have registered causal schemas."
+    )]
+    async fn counterfactual(
+        &self,
+        Parameters(params): Parameters<CounterfactualParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let engine = self.state.get_engine(&params.workspace).await?;
+        let agent = self.state.get_agent(&params.workspace).await?;
+        let actual = params.actual_action.clone();
+        let hypothetical = params.hypothetical_action.clone();
+
+        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            let actual_id = engine
+                .resolve_or_create_entity(&format!("tool:{actual}"))
+                .map_err(|e| format!("{e}"))?;
+            let hypo_id = engine
+                .resolve_or_create_entity(&format!("tool:{hypothetical}"))
+                .map_err(|e| format!("{e}"))?;
+
+            let query = crate::agent::CounterfactualQuery {
+                actual_action: actual_id,
+                hypothetical_action: hypo_id,
+                timestamp: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
+            };
+
+            let agent = agent.lock().map_err(|e| format!("agent lock: {e}"))?;
+            let result = crate::agent::counterfactual_query(
+                &query,
+                agent.causal_manager(),
+                &engine,
+            )
+            .map_err(|e| format!("{e}"))?;
+
+            let mut lines = Vec::new();
+            lines.push(format!(
+                "Counterfactual: \"{actual}\" vs \"{hypothetical}\" (confidence: {:.2})",
+                result.confidence
+            ));
+            lines.push(format!(
+                "  Actual: {} assertions, {} retractions",
+                result.actual_outcome.assertions.len(),
+                result.actual_outcome.retractions.len()
+            ));
+            lines.push(format!(
+                "  Hypothetical: {} assertions, {} retractions",
+                result.hypothetical_outcome.assertions.len(),
+                result.hypothetical_outcome.retractions.len()
+            ));
+            lines.push(format!(
+                "  Divergent fluents: {}",
+                result.divergent_fluents.len()
+            ));
+            for (sym, actual_holds, hypo_holds) in &result.divergent_fluents {
+                let label = engine.resolve_label(*sym);
+                lines.push(format!(
+                    "    {label}: actual={actual_holds}, hypothetical={hypo_holds}"
+                ));
+            }
+            match result.hypothetical_better {
+                Some(true) => lines.push("  Verdict: hypothetical would have been BETTER".into()),
+                Some(false) => lines.push("  Verdict: actual was BETTER".into()),
+                None => lines.push("  Verdict: TIE (same net effect)".into()),
+            }
+
+            Ok(lines.join("\n"))
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("task panicked: {e}"), None))?
+        .map_err(|e| McpError::internal_error(e, None))?;
+
+        Ok(CallToolResult::success(vec![Content::text(result)]))
+    }
+
+    #[tool(
+        name = "prediction_accuracy",
+        description = "Show the causal model's prediction accuracy: overall accuracy, EMA, per-action breakdown, and suggestions for schemas that need refinement."
+    )]
+    async fn prediction_accuracy(
+        &self,
+        Parameters(params): Parameters<WorkspaceParam>,
+    ) -> Result<CallToolResult, McpError> {
+        let agent = self.state.get_agent(&params.workspace).await?;
+        let engine = self.state.get_engine(&params.workspace).await?;
+
+        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            let agent = agent.lock().map_err(|e| format!("agent lock: {e}"))?;
+            let tracker = agent.prediction_tracker();
+
+            let mut lines = Vec::new();
+            lines.push("Prediction Tracker:".into());
+            lines.push(format!("  Predictions made: {}", tracker.predictions_made));
+            lines.push(format!("  Correct: {}", tracker.predictions_correct));
+            lines.push(format!("  Incorrect: {}", tracker.predictions_incorrect));
+            lines.push(format!("  Pending: {}", tracker.pending_count()));
+            lines.push(format!(
+                "  Overall accuracy: {:.1}%",
+                tracker.prediction_accuracy() * 100.0
+            ));
+            lines.push(format!("  EMA accuracy: {:.1}%", tracker.accuracy_ema * 100.0));
+
+            if !tracker.per_action_accuracy.is_empty() {
+                lines.push("  Per-action:".into());
+                for (&action_key, &(correct, total)) in &tracker.per_action_accuracy {
+                    let label = crate::symbol::SymbolId::new(action_key)
+                        .map(|id| engine.resolve_label(id))
+                        .unwrap_or_else(|| format!("#{action_key}"));
+                    let acc = if total > 0 {
+                        correct as f32 / total as f32 * 100.0
+                    } else {
+                        0.0
+                    };
+                    lines.push(format!(
+                        "    {label}: {correct}/{total} ({acc:.0}%)"
+                    ));
+                }
+            }
+
+            let suggestions = tracker.refinement_suggestions(0.6, 3);
+            if !suggestions.is_empty() {
+                lines.push("  Refinement needed:".into());
+                for (action_key, acc) in &suggestions {
+                    let label = crate::symbol::SymbolId::new(*action_key)
+                        .map(|id| engine.resolve_label(id))
+                        .unwrap_or_else(|| format!("#{action_key}"));
+                    lines.push(format!(
+                        "    {label}: accuracy {:.0}% — update schema",
+                        acc * 100.0
+                    ));
+                }
+            }
+
+            Ok(lines.join("\n"))
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("task panicked: {e}"), None))?
+        .map_err(|e| McpError::internal_error(e, None))?;
+
+        Ok(CallToolResult::success(vec![Content::text(result)]))
+    }
+
     // ── Chat ────────────────────────────────────────────────────────
 
     #[tool(
@@ -2702,7 +2862,9 @@ impl rmcp::handler::server::ServerHandler for AkhMcpServer {
                  Event calculus (temporal reasoning): `record_event` (create events that initiate/terminate \
                  fluents), `holds_at` (does fluent hold at time?), `project_state` (state at future time), \
                  `simulate_actions` (predict action sequence outcomes), `what_changed_since` (temporal diff), \
-                 `fluent_history` (full lifecycle of a fluent)."
+                 `fluent_history` (full lifecycle of a fluent).\n\n\
+                 Counterfactual reasoning: `counterfactual` (Pearl Level 3: what if action Y instead \
+                 of X?), `prediction_accuracy` (causal model accuracy stats and refinement suggestions)."
                     .to_string(),
             ),
         }

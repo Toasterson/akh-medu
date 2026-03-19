@@ -212,6 +212,8 @@ pub struct Agent {
     pub(crate) causal_manager: super::causal::CausalManager,
     /// Event calculus engine — temporal fluent reasoning (Phase 15b).
     pub(crate) ec_engine: super::event_calculus::EventCalculusEngine,
+    /// Prediction tracker — causal model refinement (Phase 15c).
+    pub(crate) prediction_tracker: super::counterfactual::PredictionTracker,
     /// Contact manager — unified people/identity resolution (Phase 25a).
     pub(crate) contact_manager: super::contact::ContactManager,
     /// Relationship graph — interpersonal relationships between contacts (Phase 25b).
@@ -461,6 +463,7 @@ impl Agent {
             preference_manager: super::preference::PreferenceManager::default(),
             causal_manager: super::causal::CausalManager::default(),
             ec_engine: super::event_calculus::EventCalculusEngine::default(),
+            prediction_tracker: super::counterfactual::PredictionTracker::default(),
             contact_manager: super::contact::ContactManager::default(),
             relationship_graph: super::contact_rel::RelationshipGraph::default(),
             person_memory: super::contact_memory::PersonMemoryIndex::new(100),
@@ -1232,6 +1235,16 @@ impl Agent {
     /// Get a mutable reference to the event calculus engine.
     pub fn ec_engine_mut(&mut self) -> &mut super::event_calculus::EventCalculusEngine {
         &mut self.ec_engine
+    }
+
+    /// Get a reference to the prediction tracker.
+    pub fn prediction_tracker(&self) -> &super::counterfactual::PredictionTracker {
+        &self.prediction_tracker
+    }
+
+    /// Get a mutable reference to the prediction tracker.
+    pub fn prediction_tracker_mut(&mut self) -> &mut super::counterfactual::PredictionTracker {
+        &mut self.prediction_tracker
     }
 
     /// Ensure an interlocutor is registered, auto-creating on first interaction.
@@ -2307,6 +2320,20 @@ impl Agent {
                 })?;
         }
 
+        // Persist prediction tracker (Phase 15c).
+        if self.prediction_tracker.predictions_made > 0 {
+            let pt_bytes = bincode::serialize(&self.prediction_tracker).map_err(|e| {
+                AgentError::ConsolidationFailed {
+                    message: format!("failed to serialize prediction tracker: {e}"),
+                }
+            })?;
+            store
+                .put_meta(b"agent:prediction_tracker", &pt_bytes)
+                .map_err(|e| AgentError::ConsolidationFailed {
+                    message: format!("failed to persist prediction tracker: {e}"),
+                })?;
+        }
+
         // Persist event calculus engine (Phase 15b).
         if !self.ec_engine.events.is_empty() || !self.ec_engine.fluents.is_empty() {
             let ec_bytes = bincode::serialize(&self.ec_engine).map_err(|e| {
@@ -2576,6 +2603,15 @@ impl Agent {
                 super::event_calculus::EventCalculusEngine::new(&engine).unwrap_or_default()
             });
 
+        // Restore prediction tracker (Phase 15c).
+        let prediction_tracker = engine
+            .store()
+            .get_meta(b"agent:prediction_tracker")
+            .ok()
+            .flatten()
+            .and_then(|bytes| bincode::deserialize(&bytes).ok())
+            .unwrap_or_default();
+
         // Restore contact manager (Phase 25a).
         let contact_manager = super::contact::ContactManager::restore(&engine)
             .unwrap_or_else(|_| {
@@ -2663,6 +2699,7 @@ impl Agent {
             preference_manager,
             causal_manager,
             ec_engine,
+            prediction_tracker,
             contact_manager,
             relationship_graph,
             person_memory,

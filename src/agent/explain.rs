@@ -994,6 +994,15 @@ pub fn derivation_kind_prose(kind: &DerivationKind) -> String {
                 "event calculus projection: {fluent_count} fluents, {event_count} events, {interval_secs}s interval"
             )
         }
+        DerivationKind::CounterfactualReasoning {
+            actual_action,
+            hypothetical_action,
+            divergent_count,
+        } => {
+            format!(
+                "counterfactual: \"{actual_action}\" vs \"{hypothetical_action}\" — {divergent_count} divergent fluent(s)"
+            )
+        }
     }
 }
 

@@ -547,6 +547,15 @@ pub enum DerivationKind {
         event_count: u32,
         interval_secs: u64,
     },
+
+    // --- Phase 15c: Counterfactual Reasoning ----------------------------------
+
+    /// A counterfactual analysis was performed (Phase 15c).
+    CounterfactualReasoning {
+        actual_action: String,
+        hypothetical_action: String,
+        divergent_count: u32,
+    },
 }
 
 impl DerivationKind {
@@ -632,6 +641,7 @@ impl DerivationKind {
             Self::CalendarAttendeeLinked { .. } => 76,
             Self::LlmTripleExtraction { .. } => 77,
             Self::EventCalculusProjection { .. } => 78,
+            Self::CounterfactualReasoning { .. } => 79,
         }
     }
 }
