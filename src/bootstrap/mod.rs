@@ -14,6 +14,7 @@ pub mod ingest;
 pub mod orchestrator;
 pub mod prerequisite;
 pub mod purpose;
+pub mod recipe;
 pub mod resources;
 
 pub use competence::{
@@ -34,6 +35,10 @@ pub use prerequisite::{
 pub use purpose::{
     BootstrapError, BootstrapIntent, BootstrapResult, DreyfusLevel, EntityType, IdentityRef,
     PurposeModel,
+};
+pub use recipe::{
+    PrerequisiteEntry, PurposeRecipe, RecipeError, RecipeIdentity, RecipePurpose, RecipeResources,
+    RecipeResult, RecipeSeeds, RecipeValidation,
 };
 pub use orchestrator::{
     BootstrapOrchestrator, BootstrapSession, BootstrapStage, Checkpoint, OrchestratorConfig,
