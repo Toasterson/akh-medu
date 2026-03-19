@@ -1012,6 +1012,16 @@ pub fn derivation_kind_prose(kind: &DerivationKind) -> String {
                 "MCTS planning: {iterations} iterations, depth {depth}, expected value {expected_value:.2}"
             )
         }
+        DerivationKind::EvidenceCombination {
+            source_count,
+            conflict_degree,
+            belief,
+            plausibility,
+        } => {
+            format!(
+                "evidence combined: {source_count} sources, conflict={conflict_degree:.2}, Bel={belief:.2}, Pl={plausibility:.2}"
+            )
+        }
     }
 }
 

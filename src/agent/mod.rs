@@ -35,6 +35,7 @@ pub mod daemon;
 pub mod decomposition;
 pub mod drives;
 pub mod error;
+pub mod evidence;
 pub mod goal;
 pub mod interlocutor;
 pub mod operator_channel;
@@ -98,6 +99,11 @@ pub use decomposition::{
 };
 pub use drives::{DriveKind, DriveSystem};
 pub use error::{AgentError, AgentResult};
+pub use evidence::{
+    BeliefInterval, ClaimAssessment, ClaimVerdict, ConflictAlert, ConflictRecommendation,
+    EvidenceError, EvidenceFusionConfig, EvidenceItem, EvidenceManager, EvidenceResult,
+    MassFunction,
+};
 pub use explain::{
     DerivationNode, ExplainError, ExplainResult, ExplanationQuery, build_derivation_tree,
     derivation_kind_prose, execute_query, explain_changes, explain_confidence, explain_entity,

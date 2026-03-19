@@ -565,6 +565,16 @@ pub enum DerivationKind {
         depth: u32,
         expected_value: f32,
     },
+
+    // --- Phase 17: Evidence Theory --------------------------------------------
+
+    /// Evidence was combined from multiple sources (Phase 17a).
+    EvidenceCombination {
+        source_count: u32,
+        conflict_degree: f32,
+        belief: f32,
+        plausibility: f32,
+    },
 }
 
 impl DerivationKind {
@@ -652,6 +662,7 @@ impl DerivationKind {
             Self::EventCalculusProjection { .. } => 78,
             Self::CounterfactualReasoning { .. } => 79,
             Self::MctsPlanning { .. } => 80,
+            Self::EvidenceCombination { .. } => 81,
         }
     }
 }

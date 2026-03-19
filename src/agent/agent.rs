@@ -216,6 +216,8 @@ pub struct Agent {
     pub(crate) prediction_tracker: super::counterfactual::PredictionTracker,
     /// TD-learned value function for planning (Phase 16a).
     pub(crate) value_function: super::state_value::ValueFunction,
+    /// Evidence manager — Dempster-Shafer belief intervals (Phase 17).
+    pub(crate) evidence_manager: super::evidence::EvidenceManager,
     /// Contact manager — unified people/identity resolution (Phase 25a).
     pub(crate) contact_manager: super::contact::ContactManager,
     /// Relationship graph — interpersonal relationships between contacts (Phase 25b).
@@ -467,6 +469,7 @@ impl Agent {
             ec_engine: super::event_calculus::EventCalculusEngine::default(),
             prediction_tracker: super::counterfactual::PredictionTracker::default(),
             value_function: super::state_value::ValueFunction::default(),
+            evidence_manager: super::evidence::EvidenceManager::new(),
             contact_manager: super::contact::ContactManager::default(),
             relationship_graph: super::contact_rel::RelationshipGraph::default(),
             person_memory: super::contact_memory::PersonMemoryIndex::new(100),
@@ -1258,6 +1261,16 @@ impl Agent {
     /// Get a mutable reference to the value function.
     pub fn value_function_mut(&mut self) -> &mut super::state_value::ValueFunction {
         &mut self.value_function
+    }
+
+    /// Get a reference to the evidence manager.
+    pub fn evidence_manager(&self) -> &super::evidence::EvidenceManager {
+        &self.evidence_manager
+    }
+
+    /// Get a mutable reference to the evidence manager.
+    pub fn evidence_manager_mut(&mut self) -> &mut super::evidence::EvidenceManager {
+        &mut self.evidence_manager
     }
 
     /// Ensure an interlocutor is registered, auto-creating on first interaction.
@@ -2333,6 +2346,11 @@ impl Agent {
                 })?;
         }
 
+        // Persist evidence manager (Phase 17).
+        if self.evidence_manager.claim_count() > 0 {
+            let _ = self.evidence_manager.persist(&self.engine);
+        }
+
         // Persist value function (Phase 16a).
         if self.value_function.update_count > 0 {
             let _ = self.value_function.persist(&self.engine);
@@ -2621,6 +2639,9 @@ impl Agent {
                 super::event_calculus::EventCalculusEngine::new(&engine).unwrap_or_default()
             });
 
+        // Restore evidence manager (Phase 17).
+        let evidence_manager = super::evidence::EvidenceManager::restore(&engine);
+
         // Restore value function (Phase 16a).
         let value_function = super::state_value::ValueFunction::restore(&engine);
 
@@ -2722,6 +2743,7 @@ impl Agent {
             ec_engine,
             prediction_tracker,
             value_function,
+            evidence_manager,
             contact_manager,
             relationship_graph,
             person_memory,

@@ -585,6 +585,34 @@ pub struct CounterfactualParams {
     pub hypothetical_action: String,
 }
 
+// ── Evidence Parameter Structs (Phase 17) ────────────────────────────────
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct AssessEvidenceParams {
+    #[schemars(description = "Target workspace (default: \"default\")")]
+    #[serde(default = "default_workspace")]
+    pub workspace: String,
+    #[schemars(description = "Claim/entity label to assess")]
+    pub claim: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct AddEvidenceParams {
+    #[schemars(description = "Target workspace (default: \"default\")")]
+    #[serde(default = "default_workspace")]
+    pub workspace: String,
+    #[schemars(description = "Claim/entity label")]
+    pub claim: String,
+    #[schemars(description = "Source of evidence (e.g. 'expert-a', 'sensor-1')")]
+    pub source: String,
+    #[schemars(description = "Mass for True (evidence supporting the claim, 0.0-1.0)")]
+    pub mass_true: f32,
+    #[schemars(description = "Mass for False (evidence against the claim, 0.0-1.0). Default: 0.0")]
+    pub mass_false: Option<f32>,
+    #[schemars(description = "Source reliability (0.0-1.0). Default: 0.8")]
+    pub reliability: Option<f32>,
+}
+
 // ── Planning Parameter Structs (Phase 16) ───────────────────────────────
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -2792,6 +2820,132 @@ impl AkhMcpServer {
         Ok(CallToolResult::success(vec![Content::text(result)]))
     }
 
+    // ── Evidence Theory (Phase 17) ─────────────────────────────────
+
+    #[tool(
+        name = "assess_evidence",
+        description = "Assess a claim using Dempster-Shafer evidence theory. Returns the belief interval [Bel, Pl], verdict (well-supported/plausible/insufficient/likely-false/conflicting), conflict degree, and source count."
+    )]
+    async fn assess_evidence(
+        &self,
+        Parameters(params): Parameters<AssessEvidenceParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let engine = self.state.get_engine(&params.workspace).await?;
+        let agent = self.state.get_agent(&params.workspace).await?;
+        let claim_label = params.claim.clone();
+
+        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            let claim_id = engine
+                .resolve_or_create_entity(&claim_label)
+                .map_err(|e| format!("{e}"))?;
+
+            let agent = agent.lock().map_err(|e| format!("agent lock: {e}"))?;
+            let assessment = agent.evidence_manager().assess_claim(claim_id);
+
+            let mut lines = Vec::new();
+            lines.push(format!(
+                "Evidence assessment for \"{claim_label}\":"
+            ));
+            lines.push(format!(
+                "  Verdict: {}",
+                assessment.verdict.as_label()
+            ));
+            lines.push(format!(
+                "  Belief interval: [{:.3}, {:.3}] (width={:.3})",
+                assessment.interval.belief,
+                assessment.interval.plausibility,
+                assessment.interval.width()
+            ));
+            lines.push(format!(
+                "  Sources: {}, conflict: {:.3}",
+                assessment.evidence_count,
+                assessment.conflict_degree
+            ));
+            lines.push(format!("  {}", assessment.reasoning));
+
+            Ok(lines.join("\n"))
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("task panicked: {e}"), None))?
+        .map_err(|e| McpError::internal_error(e, None))?;
+
+        Ok(CallToolResult::success(vec![Content::text(result)]))
+    }
+
+    #[tool(
+        name = "add_evidence",
+        description = "Add evidence from a source about a claim. Provide mass_true (evidence for) and mass_false (evidence against); remainder is ignorance. Source reliability (0-1) discounts the evidence."
+    )]
+    async fn add_evidence(
+        &self,
+        Parameters(params): Parameters<AddEvidenceParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let engine = self.state.get_engine(&params.workspace).await?;
+        let agent = self.state.get_agent(&params.workspace).await?;
+        let claim_label = params.claim.clone();
+        let source_label = params.source.clone();
+        let m_true = params.mass_true;
+        let m_false = params.mass_false.unwrap_or(0.0);
+        let reliability = params.reliability.unwrap_or(0.8);
+
+        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            let claim_id = engine
+                .resolve_or_create_entity(&claim_label)
+                .map_err(|e| format!("{e}"))?;
+            let source_id = engine
+                .resolve_or_create_entity(&source_label)
+                .map_err(|e| format!("{e}"))?;
+
+            let mass = crate::agent::MassFunction::new(m_true, m_false);
+            let item = crate::agent::EvidenceItem {
+                source_id,
+                mass,
+                timestamp: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
+                source_reliability: reliability,
+                provenance_id: None,
+            };
+
+            let mut agent = agent.lock().map_err(|e| format!("agent lock: {e}"))?;
+            agent.evidence_manager_mut().add_evidence(claim_id, item);
+
+            // Check for alerts.
+            let alerts = agent.evidence_manager_mut().drain_alerts();
+            let mut lines = Vec::new();
+            lines.push(format!(
+                "Added evidence for \"{claim_label}\" from \"{source_label}\": m_true={m_true:.2}, m_false={m_false:.2}, reliability={reliability:.2}"
+            ));
+
+            if !alerts.is_empty() {
+                lines.push(format!("  ⚠ {} conflict alert(s):", alerts.len()));
+                for alert in &alerts {
+                    lines.push(format!(
+                        "    K={:.2}: {:?}",
+                        alert.conflict_degree, alert.recommendation
+                    ));
+                }
+            }
+
+            // Show current assessment.
+            let assessment = agent.evidence_manager().assess_claim(claim_id);
+            lines.push(format!(
+                "  Current: {} [{:.3}, {:.3}]",
+                assessment.verdict.as_label(),
+                assessment.interval.belief,
+                assessment.interval.plausibility
+            ));
+
+            Ok(lines.join("\n"))
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("task panicked: {e}"), None))?
+        .map_err(|e| McpError::internal_error(e, None))?;
+
+        Ok(CallToolResult::success(vec![Content::text(result)]))
+    }
+
     // ── Planning (Phase 16) ────────────────────────────────────────
 
     #[tool(
@@ -2945,7 +3099,9 @@ impl rmcp::handler::server::ServerHandler for AkhMcpServer {
                  `fluent_history` (full lifecycle of a fluent).\n\n\
                  Counterfactual reasoning: `counterfactual` (Pearl Level 3: what if action Y instead \
                  of X?), `prediction_accuracy` (causal model accuracy stats and refinement suggestions).\n\n\
-                 Planning: `mcts_plan` (multi-step MCTS planning using causal world model and TD values)."
+                 Planning: `mcts_plan` (multi-step MCTS planning using causal world model and TD values).\n\n\
+                 Evidence theory: `add_evidence` (submit evidence for/against a claim from a source), \
+                 `assess_evidence` (Dempster-Shafer belief interval assessment with conflict detection)."
                     .to_string(),
             ),
         }
