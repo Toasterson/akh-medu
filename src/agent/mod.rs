@@ -10,6 +10,7 @@
 
 #[allow(clippy::module_inception)]
 pub mod agent;
+pub mod ach;
 pub mod calendar;
 pub mod causal;
 pub mod channel;
@@ -128,6 +129,7 @@ pub use ooda::{
     ActionResult, Decision, DecisionImpasse, GoalProgress, ImpasseKind, Observation,
     OodaCycleResult, Orientation,
 };
+pub use ach::{AchAnalysis, AchEvidence, AchHypothesis, ConsistencyRating};
 pub use calendar::{
     AllenRelation, CalendarError, CalendarEvent, CalendarManager, CalendarPredicates,
     CalendarResult, CalendarRoleVectors,
