@@ -335,6 +335,32 @@ pub struct ChatParams {
     pub message: String,
 }
 
+// ── Batch Operations ────────────────────────────────────────────────────
+
+/// A single triple in a batch assertion.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct TripleEntry {
+    #[schemars(description = "Subject entity")]
+    pub s: String,
+    #[schemars(description = "Predicate relation")]
+    pub p: String,
+    #[schemars(description = "Object entity")]
+    pub o: String,
+    #[schemars(description = "Confidence 0.0-1.0 (default: 0.9)")]
+    pub c: Option<f64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct AssertBatchParams {
+    #[schemars(description = "Target workspace (default: \"default\")")]
+    #[serde(default = "default_workspace")]
+    pub workspace: String,
+    #[schemars(
+        description = "Array of triples to assert: [{s, p, o, c?}, ...]. Example: [{\"s\":\"Sun\",\"p\":\"is-a\",\"o\":\"Star\"}]"
+    )]
+    pub triples: Vec<TripleEntry>,
+}
+
 // ── Phase 1: Bootstrap Stage Tools ──────────────────────────────────────
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -699,6 +725,62 @@ impl AkhMcpServer {
             "Asserted: {} {} {} (confidence={:.2})",
             params.subject, params.predicate, params.object, conf
         ))]))
+    }
+
+    #[tool(
+        name = "assert_batch",
+        description = "Assert multiple triples at once. Far more efficient than individual assert_triple calls. Accepts an array of {s, p, o, c?} objects. Use this when Claude generates structured triples from text — it's the primary knowledge population path."
+    )]
+    async fn assert_batch(
+        &self,
+        Parameters(params): Parameters<AssertBatchParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let engine = self.state.get_engine(&params.workspace).await?;
+        let triples = params.triples;
+
+        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            let mut asserted = 0usize;
+            let mut errors = Vec::new();
+
+            for entry in &triples {
+                let conf = entry.c.unwrap_or(0.9) as f32;
+                let res = (|| -> Result<(), String> {
+                    let s = engine
+                        .resolve_or_create_entity(&entry.s)
+                        .map_err(|e| format!("{e}"))?;
+                    let p = engine
+                        .resolve_or_create_relation(&entry.p)
+                        .map_err(|e| format!("{e}"))?;
+                    let o = engine
+                        .resolve_or_create_entity(&entry.o)
+                        .map_err(|e| format!("{e}"))?;
+                    let triple = crate::graph::Triple::new(s, p, o).with_confidence(conf);
+                    engine.add_triple(&triple).map_err(|e| format!("{e}"))?;
+                    Ok(())
+                })();
+
+                match res {
+                    Ok(()) => asserted += 1,
+                    Err(e) => errors.push(format!("{} {} {}: {}", entry.s, entry.p, entry.o, e)),
+                }
+            }
+
+            let _ = engine.persist();
+
+            let mut msg = format!("Asserted {asserted}/{} triples", triples.len());
+            if !errors.is_empty() {
+                msg.push_str(&format!("\nErrors ({}):", errors.len()));
+                for e in errors.iter().take(5) {
+                    msg.push_str(&format!("\n  - {e}"));
+                }
+            }
+            Ok(msg)
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("task panicked: {e}"), None))?
+        .map_err(|e| McpError::internal_error(e, None))?;
+
+        Ok(CallToolResult::success(vec![Content::text(result)]))
     }
 
     #[tool(

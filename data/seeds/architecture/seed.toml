@@ -1,0 +1,453 @@
+[seed]
+id = "architecture"
+name = "Architecture Domain Knowledge"
+version = "1.0.0"
+description = "Foundational architecture knowledge: structures, elements, materials, styles, and historical figures"
+
+# -- Structure Types --
+
+[[triples]]
+subject = "pyramid"
+predicate = "is-a"
+object = "architectural structure"
+confidence = 0.95
+
+[[triples]]
+subject = "temple"
+predicate = "is-a"
+object = "architectural structure"
+confidence = 0.95
+
+[[triples]]
+subject = "dome"
+predicate = "is-a"
+object = "architectural structure"
+confidence = 0.95
+
+[[triples]]
+subject = "basilica"
+predicate = "is-a"
+object = "architectural structure"
+confidence = 0.95
+
+[[triples]]
+subject = "cathedral"
+predicate = "is-a"
+object = "architectural structure"
+confidence = 0.95
+
+[[triples]]
+subject = "palace"
+predicate = "is-a"
+object = "architectural structure"
+confidence = 0.95
+
+[[triples]]
+subject = "tower"
+predicate = "is-a"
+object = "architectural structure"
+confidence = 0.95
+
+[[triples]]
+subject = "bridge"
+predicate = "is-a"
+object = "architectural structure"
+confidence = 0.95
+
+# -- Structural Elements --
+
+[[triples]]
+subject = "foundation"
+predicate = "is-a"
+object = "structural element"
+confidence = 0.95
+
+[[triples]]
+subject = "column"
+predicate = "is-a"
+object = "structural element"
+confidence = 0.95
+
+[[triples]]
+subject = "beam"
+predicate = "is-a"
+object = "structural element"
+confidence = 0.95
+
+[[triples]]
+subject = "arch"
+predicate = "is-a"
+object = "structural element"
+confidence = 0.95
+
+[[triples]]
+subject = "vault"
+predicate = "is-a"
+object = "structural element"
+confidence = 0.95
+
+[[triples]]
+subject = "truss"
+predicate = "is-a"
+object = "structural element"
+confidence = 0.95
+
+[[triples]]
+subject = "wall"
+predicate = "is-a"
+object = "structural element"
+confidence = 0.95
+
+[[triples]]
+subject = "roof"
+predicate = "is-a"
+object = "structural element"
+confidence = 0.95
+
+[[triples]]
+subject = "buttress"
+predicate = "is-a"
+object = "structural element"
+confidence = 0.95
+
+# -- Materials --
+
+[[triples]]
+subject = "concrete"
+predicate = "is-a"
+object = "building material"
+confidence = 0.95
+
+[[triples]]
+subject = "steel"
+predicate = "is-a"
+object = "building material"
+confidence = 0.95
+
+[[triples]]
+subject = "timber"
+predicate = "is-a"
+object = "building material"
+confidence = 0.95
+
+[[triples]]
+subject = "stone"
+predicate = "is-a"
+object = "building material"
+confidence = 0.95
+
+[[triples]]
+subject = "brick"
+predicate = "is-a"
+object = "building material"
+confidence = 0.95
+
+[[triples]]
+subject = "glass"
+predicate = "is-a"
+object = "building material"
+confidence = 0.95
+
+# -- Material Properties --
+
+[[triples]]
+subject = "concrete"
+predicate = "has-property"
+object = "compressive strength"
+confidence = 0.9
+
+[[triples]]
+subject = "steel"
+predicate = "has-property"
+object = "tensile strength"
+confidence = 0.9
+
+[[triples]]
+subject = "reinforced concrete"
+predicate = "combines"
+object = "concrete"
+confidence = 0.9
+
+[[triples]]
+subject = "reinforced concrete"
+predicate = "combines"
+object = "steel"
+confidence = 0.9
+
+# -- Causal/Structural Relations --
+
+[[triples]]
+subject = "foundation"
+predicate = "supports"
+object = "wall"
+confidence = 0.95
+
+[[triples]]
+subject = "wall"
+predicate = "supports"
+object = "roof"
+confidence = 0.95
+
+[[triples]]
+subject = "column"
+predicate = "supports"
+object = "beam"
+confidence = 0.95
+
+[[triples]]
+subject = "buttress"
+predicate = "supports"
+object = "wall"
+confidence = 0.9
+
+[[triples]]
+subject = "arch"
+predicate = "distributes"
+object = "compressive force"
+confidence = 0.9
+
+[[triples]]
+subject = "truss"
+predicate = "spans"
+object = "large distance"
+confidence = 0.9
+
+# -- Architectural Styles --
+
+[[triples]]
+subject = "Egyptian architecture"
+predicate = "is-a"
+object = "architectural style"
+confidence = 0.95
+
+[[triples]]
+subject = "Greek architecture"
+predicate = "is-a"
+object = "architectural style"
+confidence = 0.95
+
+[[triples]]
+subject = "Roman architecture"
+predicate = "is-a"
+object = "architectural style"
+confidence = 0.95
+
+[[triples]]
+subject = "Gothic architecture"
+predicate = "is-a"
+object = "architectural style"
+confidence = 0.95
+
+[[triples]]
+subject = "Modernist architecture"
+predicate = "is-a"
+object = "architectural style"
+confidence = 0.95
+
+[[triples]]
+subject = "Bionic architecture"
+predicate = "is-a"
+object = "architectural style"
+confidence = 0.95
+
+# -- Style Characteristics --
+
+[[triples]]
+subject = "Egyptian architecture"
+predicate = "uses"
+object = "post-and-lintel construction"
+confidence = 0.9
+
+[[triples]]
+subject = "Roman architecture"
+predicate = "uses"
+object = "arch"
+confidence = 0.9
+
+[[triples]]
+subject = "Roman architecture"
+predicate = "uses"
+object = "dome"
+confidence = 0.9
+
+[[triples]]
+subject = "Gothic architecture"
+predicate = "uses"
+object = "pointed arch"
+confidence = 0.9
+
+[[triples]]
+subject = "Gothic architecture"
+predicate = "uses"
+object = "flying buttress"
+confidence = 0.9
+
+[[triples]]
+subject = "Modernist architecture"
+predicate = "uses"
+object = "reinforced concrete"
+confidence = 0.9
+
+[[triples]]
+subject = "Modernist architecture"
+predicate = "uses"
+object = "steel"
+confidence = 0.9
+
+# -- Historical Figures --
+
+[[triples]]
+subject = "Imhotep"
+predicate = "is-a"
+object = "architect"
+confidence = 0.95
+
+[[triples]]
+subject = "Imhotep"
+predicate = "designed"
+object = "step pyramid of Djoser"
+confidence = 0.95
+
+[[triples]]
+subject = "Vitruvius"
+predicate = "is-a"
+object = "architect"
+confidence = 0.95
+
+[[triples]]
+subject = "Vitruvius"
+predicate = "authored"
+object = "De Architectura"
+confidence = 0.95
+
+[[triples]]
+subject = "Brunelleschi"
+predicate = "is-a"
+object = "architect"
+confidence = 0.95
+
+[[triples]]
+subject = "Brunelleschi"
+predicate = "designed"
+object = "Florence Cathedral dome"
+confidence = 0.95
+
+[[triples]]
+subject = "Le Corbusier"
+predicate = "is-a"
+object = "architect"
+confidence = 0.95
+
+[[triples]]
+subject = "Le Corbusier"
+predicate = "founded"
+object = "Modernist architecture"
+confidence = 0.85
+
+# -- Design Principles --
+
+[[triples]]
+subject = "form follows function"
+predicate = "is-a"
+object = "design principle"
+confidence = 0.95
+
+[[triples]]
+subject = "structural integrity"
+predicate = "is-a"
+object = "design principle"
+confidence = 0.95
+
+[[triples]]
+subject = "spatial hierarchy"
+predicate = "is-a"
+object = "design principle"
+confidence = 0.9
+
+[[triples]]
+subject = "human scale"
+predicate = "is-a"
+object = "design principle"
+confidence = 0.9
+
+[[triples]]
+subject = "sustainable design"
+predicate = "is-a"
+object = "design principle"
+confidence = 0.9
+
+# -- Sustainability --
+
+[[triples]]
+subject = "passive solar design"
+predicate = "is-a"
+object = "sustainable technique"
+confidence = 0.9
+
+[[triples]]
+subject = "natural ventilation"
+predicate = "is-a"
+object = "sustainable technique"
+confidence = 0.9
+
+[[triples]]
+subject = "green roof"
+predicate = "is-a"
+object = "sustainable technique"
+confidence = 0.9
+
+# -- Egyptian Specifics (for Ptah/Khepib) --
+
+[[triples]]
+subject = "Great Pyramid of Giza"
+predicate = "is-a"
+object = "pyramid"
+confidence = 0.95
+
+[[triples]]
+subject = "Great Pyramid of Giza"
+predicate = "built-for"
+object = "Khufu"
+confidence = 0.9
+
+[[triples]]
+subject = "Karnak"
+predicate = "is-a"
+object = "temple"
+confidence = 0.95
+
+[[triples]]
+subject = "Luxor Temple"
+predicate = "is-a"
+object = "temple"
+confidence = 0.95
+
+[[triples]]
+subject = "hypostyle hall"
+predicate = "part-of"
+object = "Egyptian temple"
+confidence = 0.9
+
+[[triples]]
+subject = "obelisk"
+predicate = "is-a"
+object = "architectural element"
+confidence = 0.9
+
+[[triples]]
+subject = "mastaba"
+predicate = "precedes"
+object = "pyramid"
+confidence = 0.85
+
+[[triples]]
+subject = "Ptah"
+predicate = "patron-of"
+object = "architecture"
+confidence = 0.9
+
+[[triples]]
+subject = "Ptah"
+predicate = "patron-of"
+object = "craftsmanship"
+confidence = 0.9
