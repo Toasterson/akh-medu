@@ -25,6 +25,7 @@ pub mod contact_rel;
 pub mod contact_style;
 pub mod constraint_check;
 pub mod conversation;
+pub mod credibility;
 pub mod chunking;
 pub mod dialogue;
 pub mod cli_tool;
@@ -86,6 +87,10 @@ pub use constraint_check::{
     ConstraintWarning, EmissionDecision, SensitivityLevel, emission_decision,
 };
 pub use conversation::{ConversationState, ConversationTurn, GroundedResponse, GroundedTriple, ResponseDetail, Speaker};
+pub use credibility::{
+    CredibilityAnalysis, CredibilityAnalyzer, CredibilityRecommendation, CredibilitySignals,
+    DeceptionIndicators, detect_manipulation_markers,
+};
 pub use interlocutor::{InterlocutorPredicates, InterlocutorProfile, InterlocutorRegistry, InterlocutorError, InterlocutorResult, interest_overlap};
 pub use multi_agent::{
     AgentProtocolMessage, CapabilityScope, CapabilityToken, InterlocutorKind, MultiAgentError,
