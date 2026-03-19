@@ -57,6 +57,7 @@ pub mod reflect;
 pub mod resource;
 pub mod semantic_enrichment;
 pub mod sleep;
+pub mod state_value;
 pub mod synthesize;
 pub mod synthesize_abs;
 pub mod tool;
@@ -165,6 +166,9 @@ pub use curiosity::{CuriosityReport, CuriosityTarget, DirectedCuriosityConfig};
 pub use resource::{EffortCase, EffortEstimate, EffortIndex, ImprovementHistory, ResourceReport};
 pub use semantic_enrichment::{EnrichmentResult, SemanticPredicates};
 pub use sleep::{ConsolidationPhase, SleepConfig, SleepCycle, SleepMetrics};
+pub use state_value::{
+    AgentState, Reward, StateRoleVectors, ValueFunction, encode_state, encode_state_with_vsa,
+};
 pub use synthesize::NarrativeSummary;
 pub use tool::{Tool, ToolInput, ToolOutput, ToolRegistry, ToolSignature};
 pub use tool_manifest::{Capability, DangerInfo, DangerLevel, ToolManifest, ToolSource};

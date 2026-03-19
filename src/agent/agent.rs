@@ -214,6 +214,8 @@ pub struct Agent {
     pub(crate) ec_engine: super::event_calculus::EventCalculusEngine,
     /// Prediction tracker — causal model refinement (Phase 15c).
     pub(crate) prediction_tracker: super::counterfactual::PredictionTracker,
+    /// TD-learned value function for planning (Phase 16a).
+    pub(crate) value_function: super::state_value::ValueFunction,
     /// Contact manager — unified people/identity resolution (Phase 25a).
     pub(crate) contact_manager: super::contact::ContactManager,
     /// Relationship graph — interpersonal relationships between contacts (Phase 25b).
@@ -464,6 +466,7 @@ impl Agent {
             causal_manager: super::causal::CausalManager::default(),
             ec_engine: super::event_calculus::EventCalculusEngine::default(),
             prediction_tracker: super::counterfactual::PredictionTracker::default(),
+            value_function: super::state_value::ValueFunction::default(),
             contact_manager: super::contact::ContactManager::default(),
             relationship_graph: super::contact_rel::RelationshipGraph::default(),
             person_memory: super::contact_memory::PersonMemoryIndex::new(100),
@@ -1245,6 +1248,16 @@ impl Agent {
     /// Get a mutable reference to the prediction tracker.
     pub fn prediction_tracker_mut(&mut self) -> &mut super::counterfactual::PredictionTracker {
         &mut self.prediction_tracker
+    }
+
+    /// Get a reference to the value function.
+    pub fn value_function(&self) -> &super::state_value::ValueFunction {
+        &self.value_function
+    }
+
+    /// Get a mutable reference to the value function.
+    pub fn value_function_mut(&mut self) -> &mut super::state_value::ValueFunction {
+        &mut self.value_function
     }
 
     /// Ensure an interlocutor is registered, auto-creating on first interaction.
@@ -2320,6 +2333,11 @@ impl Agent {
                 })?;
         }
 
+        // Persist value function (Phase 16a).
+        if self.value_function.update_count > 0 {
+            let _ = self.value_function.persist(&self.engine);
+        }
+
         // Persist prediction tracker (Phase 15c).
         if self.prediction_tracker.predictions_made > 0 {
             let pt_bytes = bincode::serialize(&self.prediction_tracker).map_err(|e| {
@@ -2603,6 +2621,9 @@ impl Agent {
                 super::event_calculus::EventCalculusEngine::new(&engine).unwrap_or_default()
             });
 
+        // Restore value function (Phase 16a).
+        let value_function = super::state_value::ValueFunction::restore(&engine);
+
         // Restore prediction tracker (Phase 15c).
         let prediction_tracker = engine
             .store()
@@ -2700,6 +2721,7 @@ impl Agent {
             causal_manager,
             ec_engine,
             prediction_tracker,
+            value_function,
             contact_manager,
             relationship_graph,
             person_memory,
