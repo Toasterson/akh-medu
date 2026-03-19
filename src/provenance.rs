@@ -538,6 +538,15 @@ pub enum DerivationKind {
         source_text_hash: u64,
         model: String,
     },
+
+    // --- Phase 15b: Event Calculus -------------------------------------------
+
+    /// A state projection was computed via event calculus (Phase 15b).
+    EventCalculusProjection {
+        fluent_count: u32,
+        event_count: u32,
+        interval_secs: u64,
+    },
 }
 
 impl DerivationKind {
@@ -622,6 +631,7 @@ impl DerivationKind {
             Self::StyleObserved { .. } => 75,
             Self::CalendarAttendeeLinked { .. } => 76,
             Self::LlmTripleExtraction { .. } => 77,
+            Self::EventCalculusProjection { .. } => 78,
         }
     }
 }

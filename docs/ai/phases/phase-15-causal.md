@@ -1,6 +1,6 @@
 # Phase 15 — Causal World Model & Event Calculus
 
-Status: **In Progress** (15a complete, 15b-15c pending)
+Status: **In Progress** (15a-15b complete, 15c-15d pending)
 
 Explicit causal model of the world: cause-and-effect predicates (causes, enables, prevents),
 action schemas with preconditions and effects, event calculus engine (Initiates/Terminates/
@@ -31,3 +31,29 @@ for causal transitivity and do-calculus. VSA encoding for state-action similarit
 - [x] `Agent.causal_manager` field with init/resume/persist lifecycle
 - [x] `AgentError::Causal` transparent variant
 - [x] 22 unit tests
+
+## Phase 15b — Event Calculus Engine
+
+- [x] `EventCalculusError` miette diagnostic enum (4 variants: FluentNotFound, EventNotFound, NoCausalManager, Engine) with `EventCalculusResult<T>`
+- [x] `EventCalculusPredicates` — 8 well-known KG relations in `ec:` namespace (initiates, terminates, happens, holds-at, clipped, is-fluent, is-event, at-time)
+- [x] `Event` struct — symbol_id, name, timestamp, initiates/terminates fluent lists
+- [x] `Fluent` struct — symbol_id, label, current_value, last initiated/terminated by/at
+- [x] `FluentHistoryEntry` — timestamp, initiated (bool), by_event
+- [x] `StateProjection` — holding fluents, terminated fluents, events in interval
+- [x] `SimulationResult` — action sequence, state trajectory, final state, confidence
+- [x] `EventCalculusEngine` — events/fluents/history HashMaps, predicates lifecycle, persist/restore via bincode
+- [x] `record_event()` — stores event + KG triples + updates fluent state + history
+- [x] `holds_at(fluent, time)` — core EC axiom: initiated and not clipped
+- [x] `is_clipped(fluent, t1, t2)` — termination between two timepoints
+- [x] `project_state(from, to)` — what holds at future time
+- [x] `simulate_actions(seq, causal_mgr, engine)` — multi-step prediction with 0.9^n confidence decay
+- [x] `what_changed_since(time)` — temporal diff sorted by time
+- [x] `fluent_history(fluent)` — full lifecycle with event attribution
+- [x] `DerivationKind::EventCalculusProjection` (tag 78) provenance variant
+- [x] `derivation_kind_prose` arm in `explain.rs`
+- [x] `Agent.ec_engine` field with init/resume/persist lifecycle
+- [x] E-graph rules in `reason/mod.rs`: ec-persist, ec-terminate, cause-trans, enable-cause
+- [x] AkhLang extensions: Causes, Enables, Prevents, Initiates, Terminates, Happens, HoldsAt, Terminated
+- [x] 6 MCP tools: record_event, holds_at, project_state, simulate_actions, what_changed_since, fluent_history
+- [x] ADR 032: Event Calculus Engine
+- [x] 13 unit tests (event_calculus) + 4 new reason tests (EC rules, causal transitivity)

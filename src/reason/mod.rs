@@ -34,6 +34,16 @@ define_language! {
         "or" = Or([egg::Id; 2]),
         "not" = Not([egg::Id; 1]),
 
+        // Causal & Event Calculus (Phase 15a-b)
+        "causes" = Causes([egg::Id; 2]),
+        "enables" = Enables([egg::Id; 2]),
+        "prevents" = Prevents([egg::Id; 2]),
+        "initiates" = Initiates([egg::Id; 2]),
+        "terminates" = Terminates([egg::Id; 2]),
+        "happens" = Happens([egg::Id; 2]),
+        "holds-at" = HoldsAt([egg::Id; 2]),
+        "terminated" = Terminated([egg::Id; 2]),
+
         // Named symbol references
         Symbol(egg::Symbol),
     }
@@ -99,6 +109,37 @@ pub fn calendar_rules() -> Vec<egg::Rewrite<AkhLang, ()>> {
     ]
 }
 
+/// Causal and Event Calculus rewrite rules (Phase 15a-b).
+///
+/// - `cause-trans`: causal transitivity — if A causes B and B causes C, then A causes C.
+/// - `enable-cause`: enabling chains — if A enables B and B causes C, then A enables C.
+/// - `ec-persist`: EC persistence — if event initiates fluent, fluent holds at that time.
+/// - `ec-terminate`: EC termination — if event terminates fluent, fluent is terminated.
+pub fn causal_rules() -> Vec<egg::Rewrite<AkhLang, ()>> {
+    vec![
+        // Causal transitivity: causes(a, b) ∧ causes(b, c) → causes(a, c)
+        egg::rewrite!("cause-trans";
+            "(and (causes ?a ?b) (causes ?b ?c))"
+            => "(and (causes ?a ?b) (and (causes ?b ?c) (causes ?a ?c)))"
+        ),
+        // Enable + cause = enable: enables(a, b) ∧ causes(b, c) → enables(a, c)
+        egg::rewrite!("enable-cause";
+            "(and (enables ?a ?b) (causes ?b ?c))"
+            => "(and (enables ?a ?b) (and (causes ?b ?c) (enables ?a ?c)))"
+        ),
+        // EC persistence: initiates(e, f) ∧ happens(e, t) → holds-at(f, t)
+        egg::rewrite!("ec-persist";
+            "(and (initiates ?e ?f) (happens ?e ?t))"
+            => "(and (initiates ?e ?f) (and (happens ?e ?t) (holds-at ?f ?t)))"
+        ),
+        // EC termination: terminates(e, f) ∧ happens(e, t) → terminated(f, t)
+        egg::rewrite!("ec-terminate";
+            "(and (terminates ?e ?f) (happens ?e ?t))"
+            => "(and (terminates ?e ?f) (and (happens ?e ?t) (terminated ?f ?t)))"
+        ),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -128,5 +169,41 @@ mod tests {
     fn builtin_rules_load() {
         let rules = builtin_rules();
         assert!(!rules.is_empty());
+    }
+
+    #[test]
+    fn causal_rules_load() {
+        let rules = causal_rules();
+        assert_eq!(rules.len(), 4);
+    }
+
+    #[test]
+    fn ec_persist_rule_fires() {
+        // If initiates(e, f) and happens(e, t) then holds-at(f, t) should be derivable.
+        let expr: egg::RecExpr<AkhLang> =
+            "(and (initiates ev fluent) (happens ev time))".parse().unwrap();
+        let runner = Runner::default().with_expr(&expr).run(&causal_rules());
+
+        // Check that holds-at(fluent, time) is in the e-graph.
+        let target: egg::RecExpr<AkhLang> = "(holds-at fluent time)".parse().unwrap();
+        let target_id = runner.egraph.lookup_expr(&target);
+        assert!(
+            target_id.is_some(),
+            "ec-persist rule should derive (holds-at fluent time)"
+        );
+    }
+
+    #[test]
+    fn cause_transitivity_rule_fires() {
+        let expr: egg::RecExpr<AkhLang> =
+            "(and (causes a b) (causes b c))".parse().unwrap();
+        let runner = Runner::default().with_expr(&expr).run(&causal_rules());
+
+        let target: egg::RecExpr<AkhLang> = "(causes a c)".parse().unwrap();
+        let target_id = runner.egraph.lookup_expr(&target);
+        assert!(
+            target_id.is_some(),
+            "cause-trans rule should derive (causes a c)"
+        );
     }
 }

@@ -13,6 +13,7 @@ pub mod agent;
 pub mod calendar;
 pub mod causal;
 pub mod channel;
+pub mod event_calculus;
 pub mod channel_message;
 pub mod chat;
 pub mod contact;
@@ -135,6 +136,10 @@ pub use contact_style::{
 pub use causal::{
     ActionSchema, CausalEffect, CausalError, CausalManager, CausalPattern, CausalPredicates,
     CausalRelation, CausalResult, CausalRoleVectors, EffectKind, PatternElement, StateTransition,
+};
+pub use event_calculus::{
+    Event, EventCalculusEngine, EventCalculusError, EventCalculusPredicates,
+    EventCalculusResult, Fluent, FluentHistoryEntry, SimulationResult, StateProjection,
 };
 pub use pim::{
     DependencyEdge as PimDependencyEdge, EisenhowerQuadrant, EnergyLevel, GtdReviewResult,

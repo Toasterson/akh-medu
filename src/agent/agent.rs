@@ -210,6 +210,8 @@ pub struct Agent {
     pub(crate) preference_manager: super::preference::PreferenceManager,
     /// Causal world model manager (Phase 15a).
     pub(crate) causal_manager: super::causal::CausalManager,
+    /// Event calculus engine — temporal fluent reasoning (Phase 15b).
+    pub(crate) ec_engine: super::event_calculus::EventCalculusEngine,
     /// Contact manager — unified people/identity resolution (Phase 25a).
     pub(crate) contact_manager: super::contact::ContactManager,
     /// Relationship graph — interpersonal relationships between contacts (Phase 25b).
@@ -458,6 +460,7 @@ impl Agent {
             calendar_manager: super::calendar::CalendarManager::default(),
             preference_manager: super::preference::PreferenceManager::default(),
             causal_manager: super::causal::CausalManager::default(),
+            ec_engine: super::event_calculus::EventCalculusEngine::default(),
             contact_manager: super::contact::ContactManager::default(),
             relationship_graph: super::contact_rel::RelationshipGraph::default(),
             person_memory: super::contact_memory::PersonMemoryIndex::new(100),
@@ -526,6 +529,13 @@ impl Agent {
         }
         if let Err(e) = agent.causal_manager.ensure_init(&agent.engine) {
             tracing::warn!("failed to init causal predicates: {e}");
+        }
+
+        // Initialize event calculus engine (Phase 15b): restore or create.
+        if let Ok(restored) = super::event_calculus::EventCalculusEngine::restore(&agent.engine) {
+            agent.ec_engine = restored;
+        } else if let Err(e) = agent.ec_engine.ensure_init(&agent.engine) {
+            tracing::warn!("failed to init event calculus predicates: {e}");
         }
 
         // Restore KG dialogue state into ConversationState.
@@ -1212,6 +1222,16 @@ impl Agent {
     /// Get a mutable reference to the causal manager.
     pub fn causal_manager_mut(&mut self) -> &mut super::causal::CausalManager {
         &mut self.causal_manager
+    }
+
+    /// Get a reference to the event calculus engine.
+    pub fn ec_engine(&self) -> &super::event_calculus::EventCalculusEngine {
+        &self.ec_engine
+    }
+
+    /// Get a mutable reference to the event calculus engine.
+    pub fn ec_engine_mut(&mut self) -> &mut super::event_calculus::EventCalculusEngine {
+        &mut self.ec_engine
     }
 
     /// Ensure an interlocutor is registered, auto-creating on first interaction.
@@ -2287,6 +2307,20 @@ impl Agent {
                 })?;
         }
 
+        // Persist event calculus engine (Phase 15b).
+        if !self.ec_engine.events.is_empty() || !self.ec_engine.fluents.is_empty() {
+            let ec_bytes = bincode::serialize(&self.ec_engine).map_err(|e| {
+                AgentError::ConsolidationFailed {
+                    message: format!("failed to serialize ec engine: {e}"),
+                }
+            })?;
+            store
+                .put_meta(b"agent:ec_engine", &ec_bytes)
+                .map_err(|e| AgentError::ConsolidationFailed {
+                    message: format!("failed to persist ec engine: {e}"),
+                })?;
+        }
+
         // Persist contact manager (Phase 25a).
         let contact_bytes = bincode::serialize(&self.contact_manager).map_err(|e| {
             AgentError::ConsolidationFailed {
@@ -2536,6 +2570,12 @@ impl Agent {
                 super::causal::CausalManager::new(&engine).unwrap_or_default()
             });
 
+        // Restore event calculus engine (Phase 15b).
+        let ec_engine = super::event_calculus::EventCalculusEngine::restore(&engine)
+            .unwrap_or_else(|_| {
+                super::event_calculus::EventCalculusEngine::new(&engine).unwrap_or_default()
+            });
+
         // Restore contact manager (Phase 25a).
         let contact_manager = super::contact::ContactManager::restore(&engine)
             .unwrap_or_else(|_| {
@@ -2622,6 +2662,7 @@ impl Agent {
             calendar_manager,
             preference_manager,
             causal_manager,
+            ec_engine,
             contact_manager,
             relationship_graph,
             person_memory,

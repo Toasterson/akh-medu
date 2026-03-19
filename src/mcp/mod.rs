@@ -500,6 +500,78 @@ pub struct InferAnalogyParams {
     pub top_k: Option<usize>,
 }
 
+// ── Event Calculus Parameter Structs (Phase 15b) ────────────────────────
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct RecordEventParams {
+    #[schemars(description = "Target workspace (default: \"default\")")]
+    #[serde(default = "default_workspace")]
+    pub workspace: String,
+    #[schemars(description = "Name of the event (e.g. 'switch-on', 'deploy-v2')")]
+    pub name: String,
+    #[schemars(description = "Timestamp (seconds since UNIX epoch). Defaults to now if omitted.")]
+    pub timestamp: Option<u64>,
+    #[schemars(
+        description = "Fluent labels that this event initiates (starts being true)"
+    )]
+    pub initiates: Option<Vec<String>>,
+    #[schemars(
+        description = "Fluent labels that this event terminates (stops being true)"
+    )]
+    pub terminates: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct HoldsAtParams {
+    #[schemars(description = "Target workspace (default: \"default\")")]
+    #[serde(default = "default_workspace")]
+    pub workspace: String,
+    #[schemars(description = "Fluent label to check (e.g. 'light-on', 'server-running')")]
+    pub fluent: String,
+    #[schemars(description = "Time to check (seconds since UNIX epoch)")]
+    pub time: u64,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ProjectStateParams {
+    #[schemars(description = "Target workspace (default: \"default\")")]
+    #[serde(default = "default_workspace")]
+    pub workspace: String,
+    #[schemars(description = "Start of interval (seconds since UNIX epoch)")]
+    pub from_time: u64,
+    #[schemars(description = "End of interval (seconds since UNIX epoch)")]
+    pub to_time: u64,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SimulateActionsParams {
+    #[schemars(description = "Target workspace (default: \"default\")")]
+    #[serde(default = "default_workspace")]
+    pub workspace: String,
+    #[schemars(
+        description = "Ordered list of action names to simulate (must have causal schemas registered)"
+    )]
+    pub actions: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct WhatChangedSinceParams {
+    #[schemars(description = "Target workspace (default: \"default\")")]
+    #[serde(default = "default_workspace")]
+    pub workspace: String,
+    #[schemars(description = "Return changes after this timestamp (seconds since UNIX epoch)")]
+    pub since: u64,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct FluentHistoryParams {
+    #[schemars(description = "Target workspace (default: \"default\")")]
+    #[serde(default = "default_workspace")]
+    pub workspace: String,
+    #[schemars(description = "Fluent label to get history for")]
+    pub fluent: String,
+}
+
 // ── Helpers ─────────────────────────────────────────────────────────────
 
 /// Format a `Vec<AkhMessage>` into human-readable text for MCP tool output.
@@ -2240,6 +2312,313 @@ impl AkhMcpServer {
         Ok(CallToolResult::success(vec![Content::text(result)]))
     }
 
+    // ── Event Calculus (Phase 15b) ─────────────────────────────────
+
+    #[tool(
+        name = "record_event",
+        description = "Record a temporal event that initiates and/or terminates fluents (time-varying properties). Events are the fundamental building blocks of the event calculus — they represent things that happen at a point in time and change what is true."
+    )]
+    async fn record_event(
+        &self,
+        Parameters(params): Parameters<RecordEventParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let engine = self.state.get_engine(&params.workspace).await?;
+        let agent = self.state.get_agent(&params.workspace).await?;
+        let event_name = params.name.clone();
+        let timestamp = params.timestamp.unwrap_or_else(|| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs()
+        });
+        let initiates_labels = params.initiates.unwrap_or_default();
+        let terminates_labels = params.terminates.unwrap_or_default();
+
+        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            let event_id = engine
+                .resolve_or_create_entity(&format!("ec:event:{event_name}"))
+                .map_err(|e| format!("{e}"))?;
+
+            let mut initiates = Vec::new();
+            for label in &initiates_labels {
+                let id = engine
+                    .resolve_or_create_entity(&format!("ec:fluent:{label}"))
+                    .map_err(|e| format!("{e}"))?;
+                initiates.push(id);
+            }
+
+            let mut terminates = Vec::new();
+            for label in &terminates_labels {
+                let id = engine
+                    .resolve_or_create_entity(&format!("ec:fluent:{label}"))
+                    .map_err(|e| format!("{e}"))?;
+                terminates.push(id);
+            }
+
+            let event = crate::agent::Event {
+                symbol_id: event_id,
+                name: event_name.clone(),
+                timestamp,
+                initiates: initiates.clone(),
+                terminates: terminates.clone(),
+            };
+
+            let mut agent = agent.lock().map_err(|e| format!("agent lock: {e}"))?;
+            agent
+                .ec_engine_mut()
+                .record_event(event, &engine)
+                .map_err(|e| format!("{e}"))?;
+
+            let _ = engine.persist();
+            Ok(format!(
+                "Recorded event \"{event_name}\" at t={timestamp}: initiates {} fluent(s), terminates {} fluent(s)",
+                initiates.len(),
+                terminates.len()
+            ))
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("task panicked: {e}"), None))?
+        .map_err(|e| McpError::internal_error(e, None))?;
+
+        Ok(CallToolResult::success(vec![Content::text(result)]))
+    }
+
+    #[tool(
+        name = "holds_at",
+        description = "Check whether a fluent (time-varying property) holds at a specific time. Evaluates the core Event Calculus axiom: a fluent holds if it was initiated by some event and not clipped (terminated) since."
+    )]
+    async fn holds_at(
+        &self,
+        Parameters(params): Parameters<HoldsAtParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let engine = self.state.get_engine(&params.workspace).await?;
+        let agent = self.state.get_agent(&params.workspace).await?;
+        let fluent_label = params.fluent.clone();
+        let time = params.time;
+
+        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            let fluent_id = engine
+                .resolve_or_create_entity(&format!("ec:fluent:{fluent_label}"))
+                .map_err(|e| format!("{e}"))?;
+
+            let agent = agent.lock().map_err(|e| format!("agent lock: {e}"))?;
+            let holds = agent.ec_engine().holds_at(fluent_id, time);
+
+            Ok(format!(
+                "Fluent \"{fluent_label}\" {} at t={time}",
+                if holds { "HOLDS" } else { "does NOT hold" }
+            ))
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("task panicked: {e}"), None))?
+        .map_err(|e| McpError::internal_error(e, None))?;
+
+        Ok(CallToolResult::success(vec![Content::text(result)]))
+    }
+
+    #[tool(
+        name = "project_state",
+        description = "Project temporal state: what fluents hold at a future time, what was terminated, and what events occurred in the interval. Useful for understanding the temporal evolution of the world."
+    )]
+    async fn project_state(
+        &self,
+        Parameters(params): Parameters<ProjectStateParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let agent = self.state.get_agent(&params.workspace).await?;
+        let from_time = params.from_time;
+        let to_time = params.to_time;
+
+        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            let agent = agent.lock().map_err(|e| format!("agent lock: {e}"))?;
+            let proj = agent.ec_engine().project_state(from_time, to_time);
+
+            let mut lines = Vec::new();
+            lines.push(format!(
+                "State projection [{from_time} → {to_time}]:"
+            ));
+            lines.push(format!("  Holding fluents: {}", proj.holding.len()));
+            for f in &proj.holding {
+                lines.push(format!("    ✓ {}", f.label));
+            }
+            lines.push(format!("  Terminated: {}", proj.terminated.len()));
+            for (f, _ev) in &proj.terminated {
+                lines.push(format!("    ✗ {}", f.label));
+            }
+            lines.push(format!("  Events in interval: {}", proj.events.len()));
+            for e in &proj.events {
+                lines.push(format!("    @ t={}: {}", e.timestamp, e.name));
+            }
+
+            Ok(lines.join("\n"))
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("task panicked: {e}"), None))?
+        .map_err(|e| McpError::internal_error(e, None))?;
+
+        Ok(CallToolResult::success(vec![Content::text(result)]))
+    }
+
+    #[tool(
+        name = "simulate_actions",
+        description = "Simulate a hypothetical sequence of actions using the causal model. Predicts how fluents change at each step, with confidence decaying geometrically. Requires causal action schemas to be registered."
+    )]
+    async fn simulate_actions(
+        &self,
+        Parameters(params): Parameters<SimulateActionsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let engine = self.state.get_engine(&params.workspace).await?;
+        let agent = self.state.get_agent(&params.workspace).await?;
+        let action_names = params.actions.clone();
+
+        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            let mut action_ids = Vec::new();
+            for name in &action_names {
+                let id = engine
+                    .resolve_or_create_entity(&format!("tool:{name}"))
+                    .map_err(|e| format!("{e}"))?;
+                action_ids.push(id);
+            }
+
+            let agent = agent.lock().map_err(|e| format!("agent lock: {e}"))?;
+            let sim = agent
+                .ec_engine()
+                .simulate_actions(&action_ids, agent.causal_manager(), &engine)
+                .map_err(|e| format!("{e}"))?;
+
+            let mut lines = Vec::new();
+            lines.push(format!(
+                "Simulation of {} actions (confidence: {:.2}):",
+                sim.action_sequence.len(),
+                sim.confidence
+            ));
+            for (i, state) in sim.state_trajectory.iter().enumerate() {
+                let holding: Vec<&str> = state
+                    .iter()
+                    .filter(|f| f.current_value)
+                    .map(|f| f.label.as_str())
+                    .collect();
+                lines.push(format!(
+                    "  Step {}: {} fluents holding [{}]",
+                    i + 1,
+                    holding.len(),
+                    holding.join(", ")
+                ));
+            }
+            lines.push(format!("  Final state: {} fluents holding", sim.final_state.len()));
+            for f in &sim.final_state {
+                lines.push(format!("    ✓ {}", f.label));
+            }
+
+            Ok(lines.join("\n"))
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("task panicked: {e}"), None))?
+        .map_err(|e| McpError::internal_error(e, None))?;
+
+        Ok(CallToolResult::success(vec![Content::text(result)]))
+    }
+
+    #[tool(
+        name = "what_changed_since",
+        description = "Temporal diff: what fluents were initiated or terminated since a given timestamp? Returns changes sorted by time."
+    )]
+    async fn what_changed_since(
+        &self,
+        Parameters(params): Parameters<WhatChangedSinceParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let agent = self.state.get_agent(&params.workspace).await?;
+        let since = params.since;
+
+        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            let agent = agent.lock().map_err(|e| format!("agent lock: {e}"))?;
+            let changes = agent.ec_engine().what_changed_since(since);
+
+            if changes.is_empty() {
+                return Ok(format!("No fluent changes since t={since}"));
+            }
+
+            let mut lines = Vec::new();
+            lines.push(format!("Changes since t={since}: ({} total)", changes.len()));
+            for (fluent, event, initiated) in &changes {
+                let status = if *initiated { "initiated" } else { "terminated" };
+                lines.push(format!(
+                    "  @ t={}: \"{}\" {} by \"{}\"",
+                    event.timestamp, fluent.label, status, event.name
+                ));
+            }
+
+            Ok(lines.join("\n"))
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("task panicked: {e}"), None))?
+        .map_err(|e| McpError::internal_error(e, None))?;
+
+        Ok(CallToolResult::success(vec![Content::text(result)]))
+    }
+
+    #[tool(
+        name = "fluent_history",
+        description = "Get the full history of a fluent: every initiation and termination event with timestamps."
+    )]
+    async fn fluent_history(
+        &self,
+        Parameters(params): Parameters<FluentHistoryParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let engine = self.state.get_engine(&params.workspace).await?;
+        let agent = self.state.get_agent(&params.workspace).await?;
+        let fluent_label = params.fluent.clone();
+
+        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            let fluent_id = engine
+                .resolve_or_create_entity(&format!("ec:fluent:{fluent_label}"))
+                .map_err(|e| format!("{e}"))?;
+
+            let agent = agent.lock().map_err(|e| format!("agent lock: {e}"))?;
+            let history = agent
+                .ec_engine()
+                .fluent_history(fluent_id)
+                .map_err(|e| format!("{e}"))?;
+
+            if history.is_empty() {
+                return Ok(format!("No history for fluent \"{fluent_label}\""));
+            }
+
+            let mut lines = Vec::new();
+            lines.push(format!(
+                "History of \"{}\" ({} entries):",
+                fluent_label,
+                history.len()
+            ));
+            for entry in &history {
+                let action = if entry.initiated { "INITIATED" } else { "TERMINATED" };
+                let event_label = agent
+                    .ec_engine()
+                    .get_event(entry.by_event)
+                    .map(|e| e.name.as_str())
+                    .unwrap_or("unknown");
+                lines.push(format!(
+                    "  @ t={}: {} by \"{}\"",
+                    entry.timestamp, action, event_label
+                ));
+            }
+
+            // Current status.
+            if let Some(f) = agent.ec_engine().get_fluent(fluent_id) {
+                lines.push(format!(
+                    "  Current: {}",
+                    if f.current_value { "HOLDING" } else { "NOT holding" }
+                ));
+            }
+
+            Ok(lines.join("\n"))
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("task panicked: {e}"), None))?
+        .map_err(|e| McpError::internal_error(e, None))?;
+
+        Ok(CallToolResult::success(vec![Content::text(result)]))
+    }
+
     // ── Chat ────────────────────────────────────────────────────────
 
     #[tool(
@@ -2319,7 +2698,11 @@ impl rmcp::handler::server::ServerHandler for AkhMcpServer {
                  Agent introspection: `agent_run_cycle` (single OODA step), `agent_goals`, \
                  `agent_recall` (episodic memory), `agent_psyche`.\n\n\
                  Knowledge introspection: `triples_of`, `provenance_of`, `export_symbols`, \
-                 `infer_analogy`, `remove_triple`."
+                 `infer_analogy`, `remove_triple`.\n\n\
+                 Event calculus (temporal reasoning): `record_event` (create events that initiate/terminate \
+                 fluents), `holds_at` (does fluent hold at time?), `project_state` (state at future time), \
+                 `simulate_actions` (predict action sequence outcomes), `what_changed_since` (temporal diff), \
+                 `fluent_history` (full lifecycle of a fluent)."
                     .to_string(),
             ),
         }

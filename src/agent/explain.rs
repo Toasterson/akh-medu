@@ -985,6 +985,15 @@ pub fn derivation_kind_prose(kind: &DerivationKind) -> String {
         } => {
             format!("LLM-extracted triple (backend: {backend}, model: {model})")
         }
+        DerivationKind::EventCalculusProjection {
+            fluent_count,
+            event_count,
+            interval_secs,
+        } => {
+            format!(
+                "event calculus projection: {fluent_count} fluents, {event_count} events, {interval_secs}s interval"
+            )
+        }
     }
 }
 
