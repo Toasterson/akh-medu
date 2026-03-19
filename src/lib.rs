@@ -75,4 +75,5 @@ pub mod temporal;
 pub mod tms;
 pub mod tui;
 pub mod vsa;
+pub mod wiki;
 pub mod workspace;
