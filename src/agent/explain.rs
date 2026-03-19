@@ -1003,6 +1003,15 @@ pub fn derivation_kind_prose(kind: &DerivationKind) -> String {
                 "counterfactual: \"{actual_action}\" vs \"{hypothetical_action}\" — {divergent_count} divergent fluent(s)"
             )
         }
+        DerivationKind::MctsPlanning {
+            iterations,
+            depth,
+            expected_value,
+        } => {
+            format!(
+                "MCTS planning: {iterations} iterations, depth {depth}, expected value {expected_value:.2}"
+            )
+        }
     }
 }
 

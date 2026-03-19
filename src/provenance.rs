@@ -556,6 +556,15 @@ pub enum DerivationKind {
         hypothetical_action: String,
         divergent_count: u32,
     },
+
+    // --- Phase 16: Predictive Planning ----------------------------------------
+
+    /// An MCTS planning session was executed (Phase 16b).
+    MctsPlanning {
+        iterations: u32,
+        depth: u32,
+        expected_value: f32,
+    },
 }
 
 impl DerivationKind {
@@ -642,6 +651,7 @@ impl DerivationKind {
             Self::LlmTripleExtraction { .. } => 77,
             Self::EventCalculusProjection { .. } => 78,
             Self::CounterfactualReasoning { .. } => 79,
+            Self::MctsPlanning { .. } => 80,
         }
     }
 }

@@ -585,6 +585,19 @@ pub struct CounterfactualParams {
     pub hypothetical_action: String,
 }
 
+// ── Planning Parameter Structs (Phase 16) ───────────────────────────────
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct MctsPlanParams {
+    #[schemars(description = "Target workspace (default: \"default\")")]
+    #[serde(default = "default_workspace")]
+    pub workspace: String,
+    #[schemars(description = "Maximum MCTS iterations (default: 100)")]
+    pub max_iterations: Option<usize>,
+    #[schemars(description = "Maximum plan depth (default: 5)")]
+    pub max_depth: Option<usize>,
+}
+
 // ── Helpers ─────────────────────────────────────────────────────────────
 
 /// Format a `Vec<AkhMessage>` into human-readable text for MCP tool output.
@@ -2779,6 +2792,73 @@ impl AkhMcpServer {
         Ok(CallToolResult::success(vec![Content::text(result)]))
     }
 
+    // ── Planning (Phase 16) ────────────────────────────────────────
+
+    #[tool(
+        name = "mcts_plan",
+        description = "Run MCTS (Monte Carlo Tree Search) planning to find the best multi-step action sequence for the agent's current goals. Uses the causal world model for state prediction and TD-learned values for evaluation."
+    )]
+    async fn mcts_plan(
+        &self,
+        Parameters(params): Parameters<MctsPlanParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let engine = self.state.get_engine(&params.workspace).await?;
+        let agent = self.state.get_agent(&params.workspace).await?;
+        let max_iterations = params.max_iterations.unwrap_or(100);
+        let max_depth = params.max_depth.unwrap_or(5);
+
+        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            let agent = agent.lock().map_err(|e| format!("agent lock: {e}"))?;
+
+            let config = crate::agent::MctsConfig {
+                max_iterations,
+                max_depth,
+                ..crate::agent::MctsConfig::default()
+            };
+
+            let root_state = crate::agent::encode_state(agent.goals(), &engine);
+            let planner = crate::agent::MctsPlanner::new(config);
+            let result = planner.plan(
+                root_state,
+                agent.causal_manager(),
+                agent.value_function(),
+                &engine,
+                None,
+            );
+
+            let mut lines = Vec::new();
+            lines.push(format!(
+                "MCTS Planning: {} iterations, depth {}, reaches_goal={}",
+                result.iterations, result.max_depth_reached, result.reaches_goal
+            ));
+            lines.push(format!(
+                "  Best plan ({} steps, expected value {:.3}):",
+                result.best_plan.len(),
+                result.expected_value
+            ));
+            for (i, action) in result.best_plan.iter().enumerate() {
+                let label = engine.resolve_label(*action);
+                lines.push(format!("    {}. {label}", i + 1));
+            }
+            if !result.first_action_scores.is_empty() {
+                lines.push("  First-action candidates:".into());
+                for (action, value, visits) in &result.first_action_scores {
+                    let label = engine.resolve_label(*action);
+                    lines.push(format!(
+                        "    {label}: value={value:.3}, visits={visits}"
+                    ));
+                }
+            }
+
+            Ok(lines.join("\n"))
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("task panicked: {e}"), None))?
+        .map_err(|e| McpError::internal_error(e, None))?;
+
+        Ok(CallToolResult::success(vec![Content::text(result)]))
+    }
+
     // ── Chat ────────────────────────────────────────────────────────
 
     #[tool(
@@ -2864,7 +2944,8 @@ impl rmcp::handler::server::ServerHandler for AkhMcpServer {
                  `simulate_actions` (predict action sequence outcomes), `what_changed_since` (temporal diff), \
                  `fluent_history` (full lifecycle of a fluent).\n\n\
                  Counterfactual reasoning: `counterfactual` (Pearl Level 3: what if action Y instead \
-                 of X?), `prediction_accuracy` (causal model accuracy stats and refinement suggestions)."
+                 of X?), `prediction_accuracy` (causal model accuracy stats and refinement suggestions).\n\n\
+                 Planning: `mcts_plan` (multi-step MCTS planning using causal world model and TD values)."
                     .to_string(),
             ),
         }

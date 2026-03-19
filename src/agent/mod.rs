@@ -43,6 +43,7 @@ pub mod oxifed;
 pub mod goal_generation;
 pub mod idle;
 pub mod library_learn;
+pub mod mcts;
 pub mod memory;
 pub mod metacognition;
 pub mod multi_agent;
@@ -165,6 +166,7 @@ pub use continuous_learning::{ContinuousLearningConfig, ContinuousLearningRunRes
 pub use curiosity::{CuriosityReport, CuriosityTarget, DirectedCuriosityConfig};
 pub use resource::{EffortCase, EffortEstimate, EffortIndex, ImprovementHistory, ResourceReport};
 pub use semantic_enrichment::{EnrichmentResult, SemanticPredicates};
+pub use mcts::{MctsConfig, MctsNode, MctsPlanner, MctsReflection, MctsResult, prune_tree};
 pub use sleep::{ConsolidationPhase, SleepConfig, SleepCycle, SleepMetrics};
 pub use state_value::{
     AgentState, Reward, StateRoleVectors, ValueFunction, encode_state, encode_state_with_vsa,
