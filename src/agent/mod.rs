@@ -9,6 +9,7 @@
 //! - **Consolidation** (deliberate reasoning about what to remember)
 
 #[allow(clippy::module_inception)]
+pub mod active_inference;
 pub mod agent;
 pub mod ach;
 pub mod calendar;
@@ -140,6 +141,10 @@ pub use nlp::{ConversationalKind, QuestionWord, UserIntent, classify_conversatio
 pub use ooda::{
     ActionResult, Decision, DecisionImpasse, GoalProgress, ImpasseKind, Observation,
     OodaCycleResult, Orientation,
+};
+pub use active_inference::{
+    ActiveInferenceConfig, ActiveInferenceEngine, FreeEnergy, GenerativeModel,
+    Policy, PolicySelectionResult, PrecisionWeights, PredictionError,
 };
 pub use ach::{AchAnalysis, AchEvidence, AchHypothesis, ConsistencyRating};
 pub use calendar::{

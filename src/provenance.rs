@@ -606,6 +606,16 @@ pub enum DerivationKind {
         tom_level: u8,
         prediction_count: u32,
     },
+
+    // --- Phase 20: Active Inference -------------------------------------------
+
+    /// An active inference cycle was run (Phase 20a).
+    ActiveInferenceCycle {
+        surprise: f32,
+        pragmatic: f32,
+        epistemic: f32,
+        efe: f32,
+    },
 }
 
 impl DerivationKind {
@@ -698,6 +708,7 @@ impl DerivationKind {
             Self::EpistemicAssessment { .. } => 83,
             Self::EpistemicUpdate { .. } => 84,
             Self::TheoryOfMind { .. } => 85,
+            Self::ActiveInferenceCycle { .. } => 86,
         }
     }
 }

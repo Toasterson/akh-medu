@@ -222,6 +222,8 @@ pub struct Agent {
     pub(crate) reliability_manager: super::source_reliability::SourceReliabilityManager,
     /// Epistemic state manager — what agents know/believe (Phase 19).
     pub(crate) epistemic_manager: super::epistemic::EpistemicStateManager,
+    /// Active inference engine — prediction, surprise, free energy (Phase 20).
+    pub(crate) active_inference: super::active_inference::ActiveInferenceEngine,
     /// Contact manager — unified people/identity resolution (Phase 25a).
     pub(crate) contact_manager: super::contact::ContactManager,
     /// Relationship graph — interpersonal relationships between contacts (Phase 25b).
@@ -476,6 +478,7 @@ impl Agent {
             evidence_manager: super::evidence::EvidenceManager::new(),
             reliability_manager: super::source_reliability::SourceReliabilityManager::new(),
             epistemic_manager: super::epistemic::EpistemicStateManager::new(),
+            active_inference: super::active_inference::ActiveInferenceEngine::default(),
             contact_manager: super::contact::ContactManager::default(),
             relationship_graph: super::contact_rel::RelationshipGraph::default(),
             person_memory: super::contact_memory::PersonMemoryIndex::new(100),
@@ -2362,6 +2365,11 @@ impl Agent {
                 })?;
         }
 
+        // Persist active inference engine (Phase 20).
+        if self.active_inference.cycle_count > 0 {
+            let _ = self.active_inference.persist(&self.engine);
+        }
+
         // Persist epistemic manager (Phase 19).
         if self.epistemic_manager.agent_count() > 0 {
             let _ = self.epistemic_manager.persist(&self.engine);
@@ -2665,6 +2673,9 @@ impl Agent {
                 super::event_calculus::EventCalculusEngine::new(&engine).unwrap_or_default()
             });
 
+        // Restore active inference engine (Phase 20).
+        let active_inference = super::active_inference::ActiveInferenceEngine::restore(&engine);
+
         // Restore epistemic manager (Phase 19).
         let epistemic_manager = super::epistemic::EpistemicStateManager::restore(&engine);
 
@@ -2778,6 +2789,7 @@ impl Agent {
             evidence_manager,
             reliability_manager,
             epistemic_manager,
+            active_inference,
             contact_manager,
             relationship_graph,
             person_memory,

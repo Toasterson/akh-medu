@@ -1049,6 +1049,16 @@ pub fn derivation_kind_prose(kind: &DerivationKind) -> String {
         } => {
             format!("theory of mind: level {tom_level}, {prediction_count} predictions")
         }
+        DerivationKind::ActiveInferenceCycle {
+            surprise,
+            pragmatic,
+            epistemic,
+            efe,
+        } => {
+            format!(
+                "active inference: surprise={surprise:.2}, pragmatic={pragmatic:.2}, epistemic={epistemic:.2}, EFE={efe:.2}"
+            )
+        }
     }
 }
 
