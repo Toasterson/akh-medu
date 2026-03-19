@@ -220,6 +220,8 @@ pub struct Agent {
     pub(crate) evidence_manager: super::evidence::EvidenceManager,
     /// Source reliability manager — Admiralty ratings + Bayesian trust (Phase 18a).
     pub(crate) reliability_manager: super::source_reliability::SourceReliabilityManager,
+    /// Epistemic state manager — what agents know/believe (Phase 19).
+    pub(crate) epistemic_manager: super::epistemic::EpistemicStateManager,
     /// Contact manager — unified people/identity resolution (Phase 25a).
     pub(crate) contact_manager: super::contact::ContactManager,
     /// Relationship graph — interpersonal relationships between contacts (Phase 25b).
@@ -473,6 +475,7 @@ impl Agent {
             value_function: super::state_value::ValueFunction::default(),
             evidence_manager: super::evidence::EvidenceManager::new(),
             reliability_manager: super::source_reliability::SourceReliabilityManager::new(),
+            epistemic_manager: super::epistemic::EpistemicStateManager::new(),
             contact_manager: super::contact::ContactManager::default(),
             relationship_graph: super::contact_rel::RelationshipGraph::default(),
             person_memory: super::contact_memory::PersonMemoryIndex::new(100),
@@ -2359,6 +2362,11 @@ impl Agent {
                 })?;
         }
 
+        // Persist epistemic manager (Phase 19).
+        if self.epistemic_manager.agent_count() > 0 {
+            let _ = self.epistemic_manager.persist(&self.engine);
+        }
+
         // Persist reliability manager (Phase 18a).
         if !self.reliability_manager.sources.is_empty() {
             let _ = self.reliability_manager.persist(&self.engine);
@@ -2657,6 +2665,9 @@ impl Agent {
                 super::event_calculus::EventCalculusEngine::new(&engine).unwrap_or_default()
             });
 
+        // Restore epistemic manager (Phase 19).
+        let epistemic_manager = super::epistemic::EpistemicStateManager::restore(&engine);
+
         // Restore reliability manager (Phase 18a).
         let reliability_manager = super::source_reliability::SourceReliabilityManager::restore(&engine);
 
@@ -2766,6 +2777,7 @@ impl Agent {
             value_function,
             evidence_manager,
             reliability_manager,
+            epistemic_manager,
             contact_manager,
             relationship_graph,
             person_memory,

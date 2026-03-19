@@ -36,6 +36,7 @@ pub mod explain;
 pub mod daemon;
 pub mod decomposition;
 pub mod drives;
+pub mod epistemic;
 pub mod error;
 pub mod evidence;
 pub mod goal;
@@ -105,6 +106,12 @@ pub use decomposition::{
     TaskNode, TaskNodeKind, TaskTree,
 };
 pub use drives::{DriveKind, DriveSystem};
+pub use epistemic::{
+    CommunicationStrategy, EpistemicError, EpistemicEvent, EpistemicModality,
+    EpistemicProfile, EpistemicProposition, EpistemicResult, EpistemicStateManager,
+    EpistemicUpdateResult, InformationAdvantage, PropositionRef, StrategicAssessment,
+    ToMEngine, ToMLevel, ToMModel,
+};
 pub use error::{AgentError, AgentResult};
 pub use evidence::{
     BeliefInterval, ClaimAssessment, ClaimVerdict, ConflictAlert, ConflictRecommendation,

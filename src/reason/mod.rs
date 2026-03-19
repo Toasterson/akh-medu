@@ -44,6 +44,12 @@ define_language! {
         "holds-at" = HoldsAt([egg::Id; 2]),
         "terminated" = Terminated([egg::Id; 2]),
 
+        // Epistemic Logic (Phase 19)
+        "knows" = Knows([egg::Id; 2]),
+        "believes" = Believes([egg::Id; 2]),
+        "ignorant-about" = IgnorantAbout([egg::Id; 2]),
+        "implies" = Implies([egg::Id; 2]),
+
         // Named symbol references
         Symbol(egg::Symbol),
     }
@@ -136,6 +142,31 @@ pub fn causal_rules() -> Vec<egg::Rewrite<AkhLang, ()>> {
         egg::rewrite!("ec-terminate";
             "(and (terminates ?e ?f) (happens ?e ?t))"
             => "(and (terminates ?e ?f) (and (happens ?e ?t) (terminated ?f ?t)))"
+        ),
+    ]
+}
+
+/// Epistemic logic rewrite rules (Phase 19).
+///
+/// - `knows-implies-believes`: knowing implies believing
+/// - `positive-introspection`: if you know P, you know that you know P
+/// - `k-axiom`: knowledge distributes over implication
+pub fn epistemic_rules() -> Vec<egg::Rewrite<AkhLang, ()>> {
+    vec![
+        // Knowing implies believing.
+        egg::rewrite!("knows-implies-believes";
+            "(knows ?a ?p)"
+            => "(and (knows ?a ?p) (believes ?a ?p))"
+        ),
+        // Positive introspection: K(a, p) → K(a, K(a, p)).
+        egg::rewrite!("positive-introspection";
+            "(knows ?a ?p)"
+            => "(and (knows ?a ?p) (knows ?a (knows ?a ?p)))"
+        ),
+        // K-axiom: K(a, p→q) ∧ K(a, p) → K(a, q).
+        egg::rewrite!("k-axiom";
+            "(and (knows ?a (implies ?p ?q)) (knows ?a ?p))"
+            => "(and (knows ?a (implies ?p ?q)) (and (knows ?a ?p) (knows ?a ?q)))"
         ),
     ]
 }

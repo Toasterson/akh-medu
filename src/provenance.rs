@@ -584,6 +584,28 @@ pub enum DerivationKind {
         reliability: String,
         credibility: String,
     },
+
+    // --- Phase 19: Epistemic Logic --------------------------------------------
+
+    /// An epistemic assessment was made (Phase 19a).
+    EpistemicAssessment {
+        agent_id_raw: u64,
+        modality: String,
+        proposition_count: u32,
+    },
+
+    /// An epistemic update was applied (Phase 19b DEL).
+    EpistemicUpdate {
+        event_kind: String,
+        updated_agent_count: u32,
+    },
+
+    /// A theory-of-mind model was built (Phase 19c).
+    TheoryOfMind {
+        target_agent_raw: u64,
+        tom_level: u8,
+        prediction_count: u32,
+    },
 }
 
 impl DerivationKind {
@@ -673,6 +695,9 @@ impl DerivationKind {
             Self::MctsPlanning { .. } => 80,
             Self::EvidenceCombination { .. } => 81,
             Self::SourceReliabilityAssessed { .. } => 82,
+            Self::EpistemicAssessment { .. } => 83,
+            Self::EpistemicUpdate { .. } => 84,
+            Self::TheoryOfMind { .. } => 85,
         }
     }
 }

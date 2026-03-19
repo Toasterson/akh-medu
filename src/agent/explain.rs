@@ -1029,6 +1029,26 @@ pub fn derivation_kind_prose(kind: &DerivationKind) -> String {
         } => {
             format!("source reliability: {reliability}{credibility}")
         }
+        DerivationKind::EpistemicAssessment {
+            modality,
+            proposition_count,
+            ..
+        } => {
+            format!("epistemic assessment: {modality} ({proposition_count} propositions)")
+        }
+        DerivationKind::EpistemicUpdate {
+            event_kind,
+            updated_agent_count,
+        } => {
+            format!("epistemic update: {event_kind} ({updated_agent_count} agents)")
+        }
+        DerivationKind::TheoryOfMind {
+            tom_level,
+            prediction_count,
+            ..
+        } => {
+            format!("theory of mind: level {tom_level}, {prediction_count} predictions")
+        }
     }
 }
 

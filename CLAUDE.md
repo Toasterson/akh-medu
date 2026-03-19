@@ -62,7 +62,7 @@ try to express options on how to handle issues for calling functions
 
 ## Agent Roadmap
 
-Phases 1-18 + 25a-25e are complete. Detailed completion checklists live under `docs/ai/phases/`.
+Phases 1-19 + 25a-25e are complete. Detailed completion checklists live under `docs/ai/phases/`.
 Plans live under `docs/ai/plans/`, ADRs under `docs/ai/decisions/`.
 
 ### Completed Phases
@@ -88,7 +88,8 @@ See individual plan docs for details. Phases are ordered by dependency, not prio
 - **14i**: Community recipe sharing — [plan](docs/ai/plans/2026-02-17-phase14-bootstrapping.md) *(not blocking Release Alpha)*
 - **Release Alpha**: K8s deployment — [plan](docs/ai/plans/2026-02-23-release-alpha.md)
 - **15d**: Temporal experience (lifeform extension) — [plan](docs/ai/plans/2026-02-22-phase15-causal-world-model.md)
-- **19-21**: Epistemic logic, active inference, game theory — [research](docs/ai/decisions/020-predictive-planning-epistemic-research.md)
+- **19**: Epistemic Logic & Theory of Mind — [plan](docs/ai/plans/2026-02-22-phase19-epistemic-reasoning.md)
+- **20-21**: Active inference, game theory — [research](docs/ai/decisions/020-predictive-planning-epistemic-research.md)
 - **22**: Akhipedia — [plan](docs/ai/plans/2026-02-23-phase22-akhipedia.md), [ADR 021](docs/ai/decisions/021-akhipedia-architecture.md)
 - **23**: Affective System — [plan](docs/ai/plans/2026-02-24-phase23-affective-system.md)
 - **24**: Sensory Grounding — [plan](docs/ai/plans/2026-02-24-phase24-sensory-grounding.md)
