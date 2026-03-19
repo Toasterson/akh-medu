@@ -224,6 +224,8 @@ pub struct Agent {
     pub(crate) epistemic_manager: super::epistemic::EpistemicStateManager,
     /// Active inference engine — prediction, surprise, free energy (Phase 20).
     pub(crate) active_inference: super::active_inference::ActiveInferenceEngine,
+    /// Temporal experience — felt duration, boredom, urgency (Phase 15d).
+    pub(crate) temporal_experience: super::temporal_experience::TemporalExperience,
     /// Contact manager — unified people/identity resolution (Phase 25a).
     pub(crate) contact_manager: super::contact::ContactManager,
     /// Relationship graph — interpersonal relationships between contacts (Phase 25b).
@@ -479,6 +481,7 @@ impl Agent {
             reliability_manager: super::source_reliability::SourceReliabilityManager::new(),
             epistemic_manager: super::epistemic::EpistemicStateManager::new(),
             active_inference: super::active_inference::ActiveInferenceEngine::default(),
+            temporal_experience: super::temporal_experience::TemporalExperience::default(),
             contact_manager: super::contact::ContactManager::default(),
             relationship_graph: super::contact_rel::RelationshipGraph::default(),
             person_memory: super::contact_memory::PersonMemoryIndex::new(100),
@@ -2790,6 +2793,7 @@ impl Agent {
             reliability_manager,
             epistemic_manager,
             active_inference,
+            temporal_experience: super::temporal_experience::TemporalExperience::default(),
             contact_manager,
             relationship_graph,
             person_memory,
