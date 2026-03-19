@@ -44,6 +44,7 @@ pub mod compartment;
 pub mod config;
 pub mod dispatch;
 pub mod engine;
+pub mod extraction;
 pub mod error;
 pub mod export;
 pub mod glyph;

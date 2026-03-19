@@ -531,6 +531,13 @@ pub enum DerivationKind {
         event_id: u64,
         contact_id: String,
     },
+
+    /// A triple was extracted from text by an LLM backend (autonomous extraction).
+    LlmTripleExtraction {
+        backend: String,
+        source_text_hash: u64,
+        model: String,
+    },
 }
 
 impl DerivationKind {
@@ -614,6 +621,7 @@ impl DerivationKind {
             Self::RelationshipRecorded { .. } => 74,
             Self::StyleObserved { .. } => 75,
             Self::CalendarAttendeeLinked { .. } => 76,
+            Self::LlmTripleExtraction { .. } => 77,
         }
     }
 }

@@ -978,6 +978,13 @@ pub fn derivation_kind_prose(kind: &DerivationKind) -> String {
         } => {
             format!("calendar attendee linked: event {event_id} ↔ contact \"{contact_id}\"")
         }
+        DerivationKind::LlmTripleExtraction {
+            backend,
+            model,
+            ..
+        } => {
+            format!("LLM-extracted triple (backend: {backend}, model: {model})")
+        }
     }
 }
 
