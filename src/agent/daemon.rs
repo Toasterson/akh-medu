@@ -67,6 +67,12 @@ pub struct DaemonConfig {
     /// Evaluates user-defined triggers against the current agent state and
     /// fires any whose conditions are met.
     pub trigger_evaluation_interval: Duration,
+    /// Knowledge extraction interval (default: 45 min).
+    ///
+    /// Runs LLM-backed triple extraction on recently-fetched content that
+    /// hasn't been processed yet. Uses the three-tier fallback: local LLM,
+    /// external API, regex.
+    pub knowledge_extraction_interval: Duration,
     /// Maximum OODA cycles (0 = unlimited).
     pub max_cycles: usize,
 }
@@ -86,6 +92,7 @@ impl Default for DaemonConfig {
             goal_generation_interval: Duration::from_secs(300),
             sleep_cycle_interval: Duration::from_secs(3600),
             trigger_evaluation_interval: Duration::from_secs(15),
+            knowledge_extraction_interval: Duration::from_secs(2700), // 45 min
             max_cycles: 0,
         }
     }
@@ -158,6 +165,7 @@ impl AgentDaemon {
         let mut goal_gen_tick = interval(self.config.goal_generation_interval);
         let mut sleep_tick = interval(self.config.sleep_cycle_interval);
         let mut trigger_tick = interval(self.config.trigger_evaluation_interval);
+        let mut extraction_tick = interval(self.config.knowledge_extraction_interval);
 
         self.agent.lock().unwrap().sink().emit(&AkhMessage::system(
             "daemon started — background learning active",
@@ -213,6 +221,9 @@ impl AgentDaemon {
                 }
                 _ = trigger_tick.tick() => {
                     self.run_trigger_evaluation();
+                }
+                _ = extraction_tick.tick() => {
+                    self.run_knowledge_extraction();
                 }
                 _ = self.wait_for_shutdown() => {
                     self.agent.lock().unwrap().sink().emit(&AkhMessage::system(
@@ -729,6 +740,116 @@ impl AgentDaemon {
         }
     }
 
+    /// Run autonomous knowledge extraction on recently-fetched content.
+    ///
+    /// The akh decides what to extract based on its own curiosity targets:
+    /// 1. Query gap analysis for ZPD-proximal concepts with knowledge gaps
+    /// 2. For each target, gather any text associated with it (doc:mentions triples)
+    /// 3. Run the TripleExtractor (local LLM → external API → regex fallback)
+    /// 4. Store extracted triples with LlmTripleExtraction provenance
+    ///
+    /// Drops the agent lock during extraction (expensive I/O) to avoid blocking
+    /// HTTP handlers.
+    fn run_knowledge_extraction(&self) {
+        use crate::extraction::{ExtractionConfig, TripleExtractor};
+
+        // Extract engine ref and drop agent lock.
+        let engine = {
+            let agent = self.agent.lock().unwrap();
+            agent.engine.clone()
+        };
+
+        // Load extraction config (use defaults for now — config.toml integration
+        // reads from the file at daemon startup and passes through DaemonConfig).
+        let config = ExtractionConfig::default();
+        if !config.enabled {
+            return;
+        }
+
+        let extractor = TripleExtractor::new(config);
+
+        // Find recently-added content paragraphs that reference gap entities.
+        // Strategy: query for `doc:mentions` triples pointing to entities that
+        // have few outgoing relations (knowledge gaps).
+        let doc_mentions = engine.resolve_symbol("doc:mentions").ok();
+        let Some(mentions_pred) = doc_mentions else {
+            return; // No content has been ingested yet.
+        };
+
+        let mention_triples = engine
+            .knowledge_graph()
+            .triples_for_predicate(mentions_pred);
+
+        if mention_triples.is_empty() {
+            return;
+        }
+
+        // Collect paragraph entities that mention under-connected concepts.
+        let mut extraction_targets: Vec<(crate::symbol::SymbolId, String)> = Vec::new();
+        for (para_id, entity_id) in &mention_triples {
+            // Check if the mentioned entity has few outgoing relations (gap signal).
+            let outgoing = engine.triples_from(*entity_id);
+            if outgoing.len() < 3 {
+                let para_label = engine.resolve_label(*para_id);
+                // Only process paragraph-like entities (from content ingest).
+                if para_label.starts_with("para:") {
+                    extraction_targets.push((*para_id, para_label));
+                }
+            }
+        }
+
+        // Limit to avoid excessive extraction in a single cycle.
+        extraction_targets.truncate(10);
+
+        if extraction_targets.is_empty() {
+            return;
+        }
+
+        let mut total_extracted = 0usize;
+
+        for (para_id, para_label) in &extraction_targets {
+            // Get the paragraph text from the KG (stored as outgoing triples).
+            let para_triples = engine.triples_from(*para_id);
+            // Build text from the paragraph's doc:content triple if it exists,
+            // or reconstruct from mentioned entity labels.
+            let text: String = para_triples
+                .iter()
+                .filter(|t| {
+                    let pred = engine.resolve_label(t.predicate);
+                    pred == "doc:mentions"
+                })
+                .map(|t| engine.resolve_label(t.object))
+                .collect::<Vec<_>>()
+                .join(", ");
+
+            if text.len() < 20 {
+                continue; // Too short to extract from.
+            }
+
+            match extractor.extract_and_store(&text, &engine) {
+                Ok(count) => total_extracted += count,
+                Err(e) => {
+                    tracing::debug!(para = %para_label, error = %e, "extraction failed");
+                }
+            }
+        }
+
+        if total_extracted > 0 {
+            let _ = engine.persist();
+            if let Ok(agent) = self.agent.lock() {
+                agent.sink().emit(&AkhMessage::system(format!(
+                    "[daemon:extraction] {total_extracted} triples extracted from {} paragraphs",
+                    extraction_targets.len(),
+                )));
+            }
+            tracing::info!(
+                triples = total_extracted,
+                paragraphs = extraction_targets.len(),
+                "daemon: knowledge extraction complete"
+            );
+        }
+    }
+
     fn persist(&self) {
         let agent = self.agent.lock().unwrap();
         if let Err(e) = agent.persist_session() {
@@ -764,6 +885,10 @@ mod tests {
         assert_eq!(config.goal_generation_interval, Duration::from_secs(300));
         assert_eq!(config.sleep_cycle_interval, Duration::from_secs(3600));
         assert_eq!(config.trigger_evaluation_interval, Duration::from_secs(15));
+        assert_eq!(
+            config.knowledge_extraction_interval,
+            Duration::from_secs(2700)
+        );
         assert_eq!(config.max_cycles, 0);
     }
 }

@@ -73,6 +73,10 @@ pub struct AkhomedConfig {
     /// Daemon-related settings.
     #[serde(default)]
     pub daemon: DaemonSection,
+
+    /// Autonomous triple extraction settings.
+    #[serde(default)]
+    pub extraction: crate::extraction::ExtractionConfig,
 }
 
 /// Daemon configuration section.
@@ -124,6 +128,7 @@ pub struct IntervalOverrides {
     pub goal_generation_secs: Option<u64>,
     pub sleep_cycle_secs: Option<u64>,
     pub trigger_evaluation_secs: Option<u64>,
+    pub knowledge_extraction_secs: Option<u64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -173,6 +178,9 @@ impl DaemonSection {
             trigger_evaluation_interval: ov
                 .trigger_evaluation_secs
                 .map_or(defaults.trigger_evaluation_interval, Duration::from_secs),
+            knowledge_extraction_interval: ov
+                .knowledge_extraction_secs
+                .map_or(defaults.knowledge_extraction_interval, Duration::from_secs),
             max_cycles: self.max_cycles,
         }
     }
