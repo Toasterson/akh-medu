@@ -226,6 +226,8 @@ pub struct Agent {
     pub(crate) active_inference: super::active_inference::ActiveInferenceEngine,
     /// Temporal experience — felt duration, boredom, urgency (Phase 15d).
     pub(crate) temporal_experience: super::temporal_experience::TemporalExperience,
+    /// Affective system — mood, somatic markers, emotional salience (Phase 23).
+    pub(crate) affective_system: super::affect::AffectiveSystem,
     /// Contact manager — unified people/identity resolution (Phase 25a).
     pub(crate) contact_manager: super::contact::ContactManager,
     /// Relationship graph — interpersonal relationships between contacts (Phase 25b).
@@ -482,6 +484,7 @@ impl Agent {
             epistemic_manager: super::epistemic::EpistemicStateManager::new(),
             active_inference: super::active_inference::ActiveInferenceEngine::default(),
             temporal_experience: super::temporal_experience::TemporalExperience::default(),
+            affective_system: super::affect::AffectiveSystem::new(),
             contact_manager: super::contact::ContactManager::default(),
             relationship_graph: super::contact_rel::RelationshipGraph::default(),
             person_memory: super::contact_memory::PersonMemoryIndex::new(100),
@@ -2368,6 +2371,13 @@ impl Agent {
                 })?;
         }
 
+        // Persist affective system (Phase 23).
+        if !self.affective_system.markers.markers.is_empty()
+            || !self.affective_system.mood.recent_appraisals.is_empty()
+        {
+            let _ = self.affective_system.persist(&self.engine);
+        }
+
         // Persist active inference engine (Phase 20).
         if self.active_inference.cycle_count > 0 {
             let _ = self.active_inference.persist(&self.engine);
@@ -2676,6 +2686,9 @@ impl Agent {
                 super::event_calculus::EventCalculusEngine::new(&engine).unwrap_or_default()
             });
 
+        // Restore affective system (Phase 23).
+        let affective_system = super::affect::AffectiveSystem::restore(&engine);
+
         // Restore active inference engine (Phase 20).
         let active_inference = super::active_inference::ActiveInferenceEngine::restore(&engine);
 
@@ -2794,6 +2807,7 @@ impl Agent {
             epistemic_manager,
             active_inference,
             temporal_experience: super::temporal_experience::TemporalExperience::default(),
+            affective_system,
             contact_manager,
             relationship_graph,
             person_memory,

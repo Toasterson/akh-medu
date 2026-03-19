@@ -62,7 +62,7 @@ try to express options on how to handle issues for calling functions
 
 ## Agent Roadmap
 
-Phases 1-22a + 14i + 15d + 25a-25e are complete. Detailed completion checklists live under `docs/ai/phases/`.
+Phases 1-23 + 14i + 15d + 22a + 25a-25e are complete. Detailed completion checklists live under `docs/ai/phases/`.
 Plans live under `docs/ai/plans/`, ADRs under `docs/ai/decisions/`.
 
 ### Completed Phases

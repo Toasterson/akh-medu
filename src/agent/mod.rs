@@ -10,6 +10,7 @@
 
 #[allow(clippy::module_inception)]
 pub mod active_inference;
+pub mod affect;
 pub mod agent;
 pub mod ach;
 pub mod calendar;
@@ -150,6 +151,10 @@ pub use nlp::{ConversationalKind, QuestionWord, UserIntent, classify_conversatio
 pub use ooda::{
     ActionResult, Decision, DecisionImpasse, GoalProgress, ImpasseKind, Observation,
     OodaCycleResult, Orientation,
+};
+pub use affect::{
+    AffectiveState, AffectiveSystem, Appraisal, AppraisalTrigger, MoodState,
+    SomaticMarker, SomaticMarkerRegistry, emotional_salience, mood_congruence_bias,
 };
 pub use active_inference::{
     ActiveInferenceConfig, ActiveInferenceEngine, FreeEnergy, GenerativeModel,
