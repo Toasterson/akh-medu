@@ -252,6 +252,11 @@ fn proposals_from_gaps(engine: &Engine, goal_symbols: &[SymbolId]) -> Vec<GoalPr
         .gaps
         .into_iter()
         .filter(|gap| gap.severity > 0.3) // Only significant gaps.
+        .filter(|gap| {
+            // Quality gate: reject junk entities before creating goals.
+            let label = engine.resolve_label(gap.entity);
+            is_goal_worthy_label(&label)
+        })
         .take(5) // Don't flood with gap proposals.
         .map(|gap| {
             let entity_label = engine.resolve_label(gap.entity);
@@ -293,6 +298,54 @@ fn proposals_from_gaps(engine: &Engine, goal_symbols: &[SymbolId]) -> Vec<GoalPr
             }
         })
         .collect()
+}
+
+/// Check whether an entity label is worth creating a goal for.
+///
+/// Rejects junk labels from ingestion noise: Unicode control characters,
+/// Wikipedia/Wikidata meta-pages, numeric-only labels, extremely short or
+/// long labels, and common ingestion artifacts.
+fn is_goal_worthy_label(label: &str) -> bool {
+    let trimmed = label.trim();
+
+    // Too short or too long
+    if trimmed.len() < 3 || trimmed.len() > 120 {
+        return false;
+    }
+
+    // Pure numeric or Wikidata ID (wd:Q12345)
+    if trimmed.starts_with("wd:") || trimmed.chars().all(|c| c.is_ascii_digit()) {
+        return false;
+    }
+
+    // Wikipedia/Wikidata meta-pages
+    let lower = trimmed.to_lowercase();
+    let junk_prefixes = [
+        "user:", "wikipedia:", "category talk:", "talk:", "file:",
+        "template:", "portal:", "module:", "draft:", "mediawiki:",
+        "sym:", "para:", "episode:", "doc:",
+    ];
+    if junk_prefixes.iter().any(|p| lower.starts_with(p)) {
+        return false;
+    }
+
+    // Common ingestion artifacts
+    let junk_patterns = [
+        "list of", "index of", "timeline of", "articles for creation",
+        "categories for discussion", "redirects to", "sandbox",
+    ];
+    if junk_patterns.iter().any(|p| lower.contains(p)) {
+        return false;
+    }
+
+    // Mostly non-alphanumeric (Unicode junk, combining marks, control chars)
+    let alpha_count = trimmed.chars().filter(|c| c.is_alphanumeric()).count();
+    let total = trimmed.chars().count();
+    if total > 0 && (alpha_count as f64 / total as f64) < 0.5 {
+        return false;
+    }
+
+    true
 }
 
 /// Contradiction provenance → goal proposals.

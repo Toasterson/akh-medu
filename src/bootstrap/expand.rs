@@ -311,7 +311,8 @@ impl DomainExpander {
             if let Ok(vec) = encode_label(ops, &candidate.label) {
                 candidate.similarity = ops.similarity(&vec, &domain_prototype).unwrap_or(0.5);
             }
-            candidate.accepted = candidate.similarity >= self.config.similarity_threshold;
+            candidate.accepted = is_valid_expansion_label(&candidate.label)
+                && candidate.similarity >= self.config.similarity_threshold;
         }
 
         // 5. Cap at max_concepts.
@@ -884,6 +885,48 @@ fn simple_url_encode(input: &str) -> String {
         }
     }
     encoded
+}
+
+/// Check whether a candidate concept label is valid for domain expansion.
+///
+/// Rejects garbage from external APIs: Unicode control/combining characters,
+/// Wikipedia meta-pages, Wikidata IDs that are pure QIDs, extremely short labels,
+/// and common ingestion artifacts.
+fn is_valid_expansion_label(label: &str) -> bool {
+    let trimmed = label.trim();
+
+    // Too short (single char or empty)
+    if trimmed.len() < 2 {
+        return false;
+    }
+
+    // Wikipedia/Wikidata meta-pages
+    let lower = trimmed.to_lowercase();
+    let junk_prefixes = [
+        "user:", "wikipedia:", "category talk:", "talk:", "file:",
+        "template:", "portal:", "module:", "draft:", "mediawiki:",
+    ];
+    if junk_prefixes.iter().any(|p| lower.starts_with(p)) {
+        return false;
+    }
+
+    // Common meta/list/index artifacts
+    let junk_patterns = [
+        "articles for creation", "categories for discussion",
+        "redirects to", "/sandbox", "/export/",
+    ];
+    if junk_patterns.iter().any(|p| lower.contains(p)) {
+        return false;
+    }
+
+    // Mostly non-alphanumeric (Unicode control chars, combining marks, RTL markers)
+    let alpha_count = trimmed.chars().filter(|c| c.is_alphanumeric() || c.is_ascii_whitespace()).count();
+    let total = trimmed.chars().count();
+    if total > 0 && (alpha_count as f64 / total as f64) < 0.5 {
+        return false;
+    }
+
+    true
 }
 
 /// Check if a Wikipedia category is a meta/maintenance category.

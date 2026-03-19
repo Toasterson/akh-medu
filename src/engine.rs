@@ -612,6 +612,50 @@ impl Engine {
         self.search_similar(&vec, top_k)
     }
 
+    /// Re-encode a symbol's hypervector using its relational neighborhood.
+    ///
+    /// Reads all outgoing triples from the KG and creates a grounded vector
+    /// that captures the symbol's structural role (holographic reduced
+    /// representation). Updates the symbol's entry in item memory.
+    ///
+    /// Returns the number of relations used for grounding (0 = no change).
+    pub fn ground_symbol(&self, symbol: SymbolId) -> AkhResult<usize> {
+        let relations: Vec<(SymbolId, SymbolId)> = self
+            .triples_from(symbol)
+            .iter()
+            .map(|t| (t.predicate, t.object))
+            .collect();
+
+        if relations.is_empty() {
+            return Ok(0);
+        }
+
+        let grounded = crate::vsa::encode::encode_with_neighborhood(
+            &self.ops, symbol, &relations,
+        )?;
+        self.item_memory.insert(symbol, grounded);
+        Ok(relations.len())
+    }
+
+    /// Re-encode all symbols that have outgoing relations in the KG.
+    ///
+    /// Returns `(grounded_count, total_relations_used)`.
+    pub fn ground_all_symbols(&self) -> AkhResult<(usize, usize)> {
+        let all = self.registry.all();
+        let mut grounded = 0usize;
+        let mut total_rels = 0usize;
+
+        for meta in &all {
+            let n = self.ground_symbol(meta.id)?;
+            if n > 0 {
+                grounded += 1;
+                total_rels += n;
+            }
+        }
+
+        Ok((grounded, total_rels))
+    }
+
     // -----------------------------------------------------------------------
     // Rule management
     // -----------------------------------------------------------------------

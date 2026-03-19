@@ -2130,6 +2130,34 @@ impl AkhMcpServer {
         ))]))
     }
 
+    // ── VSA Grounding ───────────────────────────────────────────────
+
+    #[tool(
+        name = "ground_symbols",
+        description = "Re-encode all symbol hypervectors using their relational neighborhoods (holographic reduced representations). Improves analogy and similarity quality by grounding vectors in KG structure rather than just labels."
+    )]
+    async fn ground_symbols(
+        &self,
+        Parameters(params): Parameters<WorkspaceParam>,
+    ) -> Result<CallToolResult, McpError> {
+        let engine = self.state.get_engine(&params.workspace).await?;
+
+        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            let (grounded, total_rels) = engine
+                .ground_all_symbols()
+                .map_err(|e| format!("{e}"))?;
+            let _ = engine.persist();
+            Ok(format!(
+                "Grounded {grounded} symbols using {total_rels} relations"
+            ))
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("task panicked: {e}"), None))?
+        .map_err(|e| McpError::internal_error(e, None))?;
+
+        Ok(CallToolResult::success(vec![Content::text(result)]))
+    }
+
     // ── Chat ────────────────────────────────────────────────────────
 
     #[tool(

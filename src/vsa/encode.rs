@@ -108,6 +108,43 @@ pub fn encode_label(ops: &VsaOps, label: &str) -> VsaResult<HyperVec> {
     ops.bundle(&refs)
 }
 
+/// Encode a symbol grounded in its relational neighborhood.
+///
+/// Creates a holographic reduced representation by bundling the base symbol
+/// vector with bound(predicate_vec, object_vec) for each outgoing relation.
+/// This grounds the symbol's vector in its structural role within the KG,
+/// producing more meaningful similarity comparisons than label-only encoding.
+///
+/// `relations` is a slice of (predicate_id, object_id) pairs — typically
+/// from `engine.triples_from(symbol)`.
+///
+/// Returns the base vector if no relations are provided (no-op grounding).
+pub fn encode_with_neighborhood(
+    ops: &VsaOps,
+    symbol: SymbolId,
+    relations: &[(SymbolId, SymbolId)],
+) -> VsaResult<HyperVec> {
+    let base = encode_symbol(ops, symbol);
+
+    if relations.is_empty() {
+        return Ok(base);
+    }
+
+    // Bind each (predicate, object) pair and bundle them with the base vector.
+    let mut components: Vec<HyperVec> = Vec::with_capacity(relations.len() + 1);
+    components.push(base);
+
+    for &(pred, obj) in relations {
+        let pred_vec = encode_symbol(ops, pred);
+        let obj_vec = encode_symbol(ops, obj);
+        let bound = ops.bind(&pred_vec, &obj_vec)?;
+        components.push(bound);
+    }
+
+    let refs: Vec<&HyperVec> = components.iter().collect();
+    ops.bundle(&refs)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

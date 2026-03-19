@@ -1,6 +1,6 @@
 # Akh-medu Architecture
 
-> Last updated: 2026-03-18 (MCP: fine-grained orchestration surface — 36 tools)
+> Last updated: 2026-03-19 (MCP: 37 tools + goal quality gate, expansion garbage filter, VSA relational grounding)
 
 ## Overview
 
