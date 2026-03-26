@@ -279,29 +279,42 @@ impl T5NluBackend {
 }
 ```
 
-**Cannot ship pre-trained — no pre-existing AbsTree model exists.**
-AbsTree is our own schema. T5 NLU must be trained in-situ from accumulated
-conversation data. Qwen remains the NLU Tier 3 backbone until this model is ready.
+**Ship a pre-trained base model, refine in-situ.**
+AbsTree is our own schema — no public model exists. We train the base T5 NLU
+model in an **external offline process** (outside akh-medu, using standard
+PyTorch/Burn tooling) and ship it as `t5-nlu-abstree.gguf`. This gives users
+a working NLU model on day one that replaces Qwen as Tier 3.
 
-**Training data collection** (Phase 27f):
-- Every successful NLU parse from ANY tier is logged as a (input, AbsTree) pair
-- Tier 1 (rule parser) provides ~70% of training examples (high quality, deterministic)
-- Tier 3 (Qwen) provides the remaining complex examples
-- This is **distillation**: T5 learns to do what the full cascade does, in one step
-- Estimated threshold: ~500-1000 successful parse pairs before T5 NLU is viable
+**Offline training process** (pre-release, external to akh-medu):
+1. Generate a synthetic training corpus: run Qwen on thousands of diverse
+   inputs (questions, commands, facts, goals, temporal, modal, negated, etc.)
+   and record (input_text, AbsTree_json) pairs
+2. Add hand-curated examples for edge cases and all 12 AbsTree variants
+3. Fine-tune T5-Base on this corpus using Burn or PyTorch
+4. Evaluate against held-out test set (target: >90% exact match on AbsTree structure)
+5. Quantize to GGUF via Candle tensor-tools
+6. Ship as `data/models/t5-nlu-abstree.gguf` (~140-250 MB)
 
-**Migration path**:
-1. Accumulate training pairs during normal operation (automatic, background)
-2. Phase 27 Burn loop fine-tunes T5 on accumulated NLU examples
-3. Evaluate: T5 parse accuracy vs current cascade
-4. If competitive (>90% agreement): replace Qwen as NLU Tier 3
-5. Qwen transitions to on-demand bootstrap oracle only
-6. ~1.3 GB RAM freed during normal operation
+This is **distillation**: T5 learns to replicate what Qwen does at NLU,
+at 7x less memory.
 
-**Cold-start note**: On a fresh workspace, this sub-phase does nothing — there
-are no training pairs yet. T5 NLU emerges organically as the user interacts
-with the system over days/weeks. This is by design: the model adapts to each
-user's language patterns and domain vocabulary.
+**In-situ refinement** (Phase 27 Burn loop, after deployment):
+- Phase 27f collects (input, AbsTree) pairs from ALL tiers during normal use
+- Phase 27 Burn loop periodically fine-tunes the shipped T5 NLU model further
+- Each user's model adapts to their language patterns, domain vocabulary,
+  and specific AbsTree usage patterns over time
+- The shipped model is the starting point; the refined model is the result
+
+**Migration path** (Qwen fully replaced on day one):
+1. Ship pre-trained T5 NLU → replaces Qwen as NLU Tier 3 immediately
+2. Qwen transitions to on-demand bootstrap oracle only (Phase 32)
+3. ~1.1 GB RAM freed during normal operation from day one
+4. Phase 27 live training continuously improves the shipped base over time
+
+**What this means for the model budget**:
+- Day one: DistilBERT (~130 MB) + T5 NLU (~140-250 MB) + T5 NLG (~140-250 MB)
+- Total resident: **~400-630 MB** (vs ~1.5 GB with Qwen)
+- Qwen loaded on-demand for bootstrap only (+1.1 GB temporarily)
 
 ## Estimated Effort
 
@@ -311,7 +324,7 @@ user's language patterns and domain vocabulary.
 | 33b — T5/mT5 NLG backend | ~600 | High | Phase 26b (Candle) |
 | 33c — NeuroLogic constraints | ~400 | Medium | 33b |
 | 33d — Verbalization router | ~300 | Low | Phase 28 (n akh) |
-| 33e — T5 NLU (Qwen replacement) | ~400 | High | Phase 27 (Burn training) |
+| 33e — T5 NLU (Qwen replacement) | ~400 | High | Phase 26b (Candle), external training |
 | **Total** | **~2,200** | | |
 
 ## New Dependencies
@@ -323,10 +336,12 @@ nlu-t5 = ["candle-backend"]  # T5/mT5 for NLG + eventual NLU
 
 ## Model Files
 
-| Model | Purpose | Size (GGUF Q4) | Languages |
-|---|---|---|---|
-| T5-Base (WebNLG fine-tuned) | English NLG | ~70 MB | EN |
-| mT5-Small (WebNLG fine-tuned) | Multilingual NLG | ~100 MB | EN, RU, FR, ES, AR |
-| T5-Base (AbsTree fine-tuned) | NLU (Phase 33e) | ~70 MB | EN |
+| Model | Purpose | Size (GGUF Q4) | Source | Languages |
+|---|---|---|---|---|
+| T5-Base (WebNLG fine-tuned) | NLG (triples → text) | ~140-250 MB | `webnlg/en-t5base` → GGUF | EN |
+| mT5-Small (WebNLG fine-tuned) | Multilingual NLG | ~190 MB | Fine-tune `google/mt5-small` | EN, RU, FR, ES, AR |
+| T5-Base (AbsTree fine-tuned) | NLU (text → AbsTree) | ~140-250 MB | Offline distillation from Qwen | EN (+ multilingual via mT5 variant) |
 
-Downloaded via `akh setup models`. Graceful degradation if absent.
+All shipped with the release. Downloaded via `akh setup models`.
+Phase 27 Burn loop refines the shipped NLU model in-situ per user.
+Graceful degradation if models absent (falls back to grammar + rule parser).
