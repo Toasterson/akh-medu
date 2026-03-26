@@ -1,6 +1,6 @@
 # Akh-medu Architecture
 
-> Last updated: 2026-03-19 (Phase 17 complete: Dempster-Shafer evidence theory → 49 MCP tools)
+> Last updated: 2026-03-26 (Phase 26 planned: LLM-VSA deep integration, ADR 037)
 
 ## Overview
 
@@ -463,3 +463,93 @@ Logs: `~/Library/Logs/akh-medu/akhomed.{stdout,stderr}.log`
 Scripts:
 - `scripts/smoke-test.sh` — HTTP endpoint verification (~20 endpoints)
 - `scripts/stability-monitor.sh` — CSV logging (RSS, KG size, cycles) for overnight monitoring
+
+## Planned: LLM-VSA Deep Integration (Phase 26, ADR-037)
+
+Direction for bidirectional neural↔symbolic bridge:
+
+```
+Current:  Text ──NLU──▶ AbsTree ──▶ VSA/KG (deterministic encoding, LLM is opaque)
+Target:   Text ──LLM──▶ Hidden states ──Neural encoder──▶ HyperVec ──▶ KG grounding
+                              │                                          │
+                              └────── Symbolic manipulation ◀────────────┘
+```
+
+Sub-phases:
+- **26a**: ARM NEON SIMD kernels (2-4x speedup on M2)
+- **26b**: Candle backend (pure Rust, hidden state access, Metal on M2)
+- **26c**: PolarQuant KV cache compression (~5x, enables 7B models on M2)
+- **26d**: Neural→VSA bridge (linear projection + binarization, self-supervised)
+- **26e**: Pipeline integration (neural concept extraction as NLU enrichment)
+- **26f**: Benchmarking
+
+See [plan](plans/2026-03-26-phase26-llm-vsa-deep-integration.md) and [ADR 037](decisions/037-llm-vsa-deep-integration.md).
+
+## Planned: Dual-Framework ML Stack (Phases 26-27)
+
+- **Phase 26** (Candle): Inference + hidden state access + small encoder training
+- **Phase 27** (Burn): LoRA fine-tuning, background training loops, hot-swap weights
+- Both use safetensors format for weight exchange
+
+## Planned: `n akh` Semantic Router (Phase 28, ADR-038)
+
+Dynamic routing across all inference layers:
+
+```
+Query ──▶ n akh (VSA features + LinUCB bandit)
+              │
+              ├──▶ Rule parser      (free, <1ms)
+              ├──▶ ONNX NER         (free, ~5ms)
+              ├──▶ Candle LLM       (free, ~200ms)
+              ├──▶ VSA direct       (free, <1ms, skip LLM)
+              ├──▶ Cloud API        ($$$, ~1-3s)
+              └──▶ Burn-trained     (free, ~200ms, Phase 27)
+```
+
+Self-optimizing: as Phase 27 training improves local models, bandit shifts
+traffic from cloud → local automatically.
+
+See [plan](plans/2026-03-26-phase28-semantic-router.md) and [ADR 038](decisions/038-semantic-router.md).
+
+## Planned: Capability Exposure (Phase 29, ADR-039)
+
+Expose hidden internal capabilities as user-facing operations (MCP + CLI + NLU + dashboard):
+
+- **29a**: Microtheory management (create, browse, compose, query)
+- **29b**: Skillpack lifecycle (activate, deactivate, share)
+- **29c**: Psyche & Shadow dynamics (profile, shadow journal, archetype tuning)
+- **29d**: Argumentation & debate ("argue for X", structured pro/con)
+- **29e**: Transparent reasoning ("why do you think X?", derivation trees)
+- **29f**: Hypothesis explorer (superposition visualization)
+- **29g**: Causal explorer ("what caused X?", counterfactual timelines)
+- **29h**: Evidence & belief dashboard (Dempster-Shafer intervals, conflict alerts)
+- **29i**: Source trust dashboard (reliability scores, trust history)
+
+See [plan](plans/2026-03-26-phase29-capability-exposure.md) and [ADR 039](decisions/039-capability-exposure.md).
+
+## Planned: Procedural Skills (Phase 30, ADR-040)
+
+Extend skills from "what is" (facts) to "how to do" (procedures):
+
+- **30a**: Extended format — `actions.json` (causal schemas) + `plans.json` (HTN templates)
+- **30b**: Activation wiring — skills register actions/plans with CausalManager + HTN + MCTS
+- **30c**: LLM-assisted authoring — natural language → structured skill (3-tier user model)
+- **30d**: Rule refinement loop — failure analysis → LLM suggests fixes → user approves
+- **30e**: Quality metrics — success rates, failure modes, rule coverage, staleness
+
+See [plan](plans/2026-03-26-phase30-procedural-skills.md) and [ADR 040](decisions/040-procedural-skills.md).
+
+## Planned: Skill Intelligence (Phase 31, ADR-041)
+
+Self-organizing skill ecosystem:
+
+- **31a**: Dependency graph — `depends`, `conflicts`, `provides`/`requires` capability tags
+- **31b**: Neural skill embeddings — per-skill prototype HyperVec for domain matching
+- **31c**: Skill-aware routing — `n akh` lazy-loads skills on demand
+- **31d**: Discovery from reasoning — agent detects latent skills during consolidation
+- **31e**: Dynamic synthesis — agent creates skills to fill knowledge gaps
+- **31f**: Sharing protocol — `.akhskill` archive export/import
+- **31g**: Cross-skill inference — bridge rules for multi-domain reasoning
+- **31h**: Curriculum — learning progressions for bootstrap
+
+See [plan](plans/2026-03-26-phase31-skill-intelligence.md) and [ADR 041](decisions/041-skill-intelligence.md).
