@@ -54,9 +54,16 @@ direction to pursue.
 
 ## Decision
 
-### 1. Migrate from llama-cpp-2 to Candle for LLM inference
+### 1. Migrate from llama-cpp-2 to Candle for T5 model stack
 
-**Why**: llama-cpp-2 wraps C++ (llama.cpp) which:
+**Note (revised 2026-03-27)**: The original plan was to migrate Qwen inference
+from llama-cpp-2 to Candle. The architecture has since evolved further: Qwen
+is fully replaced by three purpose-built T5 models (NLU, NLG, Knowledge) via
+Candle's `quantized_t5` module. See ADR 043 (verbalization), ADR 045 (training
+infrastructure). The Candle migration remains the prerequisite — the model
+running on it changed from Qwen to T5.
+
+**Why migrate from llama-cpp-2**: llama-cpp-2 wraps C++ (llama.cpp) which:
 - Cannot expose hidden states — only `llama_get_embeddings()` for final embeddings;
   per-layer access requires undocumented C-level eval callbacks not exposed by Rust bindings
 - Requires C++ toolchain (CMake) to build

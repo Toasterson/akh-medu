@@ -1,9 +1,9 @@
-# Phase 32 — LLM Knowledge Extraction for Bootstrap
+# Phase 32 — Knowledge Extraction for Bootstrap
 
-> Date: 2026-03-26
+> Date: 2026-03-26 (revised 2026-03-27)
 > Status: Planned
 > Phase: 32
-> Depends on: Phase 26b (Candle LLM backend)
+> Depends on: Phase 26b (Candle backend), Phase 35 (T5 training infrastructure)
 > Optional enhancement: Phase 26d (neural bridge, for hallucination detection)
 > Enhances: Phase 14 (bootstrap), Phase 30 (skill authoring), Phase 31e (skill synthesis)
 > ADR: [042-llm-knowledge-extraction](../decisions/042-llm-knowledge-extraction.md)
@@ -11,9 +11,22 @@
 ## Motivation
 
 The bootstrap pipeline extracts ~1 triple per 28 sentences from web sources.
-The local LLM already knows vastly more from pretraining. Asking it directly
-for structured knowledge — and validating the results — can yield 10-100x more
-triples per domain with the same compute budget.
+A purpose-built T5 Knowledge model, trained offline on Wikidata + ConceptNet
+(Phase 35), can generate structured triples about any concept from its learned
+knowledge patterns — yielding 10-100x more triples per domain.
+
+This model is part of the unified T5 stack (no Qwen dependency):
+
+| Model | Task | Size (GGUF) | Resident? |
+|---|---|---|---|
+| T5 NLU | text → AbsTree | ~140-250 MB | Always |
+| T5 NLG | triples → text | ~140-250 MB | Always |
+| **T5 Knowledge** | **concept → triples** | **~140-250 MB** | **Always** |
+| DistilBERT NER | entity extraction | ~130 MB | Always |
+| **Total** | | **~550-880 MB** | |
+
+All three T5 models use the same Candle `quantized_t5` loader. No Qwen, no
+on-demand loading/unloading, no 1.1 GB memory spikes.
 
 ## Sub-phases
 
@@ -25,8 +38,9 @@ Core extraction engine that prompts the LLM with focused queries and parses
 structured triple output.
 
 ```rust
-pub struct LlmElicitor {
-    llm: Arc<CandleBackend>,          // Phase 26b
+pub struct KnowledgeElicitor {
+    model: Arc<T5Model>,              // T5 Knowledge model (Candle quantized_t5)
+    tokenizer: Arc<Tokenizer>,
     config: ElicitConfig,
 }
 
@@ -267,27 +281,18 @@ retracted via TMS cascade (Phase 9c).
 
 ### 32e — Elicitation Scheduling (~200 lines)
 
-Wire LLM elicitation into the daemon's background learning cycle.
+Wire knowledge elicitation into the daemon's background learning cycle.
 
-**On-demand model loading**: Qwen is NOT kept resident for elicitation. The
-daemon loads it when an elicitation task is scheduled, runs the passes, then
-unloads. This means elicitation adds ~1.1 GB RAM temporarily during the task,
-not permanently. The T5 NLG model (Phase 33) stays resident at ~140-250 MB.
-
-**Memory lifecycle per elicitation session**:
-```
-Idle: ~300-400 MB (DistilBERT + T5)
-  → Load Qwen: ~1.5 GB
-  → Run 5 elicitation passes (~15 seconds)
-  → Unload Qwen: back to ~300-400 MB
-```
+**No on-demand loading needed**: The T5 Knowledge model is always resident
+(~140-250 MB), sharing the Candle runtime with the NLU and NLG models.
+Elicitation runs at any time without memory spikes.
 
 **New idle task**: `elicit_knowledge`
 - Trigger: When the agent identifies a knowledge gap (directed curiosity,
   Phase 11j) or when a domain has low triple density
 - Schedule: During sleep/consolidation phase, after standard background learning
 - Rate limit: Max N elicitation sessions per hour (configurable, default: 2)
-- Memory budget: Check available RAM before loading Qwen; skip if insufficient
+- No memory budget concern — model is always loaded
 
 **Integration with continuous learning** (Phase 11):
 ```
@@ -297,7 +302,7 @@ Directed curiosity identifies gap → "I know little about thermodynamics"
 Elicitation task queued
     │
     ▼
-LLM generates triples about thermodynamics (passes 1-3)
+T5 Knowledge generates triples about thermodynamics (passes 1-3)
     │
     ▼
 Validation pipeline filters hallucinations
@@ -313,7 +318,7 @@ Next curiosity cycle finds fewer gaps → satisfaction signal
 
 | Sub-phase | Lines | Complexity | Dependencies |
 |---|---|---|---|
-| 32a — Elicitation engine | ~600 | Medium | Phase 26b (Candle) |
+| 32a — Elicitation engine | ~600 | Medium | Phase 26b (Candle), Phase 35 (T5 Knowledge model) |
 | 32b — Validation pipeline | ~500 | Medium | Phase 9j/9l, optionally 26d |
 | 32c — Bootstrap integration | ~500 | Medium | 32a, 32b |
 | 32d — Provenance & retraction | ~300 | Low | Phase 9c/9k |
@@ -352,13 +357,15 @@ Negligible compared to web API latency.
 
 ## Relationship to Other Phases
 
-- **Phase 26b** (Candle): Provides the LLM inference engine
+- **Phase 26b** (Candle): Provides the `quantized_t5` inference runtime
 - **Phase 26d** (neural bridge): Provides hallucination detection via coherence check
-- **Phase 27** (Burn training): LLM-elicited triples become training data — the model
-  learns to generate better triples over time (self-improving extraction)
+- **Phase 27** (Burn training): Elicited triples become training data — the T5
+  Knowledge model improves at generating triples over time (self-improving)
 - **Phase 28** (n akh router): Router can trigger elicitation when a query hits
   a domain with low KG density
 - **Phase 30c** (skill authoring): Skill content generation reuses the elicitation
   engine for domain facts
 - **Phase 31e** (skill synthesis): Dynamic skill creation triggers elicitation
   for the gap domain
+- **Phase 35** (T5 training infrastructure): Produces the T5 Knowledge model
+  from Wikidata + ConceptNet. This phase provides the model; Phase 32 uses it.

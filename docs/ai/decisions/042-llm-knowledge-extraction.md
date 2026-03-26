@@ -1,9 +1,10 @@
-# ADR 042 — LLM Knowledge Extraction for Bootstrap
+# ADR 042 — Knowledge Extraction for Bootstrap (T5 Knowledge Model)
 
-> Date: 2026-03-26
+> Date: 2026-03-26 (revised 2026-03-27)
 > Status: Proposed
 > Phase: 32
-> Depends on: Phase 26b (Candle LLM backend), Phase 26d (neural bridge, for validation)
+> Depends on: Phase 26b (Candle backend), Phase 35 (T5 training infrastructure)
+> Optional: Phase 26d (neural bridge, for validation)
 > Enhances: Phase 14 (bootstrap pipeline), Phase 30 (skill authoring), Phase 31e (skill synthesis)
 
 ## Context
@@ -28,20 +29,22 @@ The known limitation from project memory confirms this:
 
 ## Decision
 
-### Use the local LLM as a primary knowledge source during bootstrapping
+### Use a purpose-built T5 Knowledge model for bootstrap elicitation
 
-Instead of treating the LLM as a text-extraction tool (give it text, extract
-triples), treat it as a **knowledge oracle** (ask it what it knows, generate
-triples directly from its weights).
+Instead of a general-purpose chat LLM (Qwen), use a T5-Base model fine-tuned
+specifically on Wikidata + ConceptNet (Phase 35) for structured triple generation.
+This model learns knowledge PATTERNS (person → born-in, occupation, known-for;
+chemical → formula, discovered-by) and generates structurally correct triples
+even for concepts not seen during training.
 
 **Pipeline**:
 ```
 Bootstrap: "Learn about stellar evolution"
     │
     ▼
-1. LLM knowledge elicitation
-   "List all facts about stellar evolution as (subject, predicate, object) triples"
-   → LLM generates 50-200 triples from pretraining knowledge
+1. T5 Knowledge elicitation
+   Input: "concept: stellar evolution | domain: astronomy"
+   → T5 generates 50-200 triples from learned knowledge patterns
     │
     ▼
 2. Symbolic validation
@@ -141,28 +144,37 @@ this is critical. Multi-layer defense:
 
 ## Rejected Alternatives
 
-### Use cloud LLM for extraction (higher quality)
-Violates FLOSS sovereignty principle. Also expensive at scale. The local LLM
-is sufficient when combined with validation layers.
+### General-purpose chat LLM for extraction (Qwen2.5-1.5B)
+Originally planned. Rejected because: 1.1 GB model for a structured extraction
+task that T5-Base handles better at 7x less memory. Chat models are not
+optimized for structured output. T5's encoder-decoder architecture is purpose-
+built for text-to-text tasks including structured generation.
 
-### Replace web APIs entirely with LLM
-Web APIs provide independently verifiable facts. LLM knowledge is unverifiable
-from a single source. Cross-validation between both is stronger than either alone.
+### Use cloud LLM for extraction (higher quality)
+Violates FLOSS sovereignty principle. Also expensive at scale. The local T5
+Knowledge model is sufficient when combined with validation layers.
+
+### Replace web APIs entirely with T5 Knowledge model
+Web APIs provide independently verifiable facts. Model-generated knowledge is
+unverifiable from a single source. Cross-validation between both is stronger
+than either alone.
 
 ### Auto-ingest without validation
-Too risky. LLM hallucinations would propagate through the KG. The validation
+Too risky. Model hallucinations would propagate through the KG. The validation
 pipeline + moderate confidence assignment ensures bad triples are caught.
 
 ## Consequences
 
-- New module: `src/bootstrap/llm_elicit.rs` — structured knowledge extraction
-- Extended: `src/bootstrap/expand.rs` — LLM concept elicitation in domain expansion
-- Extended: `src/bootstrap/ingest.rs` — LLM fact elicitation in curriculum ingestion
-- New `DerivationKind::LlmElicitation` variant in provenance
-- Feature-gated: `llm-bootstrap` requires `candle-backend` (Phase 26b)
+- New module: `src/bootstrap/knowledge_elicit.rs` — structured knowledge extraction
+- Extended: `src/bootstrap/expand.rs` — T5 concept elicitation in domain expansion
+- Extended: `src/bootstrap/ingest.rs` — T5 fact elicitation in curriculum ingestion
+- New `DerivationKind::KnowledgeElicitation` variant in provenance
+- Feature-gated: `knowledge-bootstrap` requires `candle-backend` (Phase 26b)
+- T5 Knowledge model shipped with release (trained by Phase 35 infrastructure)
 - Optional neural bridge validation requires Phase 26d (graceful degradation without it)
 - Confidence assignment policy configurable in `BootstrapConfig`
 - Phase 30c (skill authoring) can reuse the elicitation pipeline for skill content
+- **No Qwen dependency anywhere in the architecture**
 
 ## References
 
