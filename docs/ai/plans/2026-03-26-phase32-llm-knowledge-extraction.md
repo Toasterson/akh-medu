@@ -269,13 +269,25 @@ retracted via TMS cascade (Phase 9c).
 
 Wire LLM elicitation into the daemon's background learning cycle.
 
+**On-demand model loading**: Qwen is NOT kept resident for elicitation. The
+daemon loads it when an elicitation task is scheduled, runs the passes, then
+unloads. This means elicitation adds ~1.1 GB RAM temporarily during the task,
+not permanently. The T5 NLG model (Phase 33) stays resident at ~140-250 MB.
+
+**Memory lifecycle per elicitation session**:
+```
+Idle: ~300-400 MB (DistilBERT + T5)
+  → Load Qwen: ~1.5 GB
+  → Run 5 elicitation passes (~15 seconds)
+  → Unload Qwen: back to ~300-400 MB
+```
+
 **New idle task**: `elicit_knowledge`
 - Trigger: When the agent identifies a knowledge gap (directed curiosity,
   Phase 11j) or when a domain has low triple density
 - Schedule: During sleep/consolidation phase, after standard background learning
 - Rate limit: Max N elicitation sessions per hour (configurable, default: 2)
-- Memory budget: Check PolarQuant-freed RAM before running (LLM inference
-  needs working memory)
+- Memory budget: Check available RAM before loading Qwen; skip if insufficient
 
 **Integration with continuous learning** (Phase 11):
 ```

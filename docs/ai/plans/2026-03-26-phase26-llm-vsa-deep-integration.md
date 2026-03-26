@@ -505,6 +505,23 @@ Candle loads and runs them. Clean separation — no framework mixing at runtime.
 5. **27e — Background training scheduler**: Wire into the daemon's idle task system.
    Train during sleep/consolidation cycles. Rate-limit to avoid starving inference.
 
+6. **27f — Training data collection pipeline**: Automatic logging of training
+   pairs from the running system. This is the prerequisite for ALL fine-tuning.
+   - **NLU pairs**: Every successful parse from any tier is logged as
+     `(input_text, AbsTree_json)`. Tier 1 (rule parser) provides ~70% of
+     examples. Tier 3 (Qwen) provides complex cases. Stored in redb.
+   - **NLG pairs**: Every verbalization is logged as `(triples, output_text)`.
+     Grammar-generated text serves as faithful baseline. User corrections
+     (if any) become gold-standard examples.
+   - **Elicitation pairs**: Phase 32 LLM-generated triples that pass validation
+     become positive training examples. Rejected triples become negative examples.
+   - **Threshold**: T5 NLU becomes viable at ~500-1000 NLU pairs. T5 NLG domain
+     specialization benefits from ~200+ domain-specific NLG pairs.
+   - **Cold-start note**: On a fresh workspace, the collection pipeline runs
+     from day one but produces no training output until thresholds are met.
+     All training is deferred until sufficient data accumulates. This is by
+     design — the model adapts to each user's patterns organically.
+
 ### Concrete Burn integration patterns
 
 These patterns were identified from the Gastown scheduling research and Burn

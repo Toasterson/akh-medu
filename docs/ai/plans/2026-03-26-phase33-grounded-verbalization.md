@@ -113,6 +113,15 @@ good results without fine-tuning.
 - Metal acceleration on M2 via `Device::metal_if_available()`
 - Models stored in `data/models/t5-nlg.gguf` (downloaded via `akh setup models`)
 
+**Ship pre-fine-tuned, not train from scratch**:
+- `webnlg/en-t5base` on HuggingFace is T5-Base already fine-tuned on WebNLG
+- Convert to GGUF via Candle tensor-tools: `tensor-tools quantize --quantization q4k`
+- Pre-quantized T5 GGUF files exist at `lmz/candle-quantized-t5` (proven pipeline)
+- This model works GENERICALLY for standard RDF predicates (is-a, part-of, has, etc.)
+  on day one — no akh-medu-specific training data needed
+- Phase 27 live training then SPECIALIZES it to our domain predicates over time
+- For multilingual: `webnlg/all-mt5base` or fine-tune `google/mt5-small` on WebNLG data
+
 **Multilingual (mT5)**:
 - Language prefix: `"generate {lang}: "` prepended to input
 - Single model handles all 5 target languages
@@ -270,17 +279,29 @@ impl T5NluBackend {
 }
 ```
 
-**Training data** (Phase 27):
-- Input: natural language sentences from conversation history
-- Target: AbsTree JSON produced by current NLU pipeline (Tier 1-3)
-- This is **distillation**: T5 learns to do what the cascade does, in one step
+**Cannot ship pre-trained — no pre-existing AbsTree model exists.**
+AbsTree is our own schema. T5 NLU must be trained in-situ from accumulated
+conversation data. Qwen remains the NLU Tier 3 backbone until this model is ready.
+
+**Training data collection** (Phase 27f):
+- Every successful NLU parse from ANY tier is logged as a (input, AbsTree) pair
+- Tier 1 (rule parser) provides ~70% of training examples (high quality, deterministic)
+- Tier 3 (Qwen) provides the remaining complex examples
+- This is **distillation**: T5 learns to do what the full cascade does, in one step
+- Estimated threshold: ~500-1000 successful parse pairs before T5 NLU is viable
 
 **Migration path**:
-1. Fine-tune T5 on accumulated NLU examples (Phase 27 Burn loop)
-2. Evaluate: T5 parse accuracy vs current cascade
-3. If competitive (>90% agreement): replace Qwen as NLU Tier 3
-4. Qwen transitions to on-demand bootstrap oracle only
-5. ~1.3 GB RAM freed during normal operation
+1. Accumulate training pairs during normal operation (automatic, background)
+2. Phase 27 Burn loop fine-tunes T5 on accumulated NLU examples
+3. Evaluate: T5 parse accuracy vs current cascade
+4. If competitive (>90% agreement): replace Qwen as NLU Tier 3
+5. Qwen transitions to on-demand bootstrap oracle only
+6. ~1.3 GB RAM freed during normal operation
+
+**Cold-start note**: On a fresh workspace, this sub-phase does nothing — there
+are no training pairs yet. T5 NLU emerges organically as the user interacts
+with the system over days/weeks. This is by design: the model adapts to each
+user's language patterns and domain vocabulary.
 
 ## Estimated Effort
 
