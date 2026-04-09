@@ -60,6 +60,10 @@ pub struct NluPipeline {
     /// Wrapped in Arc because loading is expensive (~1GB GGUF).
     #[cfg(feature = "nlu-llm")]
     llm_translator: Option<std::sync::Arc<llm_translator::LlmTranslator>>,
+    /// Candle LLM backend (Tier 3 alternative) — GGUF via Candle with hidden state access.
+    /// Mutually exclusive with llm_translator at runtime; Candle preferred when both available.
+    #[cfg(feature = "candle-backend")]
+    candle_backend: Option<std::sync::Arc<std::sync::Mutex<candle_backend::CandleBackend>>>,
 }
 
 impl Clone for NluPipeline {
@@ -72,6 +76,8 @@ impl Clone for NluPipeline {
             ml_layer: self.ml_layer.clone(),
             #[cfg(feature = "nlu-llm")]
             llm_translator: self.llm_translator.clone(),
+            #[cfg(feature = "candle-backend")]
+            candle_backend: self.candle_backend.clone(),
         }
     }
 }
@@ -85,6 +91,8 @@ impl NluPipeline {
             ml_layer: None,
             #[cfg(feature = "nlu-llm")]
             llm_translator: None,
+            #[cfg(feature = "candle-backend")]
+            candle_backend: None,
         }
     }
 
@@ -96,6 +104,8 @@ impl NluPipeline {
             ml_layer: None,
             #[cfg(feature = "nlu-llm")]
             llm_translator: None,
+            #[cfg(feature = "candle-backend")]
+            candle_backend: None,
         }
     }
 
@@ -198,6 +208,23 @@ impl NluPipeline {
                     tracing::warn!(tier = 3, error = %e, "LLM translator model not loaded");
                     self.llm_translator = None;
                 }
+            }
+        }
+        // Candle backend (Tier 3 alternative): preferred over llama-cpp-2 when available.
+        #[cfg(feature = "candle-backend")]
+        {
+            let result = candle_backend::CandleBackend::try_load(_data_dir)
+                .or_else(|| {
+                    _shared_dir
+                        .as_ref()
+                        .and_then(|shared| candle_backend::CandleBackend::try_load(shared))
+                });
+            if let Some(backend) = result {
+                tracing::info!(tier = 3, backend = "candle", "Candle LLM backend loaded");
+                self.candle_backend =
+                    Some(std::sync::Arc::new(std::sync::Mutex::new(backend)));
+            } else {
+                tracing::debug!(tier = 3, backend = "candle", "Candle backend not loaded (model absent)");
             }
         }
     }
@@ -334,6 +361,36 @@ impl NluPipeline {
             }
         }
 
+        // Tier 3 (Candle): Alternative LLM backend with hidden state access.
+        // Preferred over llama-cpp-2 when both are loaded.
+        #[cfg(feature = "candle-backend")]
+        if let Some(ref candle_arc) = self.candle_backend {
+            tracing::debug!(tier = 3, backend = "candle", "attempting Candle translation");
+            let mut candle = candle_arc.lock().unwrap();
+            match candle.translate(input) {
+                Ok(translation) => {
+                    tracing::info!(
+                        tier = 3,
+                        backend = "candle",
+                        confidence = 0.72,
+                        tokens = translation.tokens_generated,
+                        "Candle translation succeeded"
+                    );
+                    self.ranker
+                        .record_success(input, &translation.tree, 3, 0.72);
+                    return Ok(NluParseResult {
+                        tree: translation.tree,
+                        source_tier: 3,
+                        confidence: 0.72,
+                        exemplar_similarity: None,
+                    });
+                }
+                Err(e) => {
+                    tracing::warn!(tier = 3, backend = "candle", error = %e, "Candle translation failed");
+                }
+            }
+        }
+
         // Tier 4: VSA Parse Ranker — check if we have a similar exemplar
         tracing::debug!(tier = 4, "checking parse ranker exemplars");
         if let Some(ranked) = self.ranker.find_similar(input) {
@@ -406,14 +463,16 @@ impl NluPipeline {
                 }
             },
             tier3_llm: {
+                let mut available = false;
                 #[cfg(feature = "nlu-llm")]
                 {
-                    self.llm_translator.is_some()
+                    available = self.llm_translator.is_some();
                 }
-                #[cfg(not(feature = "nlu-llm"))]
+                #[cfg(feature = "candle-backend")]
                 {
-                    false
+                    available = available || self.candle_backend.is_some();
                 }
+                available
             },
             tier4_ranker: true,
         }

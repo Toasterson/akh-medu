@@ -1068,6 +1068,15 @@ pub fn derivation_kind_prose(kind: &DerivationKind) -> String {
                 "game theory: {game_type}, {equilibria_count} equilibria, strategy: {recommended_strategy}"
             )
         }
+        DerivationKind::NeuralProbe {
+            layer,
+            similarity,
+            source_text,
+        } => {
+            format!(
+                "neural probe at layer {layer} (similarity: {similarity:.3}): \"{source_text}\""
+            )
+        }
         DerivationKind::Delegation {
             target,
             task_description,

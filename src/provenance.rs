@@ -628,6 +628,15 @@ pub enum DerivationKind {
 
     // --- Phase 36: Delegation ------------------------------------------------
 
+    /// A concept was identified via neural→VSA bridge probing (Phase 26d).
+    NeuralProbe {
+        layer: usize,
+        similarity: f32,
+        source_text: String,
+    },
+
+    // --- Phase 36: Delegation ------------------------------------------------
+
     /// A task was delegated to an external worker (Phase 36).
     Delegation {
         target: String,
@@ -731,7 +740,8 @@ impl DerivationKind {
             Self::TheoryOfMind { .. } => 85,
             Self::ActiveInferenceCycle { .. } => 86,
             Self::GameTheoreticModel { .. } => 87,
-            Self::Delegation { .. } => 88,
+            Self::NeuralProbe { .. } => 88,
+            Self::Delegation { .. } => 89,
         }
     }
 }

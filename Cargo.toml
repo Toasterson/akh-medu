@@ -154,3 +154,7 @@ required-features = ["server"]
 [[bench]]
 name = "vsa_ops"
 harness = false
+
+[[bench]]
+name = "phase26"
+harness = false
