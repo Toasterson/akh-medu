@@ -1,3 +1,7 @@
+[workspace]
+members = [".", "crates/seshat"]
+resolver = "3"
+
 [package]
 name = "akh-medu"
 version = "0.5.4"

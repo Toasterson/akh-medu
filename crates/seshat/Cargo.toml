@@ -1,0 +1,80 @@
+[package]
+name = "seshat"
+version = "0.1.0"
+edition = "2024"
+description = "Seshat's Archive — shared corpus library with RAG + pgvector for akh-medu"
+license = "GPL-3.0-only"
+repository = "https://github.com/Toasterson/akh-medu"
+
+[dependencies]
+# Database (SeaORM + PostgreSQL)
+sea-orm = { version = "1", features = [
+    "sqlx-postgres",
+    "runtime-tokio-rustls",
+    "macros",
+    "with-uuid",
+    "with-chrono",
+    "with-json",
+] }
+sea-orm-migration = { version = "1", features = ["sqlx-postgres", "runtime-tokio-rustls"] }
+sea-query = "0.32"
+
+# MCP server
+rmcp = { version = "0.17", features = [
+    "server",
+    "macros",
+    "transport-streamable-http-server",
+] }
+
+# Async runtime + web server
+tokio = { version = "1", features = ["full"] }
+axum = "0.8"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# Types
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+# Error handling
+miette = { version = "7", features = ["fancy"] }
+thiserror = "2"
+
+# Schema generation for MCP tool parameters
+schemars = { version = "0.8", features = ["uuid1", "chrono"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Hashing (for query cache keys)
+sha2 = "0.10"
+
+# Embedding (ONNX for sentence embeddings) — feature-gated
+ort = { version = "=2.0.0-rc.11", optional = true, default-features = false, features = ["std", "load-dynamic"] }
+tokenizers = { version = "0.22", optional = true, default-features = false, features = ["progressbar", "fancy-regex"] }
+ndarray = { version = "0.17", optional = true }
+
+# LLM synthesis via Candle (aligned with Phase 26b) — feature-gated
+candle-core = { version = "0.8", optional = true }
+candle-nn = { version = "0.8", optional = true }
+candle-transformers = { version = "0.8", optional = true }
+
+# HTTP client for model downloads
+ureq = { version = "2", features = ["json"] }
+
+# Archive extraction for model downloads
+flate2 = "1"
+tar = "0.4"
+
+[features]
+default = ["embedding"]
+embedding = ["ort", "tokenizers", "ndarray"]
+synthesis = ["candle-core", "candle-nn", "candle-transformers"]
+
+[[bin]]
+name = "seshd"
+path = "src/main.rs"

@@ -1,6 +1,6 @@
 # Akh-medu Architecture
 
-> Last updated: 2026-03-26 (Phase 26 planned: LLM-VSA deep integration, ADR 037)
+> Last updated: 2026-04-09 (Phase 37 planned: Seshat's Archive — shared corpus library, ADR 047)
 
 ## Overview
 
@@ -13,7 +13,8 @@ Akh-medu is a neuro-symbolic AI engine that runs entirely on CPU with no LLM dep
 - **Code Generation** — KG-to-Rust pipeline: code_gen tool, RustCodeGrammar, compiler feedback loop, parameterized templates, VSA code pattern encoding, pattern mining from examples, library learning cycle
 - **Multilingual Grammar** — GF-inspired abstract/concrete syntax split for 5 languages
 - **Four-Tier NLU** — rule parser → micro-ML NER → small LLM translator → VSA parse ranker (planned, Phase 14j-14m)
-- **Content Library** — document ingestion (PDF, EPUB, HTML) with chunking and semantic enrichment
+- **Content Library** — document ingestion (PDF, EPUB, HTML) with chunking and semantic enrichment (deprecated in favor of Seshat's Archive)
+- **Seshat's Archive** (Phase 37) — shared corpus library backed by pgvector/PostgreSQL, dedicated MCP service (`crates/seshat/`), RAG retrieval + LLM microtheory synthesis (Candle/T5), multi-akh sharing
 - **Tiered Storage** — hot (DashMap) → warm (mmap) → cold (redb) for scalability
 
 ## Module Map
@@ -30,7 +31,8 @@ src/
 ├── grammar/            22 modules — GF-inspired parsing/generation, entity resolution, Rust code gen (Phase 10a), templates (Phase 10e)
 ├── graph/               9 modules — KG (petgraph), SPARQL (oxigraph), analytics, predicate hierarchy (Phase 9b), defeasible reasoning (Phase 9d), arity constraints (Phase 9j), contradiction detection (Phase 9l), argumentation truth (Phase 9i), NARTs (Phase 9o)
 ├── infer/               3 modules — spreading activation (with Phase 9 hierarchy + temporal context), backward chaining, superposition
-├── library/            12 modules — document parsing, chunking, three-phase concept extraction (regex + standalone + NLU)
+├── library/            12 modules — document parsing, chunking, three-phase concept extraction (regex + standalone + NLU); seshat/ submodule for MCP client to Seshat service
+crates/seshat/          — Seshat's Archive service: pgvector schema (SeaORM), MCP server (rmcp), ONNX embedding worker, optional Candle LLM synthesis, seshat-ingest CLI
 ├── reason/              3 modules — e-graph language (AkhLang), rewrite rules, second-order quantification (Phase 9n), anti-unification (Phase 10h)
 ├── simd/                5 modules — runtime SIMD kernel dispatch (AVX2 / generic)
 ├── skills/              1 module  — skillpack lifecycle (Cold/Warm/Hot)
