@@ -109,6 +109,12 @@ tokenizers = { version = "0.22", optional = true, default-features = false, feat
 llama-cpp-2 = { version = "0.1", optional = true, features = ["sampler"] }
 encoding_rs = { version = "0.8", optional = true }
 
+# NLU Candle backend: GGUF inference with hidden state access (feature-gated)
+candle-core = { version = "0.10", optional = true }
+candle-nn = { version = "0.10", optional = true }
+candle-transformers = { version = "0.10", optional = true }
+safetensors = { version = "0.7", optional = true }
+
 # MCP server (feature-gated)
 rmcp = { version = "0.17", features = ["server", "transport-streamable-http-server"], optional = true }
 
@@ -128,6 +134,9 @@ nlu-ml = ["ort", "tokenizers"]
 nlu-llm = ["llama-cpp-2", "encoding_rs"]
 nlu-full = ["nlu-ml", "nlu-llm"]
 mcp = ["server", "rmcp"]
+delegation = ["daemon"]
+candle-backend = ["candle-core", "candle-nn", "candle-transformers", "safetensors", "tokenizers"]
+nlu-candle = ["candle-backend"]
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

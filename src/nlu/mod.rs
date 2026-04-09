@@ -18,6 +18,7 @@ pub mod parse_ranker;
 pub mod micro_ml;
 
 pub mod llm_translator;
+pub mod candle_backend;
 
 use std::path::Path;
 

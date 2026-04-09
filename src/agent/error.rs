@@ -199,6 +199,10 @@ pub enum AgentError {
     #[diagnostic(transparent)]
     Orchestrator(#[from] crate::bootstrap::orchestrator::OrchestratorError),
 
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Delegation(#[from] super::delegation::DelegationError),
+
     #[error("{0}")]
     #[diagnostic(
         code(akh::agent::engine),

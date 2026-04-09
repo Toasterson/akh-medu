@@ -5,6 +5,7 @@
 
 pub mod audit_log;
 pub mod code_gen;
+pub mod delegate;
 pub mod code_ingest;
 pub mod code_predicates;
 pub mod compile_feedback;
@@ -52,3 +53,4 @@ pub use user_interact::UserInteractTool;
 pub use agent_management::{AgentListTool, AgentMessageTool, AgentRetireTool, AgentSpawnTool};
 pub use trigger_manage::TriggerManageTool;
 pub use audit_log::AuditLogTool;
+pub use delegate::DelegateTool;

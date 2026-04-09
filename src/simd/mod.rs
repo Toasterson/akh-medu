@@ -8,15 +8,19 @@
 //!
 //! - **Generic**: Pure-Rust scalar fallback — works everywhere (illumos, ARM, etc.)
 //! - **AVX2**: 256-bit SIMD for x86_64 Linux/illumos systems with AVX2 support
+//! - **NEON**: 128-bit SIMD for aarch64 (Apple M-series, ARM servers)
 
 pub mod avx2;
 pub mod generic;
+pub mod neon;
 
 /// Instruction set architecture level detected at runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum IsaLevel {
     /// Pure-Rust scalar operations, no SIMD.
     Generic,
+    /// ARM NEON (128-bit vectors, baseline on aarch64).
+    Neon,
     /// x86_64 AVX2 (256-bit vectors).
     Avx2,
 }
@@ -25,6 +29,7 @@ impl std::fmt::Display for IsaLevel {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             IsaLevel::Generic => write!(f, "Generic (scalar)"),
+            IsaLevel::Neon => write!(f, "NEON (128-bit)"),
             IsaLevel::Avx2 => write!(f, "AVX2 (256-bit)"),
         }
     }
@@ -38,6 +43,12 @@ pub fn detect_isa() -> IsaLevel {
             return IsaLevel::Avx2;
         }
     }
+    // NEON is mandatory on aarch64 — no runtime detection needed.
+    #[cfg(target_arch = "aarch64")]
+    {
+        return IsaLevel::Neon;
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     IsaLevel::Generic
 }
 
@@ -77,6 +88,8 @@ pub fn best_kernel() -> Box<dyn VsaKernel> {
     match detect_isa() {
         #[cfg(target_arch = "x86_64")]
         IsaLevel::Avx2 => Box::new(avx2::Avx2Kernel),
+        #[cfg(target_arch = "aarch64")]
+        IsaLevel::Neon => Box::new(neon::NeonKernel),
         _ => Box::new(generic::GenericKernel),
     }
 }
@@ -182,5 +195,11 @@ mod tests {
         if detect_isa() >= IsaLevel::Avx2 {
             kernel_conformance_tests(&avx2::Avx2Kernel);
         }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn neon_kernel_conformance() {
+        kernel_conformance_tests(&neon::NeonKernel);
     }
 }
