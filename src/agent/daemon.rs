@@ -73,6 +73,11 @@ pub struct DaemonConfig {
     /// hasn't been processed yet. Uses the three-tier fallback: local LLM,
     /// external API, regex.
     pub knowledge_extraction_interval: Duration,
+    /// Neural bridge training interval (default: 2 hours).
+    ///
+    /// Runs bridge encoder alignment training during idle periods.
+    /// Only starts after sufficient training data has accumulated.
+    pub bridge_training_interval: Duration,
     /// Maximum OODA cycles (0 = unlimited).
     pub max_cycles: usize,
 }
@@ -93,6 +98,7 @@ impl Default for DaemonConfig {
             sleep_cycle_interval: Duration::from_secs(3600),
             trigger_evaluation_interval: Duration::from_secs(15),
             knowledge_extraction_interval: Duration::from_secs(2700), // 45 min
+            bridge_training_interval: Duration::from_secs(7200), // 2 hours
             max_cycles: 0,
         }
     }
@@ -166,6 +172,7 @@ impl AgentDaemon {
         let mut sleep_tick = interval(self.config.sleep_cycle_interval);
         let mut trigger_tick = interval(self.config.trigger_evaluation_interval);
         let mut extraction_tick = interval(self.config.knowledge_extraction_interval);
+        let mut bridge_training_tick = interval(self.config.bridge_training_interval);
 
         self.agent.lock().unwrap().sink().emit(&AkhMessage::system(
             "daemon started — background learning active",
@@ -224,6 +231,9 @@ impl AgentDaemon {
                 }
                 _ = extraction_tick.tick() => {
                     self.run_knowledge_extraction();
+                }
+                _ = bridge_training_tick.tick() => {
+                    self.run_bridge_training();
                 }
                 _ = self.wait_for_shutdown() => {
                     self.agent.lock().unwrap().sink().emit(&AkhMessage::system(
@@ -848,6 +858,59 @@ impl AgentDaemon {
                 "daemon: knowledge extraction complete"
             );
         }
+    }
+
+    fn run_bridge_training(&self) {
+        use crate::training::{BridgeTrainingSession, TrainerConfig};
+        use crate::vsa::neural_bridge::NeuralVsaBridge;
+        use crate::vsa::Dimension;
+
+        let engine = {
+            let agent = self.agent.lock().unwrap();
+            agent.engine.clone()
+        };
+
+        // Check if we have enough grounded symbols to train.
+        let symbol_count = engine.item_memory().all_symbols().len();
+        if symbol_count < 50 {
+            tracing::debug!(
+                symbols = symbol_count,
+                "daemon: bridge training skipped — insufficient grounded symbols (need ≥50)"
+            );
+            return;
+        }
+
+        // Create or reuse a bridge with the appropriate hidden dim.
+        // For now, use a small proxy dim since we don't have real hidden states.
+        let hidden_dim = 128;
+        let mut bridge = NeuralVsaBridge::new(hidden_dim, Dimension::DEFAULT);
+
+        let config = TrainerConfig {
+            max_steps: 100,
+            ..Default::default()
+        };
+        let session = BridgeTrainingSession::new(config);
+        let result = session.train_from_grounded_symbols(&mut bridge, &engine);
+
+        if result.improved {
+            if let Ok(agent) = self.agent.lock() {
+                agent.sink().emit(&AkhMessage::system(format!(
+                    "[daemon:bridge-training] {} steps, match rate {:.1}% → {:.1}% ({} symbols)",
+                    result.steps,
+                    result.initial_match_rate * 100.0,
+                    result.final_match_rate * 100.0,
+                    result.pairs_used,
+                )));
+            }
+        }
+        tracing::info!(
+            steps = result.steps,
+            pairs = result.pairs_used,
+            initial = result.initial_match_rate,
+            final_rate = result.final_match_rate,
+            improved = result.improved,
+            "daemon: bridge training complete"
+        );
     }
 
     fn persist(&self) {

@@ -34,6 +34,7 @@ pub mod cli_tool;
 pub mod continuous_learning;
 pub mod curiosity;
 pub mod explain;
+pub mod delegation;
 #[cfg(feature = "daemon")]
 pub mod daemon;
 pub mod decomposition;

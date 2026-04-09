@@ -73,6 +73,7 @@ pub mod store;
 pub mod symbol;
 pub mod temporal;
 pub mod tms;
+pub mod training;
 pub mod tui;
 pub mod vsa;
 pub mod wiki;
