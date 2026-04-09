@@ -115,6 +115,9 @@ candle-nn = { version = "0.10", optional = true }
 candle-transformers = { version = "0.10", optional = true }
 safetensors = { version = "0.7", optional = true }
 
+# Training: Burn framework for LoRA fine-tuning (feature-gated)
+burn = { version = "0.21.0-pre.3", optional = true, features = ["train", "ndarray"] }
+
 # MCP server (feature-gated)
 rmcp = { version = "0.17", features = ["server", "transport-streamable-http-server"], optional = true }
 
@@ -137,6 +140,8 @@ mcp = ["server", "rmcp"]
 delegation = ["daemon"]
 candle-backend = ["candle-core", "candle-nn", "candle-transformers", "safetensors", "tokenizers"]
 nlu-candle = ["candle-backend"]
+burn-training = ["burn", "candle-backend"]
+training-data = []
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

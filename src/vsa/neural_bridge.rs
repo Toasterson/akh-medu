@@ -122,6 +122,8 @@ impl LinearProjection {
 pub struct NeuralVsaBridge {
     /// Encoder: hidden_dim → vsa_dim (f32 pre-binarization).
     encoder: LinearProjection,
+    /// Decoder: vsa_dim → hidden_dim (reverse bridge, Phase 27c).
+    decoder: Option<LinearProjection>,
     /// Binarization threshold (default: 0.0 for symmetric split).
     threshold: f32,
     /// VSA dimension.
@@ -136,6 +138,7 @@ impl NeuralVsaBridge {
     pub fn new(hidden_dim: usize, vsa_dim: Dimension) -> Self {
         Self {
             encoder: LinearProjection::new(hidden_dim, vsa_dim.0),
+            decoder: None,
             threshold: 0.0,
             vsa_dim,
         }
@@ -146,9 +149,40 @@ impl NeuralVsaBridge {
         debug_assert_eq!(encoder.out_dim(), vsa_dim.0);
         Self {
             encoder,
+            decoder: None,
             threshold: 0.0,
             vsa_dim,
         }
+    }
+
+    /// Initialize the decoder (reverse bridge: VSA → hidden_dim).
+    ///
+    /// The decoder enables the symbolic reasoning core to inject solutions
+    /// back into the LLM's generation via hidden state manipulation.
+    pub fn init_decoder(&mut self) {
+        let hidden_dim = self.encoder.in_dim();
+        self.decoder = Some(LinearProjection::new(self.vsa_dim.0, hidden_dim));
+    }
+
+    /// Set a pre-trained decoder.
+    pub fn set_decoder(&mut self, decoder: LinearProjection) {
+        debug_assert_eq!(decoder.in_dim(), self.vsa_dim.0);
+        debug_assert_eq!(decoder.out_dim(), self.encoder.in_dim());
+        self.decoder = Some(decoder);
+    }
+
+    /// Decode a HyperVec back to an approximate LLM hidden state.
+    ///
+    /// Returns `None` if no decoder has been initialized.
+    pub fn decode(&self, hypervec: &HyperVec) -> Option<Vec<f32>> {
+        let decoder = self.decoder.as_ref()?;
+        let float_vec = hypervec_to_float(hypervec);
+        Some(decoder.forward(&float_vec))
+    }
+
+    /// Whether the decoder (reverse bridge) is available.
+    pub fn has_decoder(&self) -> bool {
+        self.decoder.is_some()
     }
 
     /// Encode an LLM hidden state into a HyperVec.
@@ -310,6 +344,16 @@ fn binarize_to_hypervec(projected: &[f32], threshold: f32, dim: Dimension) -> Hy
     hv
 }
 
+/// Convert a bipolar HyperVec to f32 representation (+1.0 / -1.0).
+fn hypervec_to_float(hv: &HyperVec) -> Vec<f32> {
+    let dim = hv.dim().0;
+    let mut result = Vec::with_capacity(dim);
+    for i in 0..dim {
+        result.push(if hv.get_bit(i) { 1.0 } else { -1.0 });
+    }
+    result
+}
+
 /// Sigmoid function.
 fn sigmoid(x: f32) -> f32 {
     1.0 / (1.0 + (-x).exp())
@@ -412,6 +456,27 @@ mod tests {
             trained_match >= initial_match,
             "training should improve match: {initial_match} → {trained_match}"
         );
+    }
+
+    #[test]
+    fn decode_returns_none_without_decoder() {
+        let bridge = NeuralVsaBridge::new(32, Dimension::TEST);
+        let hv = HyperVec::zero(Dimension::TEST, Encoding::Bipolar);
+        assert!(bridge.decode(&hv).is_none());
+        assert!(!bridge.has_decoder());
+    }
+
+    #[test]
+    fn decode_returns_hidden_state_with_decoder() {
+        let dim = Dimension::TEST;
+        let hidden_dim = 32;
+        let mut bridge = NeuralVsaBridge::new(hidden_dim, dim);
+        bridge.init_decoder();
+        assert!(bridge.has_decoder());
+
+        let hv = HyperVec::zero(dim, Encoding::Bipolar);
+        let decoded = bridge.decode(&hv).unwrap();
+        assert_eq!(decoded.len(), hidden_dim);
     }
 
     #[test]
