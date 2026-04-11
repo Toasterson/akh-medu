@@ -7,13 +7,10 @@
 //! The trainer is designed to run in `spawn_blocking` during daemon idle periods.
 
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use crate::engine::Engine;
 use crate::vsa::neural_bridge::{BridgeTrainer, NeuralVsaBridge};
-use crate::vsa::{Dimension, Encoding, HyperVec};
-
-use super::data_collector::{TrainingDataCollector, TrainingPairKind};
+use crate::vsa::{Dimension, HyperVec};
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -134,7 +131,7 @@ impl BridgeTrainingSession {
             if let Some(hv) = item_memory.get(sym_id) {
                 // Create a proxy hidden state from the symbol ID.
                 // In production, this comes from Candle hidden state extraction.
-                let proxy = proxy_hidden_state(sym_id.0 as u64, hidden_dim);
+                let proxy = proxy_hidden_state(sym_id.get(), hidden_dim);
                 training_pairs.push((proxy, hv.clone()));
             }
         }

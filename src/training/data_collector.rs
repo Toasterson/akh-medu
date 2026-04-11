@@ -9,9 +9,81 @@
 
 use std::path::Path;
 
+use miette::Diagnostic;
+use redb::ReadableTable;
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
-use crate::skills::LabelTriple;
+// ---------------------------------------------------------------------------
+// Error type
+// ---------------------------------------------------------------------------
+
+/// Errors from the training data collector.
+#[derive(Debug, Error, Diagnostic)]
+pub enum CollectorError {
+    #[error("redb storage error: {message}")]
+    #[diagnostic(
+        code(akh::training::storage),
+        help(
+            "The training data database encountered a storage error. \
+             Try deleting the training.redb file and restarting."
+        )
+    )]
+    Storage { message: String },
+
+    #[error("redb transaction error: {message}")]
+    #[diagnostic(
+        code(akh::training::transaction),
+        help(
+            "A database transaction failed. This may indicate corruption \
+             or a concurrent access issue. Restart the daemon."
+        )
+    )]
+    Transaction { message: String },
+}
+
+impl From<redb::DatabaseError> for CollectorError {
+    fn from(e: redb::DatabaseError) -> Self {
+        Self::Storage {
+            message: e.to_string(),
+        }
+    }
+}
+
+impl From<redb::StorageError> for CollectorError {
+    fn from(e: redb::StorageError) -> Self {
+        Self::Storage {
+            message: e.to_string(),
+        }
+    }
+}
+
+impl From<redb::TransactionError> for CollectorError {
+    fn from(e: redb::TransactionError) -> Self {
+        Self::Transaction {
+            message: e.to_string(),
+        }
+    }
+}
+
+impl From<redb::TableError> for CollectorError {
+    fn from(e: redb::TableError) -> Self {
+        Self::Transaction {
+            message: e.to_string(),
+        }
+    }
+}
+
+impl From<redb::CommitError> for CollectorError {
+    fn from(e: redb::CommitError) -> Self {
+        Self::Transaction {
+            message: e.to_string(),
+        }
+    }
+}
+
+/// Result alias for collector operations.
+pub type CollectorResult<T> = Result<T, CollectorError>;
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -110,7 +182,7 @@ pub struct TrainingDataCollector {
 
 impl TrainingDataCollector {
     /// Open or create a training data store at the given path.
-    pub fn open(path: &Path, config: CollectorConfig) -> Result<Self, redb::DatabaseError> {
+    pub fn open(path: &Path, config: CollectorConfig) -> Result<Self, CollectorError> {
         let db = redb::Database::create(path)?;
 
         // Initialize tables.
@@ -123,11 +195,16 @@ impl TrainingDataCollector {
             txn.commit()?;
         }
 
-        // Read current counter state.
+        // Read current counter state by counting entries via range scan.
         let next_id = {
             let txn = db.begin_read()?;
             let table = txn.open_table(TRAINING_TABLE)?;
-            table.len()?
+            let mut count = 0u64;
+            for entry in table.range::<u64>(..)? {
+                let _ = entry?;
+                count += 1;
+            }
+            count
         };
 
         Ok(Self {
@@ -138,7 +215,7 @@ impl TrainingDataCollector {
     }
 
     /// Record a training pair.
-    pub fn record(&mut self, pair: TrainingPair) -> Result<(), redb::DatabaseError> {
+    pub fn record(&mut self, pair: TrainingPair) -> Result<(), CollectorError> {
         let id = self.next_id;
         self.next_id += 1;
 
@@ -166,7 +243,7 @@ impl TrainingDataCollector {
         abstree_json: &str,
         source_tier: u8,
         confidence: f32,
-    ) -> Result<(), redb::DatabaseError> {
+    ) -> Result<(), CollectorError> {
         self.record(TrainingPair {
             kind: TrainingPairKind::Nlu,
             input: input.to_string(),
@@ -185,7 +262,7 @@ impl TrainingDataCollector {
         output_text: &str,
         grammar: &str,
         confidence: f32,
-    ) -> Result<(), redb::DatabaseError> {
+    ) -> Result<(), CollectorError> {
         self.record(TrainingPair {
             kind: TrainingPairKind::Nlg,
             input: triples_desc.to_string(),
@@ -203,7 +280,7 @@ impl TrainingDataCollector {
         prompt: &str,
         triples_json: &str,
         accepted: bool,
-    ) -> Result<(), redb::DatabaseError> {
+    ) -> Result<(), CollectorError> {
         self.record(TrainingPair {
             kind: TrainingPairKind::Elicitation,
             input: prompt.to_string(),
@@ -216,7 +293,7 @@ impl TrainingDataCollector {
     }
 
     /// Count of pairs per category.
-    pub fn counts(&self) -> Result<TrainingCounts, redb::DatabaseError> {
+    pub fn counts(&self) -> Result<TrainingCounts, CollectorError> {
         let txn = self.db.begin_read()?;
         let counters = txn.open_table(COUNTER_TABLE)?;
 
@@ -235,13 +312,13 @@ impl TrainingDataCollector {
     }
 
     /// Whether enough NLU data has accumulated to start NLU training.
-    pub fn nlu_ready(&self) -> Result<bool, redb::DatabaseError> {
+    pub fn nlu_ready(&self) -> Result<bool, CollectorError> {
         let counts = self.counts()?;
         Ok(counts.nlu >= self.config.nlu_threshold)
     }
 
     /// Whether enough NLG data has accumulated to start NLG training.
-    pub fn nlg_ready(&self) -> Result<bool, redb::DatabaseError> {
+    pub fn nlg_ready(&self) -> Result<bool, CollectorError> {
         let counts = self.counts()?;
         Ok(counts.nlg >= self.config.nlg_threshold)
     }
@@ -250,12 +327,12 @@ impl TrainingDataCollector {
     pub fn pairs_of_kind(
         &self,
         kind: TrainingPairKind,
-    ) -> Result<Vec<TrainingPair>, redb::DatabaseError> {
+    ) -> Result<Vec<TrainingPair>, CollectorError> {
         let txn = self.db.begin_read()?;
         let table = txn.open_table(TRAINING_TABLE)?;
         let mut pairs = Vec::new();
 
-        for entry in table.iter()? {
+        for entry in table.range::<u64>(..)? {
             let (_, value) = entry?;
             if let Ok(pair) = serde_json::from_slice::<TrainingPair>(value.value()) {
                 if pair.kind == kind {
@@ -268,10 +345,15 @@ impl TrainingDataCollector {
     }
 
     /// Total number of stored pairs.
-    pub fn total_pairs(&self) -> Result<u64, redb::DatabaseError> {
+    pub fn total_pairs(&self) -> Result<u64, CollectorError> {
         let txn = self.db.begin_read()?;
         let table = txn.open_table(TRAINING_TABLE)?;
-        table.len()
+        let mut count = 0u64;
+        for entry in table.range::<u64>(..)? {
+            let _ = entry?;
+            count += 1;
+        }
+        Ok(count)
     }
 
     /// Access the configuration.
