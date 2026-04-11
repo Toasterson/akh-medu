@@ -127,6 +127,11 @@ impl ItemMemory {
         self.vectors.is_empty()
     }
 
+    /// Return all symbol IDs currently stored in item memory.
+    pub fn all_symbols(&self) -> Vec<SymbolId> {
+        self.vectors.iter().map(|entry| *entry.key()).collect()
+    }
+
     /// Search for the `k` most similar symbols to a query vector.
     ///
     /// Returns results sorted by descending similarity.

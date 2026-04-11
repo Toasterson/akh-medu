@@ -10,7 +10,6 @@ use std::collections::HashMap;
 use crate::engine::Engine;
 use crate::symbol::SymbolId;
 use crate::vsa::neural_bridge::NeuralVsaBridge;
-use crate::vsa::ops::VsaOps;
 
 // ---------------------------------------------------------------------------
 // Verification result
@@ -79,9 +78,9 @@ impl TrainingVerifier {
         for &sym_id in &item_memory.all_symbols() {
             if let Some(grounded) = item_memory.get(sym_id) {
                 // Encode via proxy (same as trainer).
-                let proxy = super::trainer::proxy_hidden_state_public(sym_id.0 as u64, bridge.hidden_dim());
+                let proxy = super::trainer::proxy_hidden_state_public(sym_id.get(), bridge.hidden_dim());
                 let encoded = bridge.encode(&proxy);
-                if let Ok(sim) = ops.similarity(&encoded, grounded) {
+                if let Ok(sim) = ops.similarity(&encoded, &grounded) {
                     self.baselines.insert(sym_id, sim);
                 }
             }
@@ -106,16 +105,17 @@ impl TrainingVerifier {
         let item_memory = engine.item_memory();
         let ops = engine.ops();
         let mut degraded_count = 0;
-        let mut worst_concept = SymbolId(0);
+        // Use a sentinel SymbolId; will be overwritten if any concept degrades.
+        let mut worst_concept = SymbolId::new(1).expect("non-zero sentinel");
         let mut worst_delta = 0.0f32;
         let mut total_sim = 0.0f32;
         let mut checked = 0;
 
         for (&sym_id, &baseline_sim) in &self.baselines {
             if let Some(grounded) = item_memory.get(sym_id) {
-                let proxy = super::trainer::proxy_hidden_state_public(sym_id.0 as u64, bridge.hidden_dim());
+                let proxy = super::trainer::proxy_hidden_state_public(sym_id.get(), bridge.hidden_dim());
                 let encoded = bridge.encode(&proxy);
-                if let Ok(current_sim) = ops.similarity(&encoded, grounded) {
+                if let Ok(current_sim) = ops.similarity(&encoded, &grounded) {
                     let delta = baseline_sim - current_sim;
                     total_sim += current_sim;
                     checked += 1;
@@ -172,7 +172,7 @@ mod tests {
     #[test]
     fn verification_result_degraded() {
         let result = VerificationResult::Degraded {
-            worst_concept: SymbolId(42),
+            worst_concept: SymbolId::new(42).unwrap(),
             worst_delta: 0.15,
             degraded_count: 3,
             total_checked: 10,
