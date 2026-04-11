@@ -40,6 +40,18 @@ pub struct NluParseResult {
     pub confidence: f32,
     /// If the ranker contributed, the best exemplar similarity.
     pub exemplar_similarity: Option<f32>,
+    /// Concepts identified by the neural→VSA bridge (Phase 26e).
+    /// Each entry is (symbol_id_u64, similarity_score).
+    pub neural_concepts: Vec<(u64, f32)>,
+}
+
+/// A concept identified by the neural bridge after parsing.
+#[derive(Debug, Clone)]
+pub struct NeuralConcept {
+    /// Symbol ID of the identified concept.
+    pub symbol_id: u64,
+    /// Similarity between encoded hidden state and grounded concept vector.
+    pub similarity: f32,
 }
 
 /// The NLU pipeline orchestrator.
@@ -64,6 +76,8 @@ pub struct NluPipeline {
     /// Mutually exclusive with llm_translator at runtime; Candle preferred when both available.
     #[cfg(feature = "candle-backend")]
     candle_backend: Option<std::sync::Arc<std::sync::Mutex<candle_backend::CandleBackend>>>,
+    /// Training data collector (Phase 27f) — logs parse successes as training pairs.
+    training_collector: Option<std::sync::Arc<std::sync::Mutex<crate::training::TrainingDataCollector>>>,
 }
 
 impl Clone for NluPipeline {
@@ -78,6 +92,7 @@ impl Clone for NluPipeline {
             llm_translator: self.llm_translator.clone(),
             #[cfg(feature = "candle-backend")]
             candle_backend: self.candle_backend.clone(),
+            training_collector: self.training_collector.clone(),
         }
     }
 }
@@ -93,6 +108,7 @@ impl NluPipeline {
             llm_translator: None,
             #[cfg(feature = "candle-backend")]
             candle_backend: None,
+            training_collector: None,
         }
     }
 
@@ -106,7 +122,16 @@ impl NluPipeline {
             llm_translator: None,
             #[cfg(feature = "candle-backend")]
             candle_backend: None,
+            training_collector: None,
         }
+    }
+
+    /// Attach a training data collector for logging parse successes.
+    pub fn set_training_collector(
+        &mut self,
+        collector: std::sync::Arc<std::sync::Mutex<crate::training::TrainingDataCollector>>,
+    ) {
+        self.training_collector = Some(collector);
     }
 
     /// Create a pipeline with a pre-existing ranker and attempt to load models
@@ -229,6 +254,19 @@ impl NluPipeline {
         }
     }
 
+    /// Log an NLG training pair (grammar linearization → natural text).
+    ///
+    /// Called from the chat processor after a successful linearization.
+    pub fn log_nlg_pair(&self, triples_desc: &str, output_text: &str, grammar: &str) {
+        if let Some(ref collector_arc) = self.training_collector {
+            if let Ok(mut collector) = collector_arc.try_lock() {
+                if let Err(e) = collector.record_nlg(triples_desc, output_text, grammar, 1.0) {
+                    tracing::debug!(error = %e, "training data collector: NLG record failed");
+                }
+            }
+        }
+    }
+
     /// Access the ranker for persistence.
     pub fn ranker(&self) -> &ParseRanker {
         &self.ranker
@@ -237,6 +275,34 @@ impl NluPipeline {
     /// Access the ranker mutably for recording successes.
     pub fn ranker_mut(&mut self) -> &mut ParseRanker {
         &mut self.ranker
+    }
+
+    /// Build an NluParseResult and log to the training collector if attached.
+    fn make_result(
+        &mut self,
+        input: &str,
+        tree: AbsTree,
+        source_tier: u8,
+        confidence: f32,
+        exemplar_similarity: Option<f32>,
+    ) -> NluParseResult {
+        // Log to training data collector (Phase 27f).
+        if let Some(ref collector_arc) = self.training_collector {
+            if let Ok(mut collector) = collector_arc.try_lock() {
+                let json = serde_json::to_string(&tree).unwrap_or_default();
+                if let Err(e) = collector.record_nlu(input, &json, source_tier, confidence) {
+                    tracing::debug!(error = %e, "training data collector: NLU record failed");
+                }
+            }
+        }
+
+        NluParseResult {
+            tree,
+            source_tier,
+            confidence,
+            exemplar_similarity,
+            neural_concepts: Vec::new(),
+        }
     }
 
     /// Parse input through the NLU cascade.
@@ -258,41 +324,19 @@ impl NluPipeline {
                 };
 
                 tracing::info!(tier = 1, confidence = 0.85, "rule parser succeeded");
-
-                let nlu_result = NluParseResult {
-                    tree: tree.clone(),
-                    source_tier: 1,
-                    confidence: 0.85,
-                    exemplar_similarity: None,
-                };
-
-                // Record success for the ranker
                 self.ranker.record_success(input, &tree, 1, 0.85);
-
-                return Ok(nlu_result);
+                return Ok(self.make_result(input, tree, 1, 0.85, None));
             }
             ParseResult::Query { subject: _, tree } => {
                 tracing::info!(tier = 1, confidence = 0.80, "rule parser query matched");
-                let nlu_result = NluParseResult {
-                    tree: tree.clone(),
-                    source_tier: 1,
-                    confidence: 0.80,
-                    exemplar_similarity: None,
-                };
-                self.ranker
-                    .record_success(input, &nlu_result.tree, 1, 0.80);
-                return Ok(nlu_result);
+                let tree = tree.clone();
+                self.ranker.record_success(input, &tree, 1, 0.80);
+                return Ok(self.make_result(input, tree, 1, 0.80, None));
             }
             ParseResult::Goal { description } => {
                 tracing::info!(tier = 1, confidence = 0.75, "rule parser goal matched");
                 let tree = AbsTree::Freeform(description.clone());
-                let nlu_result = NluParseResult {
-                    tree,
-                    source_tier: 1,
-                    confidence: 0.75,
-                    exemplar_similarity: None,
-                };
-                return Ok(nlu_result);
+                return Ok(self.make_result(input, tree, 1, 0.75, None));
             }
             _ => {
                 tracing::debug!(tier = 1, "rule parser did not match");
@@ -310,12 +354,7 @@ impl NluPipeline {
                         tracing::info!(tier = 2, confidence = augmented.confidence, "ML NER succeeded");
                         self.ranker
                             .record_success(input, &tree, 2, augmented.confidence);
-                        return Ok(NluParseResult {
-                            tree,
-                            source_tier: 2,
-                            confidence: augmented.confidence,
-                            exemplar_similarity: None,
-                        });
+                        return Ok(self.make_result(input, tree, 2, augmented.confidence, None));
                     }
                     tracing::debug!(tier = 2, "ML NER produced no tree");
                 }
@@ -345,12 +384,7 @@ impl NluPipeline {
                     );
                     self.ranker
                         .record_success(input, &translation.tree, 3, 0.70);
-                    return Ok(NluParseResult {
-                        tree: translation.tree,
-                        source_tier: 3,
-                        confidence: 0.70,
-                        exemplar_similarity: None,
-                    });
+                    return Ok(self.make_result(input, translation.tree, 3, 0.70, None));
                 }
                 Ok(Err(e)) => {
                     tracing::warn!(tier = 3, error = %e, "LLM translation failed");
@@ -378,12 +412,7 @@ impl NluPipeline {
                     );
                     self.ranker
                         .record_success(input, &translation.tree, 3, 0.72);
-                    return Ok(NluParseResult {
-                        tree: translation.tree,
-                        source_tier: 3,
-                        confidence: 0.72,
-                        exemplar_similarity: None,
-                    });
+                    return Ok(self.make_result(input, translation.tree, 3, 0.72, None));
                 }
                 Err(e) => {
                     tracing::warn!(tier = 3, backend = "candle", error = %e, "Candle translation failed");
@@ -400,12 +429,13 @@ impl NluPipeline {
                 similarity = ranked.similarity,
                 "ranker found similar exemplar"
             );
-            return Ok(NluParseResult {
-                tree: ranked.tree,
-                source_tier: 4,
-                confidence: ranked.confidence,
-                exemplar_similarity: Some(ranked.similarity),
-            });
+            return Ok(self.make_result(
+                input,
+                ranked.tree,
+                4,
+                ranked.confidence,
+                Some(ranked.similarity),
+            ));
         }
 
         // All tiers failed

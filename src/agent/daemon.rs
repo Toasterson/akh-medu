@@ -880,37 +880,40 @@ impl AgentDaemon {
             return;
         }
 
-        // Create or reuse a bridge with the appropriate hidden dim.
-        // For now, use a small proxy dim since we don't have real hidden states.
-        let hidden_dim = 128;
-        let mut bridge = NeuralVsaBridge::new(hidden_dim, Dimension::DEFAULT);
+        // Training is CPU-bound — run in spawn_blocking to avoid starving
+        // the tokio event loop (which handles HTTP/WS/MCP requests).
+        let agent_ref = self.agent.clone();
+        tokio::task::spawn_blocking(move || {
+            let hidden_dim = 128;
+            let mut bridge = NeuralVsaBridge::new(hidden_dim, Dimension::DEFAULT);
 
-        let config = TrainerConfig {
-            max_steps: 100,
-            ..Default::default()
-        };
-        let session = BridgeTrainingSession::new(config);
-        let result = session.train_from_grounded_symbols(&mut bridge, &engine);
+            let config = TrainerConfig {
+                max_steps: 100,
+                ..Default::default()
+            };
+            let session = BridgeTrainingSession::new(config);
+            let result = session.train_from_grounded_symbols(&mut bridge, &engine);
 
-        if result.improved {
-            if let Ok(agent) = self.agent.lock() {
-                agent.sink().emit(&AkhMessage::system(format!(
-                    "[daemon:bridge-training] {} steps, match rate {:.1}% → {:.1}% ({} symbols)",
-                    result.steps,
-                    result.initial_match_rate * 100.0,
-                    result.final_match_rate * 100.0,
-                    result.pairs_used,
-                )));
+            if result.improved {
+                if let Ok(agent) = agent_ref.lock() {
+                    agent.sink().emit(&AkhMessage::system(format!(
+                        "[daemon:bridge-training] {} steps, match rate {:.1}% → {:.1}% ({} symbols)",
+                        result.steps,
+                        result.initial_match_rate * 100.0,
+                        result.final_match_rate * 100.0,
+                        result.pairs_used,
+                    )));
+                }
             }
-        }
-        tracing::info!(
-            steps = result.steps,
-            pairs = result.pairs_used,
-            initial = result.initial_match_rate,
-            final_rate = result.final_match_rate,
-            improved = result.improved,
-            "daemon: bridge training complete"
-        );
+            tracing::info!(
+                steps = result.steps,
+                pairs = result.pairs_used,
+                initial = result.initial_match_rate,
+                final_rate = result.final_match_rate,
+                improved = result.improved,
+                "daemon: bridge training complete"
+            );
+        });
     }
 
     fn persist(&self) {
