@@ -42,6 +42,7 @@ pub fn detect_isa() -> IsaLevel {
         if is_x86_feature_detected!("avx2") {
             return IsaLevel::Avx2;
         }
+        return IsaLevel::Generic;
     }
     // NEON is mandatory on aarch64 — no runtime detection needed.
     #[cfg(target_arch = "aarch64")]
