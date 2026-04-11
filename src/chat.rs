@@ -785,6 +785,9 @@ impl ChatProcessor {
                 if let Ok(prose) = registry.linearize(grammar, &discourse_tree) {
                     if !prose.trim().is_empty() {
                         // Grammar output is the final answer — no LLM involvement.
+                        // Log as NLG training pair (Phase 27f).
+                        let tree_desc = format!("{discourse_tree:?}");
+                        self.nlu_pipeline.log_nlg_pair(&tree_desc, &prose, grammar);
                         msgs.push(AkhMessage::narrative(&prose, grammar));
                         return;
                     }

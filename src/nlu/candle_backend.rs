@@ -256,10 +256,21 @@ impl CandleBackend {
 
     // ── Hidden state extraction ──────────────────────────────────────────
 
-    /// Run inference and return the final hidden state (for neural→VSA bridge).
+    /// Run inference and return a representation vector for the neural→VSA bridge.
     ///
-    /// This extracts the hidden state at the configured layer before the LM head,
-    /// enabling concept identification via the neural bridge (Phase 26d).
+    /// **Current implementation**: Returns the last-token logits vector from the
+    /// quantized model's forward pass. Candle's `quantized_qwen2::ModelWeights`
+    /// does not expose per-layer hidden states — the layer loop is internal to
+    /// the `forward()` method. Getting true hidden states would require forking
+    /// `candle-transformers` to insert a clone between layers.
+    ///
+    /// The logits vector (vocab-sized, ~151K for Qwen2.5) captures the model's
+    /// output distribution, which the neural bridge can learn to project into
+    /// VSA space. This is less informative than raw hidden states but still
+    /// carries semantic signal (similar inputs produce similar logit patterns).
+    ///
+    /// **Future**: When candle-transformers exposes a hook API or we fork the
+    /// Qwen2 model to insert hidden state capture, switch to true hidden states.
     #[cfg(feature = "candle-backend")]
     pub fn extract_hidden_state(&mut self, input: &str) -> NluResult<Vec<f32>> {
         let encoding = self.tokenizer.encode(input, true).map_err(|e| {
@@ -278,10 +289,6 @@ impl CandleBackend {
                     reason: format!("unsqueeze: {e}"),
                 })?;
 
-        // Run forward pass to get logits (hidden states are internal to the model).
-        // For now, we use the logits themselves as a proxy signal.
-        // Phase 26d will add proper per-layer hidden state extraction
-        // by modifying the Candle model's forward pass.
         let logits = self
             .model
             .forward(&input_tensor, 0)
@@ -289,7 +296,7 @@ impl CandleBackend {
                 reason: format!("forward: {e}"),
             })?;
 
-        // Take the last token's logits as a representation.
+        // Take the last token's logits as a representation vector.
         let seq_len = logits.dim(1).map_err(|e| NluError::LlmGenerationFailed {
             reason: format!("dim: {e}"),
         })?;
@@ -305,6 +312,30 @@ impl CandleBackend {
             })?;
 
         Ok(hidden_vec)
+    }
+
+    // ── PolarQuant KV cache utilities ────────────────────────────────────
+
+    /// Compress an f32 vector using the PolarQuant pipeline.
+    ///
+    /// This is a standalone utility for compressing KV cache vectors.
+    /// Full integration into Candle's internal `Cache` struct requires forking
+    /// `candle-transformers` to wrap read/write paths — deferred until a Candle
+    /// hook API or forked model is available.
+    ///
+    /// The compressed representation uses 3-bit Lloyd-Max quantization with
+    /// randomized Hadamard rotation, achieving ~5.3× compression.
+    pub fn compress_kv_vector(values: &[f32], seed: u64) -> crate::vsa::polar_quant::QuantizedVector {
+        crate::vsa::polar_quant::compress(values, seed)
+    }
+
+    /// Decompress a PolarQuant-compressed vector.
+    pub fn decompress_kv_vector(
+        qvec: &crate::vsa::polar_quant::QuantizedVector,
+        seed: u64,
+        std_dev_hint: f32,
+    ) -> Vec<f32> {
+        crate::vsa::polar_quant::decompress(qvec, seed, std_dev_hint)
     }
 
     // ── Internal generation loop ─────────────────────────────────────────
