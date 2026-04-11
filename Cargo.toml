@@ -119,8 +119,11 @@ candle-nn = { version = "0.10", optional = true }
 candle-transformers = { version = "0.10", optional = true }
 safetensors = { version = "0.7", optional = true }
 
-# Training: Burn framework for LoRA fine-tuning (feature-gated)
-burn = { version = "0.21.0-pre.3", optional = true, features = ["train", "ndarray"] }
+# Training: Burn framework for LoRA fine-tuning (future, feature-gated)
+# NOTE: Burn 0.21-pre.3's burn-dataset pulls rusqlite→libsqlite3-sys 0.35
+# which conflicts with seshat's sea-orm→sqlx→libsqlite3-sys 0.26.
+# Deferred until Burn reaches stable release with decoupled dataset crate.
+# burn = { version = "0.21", optional = true, default-features = false, features = ["train", "ndarray", "std"] }
 
 # MCP server (feature-gated)
 rmcp = { version = "0.17", features = ["server", "transport-streamable-http-server"], optional = true }
@@ -144,7 +147,7 @@ mcp = ["server", "rmcp"]
 delegation = ["daemon"]
 candle-backend = ["candle-core", "candle-nn", "candle-transformers", "safetensors", "tokenizers"]
 nlu-candle = ["candle-backend"]
-burn-training = ["burn", "candle-backend"]
+burn-training = ["candle-backend"]  # will add "burn" when sqlite3 conflict resolved
 training-data = []
 
 [dev-dependencies]
