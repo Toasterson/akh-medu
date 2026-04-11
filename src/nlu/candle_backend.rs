@@ -580,7 +580,7 @@ fn clean_generated_text(raw: &str) -> String {
 fn sample_from_probs(probs: &[f32]) -> u32 {
     use rand::Rng;
     let mut rng = rand::thread_rng();
-    let r: f32 = rng.gen();
+    let r: f32 = rng.r#gen();
     let mut cumulative = 0.0;
     for (i, &p) in probs.iter().enumerate() {
         cumulative += p;
