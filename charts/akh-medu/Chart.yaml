@@ -1,0 +1,21 @@
+apiVersion: v2
+name: akh-medu
+description: Neuro-symbolic AI engine — deploys akhomed daemon and Seshat's Archive
+type: application
+version: 0.1.0
+appVersion: "0.6.0"
+keywords:
+  - ai
+  - neuro-symbolic
+  - knowledge-graph
+  - vsa
+home: https://akh-medu.dev
+sources:
+  - https://github.com/Toasterson/akh-medu
+maintainers:
+  - name: Till Wegmueller
+dependencies:
+  - name: postgresql
+    version: "16.5.4"
+    repository: "oci://registry-1.docker.io/bitnamicharts"
+    condition: postgresql.enabled

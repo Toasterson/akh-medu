@@ -147,12 +147,23 @@ impl Default for SynthesisConfig {
 
 impl SeshatConfig {
     /// Load config from a TOML file path.
+    ///
+    /// After parsing, environment variable overrides are applied:
+    /// - `DATABASE_URL` overrides `database.url`
     pub fn from_file(path: &std::path::Path) -> crate::SeshatResult<Self> {
         let content = std::fs::read_to_string(path).map_err(|e| {
             crate::SeshatError::Config(format!("cannot read {}: {e}", path.display()))
         })?;
-        toml::from_str(&content)
-            .map_err(|e| crate::SeshatError::Config(format!("invalid TOML: {e}")))
+        let mut config: Self =
+            toml::from_str(&content)
+                .map_err(|e| crate::SeshatError::Config(format!("invalid TOML: {e}")))?;
+
+        // Allow DATABASE_URL env var to override the TOML value (useful for K8s secrets).
+        if let Ok(url) = std::env::var("DATABASE_URL") {
+            config.database.url = url;
+        }
+
+        Ok(config)
     }
 
     /// Resolve the model directory, defaulting to `~/.local/share/seshat/models/`.

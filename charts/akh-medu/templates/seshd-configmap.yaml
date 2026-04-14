@@ -1,0 +1,34 @@
+{{- if .Values.seshd.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "akh-medu.fullname" . }}-seshd-config
+  labels:
+    {{- include "akh-medu.seshd.labels" . | nindent 4 }}
+data:
+  seshat.toml: |
+    # Database URL is overridden by DATABASE_URL env var from Secret.
+    [database]
+    url = "postgres://localhost/seshat"
+    max_connections = {{ .Values.seshd.config.database.maxConnections }}
+
+    [embedding]
+    model = "{{ .Values.seshd.config.embedding.model }}"
+    batch_size = {{ .Values.seshd.config.embedding.batchSize }}
+    poll_interval_secs = {{ .Values.seshd.config.embedding.pollIntervalSecs }}
+    {{- if .Values.seshd.models.enabled }}
+    model_dir = "/models"
+    {{- end }}
+
+    [server]
+    bind = "{{ .Values.seshd.config.server.bind }}"
+    transport = "{{ .Values.seshd.config.server.transport }}"
+
+    [synthesis]
+    enabled = {{ .Values.seshd.config.synthesis.enabled }}
+    backend = "{{ .Values.seshd.config.synthesis.backend }}"
+    {{- if .Values.seshd.config.synthesis.modelPath }}
+    model_path = "{{ .Values.seshd.config.synthesis.modelPath }}"
+    {{- end }}
+    max_triples = {{ .Values.seshd.config.synthesis.maxTriples }}
+{{- end }}

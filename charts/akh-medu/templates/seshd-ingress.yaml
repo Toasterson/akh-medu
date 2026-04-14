@@ -1,0 +1,35 @@
+{{- if and .Values.seshd.enabled .Values.seshd.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "akh-medu.fullname" . }}-seshd
+  labels:
+    {{- include "akh-medu.seshd.labels" . | nindent 4 }}
+  {{- with .Values.seshd.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- if .Values.seshd.ingress.className }}
+  ingressClassName: {{ .Values.seshd.ingress.className }}
+  {{- end }}
+  {{- if .Values.seshd.ingress.tls }}
+  tls:
+    {{- toYaml .Values.seshd.ingress.tls | nindent 4 }}
+  {{- end }}
+  rules:
+    {{- range .Values.seshd.ingress.hosts }}
+    - host: {{ .host | quote }}
+      http:
+        paths:
+          {{- range .paths }}
+          - path: {{ .path }}
+            pathType: {{ .pathType }}
+            backend:
+              service:
+                name: {{ include "akh-medu.fullname" $ }}-seshd
+                port:
+                  name: http
+          {{- end }}
+    {{- end }}
+{{- end }}

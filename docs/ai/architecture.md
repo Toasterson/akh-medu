@@ -1,6 +1,6 @@
 # Akh-medu Architecture
 
-> Last updated: 2026-04-09 (Phase 37 planned: Seshat's Archive — shared corpus library, ADR 047)
+> Last updated: 2026-04-14 (Kubernetes deployment: Helm chart + Docker images, ADR 048)
 
 ## Overview
 
@@ -430,6 +430,7 @@ Phase 14a–14i: Purpose-driven bootstrapping with identity (9 sub-phases):
 |--------|---------|----------|
 | `akh` | CLI client | default (full) or `client-only` (thin HTTP client) |
 | `akhomed` | Background server/daemon | `server`, `daemon` |
+| `seshd` | Seshat's Archive MCP service | `embedding` (crate: `seshat`) |
 
 ### Daemon Mode (Primary)
 
@@ -465,6 +466,27 @@ Logs: `~/Library/Logs/akh-medu/akhomed.{stdout,stderr}.log`
 Scripts:
 - `scripts/smoke-test.sh` — HTTP endpoint verification (~20 endpoints)
 - `scripts/stability-monitor.sh` — CSV logging (RSS, KG size, cycles) for overnight monitoring
+
+### Kubernetes Deployment (ADR-048)
+
+Docker images (`docker/akhomed.Dockerfile`, `docker/seshd.Dockerfile`) produce multi-arch (`amd64`/`arm64`) containers with ONNX Runtime pre-installed. Helm chart at `charts/akh-medu/`:
+
+```
+charts/akh-medu/
+├── Chart.yaml              # Bitnami PostgreSQL subchart dependency
+├── values.yaml
+└── templates/
+    ├── akhomed-deployment.yaml   # Recreate strategy (single-writer KG)
+    ├── akhomed-service.yaml
+    ├── akhomed-pvc.yaml          # 30Gi data + 5Gi models
+    ├── seshd-deployment.yaml     # With migrate init container
+    ├── seshd-service.yaml
+    ├── seshd-configmap.yaml      # seshat.toml (DB URL from subchart secret)
+    ├── seshd-pvc.yaml            # 1Gi models
+    └── *-ingress.yaml            # Optional per service
+```
+
+PostgreSQL uses `pgvector/pgvector:pg16` image with `CREATE EXTENSION vector` in initdb.
 
 ## Planned: LLM-VSA Deep Integration (Phase 26, ADR-037)
 
