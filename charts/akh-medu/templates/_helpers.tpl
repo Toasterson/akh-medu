@@ -94,6 +94,28 @@ seshd image reference.
 {{- end }}
 
 {{/*
+Architecture affinity — pins pods to nodes whose kubernetes.io/arch matches
+one of the architectures we have actually published images for. Merges with
+any user-supplied affinity via `toYaml` in the caller.
+*/}}
+{{- define "akh-medu.archAffinity" -}}
+nodeAffinity:
+  requiredDuringSchedulingIgnoredDuringExecution:
+    nodeSelectorTerms:
+      - matchExpressions:
+          - key: kubernetes.io/arch
+            operator: In
+            values:
+              {{- range .Values.supportedArchitectures }}
+              - {{ . | quote }}
+              {{- end }}
+          - key: kubernetes.io/os
+            operator: In
+            values:
+              - "linux"
+{{- end }}
+
+{{/*
 PostgreSQL host.
 Subchart: <release>-postgresql. External: externalPostgresql.host.
 */}}

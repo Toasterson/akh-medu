@@ -2,7 +2,7 @@ apiVersion: v2
 name: akh-medu
 description: Neuro-symbolic AI engine — deploys akhomed daemon and Seshat's Archive
 type: application
-version: 0.1.0
+version: 0.1.1
 appVersion: "0.6.0"
 keywords:
   - ai

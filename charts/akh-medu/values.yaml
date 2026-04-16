@@ -5,6 +5,12 @@ global:
   security:
     allowInsecureImages: true
 
+# CPU architectures for which akhomed and seshd images have been built.
+# Pods are pinned to nodes matching one of these via required nodeAffinity
+# on `kubernetes.io/arch`. Add "arm64" here only after publishing arm64 images.
+supportedArchitectures:
+  - amd64
+
 # ── akhomed (akh-medu daemon) ──────────────────────────────────────────────
 akhomed:
   enabled: true
@@ -202,6 +208,13 @@ postgresql:
       limits:
         cpu: "1"
         memory: 1Gi
+    # Pin PostgreSQL to the same architectures as akhomed/seshd
+    # (pgvector/pgvector is multi-arch so this just mirrors our policy).
+    nodeAffinityPreset:
+      type: "hard"
+      key: "kubernetes.io/arch"
+      values:
+        - amd64
   image:
     registry: docker.io
     repository: pgvector/pgvector
