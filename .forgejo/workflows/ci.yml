@@ -30,28 +30,34 @@ jobs:
     # Intentionally independent of check-seshat so that one doesn't block the
     # other. The docker build itself catches anything check missed.
     steps:
-      - name: Build and push seshd
-        shell: bash
+      - name: Build seshd image
         run: |
-          set -euo pipefail
           REGISTRY=code.aopc.cloud/toasterson
           SHA="${SOLSTICE_COMMIT_SHA:-${GITHUB_SHA:-local}}"
-          SHORT_SHA="${SHA:0:12}"
-
+          SHORT_SHA=$(printf '%s' "$SHA" | cut -c1-12)
           docker build -f docker/seshd.Dockerfile \
             -t "$REGISTRY/seshd:$SHORT_SHA" \
             -t "$REGISTRY/seshd:latest" \
             .
 
-          # Smoke-test the binary isn't a stub (empty main). A real seshd
-          # binary writes a miette diagnostic to stderr when the config path
-          # is missing; the stub-binary bug from 0.6.0 silently exits 0.
+      - name: Smoke-test seshd binary (catch stub-binary regression)
+        run: |
+          REGISTRY=code.aopc.cloud/toasterson
+          SHA="${SOLSTICE_COMMIT_SHA:-${GITHUB_SHA:-local}}"
+          SHORT_SHA=$(printf '%s' "$SHA" | cut -c1-12)
+          # Real seshd prints a miette diagnostic for a missing config file.
+          # The 0.6.0 stub-binary bug silently exits 0 with no output.
           SMOKE=$(docker run --rm --entrypoint seshd "$REGISTRY/seshd:$SHORT_SHA" /nonexistent 2>&1 || true)
           echo "smoke output: $SMOKE"
           if [ -z "$SMOKE" ]; then
-            echo "::error::seshd produced no output for a missing config — looks like a stub-binary regression"
+            echo "seshd produced no output for a missing config - likely stub binary" >&2
             exit 1
           fi
 
+      - name: Push seshd image
+        run: |
+          REGISTRY=code.aopc.cloud/toasterson
+          SHA="${SOLSTICE_COMMIT_SHA:-${GITHUB_SHA:-local}}"
+          SHORT_SHA=$(printf '%s' "$SHA" | cut -c1-12)
           docker push "$REGISTRY/seshd:$SHORT_SHA"
           docker push "$REGISTRY/seshd:latest"
