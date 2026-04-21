@@ -30,39 +30,24 @@ jobs:
     # Intentionally independent of check-seshat so that one doesn't block the
     # other. The docker build itself catches anything check missed.
     steps:
-      - name: Install Docker buildx
-        # Solstice runners spin up a fresh VM with only plain docker installed.
-        # The seshd Dockerfile uses BuildKit-only features (--mount=type=cache,
-        # --platform=$BUILDPLATFORM), so we need buildx as a CLI plugin.
-        run: |
-          BUILDX_VERSION=v0.17.1
-          mkdir -p "$HOME/.docker/cli-plugins"
-          curl -fsSL -o "$HOME/.docker/cli-plugins/docker-buildx" \
-            "https://github.com/docker/buildx/releases/download/${BUILDX_VERSION}/buildx-${BUILDX_VERSION}.linux-amd64"
-          chmod +x "$HOME/.docker/cli-plugins/docker-buildx"
-          docker buildx version
-          docker buildx create --name solstice --driver docker-container --use
-          docker buildx inspect --bootstrap
-
-      - name: Build and load seshd image
+      - name: Build seshd image
+        # Plain `docker build` against the Solstice VM's pre-baked daemon so
+        # registry auth from ~/.docker/config.json (pre-populated by the
+        # runner image) is used for the subsequent push — matches the pattern
+        # the Anima CI uses to push anima-server / anima-ai / anima-agent.
         run: |
           REGISTRY=code.aopc.cloud/toasterson
-          SHA="${SOLSTICE_COMMIT_SHA:-${GITHUB_SHA:-local}}"
+          SHA=${SOLSTICE_COMMIT_SHA:-${GITHUB_SHA:-local}}
           SHORT_SHA=$(printf '%s' "$SHA" | cut -c1-12)
-          # --load makes the image available to the local docker daemon for
-          # the smoke test below. Single-platform (linux/amd64) only.
-          docker buildx build \
-            --platform linux/amd64 \
-            -f docker/seshd.Dockerfile \
+          docker build -f docker/seshd.Dockerfile \
             -t "$REGISTRY/seshd:$SHORT_SHA" \
             -t "$REGISTRY/seshd:latest" \
-            --load \
             .
 
       - name: Smoke-test seshd binary (catch stub-binary regression)
         run: |
           REGISTRY=code.aopc.cloud/toasterson
-          SHA="${SOLSTICE_COMMIT_SHA:-${GITHUB_SHA:-local}}"
+          SHA=${SOLSTICE_COMMIT_SHA:-${GITHUB_SHA:-local}}
           SHORT_SHA=$(printf '%s' "$SHA" | cut -c1-12)
           # Real seshd prints a miette diagnostic for a missing config file.
           # The 0.6.0 stub-binary bug silently exits 0 with no output.
@@ -76,7 +61,7 @@ jobs:
       - name: Push seshd image
         run: |
           REGISTRY=code.aopc.cloud/toasterson
-          SHA="${SOLSTICE_COMMIT_SHA:-${GITHUB_SHA:-local}}"
+          SHA=${SOLSTICE_COMMIT_SHA:-${GITHUB_SHA:-local}}
           SHORT_SHA=$(printf '%s' "$SHA" | cut -c1-12)
           docker push "$REGISTRY/seshd:$SHORT_SHA"
           docker push "$REGISTRY/seshd:latest"

@@ -1,32 +1,23 @@
-# syntax=docker/dockerfile:1
 # seshd — Seshat's Archive MCP service (pgvector RAG + synthesis)
 #
-# Build:  docker buildx build -f docker/seshd.Dockerfile -t seshd .
+# Single-arch (amd64). Uses the legacy docker builder so it works on plain
+# Solstice runner VMs without buildx. Chart + HelmRelease pin pods to amd64
+# nodes, so cross-compile complexity is unnecessary.
+#
+# Build:  docker build -f docker/seshd.Dockerfile -t seshd .
 # Run:    docker run -p 9090:9090 -v seshat-config:/config seshd
 
 ARG RUST_VERSION=1.94.1
 ARG FEATURES="embedding,synthesis"
 
 # ── Stage 1: Build ────────────────────────────────────────────────────────
-FROM --platform=$BUILDPLATFORM rust:${RUST_VERSION}-bookworm AS builder
+FROM rust:${RUST_VERSION}-bookworm AS builder
 
-ARG TARGETPLATFORM
-ARG BUILDPLATFORM
 ARG FEATURES
-
-RUN case "$TARGETPLATFORM" in \
-      linux/arm64) \
-        dpkg --add-architecture arm64 && \
-        apt-get update && \
-        apt-get install -y gcc-aarch64-linux-gnu libc6-dev-arm64-cross && \
-        rustup target add aarch64-unknown-linux-gnu ;; \
-      linux/amd64) \
-        rustup target add x86_64-unknown-linux-gnu ;; \
-    esac
 
 WORKDIR /build
 
-# Copy manifests first for dependency caching.
+# Copy manifests first so dep compilation caches as its own layer.
 COPY Cargo.toml Cargo.lock rust-toolchain.toml* ./
 COPY crates/seshat/Cargo.toml crates/seshat/Cargo.toml
 RUN mkdir -p src/bin crates/seshat/src benches && \
@@ -38,64 +29,35 @@ RUN mkdir -p src/bin crates/seshat/src benches && \
     echo 'fn main() {}' > benches/vsa_ops.rs && \
     echo 'fn main() {}' > benches/phase26.rs
 
-# Pre-build dependencies.
-RUN --mount=type=cache,target=/usr/local/cargo/registry,id=cargo-registry-${TARGETPLATFORM} \
-    --mount=type=cache,target=/build/target,id=cargo-target-seshd-${TARGETPLATFORM} \
-    case "$TARGETPLATFORM" in \
-      linux/arm64) \
-        export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc && \
-        cargo build --release -p seshat --bin seshd --features "${FEATURES}" \
-          --target aarch64-unknown-linux-gnu ;; \
-      *) \
-        cargo build --release -p seshat --bin seshd --features "${FEATURES}" \
-          --target x86_64-unknown-linux-gnu ;; \
-    esac || true
+# Pre-build dependencies with the stub entry points. `|| true` so the stub
+# phase doesn't fail the build if anything goes sideways.
+RUN cargo build --release -p seshat --bin seshd --features "${FEATURES}" || true
 
-# Copy full source.
+# Copy full source and build the real binary.
+# `touch` forces cargo to re-evaluate mtimes (docker COPY preserves them and
+# can leave cargo thinking the stub sources are still current). `rm -f` on
+# the cached stub binary is belt-and-suspenders so we never cp the stub.
 COPY . .
-
-# Build the real binary.
-# NOTE: `touch` forces cargo to re-evaluate source mtimes (COPY preserves them,
-# which can leave cargo thinking the stub binaries from the previous layer are
-# still up-to-date). `rm -f` on the binary is belt-and-suspenders against the
-# cache-mount retaining the stub artefact.
-RUN --mount=type=cache,target=/usr/local/cargo/registry,id=cargo-registry-${TARGETPLATFORM} \
-    --mount=type=cache,target=/build/target,id=cargo-target-seshd-${TARGETPLATFORM} \
-    find src crates benches -name '*.rs' -exec touch {} + && \
-    case "$TARGETPLATFORM" in \
-      linux/arm64) \
-        export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc && \
-        rm -f target/aarch64-unknown-linux-gnu/release/seshd && \
-        cargo build --release -p seshat --bin seshd --features "${FEATURES}" \
-          --target aarch64-unknown-linux-gnu && \
-        cp target/aarch64-unknown-linux-gnu/release/seshd /build/seshd ;; \
-      *) \
-        rm -f target/x86_64-unknown-linux-gnu/release/seshd && \
-        cargo build --release -p seshat --bin seshd --features "${FEATURES}" \
-          --target x86_64-unknown-linux-gnu && \
-        cp target/x86_64-unknown-linux-gnu/release/seshd /build/seshd ;; \
-    esac
+RUN find src crates benches -name '*.rs' -exec touch {} + && \
+    rm -f target/release/seshd && \
+    cargo build --release -p seshat --bin seshd --features "${FEATURES}" && \
+    cp target/release/seshd /build/seshd
 
 # ── Stage 2: ONNX Runtime (for sentence embedding) ───────────────────────
-FROM --platform=$TARGETPLATFORM debian:bookworm-slim AS ort-fetch
+FROM debian:bookworm-slim AS ort-fetch
 
-ARG TARGETPLATFORM
 ARG ORT_VERSION=1.23.2
 
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
-RUN case "$TARGETPLATFORM" in \
-      linux/arm64) ORT_ARCH="linux-aarch64" ;; \
-      *)           ORT_ARCH="linux-x64" ;; \
-    esac && \
-    curl -fSL "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-${ORT_ARCH}-${ORT_VERSION}.tgz" | \
+RUN curl -fSL "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-linux-x64-${ORT_VERSION}.tgz" | \
     tar xzf - --strip-components=1 -C /tmp && \
     mkdir -p /opt/ort/lib && \
     cp /tmp/lib/libonnxruntime.so* /opt/ort/lib/
 
 # ── Stage 3: Runtime ─────────────────────────────────────────────────────
-FROM --platform=$TARGETPLATFORM debian:bookworm-slim AS runtime
+FROM debian:bookworm-slim AS runtime
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends ca-certificates tini && \
