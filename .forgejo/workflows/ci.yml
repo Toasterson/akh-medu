@@ -29,7 +29,6 @@ jobs:
     runs-on: ubuntu-22.04
     # Intentionally independent of check-seshat so that one doesn't block the
     # other. The docker build itself catches anything check missed.
-    if: github.event_name == 'push'
     steps:
       - name: Build and push seshd
         shell: bash
