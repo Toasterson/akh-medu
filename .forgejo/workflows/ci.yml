@@ -35,7 +35,7 @@ jobs:
           REGISTRY=code.aopc.cloud/toasterson
           SHA="${SOLSTICE_COMMIT_SHA:-${GITHUB_SHA:-local}}"
           SHORT_SHA=$(printf '%s' "$SHA" | cut -c1-12)
-          docker build -f docker/seshd.Dockerfile \
+          DOCKER_BUILDKIT=1 docker build -f docker/seshd.Dockerfile \
             -t "$REGISTRY/seshd:$SHORT_SHA" \
             -t "$REGISTRY/seshd:latest" \
             .
