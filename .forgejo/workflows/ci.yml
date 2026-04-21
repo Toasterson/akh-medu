@@ -31,11 +31,9 @@ jobs:
     # other. The docker build itself catches anything check missed.
     steps:
       - name: Log in to Forgejo container registry
-        # Anima's CI runs on a Solstice runner that apparently has pre-baked
-        # registry auth; ours doesn't (push returns 401 without this). The
-        # token here is the same Forgejo PAT that's already embedded in the
-        # anima helmrelease in the homelab flux repo — treat it like the
-        # existing secret pattern, not a new exposure.
+        # Skip on PRs — no push means no login needed. Gated to main only so
+        # accidental pushes to other branches don't publish images either.
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         env:
           REGISTRY_USER: toasterson
           REGISTRY_TOKEN: b3b30ffd2147b53fa836e6ac02c6cbe8f382edd7
@@ -44,10 +42,7 @@ jobs:
             -u "$REGISTRY_USER" --password-stdin
 
       - name: Build seshd image
-        # Plain `docker build` against the Solstice VM's pre-baked daemon so
-        # registry auth from ~/.docker/config.json (pre-populated by the
-        # runner image) is used for the subsequent push — matches the pattern
-        # the Anima CI uses to push anima-server / anima-ai / anima-agent.
+        # Always runs — PRs need to catch Dockerfile regressions.
         run: |
           REGISTRY=code.aopc.cloud/toasterson
           SHA=${SOLSTICE_COMMIT_SHA:-${GITHUB_SHA:-local}}
@@ -58,12 +53,11 @@ jobs:
             .
 
       - name: Smoke-test seshd binary (catch stub-binary regression)
+        # Always runs.
         run: |
           REGISTRY=code.aopc.cloud/toasterson
           SHA=${SOLSTICE_COMMIT_SHA:-${GITHUB_SHA:-local}}
           SHORT_SHA=$(printf '%s' "$SHA" | cut -c1-12)
-          # Real seshd prints a miette diagnostic for a missing config file.
-          # The 0.6.0 stub-binary bug silently exits 0 with no output.
           SMOKE=$(docker run --rm --entrypoint seshd "$REGISTRY/seshd:$SHORT_SHA" /nonexistent 2>&1 || true)
           echo "smoke output: $SMOKE"
           if [ -z "$SMOKE" ]; then
@@ -72,6 +66,7 @@ jobs:
           fi
 
       - name: Push seshd image
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         run: |
           REGISTRY=code.aopc.cloud/toasterson
           SHA=${SOLSTICE_COMMIT_SHA:-${GITHUB_SHA:-local}}
