@@ -1,0 +1,69 @@
+name: CI
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config protobuf-compiler libprotobuf-dev libssl-dev cmake clang
+
+      - name: Install Rust toolchain
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --component clippy
+          echo '. "$HOME/.cargo/env"' >> ~/.profile
+
+      - name: Build (library crates)
+        run: |
+          . "$HOME/.cargo/env"
+          cargo build --release --workspace
+
+      - name: Test (library tests)
+        run: |
+          . "$HOME/.cargo/env"
+          cargo test --workspace --lib
+
+      - name: Clippy
+        run: |
+          . "$HOME/.cargo/env"
+          cargo clippy --workspace -- -D warnings
+
+  docker:
+    runs-on: ubuntu-22.04
+    needs: test
+    # Only build + push images on branch pushes and tags, not on PRs.
+    if: github.event_name == 'push'
+    steps:
+      - name: Build and push images
+        run: |
+          set -euo pipefail
+          REGISTRY=code.aopc.cloud/toasterson
+          SHA="${SOLSTICE_COMMIT_SHA:-${GITHUB_SHA:-local}}"
+          SHORT_SHA="${SHA:0:12}"
+
+          # Build seshd first (smaller, catches stub-binary class bugs fast).
+          docker build -f docker/seshd.Dockerfile \
+            -t "$REGISTRY/seshd:$SHORT_SHA" \
+            -t "$REGISTRY/seshd:latest" \
+            .
+
+          docker build -f docker/akhomed.Dockerfile \
+            -t "$REGISTRY/akhomed:$SHORT_SHA" \
+            -t "$REGISTRY/akhomed:latest" \
+            .
+
+          # Smoke test: seshd --help must produce output and exit non-zero on
+          # missing config (guards against the stub-binary regression where
+          # every invocation silently exits 0).
+          docker run --rm --entrypoint seshd "$REGISTRY/seshd:$SHORT_SHA" /nonexistent 2>&1 | tee /tmp/seshd-smoke.log || true
+          if ! grep -qiE "error|diagnost|cannot read" /tmp/seshd-smoke.log; then
+            echo "::error::seshd smoke test produced no error output for missing config — likely stub binary"
+            exit 1
+          fi
+
+          docker push "$REGISTRY/seshd:$SHORT_SHA"
+          docker push "$REGISTRY/seshd:latest"
+          docker push "$REGISTRY/akhomed:$SHORT_SHA"
+          docker push "$REGISTRY/akhomed:latest"

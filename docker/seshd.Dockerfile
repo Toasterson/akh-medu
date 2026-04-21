@@ -55,15 +55,22 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,id=cargo-registry-${TARG
 COPY . .
 
 # Build the real binary.
+# NOTE: `touch` forces cargo to re-evaluate source mtimes (COPY preserves them,
+# which can leave cargo thinking the stub binaries from the previous layer are
+# still up-to-date). `rm -f` on the binary is belt-and-suspenders against the
+# cache-mount retaining the stub artefact.
 RUN --mount=type=cache,target=/usr/local/cargo/registry,id=cargo-registry-${TARGETPLATFORM} \
     --mount=type=cache,target=/build/target,id=cargo-target-seshd-${TARGETPLATFORM} \
+    find src crates benches -name '*.rs' -exec touch {} + && \
     case "$TARGETPLATFORM" in \
       linux/arm64) \
         export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc && \
+        rm -f target/aarch64-unknown-linux-gnu/release/seshd && \
         cargo build --release -p seshat --bin seshd --features "${FEATURES}" \
           --target aarch64-unknown-linux-gnu && \
         cp target/aarch64-unknown-linux-gnu/release/seshd /build/seshd ;; \
       *) \
+        rm -f target/x86_64-unknown-linux-gnu/release/seshd && \
         cargo build --release -p seshat --bin seshd --features "${FEATURES}" \
           --target x86_64-unknown-linux-gnu && \
         cp target/x86_64-unknown-linux-gnu/release/seshd /build/seshd ;; \
