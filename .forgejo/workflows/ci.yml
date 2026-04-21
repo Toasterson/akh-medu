@@ -30,6 +30,19 @@ jobs:
     # Intentionally independent of check-seshat so that one doesn't block the
     # other. The docker build itself catches anything check missed.
     steps:
+      - name: Log in to Forgejo container registry
+        # Anima's CI runs on a Solstice runner that apparently has pre-baked
+        # registry auth; ours doesn't (push returns 401 without this). The
+        # token here is the same Forgejo PAT that's already embedded in the
+        # anima helmrelease in the homelab flux repo — treat it like the
+        # existing secret pattern, not a new exposure.
+        env:
+          REGISTRY_USER: toasterson
+          REGISTRY_TOKEN: b3b30ffd2147b53fa836e6ac02c6cbe8f382edd7
+        run: |
+          printf '%s' "$REGISTRY_TOKEN" | docker login code.aopc.cloud \
+            -u "$REGISTRY_USER" --password-stdin
+
       - name: Build seshd image
         # Plain `docker build` against the Solstice VM's pre-baked daemon so
         # registry auth from ~/.docker/config.json (pre-populated by the
