@@ -30,14 +30,33 @@ jobs:
     # Intentionally independent of check-seshat so that one doesn't block the
     # other. The docker build itself catches anything check missed.
     steps:
-      - name: Build seshd image
+      - name: Install Docker buildx
+        # Solstice runners spin up a fresh VM with only plain docker installed.
+        # The seshd Dockerfile uses BuildKit-only features (--mount=type=cache,
+        # --platform=$BUILDPLATFORM), so we need buildx as a CLI plugin.
+        run: |
+          BUILDX_VERSION=v0.17.1
+          mkdir -p "$HOME/.docker/cli-plugins"
+          curl -fsSL -o "$HOME/.docker/cli-plugins/docker-buildx" \
+            "https://github.com/docker/buildx/releases/download/${BUILDX_VERSION}/buildx-${BUILDX_VERSION}.linux-amd64"
+          chmod +x "$HOME/.docker/cli-plugins/docker-buildx"
+          docker buildx version
+          docker buildx create --name solstice --driver docker-container --use
+          docker buildx inspect --bootstrap
+
+      - name: Build and load seshd image
         run: |
           REGISTRY=code.aopc.cloud/toasterson
           SHA="${SOLSTICE_COMMIT_SHA:-${GITHUB_SHA:-local}}"
           SHORT_SHA=$(printf '%s' "$SHA" | cut -c1-12)
-          DOCKER_BUILDKIT=1 docker build -f docker/seshd.Dockerfile \
+          # --load makes the image available to the local docker daemon for
+          # the smoke test below. Single-platform (linux/amd64) only.
+          docker buildx build \
+            --platform linux/amd64 \
+            -f docker/seshd.Dockerfile \
             -t "$REGISTRY/seshd:$SHORT_SHA" \
             -t "$REGISTRY/seshd:latest" \
+            --load \
             .
 
       - name: Smoke-test seshd binary (catch stub-binary regression)
