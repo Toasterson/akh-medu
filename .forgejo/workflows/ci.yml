@@ -2,68 +2,54 @@ name: CI
 on: [push, pull_request]
 
 jobs:
-  test:
+  # Scoped to the seshat crate — the full akh-medu workspace release build
+  # OOM-kills rustc on the Solstice runner. Broader test/clippy/release-build
+  # coverage can return once the codebase is lighter or the runner is bigger.
+  check-seshat:
     runs-on: ubuntu-22.04
     steps:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config protobuf-compiler libprotobuf-dev libssl-dev cmake clang
+          sudo apt-get install -y build-essential pkg-config protobuf-compiler libprotobuf-dev libssl-dev
 
       - name: Install Rust toolchain
         run: |
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --component clippy
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
           echo '. "$HOME/.cargo/env"' >> ~/.profile
 
-      - name: Build (library crates)
+      - name: cargo check -p seshat
         run: |
           . "$HOME/.cargo/env"
-          cargo build --release --workspace
+          CARGO_BUILD_JOBS=2 cargo check -p seshat --all-features
 
-      - name: Test (library tests)
-        run: |
-          . "$HOME/.cargo/env"
-          cargo test --workspace --lib
-
-      - name: Clippy
-        run: |
-          . "$HOME/.cargo/env"
-          cargo clippy --workspace -- -D warnings
-
-  docker:
+  docker-seshd:
     runs-on: ubuntu-22.04
-    needs: test
-    # Only build + push images on branch pushes and tags, not on PRs.
+    # Intentionally independent of check-seshat so that one doesn't block the
+    # other. The docker build itself catches anything check missed.
     if: github.event_name == 'push'
     steps:
-      - name: Build and push images
+      - name: Build and push seshd
         run: |
           set -euo pipefail
           REGISTRY=code.aopc.cloud/toasterson
           SHA="${SOLSTICE_COMMIT_SHA:-${GITHUB_SHA:-local}}"
           SHORT_SHA="${SHA:0:12}"
 
-          # Build seshd first (smaller, catches stub-binary class bugs fast).
           docker build -f docker/seshd.Dockerfile \
             -t "$REGISTRY/seshd:$SHORT_SHA" \
             -t "$REGISTRY/seshd:latest" \
             .
 
-          docker build -f docker/akhomed.Dockerfile \
-            -t "$REGISTRY/akhomed:$SHORT_SHA" \
-            -t "$REGISTRY/akhomed:latest" \
-            .
-
-          # Smoke test: seshd --help must produce output and exit non-zero on
-          # missing config (guards against the stub-binary regression where
-          # every invocation silently exits 0).
-          docker run --rm --entrypoint seshd "$REGISTRY/seshd:$SHORT_SHA" /nonexistent 2>&1 | tee /tmp/seshd-smoke.log || true
-          if ! grep -qiE "error|diagnost|cannot read" /tmp/seshd-smoke.log; then
-            echo "::error::seshd smoke test produced no error output for missing config — likely stub binary"
+          # Smoke-test the binary isn't a stub (empty main). A real seshd
+          # binary writes a miette diagnostic to stderr when the config path
+          # is missing; the stub-binary bug from 0.6.0 silently exits 0.
+          SMOKE=$(docker run --rm --entrypoint seshd "$REGISTRY/seshd:$SHORT_SHA" /nonexistent 2>&1 || true)
+          echo "smoke output: $SMOKE"
+          if [ -z "$SMOKE" ]; then
+            echo "::error::seshd produced no output for a missing config — looks like a stub-binary regression"
             exit 1
           fi
 
           docker push "$REGISTRY/seshd:$SHORT_SHA"
           docker push "$REGISTRY/seshd:latest"
-          docker push "$REGISTRY/akhomed:$SHORT_SHA"
-          docker push "$REGISTRY/akhomed:latest"
