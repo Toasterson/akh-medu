@@ -21,7 +21,9 @@ jobs:
       - name: cargo check -p seshat
         run: |
           . "$HOME/.cargo/env"
-          CARGO_BUILD_JOBS=2 cargo check -p seshat --all-features
+          # Default features only (includes `embedding`; excludes the memory-
+          # heavy `synthesis` candle feature which OOMs the runner).
+          CARGO_BUILD_JOBS=2 cargo check -p seshat
 
   docker-seshd:
     runs-on: ubuntu-22.04
@@ -30,6 +32,7 @@ jobs:
     if: github.event_name == 'push'
     steps:
       - name: Build and push seshd
+        shell: bash
         run: |
           set -euo pipefail
           REGISTRY=code.aopc.cloud/toasterson
