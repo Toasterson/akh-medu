@@ -31,9 +31,8 @@ jobs:
     # other. The docker build itself catches anything check missed.
     steps:
       - name: Log in to Forgejo container registry
-        # Skip on PRs — no push means no login needed. Gated to main only so
-        # accidental pushes to other branches don't publish images either.
-        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        # Publish-enabled branches only; PRs and feature branches skip login.
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
         env:
           REGISTRY_USER: toasterson
           REGISTRY_TOKEN: b3b30ffd2147b53fa836e6ac02c6cbe8f382edd7
@@ -42,18 +41,23 @@ jobs:
             -u "$REGISTRY_USER" --password-stdin
 
       - name: Build seshd image
-        # Always runs — PRs need to catch Dockerfile regressions.
+        # Always runs — PRs need to catch Dockerfile regressions. On
+        # main/develop the image gets an additional branch-named tag
+        # ready for the push step.
         run: |
           REGISTRY=code.aopc.cloud/toasterson
           SHA=${SOLSTICE_COMMIT_SHA:-${GITHUB_SHA:-local}}
           SHORT_SHA=$(printf '%s' "$SHA" | cut -c1-12)
-          docker build -f docker/seshd.Dockerfile \
-            -t "$REGISTRY/seshd:$SHORT_SHA" \
-            -t "$REGISTRY/seshd:latest" \
-            .
+          TAGS="-t $REGISTRY/seshd:$SHORT_SHA"
+          case "${GITHUB_REF:-}" in
+            refs/heads/main|refs/heads/develop)
+              BRANCH=${GITHUB_REF#refs/heads/}
+              TAGS="$TAGS -t $REGISTRY/seshd:$BRANCH"
+              ;;
+          esac
+          docker build -f docker/seshd.Dockerfile $TAGS .
 
       - name: Smoke-test seshd binary (catch stub-binary regression)
-        # Always runs.
         run: |
           REGISTRY=code.aopc.cloud/toasterson
           SHA=${SOLSTICE_COMMIT_SHA:-${GITHUB_SHA:-local}}
@@ -66,10 +70,11 @@ jobs:
           fi
 
       - name: Push seshd image
-        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
         run: |
           REGISTRY=code.aopc.cloud/toasterson
           SHA=${SOLSTICE_COMMIT_SHA:-${GITHUB_SHA:-local}}
           SHORT_SHA=$(printf '%s' "$SHA" | cut -c1-12)
+          BRANCH=${GITHUB_REF#refs/heads/}
           docker push "$REGISTRY/seshd:$SHORT_SHA"
-          docker push "$REGISTRY/seshd:latest"
+          docker push "$REGISTRY/seshd:$BRANCH"
