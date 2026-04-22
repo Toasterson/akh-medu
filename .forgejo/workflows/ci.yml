@@ -30,12 +30,20 @@ jobs:
     # Intentionally independent of check-seshat so that one doesn't block the
     # other. The docker build itself catches anything check missed.
     #
-    # Auth: Solstice runners pre-populate /home/sol/.docker/config.json with
-    # container-registry creds ("configured Docker registry auth host=…" in
-    # the VM boot log). Adding an explicit `docker login` step overwrites
-    # that config with a lesser-scoped token and makes push 401 — do NOT
-    # re-add one; rely on the pre-baked auth.
+    # Auth: Solstice's pre-baked /home/sol/.docker/config.json is pull-only
+    # (proven by repeated 401 on POST /v2/.../blobs/uploads/). Use the
+    # per-job GITHUB_TOKEN, which Forgejo issues with package:write scope on
+    # the current repo. Anima CI works the same way implicitly via the run
+    # actor's effective creds — we make it explicit here.
     steps:
+      - name: Log in to Forgejo container registry
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
+        env:
+          FORGEJO_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          printf '%s' "$FORGEJO_TOKEN" | docker login code.aopc.cloud \
+            -u "${GITHUB_ACTOR:-toasterson}" --password-stdin
+
       - name: Build seshd image
         # Always runs — PRs need to catch Dockerfile regressions. On
         # main/develop the image gets an additional branch-named tag
