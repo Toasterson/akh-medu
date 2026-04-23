@@ -5,15 +5,14 @@ use std::time::Duration;
 
 use chrono::Utc;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter,
-    QueryOrder, Set,
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseBackend, DatabaseConnection,
+    EntityTrait, PaginatorTrait, QueryFilter, QueryOrder, Set, Statement,
 };
 use uuid::Uuid;
 
 use crate::config::EmbeddingConfig;
 use crate::embedder::SharedEmbedder;
 use crate::entity::pa_chunk::{self, Column as ChunkCol, Entity as Chunk};
-use crate::entity::pa_embedding;
 use crate::entity::pa_embedding::vec_to_pgvector;
 use crate::error::SeshatResult;
 
@@ -108,19 +107,31 @@ pub async fn embed_pending_batch(
     let mut embeddings_created = 0;
 
     // Insert embeddings and mark chunks as embedded.
+    //
+    // SeaORM's ActiveModel insert sends `embedding` as a text parameter,
+    // which PostgreSQL rejects with `column "embedding" is of type vector
+    // but expression is of type text` — pgvector's `vector(384)` type
+    // needs an explicit `::vector(N)` cast on insert. Parameterized raw
+    // SQL with the cast is the simplest fix; the SELECT side in
+    // `query.rs` already does the same thing.
     for (chunk, embedding) in pending_chunks.iter().zip(embeddings.iter()) {
-        // Insert embedding row.
-        let embedding_model = pa_embedding::ActiveModel {
-            id: Set(Uuid::new_v4()),
-            chunk_id: Set(chunk.id),
-            model_name: Set(model_name.to_string()),
-            embedding: Set(vec_to_pgvector(embedding)),
-            created_at: Set(now.into()),
-        };
-        embedding_model.insert(db).await?;
+        let stmt = Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            "INSERT INTO pa_embeddings (id, chunk_id, model_name, embedding, created_at) \
+             VALUES ($1, $2, $3, $4::vector(384), $5)",
+            [
+                Uuid::new_v4().into(),
+                chunk.id.into(),
+                model_name.to_string().into(),
+                vec_to_pgvector(embedding).into(),
+                sea_orm::Value::ChronoDateTimeUtc(Some(Box::new(now.to_utc()))),
+            ],
+        );
+        db.execute(stmt).await?;
         embeddings_created += 1;
 
-        // Mark chunk as embedded.
+        // Mark chunk as embedded. ActiveModel is fine here — `embedded_at`
+        // is a plain timestamptz with no custom cast needed.
         let mut chunk_active: pa_chunk::ActiveModel = chunk.clone().into();
         chunk_active.embedded_at = Set(Some(now.into()));
         chunk_active.update(db).await?;
