@@ -155,15 +155,22 @@ seshd:
   affinity: {}
 
   probes:
+    # rmcp's streamable-http transport returns 406 to a plain GET /mcp
+    # (it needs `accept: text/event-stream`), so a plain httpGet probe
+    # on /mcp fails. Use tcpSocket to just verify the listener is open.
+    # Once seshd grows a proper /healthz endpoint, this can flip back
+    # to httpGet. NOTE: kube probe schema forbids multiple handler
+    # types on the same probe, so an HR that overrides with `httpGet`
+    # must either null out `tcpSocket` or (better) the chart template
+    # needs a handler-exclusive render. Keeping the default aligned
+    # with the production HR avoids the deep-merge foot-gun.
     liveness:
-      httpGet:
-        path: /mcp
+      tcpSocket:
         port: http
       initialDelaySeconds: 15
       periodSeconds: 30
     readiness:
-      httpGet:
-        path: /mcp
+      tcpSocket:
         port: http
       initialDelaySeconds: 10
       periodSeconds: 10
