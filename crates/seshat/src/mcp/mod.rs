@@ -66,6 +66,39 @@ struct DocumentsParams {
     offset: usize,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+struct IngestParams {
+    /// Human-readable title of the document.
+    title: String,
+    /// URL-safe unique slug. Auto-derived from `title` when omitted.
+    #[serde(default)]
+    slug: Option<String>,
+    /// Document format: `markdown`, `text`, `html`, `pdf`, `epub`, `mobi`.
+    /// Markdown enables heading extraction; other formats are treated as
+    /// opaque prose for chunking purposes.
+    #[serde(default = "default_format")]
+    format: String,
+    /// Full document body.
+    body: String,
+    /// Original file path or URL this document came from, if any.
+    #[serde(default)]
+    source_path: Option<String>,
+    /// Freeform tags for categorization (stored as JSONB array).
+    #[serde(default)]
+    tags: Vec<String>,
+    /// Freeform metadata object (author, language, …) stored as JSONB.
+    #[serde(default)]
+    metadata: serde_json::Value,
+    /// Identifier of the pipeline/operator that uploaded this document.
+    #[serde(default)]
+    ingested_by: Option<String>,
+    /// Target chunk size in characters. Defaults to 1500, which keeps
+    /// chunks under the 512-WordPiece-token limit of all-MiniLM-L6-v2
+    /// with comfortable headroom.
+    #[serde(default = "default_chunk_chars")]
+    target_chunk_chars: usize,
+}
+
 fn default_top_k() -> usize {
     10
 }
@@ -74,6 +107,12 @@ fn default_min_similarity() -> f32 {
 }
 fn default_doc_limit() -> usize {
     50
+}
+fn default_format() -> String {
+    "markdown".to_string()
+}
+fn default_chunk_chars() -> usize {
+    crate::ingest::DEFAULT_TARGET_CHUNK_CHARS
 }
 
 // ── Tool response types ─────────────────────────────────────────────────
@@ -95,6 +134,14 @@ pub struct DocumentSummary {
     pub format: String,
     pub chunk_count: i32,
     pub ingested_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct IngestResult {
+    pub document_id: String,
+    pub slug: String,
+    pub chunk_count: usize,
+    pub word_count: usize,
 }
 
 // ── MCP Server implementation ───────────────────────────────────────────
@@ -299,6 +346,45 @@ impl SeshatMcpServer {
     }
 
     #[tool(
+        name = "seshat_ingest",
+        description = "Ingest a document into Seshat's Archive. Body is chunked paragraph-aware (greedy pack to `target_chunk_chars`, markdown headings propagated onto chunks, overlong paragraphs split on sentence boundaries). Returns the new document id, slug, chunk count and total word count. Embedding is handled asynchronously by the worker; call `seshat_embed_now` to force an immediate pass if you need search to be live right away."
+    )]
+    async fn seshat_ingest(
+        &self,
+        Parameters(params): Parameters<IngestParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let req = crate::ingest::IngestRequest {
+            title: params.title,
+            slug: params.slug,
+            format: params.format,
+            body: params.body,
+            source_path: params.source_path,
+            tags: params.tags,
+            metadata: if params.metadata.is_null() {
+                serde_json::json!({})
+            } else {
+                params.metadata
+            },
+            ingested_by: params.ingested_by,
+            target_chunk_chars: params.target_chunk_chars,
+        };
+
+        let summary = crate::ingest::ingest_document(&self.state.db, req)
+            .await
+            .map_err(|e| McpError::internal_error(format!("ingest: {e}"), None))?;
+
+        let result = IngestResult {
+            document_id: summary.document_id.to_string(),
+            slug: summary.slug,
+            chunk_count: summary.chunk_count,
+            word_count: summary.word_count,
+        };
+        let json = serde_json::to_string_pretty(&result)
+            .map_err(|e| McpError::internal_error(format!("serialize: {e}"), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(
         name = "seshat_embed_now",
         description = "Force the embedding worker to process all pending chunks immediately. Returns the count of newly embedded chunks."
     )]
@@ -393,6 +479,7 @@ impl rmcp::handler::server::ServerHandler for SeshatMcpServer {
                  Use `seshat_wish` to request a microtheory on a topic (RAG + LLM synthesis). \
                  Use `seshat_status` to check archive statistics. \
                  Use `seshat_documents` to list ingested documents. \
+                 Use `seshat_ingest` to add a document to the archive (paragraph-aware chunking, embedding runs asynchronously). \
                  Use `seshat_embed_now` to force embedding of pending chunks."
                     .to_string(),
             ),

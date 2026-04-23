@@ -15,6 +15,7 @@ pub mod embed_worker;
 pub mod embedder;
 pub mod entity;
 pub mod error;
+pub mod ingest;
 pub mod mcp;
 pub mod migration;
 pub mod query;
