@@ -39,11 +39,28 @@ for var in SOLSTICE_REF_NAME SOLSTICE_BRANCH SOLSTICE_HEAD_REF; do
 done
 
 if command -v git >/dev/null 2>&1 && git rev-parse --git-dir >/dev/null 2>&1; then
+    # First try name-rev. On a full clone this gives us `remotes/origin/<b>`
+    # trivially; on shallow clones it usually returns "undefined" since the
+    # branch refs aren't locally present.
     val=$(git name-rev --name-only --no-undefined HEAD 2>/dev/null \
         | sed 's|^remotes/origin/||; s|~.*$||; s|\^.*$||') || val=""
     if [ -n "$val" ] && [ "$val" != "undefined" ]; then
         printf '%s' "$val"
         exit 0
+    fi
+
+    # Shallow-clone fallback: ask the remote directly. `ls-remote --heads`
+    # prints `<sha>\t<refs/heads/name>` for every branch head on origin;
+    # find the one matching our current HEAD. One-shot network call,
+    # no local state needed.
+    head_sha=$(git rev-parse HEAD 2>/dev/null) || head_sha=""
+    if [ -n "$head_sha" ]; then
+        val=$(git ls-remote --heads origin 2>/dev/null \
+            | awk -v sha="$head_sha" '$1 == sha {sub(/^refs\/heads\//, "", $2); print $2; exit}')
+        if [ -n "$val" ]; then
+            printf '%s' "$val"
+            exit 0
+        fi
     fi
 fi
 
