@@ -43,53 +43,23 @@ jobs:
     # would just overwrite ~/.docker/config.json with whatever raw string
     # we give it (Solstice doesn't yet substitute ${{ secrets.X }} inside
     # step env: blocks — only in runs-on).
+    #
+    # Branch detection lives in `.forgejo/scripts/resolve-branch.sh` — it's
+    # called inline in each step that needs $BRANCH because $GITHUB_ENV
+    # isn't reliably set on Solstice (an earlier `echo BRANCH=... >> "$GITHUB_ENV"`
+    # crashed dash with `ambiguous redirect` and silently killed the job).
     steps:
-      - name: Resolve branch name
-        # Solstice doesn't populate GITHUB_REF / GITHUB_REF_NAME reliably
-        # (confirmed empirically — the old `case "${GITHUB_REF:-}"` never
-        # matched, so the `:develop` / `:main` image tags never shipped).
-        # Check a few known-good envs in priority order, then fall back to
-        # `git name-rev` against the checked-out sha. Result goes to
-        # $GITHUB_ENV so later steps can just read $BRANCH.
-        run: |
-          resolve_branch() {
-            if [ -n "${GITHUB_REF_NAME:-}" ]; then
-              printf '%s' "$GITHUB_REF_NAME"; return
-            fi
-            case "${GITHUB_REF:-}" in
-              refs/heads/*) printf '%s' "${GITHUB_REF#refs/heads/}"; return ;;
-            esac
-            for var in SOLSTICE_REF_NAME SOLSTICE_BRANCH SOLSTICE_HEAD_REF; do
-              val=$(eval "printf '%s' \"\${$var:-}\"")
-              if [ -n "$val" ]; then printf '%s' "$val"; return; fi
-            done
-            # Last resort: ask git. Solstice/Forgejo typically checks out a
-            # detached HEAD at the target sha, so `git rev-parse --abbrev-ref
-            # HEAD` returns 'HEAD'. `git name-rev` finds the best matching
-            # ref name instead.
-            if command -v git >/dev/null 2>&1 && git rev-parse --git-dir >/dev/null 2>&1; then
-              val=$(git name-rev --name-only --no-undefined HEAD 2>/dev/null \
-                | sed 's|^remotes/origin/||; s|~.*$||; s|\^.*$||')
-              if [ -n "$val" ] && [ "$val" != "undefined" ]; then
-                printf '%s' "$val"; return
-              fi
-            fi
-          }
-          BRANCH=$(resolve_branch)
-          if [ -z "$BRANCH" ]; then
-            BRANCH="detached"
-          fi
-          echo "detected branch: $BRANCH"
-          echo "BRANCH=$BRANCH" >> "$GITHUB_ENV"
-
       - name: Build seshd image
         # Always runs — PRs need to catch Dockerfile regressions. On
         # main/develop the image gets an additional branch-named tag ready
         # for the push step.
         run: |
+          set -eu
           REGISTRY=code.aopc.cloud/toasterson
           SHA=${SOLSTICE_COMMIT_SHA:-${GITHUB_SHA:-local}}
           SHORT_SHA=$(printf '%s' "$SHA" | cut -c1-12)
+          BRANCH=$(sh .forgejo/scripts/resolve-branch.sh)
+          echo "detected branch: '$BRANCH'"
           TAGS="-t $REGISTRY/seshd:$SHORT_SHA"
           case "$BRANCH" in
             main|develop)
@@ -101,6 +71,7 @@ jobs:
 
       - name: Smoke-test seshd binary (catch stub-binary regression)
         run: |
+          set -eu
           REGISTRY=code.aopc.cloud/toasterson
           SHA=${SOLSTICE_COMMIT_SHA:-${GITHUB_SHA:-local}}
           SHORT_SHA=$(printf '%s' "$SHA" | cut -c1-12)
@@ -112,11 +83,13 @@ jobs:
           fi
 
       - name: Push seshd image
-        # Gate on the resolved $BRANCH rather than a `github.*` expression —
-        # Solstice's handling of GitHub-Actions expressions is inconsistent
-        # (some runs pushed anyway despite `github.ref` being empty). Doing
-        # the check in-script keeps behaviour identical regardless.
+        # Gate on the resolved branch instead of a `github.*` expression —
+        # Solstice's handling of GitHub-Actions expressions is inconsistent.
+        # Resolving in-script keeps behaviour identical regardless.
         run: |
+          set -eu
+          BRANCH=$(sh .forgejo/scripts/resolve-branch.sh)
+          echo "detected branch: '$BRANCH'"
           case "$BRANCH" in
             main|develop) ;;
             *)
@@ -143,42 +116,18 @@ jobs:
     steps:
       - name: Install Helm
         run: |
+          set -eu
           HELM_VERSION=v3.17.0
           curl -fsSL -o /tmp/helm.tgz "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz"
           tar -xzf /tmp/helm.tgz -C /tmp/
           sudo install -m755 /tmp/linux-amd64/helm /usr/local/bin/helm
           helm version --short
 
-      - name: Resolve branch name
-        run: |
-          resolve_branch() {
-            if [ -n "${GITHUB_REF_NAME:-}" ]; then
-              printf '%s' "$GITHUB_REF_NAME"; return
-            fi
-            case "${GITHUB_REF:-}" in
-              refs/heads/*) printf '%s' "${GITHUB_REF#refs/heads/}"; return ;;
-            esac
-            for var in SOLSTICE_REF_NAME SOLSTICE_BRANCH SOLSTICE_HEAD_REF; do
-              val=$(eval "printf '%s' \"\${$var:-}\"")
-              if [ -n "$val" ]; then printf '%s' "$val"; return; fi
-            done
-            if command -v git >/dev/null 2>&1 && git rev-parse --git-dir >/dev/null 2>&1; then
-              val=$(git name-rev --name-only --no-undefined HEAD 2>/dev/null \
-                | sed 's|^remotes/origin/||; s|~.*$||; s|\^.*$||')
-              if [ -n "$val" ] && [ "$val" != "undefined" ]; then
-                printf '%s' "$val"; return
-              fi
-            fi
-          }
-          BRANCH=$(resolve_branch)
-          if [ -z "$BRANCH" ]; then
-            BRANCH="detached"
-          fi
-          echo "detected branch: $BRANCH"
-          echo "BRANCH=$BRANCH" >> "$GITHUB_ENV"
-
       - name: Package + publish chart to OCI
         run: |
+          set -eu
+          BRANCH=$(sh .forgejo/scripts/resolve-branch.sh)
+          echo "detected branch: '$BRANCH'"
           case "$BRANCH" in
             main|develop) ;;
             *)
@@ -204,10 +153,12 @@ jobs:
             exit 0
           fi
 
-          # Resolve dependencies (pulls Bitnami postgres into charts/ so
-          # installs with postgresql.enabled=true still work). Ignored
-          # silently if the chart has no deps.
-          helm dependency update "$CHART_DIR"
+          # NOTE: we intentionally skip `helm dependency update` — the only
+          # dependency is Bitnami postgresql (gated behind postgresql.enabled,
+          # which is always false in production because we use the shared
+          # CNPG postgres-ha cluster). Pulling from Docker Hub also risks
+          # anonymous-pull rate-limits. If a future chart grows a dep that
+          # must ship bundled, add it here.
 
           mkdir -p /tmp/pkg
           helm package "$CHART_DIR" -d /tmp/pkg
