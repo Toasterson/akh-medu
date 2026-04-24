@@ -94,17 +94,8 @@ jobs:
         #     don't depend on `github.*` expression support (inconsistent on
         #     Solstice) and don't die on the empty-branch case.
         #
-        # Diagnostic env dump goes to stderr so failures can be debugged
-        # without another commit-and-wait cycle.
         run: |
           set -eu
-          echo "=== env dump (relevant keys only) ===" >&2
-          env | grep -E '^(GITHUB_|SOLSTICE_|CI_|RUNNER_|REF|HEAD_)' | sort >&2 || true
-          echo "=== git refs ===" >&2
-          git rev-parse --is-shallow-repository 2>&1 >&2 || true
-          git for-each-ref --format='%(refname)' | head -20 >&2 || true
-          echo "=== end diag ===" >&2
-
           REGISTRY=code.aopc.cloud/toasterson
           SHA=${SOLSTICE_COMMIT_SHA:-${GITHUB_SHA:-local}}
           SHORT_SHA=$(printf '%s' "$SHA" | cut -c1-12)
@@ -147,13 +138,6 @@ jobs:
       - name: Package + publish chart to OCI
         run: |
           set -eu
-          echo "=== env dump (relevant keys only) ===" >&2
-          env | grep -E '^(GITHUB_|SOLSTICE_|CI_|RUNNER_|REF|HEAD_)' | sort >&2 || true
-          echo "=== git refs ===" >&2
-          git rev-parse --is-shallow-repository 2>&1 >&2 || true
-          git for-each-ref --format='%(refname)' | head -20 >&2 || true
-          echo "=== end diag ===" >&2
-
           BRANCH=$(sh .forgejo/scripts/resolve-branch.sh)
           echo "detected branch: '$BRANCH'"
           case "$BRANCH" in
