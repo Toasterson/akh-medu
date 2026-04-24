@@ -83,25 +83,46 @@ jobs:
           fi
 
       - name: Push seshd image
-        # Gate on the resolved branch instead of a `github.*` expression —
-        # Solstice's handling of GitHub-Actions expressions is inconsistent.
-        # Resolving in-script keeps behaviour identical regardless.
+        # Two pushes, two different gates:
+        #
+        #   * SHORT_SHA tag — always pushed, because downstream (the flux
+        #     HelmRelease) pins to this to get reproducible deploys. It's
+        #     the tag that actually matters.
+        #
+        #   * branch tag (`:main` / `:develop`) — only pushed when we can
+        #     confidently identify the branch. Resolving in-script means we
+        #     don't depend on `github.*` expression support (inconsistent on
+        #     Solstice) and don't die on the empty-branch case.
+        #
+        # Diagnostic env dump goes to stderr so failures can be debugged
+        # without another commit-and-wait cycle.
         run: |
           set -eu
-          BRANCH=$(sh .forgejo/scripts/resolve-branch.sh)
-          echo "detected branch: '$BRANCH'"
-          case "$BRANCH" in
-            main|develop) ;;
-            *)
-              echo "skipping push — branch '$BRANCH' is not main/develop"
-              exit 0
-              ;;
-          esac
+          echo "=== env dump (relevant keys only) ===" >&2
+          env | grep -E '^(GITHUB_|SOLSTICE_|CI_|RUNNER_|REF|HEAD_)' | sort >&2 || true
+          echo "=== git refs ===" >&2
+          git rev-parse --is-shallow-repository 2>&1 >&2 || true
+          git for-each-ref --format='%(refname)' | head -20 >&2 || true
+          echo "=== end diag ===" >&2
+
           REGISTRY=code.aopc.cloud/toasterson
           SHA=${SOLSTICE_COMMIT_SHA:-${GITHUB_SHA:-local}}
           SHORT_SHA=$(printf '%s' "$SHA" | cut -c1-12)
+
+          # sha tag always gets pushed
           docker push "$REGISTRY/seshd:$SHORT_SHA"
-          docker push "$REGISTRY/seshd:$BRANCH"
+
+          # branch tag only if the branch actually resolves cleanly
+          BRANCH=$(sh .forgejo/scripts/resolve-branch.sh)
+          echo "resolved branch: '$BRANCH'"
+          case "$BRANCH" in
+            main|develop)
+              docker push "$REGISTRY/seshd:$BRANCH"
+              ;;
+            *)
+              echo "skipping branch tag — branch '$BRANCH' is not main/develop"
+              ;;
+          esac
 
   # Publish the Helm chart to the OCI registry on every main/develop push
   # whose Chart.yaml version isn't already present. Versioning is manual
@@ -126,6 +147,13 @@ jobs:
       - name: Package + publish chart to OCI
         run: |
           set -eu
+          echo "=== env dump (relevant keys only) ===" >&2
+          env | grep -E '^(GITHUB_|SOLSTICE_|CI_|RUNNER_|REF|HEAD_)' | sort >&2 || true
+          echo "=== git refs ===" >&2
+          git rev-parse --is-shallow-repository 2>&1 >&2 || true
+          git for-each-ref --format='%(refname)' | head -20 >&2 || true
+          echo "=== end diag ===" >&2
+
           BRANCH=$(sh .forgejo/scripts/resolve-branch.sh)
           echo "detected branch: '$BRANCH'"
           case "$BRANCH" in
