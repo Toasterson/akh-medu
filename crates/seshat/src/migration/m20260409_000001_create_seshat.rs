@@ -102,9 +102,20 @@ impl MigrationTrait for Migration {
         .await?;
 
         // IVFFlat index for cosine similarity search.
-        // Note: this index requires the table to contain some rows before
-        // it can be built with `lists > 0`. We create it here so it's ready
-        // once data arrives. For empty tables, PostgreSQL falls back to seqscan.
+        //
+        // WARNING: this index is broken on small tables. With `lists = 100`
+        // and an almost-empty `pa_embeddings`, the default `ivfflat.probes
+        // = 1` almost always visits an empty cluster and returns zero
+        // results — even though cosine similarity is fine if you bypass
+        // the index. The earlier comment here claimed "PostgreSQL falls
+        // back to seqscan for empty tables"; that is NOT true once the
+        // index exists, and we spent a full debug session chasing the
+        // phantom bug.
+        //
+        // The next migration (`m20260425_000001_switch_to_hnsw`) drops
+        // this and creates an HNSW index instead, which doesn't have the
+        // needs-training-data failure mode. Kept here so migrations stay
+        // in chronological order.
         db.execute_unprepared(
             "CREATE INDEX IF NOT EXISTS idx_pa_embeddings_vector \
              ON pa_embeddings USING ivfflat (embedding vector_cosine_ops) \
