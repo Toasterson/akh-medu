@@ -811,12 +811,21 @@ plus a smaller, isolated test harness.
   - SIGKILL the first; bring up the second pointing at the same akh_id.
   - Assert deep equality of triple set, working memory, episode buffer,
     psyche.
+- **Postgres advisory-lock split-brain guard** (hard requirement, not a
+  follow-up): the wake/relocation path acquires
+  `pg_try_advisory_lock(hashtext('akh:' || akh_id))` before touching
+  Akh state, in addition to the `last_seen` heartbeat check. Advisory
+  locks are session-scoped, so they survive clock skew between hosts —
+  the `last_seen` guard catches the routine race, the advisory lock
+  catches the clock-skew race. Wake fails fast with a clear error if
+  either guard rejects.
 - A short operator runbook in `docs/ops/relocate-akh.md`:
   1. Identify the dead host.
   2. Pick a recovery host (cluster or M2).
   3. Run `akh akh wake --akh-id <id>` on the recovery host. The wake
      command refuses if `akh.last_seen` was updated within the last
-     30 s by another host (split-brain guard).
+     30 s by another host (split-brain guard) **or** if the advisory
+     lock for this `akh_id` is held by another session.
   4. Verify the recovered Akh responds to `akh status`.
 - A property test: random sequences of asserts/retracts, randomly
   interleaved with kill -9, always recover with bounded dataloss.
@@ -920,27 +929,26 @@ code.
    becomes worth it. Phase 38 proceeds with rebuild; Phase 40 is queued
    if the metrics demand it.
 
-4. **HNSW local-disk cache: shared between processes?** If two akhomed
-   processes on the same host serve different workspaces but the same
-   Akh moves between them, do they share the disk cache? Cleanest
-   answer: per-akh-id directory, sibling akhomeds read each other's;
-   but that means ownership of the disk cache survives host crashes
-   even though the in-memory daemon doesn't. Pencilled in as
-   per-akh-id, single-writer (whichever akhomed currently has the
-   wake-lease writes; others read).
+4. **HNSW local-disk cache: shared between processes?** *Resolved
+   (2026-04-25):* akhomed runs alone per host/container in production.
+   No sibling-process sharing concern. HNSW local-disk cache is
+   single-writer with no cross-process locking layer.
 
-5. **Split-brain on relocation.** Two operators run `akh akh wake` on
-   the same Akh on two hosts at once. The 30 s `last_seen` guard
-   handles the obvious race, but what about a clock-skew case where
-   host A's clock is 60 s behind? Plan: lock with a Postgres advisory
-   lock keyed on `akh_id` *in addition* to the `last_seen` guard;
-   advisory locks are session-scoped and survive clock skew.
+5. **Split-brain on relocation.** *Resolved (2026-04-25):* the
+   Postgres advisory lock keyed on `akh_id` (in addition to the
+   `last_seen` guard) is accepted as a hard requirement, not a
+   follow-up. Advisory locks are session-scoped and survive clock
+   skew. See sub-phase 38g deliverables — the lock guard ships with
+   the wake/relocation path.
 
-6. **AGE adoption risk.** AGE is a CNPG extension that has had a few
-   abandoned releases. Do we trust it to stay maintained on the version
-   of CNPG the cluster runs? Mitigation: AGE is a *projection* of
-   `akhomed.facts`, not a primary store. If AGE breaks or is dropped,
-   we lose external Cypher queries; we don't lose Akh state.
+6. **AGE adoption risk.** *Resolved (2026-04-25):* AGE availability
+   is guaranteed by the custom CNPG image build (homelab repo). The
+   image bakes the AGE extension at known versions. AGE is still
+   treated as a projection over `akhomed.facts` so that a future
+   migration off AGE doesn't lose Akh state — but the deploy-side
+   commitment makes the runtime risk effectively zero. If AGE
+   upstream stops being maintained, we vendor it; we do not lose it
+   via dependency rot.
 
 ## Risks and mitigations
 
@@ -949,6 +957,7 @@ code.
 | Postgres unreachable for hours                       | Medium    | High     | WAL buffer absorbs up to `max_buffer_bytes`; on overflow, daemon enters degraded mode and refuses new asserts (clear error to caller). |
 | WAL flush stalls (Postgres slow)                     | Medium    | Medium   | Flush is on a background task; OODA loop never blocks on it. Backpressure surfaces as an audit entry, not a hang. |
 | AGE Cypher planner is slow                          | High      | Low      | AGE is a read-side convenience; if it's slow, callers fall back to direct SPARQL through the akhomed HTTP API. |
+| AGE upstream stops being maintained                  | Low       | Low      | AGE availability is guaranteed by the custom CNPG image build (homelab repo) which bakes the extension at known versions. If upstream rots we vendor it. AGE is still treated as a projection over `akhomed.facts` so a future migration off AGE doesn't lose Akh state. |
 | Cross-host wake races (split-brain)                 | Low       | High     | `last_seen` heartbeat + Postgres advisory lock; CLI refuses to wake within 30 s of another host's heartbeat. |
 | Snapshot blob size grows unbounded                   | Medium    | Medium   | Snapshots include only working memory + episodes (recent-N), not full KG; full KG is in `akhomed.facts`. Episode count capped per snapshot. |
 | HNSW rebuild bottlenecks cold wake                  | Medium    | Medium   | Local-disk cache mitigates same-host. Cross-host falls back to rebuild; if it exceeds budget on real workloads, defer to Phase 40. |
@@ -999,3 +1008,11 @@ code.
 - Phase 39 (queued) — network inference backends (Phase 38 separates
   "where state lives" from "where compute happens")
 - Phase 40 (queued) — e-graph durability, if rebuild exceeds wake budget
+
+## Resolutions log
+
+### 2026-04-25
+
+- **P38Q4** (HNSW local-disk cache shared between sibling akhomeds): NO. akhomed runs alone per host/container; single-writer with no cross-process locking layer.
+- **P38Q5** (Split-brain on relocation under clock skew): YES, Postgres advisory lock keyed on `akh_id` is a hard requirement in 38g, in addition to the `last_seen` guard.
+- **P38Q6** (AGE adoption risk): AGE availability is guaranteed by the custom CNPG image build (homelab repo). Runtime risk is effectively zero; AGE remains a projection so migrating off it would not lose Akh state.

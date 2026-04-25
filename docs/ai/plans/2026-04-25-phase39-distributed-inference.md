@@ -17,11 +17,12 @@ where its state is — on a Talos node, on the M2 in the cellar, on a peer's
 laptop — but its LLM and embedding inference can route to any reachable backend
 that satisfies the request's capability profile.
 
-The core artefact is a `LlmBackend` trait with four initial implementations
-(`CandleLocal`, `CandleRemote`, `OpenRouter`, `Anthropic`), a reservation
-protocol so multiple Akhs don't fight over the 7900 XTX desktop, a discovery
-+ health loop, and a Phase 28 router extension that learns latency / cost /
-availability per backend.
+The core artefact is a `LlmBackend` trait with three primary implementations
+(`CandleLocal`, `CandleRemote`, `OpenRouter`) and one optional / conditional
+backend (`Anthropic`, shipped if convenient and dropped if it adds maintenance
+load), a reservation protocol so multiple Akhs don't fight over the 7900 XTX
+desktop, a discovery + health loop, and a Phase 28 router extension that learns
+latency / cost / availability per backend.
 
 A non-negotiable property: **no native C++ in the inference path**. Candle
 hosts everything, including the AMD ROCm / HIP variant. We accept that
@@ -50,11 +51,14 @@ Phase 39 inverts the relationship:
   ┌──────────────────────────────────────────────────────────────┐
   │  Akh daemon (M2, cellar)                                     │
   │   ├─ State: Postgres + workspace dir + warm/cold sleep       │
-  │   └─ Compute requests:                                       │
+  │   └─ Compute requests (default chain):                      │
   │       ├─ Tier-1/2 NLU      → CandleLocal (Metal, M2 GPU)    │
   │       ├─ Heavy synthesis   → CandleRemote (7900 XTX desktop) │
   │       ├─ Cheap distillation → OpenRouter (paid, per-token)   │
-  │       └─ Frontier fallback → Anthropic (paid, last resort)   │
+  │       └─ (optional rung)   → Anthropic — conditional         │
+  │                              fallback; ships if convenient,  │
+  │                              dropped if it causes maintenance│
+  │                              load (auth/caching/cost shifts) │
   └──────────────────────────────────────────────────────────────┘
 ```
 
@@ -77,14 +81,19 @@ points at an OpenAI-compatible endpoint and `ExternalApiConfig::base_url`
 accepts `https://openrouter.ai/api/v1` — we generalise that pattern into a
 proper backend.
 
-### Why Anthropic as fallback
+### Why Anthropic is an optional / conditional fallback
 
 Anthropic API gives access to Claude (the same family the operator uses
-interactively). It is the most expensive option in the chain, used only when
-the on-prem chain is unavailable *and* OpenRouter cannot satisfy the
-capability requirement (e.g. when `n akh` decides only frontier reasoning
-will do). The cost ceiling is enforced by `CostGuard` (existing pattern
-from Phase 36) and by the per-Akh budget in `akh.toml`.
+interactively). It is the most expensive option in the chain and is treated
+as **optional**: it ships if convenient and is dropped if it causes
+maintenance load (auth changes, prompt-caching API shifts, cost concerns).
+The primary stack is Candle (local + remote) and OpenRouter; Anthropic is an
+additional rung at the bottom of the fall-through chain rather than a
+first-class backend. When present, it is used only when the on-prem chain is
+unavailable *and* OpenRouter cannot satisfy the capability requirement (e.g.
+when `n akh` decides only frontier reasoning will do). The cost ceiling is
+enforced by `CostGuard` (existing pattern from Phase 36) and by the per-Akh
+budget in `akh.toml`.
 
 ### No native C++
 
@@ -478,7 +487,13 @@ pub enum WireError {
   fall-through (e.g. `Offline | Reserved | RateLimited` → next chain entry,
   `UnsupportedModel` → bubble up because no fall-through will help).
 
-## The Four Initial Backends
+## The Initial Backends
+
+The three **primary** backends are `CandleLocal`, `CandleRemote`, and
+`OpenRouter`. `Anthropic` is shipped as an **optional / conditional**
+fallback rung — present if convenient, dropped if it causes maintenance load
+(auth changes, prompt-caching API shifts, cost concerns). Phase 39 must
+build cleanly with the Anthropic backend disabled.
 
 ### CandleLocal
 
@@ -576,7 +591,14 @@ counter atomically. If the backend returns 429, surface as
 `BackendError::RateLimited{retry_after_secs}` and let the router fall
 through.
 
-### Anthropic
+### Anthropic — optional / conditional fallback
+
+> **Status:** optional. Ships if convenient, dropped if it causes
+> maintenance load (auth changes, prompt-caching API shifts, cost
+> concerns). The build must succeed with Anthropic compiled out, and the
+> default fall-through chain (CandleLocal → CandleRemote → OpenRouter)
+> must work without it. This subsection is preserved so Anthropic can be
+> reinstated cheaply if/when it is convenient.
 
 Direct Anthropic API (`https://api.anthropic.com/v1/messages`). Used as
 the last fall-through entry — most expensive, most capable.
@@ -856,9 +878,14 @@ the bandit can override per-archetype if it has confident data. Example:
 
 ```toml
 [inference.chain]
-default = ["candle_local", "candle_remote_basement", "openrouter", "anthropic"]
-frontier_synthesis = ["candle_remote_basement", "anthropic"]
+# Primary stack: Candle (local + remote) and OpenRouter. Anthropic is an
+# optional rung — listed last when present, omitted entirely when absent.
+default            = ["candle_local", "candle_remote_basement", "openrouter"]
+frontier_synthesis = ["candle_remote_basement", "openrouter"]
 cheap_distillation = ["openrouter", "candle_local"]
+
+# Optional: append "anthropic" when the operator opts in.
+# default = ["candle_local", "candle_remote_basement", "openrouter", "anthropic"]
 ```
 
 ## Latency-aware Routing in Phase 28
@@ -949,6 +976,9 @@ per_request_max_millicents = 5_000  # $0.05/request default
 [inference.budget.openrouter]
 daily_millicents = 100_000          # $1.00/day for distillation jobs
 
+# Optional: only meaningful if the Anthropic backend is compiled in and
+# enabled. Anthropic is a conditional fallback rung; cost tracking still
+# applies when it ships.
 [inference.budget.anthropic]
 daily_millicents = 20_000           # $0.20/day for frontier fallback only
 ```
@@ -1112,17 +1142,21 @@ inference-candle-local = ["inference", "candle-backend"]
   `BackendError::StreamInterrupted{tokens_so_far}` and the consumer
   sees the partial result.
 
-### 39c — OpenRouter + Anthropic + cost tracking (~900 lines)
+### 39c — OpenRouter (+ optional Anthropic) + cost tracking (~900 lines)
 
-**New module**: `src/inference/openrouter.rs`
+**New module**: `src/inference/openrouter.rs` (primary)
 - Reuses `ureq`/`reqwest` (already in deps for the existing
   `extraction/backends/api.rs`).
 - SSE parser for streaming.
 - Per-model rate cache, refreshed daily via a registry idle task.
 
-**New module**: `src/inference/anthropic.rs`
+**New module**: `src/inference/anthropic.rs` (optional / conditional)
 - Same shape, different schema (Anthropic `/v1/messages`).
 - Hard-coded rate table per model.
+- Gated behind the `inference-anthropic` feature flag. Build must
+  succeed with the feature off; the rest of 39c (OpenRouter + cost
+  tracking) does not depend on it. Drop this module if Anthropic
+  causes maintenance load.
 
 **Modify**: `src/inference/budget.rs` to consume per-response `usage`.
 
@@ -1341,13 +1375,13 @@ record them here so they're not lost.
 4. **Multiplexing requests on a single Lease**: does a single lease
    permit one in-flight request, or many? Default to one (simpler);
    batched serving could relax this if it becomes a bottleneck.
-5. **Anthropic prompt caching**: Anthropic offers prompt caching
-   discounts. If we surface system prompts through `InferenceRequest`,
-   we can opt into caching and report the actual cost (vs estimated).
-   Defer until we have measurable system-prompt overlap.
-6. **Per-archetype budget overrides**: should "code generation"
-   archetypes have a higher daily budget than "fact lookup"? Likely
-   yes; design TBD in Phase 39f.
+5. **Anthropic prompt caching**: *Resolved (2026-04-25):* Anthropic is
+   deprioritized to an optional / conditional fallback. If the
+   Anthropic client creates a problem (auth changes, prompt-caching
+   API shifts, cost concerns), it is dropped. Prompt-caching support
+   is therefore **not** a Phase 39 deliverable. If we keep Anthropic
+   and want caching later, surface system prompts through
+   `InferenceRequest` then; until then, defer.
 
 ## References
 
@@ -1364,3 +1398,10 @@ record them here so they're not lost.
 - OpenRouter API docs: https://openrouter.ai/docs
 - Anthropic API: https://docs.anthropic.com/en/api
 - tonic (gRPC for Rust): https://github.com/hyperium/tonic
+
+## Resolutions log
+
+### 2026-04-25
+
+- **P39Q5** (Anthropic prompt-caching exposure): deprioritize Anthropic. Primary stack is `CandleLocal` + `CandleRemote` + `OpenRouter`; Anthropic is an optional / conditional fallback rung — shipped if convenient, dropped if it causes maintenance load. Default fall-through chain is CandleLocal → CandleRemote → OpenRouter; Anthropic is an additional optional rung. Build must succeed with Anthropic compiled out. Cost tracking still mentions Anthropic but flags it as conditional. Prompt caching is not a Phase 39 deliverable.
+- **P39Q6** (Per-archetype budget overrides): dropped. Single global budget per Akh is enough until specific archetypes are identified that need heavy inference and aren't covered by routing decisions. Bullet removed from the plan.

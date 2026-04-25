@@ -252,3 +252,9 @@ and the amendment was forgotten. Both are bugs worth investigating.
   [ADR 037](037-llm-vsa-deep-integration.md) and Phase 26 plan
 - Phase 38 wake protocol: Anima ticket `019dc599-81c5-7ce2-a4e3-1a84ad6001e6`
   (plan not yet authored as of 2026-04-25)
+
+## Resolutions log
+
+### 2026-04-25
+
+- **P40Q1** (HNSW measurement flag): confirmed. The `--what hnsw|egraph|both` CLI flag for the measurement harness is a Phase 40a deliverable from day one. Tracked in the plan; the ADR's measurement contract is unchanged.

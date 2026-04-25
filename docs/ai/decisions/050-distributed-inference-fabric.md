@@ -61,18 +61,25 @@ backend currently best satisfies the request's capability profile.
 ## Decision
 
 Introduce a `LlmBackend` trait (Send + Sync, async where it matters) with
-four initial implementations — `CandleLocal`, `CandleRemote`, `OpenRouter`,
-`Anthropic` — managed by a `BackendRegistry` that provides healthchecks,
-reservations, and cost tracking. The `n akh` semantic router (Phase 28) is
-extended with backend-aware features (rolling p95 latency, availability,
-cents-per-token cost) so its LinUCB bandit naturally avoids reserved or
-expensive backends for queries that don't need them.
+three primary implementations — `CandleLocal`, `CandleRemote`, `OpenRouter` —
+plus one **optional / conditional** implementation, `Anthropic`, shipped if
+convenient and dropped if it causes maintenance load (auth changes,
+prompt-caching API shifts, cost concerns). All backends are managed by a
+`BackendRegistry` that provides healthchecks, reservations, and cost
+tracking. The `n akh` semantic router (Phase 28) is extended with
+backend-aware features (rolling p95 latency, availability, cents-per-token
+cost) so its LinUCB bandit naturally avoids reserved or expensive backends
+for queries that don't need them.
 
 Concretely:
 
-- **One trait, four backends.** `LlmBackend::{capabilities, health,
-  reserve, release, complete, stream}`. Hidden-state extraction is part of
-  `InferenceRequest`, not a side channel.
+- **One trait, three primary backends, one optional rung.**
+  `LlmBackend::{capabilities, health, reserve, release, complete, stream}`.
+  Hidden-state extraction is part of `InferenceRequest`, not a side
+  channel. The default fall-through chain is
+  `CandleLocal → CandleRemote → OpenRouter`; `Anthropic` is an additional
+  optional rung at the bottom when present. The build must succeed with
+  Anthropic compiled out.
 - **Reservation protocol with leases + auto-release** for scarce backends
   (the 7900 XTX, M2 when its homing Akh is busy). Per-backend policy
   controls queue depth and fall-through chain.
@@ -270,7 +277,10 @@ Roughly the order in the plan doc:
    calling Candle directly. `llama-cpp-2` stays on as a fallback feature.
 2. Phase 39b stands up `CandleRemote` and the gRPC server. Operators
    running both M2 and 7900 XTX can begin dispatching to the desktop.
-3. Phase 39c adds `OpenRouter` and `Anthropic`. Both default disabled.
+3. Phase 39c adds `OpenRouter` (primary). `Anthropic` is added as an
+   optional / conditional rung in the same sub-phase, gated behind its
+   own feature flag; both are default-disabled, and Anthropic is dropped
+   if it causes maintenance load. The rest of 39c does not depend on it.
 4. Phase 39e adds reservations + healthchecks. Up to here, the M2 can use
    the desktop without contention because no other Akh exists yet.
 5. Phase 39f extends the Phase 28 router. Traffic begins shifting based
@@ -299,3 +309,10 @@ Roughly the order in the plan doc:
 - Anthropic API: https://docs.anthropic.com/en/api
 - tonic (Rust gRPC): https://github.com/hyperium/tonic
 - vLLM (rejected alternative): https://github.com/vllm-project/vllm
+
+## Resolutions log
+
+### 2026-04-25
+
+- **P39Q5** (Anthropic prompt-caching exposure): deprioritize Anthropic. Primary stack is `CandleLocal` + `CandleRemote` + `OpenRouter`; Anthropic is an optional / conditional fallback rung — shipped if convenient, dropped if it causes maintenance load. Default fall-through chain is CandleLocal → CandleRemote → OpenRouter; Anthropic is an additional optional rung. Build must succeed with Anthropic compiled out. Cost tracking still applies when Anthropic ships.
+- **P39Q6** (Per-archetype budget overrides): dropped. Single global budget per Akh is enough until specific archetypes are identified that need heavy inference and aren't covered by routing decisions.

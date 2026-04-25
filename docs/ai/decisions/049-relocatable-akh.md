@@ -204,10 +204,14 @@ isolation we need within one cluster.
   drift if a write hits one but not the other. Mitigation: write-through
   with WAL flush is the only write path; a periodic
   `akhomed verify` job samples and reconciles.
-- **AGE adoption risk.** AGE is a CNPG extension with a lightly-loaded
-  contributor base. If a future CNPG release drops AGE support, we
-  lose external Cypher; we don't lose Akh state, but the AGE-dependent
-  consumers need a fallback (direct SPARQL via akhomed HTTP).
+- **AGE adoption risk (mitigated by deploy-side commitment).** AGE
+  availability is guaranteed by the custom CNPG image build (homelab
+  repo) which bakes the AGE extension at known versions. AGE is still
+  treated as a projection over `akhomed.facts` so that a future
+  migration off AGE doesn't lose Akh state — but the deploy-side
+  commitment makes the runtime risk effectively zero. If AGE upstream
+  stops being maintained, we vendor it; we do not lose it via
+  dependency rot.
 - **More moving parts on the operator side.** A Postgres outage now
   affects akhomed (it falls back to in-memory-only mode and refuses
   new asserts when the buffer fills). Today the daemon is unaffected
@@ -323,3 +327,11 @@ sub-phase breakdown and acceptance criteria.
 - redb: `src/store/durable.rs`
 - oxigraph: `src/graph/sparql.rs`
 - hnsw_rs: `src/vsa/item_memory.rs`
+
+## Resolutions log
+
+### 2026-04-25
+
+- **P38Q4** (HNSW local-disk cache shared between sibling akhomeds): NO. akhomed runs alone per host/container; single-writer with no cross-process locking layer.
+- **P38Q5** (Split-brain on relocation under clock skew): YES, Postgres advisory lock keyed on `akh_id` is a hard requirement on the wake/relocation path, in addition to the `last_seen` guard.
+- **P38Q6** (AGE adoption risk): AGE availability is guaranteed by the custom CNPG image build (homelab repo). Runtime risk is effectively zero; AGE remains a projection over `akhomed.facts` so a future migration off AGE would not lose Akh state.

@@ -203,6 +203,15 @@ A new workspace crate `crates/akh-egraph-bench/` containing:
    strings with hashes; only structural edges and rule patterns matter for
    saturation time.
 4. CLI flags to dump per-rule-set stats as JSON for the report.
+5. **`--what hnsw|egraph|both` measurement flag** *(confirmed deliverable,
+   resolved 2026-04-25)*. The harness measures HNSW(VSA) rebuild and e-graph
+   re-saturation behind a single flag from day one; the wake-path budget is
+   shared between the two structures, and the workloads (KG facts +
+   co-resident VSA item memory) overlap. `--what egraph` and `--what hnsw`
+   are subsets; `--what both` runs both arms and reports them side-by-side
+   in the same report. Default: `egraph` (the primary subject of Phase 40);
+   the HNSW arm folds in for measurement parity without making 40d
+   conditional on HNSW results.
 
 Crate placement: matches the precedent set by `crates/seshat/` (see
 [`Cargo.toml:2`](../../Cargo.toml)). Keeps the bench out of the main
@@ -381,21 +390,21 @@ store specifically). 40c is a documentation change. 40d is gated on 40c.
 These are explicitly left for the plan to resolve during 40a/40b. They are
 not blockers for starting the work.
 
-### Q1: Should we measure HNSW(VSA) rebuild time alongside e-graph re-saturation?
+### Q1: Should we measure HNSW(VSA) rebuild time alongside e-graph re-saturation? *Resolved (2026-04-25): YES.*
 
 The wake-path budget is shared. A 4-second HNSW rebuild plus a 4-second
 e-graph re-saturation is an 8-second wake; either alone is acceptable, both
-together are not. If we are going to build a benchmark harness for one, we
-should sweep the other in the same run — they share the same workloads (the
-KG facts and the VSA item memory are co-resident). The harness in 40a should
-have a `--what hnsw|egraph|both` flag from day one.
+together are not. The harness in 40a ships with a
+`--what hnsw|egraph|both` flag from day one — see the 40a deliverables
+section above; the flag is now a confirmed deliverable, not an open
+question.
 
 The HNSW path is reasonably well-understood — `hnsw_rs` index build is O(n
 log n) with measured constants in the existing `vsa_ops` bench
 ([`benches/vsa_ops.rs`](../../benches/vsa_ops.rs)) — but rebuild from a
 serialized item-memory snapshot has not been measured at the workstation
-scale of items we expect. **Tentative answer: yes, fold it in.** The
-incremental cost of running both benches together is small.
+scale of items we expect. The incremental cost of running both benches
+together is small, so 40b reports both arms.
 
 ### Q2: Are there workloads that need partial e-graph state mid-reasoning?
 
@@ -512,3 +521,9 @@ This plan is verified when:
   `019dc599-81c5-7ce2-a4e3-1a84ad6001e6`
 - Sibling wake-path concern: HNSW(VSA) rebuild — Phase 26 plan
   [`docs/ai/plans/2026-03-26-phase26-llm-vsa-deep-integration.md`](2026-03-26-phase26-llm-vsa-deep-integration.md)
+
+## Resolutions log
+
+### 2026-04-25
+
+- **P40Q1** (HNSW measurement flag): confirmed. The `--what hnsw|egraph|both` CLI flag for the measurement harness is a Phase 40a deliverable from day one. Default is `egraph`; the HNSW arm folds in for measurement parity in the same harness. Q1 is promoted from open question to confirmed deliverable.
