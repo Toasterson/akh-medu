@@ -6,6 +6,15 @@ try to express options on how to handle issues for calling functions
 
 ## Documentation Maintenance
 
+**Anima is the primary store for plans and decisions** (project `019d9844-ce74-7993-a9f0-c953b8f04a4e`, "Akh-Medu"). Every plan and ADR also lives in Seshat's corpus so AI agents can search across them. The `docs/ai/plans/` and `docs/ai/decisions/` directories in this repo are **backups** — they exist for offline access and as the canonical paste source when ingesting into Anima/Seshat. Code that references a plan or ADR should cite both: the Anima work-item ID *and* the local file path.
+
+Authoring flow for new plans / ADRs:
+1. Open or pick the relevant Anima work item (or create one).
+2. Write the plan / ADR markdown.
+3. Save it under `docs/ai/plans/<YYYY-MM-DD>-phase-name.md` or `docs/ai/decisions/<NNN>-name.md`.
+4. Push to Seshat via `seshat_ingest` (or eventually `anima_import` once that MCP tool lands — Anima WI `019dc4e5-df5a`) so the corpus stays in sync.
+5. Update the Anima work item's description to reference the file path; promote `current_phase` to `triaged` or `agent-ready` as appropriate.
+
 - Keep `docs/ai/architecture.md` updated when making structural changes (new modules, protocol changes, phase transitions). Bump the "last updated" date.
 - Create a new timestamped plan in `docs/ai/plans/` before starting a new phase or significant feature.
 - Create a new timestamped ADR in `docs/ai/decisions/` when making meaningful technology or design choices. Number sequentially from the last ADR.
