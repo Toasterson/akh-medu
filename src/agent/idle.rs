@@ -114,11 +114,15 @@ impl IdleScheduler {
                 now.checked_duration_since(self.last_sleep)
                     .and_then(|d| d.checked_sub(self.sleep_interval)),
             ),
-            (
-                "continuous_learning",
-                now.checked_duration_since(self.last_continuous_learning)
-                    .and_then(|d| d.checked_sub(self.continuous_learning_interval)),
-            ),
+            // continuous_learning intentionally not scheduled. The Wikipedia /
+            // Wikidata / ConceptNet expansion path produces too much
+            // low-quality garbage to keep firing in the background. Re-enable
+            // once a Seshat-mediated, RAG-grounded ingester replaces this
+            // path — see Anima WI for the replacement.
+            //
+            // The match arm in this function and the `last_continuous_learning`
+            // / `continuous_learning_interval` fields are kept so the
+            // scheduling plumbing is one diff away from being live again.
         ];
 
         // Pick the most overdue task.
