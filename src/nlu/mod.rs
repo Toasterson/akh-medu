@@ -345,16 +345,16 @@ impl NluPipeline {
 
         // Tier 2: Micro-ML NER (feature-gated)
         #[cfg(feature = "nlu-ml")]
-        if let Some(ref ml_arc) = self.ml_layer {
+        if let Some(ml_arc) = self.ml_layer.as_ref().map(std::sync::Arc::clone) {
             tracing::debug!(tier = 2, "attempting ML NER augmentation");
-            let mut ml = ml_arc.lock().unwrap();
-            match ml.augment_parse(input, ctx) {
+            let augmented_result = ml_arc.lock().unwrap().augment_parse(input, ctx);
+            match augmented_result {
                 Ok(augmented) => {
                     if let Some(tree) = augmented.tree {
-                        tracing::info!(tier = 2, confidence = augmented.confidence, "ML NER succeeded");
-                        self.ranker
-                            .record_success(input, &tree, 2, augmented.confidence);
-                        return Ok(self.make_result(input, tree, 2, augmented.confidence, None));
+                        let confidence = augmented.confidence;
+                        tracing::info!(tier = 2, confidence, "ML NER succeeded");
+                        self.ranker.record_success(input, &tree, 2, confidence);
+                        return Ok(self.make_result(input, tree, 2, confidence, None));
                     }
                     tracing::debug!(tier = 2, "ML NER produced no tree");
                 }
@@ -398,10 +398,10 @@ impl NluPipeline {
         // Tier 3 (Candle): Alternative LLM backend with hidden state access.
         // Preferred over llama-cpp-2 when both are loaded.
         #[cfg(feature = "candle-backend")]
-        if let Some(ref candle_arc) = self.candle_backend {
+        if let Some(candle_arc) = self.candle_backend.as_ref().map(std::sync::Arc::clone) {
             tracing::debug!(tier = 3, backend = "candle", "attempting Candle translation");
-            let mut candle = candle_arc.lock().unwrap();
-            match candle.translate(input) {
+            let translation_result = candle_arc.lock().unwrap().translate(input);
+            match translation_result {
                 Ok(translation) => {
                     tracing::info!(
                         tier = 3,
