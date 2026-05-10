@@ -646,6 +646,46 @@ pub enum DerivationKind {
         cost_usd: Option<f64>,
         wall_time_ms: u64,
     },
+
+    // --- Phase 22: Akhipedia ------------------------------------------------
+
+    /// A wiki article was created (Phase 22a).
+    ArticleCreated {
+        title: String,
+        author_raw: u64,
+        block_count: usize,
+    },
+
+    /// A wiki article was updated (Phase 22b).
+    ArticleUpdated {
+        title: String,
+        block_count: usize,
+    },
+
+    /// An article was cited by another (Phase 22b).
+    ArticleCited {
+        from_title: String,
+        to_title: String,
+    },
+
+    /// An article was published via ActivityPub federation (Phase 22e).
+    ArticleFederated {
+        title: String,
+        activity_type: String,
+    },
+
+    /// An opinion was expressed in a blog post (Phase 22f).
+    OpinionExpressed {
+        title: String,
+        stance: String,
+        confidence: f32,
+    },
+
+    /// A debate contribution was made (Phase 22f).
+    DebateContribution {
+        topic: String,
+        contribution_kind: String,
+    },
 }
 
 impl DerivationKind {
@@ -742,6 +782,12 @@ impl DerivationKind {
             Self::GameTheoreticModel { .. } => 87,
             Self::NeuralProbe { .. } => 88,
             Self::Delegation { .. } => 89,
+            Self::ArticleCreated { .. } => 90,
+            Self::ArticleUpdated { .. } => 91,
+            Self::ArticleCited { .. } => 92,
+            Self::ArticleFederated { .. } => 93,
+            Self::OpinionExpressed { .. } => 94,
+            Self::DebateContribution { .. } => 95,
         }
     }
 }

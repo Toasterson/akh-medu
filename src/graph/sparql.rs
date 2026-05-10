@@ -34,14 +34,27 @@ impl SparqlStore {
     }
 
     /// Open or create a persistent SPARQL store at the given path.
+    ///
+    /// When the `sparql-persist` feature is disabled (no libclang / RocksDB available),
+    /// this silently falls back to an in-memory store so the rest of the engine
+    /// can still compile and run. Production deployments should enable the feature.
     pub fn open(path: &std::path::Path) -> GraphResult<Self> {
-        std::fs::create_dir_all(path).map_err(|e| GraphError::Sparql {
-            message: format!("failed to create oxigraph directory: {e}"),
-        })?;
-        let store = Store::open(path).map_err(|e| GraphError::Sparql {
-            message: format!("failed to open oxigraph store at {}: {e}", path.display()),
-        })?;
-        Ok(Self { store })
+        #[cfg(feature = "sparql-persist")]
+        {
+            std::fs::create_dir_all(path).map_err(|e| GraphError::Sparql {
+                message: format!("failed to create oxigraph directory: {e}"),
+            })?;
+            let store = Store::open(path).map_err(|e| GraphError::Sparql {
+                message: format!("failed to open oxigraph store at {}: {e}", path.display()),
+            })?;
+            return Ok(Self { store });
+        }
+        // sparql-persist not enabled — use an in-memory store instead.
+        #[cfg(not(feature = "sparql-persist"))]
+        {
+            let _ = path;
+            Self::in_memory()
+        }
     }
 
     /// Convert a SymbolId to an IRI NamedNode.

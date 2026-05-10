@@ -225,6 +225,12 @@ enum Commands {
         #[command(subcommand)]
         action: SetupAction,
     },
+
+    /// Akhipedia: the agent's internal knowledge wiki (Phase 22).
+    Wiki {
+        #[command(subcommand)]
+        action: WikiAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -246,6 +252,49 @@ enum SetupAction {
     },
     /// Check the current NLU setup status.
     Check,
+}
+
+#[derive(Subcommand)]
+enum WikiAction {
+    /// List all wiki articles.
+    List,
+    /// Read a wiki article by title.
+    Read {
+        /// Article title.
+        #[arg(long)]
+        title: String,
+    },
+    /// Search wiki articles by keyword.
+    Search {
+        /// Search query.
+        query: String,
+    },
+    /// Render the wiki to static HTML (requires --features wiki).
+    Render {
+        /// Output directory for the static site.
+        #[arg(long, default_value = "site")]
+        output: PathBuf,
+        /// Site title.
+        #[arg(long, default_value = "Akhipedia")]
+        site_title: String,
+    },
+    /// Blog subcommands (opinion posts).
+    Blog {
+        #[command(subcommand)]
+        action: WikiBlogAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum WikiBlogAction {
+    /// List blog posts (articles with opinion blocks), newest-first.
+    List,
+    /// Show a debate thread rooted at a topic article.
+    Debate {
+        /// Root topic article title.
+        #[arg(long)]
+        topic: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -3671,6 +3720,12 @@ fn main() -> Result<()> {
         Commands::Setup { action } => {
             dispatch_setup(action)?;
         }
+
+        // ── Wiki (Akhipedia) ─────────────────────────────────────────────
+        Commands::Wiki { action } => {
+            let engine = Engine::new(config).into_diagnostic()?;
+            dispatch_wiki(action, &engine)?;
+        }
     }
 
     Ok(())
@@ -3756,6 +3811,141 @@ fn dispatch_setup(action: SetupAction) -> Result<()> {
         SetupAction::Check => {
             setup::check_setup(&paths).into_diagnostic()?;
         }
+    }
+
+    Ok(())
+}
+
+/// Dispatch `akh wiki` subcommands (requires local engine access).
+#[cfg(not(feature = "client-only"))]
+fn dispatch_wiki(action: WikiAction, engine: &akh_medu::engine::Engine) -> Result<()> {
+    use akh_medu::wiki::{ArticleStore, blog};
+
+    match action {
+        WikiAction::List => {
+            let store = ArticleStore::restore(engine);
+            let mut titles = store.list_titles();
+            titles.sort_unstable();
+            if titles.is_empty() {
+                println!("No wiki articles yet. Use `akh wiki write` or the agent write tools.");
+            } else {
+                println!("{} article(s):", titles.len());
+                for t in &titles {
+                    println!("  • {t}");
+                }
+            }
+        }
+
+        WikiAction::Read { title } => {
+            let store = ArticleStore::restore(engine);
+            match store.get_by_title(&title) {
+                None => {
+                    eprintln!("Article not found: \"{title}\"");
+                    std::process::exit(1);
+                }
+                Some(article) => {
+                    println!("# {}", article.header.title);
+                    println!(
+                        "Author: #{} | Created: {} | Blocks: {}",
+                        article.header.author.get(),
+                        article.header.created,
+                        article.header.blocks.len(),
+                    );
+                    if !article.header.cites.is_empty() {
+                        println!("Cites: {} article(s)", article.header.cites.len());
+                    }
+                    println!();
+                    println!("{}", article.body);
+                }
+            }
+        }
+
+        WikiAction::Search { query } => {
+            let store = ArticleStore::restore(engine);
+            let lower = query.to_lowercase();
+            let mut hits: Vec<_> = store
+                .articles
+                .values()
+                .filter(|a| {
+                    a.header.title.to_lowercase().contains(&lower)
+                        || a.body.to_lowercase().contains(&lower)
+                })
+                .collect();
+            hits.sort_by(|a, b| a.header.title.cmp(&b.header.title));
+            if hits.is_empty() {
+                println!("No articles found matching \"{query}\".");
+            } else {
+                println!("Found {} article(s):", hits.len());
+                for h in &hits {
+                    println!("  • {}", h.header.title);
+                }
+            }
+        }
+
+        WikiAction::Render { output, site_title } => {
+            #[cfg(feature = "wiki")]
+            {
+                use akh_medu::wiki::{RenderConfig, WikiRenderer};
+                let store = ArticleStore::restore(engine);
+                let config = RenderConfig {
+                    output_dir: output.clone(),
+                    site_title,
+                    base_url: "/".into(),
+                };
+                let renderer = WikiRenderer::new(config);
+                let n = renderer
+                    .render_site(&store)
+                    .map_err(|e| miette::miette!("{e}"))?;
+                println!(
+                    "Rendered {n} article(s) to {}",
+                    output.display()
+                );
+            }
+            #[cfg(not(feature = "wiki"))]
+            {
+                let _ = (output, site_title);
+                eprintln!(
+                    "Rendering requires the `wiki` feature. Rebuild with: cargo build --features wiki"
+                );
+                std::process::exit(1);
+            }
+        }
+
+        WikiAction::Blog { action } => match action {
+            WikiBlogAction::List => {
+                let store = ArticleStore::restore(engine);
+                let posts = blog::list_blog_posts(&store);
+                if posts.is_empty() {
+                    println!("No blog posts yet (articles need Opinion blocks).");
+                } else {
+                    println!("{} blog post(s):", posts.len());
+                    for p in &posts {
+                        let stance = p
+                            .primary_stance
+                            .as_ref()
+                            .map(|s| format!(" [{}]", s.position))
+                            .unwrap_or_default();
+                        println!("  • {}{}", p.title, stance);
+                    }
+                }
+            }
+            WikiBlogAction::Debate { topic } => {
+                let store = ArticleStore::restore(engine);
+                match blog::build_debate_thread(&store, &topic) {
+                    Err(e) => {
+                        eprintln!("Error: {e}");
+                        std::process::exit(1);
+                    }
+                    Ok(thread) => {
+                        println!("Debate thread: \"{}\"", thread.topic);
+                        println!("{} contribution(s):", thread.len());
+                        for (i, c) in thread.contributions.iter().enumerate() {
+                            println!("  {}. {c}", i + 1);
+                        }
+                    }
+                }
+            }
+        },
     }
 
     Ok(())
@@ -5040,6 +5230,12 @@ fn run_client_only(cli: Cli) -> Result<()> {
 
         // ── Setup (handled by early return, unreachable) ────────────────
         Commands::Setup { .. } => unreachable!("handled by early return"),
+
+        // ── Wiki (Akhipedia) — not yet available via remote client ───────
+        Commands::Wiki { .. } => {
+            eprintln!("Wiki commands require local engine access. Run without --server flag.");
+            std::process::exit(1);
+        }
     }
 
     Ok(())
