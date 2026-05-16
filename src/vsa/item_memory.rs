@@ -134,6 +134,10 @@ impl ItemMemory {
 
     /// Search for the `k` most similar symbols to a query vector.
     ///
+    /// Uses brute-force search over all stored vectors. For ~2000 symbols
+    /// at 10,000 bits, this completes in <1ms and is always correct — unlike
+    /// the HNSW ANN which degenerates at high dimensions (313 u32 words).
+    ///
     /// Returns results sorted by descending similarity.
     pub fn search(&self, query: &HyperVec, k: usize) -> VsaResult<Vec<SearchResult>> {
         if query.dim() != self.dim {
@@ -143,30 +147,63 @@ impl ItemMemory {
             });
         }
 
-        let query_u32 = bytes_to_u32_vec(query.data());
-        let ef_search = (k * 2).max(32); // ef_search should be >= k
-
-        let hnsw = self.hnsw.read().map_err(|_| VsaError::HnswError {
-            message: "HNSW lock poisoned".into(),
-        })?;
-
-        let neighbours = hnsw.search(&query_u32, k, ef_search);
-
         let total_bits = self.dim.0 as f32;
-        let mut results: Vec<SearchResult> = neighbours
+
+        // Brute-force: scan all stored vectors, keep top-k by similarity.
+        // Uses a bounded min-heap for efficiency.
+        use std::collections::BinaryHeap;
+        use std::cmp::Ordering;
+
+        #[derive(Debug)]
+        struct Candidate {
+            symbol_id: SymbolId,
+            similarity: f32,
+        }
+        impl PartialEq for Candidate {
+            fn eq(&self, other: &Self) -> bool {
+                self.similarity == other.similarity
+            }
+        }
+        impl Eq for Candidate {}
+        impl PartialOrd for Candidate {
+            fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+                self.similarity.partial_cmp(&other.similarity)
+            }
+        }
+        impl Ord for Candidate {
+            fn cmp(&self, other: &Self) -> Ordering {
+                self.partial_cmp(other).unwrap_or(Ordering::Equal)
+            }
+        }
+
+        // Min-heap to keep only the top-k (smallest similarity at the top to pop)
+        let mut heap = BinaryHeap::<std::cmp::Reverse<Candidate>>::new();
+
+        for entry in self.vectors.iter() {
+            let symbol_id = *entry.key();
+            let vec = entry.value();
+            let hamming = hamming_distance_bytes(query.data(), vec.data());
+            let similarity = 1.0 - (hamming as f32 / total_bits);
+
+            heap.push(std::cmp::Reverse(Candidate {
+                symbol_id,
+                similarity,
+            }));
+
+            if heap.len() > k {
+                heap.pop();
+            }
+        }
+
+        let mut results: Vec<SearchResult> = heap
             .into_iter()
-            .filter_map(|n| {
-                let symbol_id = self.id_to_symbol.get(&n.d_id)?.value().to_owned();
-                // HNSW returns Hamming distance; convert to similarity
-                let hamming_dist = n.distance;
-                let similarity = 1.0 - (hamming_dist / total_bits);
-                Some(SearchResult {
-                    symbol_id,
-                    similarity,
-                })
+            .map(|rev| SearchResult {
+                symbol_id: rev.0.symbol_id,
+                similarity: rev.0.similarity,
             })
             .collect();
 
+        // Sort descending
         results.sort_by(|a, b| b.similarity.partial_cmp(&a.similarity).unwrap());
         Ok(results)
     }
@@ -208,6 +245,15 @@ fn bytes_to_u32_vec(bytes: &[u8]) -> Vec<u32> {
         result.push(u32::from_le_bytes(word));
     }
     result
+}
+
+/// Compute Hamming distance between two byte slices via popcount.
+fn hamming_distance_bytes(a: &[u8], b: &[u8]) -> u32 {
+    debug_assert_eq!(a.len(), b.len());
+    a.iter()
+        .zip(b.iter())
+        .map(|(&av, &bv)| (av ^ bv).count_ones())
+        .sum()
 }
 
 #[cfg(test)]
