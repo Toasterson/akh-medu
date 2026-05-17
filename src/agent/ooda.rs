@@ -236,11 +236,24 @@ fn orient(agent: &mut Agent, observation: &Observation) -> AgentResult<Orientati
     let mut inferences = Vec::new();
 
     // For each active goal, gather adjacent KG triples.
+    // Only run inference on Entity-kind symbols — skip episodes, summaries,
+    // criteria artifacts, and working-memory noise to prevent garbage amplification.
     for goal_id in &observation.active_goals {
         let from = agent.engine.triples_from(*goal_id);
         let to = agent.engine.triples_to(*goal_id);
         relevant_knowledge.extend(from);
         relevant_knowledge.extend(to);
+
+        // Guard: only seed inference from real Entity symbols.
+        let is_entity = agent
+            .engine
+            .get_symbol_meta(*goal_id)
+            .map(|m| matches!(m.kind, crate::symbol::SymbolKind::Entity))
+            .unwrap_or(false);
+
+        if !is_entity {
+            continue;
+        }
 
         // Try inference from goal symbol.
         let query = crate::infer::InferenceQuery {
