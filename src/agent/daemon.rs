@@ -154,6 +154,19 @@ impl AgentDaemon {
         (Arc::clone(&self.paused), Arc::clone(&self.cycle_done))
     }
 
+    /// Replace the internal pause handles with externally-managed ones.
+    /// Caller creates the handles, registers them in McpState, and passes
+    /// clones here so the daemon respects external pause requests.
+    pub fn with_pause_handles(
+        mut self,
+        paused: Arc<AtomicBool>,
+        cycle_done: Arc<tokio::sync::Notify>,
+    ) -> Self {
+        self.paused = paused;
+        self.cycle_done = cycle_done;
+        self
+    }
+
     /// Attach an external shutdown receiver (replaces Ctrl+C handling).
     pub fn with_shutdown(mut self, rx: tokio::sync::watch::Receiver<bool>) -> Self {
         self.shutdown = Some(rx);

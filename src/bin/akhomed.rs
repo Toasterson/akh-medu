@@ -64,6 +64,9 @@ struct ServerState {
     nlu_pipelines: RwLock<HashMap<String, Arc<Mutex<akh_medu::nlu::NluPipeline>>>>,
     /// Broadcast channel for audit entries — WS clients subscribe to this.
     audit_broadcast: tokio::sync::broadcast::Sender<akh_medu::audit::AuditEntry>,
+    /// Shared registry of per-workspace pause handles. Daemons write their
+    /// handles here; McpState reads them for suspend/resume via MCP.
+    daemon_pauses: RwLock<HashMap<String, mcp::DaemonPauseHandle>>,
 }
 
 /// Background daemon state for a workspace.
@@ -1343,6 +1346,11 @@ async fn start_daemon_handler(
     let daemon_status = Arc::clone(&status);
     let daemon_ws_name = ws_name.clone();
 
+    // Register pause handle so MCP can suspend/resume this daemon.
+    let pause_handle = mcp::DaemonPauseHandle::new();
+    state.daemon_pauses.write().await.insert(ws_name.clone(), pause_handle.clone());
+
+    let task_handle = pause_handle.clone();
     let handle = tokio::task::spawn(async move {
         run_daemon_task(
             shared_agent,
@@ -1350,6 +1358,7 @@ async fn start_daemon_handler(
             shutdown_rx,
             daemon_config,
             daemon_ws_name,
+            task_handle,
         )
         .await;
     });
@@ -1423,12 +1432,14 @@ async fn run_daemon_task(
     shutdown_rx: tokio::sync::watch::Receiver<bool>,
     daemon_config: akh_medu::agent::DaemonConfig,
     ws_name: String,
+    pause_handle: mcp::DaemonPauseHandle,
 ) {
     use akh_medu::agent::AgentDaemon;
 
     let mut daemon = AgentDaemon::new(shared_agent, daemon_config)
         .with_shutdown(shutdown_rx)
-        .with_status(Arc::clone(&status));
+        .with_status(Arc::clone(&status))
+        .with_pause_handles(pause_handle.paused, pause_handle.cycle_done);
 
     if let Err(e) = daemon.run().await {
         tracing::error!(error = %e, ws = %ws_name, "daemon task failed");
