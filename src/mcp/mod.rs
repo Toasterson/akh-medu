@@ -23,6 +23,7 @@ use serde::Deserialize;
 use tokio::sync::RwLock;
 
 use crate::agent::{Agent, AgentConfig};
+use crate::agent::goal::GoalStatus;
 use crate::engine::{Engine, EngineConfig};
 use crate::message::AkhMessage;
 use crate::paths::AkhPaths;
@@ -333,6 +334,39 @@ pub struct ChatParams {
         description = "User message to process through the full NLU pipeline (dialogue acts, facts, queries, goals)"
     )]
     pub message: String,
+}
+
+// ── Goal Lifecycle Parameter Structs ─────────────────────────────────────
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct AddGoalParams {
+    #[schemars(description = "Target workspace (default: \"default\")")]
+    #[serde(default = "default_workspace")]
+    pub workspace: String,
+    #[schemars(description = "Goal description text")]
+    pub goal_text: String,
+    #[schemars(description = "Priority 0-255 (default: 128)")]
+    pub priority: Option<u8>,
+    #[schemars(description = "Success criteria (default: \"Agent-determined completion\")")]
+    pub criteria: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct GoalIdParams {
+    #[schemars(description = "Target workspace (default: \"default\")")]
+    #[serde(default = "default_workspace")]
+    pub workspace: String,
+    #[schemars(description = "Goal ID as a u64 string (e.g. \"42\")")]
+    pub goal_id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ManageGoalsParams {
+    #[schemars(description = "Target workspace (default: \"default\")")]
+    #[serde(default = "default_workspace")]
+    pub workspace: String,
+    #[schemars(description = "Action: 'list' (show all goals), 'cancel-failed' (cancel all Failed goals), or 'cancel-duplicates' (cancel goals with duplicate titles)")]
+    pub action: String,
 }
 
 // ── Batch Operations ────────────────────────────────────────────────────
@@ -3133,6 +3167,227 @@ impl AkhMcpServer {
             }
 
             Ok(lines.join("\n"))
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("task panicked: {e}"), None))?
+        .map_err(|e| McpError::internal_error(e, None))?;
+
+        Ok(CallToolResult::success(vec![Content::text(result)]))
+    }
+
+    // ── Goal Lifecycle Management ─────────────────────────────────
+
+    #[tool(
+        name = "add_goal",
+        description = "Add a new goal for the agent to pursue. Returns the goal's symbol ID. The agent will work on goals automatically during cycles."
+    )]
+    async fn add_goal(
+        &self,
+        Parameters(params): Parameters<AddGoalParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let agent = self.state.get_agent(&params.workspace).await?;
+        let goal_text = params.goal_text.clone();
+        let priority = params.priority.unwrap_or(128);
+        let criteria = params
+            .criteria
+            .unwrap_or_else(|| "Agent-determined completion".to_string());
+
+        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            let mut agent = agent.lock().map_err(|e| format!("agent lock: {e}"))?;
+            let goal_id = agent
+                .add_goal(&goal_text, priority, &criteria)
+                .map_err(|e| format!("{e}"))?;
+            let _ = agent.persist_session();
+            Ok(format!("Goal added: id={} \"{goal_text}\" (priority={priority})", goal_id.get()))
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("task panicked: {e}"), None))?
+        .map_err(|e| McpError::internal_error(e, None))?;
+
+        Ok(CallToolResult::success(vec![Content::text(result)]))
+    }
+
+    #[tool(
+        name = "cancel_goal",
+        description = "Cancel a goal by its ID (mark as Failed with reason 'cancelled')."
+    )]
+    async fn cancel_goal(
+        &self,
+        Parameters(params): Parameters<GoalIdParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let agent = self.state.get_agent(&params.workspace).await?;
+        let goal_id_str = params.goal_id.clone();
+
+        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            let raw_id: u64 = goal_id_str
+                .parse()
+                .map_err(|_| format!("invalid goal_id: '{goal_id_str}' — must be a u64 number"))?;
+            let goal_id = crate::symbol::SymbolId::new(raw_id)
+                .ok_or_else(|| format!("invalid goal_id: {raw_id} (zero or out of range)"))?;
+
+            let mut agent = agent.lock().map_err(|e| format!("agent lock: {e}"))?;
+            agent
+                .fail_goal(goal_id, "cancelled")
+                .map_err(|e| format!("{e}"))?;
+            let _ = agent.persist_session();
+            Ok(format!("Goal {raw_id} cancelled"))
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("task panicked: {e}"), None))?
+        .map_err(|e| McpError::internal_error(e, None))?;
+
+        Ok(CallToolResult::success(vec![Content::text(result)]))
+    }
+
+    #[tool(
+        name = "suspend_goal",
+        description = "Suspend a goal by its ID (mark as Suspended). Suspended goals are paused but can be resumed later."
+    )]
+    async fn suspend_goal(
+        &self,
+        Parameters(params): Parameters<GoalIdParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let agent = self.state.get_agent(&params.workspace).await?;
+        let goal_id_str = params.goal_id.clone();
+
+        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            let raw_id: u64 = goal_id_str
+                .parse()
+                .map_err(|_| format!("invalid goal_id: '{goal_id_str}' — must be a u64 number"))?;
+            let goal_id = crate::symbol::SymbolId::new(raw_id)
+                .ok_or_else(|| format!("invalid goal_id: {raw_id} (zero or out of range)"))?;
+
+            let mut agent = agent.lock().map_err(|e| format!("agent lock: {e}"))?;
+            agent
+                .suspend_goal(goal_id)
+                .map_err(|e| format!("{e}"))?;
+            let _ = agent.persist_session();
+            Ok(format!("Goal {raw_id} suspended"))
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("task panicked: {e}"), None))?
+        .map_err(|e| McpError::internal_error(e, None))?;
+
+        Ok(CallToolResult::success(vec![Content::text(result)]))
+    }
+
+    #[tool(
+        name = "resume_goal",
+        description = "Resume a previously suspended goal by its ID (mark as Active)."
+    )]
+    async fn resume_goal(
+        &self,
+        Parameters(params): Parameters<GoalIdParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let agent = self.state.get_agent(&params.workspace).await?;
+        let goal_id_str = params.goal_id.clone();
+
+        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            let raw_id: u64 = goal_id_str
+                .parse()
+                .map_err(|_| format!("invalid goal_id: '{goal_id_str}' — must be a u64 number"))?;
+            let goal_id = crate::symbol::SymbolId::new(raw_id)
+                .ok_or_else(|| format!("invalid goal_id: {raw_id} (zero or out of range)"))?;
+
+            let mut agent = agent.lock().map_err(|e| format!("agent lock: {e}"))?;
+            agent
+                .resume_goal(goal_id)
+                .map_err(|e| format!("{e}"))?;
+            let _ = agent.persist_session();
+            Ok(format!("Goal {raw_id} resumed (now Active)"))
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("task panicked: {e}"), None))?
+        .map_err(|e| McpError::internal_error(e, None))?;
+
+        Ok(CallToolResult::success(vec![Content::text(result)]))
+    }
+
+    #[tool(
+        name = "manage_goals",
+        description = "Manage goals in bulk. Actions: 'list' (show all goals with status), 'cancel-failed' (cancel/reap all Failed goals), 'cancel-duplicates' (cancel goals with duplicate titles by similarity)."
+    )]
+    async fn manage_goals(
+        &self,
+        Parameters(params): Parameters<ManageGoalsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let agent = self.state.get_agent(&params.workspace).await?;
+        let action = params.action.clone();
+
+        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            let mut agent = agent.lock().map_err(|e| format!("agent lock: {e}"))?;
+
+            match action.as_str() {
+                "list" => {
+                    if agent.goals.is_empty() {
+                        return Ok("No goals.".to_string());
+                    }
+                    let lines: Vec<String> = agent
+                        .goals
+                        .iter()
+                        .map(|g| {
+                            format!(
+                                "  [{}] id={} \"{}\" (priority={})",
+                                format!("{:?}", g.status),
+                                g.symbol_id.get(),
+                                g.description,
+                                g.priority
+                            )
+                        })
+                        .collect();
+                    Ok(format!("Goals ({}):\n{}", agent.goals.len(), lines.join("\n")))
+                }
+                "cancel-failed" => {
+                    let failed_ids: Vec<crate::symbol::SymbolId> = agent
+                        .goals
+                        .iter()
+                        .filter(|g| matches!(g.status, GoalStatus::Failed { .. }))
+                        .map(|g| g.symbol_id)
+                        .collect();
+                    let count = failed_ids.len();
+                    for goal_id in &failed_ids {
+                        // Already Failed — just remove from the active list.
+                        // fail_goal would be a no-op, so remove from goals vec.
+                        agent.goals.retain(|g| g.symbol_id != *goal_id);
+                    }
+                    let _ = agent.persist_session();
+                    Ok(format!("Reaped {count} failed goal(s)"))
+                }
+                "cancel-duplicates" => {
+                    // Group goals by similarity of their description.
+                    // Simple approach: compare descriptions ignoring case and trimming.
+                    let mut seen: std::collections::HashMap<String, Vec<crate::symbol::SymbolId>> =
+                        std::collections::HashMap::new();
+                    for g in &agent.goals {
+                        let key = g.description.trim().to_lowercase();
+                        seen.entry(key).or_default().push(g.symbol_id);
+                    }
+
+                    let mut removed = 0u64;
+                    for (_key, ids) in &seen {
+                        if ids.len() > 1 {
+                            // Keep the first, cancel the rest.
+                            for excess_id in &ids[1..] {
+                                if let Err(e) = agent.fail_goal(*excess_id, "duplicate") {
+                                    tracing::debug!("failed to cancel duplicate goal: {e}");
+                                } else {
+                                    removed += 1;
+                                }
+                            }
+                        }
+                    }
+
+                    let _ = agent.persist_session();
+                    Ok(format!(
+                        "Found {} duplicate groups, cancelled {} redundant goals",
+                        seen.values().filter(|v| v.len() > 1).count(),
+                        removed
+                    ))
+                }
+                other => Err(format!(
+                    "Unknown action: '{other}'. Valid actions: list, cancel-failed, cancel-duplicates"
+                )),
+            }
         })
         .await
         .map_err(|e| McpError::internal_error(format!("task panicked: {e}"), None))?

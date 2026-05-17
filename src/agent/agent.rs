@@ -1394,6 +1394,18 @@ impl Agent {
         goal::update_goal_status(&self.engine, goal, GoalStatus::Suspended, &self.predicates)
     }
 
+    /// Resume a previously suspended goal.
+    pub fn resume_goal(&mut self, goal_id: SymbolId) -> AgentResult<()> {
+        let goal = self
+            .goals
+            .iter_mut()
+            .find(|g| g.symbol_id == goal_id)
+            .ok_or(AgentError::GoalNotFound {
+                goal_id: goal_id.get(),
+            })?;
+        goal::update_goal_status(&self.engine, goal, GoalStatus::Active, &self.predicates)
+    }
+
     /// Mark a goal as failed with a reason.
     pub fn fail_goal(&mut self, goal_id: SymbolId, reason: &str) -> AgentResult<()> {
         let goal = self
