@@ -11,6 +11,7 @@
 //! in both deployment modes.
 
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use super::Agent;
@@ -118,6 +119,12 @@ pub struct AgentDaemon {
     agent: Arc<Mutex<Agent>>,
     config: DaemonConfig,
     total_cycles: usize,
+    /// When true, cycle/learning methods skip their work without acquiring
+    /// the agent lock — allowing external writers to acquire it uncontended.
+    paused: Arc<AtomicBool>,
+    /// Notified after each cycle completes. The suspend handler waits on
+    /// this to ensure the daemon has released the agent lock.
+    cycle_done: Arc<tokio::sync::Notify>,
     /// Optional external shutdown signal (replaces Ctrl+C when set).
     ///
     /// Used by `akhomed` to integrate daemon shutdown with the HTTP server's
@@ -134,9 +141,17 @@ impl AgentDaemon {
             agent,
             config,
             total_cycles: 0,
+            paused: Arc::new(AtomicBool::new(false)),
+            cycle_done: Arc::new(tokio::sync::Notify::new()),
             shutdown: None,
             status: None,
         }
+    }
+
+    /// Pause the daemon — prevents new cycle/learning work from acquiring
+    /// the agent lock. Returns handles the caller uses to resume.
+    pub fn pause_handle(&self) -> (Arc<AtomicBool>, Arc<tokio::sync::Notify>) {
+        (Arc::clone(&self.paused), Arc::clone(&self.cycle_done))
     }
 
     /// Attach an external shutdown receiver (replaces Ctrl+C handling).
@@ -185,6 +200,13 @@ impl AgentDaemon {
         self.run_goal_generation();
 
         loop {
+            // When paused, spin-sleep — prevents daemon from acquiring
+            // the agent lock while batch writes are in progress.
+            if self.paused.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                continue;
+            }
+
             tokio::select! {
                 _ = equivalence_tick.tick() => {
                     self.run_equivalence_learning();
@@ -719,8 +741,16 @@ impl AgentDaemon {
     fn run_idle_cycle(&mut self) {
         use super::goal;
 
+        // Respect pause — don't even try to acquire the agent lock.
+        if self.paused.load(Ordering::SeqCst) {
+            self.cycle_done.notify_one();
+            return;
+        }
+
         let mut agent = self.agent.lock().unwrap();
         if goal::active_goals(agent.goals()).is_empty() {
+            drop(agent);
+            self.cycle_done.notify_one();
             return;
         }
 
@@ -748,6 +778,8 @@ impl AgentDaemon {
                 tracing::warn!(error = %e, "daemon: OODA cycle failed");
             }
         }
+        // Notify any waiter that we've released the agent lock.
+        self.cycle_done.notify_one();
     }
 
     /// Run autonomous knowledge extraction on recently-fetched content.
