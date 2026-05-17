@@ -30,6 +30,7 @@ use tower_http::cors::CorsLayer;
 use akh_medu::agent::trigger::{Trigger, TriggerStore};
 use akh_medu::agent::{Agent, AgentConfig};
 use akh_medu::client::DaemonStatus;
+use akh_medu::mcp::{self, DaemonPauseHandle};
 use akh_medu::config::AkhomedConfig;
 use akh_medu::engine::{Engine, EngineConfig};
 use akh_medu::grammar::concrete::ParseContext;
@@ -87,6 +88,7 @@ impl ServerState {
             agents: Arc::new(RwLock::new(HashMap::new())),
             nlu_pipelines: RwLock::new(HashMap::new()),
             audit_broadcast: audit_tx,
+            daemon_pauses: RwLock::new(HashMap::new()),
         }
     }
 
@@ -3428,6 +3430,9 @@ async fn main() {
                     let daemon_status = Arc::clone(&status);
                     let daemon_ws = ws_name.clone();
                     let dc = daemon_config.clone();
+                    let pause_handle = mcp::DaemonPauseHandle::new();
+                    state.daemon_pauses.write().await.insert(ws_name.clone(), pause_handle.clone());
+                    let task_handle = pause_handle.clone();
                     let handle = tokio::task::spawn(async move {
                         run_daemon_task(
                             shared_agent,
@@ -3435,6 +3440,7 @@ async fn main() {
                             shutdown_rx,
                             dc,
                             daemon_ws,
+                            task_handle,
                         )
                         .await;
                     });
