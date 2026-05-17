@@ -654,7 +654,8 @@ impl Engine {
         let config = crate::vsa::grounding::GroundingConfig::default();
         let result =
             crate::vsa::grounding::ground_all(self, &self.ops, &self.item_memory, &config)?;
-        Ok((result.symbols_updated, 0))
+        let total_rels = self.all_triples().len();
+        Ok((result.symbols_updated, total_rels))
     }
 
     // -----------------------------------------------------------------------
