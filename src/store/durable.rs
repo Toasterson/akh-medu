@@ -119,7 +119,42 @@ impl DurableStore {
         Ok(())
     }
 
-    /// Check if a key exists.
+    /// Remove multiple keys in a single transaction.
+    ///
+    /// Returns the number of keys that were actually removed (existed and
+    /// were deleted). Keys that don't exist are silently skipped.
+    pub fn remove_batch(&self, keys: &[&[u8]]) -> StoreResult<usize> {
+        let txn = self.db.begin_write().map_err(|e| StoreError::Redb {
+            message: format!("begin_write failed: {e}"),
+        })?;
+        let count = {
+            let mut table = match txn.open_table(META_TABLE) {
+                Ok(t) => t,
+                Err(redb::TableError::TableDoesNotExist(_)) => return Ok(0),
+                Err(e) => {
+                    return Err(StoreError::Redb {
+                        message: format!("open_table failed: {e}"),
+                    });
+                }
+            };
+            let mut removed = 0usize;
+            for key in keys {
+                let result = table.remove(*key).map_err(|e| StoreError::Redb {
+                    message: format!("remove failed: {e}"),
+                })?;
+                if result.is_some() {
+                    removed += 1;
+                }
+            }
+            removed
+        };
+        txn.commit().map_err(|e| StoreError::Redb {
+            message: format!("commit failed: {e}"),
+        })?;
+        Ok(count)
+    }
+
+/// Check if a key exists.
     pub fn contains(&self, key: &[u8]) -> StoreResult<bool> {
         self.get(key).map(|v| v.is_some())
     }
@@ -279,6 +314,57 @@ mod tests {
         let results = store.scan_prefix(b"sym_meta:").unwrap();
         assert_eq!(results.len(), 3);
         assert!(results.iter().all(|(k, _)| k.starts_with(b"sym_meta:")));
+    }
+
+        #[test]
+    fn remove_batch_basic() {
+        let dir = TempDir::new().unwrap();
+        let store = DurableStore::open(dir.path()).unwrap();
+
+        store.put(b"k1", b"v1").unwrap();
+        store.put(b"k2", b"v2").unwrap();
+        store.put(b"k3", b"v3").unwrap();
+        store.put(b"k4", b"v4").unwrap();
+
+        // Remove k1 and k3 in one transaction
+        let removed = store.remove_batch(&[b"k1", b"k3"]).unwrap();
+        assert_eq!(removed, 2);
+        assert_eq!(store.get(b"k1").unwrap(), None);
+        assert_eq!(store.get(b"k2").unwrap(), Some(b"v2".to_vec()));
+        assert_eq!(store.get(b"k3").unwrap(), None);
+        assert_eq!(store.get(b"k4").unwrap(), Some(b"v4".to_vec()));
+    }
+
+    #[test]
+    fn remove_batch_partial_nonexistent() {
+        let dir = TempDir::new().unwrap();
+        let store = DurableStore::open(dir.path()).unwrap();
+
+        store.put(b"exists", b"data").unwrap();
+
+        // Try to remove one that exists and one that doesn't
+        let removed = store.remove_batch(&[b"exists", b"nope"]).unwrap();
+        assert_eq!(removed, 1);
+        assert_eq!(store.get(b"exists").unwrap(), None);
+    }
+
+    #[test]
+    fn remove_batch_empty() {
+        let dir = TempDir::new().unwrap();
+        let store = DurableStore::open(dir.path()).unwrap();
+
+        store.put(b"key", b"val").unwrap();
+        let removed = store.remove_batch(&[]).unwrap();
+        assert_eq!(removed, 0);
+        assert_eq!(store.get(b"key").unwrap(), Some(b"val".to_vec()));
+    }
+
+    #[test]
+    fn remove_batch_all_nonexistent() {
+        let dir = TempDir::new().unwrap();
+        let store = DurableStore::open(dir.path()).unwrap();
+        let removed = store.remove_batch(&[b"ghost1", b"ghost2"]).unwrap();
+        assert_eq!(removed, 0);
     }
 
     #[test]
