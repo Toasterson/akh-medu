@@ -614,48 +614,54 @@ impl Engine {
 
     /// Re-encode a symbol's hypervector using its relational neighborhood.
     ///
-    /// Uses the existing ItemMemory vectors for neighbors and predicates
-    /// (not fresh random seeds) so that the grounded result captures actual
-    /// KG structure. Blends the symbol's current vector with its neighborhood
-    /// bundle via probabilistic bit selection for reproducible convergence.
+    /// Reads all outgoing triples from the KG and creates a grounded vector
+    /// that captures the symbol's structural role (holographic reduced
+    /// representation). Updates the symbol's entry in item memory.
     ///
-    /// Returns the number of neighbor vectors used for grounding (0 = no change).
+    /// Returns the number of relations used for grounding (0 = no change).
     pub fn ground_symbol(&self, symbol: SymbolId) -> AkhResult<usize> {
-        let config = crate::vsa::grounding::GroundingConfig::default();
-        let grounded = crate::vsa::grounding::ground_symbol(
-            symbol,
-            self,
-            &self.ops,
-            &self.item_memory,
-            &config,
-        )?;
+        let relations: Vec<(SymbolId, SymbolId)> = self
+            .triples_from(symbol)
+            .iter()
+            .map(|t| (t.predicate, t.object))
+            .collect();
 
-        // Count how many neighbor vectors were used (non-empty bundle)
-        let outgoing = self.triples_from(symbol).len();
-        let incoming = self.triples_to(symbol).len();
-        let n_edges = outgoing + incoming;
-
-        if n_edges == 0 {
+        if relations.is_empty() {
             return Ok(0);
         }
 
+        let grounded = crate::vsa::encode::encode_with_neighborhood(
+            &self.ops, symbol, &relations,
+        )?;
         self.item_memory.insert(symbol, grounded);
-        Ok(n_edges)
+        Ok(relations.len())
     }
 
     /// Re-encode all symbols that have outgoing relations in the KG.
     ///
-    /// Uses iterative neighborhood aggregation from `vsa::grounding::ground_all`
-    /// which properly re-uses existing ItemMemory vectors rather than creating
-    /// fresh random seeds on each call.
-    ///
     /// Returns `(grounded_count, total_relations_used)`.
     pub fn ground_all_symbols(&self) -> AkhResult<(usize, usize)> {
-        let config = crate::vsa::grounding::GroundingConfig::default();
-        let result =
-            crate::vsa::grounding::ground_all(self, &self.ops, &self.item_memory, &config)?;
-        let total_rels = self.all_triples().len();
-        Ok((result.symbols_updated, total_rels))
+        let all = self.registry.all();
+        let mut grounded = 0usize;
+        let mut total_rels = 0usize;
+
+        for meta in &all {
+            let n = self.ground_symbol(meta.id)?;
+            if n > 0 {
+                grounded += 1;
+                total_rels += n;
+            }
+        }
+
+        // Rebuild the HNSW index to remove stale entries accumulated from
+        // re-grounding. Without this, similarity_search returns uniform 1.0
+        // because old random vectors remain in the index alongside the new
+        // grounded ones.
+        if grounded > 0 {
+            self.item_memory.rebuild_hnsw();
+        }
+
+        Ok((grounded, total_rels))
     }
 
     // -----------------------------------------------------------------------
@@ -1897,6 +1903,126 @@ impl Engine {
     pub fn remove_triples_in_compartment(&self, compartment_id: &str) -> usize {
         self.knowledge_graph
             .remove_triples_in_compartment(compartment_id)
+    }
+
+    /// Add multiple triples in a single operation.
+    ///
+    /// Resolves all symbols upfront and inserts each triple into the KG.
+    /// Contradiction detection and constraint checking run per-triple
+    /// (consistent with `add_triple`), but all symbol resolution happens
+    /// before any insertions.
+    ///
+    /// Returns a summary: (asserted_count, Vec of error strings for failures).
+    pub fn add_triples_batch(
+        &self,
+        entries: &[(impl AsRef<str>, impl AsRef<str>, impl AsRef<str>)],
+        default_confidence: f32,
+    ) -> (usize, Vec<String>) {
+        // Phase 1: resolve all symbols upfront
+        struct Resolved<'a> {
+            s: SymbolId,
+            p: SymbolId,
+            o: SymbolId,
+            conf: f32,
+            label_s: &'a str,
+            label_p: &'a str,
+            label_o: &'a str,
+        }
+        let mut resolved = Vec::with_capacity(entries.len());
+        let mut errors = Vec::new();
+
+        for (s_ref, p_ref, o_ref) in entries {
+            let (sl, pl, ol) = (s_ref.as_ref(), p_ref.as_ref(), o_ref.as_ref());
+            let s = match self.resolve_or_create_entity(sl) {
+                Ok(id) => id,
+                Err(e) => { errors.push(format!("{sl} {pl} {ol}: {e}")); continue; }
+            };
+            let p = match self.resolve_or_create_relation(pl) {
+                Ok(id) => id,
+                Err(e) => { errors.push(format!("{sl} {pl} {ol}: {e}")); continue; }
+            };
+            let o = match self.resolve_or_create_entity(ol) {
+                Ok(id) => id,
+                Err(e) => { errors.push(format!("{sl} {pl} {ol}: {e}")); continue; }
+            };
+            resolved.push(Resolved { s, p, o, conf: default_confidence, label_s: sl, label_p: pl, label_o: ol });
+        }
+
+        // Phase 2: insert each resolved triple
+        let mut asserted = 0usize;
+        for r in &resolved {
+            let triple = crate::graph::Triple::new(r.s, r.p, r.o).with_confidence(r.conf);
+            match self.add_triple(&triple) {
+                Ok(()) => asserted += 1,
+                Err(e) => errors.push(format!("{} {} {}: {e}", r.label_s, r.label_p, r.label_o)),
+            }
+        }
+
+        (asserted, errors)
+    }
+
+    /// Remove multiple triples from the knowledge graph.
+    ///
+    /// All resolutions happen upfront; each triple is removed from the KG
+    /// and SPARQL store. TMS cascade (if enabled) fires once per symbol
+    /// at the end rather than after each individual triple.
+    ///
+    /// Returns the number of triples actually removed.
+    pub fn remove_triples_batch(
+        &self,
+        triples: &[(impl AsRef<str>, impl AsRef<str>, impl AsRef<str>)],
+    ) -> AkhResult<usize> {
+        // Phase 1: resolve all symbols
+        struct Resolved {
+            s: SymbolId,
+            p: SymbolId,
+            o: SymbolId,
+        }
+        let mut resolved = Vec::with_capacity(triples.len());
+        for (s_ref, p_ref, o_ref) in triples {
+            let s = self.resolve_symbol(s_ref.as_ref())?;
+            let p = self.resolve_symbol(p_ref.as_ref())?;
+            let o = self.resolve_symbol(o_ref.as_ref())?;
+            resolved.push(Resolved { s, p, o });
+        }
+
+        // Phase 2: remove all from the KG + SPARQL
+        let mut removed = 0usize;
+        for r in &resolved {
+            if self.knowledge_graph.remove_triple(r.s, r.p, r.o) {
+                if let Some(ref sparql) = self.sparql {
+                    let _ = sparql.remove_triple(r.s, r.p, r.o);
+                }
+                removed += 1;
+            }
+        }
+
+        // Phase 3: TMS cascade (if enabled) — collect unique symbols from removed triples
+        if self.phase9_config.tms_enabled && removed > 0 {
+            let mut tms = self.tms.write().unwrap();
+            let mut tms_retracted = Vec::new();
+            for r in &resolved {
+                let result = tms.retract(r.o);
+                for &rs in &result.retracted {
+                    if rs != r.o && !tms_retracted.contains(&rs) {
+                        tms_retracted.push(rs);
+                    }
+                }
+            }
+            // Remove cascaded triples from KG
+            for &sym in &tms_retracted {
+                let triples_from: Vec<_> = self.knowledge_graph.triples_from(sym);
+                for t in &triples_from {
+                    self.knowledge_graph.remove_triple(t.subject, t.predicate, t.object);
+                }
+                let triples_to: Vec<_> = self.knowledge_graph.triples_to(sym);
+                for t in &triples_to {
+                    self.knowledge_graph.remove_triple(t.subject, t.predicate, t.object);
+                }
+            }
+        }
+
+        Ok(removed)
     }
 
     // -----------------------------------------------------------------------

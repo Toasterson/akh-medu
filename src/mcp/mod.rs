@@ -23,7 +23,6 @@ use serde::Deserialize;
 use tokio::sync::RwLock;
 
 use crate::agent::{Agent, AgentConfig};
-use crate::agent::goal::GoalStatus;
 use crate::engine::{Engine, EngineConfig};
 use crate::message::AkhMessage;
 use crate::paths::AkhPaths;
@@ -45,24 +44,6 @@ pub struct McpState {
     pub agents: Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>,
     /// Cached NLU pipelines per workspace — avoids reloading 1GB+ LLM on every chat call.
     pub nlu_pipelines: RwLock<HashMap<String, Arc<Mutex<crate::nlu::NluPipeline>>>>,
-    /// Per-workspace daemon pause handles for suspend/resume via MCP.
-    pub daemon_pauses: RwLock<HashMap<String, DaemonPauseHandle>>,
-}
-
-/// Pause control for a single workspace daemon.
-#[derive(Clone)]
-pub struct DaemonPauseHandle {
-    pub paused: Arc<std::sync::atomic::AtomicBool>,
-    pub cycle_done: Arc<tokio::sync::Notify>,
-}
-
-impl DaemonPauseHandle {
-    pub fn new() -> Self {
-        Self {
-            paused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            cycle_done: Arc::new(tokio::sync::Notify::new()),
-        }
-    }
 }
 
 impl McpState {
@@ -76,7 +57,6 @@ impl McpState {
             workspaces,
             agents,
             nlu_pipelines: RwLock::new(HashMap::new()),
-            daemon_pauses: RwLock::new(HashMap::new()),
         }
     }
 
@@ -355,39 +335,6 @@ pub struct ChatParams {
     pub message: String,
 }
 
-// ── Goal Lifecycle Parameter Structs ─────────────────────────────────────
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct AddGoalParams {
-    #[schemars(description = "Target workspace (default: \"default\")")]
-    #[serde(default = "default_workspace")]
-    pub workspace: String,
-    #[schemars(description = "Goal description text")]
-    pub goal_text: String,
-    #[schemars(description = "Priority 0-255 (default: 128)")]
-    pub priority: Option<u8>,
-    #[schemars(description = "Success criteria (default: \"Agent-determined completion\")")]
-    pub criteria: Option<String>,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct GoalIdParams {
-    #[schemars(description = "Target workspace (default: \"default\")")]
-    #[serde(default = "default_workspace")]
-    pub workspace: String,
-    #[schemars(description = "Goal ID as a u64 string (e.g. \"42\")")]
-    pub goal_id: String,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct ManageGoalsParams {
-    #[schemars(description = "Target workspace (default: \"default\")")]
-    #[serde(default = "default_workspace")]
-    pub workspace: String,
-    #[schemars(description = "Action: 'list' (show all goals), 'cancel-failed' (cancel all Failed goals), or 'cancel-duplicates' (cancel goals with duplicate titles)")]
-    pub action: String,
-}
-
 // ── Batch Operations ────────────────────────────────────────────────────
 
 /// A single triple in a batch assertion.
@@ -412,6 +359,16 @@ pub struct AssertBatchParams {
         description = "Array of triples to assert: [{s, p, o, c?}, ...]. Example: [{\"s\":\"Sun\",\"p\":\"is-a\",\"o\":\"Star\"}]"
     )]
     pub triples: Vec<TripleEntry>,
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct RemoveBatchParams {
+    #[schemars(description = "Target workspace (default: "default")")]
+    #[serde(default = "default_workspace")]
+    pub workspace: String,
+    #[schemars(description = "Array of triples to remove: [{s, p, o}, ...]")]
+    pub triples: Vec<TripleEntry>,
+}
+
 }
 
 // ── Phase 1: Bootstrap Stage Tools ──────────────────────────────────────
@@ -937,38 +894,18 @@ impl AkhMcpServer {
         Parameters(params): Parameters<AssertBatchParams>,
     ) -> Result<CallToolResult, McpError> {
         let engine = self.state.get_engine(&params.workspace).await?;
-        let triples = params.triples;
 
         let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
-            let mut asserted = 0usize;
-            let mut errors = Vec::new();
+            // Use Engine::add_triples_batch for single-call batch assertion
+            let entries: Vec<(String, String, String)> = params.triples.iter().map(|e| {
+                (e.s.clone(), e.p.clone(), e.o.clone())
+            }).collect();
 
-            for entry in &triples {
-                let conf = entry.c.unwrap_or(0.9) as f32;
-                let res = (|| -> Result<(), String> {
-                    let s = engine
-                        .resolve_or_create_entity(&entry.s)
-                        .map_err(|e| format!("{e}"))?;
-                    let p = engine
-                        .resolve_or_create_relation(&entry.p)
-                        .map_err(|e| format!("{e}"))?;
-                    let o = engine
-                        .resolve_or_create_entity(&entry.o)
-                        .map_err(|e| format!("{e}"))?;
-                    let triple = crate::graph::Triple::new(s, p, o).with_confidence(conf);
-                    engine.add_triple(&triple).map_err(|e| format!("{e}"))?;
-                    Ok(())
-                })();
-
-                match res {
-                    Ok(()) => asserted += 1,
-                    Err(e) => errors.push(format!("{} {} {}: {}", entry.s, entry.p, entry.o, e)),
-                }
-            }
+            let (asserted, errors) = engine.add_triples_batch(&entries, 0.9);
 
             let _ = engine.persist();
 
-            let mut msg = format!("Asserted {asserted}/{} triples", triples.len());
+            let mut msg = format!("Asserted {asserted}/{} triples", entries.len());
             if !errors.is_empty() {
                 msg.push_str(&format!("\nErrors ({}):", errors.len()));
                 for e in errors.iter().take(5) {
@@ -2033,6 +1970,38 @@ impl AkhMcpServer {
 
         Ok(CallToolResult::success(vec![Content::text(msg)]))
     }
+
+
+    #[tool(
+        name = "remove_batch",
+        description = "Remove multiple triples from the knowledge graph at once. Accepts an array of {subject, predicate, object} objects. All triples are removed before any TMS cascade fires (avoids per-triple lock contention)."
+    )]
+    async fn remove_batch(
+        &self,
+        Parameters(params): Parameters<RemoveBatchParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let engine = self.state.get_engine(&params.workspace).await?;
+
+        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            let entries: Vec<(String, String, String)> = params.triples.iter().map(|e| {
+                (e.s.clone(), e.p.clone(), e.o.clone())
+            }).collect();
+
+            let removed = engine
+                .remove_triples_batch(&entries)
+                .map_err(|e| format!("{e}"))?;
+
+            let _ = engine.persist();
+
+            Ok(format!("Removed {removed}/{total} triples", removed = removed, total = entries.len()))
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("task panicked: {e}"), None))?
+        .map_err(|e| McpError::internal_error(e, None))?;
+
+        Ok(CallToolResult::success(vec![Content::text(result)]))
+    }
+
 
     // ── Phase 2: Agent Introspection Tools ─────────────────────────
 
@@ -3192,277 +3161,6 @@ impl AkhMcpServer {
         .map_err(|e| McpError::internal_error(e, None))?;
 
         Ok(CallToolResult::success(vec![Content::text(result)]))
-    }
-
-    // ── Goal Lifecycle Management ─────────────────────────────────
-
-    #[tool(
-        name = "add_goal",
-        description = "Add a new goal for the agent to pursue. Returns the goal's symbol ID. The agent will work on goals automatically during cycles."
-    )]
-    async fn add_goal(
-        &self,
-        Parameters(params): Parameters<AddGoalParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let agent = self.state.get_agent(&params.workspace).await?;
-        let goal_text = params.goal_text.clone();
-        let priority = params.priority.unwrap_or(128);
-        let criteria = params
-            .criteria
-            .unwrap_or_else(|| "Agent-determined completion".to_string());
-
-        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
-            let mut agent = agent.lock().map_err(|e| format!("agent lock: {e}"))?;
-            let goal_id = agent
-                .add_goal(&goal_text, priority, &criteria)
-                .map_err(|e| format!("{e}"))?;
-            let _ = agent.persist_session();
-            Ok(format!("Goal added: id={} \"{goal_text}\" (priority={priority})", goal_id.get()))
-        })
-        .await
-        .map_err(|e| McpError::internal_error(format!("task panicked: {e}"), None))?
-        .map_err(|e| McpError::internal_error(e, None))?;
-
-        Ok(CallToolResult::success(vec![Content::text(result)]))
-    }
-
-    #[tool(
-        name = "cancel_goal",
-        description = "Cancel a goal by its ID (mark as Failed with reason 'cancelled')."
-    )]
-    async fn cancel_goal(
-        &self,
-        Parameters(params): Parameters<GoalIdParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let agent = self.state.get_agent(&params.workspace).await?;
-        let goal_id_str = params.goal_id.clone();
-
-        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
-            let raw_id: u64 = goal_id_str
-                .parse()
-                .map_err(|_| format!("invalid goal_id: '{goal_id_str}' — must be a u64 number"))?;
-            let goal_id = crate::symbol::SymbolId::new(raw_id)
-                .ok_or_else(|| format!("invalid goal_id: {raw_id} (zero or out of range)"))?;
-
-            let mut agent = agent.lock().map_err(|e| format!("agent lock: {e}"))?;
-            agent
-                .fail_goal(goal_id, "cancelled")
-                .map_err(|e| format!("{e}"))?;
-            let _ = agent.persist_session();
-            Ok(format!("Goal {raw_id} cancelled"))
-        })
-        .await
-        .map_err(|e| McpError::internal_error(format!("task panicked: {e}"), None))?
-        .map_err(|e| McpError::internal_error(e, None))?;
-
-        Ok(CallToolResult::success(vec![Content::text(result)]))
-    }
-
-    #[tool(
-        name = "suspend_goal",
-        description = "Suspend a goal by its ID (mark as Suspended). Suspended goals are paused but can be resumed later."
-    )]
-    async fn suspend_goal(
-        &self,
-        Parameters(params): Parameters<GoalIdParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let agent = self.state.get_agent(&params.workspace).await?;
-        let goal_id_str = params.goal_id.clone();
-
-        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
-            let raw_id: u64 = goal_id_str
-                .parse()
-                .map_err(|_| format!("invalid goal_id: '{goal_id_str}' — must be a u64 number"))?;
-            let goal_id = crate::symbol::SymbolId::new(raw_id)
-                .ok_or_else(|| format!("invalid goal_id: {raw_id} (zero or out of range)"))?;
-
-            let mut agent = agent.lock().map_err(|e| format!("agent lock: {e}"))?;
-            agent
-                .suspend_goal(goal_id)
-                .map_err(|e| format!("{e}"))?;
-            let _ = agent.persist_session();
-            Ok(format!("Goal {raw_id} suspended"))
-        })
-        .await
-        .map_err(|e| McpError::internal_error(format!("task panicked: {e}"), None))?
-        .map_err(|e| McpError::internal_error(e, None))?;
-
-        Ok(CallToolResult::success(vec![Content::text(result)]))
-    }
-
-    #[tool(
-        name = "resume_goal",
-        description = "Resume a previously suspended goal by its ID (mark as Active)."
-    )]
-    async fn resume_goal(
-        &self,
-        Parameters(params): Parameters<GoalIdParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let agent = self.state.get_agent(&params.workspace).await?;
-        let goal_id_str = params.goal_id.clone();
-
-        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
-            let raw_id: u64 = goal_id_str
-                .parse()
-                .map_err(|_| format!("invalid goal_id: '{goal_id_str}' — must be a u64 number"))?;
-            let goal_id = crate::symbol::SymbolId::new(raw_id)
-                .ok_or_else(|| format!("invalid goal_id: {raw_id} (zero or out of range)"))?;
-
-            let mut agent = agent.lock().map_err(|e| format!("agent lock: {e}"))?;
-            agent
-                .resume_goal(goal_id)
-                .map_err(|e| format!("{e}"))?;
-            let _ = agent.persist_session();
-            Ok(format!("Goal {raw_id} resumed (now Active)"))
-        })
-        .await
-        .map_err(|e| McpError::internal_error(format!("task panicked: {e}"), None))?
-        .map_err(|e| McpError::internal_error(e, None))?;
-
-        Ok(CallToolResult::success(vec![Content::text(result)]))
-    }
-
-    #[tool(
-        name = "manage_goals",
-        description = "Manage goals in bulk. Actions: 'list' (show all goals with status), 'cancel-failed' (cancel/reap all Failed goals), 'cancel-duplicates' (cancel goals with duplicate titles by similarity)."
-    )]
-    async fn manage_goals(
-        &self,
-        Parameters(params): Parameters<ManageGoalsParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let agent = self.state.get_agent(&params.workspace).await?;
-        let action = params.action.clone();
-
-        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
-            let mut agent = agent.lock().map_err(|e| format!("agent lock: {e}"))?;
-
-            match action.as_str() {
-                "list" => {
-                    if agent.goals.is_empty() {
-                        return Ok("No goals.".to_string());
-                    }
-                    let lines: Vec<String> = agent
-                        .goals
-                        .iter()
-                        .map(|g| {
-                            format!(
-                                "  [{}] id={} \"{}\" (priority={})",
-                                format!("{:?}", g.status),
-                                g.symbol_id.get(),
-                                g.description,
-                                g.priority
-                            )
-                        })
-                        .collect();
-                    Ok(format!("Goals ({}):\n{}", agent.goals.len(), lines.join("\n")))
-                }
-                "cancel-failed" => {
-                    let failed_ids: Vec<crate::symbol::SymbolId> = agent
-                        .goals
-                        .iter()
-                        .filter(|g| matches!(g.status, GoalStatus::Failed { .. }))
-                        .map(|g| g.symbol_id)
-                        .collect();
-                    let count = failed_ids.len();
-                    for goal_id in &failed_ids {
-                        // Already Failed — just remove from the active list.
-                        // fail_goal would be a no-op, so remove from goals vec.
-                        agent.goals.retain(|g| g.symbol_id != *goal_id);
-                    }
-                    let _ = agent.persist_session();
-                    Ok(format!("Reaped {count} failed goal(s)"))
-                }
-                "cancel-duplicates" => {
-                    // Group goals by similarity of their description.
-                    // Simple approach: compare descriptions ignoring case and trimming.
-                    let mut seen: std::collections::HashMap<String, Vec<crate::symbol::SymbolId>> =
-                        std::collections::HashMap::new();
-                    for g in &agent.goals {
-                        let key = g.description.trim().to_lowercase();
-                        seen.entry(key).or_default().push(g.symbol_id);
-                    }
-
-                    let mut removed = 0u64;
-                    for (_key, ids) in &seen {
-                        if ids.len() > 1 {
-                            // Keep the first, cancel the rest.
-                            for excess_id in &ids[1..] {
-                                if let Err(e) = agent.fail_goal(*excess_id, "duplicate") {
-                                    tracing::debug!("failed to cancel duplicate goal: {e}");
-                                } else {
-                                    removed += 1;
-                                }
-                            }
-                        }
-                    }
-
-                    let _ = agent.persist_session();
-                    Ok(format!(
-                        "Found {} duplicate groups, cancelled {} redundant goals",
-                        seen.values().filter(|v| v.len() > 1).count(),
-                        removed
-                    ))
-                }
-                other => Err(format!(
-                    "Unknown action: '{other}'. Valid actions: list, cancel-failed, cancel-duplicates"
-                )),
-            }
-        })
-        .await
-        .map_err(|e| McpError::internal_error(format!("task panicked: {e}"), None))?
-        .map_err(|e| McpError::internal_error(e, None))?;
-
-        Ok(CallToolResult::success(vec![Content::text(result)]))
-    }
-
-    // ── Daemon Pause/Resume ───────────────────────────────────────────
-
-    #[tool(
-        name = "suspend_workspace",
-        description = "Suspend the daemon's autonomous cycles on this workspace, freeing the agent lock so external writers can perform batch operations (assert_triple, assert_batch, remove_triple) without contention. Call resume_workspace when done."
-    )]
-    async fn suspend_workspace(
-        &self,
-        Parameters(params): Parameters<WorkspaceParam>,
-    ) -> Result<CallToolResult, McpError> {
-        let ws = params.workspace.clone();
-        let daemon_pauses = self.state.daemon_pauses.blocking_read();
-        if let Some(h) = daemon_pauses.get(&ws) {
-            h.paused.store(true, std::sync::atomic::Ordering::SeqCst);
-            let cycle_done = h.cycle_done.clone();
-            drop(daemon_pauses);
-            let timeout = std::time::Duration::from_secs(10);
-            let _ = tokio::time::timeout(timeout, cycle_done.notified()).await;
-            Ok(CallToolResult::success(vec![Content::text(
-                format!("Workspace \"{ws}\" suspended — daemon cycles paused"),
-            )]))
-        } else {
-            Ok(CallToolResult::success(vec![Content::text(
-                format!("No daemon running for workspace \"{ws}\" — already free"),
-            )]))
-        }
-    }
-
-    #[tool(
-        name = "resume_workspace",
-        description = "Resume the daemon's autonomous cycles after a suspend_workspace call."
-    )]
-    async fn resume_workspace(
-        &self,
-        Parameters(params): Parameters<WorkspaceParam>,
-    ) -> Result<CallToolResult, McpError> {
-        let ws = params.workspace.clone();
-        let daemon_pauses = self.state.daemon_pauses.blocking_read();
-        if let Some(h) = daemon_pauses.get(&ws) {
-            h.paused.store(false, std::sync::atomic::Ordering::SeqCst);
-            Ok(CallToolResult::success(vec![Content::text(
-                format!("Workspace \"{ws}\" resumed — daemon cycles continuing"),
-            )]))
-        } else {
-            Ok(CallToolResult::success(vec![Content::text(
-                format!("No daemon running for workspace \"{ws}\""),
-            )]))
-        }
     }
 
     // ── Chat ────────────────────────────────────────────────────────

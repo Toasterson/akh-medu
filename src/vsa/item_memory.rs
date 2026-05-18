@@ -6,9 +6,10 @@
 //! - Fast ANN search: find the most similar symbols to a query vector
 //! - Concurrent access via DashMap for the symbol registry
 
+use std::collections::HashMap;
 use std::sync::RwLock;
 
-use anndists::dist::DistHamming;
+use anndists::dist::Distance;
 use dashmap::DashMap;
 use hnsw_rs::hnsw::Hnsw;
 
@@ -18,6 +19,27 @@ use crate::symbol::SymbolId;
 use super::encode::encode_symbol;
 use super::ops::{VsaOps, VsaResult};
 use super::{Dimension, Encoding, HyperVec};
+
+/// Bit-level Hamming distance for u32-packed binary vectors.
+///
+/// Counts the number of BITS that differ via XOR + popcount, producing a
+/// distance in [0, dim_bits]. This is correct for binary hypervectors packed
+/// as u32 slices from `bytes_to_u32_vec`.
+///
+/// `anndists::DistHamming<u32>` counts u32 ELEMENTS that differ (not bits),
+/// which gives a max distance of ~313 for 10 000-bit vectors and causes
+/// similarity values to cluster near 1.0. This custom struct fixes that.
+#[derive(Clone, Copy)]
+struct BitHamming;
+
+impl Distance<u32> for BitHamming {
+    fn eval(&self, va: &[u32], vb: &[u32]) -> f32 {
+        va.iter()
+            .zip(vb.iter())
+            .map(|(a, b)| (a ^ b).count_ones() as f32)
+            .sum()
+    }
+}
 
 /// Search result from item memory.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -36,10 +58,13 @@ pub struct ItemMemory {
     /// Exact symbol → hypervector mapping.
     vectors: DashMap<SymbolId, HyperVec>,
     /// HNSW ANN index for similarity search.
-    /// Uses u32 data with Hamming distance for bipolar vectors.
-    hnsw: RwLock<Hnsw<'static, u32, DistHamming>>,
+    /// Uses u32 data with bit-level Hamming distance for bipolar vectors.
+    hnsw: RwLock<Hnsw<'static, u32, BitHamming>>,
     /// Mapping from HNSW internal IDs to SymbolIds.
     id_to_symbol: DashMap<usize, SymbolId>,
+    /// Canonical (latest) HNSW internal ID for each symbol.
+    /// Used to filter stale index entries after re-grounding.
+    symbol_to_hnsw_id: DashMap<SymbolId, usize>,
     /// Next HNSW internal ID to assign.
     next_hnsw_id: std::sync::atomic::AtomicUsize,
     /// Dimension and encoding config.
@@ -64,12 +89,13 @@ impl ItemMemory {
         let max_layer = (max_elements as f64).log2().ceil() as usize;
         let max_layer = max_layer.clamp(4, 16);
 
-        let hnsw = Hnsw::new(max_layer, max_elements, 16, 200, DistHamming {});
+        let hnsw = Hnsw::new(max_layer, max_elements, 16, 200, BitHamming {});
 
         Self {
             vectors: DashMap::new(),
             hnsw: RwLock::new(hnsw),
             id_to_symbol: DashMap::new(),
+            symbol_to_hnsw_id: DashMap::new(),
             next_hnsw_id: std::sync::atomic::AtomicUsize::new(0),
             dim,
             encoding,
@@ -90,7 +116,11 @@ impl ItemMemory {
         vec
     }
 
-    /// Insert a specific hypervector for a symbol.
+    /// Insert or update the hypervector for a symbol.
+    ///
+    /// If the symbol already has an HNSW entry, the old entry becomes stale.
+    /// The `symbol_to_hnsw_id` map is updated so `search` always sees the
+    /// latest vector and filters out stale entries.
     pub fn insert(&self, symbol: SymbolId, vec: HyperVec) {
         // Convert to u32 slices for HNSW (bit-packed representation)
         let data_u32 = bytes_to_u32_vec(vec.data());
@@ -104,6 +134,9 @@ impl ItemMemory {
         }
 
         self.id_to_symbol.insert(hnsw_id, symbol);
+        // Track the canonical (latest) HNSW ID for this symbol so that
+        // search can skip the old stale entry when the symbol is re-grounded.
+        self.symbol_to_hnsw_id.insert(symbol, hnsw_id);
         self.vectors.insert(symbol, vec);
     }
 
@@ -134,11 +167,10 @@ impl ItemMemory {
 
     /// Search for the `k` most similar symbols to a query vector.
     ///
-    /// Uses brute-force search over all stored vectors. For ~2000 symbols
-    /// at 10,000 bits, this completes in <1ms and is always correct — unlike
-    /// the HNSW ANN which degenerates at high dimensions (313 u32 words).
-    ///
-    /// Returns results sorted by descending similarity.
+    /// Returns up to `k` results sorted by descending similarity.
+    /// Stale HNSW entries (from symbols that have been re-grounded) are
+    /// filtered out, and results are deduplicated by symbol_id so each
+    /// symbol appears at most once.
     pub fn search(&self, query: &HyperVec, k: usize) -> VsaResult<Vec<SearchResult>> {
         if query.dim() != self.dim {
             return Err(VsaError::DimensionMismatch {
@@ -147,65 +179,96 @@ impl ItemMemory {
             });
         }
 
+        let query_u32 = bytes_to_u32_vec(query.data());
+        // Request more candidates than k to compensate for stale-entry filtering
+        // and per-symbol deduplication.
+        let fetch_k = (k * 3).max(k + 16);
+        let ef_search = (fetch_k * 2).max(64);
+
+        let hnsw = self.hnsw.read().map_err(|_| VsaError::HnswError {
+            message: "HNSW lock poisoned".into(),
+        })?;
+
+        let neighbours = hnsw.search(&query_u32, fetch_k, ef_search);
+
         let total_bits = self.dim.0 as f32;
-
-        // Brute-force: scan all stored vectors, keep top-k by similarity.
-        // Uses a bounded min-heap for efficiency.
-        use std::collections::BinaryHeap;
-        use std::cmp::Ordering;
-
-        #[derive(Debug)]
-        struct Candidate {
-            symbol_id: SymbolId,
-            similarity: f32,
-        }
-        impl PartialEq for Candidate {
-            fn eq(&self, other: &Self) -> bool {
-                self.similarity == other.similarity
+        // Collect best similarity per symbol, skipping stale HNSW entries.
+        let mut best: HashMap<SymbolId, f32> = HashMap::new();
+        for n in &neighbours {
+            let symbol_id = match self.id_to_symbol.get(&n.d_id) {
+                Some(s) => s.value().to_owned(),
+                None => continue,
+            };
+            // Skip stale entries: only the canonical HNSW ID for this symbol
+            // reflects the current (possibly re-grounded) vector.
+            let is_canonical = self
+                .symbol_to_hnsw_id
+                .get(&symbol_id)
+                .map(|id| *id.value() == n.d_id)
+                .unwrap_or(false);
+            if !is_canonical {
+                continue;
             }
-        }
-        impl Eq for Candidate {}
-        impl PartialOrd for Candidate {
-            fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-                self.similarity.partial_cmp(&other.similarity)
-            }
-        }
-        impl Ord for Candidate {
-            fn cmp(&self, other: &Self) -> Ordering {
-                self.partial_cmp(other).unwrap_or(Ordering::Equal)
+            let similarity = 1.0 - (n.distance / total_bits);
+            let entry = best.entry(symbol_id).or_insert(f32::NEG_INFINITY);
+            if similarity > *entry {
+                *entry = similarity;
             }
         }
 
-        // Min-heap to keep only the top-k (smallest similarity at the top to pop)
-        let mut heap = BinaryHeap::<std::cmp::Reverse<Candidate>>::new();
-
-        for entry in self.vectors.iter() {
-            let symbol_id = *entry.key();
-            let vec = entry.value();
-            let hamming = hamming_distance_bytes(query.data(), vec.data());
-            let similarity = 1.0 - (hamming as f32 / total_bits);
-
-            heap.push(std::cmp::Reverse(Candidate {
+        let mut results: Vec<SearchResult> = best
+            .into_iter()
+            .map(|(symbol_id, similarity)| SearchResult {
                 symbol_id,
                 similarity,
-            }));
-
-            if heap.len() > k {
-                heap.pop();
-            }
-        }
-
-        let mut results: Vec<SearchResult> = heap
-            .into_iter()
-            .map(|rev| SearchResult {
-                symbol_id: rev.0.symbol_id,
-                similarity: rev.0.similarity,
             })
             .collect();
 
-        // Sort descending
         results.sort_by(|a, b| b.similarity.partial_cmp(&a.similarity).unwrap());
+        results.truncate(k);
         Ok(results)
+    }
+
+    /// Rebuild the HNSW index from the current contents of `vectors`.
+    ///
+    /// After a bulk re-encoding operation (e.g. `ground_all_symbols`), the
+    /// HNSW index accumulates stale entries from previous vector versions.
+    /// Rebuilding replaces the index with only the current vectors, restoring
+    /// search recall and removing stale entries entirely.
+    ///
+    /// This holds the HNSW write lock for the duration of the swap to prevent
+    /// concurrent searches from observing inconsistent state.
+    pub fn rebuild_hnsw(&self) {
+        let n = self.vectors.len();
+        if n == 0 {
+            return;
+        }
+        let max_layer = ((n as f64).log2().ceil() as usize).clamp(4, 16);
+        let new_hnsw = Hnsw::new(max_layer, n + 64, 16, 200, BitHamming {});
+
+        // Build (hnsw_id, symbol, data) triples outside the write lock.
+        let mut pairs: Vec<(usize, SymbolId)> = Vec::with_capacity(n);
+        let mut next_id: usize = 0;
+        for entry in &self.vectors {
+            let symbol = *entry.key();
+            let data_u32 = bytes_to_u32_vec(entry.value().data());
+            new_hnsw.insert((&data_u32, next_id));
+            pairs.push((next_id, symbol));
+            next_id += 1;
+        }
+
+        // Swap under the write lock so concurrent reads don't see torn state.
+        if let Ok(mut hnsw_guard) = self.hnsw.write() {
+            self.id_to_symbol.clear();
+            self.symbol_to_hnsw_id.clear();
+            for &(hnsw_id, symbol) in &pairs {
+                self.id_to_symbol.insert(hnsw_id, symbol);
+                self.symbol_to_hnsw_id.insert(symbol, hnsw_id);
+            }
+            self.next_hnsw_id
+                .store(next_id, std::sync::atomic::Ordering::SeqCst);
+            *hnsw_guard = new_hnsw;
+        }
     }
 
     /// Batch insert using rayon for parallel encoding.
@@ -247,22 +310,32 @@ fn bytes_to_u32_vec(bytes: &[u8]) -> Vec<u32> {
     result
 }
 
-/// Compute Hamming distance between two byte slices via popcount.
-fn hamming_distance_bytes(a: &[u8], b: &[u8]) -> u32 {
-    debug_assert_eq!(a.len(), b.len());
-    a.iter()
-        .zip(b.iter())
-        .map(|(&av, &bv)| (av ^ bv).count_ones())
-        .sum()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::simd;
+    use rand::SeedableRng;
 
     fn test_ops() -> VsaOps {
         VsaOps::new(simd::best_kernel(), Dimension::TEST, Encoding::Bipolar)
+    }
+
+    #[test]
+    fn bit_hamming_counts_bits_not_elements() {
+        // 0b00000011 XOR 0b00000000 = 0b00000011 → 2 bits set
+        let va = vec![0b00000011u32];
+        let vb = vec![0b00000000u32];
+        let d = BitHamming {}.eval(&va, &vb);
+        assert_eq!(d, 2.0, "BitHamming should count differing BITS, got {d}");
+
+        // Single-bit difference
+        let vc = vec![0b00000001u32];
+        let vd = vec![0b00000000u32];
+        assert_eq!(BitHamming {}.eval(&vc, &vd), 1.0);
+
+        // Identical: zero distance
+        let ve = vec![0xDEADBEEFu32, 0xCAFEBABEu32];
+        assert_eq!(BitHamming {}.eval(&ve, &ve), 0.0);
     }
 
     #[test]
@@ -296,6 +369,109 @@ mod tests {
         assert!(!results.is_empty());
         assert_eq!(results[0].symbol_id, query_sym);
         assert!((results[0].similarity - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn search_similarity_range_for_random_symbols() {
+        let ops = test_ops();
+        let mem = ItemMemory::new(Dimension::TEST, Encoding::Bipolar, 200);
+
+        for i in 1..=30u64 {
+            let sym = SymbolId::new(i).unwrap();
+            mem.get_or_create(&ops, sym);
+        }
+
+        let sym1 = SymbolId::new(1).unwrap();
+        let vec1 = mem.get(sym1).unwrap();
+        let results = mem.search(&vec1, 10).unwrap();
+
+        // sym1 itself must be at the top with similarity 1.0
+        assert!(!results.is_empty());
+        assert_eq!(results[0].symbol_id, sym1);
+        assert!((results[0].similarity - 1.0).abs() < 0.001);
+
+        // Other random symbols should NOT all have similarity 1.0 —
+        // that would indicate the normalization is wrong.
+        let other_max = results[1..]
+            .iter()
+            .filter(|r| r.symbol_id != sym1)
+            .map(|r| r.similarity)
+            .fold(f32::NEG_INFINITY, f32::max);
+
+        assert!(
+            other_max < 0.85,
+            "Random unrelated symbols should have similarity < 0.85 (uniform-1.0 bug); \
+             got {other_max:.4}. This indicates DistHamming is not counting bits correctly."
+        );
+    }
+
+    #[test]
+    fn search_deduplicates_after_regrounding() {
+        let ops = test_ops();
+        let mem = ItemMemory::new(Dimension::TEST, Encoding::Bipolar, 100);
+
+        // Insert several symbols so HNSW has something to index
+        for i in 1..=5u64 {
+            mem.get_or_create(&ops, SymbolId::new(i).unwrap());
+        }
+
+        let sym = SymbolId::new(1).unwrap();
+        // Simulate grounding: re-insert with a different vector
+        let mut rng = rand::rngs::StdRng::seed_from_u64(999);
+        let new_vec = ops.random(&mut rng);
+        mem.insert(sym, new_vec.clone());
+
+        // Search should return sym at most once even though HNSW has
+        // two entries for it (old random + new grounded).
+        let results = mem.search(&new_vec, 5).unwrap();
+        let count = results.iter().filter(|r| r.symbol_id == sym).count();
+        assert_eq!(count, 1, "Symbol should appear exactly once after re-grounding");
+
+        // The one result for sym should be the LATEST vector (sim = 1.0)
+        let sym_sim = results
+            .iter()
+            .find(|r| r.symbol_id == sym)
+            .map(|r| r.similarity)
+            .unwrap();
+        assert!(
+            (sym_sim - 1.0).abs() < 0.001,
+            "Re-grounded symbol should have similarity 1.0, got {sym_sim}"
+        );
+    }
+
+    #[test]
+    fn rebuild_hnsw_removes_stale_entries() {
+        let ops = test_ops();
+        let mem = ItemMemory::new(Dimension::TEST, Encoding::Bipolar, 200);
+
+        // Insert initial symbols
+        for i in 1..=10u64 {
+            mem.get_or_create(&ops, SymbolId::new(i).unwrap());
+        }
+
+        // Re-ground all symbols (simulates ground_all_symbols)
+        let mut rng = rand::rngs::StdRng::seed_from_u64(42);
+        for i in 1..=10u64 {
+            let sym = SymbolId::new(i).unwrap();
+            mem.insert(sym, ops.random(&mut rng));
+        }
+
+        // Rebuild removes stale entries
+        mem.rebuild_hnsw();
+
+        // Every symbol should appear exactly once in a broad search
+        let sym = SymbolId::new(1).unwrap();
+        let vec = mem.get(sym).unwrap();
+        let results = mem.search(&vec, 10).unwrap();
+
+        let mut seen = std::collections::HashSet::new();
+        for r in &results {
+            assert!(
+                seen.insert(r.symbol_id),
+                "Symbol {:?} appeared more than once after rebuild",
+                r.symbol_id
+            );
+        }
     }
 
     #[test]
