@@ -44,6 +44,24 @@ pub struct McpState {
     pub agents: Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>,
     /// Cached NLU pipelines per workspace — avoids reloading 1GB+ LLM on every chat call.
     pub nlu_pipelines: RwLock<HashMap<String, Arc<Mutex<crate::nlu::NluPipeline>>>>,
+    /// Per-workspace daemon pause handles for suspend/resume via MCP.
+    pub daemon_pauses: RwLock<HashMap<String, DaemonPauseHandle>>,
+}
+
+/// Pause control for a single workspace daemon.
+#[derive(Clone)]
+pub struct DaemonPauseHandle {
+    pub paused: Arc<std::sync::atomic::AtomicBool>,
+    pub cycle_done: Arc<tokio::sync::Notify>,
+}
+
+impl DaemonPauseHandle {
+    pub fn new() -> Self {
+        Self {
+            paused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            cycle_done: Arc::new(tokio::sync::Notify::new()),
+        }
+    }
 }
 
 impl McpState {
@@ -57,6 +75,7 @@ impl McpState {
             workspaces,
             agents,
             nlu_pipelines: RwLock::new(HashMap::new()),
+            daemon_pauses: RwLock::new(HashMap::new()),
         }
     }
 
@@ -359,16 +378,15 @@ pub struct AssertBatchParams {
         description = "Array of triples to assert: [{s, p, o, c?}, ...]. Example: [{\"s\":\"Sun\",\"p\":\"is-a\",\"o\":\"Star\"}]"
     )]
     pub triples: Vec<TripleEntry>,
+}
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct RemoveBatchParams {
-    #[schemars(description = "Target workspace (default: "default")")]
+    #[schemars(description = "Target workspace (default: \"default\")")]
     #[serde(default = "default_workspace")]
     pub workspace: String,
     #[schemars(description = "Array of triples to remove: [{s, p, o}, ...]")]
     pub triples: Vec<TripleEntry>,
-}
-
 }
 
 // ── Phase 1: Bootstrap Stage Tools ──────────────────────────────────────
@@ -2000,6 +2018,56 @@ impl AkhMcpServer {
         .map_err(|e| McpError::internal_error(e, None))?;
 
         Ok(CallToolResult::success(vec![Content::text(result)]))
+    }
+
+    // ══ Daemon Pause/Resume ═══════════════════════════════════════════
+
+    #[tool(
+        name = "suspend_workspace",
+        description = "Suspend the daemon autonomous cycles on this workspace, freeing the agent lock so external writers can perform batch operations (assert_triple, assert_batch, remove_triple, remove_batch) without contention. Call resume_workspace when done."
+    )]
+    async fn suspend_workspace(
+        &self,
+        Parameters(params): Parameters<WorkspaceParam>,
+    ) -> Result<CallToolResult, McpError> {
+        let ws = params.workspace.clone();
+        let daemon_pauses = self.state.daemon_pauses.blocking_read();
+        if let Some(h) = daemon_pauses.get(&ws) {
+            h.paused.store(true, std::sync::atomic::Ordering::SeqCst);
+            let cycle_done = h.cycle_done.clone();
+            drop(daemon_pauses);
+            let timeout = std::time::Duration::from_secs(10);
+            let _ = tokio::time::timeout(timeout, cycle_done.notified()).await;
+            Ok(CallToolResult::success(vec![Content::text(
+                format!("Workspace \"{ws}\" suspended — daemon cycles paused"),
+            )]))
+        } else {
+            Ok(CallToolResult::success(vec![Content::text(
+                format!("No daemon running for workspace \"{ws}\" — already free"),
+            )]))
+        }
+    }
+
+    #[tool(
+        name = "resume_workspace",
+        description = "Resume the daemon autonomous cycles after a suspend_workspace call."
+    )]
+    async fn resume_workspace(
+        &self,
+        Parameters(params): Parameters<WorkspaceParam>,
+    ) -> Result<CallToolResult, McpError> {
+        let ws = params.workspace.clone();
+        let daemon_pauses = self.state.daemon_pauses.blocking_read();
+        if let Some(h) = daemon_pauses.get(&ws) {
+            h.paused.store(false, std::sync::atomic::Ordering::SeqCst);
+            Ok(CallToolResult::success(vec![Content::text(
+                format!("Workspace \"{ws}\" resumed — daemon cycles continuing"),
+            )]))
+        } else {
+            Ok(CallToolResult::success(vec![Content::text(
+                format!("No daemon running for workspace \"{ws}\""),
+            )]))
+        }
     }
 
 
