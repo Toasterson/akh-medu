@@ -38,7 +38,7 @@
   {"subject": "Mirror", "predicate": "specializes-in", "object": "Testing", "confidence": 1.0},
 
   {"subject": "Stabilizer", "predicate": "is-a", "object": "Archetype", "confidence": 1.0},
-  {"subject": "Stabilizer", "predicate": "instance-of", "object": "Maat", "confidence": 1.0},
+  {"subject": "Stabilizer", "predicate": "instance-of", "object": "Ma'at", "confidence": 1.0},
   {"subject": "Stabilizer", "predicate": "specializes-in", "object": "Quality", "confidence": 1.0},
   {"subject": "Stabilizer", "predicate": "specializes-in", "object": "Standards", "confidence": 1.0},
   {"subject": "Stabilizer", "predicate": "specializes-in", "object": "Consistency", "confidence": 1.0},

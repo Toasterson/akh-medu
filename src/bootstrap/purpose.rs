@@ -196,7 +196,7 @@ static RE_DOMAIN: LazyLock<Regex> = LazyLock::new(|| {
 
 const DEITIES: &[&str] = &[
     "ptah", "ra", "thoth", "anubis", "osiris", "isis", "horus", "sekhmet",
-    "bastet", "sobek", "khnum", "atum", "maat", "hathor", "set",
+    "bastet", "sobek", "khnum", "atum", "maat", "ma'at", "hathor", "set",
     "athena", "apollo", "hermes", "hephaestus", "zeus", "hera", "ares",
     "artemis", "poseidon", "demeter", "dionysus", "prometheus",
     "odin", "thor", "loki", "freya", "frigg", "tyr", "baldr", "heimdall",

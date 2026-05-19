@@ -263,14 +263,21 @@ fn chunk_text(text: &str, max_chars: usize) -> Vec<&str> {
     chunks
 }
 
+/// Normalize a label for triple deduplication: lowercase and strip apostrophe
+/// variants so "Maat" and "Ma'at" collapse to the same key.
+fn norm_triple_part(s: &str) -> String {
+    s.to_lowercase()
+        .replace(['\u{0027}', '\u{2018}', '\u{2019}', '\u{02BC}'], "")
+}
+
 /// Deduplicate triples by (subject, predicate, object) keeping highest confidence.
 fn dedup_triples(triples: &mut Vec<RawTriple>) {
     let mut seen = std::collections::HashMap::new();
     for triple in triples.iter() {
         let key = (
-            triple.subject.to_lowercase(),
-            triple.predicate.to_lowercase(),
-            triple.object.to_lowercase(),
+            norm_triple_part(&triple.subject),
+            norm_triple_part(&triple.predicate),
+            norm_triple_part(&triple.object),
         );
         let entry = seen.entry(key).or_insert(0.0f32);
         if triple.confidence > *entry {
@@ -282,9 +289,9 @@ fn dedup_triples(triples: &mut Vec<RawTriple>) {
     let mut emitted = std::collections::HashSet::new();
     for triple in triples.drain(..) {
         let key = (
-            triple.subject.to_lowercase(),
-            triple.predicate.to_lowercase(),
-            triple.object.to_lowercase(),
+            norm_triple_part(&triple.subject),
+            norm_triple_part(&triple.predicate),
+            norm_triple_part(&triple.object),
         );
         if emitted.insert(key) {
             unique.push(triple);
