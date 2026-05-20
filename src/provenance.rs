@@ -5,7 +5,7 @@
 //! via redb with multiple indices for efficient lookup.
 
 use std::num::NonZeroU64;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use redb::{
@@ -842,8 +842,11 @@ impl ProvenanceRecord {
 ///
 /// Stores provenance records with multiple indices for efficient querying
 /// by derived symbol, source symbol, and derivation kind.
+///
+/// The database is wrapped in `Arc<Mutex<Database>>` to serialize concurrent
+/// write attempts at the Rust level, preventing OS-level lock pile-up.
 pub struct ProvenanceLedger {
-    db: Arc<Database>,
+    db: Arc<Mutex<Database>>,
     next_id: AtomicU64,
 }
 
@@ -865,10 +868,11 @@ impl ProvenanceLedger {
     /// Open a provenance ledger on an existing database.
     ///
     /// Recovers the next ID counter by scanning the primary table.
-    pub fn open(db: Arc<Database>) -> ProvenanceResult<Self> {
+    pub fn open(db: Arc<Mutex<Database>>) -> ProvenanceResult<Self> {
         // Ensure tables exist by opening a write txn.
         {
-            let txn = db.begin_write().map_err(redb_err)?;
+            let db_lock = db.lock().expect("redb mutex poisoned");
+            let txn = db_lock.begin_write().map_err(redb_err)?;
             // Opening the tables creates them if absent.
             txn.open_table(PROVENANCE_TABLE).map_err(redb_err)?;
             txn.open_multimap_table(DERIVED_INDEX)
@@ -882,7 +886,9 @@ impl ProvenanceLedger {
 
         // Recover max ID from the primary table.
         let max_id = {
-            let txn = db.begin_read().map_err(redb_err)?;
+            let db_lock = db.lock().expect("redb mutex poisoned");
+            let txn = db_lock.begin_read().map_err(redb_err)?;
+            drop(db_lock); // release lock — read txn is independent
             let table = txn.open_table(PROVENANCE_TABLE).map_err(redb_err)?;
             let mut max = 0u64;
             let iter = table.iter().map_err(redb_err)?;
@@ -915,7 +921,8 @@ impl ProvenanceLedger {
             })
         })?;
 
-        let txn = self.db.begin_write().map_err(redb_err)?;
+        let db_lock = self.db.lock().expect("redb mutex poisoned");
+        let txn = db_lock.begin_write().map_err(redb_err)?;
         {
             let mut table = txn.open_table(PROVENANCE_TABLE).map_err(redb_err)?;
             table
@@ -977,7 +984,8 @@ impl ProvenanceLedger {
             encoded_batch.push((raw_id, encoded));
         }
 
-        let txn = self.db.begin_write().map_err(redb_err)?;
+        let db_lock = self.db.lock().expect("redb mutex poisoned");
+        let txn = db_lock.begin_write().map_err(redb_err)?;
         {
             let mut table = txn.open_table(PROVENANCE_TABLE).map_err(redb_err)?;
             for (raw_id, encoded) in &encoded_batch {
@@ -1019,7 +1027,9 @@ impl ProvenanceLedger {
 
     /// Get a provenance record by its ID.
     pub fn get(&self, id: ProvenanceId) -> ProvenanceResult<ProvenanceRecord> {
-        let txn = self.db.begin_read().map_err(redb_err)?;
+        let db_lock = self.db.lock().expect("redb mutex poisoned");
+        let txn = db_lock.begin_read().map_err(redb_err)?;
+        drop(db_lock); // release lock — read txn is independent
         let table = txn.open_table(PROVENANCE_TABLE).map_err(redb_err)?;
         let guard = table
             .get(id.get())
@@ -1052,7 +1062,9 @@ impl ProvenanceLedger {
 
     /// Total number of provenance records.
     pub fn len(&self) -> ProvenanceResult<usize> {
-        let txn = self.db.begin_read().map_err(redb_err)?;
+        let db_lock = self.db.lock().expect("redb mutex poisoned");
+        let txn = db_lock.begin_read().map_err(redb_err)?;
+        drop(db_lock); // release lock — read txn is independent
         let table = txn.open_table(PROVENANCE_TABLE).map_err(redb_err)?;
         Ok(table.len().map_err(redb_err)? as usize)
     }
@@ -1072,7 +1084,9 @@ impl ProvenanceLedger {
         table_def: &MultimapTableDefinition<u64, u64>,
         key: u64,
     ) -> ProvenanceResult<Vec<ProvenanceRecord>> {
-        let txn = self.db.begin_read().map_err(redb_err)?;
+        let db_lock = self.db.lock().expect("redb mutex poisoned");
+        let txn = db_lock.begin_read().map_err(redb_err)?;
+        drop(db_lock); // release lock — read txn is independent
         let idx = txn
             .open_multimap_table(*table_def)
             .map_err(redb_err)?;
@@ -1099,7 +1113,9 @@ impl ProvenanceLedger {
 
     /// Retrieve records given a u8-keyed multimap index (kind).
     fn records_from_kind_index(&self, tag: u8) -> ProvenanceResult<Vec<ProvenanceRecord>> {
-        let txn = self.db.begin_read().map_err(redb_err)?;
+        let db_lock = self.db.lock().expect("redb mutex poisoned");
+        let txn = db_lock.begin_read().map_err(redb_err)?;
+        drop(db_lock); // release lock — read txn is independent
         let idx = txn
             .open_multimap_table(KIND_INDEX)
             .map_err(redb_err)?;
@@ -1129,12 +1145,12 @@ impl ProvenanceLedger {
 mod tests {
     use super::*;
 
-    fn test_db() -> Arc<Database> {
+    fn test_db() -> Arc<Mutex<Database>> {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("test.redb");
         // Leak the TempDir to keep the directory alive for the test.
         std::mem::forget(dir);
-        Arc::new(Database::create(path).unwrap())
+        Arc::new(Mutex::new(Database::create(path).unwrap()))
     }
 
     fn sym(id: u64) -> SymbolId {
@@ -1267,7 +1283,7 @@ mod tests {
     fn persistence_across_reopens() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("persist.redb");
-        let db = Arc::new(Database::create(&path).unwrap());
+        let db = Arc::new(Mutex::new(Database::create(&path).unwrap()));
 
         let stored_id = {
             let ledger = ProvenanceLedger::open(Arc::clone(&db)).unwrap();
@@ -1278,7 +1294,7 @@ mod tests {
 
         // Drop and reopen.
         drop(db);
-        let db2 = Arc::new(Database::create(&path).unwrap());
+        let db2 = Arc::new(Mutex::new(Database::create(&path).unwrap()));
         let ledger2 = ProvenanceLedger::open(db2).unwrap();
 
         let retrieved = ledger2.get(stored_id).unwrap();
