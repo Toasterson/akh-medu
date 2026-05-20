@@ -46,6 +46,9 @@ pub struct McpState {
     pub nlu_pipelines: RwLock<HashMap<String, Arc<Mutex<crate::nlu::NluPipeline>>>>,
     /// Per-workspace daemon pause handles for suspend/resume via MCP.
     pub daemon_pauses: RwLock<HashMap<String, DaemonPauseHandle>>,
+    /// Per-workspace gates that serialize Engine::new() so two concurrent
+    /// MCP calls never collide on the redb file-lock open.
+    pub loading_gates: RwLock<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 /// Pause control for a single workspace daemon.
@@ -76,6 +79,7 @@ impl McpState {
             agents,
             nlu_pipelines: RwLock::new(HashMap::new()),
             daemon_pauses: RwLock::new(HashMap::new()),
+            loading_gates: RwLock::new(HashMap::new()),
         }
     }
 
@@ -122,9 +126,10 @@ impl McpState {
 
     /// Get or lazily open an engine for the given workspace.
     ///
-    /// Uses a write-lock entry pattern to prevent concurrent MCP calls from
-    /// racing into `Engine::new()` → `redb::Database::open()` on the same
-    /// workspace, which would collide on the OS file lock and SIGKILL.
+    /// Uses a per-workspace loading gate (`Arc<Mutex<()>>`) to prevent
+    /// concurrent `Engine::new()` calls that collide on the redb file lock.
+    /// The heavy open is dispatched to `spawn_blocking` so Tokio's runtime
+    /// isn't starved.
     pub async fn get_engine(&self, name: &str) -> Result<Arc<Engine>, McpError> {
         // Fast path: already loaded (read lock).
         {
@@ -134,11 +139,22 @@ impl McpState {
             }
         }
 
-        // Take write lock BEFORE the expensive open so only one caller
-        // runs Engine::new() per workspace. Re-check inside the write lock.
-        let mut map = self.workspaces.write().await;
-        if let Some(engine) = map.get(name) {
-            return Ok(Arc::clone(engine));
+        // Per-workspace gate — ensures only one caller hits the filesystem.
+        let gate = {
+            let mut gates = self.loading_gates.write().await;
+            gates
+                .entry(name.to_string())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                .clone()
+        };
+        let _guard = gate.lock().await;
+
+        // Re-check after acquiring the gate — another caller may have loaded it.
+        {
+            let map = self.workspaces.read().await;
+            if let Some(engine) = map.get(name) {
+                return Ok(Arc::clone(engine));
+            }
         }
 
         let ws_paths = self.paths.workspace(name);
@@ -156,14 +172,19 @@ impl McpState {
             ..Default::default()
         };
 
-        let engine = Engine::new(config).map_err(|e| {
-            McpError::internal_error(
-                format!("failed to open workspace \"{name}\": {e}"),
-                None,
-            )
-        })?;
+        // Run the expensive DB open on a blocking thread so Tokio isn't frozen.
+        let engine = tokio::task::spawn_blocking(move || Engine::new(config))
+            .await
+            .map_err(|e| McpError::internal_error(format!("engine init join error: {e}"), None))?
+            .map_err(|e| {
+                McpError::internal_error(
+                    format!("failed to open workspace \"{name}\": {e}"),
+                    None,
+                )
+            })?;
 
         let engine = Arc::new(engine);
+        let mut map = self.workspaces.write().await;
         map.insert(name.to_string(), Arc::clone(&engine));
         Ok(engine)
     }
