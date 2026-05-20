@@ -10,8 +10,8 @@
 //! same `AgentDaemon`, so every background task added here automatically works
 //! in both deployment modes.
 
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use super::Agent;
@@ -99,7 +99,7 @@ impl Default for DaemonConfig {
             sleep_cycle_interval: Duration::from_secs(3600),
             trigger_evaluation_interval: Duration::from_secs(15),
             knowledge_extraction_interval: Duration::from_secs(2700), // 45 min
-            bridge_training_interval: Duration::from_secs(7200), // 2 hours
+            bridge_training_interval: Duration::from_secs(7200),      // 2 hours
             max_cycles: 0,
         }
     }
@@ -184,6 +184,16 @@ impl AgentDaemon {
     /// Schedules all background tasks as tokio intervals and selects on them.
     /// Shuts down cleanly on Ctrl+C (or external shutdown signal), persisting
     /// the session before exit.
+    ///
+    /// ## Concurrency note
+    ///
+    /// Every background method (`run_*`) is synchronous — it acquires
+    /// `std::sync::Mutex` guards and calls redb write transactions.  Calling
+    /// blocking code directly on a Tokio async thread starves the runtime,
+    /// preventing other async tasks (MCP handlers, HTTP requests) from making
+    /// progress.  We therefore wrap every such call in
+    /// `tokio::task::block_in_place`, which signals Tokio to migrate waiting
+    /// async tasks to other threads before this thread blocks.
     pub async fn run(&mut self) -> AgentResult<()> {
         use tokio::time::interval;
 
@@ -202,15 +212,17 @@ impl AgentDaemon {
         let mut extraction_tick = interval(self.config.knowledge_extraction_interval);
         let mut bridge_training_tick = interval(self.config.bridge_training_interval);
 
-        self.agent.lock().unwrap().sink().emit(&AkhMessage::system(
-            "daemon started — background learning active",
-        ));
+        tokio::task::block_in_place(|| {
+            self.agent.lock().unwrap().sink().emit(&AkhMessage::system(
+                "daemon started — background learning active",
+            ));
+        });
 
         // Startup burst: seed goals so the akh can start acting immediately.
         // Continuous learning is deliberately NOT run at startup — it holds the
         // agent mutex for 30-120s (network I/O + ingestion), blocking all HTTP
         // handlers.  The interval timer will kick it off naturally.
-        self.run_goal_generation();
+        tokio::task::block_in_place(|| self.run_goal_generation());
 
         loop {
             // When paused, spin-sleep — prevents daemon from acquiring
@@ -222,75 +234,86 @@ impl AgentDaemon {
 
             tokio::select! {
                 _ = equivalence_tick.tick() => {
-                    self.run_equivalence_learning();
+                    tokio::task::block_in_place(|| self.run_equivalence_learning());
                 }
                 _ = reflection_tick.tick() => {
-                    self.run_reflection();
+                    tokio::task::block_in_place(|| self.run_reflection());
                 }
                 _ = consolidation_tick.tick() => {
-                    self.run_consolidation_check();
+                    tokio::task::block_in_place(|| self.run_consolidation_check());
                 }
                 _ = schema_tick.tick() => {
-                    self.run_schema_discovery();
+                    tokio::task::block_in_place(|| self.run_schema_discovery());
                 }
                 _ = rules_tick.tick() => {
-                    self.run_rule_inference();
+                    tokio::task::block_in_place(|| self.run_rule_inference());
                 }
                 _ = gaps_tick.tick() => {
-                    self.run_gap_analysis();
+                    tokio::task::block_in_place(|| self.run_gap_analysis());
                 }
                 _ = persist_tick.tick() => {
-                    self.persist();
+                    tokio::task::block_in_place(|| self.persist());
                 }
                 _ = idle_cycle_tick.tick() => {
-                    self.run_idle_cycle();
+                    tokio::task::block_in_place(|| self.run_idle_cycle());
                     if self.config.max_cycles > 0 && self.total_cycles >= self.config.max_cycles {
-                        self.agent.lock().unwrap().sink().emit(&AkhMessage::system(format!(
-                            "daemon: max cycles ({}) reached, shutting down",
-                            self.config.max_cycles,
-                        )));
+                        tokio::task::block_in_place(|| {
+                            self.agent.lock().unwrap().sink().emit(&AkhMessage::system(
+                                format!(
+                                    "daemon: max cycles ({}) reached, shutting down",
+                                    self.config.max_cycles,
+                                ),
+                            ));
+                        });
                         break;
                     }
                 }
                 _ = continuous_learning_tick.tick() => {
-                    self.run_continuous_learning();
+                    tokio::task::block_in_place(|| self.run_continuous_learning());
                 }
                 _ = goal_gen_tick.tick() => {
-                    self.run_goal_generation();
+                    tokio::task::block_in_place(|| self.run_goal_generation());
                 }
                 _ = sleep_tick.tick() => {
-                    self.run_sleep_cycle();
+                    tokio::task::block_in_place(|| self.run_sleep_cycle());
                 }
                 _ = trigger_tick.tick() => {
-                    self.run_trigger_evaluation();
+                    tokio::task::block_in_place(|| self.run_trigger_evaluation());
                 }
                 _ = extraction_tick.tick() => {
-                    self.run_knowledge_extraction();
+                    tokio::task::block_in_place(|| self.run_knowledge_extraction());
                 }
                 _ = bridge_training_tick.tick() => {
-                    self.run_bridge_training();
+                    // run_bridge_training dispatches heavy work to spawn_blocking
+                    // internally; block_in_place covers only the brief mutex
+                    // acquisition at the start.
+                    tokio::task::block_in_place(|| self.run_bridge_training());
                 }
                 _ = self.wait_for_shutdown() => {
-                    self.agent.lock().unwrap().sink().emit(&AkhMessage::system(
-                        "daemon: received shutdown signal, persisting session...",
-                    ));
+                    tokio::task::block_in_place(|| {
+                        self.agent.lock().unwrap().sink().emit(&AkhMessage::system(
+                            "daemon: received shutdown signal, persisting session...",
+                        ));
+                    });
                     break;
                 }
             }
         }
 
         // Final persist on shutdown.
-        self.persist();
+        tokio::task::block_in_place(|| self.persist());
         if let Some(ref status) = self.status
             && let Ok(mut st) = status.try_lock()
         {
             st.running = false;
         }
-        self.agent
-            .lock()
-            .unwrap()
-            .sink()
-            .emit(&AkhMessage::system("daemon stopped"));
+        tokio::task::block_in_place(|| {
+            self.agent
+                .lock()
+                .unwrap()
+                .sink()
+                .emit(&AkhMessage::system("daemon stopped"));
+        });
         Ok(())
     }
 
@@ -492,11 +515,8 @@ impl AgentDaemon {
         // Lock is released here — HTTP handlers can proceed.
 
         let config = super::continuous_learning::ContinuousLearningConfig::default();
-        match super::continuous_learning::run_continuous_learning(
-            &engine,
-            &curiosity_cfg,
-            &config,
-        ) {
+        match super::continuous_learning::run_continuous_learning(&engine, &curiosity_cfg, &config)
+        {
             Ok(result) => {
                 // Re-acquire lock briefly just for the status message.
                 if let Ok(agent) = self.agent.lock() {
@@ -529,8 +549,18 @@ impl AgentDaemon {
 
     fn run_goal_generation(&mut self) {
         // Phase 1: Brief lock — snapshot inputs + update drives (needs &WorkingMemory).
-        let (engine, goals_snapshot, drives_snapshot, gen_config, predicates,
-             cycle_count, impasse, reflection, watch_firings, curiosity_config) = {
+        let (
+            engine,
+            goals_snapshot,
+            drives_snapshot,
+            gen_config,
+            predicates,
+            cycle_count,
+            impasse,
+            reflection,
+            watch_firings,
+            curiosity_config,
+        ) = {
             let mut guard = self.agent.lock().unwrap();
             // Explicit reborrow so the borrow checker can split field access.
             let agent: &mut Agent = &mut *guard;
@@ -565,12 +595,10 @@ impl AgentDaemon {
         // Lock released — HTTP handlers can proceed.
 
         // Phase 2: Expensive computation (no lock held).
-        let curiosity_proposals = super::curiosity::compute_directed_curiosity(
-            &engine,
-            &curiosity_config,
-        )
-        .map(|report| report.proposals)
-        .unwrap_or_default();
+        let curiosity_proposals =
+            super::curiosity::compute_directed_curiosity(&engine, &curiosity_config)
+                .map(|report| report.proposals)
+                .unwrap_or_default();
 
         let gen_result = match super::goal_generation::generate_goals(
             &engine,
@@ -907,8 +935,8 @@ impl AgentDaemon {
 
     fn run_bridge_training(&self) {
         use crate::training::{BridgeTrainingSession, TrainerConfig};
-        use crate::vsa::neural_bridge::NeuralVsaBridge;
         use crate::vsa::Dimension;
+        use crate::vsa::neural_bridge::NeuralVsaBridge;
 
         let engine = {
             let agent = self.agent.lock().unwrap();
@@ -992,7 +1020,10 @@ mod tests {
         assert_eq!(config.gap_analysis_interval, Duration::from_secs(900));
         assert_eq!(config.persist_interval, Duration::from_secs(60));
         assert_eq!(config.idle_cycle_interval, Duration::from_secs(30));
-        assert_eq!(config.continuous_learning_interval, Duration::from_secs(7200));
+        assert_eq!(
+            config.continuous_learning_interval,
+            Duration::from_secs(7200)
+        );
         assert_eq!(config.goal_generation_interval, Duration::from_secs(300));
         assert_eq!(config.sleep_cycle_interval, Duration::from_secs(3600));
         assert_eq!(config.trigger_evaluation_interval, Duration::from_secs(15));
