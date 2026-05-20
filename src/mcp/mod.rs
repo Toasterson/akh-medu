@@ -121,8 +121,12 @@ impl McpState {
     }
 
     /// Get or lazily open an engine for the given workspace.
+    ///
+    /// Uses a write-lock entry pattern to prevent concurrent MCP calls from
+    /// racing into `Engine::new()` → `redb::Database::open()` on the same
+    /// workspace, which would collide on the OS file lock and SIGKILL.
     pub async fn get_engine(&self, name: &str) -> Result<Arc<Engine>, McpError> {
-        // Fast path: already loaded.
+        // Fast path: already loaded (read lock).
         {
             let map = self.workspaces.read().await;
             if let Some(engine) = map.get(name) {
@@ -130,7 +134,13 @@ impl McpState {
             }
         }
 
-        // Slow path: open workspace from disk.
+        // Take write lock BEFORE the expensive open so only one caller
+        // runs Engine::new() per workspace. Re-check inside the write lock.
+        let mut map = self.workspaces.write().await;
+        if let Some(engine) = map.get(name) {
+            return Ok(Arc::clone(engine));
+        }
+
         let ws_paths = self.paths.workspace(name);
         if !ws_paths.root.exists() {
             return Err(McpError::invalid_params(
@@ -154,7 +164,6 @@ impl McpState {
         })?;
 
         let engine = Arc::new(engine);
-        let mut map = self.workspaces.write().await;
         map.insert(name.to_string(), Arc::clone(&engine));
         Ok(engine)
     }
