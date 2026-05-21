@@ -1330,6 +1330,59 @@ impl Engine {
         Ok(engine.run(self)?)
     }
 
+    /// Remove semantically invalid `is-a` and `child-of` triples from the KG.
+    ///
+    /// These arise when the inference engine transitively closes across
+    /// mismatched domains — for example, agent identity nodes (Ptah, Khnum,
+    /// Horus, …) gaining spurious `is-a` links to CI runners, ForgejoActions,
+    /// storage nodes, tool-name identifiers, UUIDs, or raw noise artefacts.
+    ///
+    /// The predicate-specific semantic guard applied here mirrors the runtime
+    /// guard in the forward-chaining rule engine, so this serves as retroactive
+    /// cleanup for contamination that accumulated before the guard was in place.
+    ///
+    /// Returns the number of triples removed.
+    pub fn purge_contaminated_inferences(&self) -> AkhResult<usize> {
+        use crate::autonomous::rule_engine::{
+            is_invalid_type_hierarchy_participant, is_noise_entity,
+        };
+
+        let is_a_id = self.lookup_symbol("is-a").ok();
+        let child_of_id = self.lookup_symbol("child-of").ok();
+        if is_a_id.is_none() && child_of_id.is_none() {
+            return Ok(0);
+        }
+
+        let candidates: Vec<Triple> = self
+            .all_triples()
+            .into_iter()
+            .filter(|t| Some(t.predicate) == is_a_id || Some(t.predicate) == child_of_id)
+            .collect();
+
+        let mut removed = 0usize;
+        for triple in candidates {
+            let pred_label = self.resolve_label(triple.predicate);
+            let subj_label = self.resolve_label(triple.subject);
+            let obj_label = self.resolve_label(triple.object);
+
+            let contaminated = is_noise_entity(&subj_label)
+                || is_noise_entity(&obj_label)
+                || is_invalid_type_hierarchy_participant(&pred_label, &subj_label)
+                || is_invalid_type_hierarchy_participant(&pred_label, &obj_label);
+
+            if contaminated {
+                self.knowledge_graph
+                    .remove_triple(triple.subject, triple.predicate, triple.object);
+                if let Some(ref sparql) = self.sparql {
+                    let _ = sparql.remove_triple(triple.subject, triple.predicate, triple.object);
+                }
+                removed += 1;
+            }
+        }
+
+        Ok(removed)
+    }
+
     /// Analyze knowledge gaps around the given goal symbols.
     pub fn analyze_gaps(
         &self,
