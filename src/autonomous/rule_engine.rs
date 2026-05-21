@@ -37,6 +37,30 @@ pub fn is_noise_entity(name: &str) -> bool {
     || is_numeric_string(name)
 }
 
+/// Returns `true` if the entity is a service-topology or infrastructure type
+/// that should be excluded from structural rules such as `contains-part-inverse`.
+///
+/// Checked by walking the entity's outgoing `is-a` triples.  Returns `false`
+/// quickly when `guards` is empty or when the KG has no `is-a` predicate yet.
+fn is_entity_type_guarded(entity: SymbolId, guards: &[String], engine: &Engine) -> bool {
+    if guards.is_empty() {
+        return false;
+    }
+    let isa_id = match engine.lookup_symbol("is-a") {
+        Ok(id) => id,
+        Err(_) => return false,
+    };
+    for triple in engine.triples_from(entity) {
+        if triple.predicate == isa_id {
+            let obj_label = engine.resolve_label(triple.object);
+            if guards.iter().any(|g| g == &obj_label) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Returns `true` if the string is purely numeric (digits and at most one decimal point).
 fn is_numeric_string(s: &str) -> bool {
     if s.is_empty() {
@@ -184,6 +208,20 @@ impl RuleEngine {
                                 continue;
                             }
 
+                            // Per-rule antecedent confidence floor: if the
+                            // weakest antecedent triple is below the threshold,
+                            // skip this binding to prevent low-quality source
+                            // edges from spawning derived topology.
+                            if rule.min_antecedent_confidence > 0.0 {
+                                let weakest = matched_triples
+                                    .iter()
+                                    .map(|t| t.confidence)
+                                    .fold(f32::MAX, f32::min);
+                                if weakest < rule.min_antecedent_confidence {
+                                    continue;
+                                }
+                            }
+
                             let derived_triple = DerivedTriple {
                                 triple: triple.with_confidence(confidence),
                                 rule_name: rule.name.clone(),
@@ -273,9 +311,11 @@ impl RuleEngine {
             return Ok(Vec::new());
         }
 
+        let guards = &rule.entity_type_guards;
+
         // Start with the first antecedent.
         let mut results: Vec<(HashMap<String, SymbolId>, Vec<Triple>)> = self
-            .match_pattern(&rule.antecedents[0], &HashMap::new(), engine)?
+            .match_pattern(&rule.antecedents[0], &HashMap::new(), engine, guards)?
             .into_iter()
             .map(|(b, t)| (b, vec![t]))
             .collect();
@@ -284,7 +324,7 @@ impl RuleEngine {
         for pattern in rule.antecedents.iter().skip(1) {
             let mut new_results = Vec::new();
             for (bindings, matched) in &results {
-                let extensions = self.match_pattern(pattern, bindings, engine)?;
+                let extensions = self.match_pattern(pattern, bindings, engine, guards)?;
                 for (ext_bindings, ext_triple) in extensions {
                     let mut combined = bindings.clone();
                     combined.extend(ext_bindings);
@@ -304,11 +344,16 @@ impl RuleEngine {
     }
 
     /// Match a single triple pattern against the KG, given existing bindings.
+    ///
+    /// `entity_type_guards` is the per-rule list of `is-a` type labels that,
+    /// when matched by either the subject or object of a candidate triple,
+    /// cause the triple to be skipped for this rule.
     fn match_pattern(
         &self,
         pattern: &TriplePattern,
         bindings: &HashMap<String, SymbolId>,
         engine: &Engine,
+        entity_type_guards: &[String],
     ) -> AutonomousResult<Vec<(HashMap<String, SymbolId>, Triple)>> {
         let mut results = Vec::new();
 
@@ -333,6 +378,15 @@ impl RuleEngine {
             let subj_label = engine.resolve_label(triple.subject);
             let obj_label = engine.resolve_label(triple.object);
             if is_noise_entity(&subj_label) || is_noise_entity(&obj_label) {
+                continue;
+            }
+
+            // Per-rule entity type guard: skip triples whose subject or object
+            // has an `is-a` relationship to any guarded type (e.g. DigitalArchitect).
+            // This prevents structural rules from creating spurious topology edges.
+            if is_entity_type_guarded(triple.subject, entity_type_guards, engine)
+                || is_entity_type_guarded(triple.object, entity_type_guards, engine)
+            {
                 continue;
             }
 
@@ -439,6 +493,69 @@ impl RuleEngine {
                 }
             }
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Topology cleanup
+    // -----------------------------------------------------------------------
+
+    /// Remove all `part-of` triples from the KG whose subject **or** object has
+    /// an `is-a` relationship to any of the supplied `guarded_types`.
+    ///
+    /// This is the primary remediation path for false service-topology edges that
+    /// were generated by `contains-part-inverse` before the entity-type guard was
+    /// in place, as well as for OODA-cycle artifacts — i.e. `part-of` triples
+    /// that were derived by rule inference during agent cycles but should never
+    /// have been created for infrastructure entities.
+    ///
+    /// Returns the number of triples removed.
+    pub fn purge_false_part_of_topology(engine: &Engine, guarded_types: &[&str]) -> usize {
+        let part_of_id = match engine.lookup_symbol("part-of") {
+            Ok(id) => id,
+            Err(_) => return 0,
+        };
+        let isa_id = match engine.lookup_symbol("is-a") {
+            Ok(id) => id,
+            Err(_) => return 0,
+        };
+
+        // Build the set of entity SymbolIds that belong to a guarded type.
+        let all = engine.all_triples();
+        let guarded_entities: std::collections::HashSet<SymbolId> = all
+            .iter()
+            .filter(|t| t.predicate == isa_id)
+            .filter(|t| {
+                let label = engine.resolve_label(t.object);
+                guarded_types.iter().any(|gt| *gt == label.as_str())
+            })
+            .map(|t| t.subject)
+            .collect();
+
+        if guarded_entities.is_empty() {
+            return 0;
+        }
+
+        // Collect `part-of` triples that involve at least one guarded entity.
+        let to_remove: Vec<Triple> = all
+            .into_iter()
+            .filter(|t| {
+                t.predicate == part_of_id
+                    && (guarded_entities.contains(&t.subject)
+                        || guarded_entities.contains(&t.object))
+            })
+            .collect();
+
+        let mut removed = 0usize;
+        for triple in to_remove {
+            if engine
+                .remove_triple(triple.subject, triple.predicate, triple.object)
+                .map(|r| !r.retracted.is_empty())
+                .unwrap_or(false)
+            {
+                removed += 1;
+            }
+        }
+        removed
     }
 }
 
@@ -681,7 +798,11 @@ mod tests {
         assert!(!engine.has_triple(a, isa, b));
 
         // is-a-transitive should have produced zero derivations.
-        let transitive_derived = result.rule_stats.get("is-a-transitive").copied().unwrap_or(0);
+        let transitive_derived = result
+            .rule_stats
+            .get("is-a-transitive")
+            .copied()
+            .unwrap_or(0);
         assert_eq!(transitive_derived, 0);
     }
 
@@ -702,5 +823,170 @@ mod tests {
         assert!(!is_noise_entity("Stor01"));
         assert!(!is_noise_entity("is-a"));
         assert!(!is_noise_entity("part-of"));
+    }
+
+    #[test]
+    fn entity_type_guard_blocks_contains_part_inverse() {
+        let engine = test_engine();
+        // Stor01 is-a DigitalArchitect; Container contains Stor01.
+        // The `contains-part-inverse` builtin rule has a DigitalArchitect guard,
+        // so "Stor01 part-of Container" must NOT be derived.
+        engine
+            .ingest_label_triples(&[
+                (
+                    "Stor01".into(),
+                    "is-a".into(),
+                    "DigitalArchitect".into(),
+                    1.0,
+                ),
+                ("Container".into(), "contains".into(), "Stor01".into(), 1.0),
+            ])
+            .unwrap();
+
+        let re = RuleEngine::new(RuleEngineConfig::default()).with_rules(RuleSet::builtin());
+        let _ = re.run(&engine).unwrap();
+
+        let stor01 = engine.lookup_symbol("Stor01").unwrap();
+        let container = engine.lookup_symbol("Container").unwrap();
+        // If the rule was correctly blocked, "part-of" was never registered and
+        // lookup_symbol returns Err — trivially no spurious triple exists.
+        assert!(
+            engine.lookup_symbol("part-of").map_or(true, |part_of| {
+                !engine.has_triple(stor01, part_of, container)
+            }),
+            "contains-part-inverse must not fire for DigitalArchitect entities"
+        );
+    }
+
+    #[test]
+    fn entity_type_guard_does_not_block_non_guarded_entities() {
+        let engine = test_engine();
+        // Box contains Widget — neither is a DigitalArchitect,
+        // so `Widget part-of Box` should be derived normally.
+        engine
+            .ingest_label_triples(&[("Box".into(), "contains".into(), "Widget".into(), 1.0)])
+            .unwrap();
+
+        let re = RuleEngine::new(RuleEngineConfig::default()).with_rules(RuleSet::builtin());
+        let _ = re.run(&engine).unwrap();
+
+        let widget = engine.lookup_symbol("Widget").unwrap();
+        let box_sym = engine.lookup_symbol("Box").unwrap();
+        let part_of = engine.lookup_symbol("part-of").unwrap();
+        assert!(
+            engine.has_triple(widget, part_of, box_sym),
+            "contains-part-inverse should fire for non-guarded entities"
+        );
+    }
+
+    #[test]
+    fn min_antecedent_confidence_blocks_low_conf_source() {
+        let engine = test_engine();
+        // ServiceA contains ServiceB with only 0.5 confidence (regex extraction).
+        // contains-part-inverse requires min_antecedent_confidence = 0.7,
+        // so the part-of edge must NOT be derived.
+        engine
+            .ingest_label_triples(&[("ServiceA".into(), "contains".into(), "ServiceB".into(), 0.5)])
+            .unwrap();
+
+        let re = RuleEngine::new(RuleEngineConfig::default()).with_rules(RuleSet::builtin());
+        let _ = re.run(&engine).unwrap();
+
+        let service_b = engine.lookup_symbol("ServiceB").unwrap();
+        let service_a = engine.lookup_symbol("ServiceA").unwrap();
+        // If the rule was blocked, "part-of" may never have been registered.
+        assert!(
+            engine.lookup_symbol("part-of").map_or(true, |part_of| {
+                !engine.has_triple(service_b, part_of, service_a)
+            }),
+            "low-confidence contains must not spawn part-of edges"
+        );
+    }
+
+    #[test]
+    fn min_antecedent_confidence_allows_high_conf_source() {
+        let engine = test_engine();
+        // Box contains Lid with 0.9 confidence — above the 0.7 threshold.
+        engine
+            .ingest_label_triples(&[("Box".into(), "contains".into(), "Lid".into(), 0.9)])
+            .unwrap();
+
+        let re = RuleEngine::new(RuleEngineConfig::default()).with_rules(RuleSet::builtin());
+        let _ = re.run(&engine).unwrap();
+
+        let lid = engine.lookup_symbol("Lid").unwrap();
+        let box_sym = engine.lookup_symbol("Box").unwrap();
+        let part_of = engine.lookup_symbol("part-of").unwrap();
+        assert!(
+            engine.has_triple(lid, part_of, box_sym),
+            "high-confidence contains should produce part-of edge"
+        );
+    }
+
+    #[test]
+    fn purge_false_part_of_topology_removes_infra_edges() {
+        let engine = test_engine();
+        // MacMini is-a DigitalArchitect; a false part-of edge was inserted.
+        engine
+            .ingest_label_triples(&[
+                (
+                    "MacMini".into(),
+                    "is-a".into(),
+                    "DigitalArchitect".into(),
+                    1.0,
+                ),
+                ("MacMini".into(), "part-of".into(), "DataCenter".into(), 1.0),
+            ])
+            .unwrap();
+
+        let mac = engine.lookup_symbol("MacMini").unwrap();
+        let dc = engine.lookup_symbol("DataCenter").unwrap();
+        let part_of = engine.lookup_symbol("part-of").unwrap();
+        assert!(
+            engine.has_triple(mac, part_of, dc),
+            "precondition: triple exists before purge"
+        );
+
+        let removed = RuleEngine::purge_false_part_of_topology(&engine, &["DigitalArchitect"]);
+        assert_eq!(
+            removed, 1,
+            "exactly one false topology triple should be removed"
+        );
+        assert!(
+            !engine.has_triple(mac, part_of, dc),
+            "the false part-of triple should be gone after purge"
+        );
+    }
+
+    #[test]
+    fn purge_false_part_of_topology_leaves_legitimate_edges() {
+        let engine = test_engine();
+        // Wheel is-a PhysicalPart (not DigitalArchitect); Car has Wheel part-of it.
+        // Purge with DigitalArchitect guard should leave this edge alone.
+        engine
+            .ingest_label_triples(&[
+                ("Wheel".into(), "is-a".into(), "PhysicalPart".into(), 1.0),
+                ("Wheel".into(), "part-of".into(), "Car".into(), 1.0),
+            ])
+            .unwrap();
+
+        let wheel = engine.lookup_symbol("Wheel").unwrap();
+        let car = engine.lookup_symbol("Car").unwrap();
+        let part_of = engine.lookup_symbol("part-of").unwrap();
+
+        let removed = RuleEngine::purge_false_part_of_topology(&engine, &["DigitalArchitect"]);
+        assert_eq!(removed, 0, "non-guarded entities should not be purged");
+        assert!(
+            engine.has_triple(wheel, part_of, car),
+            "legitimate part-of edge must survive purge"
+        );
+    }
+
+    #[test]
+    fn purge_returns_zero_when_no_part_of_predicate_exists() {
+        let engine = test_engine();
+        // No triples at all — purge should be a no-op and not panic.
+        let removed = RuleEngine::purge_false_part_of_topology(&engine, &["DigitalArchitect"]);
+        assert_eq!(removed, 0);
     }
 }
