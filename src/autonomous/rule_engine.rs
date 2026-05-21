@@ -14,6 +14,49 @@ use super::error::AutonomousResult;
 use super::rules::{InferenceRule, RuleSet, RuleTerm, TriplePattern};
 
 // ---------------------------------------------------------------------------
+// Noise entity filter
+// ---------------------------------------------------------------------------
+
+/// Returns `true` if an entity name matches known noise/artifact patterns from
+/// agent learning and scaffolding. Entities matching these patterns should be
+/// excluded from rule inference to prevent nonsense transitive closures (e.g.
+/// `Tecton → is-a → Stor01` through intermediate tool-output entities).
+pub fn is_noise_entity(name: &str) -> bool {
+    // Agent learning artifacts
+    name.starts_with("episode:")
+    // Agent goal records
+    || name.starts_with("goal:")
+    // Agent criteria patterns
+    || name.starts_with("criteria:")
+    // Agent scaffolding markers
+    || name.starts_with("expand:")
+    || name.starts_with("desc:")
+    // Numeric rate/certainty markers like "rate:0.8000"
+    || name.starts_with("rate:")
+    // Bare numeric strings like "0.9910"
+    || is_numeric_string(name)
+}
+
+/// Returns `true` if the string is purely numeric (digits and at most one decimal point).
+fn is_numeric_string(s: &str) -> bool {
+    if s.is_empty() {
+        return false;
+    }
+    let mut dot_count = 0;
+    for ch in s.chars() {
+        if ch == '.' {
+            dot_count += 1;
+            if dot_count > 1 {
+                return false;
+            }
+        } else if !ch.is_ascii_digit() {
+            return false;
+        }
+    }
+    true
+}
+
+// ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
 
@@ -285,6 +328,14 @@ impl RuleEngine {
         };
 
         for triple in &candidate_triples {
+            // Skip triples involving noise/artifact entities (agent scaffolding,
+            // numeric noise, etc.) to prevent nonsensical transitive closures.
+            let subj_label = engine.resolve_label(triple.subject);
+            let obj_label = engine.resolve_label(triple.object);
+            if is_noise_entity(&subj_label) || is_noise_entity(&obj_label) {
+                continue;
+            }
+
             let mut new_bindings = HashMap::new();
             let matched =
                 self.match_term(
@@ -605,5 +656,51 @@ mod tests {
         let result = re.run(&engine).unwrap();
 
         assert!(result.derived.len() <= 2);
+    }
+
+    #[test]
+    fn noise_entities_do_not_participate_in_inference() {
+        let engine = test_engine();
+        // Chain: A -> goal:X -> B. The goal:X entity should be skipped by
+        // the noise filter, so transitive closure should NOT derive A is-a B.
+        engine
+            .ingest_label_triples(&[
+                ("A".into(), "is-a".into(), "goal:xyz".into(), 1.0),
+                ("goal:xyz".into(), "is-a".into(), "B".into(), 1.0),
+            ])
+            .unwrap();
+
+        let re = RuleEngine::new(RuleEngineConfig::default()).with_rules(RuleSet::builtin());
+        let result = re.run(&engine).unwrap();
+
+        // A is-a B should NOT be derived because the intermediate entity
+        // "goal:xyz" is a noise entity.
+        let a = engine.lookup_symbol("A").unwrap();
+        let b = engine.lookup_symbol("B").unwrap();
+        let isa = engine.lookup_symbol("is-a").unwrap();
+        assert!(!engine.has_triple(a, isa, b));
+
+        // is-a-transitive should have produced zero derivations.
+        let transitive_derived = result.rule_stats.get("is-a-transitive").copied().unwrap_or(0);
+        assert_eq!(transitive_derived, 0);
+    }
+
+    #[test]
+    fn noise_entity_detection_patterns() {
+        // These should all be recognized as noise.
+        assert!(is_noise_entity("episode:42"));
+        assert!(is_noise_entity("goal:learn_rust"));
+        assert!(is_noise_entity("criteria:quality_score"));
+        assert!(is_noise_entity("expand:some_concept"));
+        assert!(is_noise_entity("desc:a_description"));
+        assert!(is_noise_entity("rate:0.8000"));
+        assert!(is_noise_entity("0.9910"));
+
+        // These should NOT be recognized as noise.
+        assert!(!is_noise_entity("Tecton"));
+        assert!(!is_noise_entity("MacMini"));
+        assert!(!is_noise_entity("Stor01"));
+        assert!(!is_noise_entity("is-a"));
+        assert!(!is_noise_entity("part-of"));
     }
 }

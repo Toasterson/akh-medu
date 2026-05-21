@@ -3385,10 +3385,67 @@ async fn main() {
     };
 
     // AKH_AUTO_START env var overrides config if set.
-    let auto_start: Vec<String> = match std::env::var("AKH_AUTO_START") {
-        Ok(val) if val.is_empty() => Vec::new(),
-        Ok(val) => val.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect(),
-        Err(_) => config.daemon.auto_start.clone(),
+    // "default" is treated as "no auto-start" (daemons are paused by default).
+    let env_auto_start: Option<Vec<String>> = match std::env::var("AKH_AUTO_START") {
+        Ok(val) => {
+            let trimmed = val.trim();
+            if trimmed.is_empty() || trimmed == "default" {
+                Some(Vec::new())
+            } else {
+                Some(
+                    trimmed
+                        .split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty() && s != "default")
+                        .collect(),
+                )
+            }
+        }
+        Err(_) => None,
+    };
+
+    // CLI --auto-start <workspace> adds to the auto-start list.
+    // This is opt-in: workspaces are NOT auto-started unless explicitly listed.
+    let mut cli_auto_start = Vec::new();
+    {
+        let mut args = std::env::args().skip(1);
+        while let Some(arg) = args.next() {
+            if arg == "--auto-start" {
+                if let Some(ws) = args.next() {
+                    if !ws.is_empty() && ws != "default" {
+                        cli_auto_start.push(ws);
+                    }
+                }
+            }
+        }
+    }
+
+    // Merge: env var takes precedence if set; otherwise use config + CLI.
+    let auto_start: Vec<String> = if let Some(env_list) = env_auto_start {
+        // Env var overrides everything. Merge with CLI for dedup.
+        let mut merged = env_list;
+        for w in cli_auto_start {
+            if !merged.contains(&w) {
+                merged.push(w);
+            }
+        }
+        merged
+    } else {
+        // Config provides defaults (filtered to remove "default" sentinel),
+        // CLI --auto-start appends.
+        let mut merged: Vec<String> = config
+            .daemon
+            .auto_start
+            .iter()
+            .filter(|s| s.as_str() != "default")
+            .cloned()
+            .collect();
+        for w in cli_auto_start {
+            if !merged.contains(&w) {
+                merged.push(w);
+            }
+        }
+        merged
     };
 
     let state = Arc::new(ServerState::new(paths.clone(), config));
