@@ -9,14 +9,15 @@
 //! Designed for autonomous operation in daemon mode — the akh populates its
 //! own knowledge graph without human intervention.
 
+mod backends;
 pub mod config;
 mod error;
 mod prompt;
-mod backends;
 
 pub use config::{ExternalApiConfig, ExtractionConfig};
 pub use error::{ExtractionError, ExtractionResult};
 
+use crate::autonomous::is_noise_entity;
 use crate::engine::Engine;
 use crate::graph::Triple;
 use crate::provenance::{DerivationKind, ProvenanceRecord};
@@ -176,11 +177,7 @@ impl TripleExtractor {
     /// Extract triples and insert them into the engine with provenance.
     ///
     /// Returns the number of triples successfully inserted.
-    pub fn extract_and_store(
-        &self,
-        text: &str,
-        engine: &Engine,
-    ) -> ExtractionResult<usize> {
+    pub fn extract_and_store(&self, text: &str, engine: &Engine) -> ExtractionResult<usize> {
         let output = self.extract(text)?;
         let mut inserted = 0;
 
@@ -192,6 +189,18 @@ impl TripleExtractor {
         };
 
         for raw in &output.triples {
+            // Reject triples that reference agent-internal scaffolding entities
+            // (tool names, file paths, episode IDs, literal parameters, etc.).
+            // This prevents "episode bleed" from contaminating the domain KG.
+            if is_noise_entity(&raw.subject) || is_noise_entity(&raw.object) {
+                tracing::debug!(
+                    subject = %raw.subject,
+                    object = %raw.object,
+                    "skipping triple with scaffolding entity"
+                );
+                continue;
+            }
+
             let s = match engine.resolve_or_create_entity(&raw.subject) {
                 Ok(id) => id,
                 Err(_) => continue,
