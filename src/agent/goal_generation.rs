@@ -329,6 +329,15 @@ fn is_goal_worthy_label(label: &str) -> bool {
         return false;
     }
 
+    // OODA cycle artifacts and internal agent metadata.
+    // Entities like "summary:Decide: tool=X, goal=Y" are created by episodic
+    // memory consolidation and carry no knowledge value. Without this guard they
+    // appear as dead-end entities in gap analysis and produce useless
+    // auto-completion goals, contaminating ~39% of the goal set.
+    if super::synthesize::is_metadata_label(&lower) {
+        return false;
+    }
+
     // Common ingestion artifacts
     let junk_patterns = [
         "list of", "index of", "timeline of", "articles for creation",
@@ -714,6 +723,20 @@ pub fn provenance_from_source(source: &GoalSource) -> (String, f32) {
 mod tests {
     use super::*;
     use crate::agent::drives::DriveSystem;
+
+    #[test]
+    fn is_goal_worthy_rejects_summary_labels() {
+        // OODA cycle creates "summary:..." entities in the KG; they must never
+        // become goal candidates.
+        assert!(!is_goal_worthy_label("summary:Decide: tool=kg_query, goal=foo"));
+        assert!(!is_goal_worthy_label("summary:Cycle 5: 3 active goals"));
+        assert!(!is_goal_worthy_label("episode:42"));
+        assert!(!is_goal_worthy_label("tag:observation"));
+        assert!(!is_goal_worthy_label("agent:has_summary"));
+        // Real knowledge entities are not rejected.
+        assert!(is_goal_worthy_label("photosynthesis"));
+        assert!(is_goal_worthy_label("Rust programming language"));
+    }
 
     #[test]
     fn proposals_from_drives_empty_when_below_threshold() {
