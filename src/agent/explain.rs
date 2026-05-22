@@ -1091,6 +1091,43 @@ pub fn derivation_kind_prose(kind: &DerivationKind) -> String {
                 "delegated to {target} (model: {model}, {wall_time_ms}ms): {task_description}"
             )
         }
+        DerivationKind::ArticleCreated {
+            title,
+            block_count,
+            ..
+        } => {
+            format!("wiki article created: \"{title}\" ({block_count} blocks)")
+        }
+        DerivationKind::ArticleUpdated { title, block_count } => {
+            format!("wiki article updated: \"{title}\" ({block_count} blocks)")
+        }
+        DerivationKind::ArticleCited {
+            from_title,
+            to_title,
+        } => {
+            format!("wiki citation recorded: \"{from_title}\" → \"{to_title}\"")
+        }
+        DerivationKind::ArticleFederated {
+            title,
+            activity_type,
+        } => {
+            format!("wiki article federated: \"{title}\" ({activity_type})")
+        }
+        DerivationKind::OpinionExpressed {
+            title,
+            stance,
+            confidence,
+        } => {
+            format!(
+                "opinion expressed in \"{title}\": {stance} (confidence: {confidence:.2})"
+            )
+        }
+        DerivationKind::DebateContribution {
+            topic,
+            contribution_kind,
+        } => {
+            format!("debate contribution on \"{topic}\": {contribution_kind}")
+        }
     }
 }
 

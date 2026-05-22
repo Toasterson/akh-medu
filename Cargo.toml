@@ -44,7 +44,7 @@ rayon = "1"
 hnsw_rs = "0.3"
 anndists = "0.1"
 petgraph = "0.7"
-oxigraph = "0.5"
+oxigraph = { version = "0.5", default-features = false }
 
 # Code analysis
 syn = { version = "2", features = ["full", "visit"] }
@@ -132,6 +132,13 @@ rmcp = { version = "0.17", features = ["server", "transport-streamable-http-serv
 icalendar = { version = "0.16", optional = true, features = ["parser"] }
 chrono = { version = "0.4", optional = true, features = ["serde"] }
 
+# Akhipedia wiki (feature-gated)
+comrak = { version = "0.31", optional = true, default-features = false, features = ["syntect"] }
+syntect = { version = "5", optional = true }
+minijinja = { version = "2", optional = true }
+tantivy = { version = "0.22", optional = true }
+blake3 = { version = "1", optional = true }
+
 [features]
 client-only = [ "daemon" ]  # Strips local engine from akh binary; requires running akhomed server
 daemon = ["tokio", "tokio-tungstenite", "futures-util"]
@@ -149,6 +156,8 @@ candle-backend = ["candle-core", "candle-nn", "candle-transformers", "safetensor
 nlu-candle = ["candle-backend"]
 burn-training = ["candle-backend"]  # will add "burn" when sqlite3 conflict resolved
 training-data = []
+wiki = ["dep:comrak", "dep:syntect", "dep:minijinja", "dep:tantivy", "dep:blake3"]
+sparql-persist = ["oxigraph/rocksdb"]
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

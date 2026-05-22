@@ -215,7 +215,7 @@ impl ArticleStore {
         }
 
         let article_id = engine
-            .create_symbol(SymbolKind::Entity, &format!("wiki:{title}"))
+            .create_symbol(SymbolKind::Entity, format!("wiki:{title}").as_str())
             .map_err(|e| WikiError::Engine(Box::new(e)))?
             .id;
 
@@ -324,13 +324,29 @@ impl ArticleStore {
         let &from_id_raw = self.title_index.get(from_title).ok_or_else(|| WikiError::ArticleNotFound {
             title: from_title.into(),
         })?;
-        if let Some(article) = self.articles.get_mut(&from_id_raw) {
-            if let Some(to_sym) = crate::symbol::SymbolId::new(to_id) {
-                if !article.header.cites.contains(&to_sym) {
-                    article.header.cites.push(to_sym);
-                }
-            }
+        if let (Some(article), Some(to_sym)) = (
+            self.articles.get_mut(&from_id_raw),
+            crate::symbol::SymbolId::new(to_id),
+        ) && !article.header.cites.contains(&to_sym) {
+            article.header.cites.push(to_sym);
         }
+        Ok(())
+    }
+
+    /// Set the `responds_to` link on an existing article.
+    pub fn set_responds_to(
+        &mut self,
+        title: &str,
+        parent_id: SymbolId,
+    ) -> WikiResult<()> {
+        let &id = self.title_index.get(title).ok_or_else(|| WikiError::ArticleNotFound {
+            title: title.into(),
+        })?;
+        let article = self.articles.get_mut(&id).ok_or_else(|| WikiError::ArticleNotFound {
+            title: title.into(),
+        })?;
+        article.header.responds_to = Some(parent_id);
+        article.header.modified = now_secs();
         Ok(())
     }
 

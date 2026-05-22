@@ -140,6 +140,10 @@ pub enum AkhError {
     #[error(transparent)]
     #[diagnostic(transparent)]
     Nlu(#[from] crate::nlu::error::NluError),
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Wiki(#[from] crate::wiki::WikiError),
 }
 
 // ---------------------------------------------------------------------------
