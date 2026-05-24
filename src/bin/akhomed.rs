@@ -447,7 +447,8 @@ async fn apply_seed(
     Path((ws_name, pack_name)): Path<(String, String)>,
 ) -> Result<Json<SeedAppliedResponse>, (StatusCode, String)> {
     let engine = state.get_engine(&ws_name).await?;
-    let registry = SeedRegistry::bundled();
+    let seeds_dir = state.paths.seeds_dir();
+    let registry = SeedRegistry::discover(&seeds_dir);
     match registry.apply(&pack_name, &engine) {
         Ok(report) => Ok(Json(SeedAppliedResponse {
             pack: pack_name,
