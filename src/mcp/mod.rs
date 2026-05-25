@@ -706,6 +706,28 @@ pub struct MctsPlanParams {
     pub max_depth: Option<usize>,
 }
 
+// ── Stats / Analytics Parameter Structs ─────────────────────────────────
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct TripleStatsParams {
+    #[schemars(description = "Target workspace (default: \"default\")")]
+    #[serde(default = "default_workspace")]
+    pub workspace: String,
+    #[schemars(description = "Number of top-connected entities to return (default: 10)")]
+    pub top_n: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PredicateFilterParams {
+    #[schemars(description = "Target workspace (default: \"default\")")]
+    #[serde(default = "default_workspace")]
+    pub workspace: String,
+    #[schemars(description = "Predicate label to filter by (e.g. \"child-of\", \"is-a\")")]
+    pub predicate: String,
+    #[schemars(description = "Maximum number of entity pairs to return (default: 50)")]
+    pub limit: Option<usize>,
+}
+
 // ── Helpers ─────────────────────────────────────────────────────────────
 
 /// Format a `Vec<AkhMessage>` into human-readable text for MCP tool output.
@@ -3305,6 +3327,162 @@ impl AkhMcpServer {
 
         Ok(CallToolResult::success(vec![Content::text(result)]))
     }
+
+    // ── Analytics ─────────────────────────────────────────────────────
+
+    #[tool(
+        name = "triple_stats",
+        description = "Workspace-level knowledge-graph diagnostics in one call: total triples, \
+                       entity counts, predicate distribution, confidence bands, top-connected \
+                       entities, orphan count, and average relations per entity."
+    )]
+    async fn triple_stats(
+        &self,
+        Parameters(params): Parameters<TripleStatsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let engine = self.state.get_engine(&params.workspace).await?;
+        let top_n = params.top_n.unwrap_or(10);
+
+        let triples = engine.all_triples();
+        let total_triples = triples.len();
+
+        // entity_degree: symbol_id -> [outgoing, incoming]
+        let mut entity_degree: HashMap<u64, [usize; 2]> = HashMap::new();
+        let mut predicate_counts: HashMap<String, usize> = HashMap::new();
+        let mut conf_0_3: usize = 0;
+        let mut conf_3_7: usize = 0;
+        let mut conf_7_9: usize = 0;
+        let mut conf_9_1: usize = 0;
+
+        for t in &triples {
+            entity_degree.entry(t.subject.get()).or_insert([0, 0])[0] += 1;
+            entity_degree.entry(t.object.get()).or_insert([0, 0])[1] += 1;
+
+            let pred_label = engine.resolve_label(t.predicate);
+            *predicate_counts.entry(pred_label).or_insert(0) += 1;
+
+            let conf = t.confidence;
+            if conf < 0.3 {
+                conf_0_3 += 1;
+            } else if conf < 0.7 {
+                conf_3_7 += 1;
+            } else if conf < 0.9 {
+                conf_7_9 += 1;
+            } else {
+                conf_9_1 += 1;
+            }
+        }
+
+        let total_entities = entity_degree.len();
+
+        // Orphans: graph nodes that appear in neither subject nor object position.
+        let orphan_entities = engine
+            .knowledge_graph()
+            .nodes()
+            .iter()
+            .filter(|sym| !entity_degree.contains_key(&sym.get()))
+            .count();
+
+        // Top N by total degree (outgoing + incoming).
+        let mut ranked: Vec<(u64, usize, usize)> = entity_degree
+            .iter()
+            .map(|(&id, degrees)| (id, degrees[0], degrees[1]))
+            .collect();
+        ranked.sort_by(|a, b| (b.1 + b.2).cmp(&(a.1 + a.2)));
+        ranked.truncate(top_n);
+
+        let top_connected: Vec<serde_json::Value> = ranked
+            .iter()
+            .filter_map(|&(id, out, inc)| {
+                let sym = crate::symbol::SymbolId::new(id)?;
+                let label = engine.resolve_label(sym);
+                Some(serde_json::json!({
+                    "entity": label,
+                    "outgoing": out,
+                    "incoming": inc,
+                }))
+            })
+            .collect();
+
+        let avg_relations = if total_entities > 0 {
+            (total_triples as f64 / total_entities as f64 * 10.0).round() / 10.0
+        } else {
+            0.0
+        };
+
+        let stats = serde_json::json!({
+            "total_triples": total_triples,
+            "total_entities": total_entities,
+            "predicate_counts": predicate_counts,
+            "confidence_distribution": {
+                "0.0-0.3": conf_0_3,
+                "0.3-0.7": conf_3_7,
+                "0.7-0.9": conf_7_9,
+                "0.9-1.0": conf_9_1,
+            },
+            "top_connected": top_connected,
+            "orphan_entities": orphan_entities,
+            "avg_relations_per_entity": avg_relations,
+        });
+
+        let json = serde_json::to_string_pretty(&stats)
+            .map_err(|e| McpError::internal_error(format!("json: {e}"), None))?;
+
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(
+        name = "predicate_filter",
+        description = "List all entity pairs (subject → object) connected by a specific predicate. \
+                       Drill-down companion to triple_stats's predicate_counts output."
+    )]
+    async fn predicate_filter(
+        &self,
+        Parameters(params): Parameters<PredicateFilterParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let engine = self.state.get_engine(&params.workspace).await?;
+        let limit = params.limit.unwrap_or(50);
+
+        let pred_id = engine
+            .resolve_symbol(&params.predicate)
+            .map_err(|e| McpError::invalid_params(format!("predicate: {e}"), None))?;
+
+        let triples = engine.all_triples();
+        let matching: Vec<_> = triples.iter().filter(|t| t.predicate == pred_id).collect();
+        let total = matching.len();
+
+        if total == 0 {
+            return Ok(CallToolResult::success(vec![Content::text(format!(
+                "No triples with predicate \"{}\"",
+                params.predicate
+            ))]));
+        }
+
+        let truncated = total > limit;
+        let mut lines = vec![format!(
+            "Predicate \"{}\" — {} triple(s){}:",
+            params.predicate,
+            total,
+            if truncated {
+                format!(" (showing first {limit})")
+            } else {
+                String::new()
+            },
+        )];
+
+        for t in matching.iter().take(limit) {
+            lines.push(format!(
+                "  {} → {} (conf={:.2})",
+                engine.resolve_label(t.subject),
+                engine.resolve_label(t.object),
+                t.confidence,
+            ));
+        }
+
+        Ok(CallToolResult::success(vec![Content::text(
+            lines.join("\n"),
+        )]))
+    }
 }
 
 // ── ServerHandler impl ──────────────────────────────────────────────────
@@ -3351,7 +3529,10 @@ impl rmcp::handler::server::ServerHandler for AkhMcpServer {
                  Evidence theory: `add_evidence` (submit evidence for/against a claim from a source), \
                  `assess_evidence` (Dempster-Shafer belief interval assessment with conflict detection).\n\n\
                  Source reliability: `rate_source` (NATO Admiralty rating from Bayesian trust model), \
-                 `verify_source_claim` (update trust when claim verified true/false)."
+                 `verify_source_claim` (update trust when claim verified true/false).\n\n\
+                 Analytics: `triple_stats` (full workspace diagnostics — predicate distribution, \
+                 confidence bands, top-connected entities, orphan count in one call), \
+                 `predicate_filter` (list all entity pairs for a specific predicate)."
                     .to_string(),
             ),
         }
