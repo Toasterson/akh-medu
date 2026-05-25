@@ -128,6 +128,7 @@ const ONTOLOGY_TOML: &str = include_str!("../../data/seeds/ontology/seed.toml");
 const COMMON_SENSE_TOML: &str = include_str!("../../data/seeds/common-sense/seed.toml");
 const COMPUTING_TOML: &str = include_str!("../../data/seeds/computing/seed.toml");
 const ARCHITECTURE_TOML: &str = include_str!("../../data/seeds/architecture/seed.toml");
+const ENNEAD_TOML: &str = include_str!("../../data/seeds/ennead/seed.toml");
 
 fn parse_seed_toml(toml_str: &str, source: SeedSource) -> SeedResult<SeedPack> {
     let parsed: SeedToml = toml::from_str(toml_str).map_err(|e| SeedError::Parse {
@@ -152,6 +153,7 @@ fn bundled_packs() -> Vec<SeedPack> {
         (COMMON_SENSE_TOML, "common-sense"),
         (COMPUTING_TOML, "computing"),
         (ARCHITECTURE_TOML, "architecture"),
+        (ENNEAD_TOML, "ennead"),
     ]
     .iter()
     .filter_map(
@@ -393,12 +395,13 @@ mod tests {
     #[test]
     fn bundled_packs_parse() {
         let packs = bundled_packs();
-        assert_eq!(packs.len(), 5);
+        assert_eq!(packs.len(), 6);
         assert!(packs.iter().any(|p| p.id == "identity"));
         assert!(packs.iter().any(|p| p.id == "ontology"));
         assert!(packs.iter().any(|p| p.id == "common-sense"));
         assert!(packs.iter().any(|p| p.id == "computing"));
         assert!(packs.iter().any(|p| p.id == "architecture"));
+        assert!(packs.iter().any(|p| p.id == "ennead"));
     }
 
     #[test]
@@ -441,7 +444,7 @@ mod tests {
         let reg = SeedRegistry::bundled();
         let ids: Vec<String> = reg.list().iter().map(|p| p.id.clone()).collect();
         let reports = reg.apply_all(&ids, &engine).unwrap();
-        assert_eq!(reports.len(), 5);
+        assert_eq!(reports.len(), 6);
 
         let total: usize = reports.iter().map(|r| r.triples_applied).sum();
         assert!(
