@@ -130,6 +130,41 @@ impl ServerState {
             ledger.set_broadcast(self.audit_broadcast.clone());
         }
 
+        // Apply seed packs listed in the workspace config (idempotent — seeds
+        // track themselves via akh:seed-applied triples so re-opening a fully
+        // seeded workspace is a no-op).
+        {
+            let config_path = self.paths.workspace_config_file(name);
+            let ws_config = if config_path.exists() {
+                akh_medu::workspace::WorkspaceConfig::load(&config_path)
+                    .unwrap_or_else(|_| akh_medu::workspace::WorkspaceConfig::with_name(name))
+            } else {
+                akh_medu::workspace::WorkspaceConfig::with_name(name)
+            };
+            if !ws_config.seed_packs.is_empty() {
+                let seeds_dir = self.paths.seeds_dir();
+                let registry = SeedRegistry::discover(&seeds_dir);
+                match registry.apply_all(&ws_config.seed_packs, &engine) {
+                    Ok(reports) => {
+                        let applied: usize = reports.iter().map(|r| r.triples_applied).sum();
+                        if applied > 0 {
+                            tracing::info!(
+                                workspace = %name,
+                                triples = applied,
+                                "applied seed packs on first open"
+                            );
+                            if let Err(e) = engine.persist() {
+                                tracing::warn!(workspace = %name, "persist after seeding failed: {e}");
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(workspace = %name, "seed application failed: {e}");
+                    }
+                }
+            }
+        }
+
         let engine = Arc::new(engine);
         let mut map = self.workspaces.write().await;
         map.insert(name.to_string(), Arc::clone(&engine));
