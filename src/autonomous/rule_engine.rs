@@ -254,6 +254,20 @@ impl RuleEngine {
                                 continue;
                             }
 
+                            // Self-reference guard: skip any derived triple where the
+                            // subject and object resolve to the same symbol. Transitive
+                            // rules (is-a-transitive, parent-child-inverse) can produce
+                            // X → P → X loops; discard them before they enter the KG.
+                            if triple.subject == triple.object {
+                                tracing::debug!(
+                                    rule = %rule.name,
+                                    symbol = triple.subject.get(),
+                                    predicate = %pred_label,
+                                    "rule engine discarding self-referential derived triple"
+                                );
+                                continue;
+                            }
+
                             let key = (
                                 triple.subject.get(),
                                 triple.predicate.get(),
@@ -949,5 +963,63 @@ mod tests {
         let child_of = engine.lookup_symbol("child-of").unwrap();
 
         assert!(!engine.has_triple(infer_rules_sym, child_of, ptah));
+    }
+
+    #[test]
+    fn self_referential_triple_blocked_in_rule_engine() {
+        let engine = test_engine();
+        // Ma'at is-a X, X is-a Ma'at — transitive closure must NOT derive Ma'at is-a Ma'at.
+        engine
+            .ingest_label_triples(&[
+                ("Maat".into(), "is-a".into(), "Concept".into(), 0.9),
+                ("Concept".into(), "is-a".into(), "Maat".into(), 0.9),
+            ])
+            .unwrap();
+
+        let re = RuleEngine::new(RuleEngineConfig::default()).with_rules(RuleSet::builtin());
+        let result = re.run(&engine).unwrap();
+
+        let maat = engine.lookup_symbol("Maat").unwrap();
+        let isa = engine.lookup_symbol("is-a").unwrap();
+
+        // Ma'at is-a Ma'at must NOT be derived or committed.
+        assert!(!engine.has_triple(maat, isa, maat));
+        // None of the derived triples should be self-referential.
+        for dt in &result.derived {
+            assert_ne!(
+                dt.triple.subject, dt.triple.object,
+                "rule engine derived a self-referential triple via rule '{}'",
+                dt.rule_name
+            );
+        }
+    }
+
+    #[test]
+    fn parent_child_inverse_self_loop_blocked() {
+        let engine = test_engine();
+        // deity parent-of deity — parent-child-inverse rule must NOT produce deity child-of deity.
+        engine
+            .ingest_label_triples(&[("deity".into(), "parent-of".into(), "deity".into(), 0.9)])
+            .unwrap();
+
+        let re = RuleEngine::new(RuleEngineConfig::default()).with_rules(RuleSet::builtin());
+        let result = re.run(&engine).unwrap();
+
+        // If child-of was never committed the symbol won't exist — that alone proves no
+        // self-referential triple was inserted.  If it does exist, verify no self-loop.
+        if let (Ok(deity), Ok(child_of)) = (
+            engine.lookup_symbol("deity"),
+            engine.lookup_symbol("child-of"),
+        ) {
+            assert!(!engine.has_triple(deity, child_of, deity));
+        }
+
+        for dt in &result.derived {
+            assert_ne!(
+                dt.triple.subject, dt.triple.object,
+                "rule engine derived self-referential triple via rule '{}'",
+                dt.rule_name
+            );
+        }
     }
 }

@@ -446,6 +446,20 @@ impl Engine {
     /// 2. **Insert**: KG + hypervector creation + SPARQL sync
     /// 3. **Post-insert**: Hierarchy invalidation, Skolem auto-grounding, rule macro expansion
     pub fn add_triple(&self, triple: &Triple) -> AkhResult<()> {
+        // --- Self-reference guard: subject == object is semantically meaningless for
+        // structural predicates and is the root cause of identity contamination loops
+        // (e.g. Ma'at child-of Ma'at, deity → Ma'at). Drop silently with a warning so
+        // callers don't need to handle a new error variant.
+        if triple.subject == triple.object {
+            tracing::warn!(
+                subject = triple.subject.get(),
+                predicate = triple.predicate.get(),
+                "dropping self-referential triple (subject == object); \
+                 likely an inference or extraction artefact"
+            );
+            return Ok(());
+        }
+
         // --- Phase 9 pre-insert: constraint check ---
         if self.phase9_config.enforce_constraints {
             let registry = self.constraint_registry.read().unwrap();
@@ -1365,7 +1379,8 @@ impl Engine {
             let subj_label = self.resolve_label(triple.subject);
             let obj_label = self.resolve_label(triple.object);
 
-            let contaminated = is_noise_entity(&subj_label)
+            let contaminated = triple.subject == triple.object
+                || is_noise_entity(&subj_label)
                 || is_noise_entity(&obj_label)
                 || is_invalid_type_hierarchy_participant(&pred_label, &subj_label)
                 || is_invalid_type_hierarchy_participant(&pred_label, &obj_label);
@@ -2826,6 +2841,31 @@ mod tests {
 
         let objects = engine.knowledge_graph().objects_of(sun.id, is_a.id);
         assert_eq!(objects, vec![star.id]);
+    }
+
+    #[test]
+    fn add_triple_self_reference_is_dropped() {
+        let engine = Engine::new(EngineConfig {
+            dimension: Dimension::TEST,
+            ..Default::default()
+        })
+        .unwrap();
+
+        let maat = engine.create_symbol(SymbolKind::Entity, "Maat").unwrap();
+        let child_of = engine
+            .create_symbol(SymbolKind::Relation, "child-of")
+            .unwrap();
+
+        // Adding a self-referential triple must succeed (no error) but must not be stored.
+        engine
+            .add_triple(&Triple::new(maat.id, child_of.id, maat.id))
+            .unwrap();
+
+        let objects = engine.knowledge_graph().objects_of(maat.id, child_of.id);
+        assert!(
+            objects.is_empty(),
+            "self-referential triple must not be inserted into the KG"
+        );
     }
 
     #[test]
