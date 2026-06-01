@@ -802,6 +802,15 @@ enum WorkspaceAction {
         /// Role to assign (e.g. Architect, Investigator, Executor).
         role: String,
     },
+    /// List (and optionally delete) workspaces with invalid names.
+    ///
+    /// Workspaces created by older agent runs sometimes have names like
+    /// "status:active" or "episode:848". This command identifies and removes them.
+    Cleanup {
+        /// Actually delete the junk workspaces (default: dry-run only).
+        #[arg(long)]
+        delete: bool,
+    },
 }
 
 /// Resolve an [`AkhClient`]: prefer a running akhomed server, fall back to local engine.
@@ -1006,6 +1015,30 @@ fn main() -> Result<()> {
                     let client = resolve_client(&name, config, Some(mgr.paths()))?;
                     client.assign_role(&role).into_diagnostic()?;
                     println!("Assigned role \"{role}\" to workspace \"{name}\".");
+                }
+                WorkspaceAction::Cleanup { delete } => {
+                    let junk = mgr.list_invalid_names();
+                    if junk.is_empty() {
+                        println!("No junk workspaces found.");
+                    } else if delete {
+                        let (deleted, errors) = mgr.delete_junk_workspaces();
+                        for name in &deleted {
+                            println!("Deleted junk workspace \"{name}\".");
+                        }
+                        for (name, err) in &errors {
+                            eprintln!("Failed to delete \"{name}\": {err}");
+                        }
+                        println!(
+                            "Deleted {}/{} junk workspaces.",
+                            deleted.len(),
+                            deleted.len() + errors.len()
+                        );
+                    } else {
+                        println!("Junk workspaces (use --delete to remove them):");
+                        for name in &junk {
+                            println!("  {name}");
+                        }
+                    }
                 }
             }
         }
@@ -4068,6 +4101,33 @@ fn run_client_only(cli: Cli) -> Result<()> {
                 let ws_client = resolve_client(&name, xdg_paths.as_ref())?;
                 ws_client.assign_role(&role).into_diagnostic()?;
                 println!("Assigned role \"{role}\" to workspace \"{name}\".");
+            }
+            WorkspaceAction::Cleanup { delete } => {
+                let paths = xdg_paths
+                    .ok_or_else(|| miette::miette!("XDG paths not available; cannot scan workspaces"))?;
+                let mgr = akh_medu::workspace::WorkspaceManager::new(paths);
+                let junk = mgr.list_invalid_names();
+                if junk.is_empty() {
+                    println!("No junk workspaces found.");
+                } else if delete {
+                    let (deleted, errors) = mgr.delete_junk_workspaces();
+                    for name in &deleted {
+                        println!("Deleted junk workspace \"{name}\".");
+                    }
+                    for (name, err) in &errors {
+                        eprintln!("Failed to delete \"{name}\": {err}");
+                    }
+                    println!(
+                        "Deleted {}/{} junk workspaces.",
+                        deleted.len(),
+                        deleted.len() + errors.len()
+                    );
+                } else {
+                    println!("Junk workspaces (use --delete to remove them):");
+                    for name in &junk {
+                        println!("  {name}");
+                    }
+                }
             }
         },
 

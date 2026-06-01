@@ -10,6 +10,7 @@ use crate::agent::tool_manifest::{
     Capability, DangerInfo, DangerLevel, ToolManifest, ToolParamSchema, ToolSource,
 };
 use crate::engine::Engine;
+use crate::workspace::validate_workspace_name;
 use std::collections::HashSet;
 
 // ---------------------------------------------------------------------------
@@ -124,7 +125,11 @@ impl Tool for AgentSpawnTool {
             parameters: vec![
                 ToolParam {
                     name: "name".into(),
-                    description: "Name for the new workspace.".into(),
+                    description: "Name for the new workspace. Must be 1–63 characters: \
+                                  lowercase letters (a-z), digits (0-9), hyphens (-), or \
+                                  underscores (_). Must start with a letter or digit. \
+                                  Colons, spaces, and uppercase letters are not allowed."
+                        .into(),
                     required: true,
                 },
                 ToolParam {
@@ -139,6 +144,16 @@ impl Tool for AgentSpawnTool {
     fn execute(&self, _engine: &Engine, input: ToolInput) -> AgentResult<ToolOutput> {
         let name = input.require("name", "agent_spawn")?;
         let role = input.get("role");
+
+        // Reject invalid names immediately — before any network call — so the
+        // agent gets a clear diagnostic rather than an opaque HTTP 400.
+        if let Err(e) = validate_workspace_name(name) {
+            return Ok(ToolOutput::err(format!(
+                "Invalid workspace name \"{name}\": {e}. \
+                 Workspace names must be 1–63 lowercase letters, digits, hyphens, or underscores, \
+                 and must start with a letter or digit."
+            )));
+        }
 
         let base_url = match discover_base_url() {
             Ok(u) => u,
@@ -208,7 +223,12 @@ impl Tool for AgentSpawnTool {
             name: "agent_spawn".into(),
             description: "Creates a new agent workspace via akhomed.".into(),
             parameters: vec![
-                ToolParamSchema::required("name", "Name for the new workspace."),
+                ToolParamSchema::required(
+                    "name",
+                    "Name for the new workspace — 1–63 lowercase letters, digits, hyphens, or \
+                     underscores, starting with a letter or digit. Colons, spaces, and uppercase \
+                     letters are rejected.",
+                ),
                 ToolParamSchema::optional(
                     "role",
                     "Ennead archetype name (e.g. Investigator, Executor).",

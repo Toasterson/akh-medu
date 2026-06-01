@@ -321,7 +321,11 @@ pub struct RunAgentParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct CreateWorkspaceParams {
-    #[schemars(description = "Name for the new workspace")]
+    #[schemars(
+        description = "Name for the new workspace. Must be 1–63 characters: lowercase letters \
+                       (a-z), digits (0-9), hyphens, or underscores. Must start with a letter \
+                       or digit. Colons, spaces, and uppercase letters are not allowed."
+    )]
     pub name: String,
     #[schemars(description = "Optional role to assign (e.g. 'astronomy researcher')")]
     pub role: Option<String>,
@@ -1304,9 +1308,13 @@ impl AkhMcpServer {
             name: name.clone(),
             ..Default::default()
         };
-        manager
-            .create(config)
-            .map_err(|e| McpError::internal_error(format!("{e}"), None))?;
+        manager.create(config).map_err(|e| {
+            if matches!(e, crate::workspace::WorkspaceError::InvalidName { .. }) {
+                McpError::invalid_params(format!("{e}"), None)
+            } else {
+                McpError::internal_error(format!("{e}"), None)
+            }
+        })?;
 
         let mut extra = String::new();
 
