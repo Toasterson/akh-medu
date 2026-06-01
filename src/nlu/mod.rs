@@ -12,6 +12,7 @@
 //! 4. **VSA parse ranker** — ranks candidate parses using exemplar memory
 
 pub mod error;
+pub mod kg_context;
 pub mod parse_ranker;
 
 #[cfg(feature = "nlu-ml")]
@@ -452,7 +453,13 @@ impl NluPipeline {
     // farewells) where hallucination risk is low and persona flavor helps.
 
     /// Generate a brief dialogue act response (greeting, farewell, etc.)
-    /// using the LLM with persona context. Returns `None` if LLM unavailable.
+    /// using the LLM with persona and optional KG context.
+    ///
+    /// `context` is the active conversation topic (e.g. "the Ennead").
+    /// `kg_context` is the pre-built KG context block from [`kg_context::KgContextBuilder`];
+    /// when present it is injected into the system prompt to ground the response.
+    ///
+    /// Returns `None` when no LLM backend is loaded.
     #[allow(unused_variables)] // params used only when nlu-llm feature is enabled
     pub fn generate_dialogue(
         &self,
@@ -460,11 +467,13 @@ impl NluPipeline {
         persona_name: &str,
         traits: &[String],
         context: Option<&str>,
+        kg_context: Option<&str>,
     ) -> Option<String> {
         #[cfg(feature = "nlu-llm")]
         if let Some(ref llm_arc) = self.llm_translator {
             let llm = std::sync::Arc::clone(llm_arc);
-            let prompt = llm_translator::build_dialogue_prompt(act, persona_name, traits, context);
+            let prompt =
+                llm_translator::build_dialogue_prompt(act, persona_name, traits, context, kg_context);
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
                 llm.generate(&prompt, 64)
             }));

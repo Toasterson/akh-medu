@@ -477,12 +477,18 @@ Output: "#
 
 /// Build a short prompt for dialogue acts (greeting, farewell, etc.).
 ///
-/// Uses Qwen2.5-Instruct chat template format.
+/// Uses Qwen2.5-Instruct chat template format. When `kg_context` is provided
+/// it is injected into the system message, grounding the model's response in
+/// actual KG facts and reducing hallucination.
+///
+/// Token budget: kg_context should be < 1 800 tokens so the combined prompt
+/// stays below the 3 800-token limit enforced by the generation loop.
 pub fn build_dialogue_prompt(
     act: &str,
     persona_name: &str,
     traits: &[String],
     context: Option<&str>,
+    kg_context: Option<&str>,
 ) -> String {
     let traits_str = if traits.is_empty() {
         "knowledgeable".to_string()
@@ -494,10 +500,14 @@ pub fn build_dialogue_prompt(
         .map(|c| format!(" We were discussing {c}."))
         .unwrap_or_default();
 
+    let kg_section = kg_context
+        .map(|kg| format!("\n\n{kg}"))
+        .unwrap_or_default();
+
     format!(
         "<|im_start|>system\n\
          You are {persona_name}, a knowledge engine that is {traits_str}.\n\
-         Respond with exactly one sentence. No hashtags. Always introduce yourself as {persona_name}.<|im_end|>\n\
+         Respond with exactly one sentence. No hashtags. Always introduce yourself as {persona_name}.{kg_section}<|im_end|>\n\
          <|im_start|>user\n\
          Generate a {act} response.{context_line}<|im_end|>\n\
          <|im_start|>assistant\n"
@@ -562,10 +572,24 @@ mod tests {
 
     #[test]
     fn dialogue_prompt_contains_act() {
-        let prompt = build_dialogue_prompt("greeting", "Akh", &["warm".into()], None);
+        let prompt = build_dialogue_prompt("greeting", "Akh", &["warm".into()], None, None);
         assert!(prompt.contains("greeting"));
         assert!(prompt.contains("Akh"));
         assert!(prompt.contains("warm"));
+    }
+
+    #[test]
+    fn dialogue_prompt_includes_kg_context() {
+        let kg = "## Knowledge Graph Context\n- Ennead is-a collective\n";
+        let prompt = build_dialogue_prompt("greeting", "Akh", &[], None, Some(kg));
+        assert!(prompt.contains("Knowledge Graph Context"));
+        assert!(prompt.contains("Ennead is-a collective"));
+    }
+
+    #[test]
+    fn dialogue_prompt_no_kg_context_unchanged() {
+        let without = build_dialogue_prompt("farewell", "Akh", &[], None, None);
+        assert!(!without.contains("Knowledge Graph Context"));
     }
 
     // ── JSON → AbsTree parsing ─────────────────────────────────────────

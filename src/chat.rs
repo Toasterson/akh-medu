@@ -26,6 +26,7 @@ use crate::infer::InferenceQuery;
 use crate::infer::backward::{BackwardConfig, infer_backward};
 use crate::message::AkhMessage;
 use crate::nlu::NluPipeline;
+use crate::nlu::kg_context::KgContextBuilder;
 use crate::symbol::SymbolId;
 
 // ── Query decomposition ─────────────────────────────────────────────────
@@ -62,6 +63,8 @@ pub struct ChatProcessor {
     nlu_pipeline: NluPipeline,
     config: ChatProcessorConfig,
     lexicon: Lexicon,
+    /// Session-scoped KG context builder for grounding LLM prompts.
+    kg_context_builder: KgContextBuilder,
 }
 
 impl ChatProcessor {
@@ -94,6 +97,7 @@ impl ChatProcessor {
                 ..Default::default()
             },
             lexicon,
+            kg_context_builder: KgContextBuilder::new(),
         }
     }
 
@@ -201,13 +205,13 @@ impl ChatProcessor {
         match tree {
             // ── Dialogue acts ───────────────────────────────────────
             AbsTree::Greeting { .. } => {
-                self.handle_dialogue_greeting(&mut msgs, agent, engine, &grammar);
+                self.handle_dialogue_greeting(&mut msgs, agent, engine, &grammar, raw_input);
             }
             AbsTree::Farewell { .. } => {
-                self.handle_dialogue_farewell(&mut msgs, agent, engine, &grammar);
+                self.handle_dialogue_farewell(&mut msgs, agent, engine, &grammar, raw_input);
             }
             AbsTree::Acknowledgment { .. } => {
-                self.handle_dialogue_ack(&mut msgs, agent, engine, &grammar);
+                self.handle_dialogue_ack(&mut msgs, agent, engine, &grammar, raw_input);
             }
             AbsTree::FollowUpRequest { .. } => {
                 self.handle_dialogue_follow_up(&mut msgs, agent, engine, &grammar);
@@ -279,14 +283,22 @@ impl ChatProcessor {
         agent: &mut Agent,
         engine: &Arc<Engine>,
         grammar: &str,
+        raw_input: &str,
     ) {
         let (name, traits) = Self::persona_name_and_traits(engine);
         let active_topic = Self::active_topic_label(agent, engine);
+        let kg_ctx = self.kg_context_builder.build(raw_input, engine);
         // Try LLM-generated greeting — but validate it mentions the persona name.
         // Small LLMs often ignore the system prompt and produce generic greetings.
         let text = self
             .nlu_pipeline
-            .generate_dialogue("greeting", &name, &traits, active_topic.as_deref())
+            .generate_dialogue(
+                "greeting",
+                &name,
+                &traits,
+                active_topic.as_deref(),
+                kg_ctx.as_deref(),
+            )
             .filter(|t| t.to_lowercase().contains(&name.to_lowercase()))
             .unwrap_or_else(|| {
                 agent
@@ -303,11 +315,13 @@ impl ChatProcessor {
         agent: &mut Agent,
         engine: &Arc<Engine>,
         grammar: &str,
+        raw_input: &str,
     ) {
         let (name, traits) = Self::persona_name_and_traits(engine);
+        let kg_ctx = self.kg_context_builder.build(raw_input, engine);
         let text = self
             .nlu_pipeline
-            .generate_dialogue("farewell", &name, &traits, None)
+            .generate_dialogue("farewell", &name, &traits, None, kg_ctx.as_deref())
             .unwrap_or_else(|| agent.dialogue_manager().handle_farewell(&name));
         msgs.push(AkhMessage::narrative(&text, grammar));
         agent.conversation_state_mut().record_agent_turn(&text);
@@ -319,11 +333,13 @@ impl ChatProcessor {
         agent: &mut Agent,
         engine: &Arc<Engine>,
         grammar: &str,
+        raw_input: &str,
     ) {
         let (name, traits) = Self::persona_name_and_traits(engine);
+        let kg_ctx = self.kg_context_builder.build(raw_input, engine);
         let text = self
             .nlu_pipeline
-            .generate_dialogue("acknowledgment", &name, &traits, None)
+            .generate_dialogue("acknowledgment", &name, &traits, None, kg_ctx.as_deref())
             .unwrap_or_else(|| agent.dialogue_manager().handle_ack(&traits));
         msgs.push(AkhMessage::narrative(&text, grammar));
         agent.conversation_state_mut().record_agent_turn(&text);
