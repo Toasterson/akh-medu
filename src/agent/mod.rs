@@ -54,9 +54,11 @@ pub mod library_learn;
 pub mod mcts;
 pub mod memory;
 pub mod metacognition;
+pub mod model_manager;
 pub mod multi_agent;
 pub mod nlp;
 pub mod ooda;
+pub mod ollama;
 pub mod pim;
 pub mod plan;
 pub mod plan_monitor;
@@ -210,6 +212,11 @@ pub use curiosity::{CuriosityReport, CuriosityTarget, DirectedCuriosityConfig};
 pub use resource::{EffortCase, EffortEstimate, EffortIndex, ImprovementHistory, ResourceReport};
 pub use semantic_enrichment::{EnrichmentResult, SemanticPredicates};
 pub use mcts::{MctsConfig, MctsNode, MctsPlanner, MctsReflection, MctsResult, prune_tree};
+pub use model_manager::{
+    AgentModelManager, ModelManagerConfig, ModelManagerError, ModelManagerResult,
+    build_system_prompt,
+};
+pub use ollama::{OllamaClient, OllamaConfig, OllamaError, OllamaResult};
 pub use sleep::{ConsolidationPhase, SleepConfig, SleepCycle, SleepMetrics};
 pub use source_reliability::{
     AdmiraltyRating, BetaDistribution, InformationCredibility, ReliabilityError,

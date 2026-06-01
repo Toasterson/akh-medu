@@ -245,6 +245,8 @@ pub struct Agent {
     /// Optional WASM tool runtime (only when `wasm-tools` feature is enabled).
     #[cfg(feature = "wasm-tools")]
     pub(crate) wasm_runtime: Option<super::wasm_runtime::WasmToolRuntime>,
+    /// Per-agent model manager for local Gemma inference via Ollama (optional).
+    pub(crate) model_manager: Option<std::sync::Arc<super::model_manager::AgentModelManager>>,
 }
 
 impl Agent {
@@ -494,6 +496,7 @@ impl Agent {
             curiosity_config,
             #[cfg(feature = "wasm-tools")]
             wasm_runtime: super::wasm_runtime::WasmToolRuntime::new().ok(),
+            model_manager: None,
         };
 
         // Initialize interlocutor predicates.
@@ -1106,6 +1109,63 @@ impl Agent {
     /// Unconditionally replace the agent's psyche (admin override).
     pub fn force_set_psyche(&mut self, psyche: crate::compartment::psyche::Psyche) {
         self.psyche = Some(psyche);
+    }
+
+    // ── Model manager (per-agent Gemma via Ollama) ─────────────────────────
+
+    /// Attach a model manager so this agent can run local Gemma inference.
+    pub fn with_model_manager(
+        mut self,
+        manager: std::sync::Arc<super::model_manager::AgentModelManager>,
+    ) -> Self {
+        self.model_manager = Some(manager);
+        self
+    }
+
+    /// Set or replace the model manager.
+    pub fn set_model_manager(
+        &mut self,
+        manager: std::sync::Arc<super::model_manager::AgentModelManager>,
+    ) {
+        self.model_manager = Some(manager);
+    }
+
+    /// Get a reference to the model manager, if one is attached.
+    pub fn model_manager(
+        &self,
+    ) -> Option<&super::model_manager::AgentModelManager> {
+        self.model_manager.as_deref()
+    }
+
+    /// Register this agent with its attached model manager using the current
+    /// psyche (if any).
+    ///
+    /// The agent is identified by its engine workspace name, or by the provided
+    /// `agent_id` string.  Idempotent — safe to call on every OODA cycle.
+    ///
+    /// Returns `true` if a model manager is attached; `false` otherwise.
+    pub fn register_with_model_manager(&self, agent_id: &str, agent_name: &str) -> bool {
+        let Some(ref mgr) = self.model_manager else {
+            return false;
+        };
+        mgr.load_agent(agent_id, agent_name, self.psyche.as_ref());
+        true
+    }
+
+    /// Generate text from the attached model manager using this agent's Psyche
+    /// encoding.
+    ///
+    /// Returns `None` when no model manager is attached.
+    /// Callers should handle `ModelManagerError` variants as follows:
+    /// - `AgentNotLoaded` → call `register_with_model_manager()` first.
+    /// - `NoBackendAvailable` → start Ollama or configure `fallback_api`.
+    pub fn generate_with_model(
+        &self,
+        agent_id: &str,
+        user_prompt: &str,
+    ) -> Option<super::model_manager::ModelManagerResult<String>> {
+        let mgr = self.model_manager.as_deref()?;
+        Some(mgr.generate(agent_id, user_prompt))
     }
 
     // ── Channel registry (Phase 12a) ────────────────────────────────────
@@ -2829,6 +2889,7 @@ impl Agent {
             curiosity_config,
             #[cfg(feature = "wasm-tools")]
             wasm_runtime: super::wasm_runtime::WasmToolRuntime::new().ok(),
+            model_manager: None,
         };
 
         // Initialize interlocutor predicates.
