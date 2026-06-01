@@ -43,6 +43,7 @@ pub mod compartment;
 #[cfg(feature = "daemon")]
 pub mod config;
 pub mod dispatch;
+pub mod eliza;
 pub mod engine;
 pub mod extraction;
 pub mod error;

@@ -1,0 +1,109 @@
+# ELIZA Doctor script
+#
+# Keywords in each rule are synonym variants for the same concept.
+# The engine encodes all keywords as bipolar hypervectors (10 000 dims) at
+# load time and uses exact string matching + VSA similarity for matching.
+#
+# similarity_threshold (default 0.70) controls the VSA fuzzy match.
+
+[script]
+name = "Doctor"
+default_response = "Please go on."
+initial_greeting = "How do you do. Please tell me your problem."
+
+# ── Greetings (checked first via priority) ───────────────────────────────────
+
+[[rules]]
+keywords = ["hello", "hi", "hey", "greetings", "howdy"]
+similarity_threshold = 0.70
+priority = 20
+responses = [
+    "How do you do. Please state your problem.",
+    "Hello. What seems to be on your mind?",
+]
+
+# ── Family relationships ──────────────────────────────────────────────────────
+
+[[rules]]
+keywords = ["mother", "mom", "mama", "mum", "mummy"]
+similarity_threshold = 0.70
+priority = 10
+responses = [
+    "Tell me more about your mother.",
+    "How did your mother make you feel?",
+    "What comes to mind when you think about your mother?",
+]
+
+[[rules]]
+keywords = ["father", "dad", "papa", "daddy", "pop"]
+similarity_threshold = 0.70
+priority = 10
+responses = [
+    "Tell me more about your father.",
+    "How do you feel about your father?",
+    "What is your relationship with your father like?",
+]
+
+[[rules]]
+keywords = ["parent", "parents", "family", "siblings", "brother", "sister"]
+similarity_threshold = 0.70
+priority = 8
+responses = [
+    "Tell me more about your family.",
+    "Who else in your family feels that way?",
+    "How does your family influence you?",
+]
+
+# ── Emotional states ──────────────────────────────────────────────────────────
+
+[[rules]]
+keywords = ["sad", "unhappy", "depressed", "miserable", "hopeless", "down"]
+similarity_threshold = 0.70
+priority = 5
+responses = [
+    "I'm sorry to hear that you are feeling sad.",
+    "Do you often feel this way?",
+    "What do you think brings on these feelings?",
+]
+
+[[rules]]
+keywords = ["happy", "glad", "joyful", "elated", "pleased", "content"]
+similarity_threshold = 0.70
+priority = 5
+responses = [
+    "That's good to hear. What makes you feel happy?",
+    "I'm glad you feel that way. Can you tell me more?",
+]
+
+[[rules]]
+keywords = ["angry", "mad", "furious", "upset", "frustrated", "annoyed"]
+similarity_threshold = 0.70
+priority = 5
+responses = [
+    "What makes you feel angry?",
+    "Tell me more about what upsets you.",
+    "How do you usually handle your anger?",
+]
+
+# ── Dreams & the unconscious ──────────────────────────────────────────────────
+
+[[rules]]
+keywords = ["dream", "dreams", "dreamed", "dreamt", "nightmare"]
+similarity_threshold = 0.70
+priority = 7
+responses = [
+    "What do you think this dream means?",
+    "Do you often have dreams like that?",
+    "What feelings did the dream bring up?",
+]
+
+# ── Closing ───────────────────────────────────────────────────────────────────
+
+[[rules]]
+keywords = ["goodbye", "bye", "farewell", "quit", "exit", "done"]
+similarity_threshold = 0.70
+priority = 15
+responses = [
+    "Goodbye. It was nice talking with you.",
+    "Thank you for the session. Take care.",
+]
