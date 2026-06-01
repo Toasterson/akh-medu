@@ -256,7 +256,7 @@ pub fn create_goal(
             .filter(|t| t.predicate == pred)
             .collect();
         for o in &old {
-            let _ = kg.remove_triple(o.subject, o.predicate, o.object);
+            let _ = engine.remove_triple(o.subject, o.predicate, o.object);
         }
     }
 
@@ -334,14 +334,15 @@ pub fn update_goal_status(
     predicates: &AgentPredicates,
 ) -> AgentResult<()> {
     // Remove the old status triple so we don't accumulate stale values.
-    let kg = engine.knowledge_graph();
-    let old_status_triples: Vec<_> = kg
+    // Use engine.remove_triple() (not kg.remove_triple()) to sync the deletion
+    // to the SPARQL persistent store; otherwise the old status survives persist/restore.
+    let old_status_triples: Vec<_> = engine
         .triples_from(goal.symbol_id)
         .into_iter()
         .filter(|t| t.predicate == predicates.has_status)
         .collect();
     for old in &old_status_triples {
-        let _ = kg.remove_triple(old.subject, old.predicate, old.object);
+        let _ = engine.remove_triple(old.subject, old.predicate, old.object);
     }
 
     let status_label = format!("status:{}", new_status.as_label());

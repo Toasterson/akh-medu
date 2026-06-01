@@ -565,9 +565,14 @@ impl AgentDaemon {
         // Lock released — HTTP handlers can proceed.
 
         // Phase 2: Expensive computation (no lock held).
+        let goal_symbols_snapshot: Vec<crate::symbol::SymbolId> = super::goal::active_goals(&goals_snapshot)
+            .iter()
+            .map(|g| g.symbol_id)
+            .collect();
         let curiosity_proposals = super::curiosity::compute_directed_curiosity(
             &engine,
             &curiosity_config,
+            &goal_symbols_snapshot,
         )
         .map(|report| report.proposals)
         .unwrap_or_default();

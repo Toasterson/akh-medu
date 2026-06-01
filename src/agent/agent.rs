@@ -1855,9 +1855,11 @@ impl Agent {
         );
 
         // Phase 11j: Generate curiosity proposals alongside drive signals.
+        // Pass goal_symbols so curiosity is scoped to goal-reachable entities.
         let curiosity_proposals = super::curiosity::compute_directed_curiosity(
             &self.engine,
             &self.curiosity_config,
+            &goal_symbols,
         )
         .map(|report| report.proposals)
         .unwrap_or_default();
