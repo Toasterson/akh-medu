@@ -19,6 +19,7 @@ pub mod ingest;
 pub mod mcp;
 pub mod migration;
 pub mod query;
+pub mod scripts;
 
 pub use config::SeshatConfig;
 pub use error::{SeshatError, SeshatResult};
