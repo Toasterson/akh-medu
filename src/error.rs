@@ -144,6 +144,10 @@ pub enum AkhError {
     #[error(transparent)]
     #[diagnostic(transparent)]
     Wiki(#[from] crate::wiki::WikiError),
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Perception(#[from] crate::perception::PerceptionError),
 }
 
 // ---------------------------------------------------------------------------

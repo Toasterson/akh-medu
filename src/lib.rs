@@ -57,6 +57,7 @@ pub mod mcp;
 pub mod message;
 pub mod nlu;
 pub mod partition;
+pub mod perception;
 pub mod paths;
 pub mod pipeline;
 pub mod provenance;

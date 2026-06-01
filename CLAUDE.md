@@ -71,7 +71,7 @@ Authoring flow for new plans / ADRs:
 
 ## Agent Roadmap
 
-Phases 1-23 + 14i + 15d + 22a + 25a-25e are complete. Detailed completion checklists live under `docs/ai/phases/`.
+Phases 1-24 + 14i + 15d + 22a + 25a-25e are complete. Detailed completion checklists live under `docs/ai/phases/`.
 Plans live under `docs/ai/plans/`, ADRs under `docs/ai/decisions/`.
 
 ### Completed Phases
@@ -88,6 +88,7 @@ Plans live under `docs/ai/plans/`, ADRs under `docs/ai/decisions/`.
 - **16a-16c**: MCTS Planning + TD Values + Plan Monitoring — [plan](docs/ai/plans/2026-02-22-phase16-predictive-planning.md), [ADR 034](docs/ai/decisions/034-mcts-planning.md)
 - **17**: Dempster-Shafer Evidence Theory — [plan](docs/ai/plans/2026-02-22-phase17-evidence-theory.md), [ADR 035](docs/ai/decisions/035-evidence-theory.md)
 - **18a-18c**: Source Reliability + ACH + Credibility — [plan](docs/ai/plans/2026-02-22-phase18-source-reliability.md), [ADR 036](docs/ai/decisions/036-source-reliability.md)
+- **24**: Sensory Grounding (24a vision, 24b audio, 24c structured) — [plan](docs/ai/plans/2026-02-24-phase24-sensory-grounding.md)
 - **25a-25e**: People & Contacts — [phase](docs/ai/phases/phase-25-people-contacts.md), [ADR 028](docs/ai/decisions/028-people-contacts-architecture.md)
 
 ### Upcoming Phases
@@ -100,7 +101,6 @@ See individual plan docs for details. Phases are ordered by dependency, not prio
 - **21**: Game-Theoretic Social Reasoning — [plan](docs/ai/plans/2026-02-22-phase21-game-theory.md)
 - **22**: Akhipedia — [plan](docs/ai/plans/2026-02-23-phase22-akhipedia.md), [ADR 021](docs/ai/decisions/021-akhipedia-architecture.md)
 - **23**: Affective System — [plan](docs/ai/plans/2026-02-24-phase23-affective-system.md)
-- **24**: Sensory Grounding — [plan](docs/ai/plans/2026-02-24-phase24-sensory-grounding.md)
 - **26**: LLM-VSA Deep Integration (Candle migration, Neural→VSA bridge, PolarQuant, NEON SIMD) — [plan](docs/ai/plans/2026-03-26-phase26-llm-vsa-deep-integration.md), [ADR 037](docs/ai/decisions/037-llm-vsa-deep-integration.md)
 - **27**: Live KG→LLM Training (Burn framework, LoRA fine-tuning, depends on Phase 26) — preliminary plan in Phase 26 doc
 - **28**: `n akh` Semantic Router (dynamic model routing, LinUCB bandit, cost-aware) — [plan](docs/ai/plans/2026-03-26-phase28-semantic-router.md), [ADR 038](docs/ai/decisions/038-semantic-router.md)

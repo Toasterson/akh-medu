@@ -686,6 +686,20 @@ pub enum DerivationKind {
         topic: String,
         contribution_kind: String,
     },
+
+    // --- Phase 24: Sensory Grounding -----------------------------------------
+
+    /// Knowledge grounded from direct sensory observation (Phase 24).
+    ///
+    /// The agent perceived this through image, audio, or structured sensor input.
+    Perceived {
+        /// Modality: "image", "audio", or "structured".
+        modality: String,
+        /// Extraction confidence in [0, 1].
+        confidence: f32,
+        /// Opaque source identifier (e.g. file path, device name, or URI).
+        source_id: String,
+    },
 }
 
 impl DerivationKind {
@@ -788,6 +802,7 @@ impl DerivationKind {
             Self::ArticleFederated { .. } => 93,
             Self::OpinionExpressed { .. } => 94,
             Self::DebateContribution { .. } => 95,
+            Self::Perceived { .. } => 96,
         }
     }
 }

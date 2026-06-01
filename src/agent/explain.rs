@@ -1128,6 +1128,15 @@ pub fn derivation_kind_prose(kind: &DerivationKind) -> String {
         } => {
             format!("debate contribution on \"{topic}\": {contribution_kind}")
         }
+        DerivationKind::Perceived {
+            modality,
+            confidence,
+            source_id,
+        } => {
+            format!(
+                "perceived via {modality} (confidence: {confidence:.2}, source: {source_id})"
+            )
+        }
     }
 }
 

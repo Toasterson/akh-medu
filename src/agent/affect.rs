@@ -115,6 +115,14 @@ pub enum AppraisalTrigger {
     ResourcePressure { severity: f32 },
     /// Temporal signal (from Phase 15d).
     TemporalSignal { valence: f32, arousal: f32 },
+    /// A perceptual stimulus was processed (Phase 24).
+    ///
+    /// Allows the sensory grounding system to feed into the affective loop.
+    PerceptualStimulus {
+        modality: String,
+        valence: f32,
+        arousal: f32,
+    },
 }
 
 impl Appraisal {
