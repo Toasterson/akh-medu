@@ -255,6 +255,19 @@ impl Engine {
             if !restored.is_empty() {
                 let count = knowledge_graph.bulk_load(&restored).unwrap_or(0);
                 tracing::info!(triples = count, "knowledge graph restored from SPARQL");
+            } else {
+                // SPARQL is in-memory (sparql-persist not enabled or store is empty).
+                // Try the redb triple backup written by persist().
+                if let Ok(Some(bytes)) = store.get_meta(b"graph:kg_backup") {
+                    match bincode::deserialize::<Vec<Triple>>(&bytes) {
+                        Ok(triples) if !triples.is_empty() => {
+                            let count = knowledge_graph.bulk_load(&triples).unwrap_or(0);
+                            tracing::info!(triples = count, "knowledge graph restored from redb backup");
+                        }
+                        Ok(_) => {}
+                        Err(e) => tracing::warn!(error = %e, "failed to deserialize KG redb backup"),
+                    }
+                }
             }
         }
 
@@ -2632,6 +2645,21 @@ impl Engine {
         // Sync knowledge graph to SPARQL store.
         if let Some(ref sparql) = self.sparql {
             sparql.sync_from(&self.knowledge_graph)?;
+        }
+
+        // Always back up KG triples to redb when persistence is enabled.
+        // This ensures triples survive restarts even when the sparql-persist
+        // feature is disabled (e.g. in dev/test without RocksDB).
+        if self.sparql.is_some() {
+            let triples = self.knowledge_graph.all_triples();
+            match bincode::serialize(&triples) {
+                Ok(encoded) => {
+                    let _ = self.store.put_meta(b"graph:kg_backup", &encoded);
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to serialize KG triples for redb backup");
+                }
+            }
         }
 
         // Persist Phase 9 registries.

@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::engine::Engine;
 use crate::graph::Triple;
 use crate::provenance::{DerivationKind, ProvenanceRecord};
-use crate::symbol::{SymbolId, SymbolKind};
+use crate::symbol::SymbolId;
 
 use super::agent::AgentPredicates;
 use super::error::{AgentError, AgentResult};
@@ -445,13 +445,14 @@ fn persist_episode(
     relevance_score: f32,
     predicates: &AgentPredicates,
 ) -> AgentResult<SymbolId> {
-    // Create the episode entity.
+    // Create (or resolve) the episode entity. Using resolve_or_create_entity means
+    // that if the same WM entry id appears across sessions (WM counter resets on
+    // restart), we reuse the existing symbol and update its triples idempotently
+    // rather than failing with DuplicateLabel.
     let episode_label = format!("episode:{}", entry.id);
-    let episode = engine.create_symbol(SymbolKind::Entity, &episode_label)?;
+    let episode_id = engine.resolve_or_create_entity(&episode_label)?;
 
     // Link the episode to its summary via has_summary predicate.
-    // We store the summary as the episode's own label (already done above),
-    // but also create a dedicated summary entity.
     let summary_label = if entry.content.len() > 80 {
         format!("summary:{}", &entry.content[..80])
     } else {
@@ -459,14 +460,14 @@ fn persist_episode(
     };
     let summary_sym = engine.resolve_or_create_entity(&summary_label)?;
     let _ = engine.add_triple(&Triple::new(
-        episode.id,
+        episode_id,
         predicates.has_summary,
         summary_sym,
     ));
 
     // Link to learned symbols.
     for sym in &entry.symbols {
-        let _ = engine.add_triple(&Triple::new(episode.id, predicates.learned, *sym));
+        let _ = engine.add_triple(&Triple::new(episode_id, predicates.learned, *sym));
     }
 
     // Create a tag for the entry kind.
@@ -478,12 +479,12 @@ fn persist_episode(
         WorkingMemoryKind::ToolResult => "tag:tool_result",
     };
     let tag_sym = engine.resolve_or_create_entity(kind_tag_label)?;
-    let _ = engine.add_triple(&Triple::new(episode.id, predicates.has_tag, tag_sym));
+    let _ = engine.add_triple(&Triple::new(episode_id, predicates.has_tag, tag_sym));
 
     // Mark as episodic memory type.
     let mem_type_sym = engine.resolve_or_create_entity("episodic_memory")?;
     let _ = engine.add_triple(&Triple::new(
-        episode.id,
+        episode_id,
         predicates.memory_type,
         mem_type_sym,
     ));
@@ -501,7 +502,7 @@ fn persist_episode(
     );
 
     let mut prov = ProvenanceRecord::new(
-        episode.id,
+        episode_id,
         DerivationKind::AgentConsolidation {
             reason: reason.clone(),
             relevance_score,
@@ -512,7 +513,7 @@ fn persist_episode(
 
     let _ = engine.store_provenance(&mut prov);
 
-    Ok(episode.id)
+    Ok(episode_id)
 }
 
 /// Recall episodic memories from the KG by querying related symbols.
@@ -561,6 +562,118 @@ pub fn recall_episodes(
     Ok(episodes)
 }
 
+/// Recall the most recent episodic memories from the KG without requiring query symbols.
+///
+/// Scans all episodes by following reverse links from the well-known `episodic_memory`
+/// marker entity and returns the `top_k` most recent, sorted by symbol creation timestamp.
+/// Returns an empty vec (not an error) when no episodes exist yet.
+pub fn recall_recent_episodes(
+    engine: &Engine,
+    predicates: &AgentPredicates,
+    top_k: usize,
+) -> AgentResult<Vec<EpisodicEntry>> {
+    // The "episodic_memory" label is the type marker written by persist_episode and
+    // index_cycle_episode. If it has never been created, no episodes exist yet.
+    let mem_type_id = match engine.resolve_symbol("episodic_memory") {
+        Ok(id) => id,
+        Err(_) => return Ok(Vec::new()),
+    };
+
+    // All episodes have a triple: episode -[memory_type]-> episodic_memory.
+    let incoming = engine.triples_to(mem_type_id);
+    let mut episodes: Vec<EpisodicEntry> = incoming
+        .iter()
+        .filter(|t| t.predicate == predicates.memory_type)
+        .filter_map(|t| reconstruct_episode(engine, t.subject, predicates))
+        .collect();
+
+    // Most recent first: primary sort by creation timestamp, secondary by SymbolId
+    // (monotonically increasing) so episodes within the same second are deterministic.
+    episodes.sort_by(|a, b| {
+        b.timestamp
+            .cmp(&a.timestamp)
+            .then(b.symbol_id.get().cmp(&a.symbol_id.get()))
+    });
+    episodes.truncate(top_k);
+
+    Ok(episodes)
+}
+
+/// Create and index an episodic memory entry directly from an OODA cycle result.
+///
+/// This bypasses the consolidation threshold so that every OODA cycle immediately
+/// leaves a retrievable trace. Episodes created here are identical in structure to
+/// consolidated ones and are found by both `recall_episodes` and `recall_recent_episodes`.
+pub fn index_cycle_episode(
+    engine: &Engine,
+    predicates: &AgentPredicates,
+    cycle_count: u64,
+    goal_label: &str,
+    goal_id: Option<SymbolId>,
+    chosen_tool: &str,
+    progress: &str,
+) -> AgentResult<()> {
+    // Resolve or create the episode entity. A deterministic label means crash-recovery
+    // or session restarts with overlapping cycle numbers reuse the existing symbol and
+    // add triples idempotently rather than failing with DuplicateLabel.
+    let episode_label = format!("cycle_episode:{cycle_count}");
+    let episode_id = engine.resolve_or_create_entity(&episode_label)?;
+
+    // Summary — truncated to 80 chars so it fits comfortably in recall output.
+    let summary_text = format!(
+        "Cycle {cycle_count}: tool={chosen_tool} goal=\"{goal_label}\" progress={progress}"
+    );
+    let summary_label = if summary_text.len() > 80 {
+        format!("summary:{}", &summary_text[..80])
+    } else {
+        format!("summary:{summary_text}")
+    };
+    let summary_sym = engine.resolve_or_create_entity(&summary_label)?;
+    let _ = engine.add_triple(&Triple::new(episode_id, predicates.has_summary, summary_sym));
+
+    // Tag: marks this as a direct cycle episode (as opposed to a consolidated one).
+    let cycle_tag = engine.resolve_or_create_entity("tag:cycle_episode")?;
+    let _ = engine.add_triple(&Triple::new(episode_id, predicates.has_tag, cycle_tag));
+
+    // Tag: progress outcome for targeted queries.
+    let progress_tag_label = format!("tag:progress_{progress}");
+    let progress_tag = engine.resolve_or_create_entity(&progress_tag_label)?;
+    let _ = engine.add_triple(&Triple::new(episode_id, predicates.has_tag, progress_tag));
+
+    // Link to the goal so symbol-based recall can find this episode.
+    if let Some(gid) = goal_id {
+        let _ = engine.add_triple(&Triple::new(episode_id, predicates.learned, gid));
+    }
+
+    // Mark as episodic memory — this is how recall_recent_episodes discovers all episodes.
+    let mem_type_sym = engine.resolve_or_create_entity("episodic_memory")?;
+    let _ = engine.add_triple(&Triple::new(episode_id, predicates.memory_type, mem_type_sym));
+
+    // from_cycle: link to a cycle-number entity for temporal ordering queries.
+    let cycle_entity_label = format!("cycle:{cycle_count}");
+    let cycle_sym = engine.resolve_or_create_entity(&cycle_entity_label)?;
+    let _ = engine.add_triple(&Triple::new(episode_id, predicates.from_cycle, cycle_sym));
+
+    // Provenance — record at full confidence since this is a direct agent action.
+    let reason = format!(
+        "Direct episode from OODA cycle {cycle_count}: tool={chosen_tool} progress={progress}"
+    );
+    let mut prov = ProvenanceRecord::new(
+        episode_id,
+        DerivationKind::AgentConsolidation {
+            reason,
+            relevance_score: 1.0,
+        },
+    )
+    .with_confidence(1.0);
+    if let Some(gid) = goal_id {
+        prov = prov.with_sources(vec![gid]);
+    }
+    let _ = engine.store_provenance(&mut prov);
+
+    Ok(())
+}
+
 /// Reconstruct an EpisodicEntry from its KG triples.
 fn reconstruct_episode(
     engine: &Engine,
@@ -586,7 +699,8 @@ fn reconstruct_episode(
 
     for triple in &triples {
         if triple.predicate == predicates.has_summary {
-            summary = engine.resolve_label(triple.object);
+            let label = engine.resolve_label(triple.object);
+            summary = label.trim_start_matches("summary:").to_string();
         } else if triple.predicate == predicates.learned {
             learnings.push(triple.object);
         } else if triple.predicate == predicates.has_tag {
@@ -1090,5 +1204,92 @@ mod tests {
         let entry = wm.get(id).unwrap();
         assert_eq!(entry.reference_count, 2);
         assert_eq!(entry.access_timestamps, vec![5, 8]);
+    }
+
+    // -- KG-backed episodic memory tests --
+
+    fn test_predicates(engine: &crate::engine::Engine) -> super::super::agent::AgentPredicates {
+        super::super::agent::AgentPredicates::init(engine).unwrap()
+    }
+
+    #[test]
+    fn index_and_recall_recent_cycle_episode() {
+        let engine = crate::engine::Engine::new(crate::engine::EngineConfig::default()).unwrap();
+        let predicates = test_predicates(&engine);
+
+        let goal_sym = engine
+            .resolve_or_create_entity("goal:learn_rust")
+            .unwrap();
+
+        index_cycle_episode(&engine, &predicates, 1, "learn rust", Some(goal_sym), "nlu_parse", "advanced").unwrap();
+
+        let episodes = recall_recent_episodes(&engine, &predicates, 10).unwrap();
+        assert_eq!(episodes.len(), 1);
+        assert!(
+            episodes[0].summary.contains("learn rust"),
+            "summary should contain goal text: got {:?}",
+            episodes[0].summary
+        );
+        assert!(
+            !episodes[0].summary.starts_with("summary:"),
+            "summary should not have 'summary:' prefix: got {:?}",
+            episodes[0].summary
+        );
+    }
+
+    #[test]
+    fn multiple_cycle_episodes_ordered_by_recency() {
+        let engine = crate::engine::Engine::new(crate::engine::EngineConfig::default()).unwrap();
+        let predicates = test_predicates(&engine);
+
+        index_cycle_episode(&engine, &predicates, 1, "goal A", None, "tool_a", "advanced").unwrap();
+        index_cycle_episode(&engine, &predicates, 2, "goal B", None, "tool_b", "completed").unwrap();
+        index_cycle_episode(&engine, &predicates, 3, "goal C", None, "tool_c", "no_change").unwrap();
+
+        let episodes = recall_recent_episodes(&engine, &predicates, 2).unwrap();
+        assert_eq!(episodes.len(), 2);
+        // Most recent (highest symbol id / created latest) should come first.
+        // Cycle 3 was created last.
+        assert!(
+            episodes[0].summary.contains("goal C") || episodes[0].summary.contains('3'),
+            "Expected most recent episode first: {:?}",
+            episodes[0].summary
+        );
+    }
+
+    #[test]
+    fn recall_episodes_by_symbol_finds_goal_link() {
+        let engine = crate::engine::Engine::new(crate::engine::EngineConfig::default()).unwrap();
+        let predicates = test_predicates(&engine);
+
+        let goal_sym = engine.resolve_or_create_entity("goal:my_goal").unwrap();
+        index_cycle_episode(&engine, &predicates, 5, "my goal", Some(goal_sym), "search", "advanced").unwrap();
+
+        let episodes = recall_episodes(&engine, &[goal_sym], &predicates, 5).unwrap();
+        assert_eq!(episodes.len(), 1);
+        assert!(episodes[0].summary.contains("my goal") || episodes[0].summary.contains('5'));
+    }
+
+    #[test]
+    fn index_cycle_episode_idempotent_on_same_label() {
+        let engine = crate::engine::Engine::new(crate::engine::EngineConfig::default()).unwrap();
+        let predicates = test_predicates(&engine);
+
+        // Indexing the same cycle twice should not error (resolve_or_create_entity is idempotent).
+        index_cycle_episode(&engine, &predicates, 7, "goal X", None, "tool_x", "advanced").unwrap();
+        index_cycle_episode(&engine, &predicates, 7, "goal X", None, "tool_x", "advanced").unwrap();
+
+        // Still exactly one episode (triples are deduplicated).
+        let episodes = recall_recent_episodes(&engine, &predicates, 10).unwrap();
+        assert_eq!(episodes.len(), 1);
+    }
+
+    #[test]
+    fn recall_recent_empty_when_no_episodes() {
+        let engine = crate::engine::Engine::new(crate::engine::EngineConfig::default()).unwrap();
+        let predicates = test_predicates(&engine);
+
+        let episodes = recall_recent_episodes(&engine, &predicates, 5).unwrap();
+        assert!(episodes.is_empty());
     }
 }

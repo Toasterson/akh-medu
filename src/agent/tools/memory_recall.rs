@@ -27,11 +27,15 @@ impl Tool for MemoryRecallTool {
     fn signature(&self) -> ToolSignature {
         ToolSignature {
             name: "memory_recall".into(),
-            description: "Recall episodic memories by query symbols or tags.".into(),
+            description: "Recall episodic memories by query symbols or tags. Falls back to \
+                           most-recent episodes when no query terms resolve to known symbols."
+                .into(),
             parameters: vec![
                 ToolParam {
                     name: "query_symbols".into(),
-                    description: "Comma-separated symbol names or IDs to query.".into(),
+                    description: "Comma-separated symbol names or IDs to query. Generic terms \
+                                  like 'recent' trigger a temporal scan of all episodes."
+                        .into(),
                     required: true,
                 },
                 ToolParam {
@@ -52,19 +56,27 @@ impl Tool for MemoryRecallTool {
             .filter_map(|s| engine.resolve_symbol(s.trim()).ok())
             .collect();
 
-        if query_ids.is_empty() {
-            return Ok(ToolOutput::ok("No valid query symbols resolved."));
-        }
-
-        let episodes = memory::recall_episodes(engine, &query_ids, &self.predicates, top_k)
-            .map_err(|e| AgentError::ToolExecution {
-                tool_name: "memory_recall".into(),
-                message: format!("{e}"),
-            })?;
+        let (episodes, mode) = if query_ids.is_empty() {
+            // Generic terms ("recent", "memory", "events") won't resolve to symbols.
+            // Fall back to a pure recency scan so the agent can always access its history.
+            let eps = memory::recall_recent_episodes(engine, &self.predicates, top_k)
+                .map_err(|e| AgentError::ToolExecution {
+                    tool_name: "memory_recall".into(),
+                    message: format!("{e}"),
+                })?;
+            (eps, "recent")
+        } else {
+            let eps = memory::recall_episodes(engine, &query_ids, &self.predicates, top_k)
+                .map_err(|e| AgentError::ToolExecution {
+                    tool_name: "memory_recall".into(),
+                    message: format!("{e}"),
+                })?;
+            (eps, "matched")
+        };
 
         if episodes.is_empty() {
             return Ok(ToolOutput::ok_with_symbols(
-                "No episodic memories found for the query symbols.",
+                "No episodic memories found.",
                 query_ids,
             ));
         }
@@ -83,18 +95,26 @@ impl Tool for MemoryRecallTool {
             all_symbols.extend(&ep.learnings);
         }
 
-        let result = format!("Recalled {} episode(s):\n{}", lines.len(), lines.join("\n"));
+        let result = format!(
+            "Recalled {} episode(s) [{}]:\n{}",
+            lines.len(),
+            mode,
+            lines.join("\n")
+        );
         Ok(ToolOutput::ok_with_symbols(result, all_symbols))
     }
 
     fn manifest(&self) -> ToolManifest {
         ToolManifest {
             name: "memory_recall".into(),
-            description: "Recall episodic memories by query symbols or tags.".into(),
+            description: "Recall episodic memories by query symbols or tags. Falls back to \
+                           most-recent episodes when no query terms resolve to known symbols."
+                .into(),
             parameters: vec![
                 ToolParamSchema::required(
                     "query_symbols",
-                    "Comma-separated symbol names or IDs to query.",
+                    "Comma-separated symbol names or IDs to query. Generic terms like 'recent' \
+                     trigger a temporal scan of all episodes.",
                 ),
                 ToolParamSchema::optional(
                     "top_k",

@@ -227,6 +227,11 @@ impl Goal {
     }
 }
 
+/// Redb key for a goal's status mirror.
+fn goal_status_redb_key(goal_id: SymbolId) -> String {
+    format!("agent:goal_status:{}", goal_id.get())
+}
+
 /// Create a goal and persist it in the knowledge graph.
 ///
 /// If a symbol with the same goal label already exists (e.g. from a previous
@@ -267,6 +272,10 @@ pub fn create_goal(
     // Store status.
     let status_sym = engine.resolve_or_create_entity("status:active")?;
     let _ = engine.add_triple(&Triple::new(goal_id, predicates.has_status, status_sym));
+    // Mirror status to redb so restore_goals can recover it when SPARQL is in-memory.
+    let _ = engine
+        .store()
+        .put_meta(goal_status_redb_key(goal_id).as_bytes(), b"active");
 
     // Store priority.
     let priority_sym = engine.resolve_or_create_entity(&format!("priority:{priority}"))?;
@@ -351,6 +360,10 @@ pub fn update_goal_status(
         predicates.has_status,
         status_sym,
     ));
+    // Mirror status to redb so restore_goals can recover it when SPARQL is in-memory.
+    let _ = engine
+        .store()
+        .put_meta(goal_status_redb_key(goal.symbol_id).as_bytes(), new_status.as_label().as_bytes());
     goal.status = new_status;
     Ok(())
 }
@@ -434,6 +447,18 @@ pub fn restore_goals(engine: &Engine, predicates: &AgentPredicates) -> AgentResu
                 parent = Some(triple.object);
             } else if triple.predicate == predicates.blocked_by {
                 blocked_by.push(triple.object);
+            }
+        }
+
+        // When no has_status triple exists (e.g. because SPARQL is in-memory and
+        // wasn't persisted), fall back to the redb-mirrored status written by
+        // create_goal / update_goal_status.
+        if status_sym_id.is_none() {
+            let key = goal_status_redb_key(meta.id);
+            if let Ok(Some(bytes)) = engine.store().get_meta(key.as_bytes())
+                && let Ok(label) = std::str::from_utf8(&bytes)
+            {
+                status = GoalStatus::from_label(label);
             }
         }
 
