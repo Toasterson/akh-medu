@@ -95,6 +95,27 @@ pub enum CompartmentError {
     )]
     PsycheImmutable,
 
+    #[error("access denied to compartment \"{id}\" (scope={scope}): {reason}")]
+    #[diagnostic(
+        code(akh::compartment::access_denied),
+        help(
+            "The compartment \"{id}\" has scope \"{scope}\" which restricts access. \
+             Only the owning workspace agent may perform this operation."
+        )
+    )]
+    AccessDenied {
+        id: String,
+        scope: String,
+        reason: String,
+    },
+
+    #[error("compartment \"{id}\" already exists on disk — use load() to register it")]
+    #[diagnostic(
+        code(akh::compartment::already_exists),
+        help("A compartment directory with id \"{id}\" already exists. Choose a different id.")
+    )]
+    AlreadyExists { id: String },
+
     #[error(transparent)]
     #[diagnostic(transparent)]
     Store(#[from] StoreError),

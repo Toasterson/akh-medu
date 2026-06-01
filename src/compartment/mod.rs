@@ -19,7 +19,7 @@ pub mod psyche;
 
 pub use error::{CompartmentError, CompartmentResult};
 pub use manager::CompartmentManager;
-pub use manifest::{CompartmentKind, CompartmentManifest, CompartmentState};
+pub use manifest::{CompartmentKind, CompartmentManifest, CompartmentScope, CompartmentState};
 pub use microtheory::{
     ContextAncestryCache, ContextDomain, ContextPredicates, LiftCondition, LiftingRule,
     Microtheory,
