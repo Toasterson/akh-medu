@@ -87,6 +87,18 @@ pub enum LibraryError {
     )]
     EmptyDocument { origin: String },
 
+    #[error("domain \"{domain}\" is not in this project's allowed-domain list")]
+    #[diagnostic(
+        code(akh::library::domain_not_allowed),
+        help(
+            "The ingest source URL's domain is not permitted for this project. \
+             Add it to the project's allowed_domains list, or verify the URL \
+             is from a trusted source. Allowed domains can be configured with \
+             `akh-medu project set-domains <project> <domain1> [domain2 ...]`."
+        )
+    )]
+    DomainNotAllowed { domain: String },
+
     #[error(transparent)]
     #[diagnostic(transparent)]
     Engine(#[from] crate::error::EngineError),

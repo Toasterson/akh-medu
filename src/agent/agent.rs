@@ -2073,12 +2073,16 @@ impl Agent {
     ///
     /// Returns the project's symbol ID. The project is added to the agenda
     /// with the given priority.
+    ///
+    /// `allowed_domains` sets the URL ingest allowlist for this project.
+    /// Pass `None` to allow all sources (legacy open behaviour).
     pub fn create_project(
         &mut self,
         name: &str,
         description: &str,
         scope_concepts: &[&str],
         priority: u8,
+        allowed_domains: Option<Vec<String>>,
     ) -> AgentResult<SymbolId> {
         let proj = project::create_project(
             &self.engine,
@@ -2087,6 +2091,7 @@ impl Agent {
             scope_concepts,
             &self.project_predicates,
             &self.predicates,
+            allowed_domains,
         )?;
         let id = proj.id;
         self.agenda.add_project(id, priority);

@@ -24,6 +24,61 @@ use crate::provenance::{DerivationKind, ProvenanceRecord};
 use crate::symbol::SymbolId;
 use crate::vsa::encode::encode_label;
 
+// ---------------------------------------------------------------------------
+// Domain allowlist
+// ---------------------------------------------------------------------------
+
+/// Validate that `url`'s host is in `allowed_domains`.
+///
+/// Extracts the host component with a minimal parser — no external crate
+/// required.  Accepts both `http://` and `https://` schemes.
+///
+/// Returns `LibraryError::DomainNotAllowed` when the host is absent or not in
+/// the list; passes through when `allowed_domains` is empty (block all) or
+/// when the host matches.
+fn check_domain_allowed(url: &str, allowed_domains: &[String]) -> LibraryResult<()> {
+    let host = extract_host(url).unwrap_or_default();
+
+    if allowed_domains.iter().any(|d| d == &host) {
+        return Ok(());
+    }
+
+    Err(LibraryError::DomainNotAllowed {
+        domain: if host.is_empty() {
+            url.to_string()
+        } else {
+            host
+        },
+    })
+}
+
+/// Extract the host (and port, if present) from an http/https URL string.
+///
+/// Returns `None` for non-URL strings or unparseable inputs; callers treat
+/// that as a domain violation.
+fn extract_host(url: &str) -> Option<String> {
+    // Strip scheme prefix.
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))?;
+
+    // Host ends at the first '/', '?', '#', or end of string.
+    let host_and_port = rest.split(['/', '?', '#']).next()?;
+
+    // Strip userinfo (user:pass@host).
+    let host = if let Some(at_pos) = host_and_port.rfind('@') {
+        &host_and_port[at_pos + 1..]
+    } else {
+        host_and_port
+    };
+
+    if host.is_empty() {
+        None
+    } else {
+        Some(host.to_lowercase())
+    }
+}
+
 /// Configuration for the ingestion pipeline.
 #[derive(Default)]
 pub struct IngestConfig {
@@ -35,6 +90,14 @@ pub struct IngestConfig {
     pub format: Option<ContentFormat>,
     /// Chunk normalization settings.
     pub chunk_config: ChunkConfig,
+    /// Allowed URL domains for web-sourced documents.
+    ///
+    /// `None` permits all origins (backwards-compatible default).
+    /// `Some([])` blocks all URL sources for this project.
+    /// `Some(["example.com", ...])` restricts ingestion to the listed domains.
+    /// Subdomains must be listed explicitly; `"example.com"` does NOT cover
+    /// `"sub.example.com"`.
+    pub allowed_domains: Option<Vec<String>>,
 }
 
 
@@ -73,6 +136,13 @@ pub fn ingest_document(
     config: IngestConfig,
     nlu: Option<&mut NluPipeline>,
 ) -> LibraryResult<IngestResult> {
+    // 0. Domain allowlist guard — reject URL sources that violate project policy.
+    if let DocumentSource::Url(ref url) = source {
+        if let Some(ref allowed) = config.allowed_domains {
+            check_domain_allowed(url, allowed)?;
+        }
+    }
+
     // 1. Determine format.
     let format = config.format.unwrap_or_else(|| {
         let source_str = source.to_string();
@@ -856,4 +926,79 @@ fn capitalize(s: &str) -> String {
     let mut chars = s.chars();
     let first = chars.next().unwrap().to_uppercase().to_string();
     first + chars.as_str()
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_host_https() {
+        assert_eq!(
+            extract_host("https://docs.rust-lang.org/std/"),
+            Some("docs.rust-lang.org".into())
+        );
+    }
+
+    #[test]
+    fn extract_host_http_with_path_and_query() {
+        assert_eq!(
+            extract_host("http://example.com/page?q=1#anchor"),
+            Some("example.com".into())
+        );
+    }
+
+    #[test]
+    fn extract_host_with_port() {
+        assert_eq!(
+            extract_host("http://localhost:8080/api"),
+            Some("localhost:8080".into())
+        );
+    }
+
+    #[test]
+    fn extract_host_strips_userinfo() {
+        assert_eq!(
+            extract_host("https://user:pass@example.com/path"),
+            Some("example.com".into())
+        );
+    }
+
+    #[test]
+    fn extract_host_non_url() {
+        assert_eq!(extract_host("not a url"), None);
+        assert_eq!(extract_host("ftp://example.com"), None);
+    }
+
+    #[test]
+    fn check_domain_allowed_match() {
+        let allowed = vec!["github.com".to_string(), "docs.rust-lang.org".to_string()];
+        assert!(check_domain_allowed("https://github.com/foo/bar", &allowed).is_ok());
+        assert!(check_domain_allowed("https://docs.rust-lang.org/std/", &allowed).is_ok());
+    }
+
+    #[test]
+    fn check_domain_allowed_reject() {
+        let allowed = vec!["github.com".to_string()];
+        let err = check_domain_allowed("https://pubmed.ncbi.nlm.nih.gov/article123", &allowed);
+        assert!(matches!(err, Err(LibraryError::DomainNotAllowed { .. })));
+    }
+
+    #[test]
+    fn check_domain_allowed_empty_list_blocks_all() {
+        let err = check_domain_allowed("https://any-site.com/path", &[]);
+        assert!(matches!(err, Err(LibraryError::DomainNotAllowed { .. })));
+    }
+
+    #[test]
+    fn subdomain_not_matched_by_parent() {
+        // "example.com" must not permit "sub.example.com" — explicit listing required.
+        let allowed = vec!["example.com".to_string()];
+        let err = check_domain_allowed("https://sub.example.com/page", &allowed);
+        assert!(matches!(err, Err(LibraryError::DomainNotAllowed { .. })));
+    }
 }
