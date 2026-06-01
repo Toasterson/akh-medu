@@ -4,7 +4,13 @@
 //! (triples), rewrite rules, and metadata. They follow a lifecycle:
 //! Cold (on disk) → Warm (manifest parsed) → Hot (active in memory).
 
+pub mod bridge;
+pub mod curriculum;
+pub mod discover;
+pub mod graph;
 pub mod manager;
+pub mod share;
+pub mod synthesis;
 
 use serde::{Deserialize, Serialize};
 
@@ -32,6 +38,9 @@ impl std::fmt::Display for SkillState {
 }
 
 /// Metadata describing a skillpack.
+///
+/// Extended in Phase 31 with dependency tracking (31a), curriculum support (31h),
+/// and remote sharing (31f).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SkillManifest {
     /// Unique skillpack identifier.
@@ -63,6 +72,30 @@ pub struct SkillManifest {
     /// Key-value configuration passed to tools (e.g., API keys, base URLs).
     #[serde(default)]
     pub tool_config: std::collections::HashMap<String, String>,
+
+    // ── Phase 31a: Dependency graph ────────────────────────────────────────
+    /// Skill IDs that must be active before this skill can be activated.
+    #[serde(default)]
+    pub depends: Vec<String>,
+    /// Skill IDs that cannot be co-active with this skill.
+    #[serde(default)]
+    pub conflicts: Vec<String>,
+    /// Capability tags this skill provides (for loose-coupling via `requires`).
+    #[serde(default)]
+    pub provides: Vec<String>,
+    /// Capability tags this skill needs; resolved to provider skill IDs at activation.
+    #[serde(default)]
+    pub requires: Vec<String>,
+
+    // ── Phase 31f: Sharing / remote URL ───────────────────────────────────
+    /// Optional canonical remote URL for this skill archive (e.g., from a registry).
+    #[serde(default)]
+    pub remote_url: Option<String>,
+
+    // ── Phase 31h: Curriculum ──────────────────────────────────────────────
+    /// Path to the curriculum JSON file relative to the skill directory.
+    #[serde(default)]
+    pub curriculum_file: Option<String>,
 }
 
 /// A skillpack with its manifest and current state.
@@ -78,6 +111,8 @@ pub struct LoadedSkill {
     pub rule_count: usize,
     /// Estimated memory usage in bytes.
     pub memory_bytes: usize,
+    /// Timestamp of the most recent access (Phase 31c idle-deactivation tracking).
+    pub last_used_at: Option<std::time::Instant>,
 }
 
 /// Summary info for listing skills.
@@ -99,6 +134,12 @@ pub struct SkillInfo {
     pub triple_count: usize,
     /// Rules loaded.
     pub rule_count: usize,
+    /// Capabilities provided by this skill.
+    #[serde(default)]
+    pub provides: Vec<String>,
+    /// Capabilities required by this skill.
+    #[serde(default)]
+    pub requires: Vec<String>,
 }
 
 /// Result of activating a skillpack.
