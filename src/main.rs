@@ -231,6 +231,35 @@ enum Commands {
         #[command(subcommand)]
         action: WikiAction,
     },
+
+    /// Episodic memory management (journal ingest, recall helpers).
+    Memory {
+        #[command(subcommand)]
+        action: MemoryAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum MemoryAction {
+    /// Ingest OpenClaw daily memory journals (*.md) into the episodic store.
+    ///
+    /// Scans a directory for markdown files and creates episodic KG entries
+    /// so `agent_recall` can find them. Re-running is safe: already-ingested
+    /// files are detected by marker entities and skipped.
+    IngestJournals {
+        /// Target workspace (default: "default").
+        #[arg(long, default_value = "default")]
+        workspace: String,
+
+        /// Directory containing *.md journal files.
+        /// Defaults to $AKH_JOURNAL_DIR or $XDG_DATA_HOME/akh-medu/journals/.
+        #[arg(long)]
+        dir: Option<PathBuf>,
+
+        /// Ingest a single file instead of scanning a directory.
+        #[arg(long)]
+        file: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -3726,6 +3755,48 @@ fn main() -> Result<()> {
             let engine = Engine::new(config).into_diagnostic()?;
             dispatch_wiki(action, &engine)?;
         }
+
+        // ── Memory management ────────────────────────────────────────────
+        Commands::Memory { action } => {
+            match action {
+                MemoryAction::IngestJournals { workspace, dir, file } => {
+                    use akh_medu::agent::journal_ingest;
+
+                    let akh_paths = xdg_paths
+                        .as_ref()
+                        .ok_or_else(|| miette::miette!("Cannot resolve XDG paths. Set HOME."))?;
+                    let ws = akh_paths.workspace(&workspace);
+                    let ws_config = EngineConfig {
+                        dimension: Dimension(cli.dimension),
+                        data_dir: Some(ws.kg_dir.clone()),
+                        compartments_dir: Some(ws.compartments_dir.clone()),
+                        language,
+                        ..Default::default()
+                    };
+                    let engine = Engine::new(ws_config).into_diagnostic()?;
+
+                    if let Some(f) = file {
+                        let n = journal_ingest::ingest_journal_file_auto(&engine, &f)
+                            .into_diagnostic()?;
+                        engine.persist().into_diagnostic()?;
+                        println!("Ingested {n} episode(s) from \"{}\".", f.display());
+                    } else {
+                        let journal_dir =
+                            dir.unwrap_or_else(|| akh_paths.memory_journals_dir());
+                        let stats = journal_ingest::ingest_journals_auto(&engine, &journal_dir)
+                            .into_diagnostic()?;
+                        engine.persist().into_diagnostic()?;
+                        println!(
+                            "Journal ingest complete: {} file(s) scanned, {} ingested, {} skipped, {} episode(s) created.",
+                            stats.files_scanned,
+                            stats.files_ingested,
+                            stats.files_skipped,
+                            stats.episodes_created,
+                        );
+                    }
+                }
+            }
+        }
     }
 
     Ok(())
@@ -5234,6 +5305,14 @@ fn run_client_only(cli: Cli) -> Result<()> {
         // ── Wiki (Akhipedia) — not yet available via remote client ───────
         Commands::Wiki { .. } => {
             eprintln!("Wiki commands require local engine access. Run without --server flag.");
+            std::process::exit(1);
+        }
+
+        // ── Memory — not available via remote client ──────────────────────
+        Commands::Memory { .. } => {
+            eprintln!(
+                "Memory commands require local engine access. Run without --server flag."
+            );
             std::process::exit(1);
         }
     }

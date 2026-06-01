@@ -128,6 +128,7 @@ impl AkhPaths {
         let library_dir = self.library_dir();
         let library_inbox = self.library_inbox();
         let library_docs = self.library_documents_dir();
+        let journals_dir = self.memory_journals_dir();
         for dir in [
             &self.config_dir,
             &self.data_dir,
@@ -143,6 +144,7 @@ impl AkhPaths {
             &library_dir,
             &library_inbox,
             &library_docs,
+            &journals_dir,
         ] {
             std::fs::create_dir_all(dir).map_err(|e| PathError::CreateDir {
                 path: dir.display().to_string(),
@@ -175,6 +177,16 @@ impl AkhPaths {
     /// shared location rather than per-workspace.
     pub fn models_dir(&self) -> PathBuf {
         self.data_dir.join("models")
+    }
+
+    /// Path to the OpenClaw daily memory journal directory.
+    ///
+    /// Defaults to `$XDG_DATA_HOME/akh-medu/journals/`. Override with
+    /// the `AKH_JOURNAL_DIR` environment variable.
+    pub fn memory_journals_dir(&self) -> PathBuf {
+        std::env::var("AKH_JOURNAL_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| self.data_dir.join("journals"))
     }
 
     /// Path to the shared content library directory.
