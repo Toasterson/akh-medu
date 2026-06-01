@@ -686,6 +686,14 @@ pub enum DerivationKind {
         topic: String,
         contribution_kind: String,
     },
+
+    // --- Import/Export (MCP import_export tools) ------------------------------
+
+    /// Triples were imported from a file (MCP import_triples tool).
+    FileImport {
+        source_path: String,
+        format: String,
+    },
 }
 
 impl DerivationKind {
@@ -788,6 +796,7 @@ impl DerivationKind {
             Self::ArticleFederated { .. } => 93,
             Self::OpinionExpressed { .. } => 94,
             Self::DebateContribution { .. } => 95,
+            Self::FileImport { .. } => 96,
         }
     }
 }

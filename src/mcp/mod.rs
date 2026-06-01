@@ -728,6 +728,49 @@ pub struct PredicateFilterParams {
     pub limit: Option<usize>,
 }
 
+// ── Import/Export Parameter Structs ─────────────────────────────────────
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ExportTriplesParams {
+    #[schemars(description = "Target workspace (default: \"default\")")]
+    #[serde(default = "default_workspace")]
+    pub workspace: String,
+    #[schemars(
+        description = "Serialization format: \"json\" (label-based array), \"json-ld\" (JSON-LD @graph), or \"n-triples\" (RDF N-Triples with akh: prefix)"
+    )]
+    pub format: String,
+    #[schemars(
+        description = "Optional predicate labels to include (e.g. [\"is-a\", \"part-of\"]). Omit to export all predicates."
+    )]
+    pub predicate_filter: Option<Vec<String>>,
+    #[schemars(
+        description = "Optional subject label to include (e.g. \"Tecton\"). Omit to export all subjects."
+    )]
+    pub subject_filter: Option<String>,
+    #[schemars(
+        description = "Absolute path to write output. If omitted, content is returned inline. Must be an absolute path."
+    )]
+    pub output_path: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ImportTriplesParams {
+    #[schemars(description = "Target workspace (default: \"default\")")]
+    #[serde(default = "default_workspace")]
+    pub workspace: String,
+    #[schemars(
+        description = "File format: \"json\" (label-based array), \"json-ld\" (JSON-LD @graph), or \"n-triples\" (N-Triples with akh: prefix)"
+    )]
+    pub format: String,
+    #[schemars(description = "Absolute path to the file to import")]
+    pub input_path: String,
+    #[schemars(
+        description = "If true, simulate the import and report conflicts without modifying the workspace"
+    )]
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
 // ── Helpers ─────────────────────────────────────────────────────────────
 
 /// Format a `Vec<AkhMessage>` into human-readable text for MCP tool output.
@@ -805,6 +848,169 @@ fn format_messages(msgs: &[AkhMessage]) -> String {
         }
     }
     lines.join("\n")
+}
+
+// ── Import/Export Helpers ───────────────────────────────────────────────
+
+/// A triple in label form used for import/export.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct LabelTriple {
+    s: String,
+    p: String,
+    o: String,
+    confidence: f32,
+}
+
+fn serialize_triples_json(triples: &[LabelTriple]) -> Result<String, String> {
+    serde_json::to_string_pretty(triples).map_err(|e| format!("json serialize: {e}"))
+}
+
+fn serialize_triples_jsonld(triples: &[LabelTriple]) -> Result<String, String> {
+    let graph: Vec<serde_json::Value> = triples
+        .iter()
+        .map(|t| {
+            serde_json::json!({
+                "subject": t.s,
+                "predicate": t.p,
+                "object": t.o,
+                "confidence": t.confidence
+            })
+        })
+        .collect();
+    let doc = serde_json::json!({
+        "@context": {
+            "@vocab": "https://akh-medu.dev/sym/",
+            "subject": "https://akh-medu.dev/triple/subject",
+            "predicate": "https://akh-medu.dev/triple/predicate",
+            "object": "https://akh-medu.dev/triple/object",
+            "confidence": "https://akh-medu.dev/meta/confidence"
+        },
+        "@graph": graph
+    });
+    serde_json::to_string_pretty(&doc).map_err(|e| format!("json-ld serialize: {e}"))
+}
+
+fn serialize_triples_ntriples(triples: &[LabelTriple]) -> String {
+    let mut out = String::new();
+    for t in triples {
+        out.push_str(&format!(
+            "<akh:{}> <akh:{}> <akh:{}> .\n",
+            t.s.replace(' ', "_"),
+            t.p.replace(' ', "_"),
+            t.o.replace(' ', "_"),
+        ));
+    }
+    out
+}
+
+fn parse_triples_json(content: &str) -> Result<Vec<LabelTriple>, String> {
+    serde_json::from_str(content).map_err(|e| format!("json parse: {e}"))
+}
+
+fn parse_triples_jsonld(content: &str) -> Result<Vec<LabelTriple>, String> {
+    let doc: serde_json::Value =
+        serde_json::from_str(content).map_err(|e| format!("json-ld parse: {e}"))?;
+    let graph = doc
+        .get("@graph")
+        .and_then(|g| g.as_array())
+        .ok_or("missing @graph array")?;
+    let mut triples = Vec::with_capacity(graph.len());
+    for (i, entry) in graph.iter().enumerate() {
+        let s = entry
+            .get("subject")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| format!("@graph[{i}]: missing subject"))?
+            .to_string();
+        let p = entry
+            .get("predicate")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| format!("@graph[{i}]: missing predicate"))?
+            .to_string();
+        let o = entry
+            .get("object")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| format!("@graph[{i}]: missing object"))?
+            .to_string();
+        let confidence = entry
+            .get("confidence")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(1.0) as f32;
+        triples.push(LabelTriple { s, p, o, confidence });
+    }
+    Ok(triples)
+}
+
+fn parse_triples_ntriples(content: &str) -> Result<Vec<LabelTriple>, String> {
+    let mut triples = Vec::new();
+    for (line_num, line) in content.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        // Expected: <akh:SUBJ> <akh:PRED> <akh:OBJ> .
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 4 {
+            return Err(format!("line {}: expected 4 tokens, got {}", line_num + 1, parts.len()));
+        }
+        let parse_iri = |tok: &str, field: &str| -> Result<String, String> {
+            if !tok.starts_with('<') || !tok.ends_with('>') {
+                return Err(format!("line {}: {field} must be wrapped in < >", line_num + 1));
+            }
+            let inner = &tok[1..tok.len() - 1];
+            let label = if let Some(rest) = inner.strip_prefix("akh:") {
+                rest.replace('_', " ")
+            } else {
+                inner.to_string()
+            };
+            Ok(label)
+        };
+        let s = parse_iri(parts[0], "subject")?;
+        let p = parse_iri(parts[1], "predicate")?;
+        let o = parse_iri(parts[2], "object")?;
+        triples.push(LabelTriple { s, p, o, confidence: 1.0 });
+    }
+    Ok(triples)
+}
+
+/// Validate a path for writing: must be absolute, no null bytes, parent must exist.
+fn validate_write_path(path_str: &str) -> Result<std::path::PathBuf, McpError> {
+    if path_str.contains('\0') {
+        return Err(McpError::invalid_params(
+            format!("output_path contains null bytes"),
+            None,
+        ));
+    }
+    let p = std::path::PathBuf::from(path_str);
+    if !p.is_absolute() {
+        return Err(McpError::invalid_params(
+            format!("output_path must be an absolute path"),
+            None,
+        ));
+    }
+    let parent = p.parent().unwrap_or(&p);
+    let canonical_parent = parent.canonicalize().map_err(|e| {
+        McpError::invalid_params(
+            format!("output_path parent directory not accessible: {e}"),
+            None,
+        )
+    })?;
+    let filename = p.file_name().ok_or_else(|| {
+        McpError::invalid_params(format!("output_path has no filename component"), None)
+    })?;
+    Ok(canonical_parent.join(filename))
+}
+
+/// Validate a path for reading: must exist and be a regular file.
+fn validate_read_path(path_str: &str) -> Result<std::path::PathBuf, McpError> {
+    if path_str.contains('\0') {
+        return Err(McpError::invalid_params(
+            format!("input_path contains null bytes"),
+            None,
+        ));
+    }
+    std::path::PathBuf::from(path_str)
+        .canonicalize()
+        .map_err(|e| McpError::invalid_params(format!("cannot access input_path: {e}"), None))
 }
 
 // ── MCP Server ──────────────────────────────────────────────────────────
@@ -3483,6 +3689,236 @@ impl AkhMcpServer {
             lines.join("\n"),
         )]))
     }
+
+    // ── Import / Export ─────────────────────────────────────────────────
+
+    #[tool(
+        name = "export_triples",
+        description = "Export knowledge-graph triples to JSON, JSON-LD, or N-Triples format. \
+                       Optional predicate_filter and subject_filter narrow the export. \
+                       If output_path is omitted the serialized content is returned inline; \
+                       otherwise it is written to that absolute path."
+    )]
+    async fn export_triples(
+        &self,
+        Parameters(params): Parameters<ExportTriplesParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let engine = self.state.get_engine(&params.workspace).await?;
+
+        // Validate output path upfront (before doing expensive work).
+        let output_path = params
+            .output_path
+            .as_deref()
+            .map(validate_write_path)
+            .transpose()?;
+
+        let format = params.format.to_lowercase();
+        if !matches!(format.as_str(), "json" | "json-ld" | "n-triples") {
+            return Err(McpError::invalid_params(
+                format!("format must be one of: json, json-ld, n-triples"),
+                None,
+            ));
+        }
+
+        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            let all_triples = engine.all_triples();
+
+            // Resolve optional subject filter.
+            let subject_id = if let Some(ref subj) = params.subject_filter {
+                Some(
+                    engine
+                        .resolve_symbol(subj)
+                        .map_err(|e| format!("subject_filter: {e}"))?,
+                )
+            } else {
+                None
+            };
+
+            // Resolve optional predicate filters.
+            let predicate_ids: Option<Vec<_>> = if let Some(ref preds) = params.predicate_filter {
+                let ids: Result<Vec<_>, _> = preds
+                    .iter()
+                    .map(|p| {
+                        engine
+                            .resolve_symbol(p)
+                            .map_err(|e| format!("predicate_filter \"{p}\": {e}"))
+                    })
+                    .collect();
+                Some(ids?)
+            } else {
+                None
+            };
+
+            // Filter triples.
+            let filtered: Vec<LabelTriple> = all_triples
+                .into_iter()
+                .filter(|t| {
+                    subject_id.map_or(true, |sid| t.subject == sid)
+                        && predicate_ids
+                            .as_ref()
+                            .map_or(true, |ids| ids.contains(&t.predicate))
+                })
+                .map(|t| LabelTriple {
+                    s: engine.resolve_label(t.subject),
+                    p: engine.resolve_label(t.predicate),
+                    o: engine.resolve_label(t.object),
+                    confidence: t.confidence,
+                })
+                .collect();
+
+            let count = filtered.len();
+
+            let serialized = match format.as_str() {
+                "json" => serialize_triples_json(&filtered)?,
+                "json-ld" => serialize_triples_jsonld(&filtered)?,
+                _ => serialize_triples_ntriples(&filtered),
+            };
+
+            // Write to file if requested.
+            if let Some(ref path) = output_path {
+                std::fs::write(path, &serialized)
+                    .map_err(|e| format!("write to {}: {e}", path.display()))?;
+                return Ok(format!(
+                    "Exported {count} triples ({format}) to \"{}\"",
+                    path.display()
+                ));
+            }
+
+            Ok(format!("Exported {count} triples ({format}):\n{serialized}"))
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("task panicked: {e}"), None))?
+        .map_err(|e| McpError::internal_error(e, None))?;
+
+        Ok(CallToolResult::success(vec![Content::text(result)]))
+    }
+
+    #[tool(
+        name = "import_triples",
+        description = "Import triples from a JSON, JSON-LD, or N-Triples file into a workspace. \
+                       With dry_run:true, reports what would be imported (new vs. conflicts) \
+                       without modifying the workspace. With dry_run:false, new triples are \
+                       asserted with provenance source=file_import; conflicting triples \
+                       (already present) are skipped."
+    )]
+    async fn import_triples(
+        &self,
+        Parameters(params): Parameters<ImportTriplesParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let input_path = validate_read_path(&params.input_path)?;
+        let engine = self.state.get_engine(&params.workspace).await?;
+
+        let format = params.format.to_lowercase();
+        if !matches!(format.as_str(), "json" | "json-ld" | "n-triples") {
+            return Err(McpError::invalid_params(
+                format!("format must be one of: json, json-ld, n-triples"),
+                None,
+            ));
+        }
+
+        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            // Read and parse file.
+            let content = std::fs::read_to_string(&input_path)
+                .map_err(|e| format!("read \"{}\": {e}", input_path.display()))?;
+
+            let label_triples = match format.as_str() {
+                "json" => parse_triples_json(&content)?,
+                "json-ld" => parse_triples_jsonld(&content)?,
+                _ => parse_triples_ntriples(&content)?,
+            };
+
+            let triples_read = label_triples.len();
+            let mut new_count = 0usize;
+            let mut conflicts = 0usize;
+            let source_path = input_path.display().to_string();
+
+            for lt in &label_triples {
+                // Try to resolve all three labels to existing symbols.
+                let s_id = engine.resolve_symbol(&lt.s).ok();
+                let p_id = engine.resolve_symbol(&lt.p).ok();
+                let o_id = engine.resolve_symbol(&lt.o).ok();
+
+                let already_exists = match (s_id, p_id, o_id) {
+                    (Some(s), Some(p), Some(o)) => engine.has_triple(s, p, o),
+                    _ => false,
+                };
+
+                if already_exists {
+                    conflicts += 1;
+                } else {
+                    new_count += 1;
+                }
+            }
+
+            let mut imported = 0usize;
+
+            if !params.dry_run {
+                use crate::provenance::{DerivationKind, ProvenanceRecord};
+
+                for lt in &label_triples {
+                    let s_id = engine.resolve_symbol(&lt.s).ok();
+                    let p_id = engine.resolve_symbol(&lt.p).ok();
+                    let o_id = engine.resolve_symbol(&lt.o).ok();
+
+                    let already_exists = match (s_id, p_id, o_id) {
+                        (Some(s), Some(p), Some(o)) => engine.has_triple(s, p, o),
+                        _ => false,
+                    };
+
+                    if already_exists {
+                        continue;
+                    }
+
+                    // Create or resolve symbols, then assert triple.
+                    let s = engine
+                        .resolve_or_create_entity(&lt.s)
+                        .map_err(|e| format!("subject \"{}\": {e}", lt.s))?;
+                    let p = engine
+                        .resolve_or_create_relation(&lt.p)
+                        .map_err(|e| format!("predicate \"{}\": {e}", lt.p))?;
+                    let o = engine
+                        .resolve_or_create_entity(&lt.o)
+                        .map_err(|e| format!("object \"{}\": {e}", lt.o))?;
+
+                    let triple = crate::graph::Triple::new(s, p, o).with_confidence(lt.confidence);
+                    engine
+                        .add_triple(&triple)
+                        .map_err(|e| format!("assert {} {} {}: {e}", lt.s, lt.p, lt.o))?;
+
+                    // Record provenance.
+                    let mut prov = ProvenanceRecord::new(
+                        s,
+                        DerivationKind::FileImport {
+                            source_path: source_path.clone(),
+                            format: format.clone(),
+                        },
+                    )
+                    .with_confidence(lt.confidence)
+                    .with_sources(vec![p, o]);
+                    let _ = engine.store_provenance(&mut prov);
+
+                    imported += 1;
+                }
+
+                let _ = engine.persist();
+            }
+
+            let summary = serde_json::json!({
+                "triples_read": triples_read,
+                "new": new_count,
+                "conflicts": conflicts,
+                "imported": imported,
+                "skipped_conflicts": conflicts
+            });
+            serde_json::to_string_pretty(&summary)
+                .map_err(|e| format!("json response: {e}"))
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("task panicked: {e}"), None))?
+        .map_err(|e| McpError::internal_error(e, None))?;
+
+        Ok(CallToolResult::success(vec![Content::text(result)]))
+    }
 }
 
 // ── ServerHandler impl ──────────────────────────────────────────────────
@@ -3532,7 +3968,11 @@ impl rmcp::handler::server::ServerHandler for AkhMcpServer {
                  `verify_source_claim` (update trust when claim verified true/false).\n\n\
                  Analytics: `triple_stats` (full workspace diagnostics — predicate distribution, \
                  confidence bands, top-connected entities, orphan count in one call), \
-                 `predicate_filter` (list all entity pairs for a specific predicate)."
+                 `predicate_filter` (list all entity pairs for a specific predicate).\n\n\
+                 Import/export: `export_triples` (serialize KG triples to JSON, JSON-LD, or \
+                 N-Triples — optionally filtered by subject/predicate, optionally written to a file), \
+                 `import_triples` (load triples from a file; dry_run:true shows new vs. conflicts \
+                 without mutating; dry_run:false asserts new triples with provenance source=file_import)."
                     .to_string(),
             ),
         }

@@ -1128,6 +1128,12 @@ pub fn derivation_kind_prose(kind: &DerivationKind) -> String {
         } => {
             format!("debate contribution on \"{topic}\": {contribution_kind}")
         }
+        DerivationKind::FileImport {
+            source_path,
+            format,
+        } => {
+            format!("imported from file \"{source_path}\" ({format})")
+        }
     }
 }
 
