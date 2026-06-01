@@ -248,15 +248,16 @@ pub fn create_goal(
 
     // Remove any stale property triples from a previous generation cycle
     // (resolve_or_create_entity reuses the same goal_id for the same label).
-    let kg = engine.knowledge_graph();
+    // Use engine.remove_triple() so removals propagate to the SPARQL store.
     for pred in [predicates.has_description, predicates.has_status, predicates.has_priority] {
-        let old: Vec<_> = kg
+        let old: Vec<_> = engine
+            .knowledge_graph()
             .triples_from(goal_id)
             .into_iter()
             .filter(|t| t.predicate == pred)
             .collect();
         for o in &old {
-            let _ = kg.remove_triple(o.subject, o.predicate, o.object);
+            let _ = engine.remove_triple(o.subject, o.predicate, o.object);
         }
     }
 
@@ -334,14 +335,16 @@ pub fn update_goal_status(
     predicates: &AgentPredicates,
 ) -> AgentResult<()> {
     // Remove the old status triple so we don't accumulate stale values.
-    let kg = engine.knowledge_graph();
-    let old_status_triples: Vec<_> = kg
+    // Use engine.remove_triple() (not kg.remove_triple()) so the removal is
+    // also propagated to the SPARQL store.
+    let old_status_triples: Vec<_> = engine
+        .knowledge_graph()
         .triples_from(goal.symbol_id)
         .into_iter()
         .filter(|t| t.predicate == predicates.has_status)
         .collect();
     for old in &old_status_triples {
-        let _ = kg.remove_triple(old.subject, old.predicate, old.object);
+        let _ = engine.remove_triple(old.subject, old.predicate, old.object);
     }
 
     let status_label = format!("status:{}", new_status.as_label());

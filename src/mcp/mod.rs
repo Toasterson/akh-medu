@@ -11,7 +11,9 @@
 //! defaults to `"default"`.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use rmcp::handler::server::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
@@ -22,7 +24,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use tokio::sync::RwLock;
 
-use crate::agent::{Agent, AgentConfig};
+use crate::agent::{Agent, AgentConfig, GoalStatus};
 use crate::engine::{Engine, EngineConfig};
 use crate::message::AkhMessage;
 use crate::paths::AkhPaths;
@@ -49,22 +51,35 @@ pub struct McpState {
     /// Per-workspace gates that serialize Engine::new() so two concurrent
     /// MCP calls never collide on the redb file-lock open.
     pub loading_gates: RwLock<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// Lifecycle stats tracked by daemon_run_bounded / workspace_unload.
+    pub workspace_stats: RwLock<HashMap<String, WorkspaceStats>>,
 }
 
 /// Pause control for a single workspace daemon.
 #[derive(Clone)]
 pub struct DaemonPauseHandle {
-    pub paused: Arc<std::sync::atomic::AtomicBool>,
+    pub paused: Arc<AtomicBool>,
     pub cycle_done: Arc<tokio::sync::Notify>,
 }
 
 impl DaemonPauseHandle {
     pub fn new() -> Self {
         Self {
-            paused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            paused: Arc::new(AtomicBool::new(false)),
             cycle_done: Arc::new(tokio::sync::Notify::new()),
         }
     }
+}
+
+/// Lightweight tracking for workspace lifecycle events surfaced by daemon_status.
+#[derive(Debug, Default, Clone)]
+pub struct WorkspaceStats {
+    /// Total OODA cycles run via daemon_run_bounded for this workspace.
+    pub bounded_cycles: usize,
+    /// Unix timestamp (seconds) of the most recent daemon_run_bounded persist.
+    pub last_bounded_persist_at: Option<u64>,
+    /// True when workspace_unload was called and the engine is out of memory.
+    pub is_unloaded: bool,
 }
 
 impl McpState {
@@ -80,6 +95,7 @@ impl McpState {
             nlu_pipelines: RwLock::new(HashMap::new()),
             daemon_pauses: RwLock::new(HashMap::new()),
             loading_gates: RwLock::new(HashMap::new()),
+            workspace_stats: RwLock::new(HashMap::new()),
         }
     }
 
@@ -382,6 +398,31 @@ pub struct ChatParams {
         description = "User message to process through the full NLU pipeline (dialogue acts, facts, queries, goals)"
     )]
     pub message: String,
+}
+
+// ── Daemon Lifecycle Parameter Structs ─────────────────────────────────
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DaemonRunBoundedParams {
+    #[schemars(description = "Target workspace (default: \"default\")")]
+    #[serde(default = "default_workspace")]
+    pub workspace: String,
+    #[schemars(description = "Maximum OODA cycles to run (default: 10)")]
+    pub max_cycles: Option<u32>,
+    #[schemars(description = "Wall-clock timeout in seconds (default: 300). Whichever limit fires first causes a soft stop.")]
+    pub max_duration_seconds: Option<u64>,
+    #[schemars(description = "Optional goals to add before running. Existing goals are preserved.")]
+    pub goal_filter: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct WorkspacePersistParams {
+    #[schemars(description = "Target workspace (default: \"default\")")]
+    #[serde(default = "default_workspace")]
+    pub workspace: String,
+    #[schemars(description = "Force a full snapshot (no-op pre-ADR-049; always flushes the redb store)")]
+    #[serde(default)]
+    pub force_snapshot: bool,
 }
 
 // ── Batch Operations ────────────────────────────────────────────────────
@@ -2122,6 +2163,343 @@ impl AkhMcpServer {
         }
     }
 
+    // ══ Bounded Daemon Runs / Workspace Lifecycle ═════════════════════════
+
+    #[tool(
+        name = "daemon_run_bounded",
+        description = "Run the OODA agent loop on this workspace for at most max_cycles cycles OR \
+                       max_duration_seconds wall-clock seconds — whichever limit fires first triggers \
+                       a soft stop (current cycle completes, then the loop exits). Optionally supply \
+                       goal_filter to add goals before running; existing goals are preserved. \
+                       Returns cycle count, elapsed time, and remaining active goals."
+    )]
+    async fn daemon_run_bounded(
+        &self,
+        Parameters(params): Parameters<DaemonRunBoundedParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let ws = params.workspace.clone();
+        let agent = self.state.get_agent(&ws).await?;
+
+        let max_cycles = params.max_cycles.unwrap_or(10) as usize;
+        let max_dur_secs = params.max_duration_seconds.unwrap_or(300);
+        let goal_filter = params.goal_filter.clone().unwrap_or_default();
+
+        // Shared stop flag: timer task flips it after wall-clock deadline.
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_for_timer = Arc::clone(&stop);
+
+        let timer_handle = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(max_dur_secs)).await;
+            stop_for_timer.store(true, Ordering::SeqCst);
+        });
+
+        let stop_for_task = Arc::clone(&stop);
+        let result = tokio::task::spawn_blocking(move || -> Result<(usize, f64, usize), String> {
+            let mut agent = agent.lock().map_err(|e| format!("agent lock: {e}"))?;
+
+            for goal in &goal_filter {
+                let _ = agent.add_goal(goal, 128, "Bounded run goal");
+            }
+
+            let mut cycles = 0usize;
+            let started = Instant::now();
+
+            loop {
+                if cycles >= max_cycles || stop_for_task.load(Ordering::Relaxed) {
+                    break;
+                }
+                match agent.run_cycle() {
+                    Ok(_) => cycles += 1,
+                    Err(crate::agent::AgentError::NoGoals) => break,
+                    Err(crate::agent::AgentError::MaxCyclesReached { .. }) => break,
+                    Err(e) => return Err(format!("cycle {cycles}: {e}")),
+                }
+            }
+
+            let elapsed = started.elapsed().as_secs_f64();
+            let _ = agent.persist_session();
+
+            let remaining = agent
+                .goals()
+                .iter()
+                .filter(|g| matches!(g.status, GoalStatus::Active | GoalStatus::Pending))
+                .count();
+
+            Ok((cycles, elapsed, remaining))
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("task panicked: {e}"), None))?
+        .map_err(|e| McpError::internal_error(e, None))?;
+
+        timer_handle.abort();
+
+        let (cycles, elapsed, remaining) = result;
+
+        // Record stats for daemon_status.
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        {
+            let mut stats = self.state.workspace_stats.write().await;
+            let entry = stats.entry(ws.clone()).or_default();
+            entry.bounded_cycles += cycles;
+            entry.last_bounded_persist_at = Some(now_secs);
+            entry.is_unloaded = false;
+        }
+
+        let stopped_by = if stop.load(Ordering::Relaxed) {
+            "wall-clock timeout"
+        } else {
+            "cycle limit"
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "daemon_run_bounded: ran {cycles} cycle(s) in {elapsed:.1}s (stopped by {stopped_by}). \
+             {remaining} active goal(s) remaining.",
+        ))]))
+    }
+
+    #[tool(
+        name = "workspace_persist",
+        description = "Force a WAL flush and engine persist for this workspace. Ensures all \
+                       in-memory knowledge-graph changes are durably written to the redb store. \
+                       The force_snapshot flag is accepted for forward-compatibility with ADR-049 \
+                       (Postgres WAL + snapshots) but is currently a no-op beyond the normal persist."
+    )]
+    async fn workspace_persist(
+        &self,
+        Parameters(params): Parameters<WorkspacePersistParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let ws = params.workspace.clone();
+        let engine = self.state.get_engine(&ws).await?;
+
+        tokio::task::spawn_blocking(move || {
+            let _ = engine.persist();
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("persist task panicked: {e}"), None))?;
+
+        // Also persist the agent session if one is loaded.
+        {
+            let agents = self.state.agents.read().await;
+            if let Some(agent) = agents.get(&ws) {
+                let agent = Arc::clone(agent);
+                tokio::task::spawn_blocking(move || {
+                    if let Ok(a) = agent.lock() {
+                        let _ = a.persist_session();
+                    }
+                })
+                .await
+                .map_err(|e| {
+                    McpError::internal_error(format!("agent persist task panicked: {e}"), None)
+                })?;
+            }
+        }
+
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        {
+            let mut stats = self.state.workspace_stats.write().await;
+            let entry = stats.entry(ws.clone()).or_default();
+            entry.last_bounded_persist_at = Some(now_secs);
+        }
+
+        let snapshot_note = if params.force_snapshot {
+            " (force_snapshot requested — no-op pre-ADR-049)"
+        } else {
+            ""
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Workspace \"{ws}\" persisted successfully{snapshot_note}.",
+        ))]))
+    }
+
+    #[tool(
+        name = "workspace_unload",
+        description = "Persist all in-memory state for this workspace, then drop the Engine, \
+                       Agent, and NLU pipeline from memory. The daemon pause handle is kept so \
+                       the background task can be resumed. The next MCP tool call that accesses \
+                       this workspace will transparently reload it from disk (lazy-load). \
+                       Use this to free memory between long-running tasks on many workspaces."
+    )]
+    async fn workspace_unload(
+        &self,
+        Parameters(params): Parameters<WorkspaceParam>,
+    ) -> Result<CallToolResult, McpError> {
+        let ws = params.workspace.clone();
+
+        // Persist engine + agent before dropping.
+        {
+            let workspaces = self.state.workspaces.read().await;
+            if let Some(engine) = workspaces.get(&ws) {
+                let engine = Arc::clone(engine);
+                tokio::task::spawn_blocking(move || {
+                    let _ = engine.persist();
+                })
+                .await
+                .map_err(|e| {
+                    McpError::internal_error(format!("persist task panicked: {e}"), None)
+                })?;
+            }
+        }
+        {
+            let agents = self.state.agents.read().await;
+            if let Some(agent) = agents.get(&ws) {
+                let agent = Arc::clone(agent);
+                tokio::task::spawn_blocking(move || {
+                    if let Ok(a) = agent.lock() {
+                        let _ = a.persist_session();
+                    }
+                })
+                .await
+                .map_err(|e| {
+                    McpError::internal_error(format!("agent persist task panicked: {e}"), None)
+                })?;
+            }
+        }
+
+        // Drop heavy in-memory structures; keep daemon_pauses intact.
+        {
+            let mut workspaces = self.state.workspaces.write().await;
+            workspaces.remove(&ws);
+        }
+        {
+            let mut agents = self.state.agents.write().await;
+            agents.remove(&ws);
+        }
+        {
+            let mut nlu = self.state.nlu_pipelines.write().await;
+            nlu.remove(&ws);
+        }
+
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        {
+            let mut stats = self.state.workspace_stats.write().await;
+            let entry = stats.entry(ws.clone()).or_default();
+            entry.last_bounded_persist_at = Some(now_secs);
+            entry.is_unloaded = true;
+        }
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Workspace \"{ws}\" unloaded: engine, agent, and NLU pipeline dropped from memory. \
+             Daemon pause handle retained. Next access will reload from disk.",
+        ))]))
+    }
+
+    #[tool(
+        name = "daemon_status",
+        description = "Return the current lifecycle status of a workspace: whether the engine is \
+                       loaded in memory, whether a daemon pause handle exists (indicating a daemon \
+                       was started), bounded-run cycle count, last persist timestamp, active goal \
+                       count, and current KG size."
+    )]
+    async fn daemon_status(
+        &self,
+        Parameters(params): Parameters<WorkspaceParam>,
+    ) -> Result<CallToolResult, McpError> {
+        let ws = params.workspace.clone();
+
+        let is_loaded = {
+            let workspaces = self.state.workspaces.read().await;
+            workspaces.contains_key(&ws)
+        };
+
+        let has_daemon = {
+            let pauses = self.state.daemon_pauses.read().await;
+            pauses.contains_key(&ws)
+        };
+
+        let is_paused = {
+            let pauses = self.state.daemon_pauses.read().await;
+            pauses
+                .get(&ws)
+                .map(|h| h.paused.load(Ordering::SeqCst))
+                .unwrap_or(false)
+        };
+
+        let stats = {
+            let stats = self.state.workspace_stats.read().await;
+            stats.get(&ws).cloned().unwrap_or_default()
+        };
+
+        // Goal count requires a loaded agent — skip if unloaded to avoid re-loading.
+        let (active_goals, kg_symbols, kg_triples) = if is_loaded {
+            let agent_count = {
+                let agents = self.state.agents.read().await;
+                if let Some(agent) = agents.get(&ws) {
+                    let agent = Arc::clone(agent);
+                    tokio::task::spawn_blocking(move || {
+                        agent
+                            .lock()
+                            .ok()
+                            .map(|a| {
+                                a.goals()
+                                    .iter()
+                                    .filter(|g| {
+                                        matches!(g.status, GoalStatus::Active | GoalStatus::Pending)
+                                    })
+                                    .count()
+                            })
+                            .unwrap_or(0)
+                    })
+                    .await
+                    .unwrap_or(0)
+                } else {
+                    0
+                }
+            };
+            let (syms, triples) = {
+                let workspaces = self.state.workspaces.read().await;
+                if let Some(engine) = workspaces.get(&ws) {
+                    let engine = Arc::clone(engine);
+                    tokio::task::spawn_blocking(move || {
+                        (engine.all_symbols().len(), engine.all_triples().len())
+                    })
+                    .await
+                    .unwrap_or((0, 0))
+                } else {
+                    (0, 0)
+                }
+            };
+            (agent_count, syms, triples)
+        } else {
+            (0, 0, 0)
+        };
+
+        let last_persist_str = stats
+            .last_bounded_persist_at
+            .map(|ts| format!("{ts}"))
+            .unwrap_or_else(|| "never".into());
+
+        let daemon_str = if has_daemon {
+            if is_paused {
+                "running (paused)"
+            } else {
+                "running"
+            }
+        } else {
+            "none"
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "workspace: {ws}\n\
+             loaded: {is_loaded}\n\
+             daemon: {daemon_str}\n\
+             bounded_cycles: {}\n\
+             last_persist: {last_persist_str}\n\
+             active_goals: {active_goals}\n\
+             kg_symbols: {kg_symbols}\n\
+             kg_triples: {kg_triples}",
+            stats.bounded_cycles,
+        ))]))
+    }
 
     // ── Phase 2: Agent Introspection Tools ─────────────────────────
 

@@ -247,14 +247,23 @@ impl Engine {
         let store = Arc::new(store);
 
         // Restore knowledge graph from persistent SPARQL store.
-        if let Some(ref sparql) = sparql {
-            let restored = sparql.all_triples().unwrap_or_else(|e| {
-                tracing::warn!(error = %e, "KG restore from SPARQL skipped");
-                vec![]
-            });
-            if !restored.is_empty() {
-                let count = knowledge_graph.bulk_load(&restored).unwrap_or(0);
+        // When the `sparql-persist` feature is disabled the SPARQL store is in-memory
+        // and returns 0 triples — fall back to the redb triple backup in that case.
+        {
+            let sparql_triples = sparql.as_ref().and_then(|s| s.all_triples().ok()).unwrap_or_default();
+            if !sparql_triples.is_empty() {
+                let count = knowledge_graph.bulk_load(&sparql_triples).unwrap_or(0);
                 tracing::info!(triples = count, "knowledge graph restored from SPARQL");
+            } else {
+                // SPARQL had no data — try the redb KG backup written by persist().
+                if let Some(bytes) = store.get_meta(b"kg_triples").ok().flatten() {
+                    if let Ok(backup) = bincode::deserialize::<Vec<Triple>>(&bytes) {
+                        let count = knowledge_graph.bulk_load(&backup).unwrap_or(0);
+                        if count > 0 {
+                            tracing::info!(triples = count, "knowledge graph restored from redb backup");
+                        }
+                    }
+                }
             }
         }
 
@@ -2632,6 +2641,15 @@ impl Engine {
         // Sync knowledge graph to SPARQL store.
         if let Some(ref sparql) = self.sparql {
             sparql.sync_from(&self.knowledge_graph)?;
+        }
+
+        // Write KG triple backup to redb — used as fallback when the SPARQL store
+        // is in-memory only (sparql-persist feature disabled).
+        {
+            let all_triples = self.knowledge_graph.all_triples();
+            if let Ok(bytes) = bincode::serialize(&all_triples) {
+                let _ = self.store.put_meta(b"kg_triples", &bytes);
+            }
         }
 
         // Persist Phase 9 registries.

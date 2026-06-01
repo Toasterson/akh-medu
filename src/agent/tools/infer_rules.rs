@@ -53,7 +53,7 @@ impl Tool for InferRulesTool {
             .unwrap_or(0.1);
         let run_cleanup = input
             .get("cleanup")
-            .map(|s| matches!(s.as_str(), "true" | "1" | "yes"))
+            .map(|s| matches!(s.as_ref(), "true" | "1" | "yes"))
             .unwrap_or(false);
 
         let mut lines = Vec::new();
