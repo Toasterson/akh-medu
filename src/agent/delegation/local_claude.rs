@@ -118,6 +118,7 @@ impl LocalClaudeWorker {
                     exit_code: output.status.code(),
                     goal_id: task.goal_id,
                     error: None,
+                    target: None,
                 })
             }
             Ok(Err(e)) => Err(DelegationError::Io(e)),
@@ -266,6 +267,7 @@ Some trailing text.
             required_capabilities: vec![],
             goal_id: 42,
             priority: 0.8,
+            target_hint: None,
         };
         let prompt = LocalClaudeWorker::build_prompt(&task);
         assert!(prompt.contains("Write unit tests"));

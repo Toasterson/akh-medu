@@ -79,6 +79,12 @@ pub struct DaemonConfig {
     /// Runs bridge encoder alignment training during idle periods.
     /// Only starts after sufficient training data has accumulated.
     pub bridge_training_interval: Duration,
+    /// Delegation result processing interval (default: 10s).
+    ///
+    /// Drains the pending task queue, dispatches new delegations, processes
+    /// completed results, asserts result triples into the KG, and stores
+    /// delegation provenance.
+    pub delegation_interval: Duration,
     /// Maximum OODA cycles (0 = unlimited).
     pub max_cycles: usize,
 }
@@ -100,6 +106,7 @@ impl Default for DaemonConfig {
             trigger_evaluation_interval: Duration::from_secs(15),
             knowledge_extraction_interval: Duration::from_secs(2700), // 45 min
             bridge_training_interval: Duration::from_secs(7200), // 2 hours
+            delegation_interval: Duration::from_secs(10),
             max_cycles: 0,
         }
     }
@@ -201,6 +208,7 @@ impl AgentDaemon {
         let mut trigger_tick = interval(self.config.trigger_evaluation_interval);
         let mut extraction_tick = interval(self.config.knowledge_extraction_interval);
         let mut bridge_training_tick = interval(self.config.bridge_training_interval);
+        let mut delegation_tick = interval(self.config.delegation_interval);
 
         self.agent.lock().unwrap().sink().emit(&AkhMessage::system(
             "daemon started — background learning active",
@@ -269,6 +277,9 @@ impl AgentDaemon {
                 }
                 _ = bridge_training_tick.tick() => {
                     self.run_bridge_training();
+                }
+                _ = delegation_tick.tick() => {
+                    self.run_delegation_tick().await;
                 }
                 _ = self.wait_for_shutdown() => {
                     self.agent.lock().unwrap().sink().emit(&AkhMessage::system(
@@ -972,6 +983,143 @@ impl AgentDaemon {
                 && let Ok(mut st) = status.try_lock()
             {
                 st.last_persist_at = Some(now_secs());
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 36: Delegation tick
+    // -----------------------------------------------------------------------
+
+    /// Process the delegation subsystem on each tick (every 10s).
+    ///
+    /// When the `delegation` feature is disabled this is a no-op.
+    async fn run_delegation_tick(&self) {
+        #[cfg(feature = "delegation")]
+        self.run_delegation_tick_inner().await;
+    }
+
+    /// Inner implementation (only compiled with the `delegation` feature).
+    #[cfg(feature = "delegation")]
+    async fn run_delegation_tick_inner(&self) {
+        use super::delegation::DelegationOutcome;
+        use crate::provenance::{DerivationKind, ProvenanceRecord};
+
+        // --- Phase 1: Drain pending queue and dispatch ---
+        let pending = {
+            let agent = self.agent.lock().unwrap();
+            agent.delegation_manager().drain_pending()
+        };
+
+        for task in pending {
+            let hint = task.target_hint.clone();
+            let agent = self.agent.lock().unwrap();
+            match agent.delegation_manager().dispatch(task, hint.as_deref()) {
+                Ok(id) => {
+                    tracing::info!(delegation_id = %id, "delegation dispatched");
+                    agent.sink().emit(&AkhMessage::system(format!(
+                        "[daemon:delegation] dispatched delegation {id}",
+                    )));
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "daemon: failed to dispatch delegation");
+                }
+            }
+        }
+
+        // --- Phase 2: Process completed results ---
+        let completed: Vec<DelegationOutcome> = {
+            let agent = self.agent.lock().unwrap();
+            let mut results = Vec::new();
+            while let Some(outcome) = agent.delegation_manager().try_recv() {
+                results.push(outcome);
+            }
+            results
+        };
+
+        for outcome in completed {
+            let target_label = outcome
+                .target
+                .as_ref()
+                .map(|t| t.to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+
+            if let Some(ref err) = outcome.error {
+                tracing::warn!(
+                    delegation_id = outcome.id.0,
+                    error = %err,
+                    "delegation failed"
+                );
+            } else {
+                tracing::info!(
+                    delegation_id = outcome.id.0,
+                    target = %target_label,
+                    wall_time_ms = outcome.wall_time.as_millis(),
+                    "delegation completed"
+                );
+            }
+
+            // Assert result triples into KG.
+            if let Some(ref structured) = outcome.structured {
+                let engine = self.agent.lock().unwrap().engine.clone();
+                let tuples: Vec<(String, String, String, f32)> = structured
+                    .triples
+                    .iter()
+                    .map(|t| (t.subject.clone(), t.predicate.clone(), t.object.clone(), t.confidence))
+                    .collect();
+                if let Err(e) = engine.ingest_label_triples(&tuples) {
+                    tracing::debug!(error = %e, "delegation: failed to assert triples");
+                }
+                // Store delegation provenance.
+                // Use the delegation ID as a synthetic SymbolId (must be non-zero).
+                // If delegation ID happens to be 0, resolve a placeholder entity.
+                let sym_id = crate::symbol::SymbolId::new(outcome.id.0.max(1))
+                    .unwrap_or_else(|| {
+                        engine.resolve_or_create_entity("delegation:placeholder")
+                            .unwrap_or_else(|_| {
+                                // Last resort: use id=1 which is always valid.
+                                crate::symbol::SymbolId::new(1).unwrap()
+                            })
+                    });
+                let mut prov = ProvenanceRecord::new(
+                    sym_id,
+                    DerivationKind::Delegation {
+                        target: target_label.clone(),
+                        task_description: outcome.stdout.chars().take(200).collect(),
+                        model_used: None,
+                        tokens_consumed: outcome.tokens_consumed,
+                        cost_usd: outcome.cost_usd,
+                        wall_time_ms: outcome.wall_time.as_millis() as u64,
+                    },
+                );
+                if let Ok(agent) = self.agent.lock() {
+                    if let Err(e) = agent.engine.store_provenance(&mut prov) {
+                        tracing::debug!(error = %e, "delegation: failed to store provenance");
+                    }
+                    // Add summary to working memory if non-empty.
+                    if !structured.summary.is_empty() {
+                        agent.sink().emit(&AkhMessage::system(format!(
+                            "[daemon:delegation] {target_label}: {}", structured.summary
+                        )));
+                    }
+                }
+            }
+
+            // Remove from active tracking.
+            if let Ok(agent) = self.agent.lock() {
+                agent.delegation_manager().complete(outcome.id);
+            }
+        }
+
+        // --- Phase 3: Check timeouts ---
+        let timed_out = {
+            let agent = self.agent.lock().unwrap();
+            agent.delegation_manager().check_timeouts()
+        };
+        for id in timed_out {
+            tracing::warn!(delegation_id = %id, "delegation timed out");
+            if let Ok(agent) = self.agent.lock() {
+                agent.delegation_manager().complete(id);
             }
         }
     }

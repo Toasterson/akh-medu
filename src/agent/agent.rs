@@ -245,6 +245,9 @@ pub struct Agent {
     /// Optional WASM tool runtime (only when `wasm-tools` feature is enabled).
     #[cfg(feature = "wasm-tools")]
     pub(crate) wasm_runtime: Option<super::wasm_runtime::WasmToolRuntime>,
+    /// Delegation manager for offloading LLM-class tasks (Phase 36).
+    #[cfg(feature = "delegation")]
+    pub(crate) delegation_manager: super::delegation::DelegationManager,
 }
 
 impl Agent {
@@ -253,6 +256,8 @@ impl Agent {
         registry: &mut ToolRegistry,
         predicates: &AgentPredicates,
         engine: &Engine,
+        #[cfg(feature = "delegation")]
+        delegation_pending: std::sync::Arc<std::sync::Mutex<Vec<super::delegation::DelegationTask>>>,
     ) {
         // Core KG tools.
         registry.register(Box::new(tools::KgQueryTool));
@@ -300,6 +305,12 @@ impl Agent {
 
         // Audit log.
         registry.register(Box::new(tools::AuditLogTool));
+
+        // Delegation tool (Phase 36) — wired to pending task queue.
+        #[cfg(feature = "delegation")]
+        registry.register(Box::new(tools::DelegateTool::new(delegation_pending)));
+        #[cfg(not(feature = "delegation"))]
+        registry.register(Box::new(tools::DelegateTool::new_noop()));
     }
 
     /// Attach the audit ledger to the tool registry if persistence is configured.
@@ -419,8 +430,21 @@ impl Agent {
         let dialogue_predicates = super::dialogue::DialoguePredicates::init(&engine)?;
         let dialogue_manager = super::dialogue::DialogueManager::new(dialogue_predicates, "operator");
 
+        // Create delegation manager early so we can pass the pending queue to DelegateTool.
+        #[cfg(feature = "delegation")]
+        let delegation_manager =
+            super::delegation::DelegationManager::new(super::delegation::DelegationConfig::default());
+        #[cfg(feature = "delegation")]
+        let delegation_pending = delegation_manager.pending_queue();
+
         let mut tool_registry = ToolRegistry::new();
-        Self::register_builtin_tools(&mut tool_registry, &predicates, &engine);
+        Self::register_builtin_tools(
+            &mut tool_registry,
+            &predicates,
+            &engine,
+            #[cfg(feature = "delegation")]
+            delegation_pending,
+        );
         Self::wire_audit_ledger(&mut tool_registry, &engine);
 
         let working_memory = WorkingMemory::new(config.working_memory_capacity);
@@ -494,6 +518,8 @@ impl Agent {
             curiosity_config,
             #[cfg(feature = "wasm-tools")]
             wasm_runtime: super::wasm_runtime::WasmToolRuntime::new().ok(),
+            #[cfg(feature = "delegation")]
+            delegation_manager,
         };
 
         // Initialize interlocutor predicates.
@@ -571,6 +597,33 @@ impl Agent {
         agent.load_skill_tools();
 
         Ok(agent)
+    }
+
+    // -----------------------------------------------------------------------
+    // Delegation manager accessors (Phase 36)
+    // -----------------------------------------------------------------------
+
+    /// Immutable access to the delegation manager.
+    #[cfg(feature = "delegation")]
+    pub fn delegation_manager(&self) -> &super::delegation::DelegationManager {
+        &self.delegation_manager
+    }
+
+    /// Mutable access to the delegation manager.
+    #[cfg(feature = "delegation")]
+    pub fn delegation_manager_mut(&mut self) -> &mut super::delegation::DelegationManager {
+        &mut self.delegation_manager
+    }
+
+    /// Replace the delegation manager (e.g. after loading config from akh.toml).
+    #[cfg(feature = "delegation")]
+    pub fn set_delegation_manager(&mut self, manager: super::delegation::DelegationManager) {
+        // Migrate the pending queue so any tasks queued before the swap are preserved.
+        let pending = self.delegation_manager.drain_pending();
+        self.delegation_manager = manager;
+        for task in pending {
+            let _ = self.delegation_manager.enqueue(task);
+        }
     }
 
     /// Add a new goal. Returns the goal's symbol ID.
@@ -2534,8 +2587,22 @@ impl Agent {
         let dialogue_predicates = super::dialogue::DialoguePredicates::init(&engine)?;
         let dialogue_manager = super::dialogue::DialogueManager::new(dialogue_predicates, "operator");
 
+        // Create delegation manager (delegation state is not persisted between sessions
+        // — active delegations are transient; the config reloads from defaults).
+        #[cfg(feature = "delegation")]
+        let delegation_manager =
+            super::delegation::DelegationManager::new(super::delegation::DelegationConfig::default());
+        #[cfg(feature = "delegation")]
+        let delegation_pending = delegation_manager.pending_queue();
+
         let mut tool_registry = ToolRegistry::new();
-        Self::register_builtin_tools(&mut tool_registry, &predicates, &engine);
+        Self::register_builtin_tools(
+            &mut tool_registry,
+            &predicates,
+            &engine,
+            #[cfg(feature = "delegation")]
+            delegation_pending,
+        );
         Self::wire_audit_ledger(&mut tool_registry, &engine);
 
         let store = engine.store();
@@ -2829,6 +2896,8 @@ impl Agent {
             curiosity_config,
             #[cfg(feature = "wasm-tools")]
             wasm_runtime: super::wasm_runtime::WasmToolRuntime::new().ok(),
+            #[cfg(feature = "delegation")]
+            delegation_manager,
         };
 
         // Initialize interlocutor predicates.
