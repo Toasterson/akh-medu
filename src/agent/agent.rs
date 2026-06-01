@@ -425,8 +425,10 @@ impl Agent {
 
         let working_memory = WorkingMemory::new(config.working_memory_capacity);
 
-        // Try to restore goals from KG.
-        let goals = goal::restore_goals(&engine, &predicates).unwrap_or_default();
+        // Try to restore goals: prefer durable-store blob (survives without
+        // sparql-persist), fall back to KG-triple reconstruction.
+        let goals = goal::restore_goals_from_store(&engine)
+            .unwrap_or_else(|| goal::restore_goals(&engine, &predicates).unwrap_or_default());
 
         // Load psyche from compartment manager if available.
         let psyche = engine.compartments().and_then(|cm| cm.psyche());
@@ -2514,6 +2516,9 @@ impl Agent {
                 message: format!("failed to persist curiosity config: {e}"),
             })?;
 
+        // Persist goals to durable store (survives restart without sparql-persist).
+        goal::persist_goals(&self.goals, &self.engine)?;
+
         // Flush the engine's durable store.
         self.engine
             .persist()
@@ -2521,6 +2526,20 @@ impl Agent {
                 message: format!("engine persist failed: {e}"),
             })?;
 
+        Ok(())
+    }
+
+    /// Lightweight persist: saves goals and flushes the engine's durable store.
+    ///
+    /// Use this instead of calling `engine.persist()` directly when you want
+    /// goal state to survive a restart without a full `persist_session()`.
+    pub fn persist(&self) -> AgentResult<()> {
+        goal::persist_goals(&self.goals, &self.engine)?;
+        self.engine
+            .persist()
+            .map_err(|e| AgentError::ConsolidationFailed {
+                message: format!("engine persist failed: {e}"),
+            })?;
         Ok(())
     }
 
@@ -2560,8 +2579,9 @@ impl Agent {
             .and_then(|bytes| bincode::deserialize::<u64>(&bytes).ok())
             .unwrap_or(0);
 
-        // Restore goals from KG.
-        let goals = goal::restore_goals(&engine, &predicates).unwrap_or_default();
+        // Restore goals: prefer durable-store blob, fall back to KG-triple reconstruction.
+        let goals = goal::restore_goals_from_store(&engine)
+            .unwrap_or_else(|| goal::restore_goals(&engine, &predicates).unwrap_or_default());
 
         // Restore psyche: prefer persisted state, fall back to compartment manager.
         let psyche = store

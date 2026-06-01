@@ -1383,6 +1383,60 @@ impl Engine {
         Ok(removed)
     }
 
+    /// Remove all agent runtime artifact entities from the knowledge graph.
+    ///
+    /// Runtime artifacts are entities whose labels start with `"summary:"` —
+    /// opaque string dumps written by the old memory consolidation path.  They
+    /// inflate triple counts, bloat the VSA similarity space, and carry no
+    /// durable semantic value.
+    ///
+    /// This method acts as a one-time GC sweep for databases that accumulated
+    /// artifacts before the consolidation guard (WI-019e1061) was introduced.
+    /// New runs no longer produce `summary:*` entities, so this is safe to call
+    /// at engine startup and as a background maintenance task.
+    ///
+    /// Returns the number of triples removed.
+    pub fn purge_runtime_artifacts(&self) -> AkhResult<usize> {
+        let artifact_ids: Vec<SymbolId> = self
+            .all_symbols()
+            .into_iter()
+            .filter(|m| m.label.starts_with("summary:"))
+            .map(|m| m.id)
+            .collect();
+
+        if artifact_ids.is_empty() {
+            return Ok(0);
+        }
+
+        let artifact_set: std::collections::HashSet<SymbolId> =
+            artifact_ids.iter().copied().collect();
+
+        let to_remove: Vec<Triple> = self
+            .all_triples()
+            .into_iter()
+            .filter(|t| {
+                artifact_set.contains(&t.subject) || artifact_set.contains(&t.object)
+            })
+            .collect();
+
+        let removed = to_remove.len();
+        for triple in to_remove {
+            self.knowledge_graph
+                .remove_triple(triple.subject, triple.predicate, triple.object);
+            if let Some(ref sparql) = self.sparql {
+                let _ = sparql.remove_triple(triple.subject, triple.predicate, triple.object);
+            }
+        }
+
+        tracing::info!(
+            artifact_symbols = artifact_ids.len(),
+            triples_removed = removed,
+            "purged runtime artifact entities from knowledge graph"
+        );
+
+        Ok(removed)
+    }
+
     /// Analyze knowledge gaps around the given goal symbols.
     pub fn analyze_gaps(
         &self,
