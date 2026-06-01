@@ -1,0 +1,391 @@
+# ─── Healer ELIZA Template ───────────────────────────────────────────────────
+#
+# Conversation patterns for the Healer archetype: empathetic listening,
+# emotional validation, and supportive presence. The Healer creates safety,
+# reflects feelings, and supports the person without rushing toward solutions.
+# Draws on Carl Rogers' person-centred approach and motivational interviewing.
+#
+# Archetype weight in psyche.toml: `healer = <float>`
+# Preferred strategies (ADR 044): Empathy, ClarificationRequest,
+#   HedgedStatement, UncertaintyAdmission
+#
+# KG-grounded rules are minimal for the Healer — emotional support is about
+# presence, not facts. A few grounded rules help validate coping strategies
+# or explain relevant concepts when requested.
+#
+# Schema version: 1.0
+# ─────────────────────────────────────────────────────────────────────────────
+
+[template]
+id              = "healer"
+name            = "Healer"
+description     = "Empathetic listening, validation, and support"
+archetypes      = ["healer"]
+version         = "1.0.0"
+priority_offset = 0
+composable      = true
+
+# ─── Synonym groups ───────────────────────────────────────────────────────────
+
+[[synonyms]]
+group = "feel"
+words = ["feel", "am feeling", "am", "have been feeling", "experience", "sense", "notice"]
+
+[[synonyms]]
+group = "sad"
+words = ["sad", "unhappy", "depressed", "down", "low", "blue", "melancholy", "miserable", "heartbroken", "grief", "grieving", "sorrowful"]
+
+[[synonyms]]
+group = "anxious"
+words = ["anxious", "worried", "nervous", "scared", "afraid", "fearful", "apprehensive", "uneasy", "restless", "on edge", "panicky", "stressed"]
+
+[[synonyms]]
+group = "angry"
+words = ["angry", "frustrated", "annoyed", "irritated", "furious", "upset", "mad", "enraged", "resentful", "bitter"]
+
+[[synonyms]]
+group = "overwhelmed"
+words = ["overwhelmed", "overloaded", "swamped", "buried", "drowning", "exhausted", "burned out", "burnt out", "at capacity", "struggling"]
+
+[[synonyms]]
+group = "help"
+words = ["help", "support", "assist", "aid", "guide", "comfort", "be there for", "listen to"]
+
+[[synonyms]]
+group = "alone"
+words = ["alone", "lonely", "isolated", "disconnected", "by myself", "on my own", "without support", "no one", "nobody"]
+
+[[synonyms]]
+group = "difficult"
+words = ["difficult", "hard", "tough", "challenging", "painful", "rough", "trying", "exhausting", "draining", "impossible"]
+
+# ─── ELIZA rules ──────────────────────────────────────────────────────────────
+
+[[rules]]
+keyword  = "feel"
+priority = 90
+
+  [[rules.decompositions]]
+  pattern  = "i (?:feel|am feeling|have been feeling) (.+)"
+  responses = [
+    "It sounds like you're feeling {1}. Is that right?",
+    "Tell me more about feeling {1}.",
+    "What's it like for you when you feel {1}?",
+    "How long have you been feeling {1}?",
+    "What do you think is behind feeling {1}?",
+  ]
+
+  [[rules.decompositions]]
+  pattern  = "(?:it |this |that )?feels (?:like |as if |as though )?(.+)"
+  responses = [
+    "That sounds difficult — feeling like {1}. What is that like?",
+    "When it feels like {1}, what do you most need?",
+    "What would it feel like if {1} weren't happening?",
+  ]
+
+[[rules]]
+keyword  = "sad"
+priority = 88
+
+  [[rules.decompositions]]
+  pattern  = "i (?:feel|am|have been) (?:sad|depressed|unhappy|down|blue|low|heartbroken|miserable|grieving)"
+  responses = [
+    "I'm sorry you're feeling that way. Can you tell me more about what's going on?",
+    "Sadness can be heavy. What happened?",
+    "It's okay to feel sad. What's weighing on you?",
+    "You don't have to carry this alone. What's bringing you down?",
+    "I hear that you're hurting. What's on your heart?",
+  ]
+
+  [[rules.decompositions]]
+  pattern  = "i (?:feel|am) sad (?:about|because of|due to|over) (.+)"
+  responses = [
+    "I understand. Being sad about {1} makes sense. How long have you been carrying that?",
+    "That sounds really hard — feeling sad about {1}. What does the sadness feel like?",
+    "What do you need most right now as you deal with {1}?",
+  ]
+
+[[rules]]
+keyword  = "anxious"
+priority = 88
+
+  [[rules.decompositions]]
+  pattern  = "i (?:feel|am|have been) (?:anxious|worried|scared|afraid|nervous|fearful|stressed)"
+  responses = [
+    "Anxiety can be exhausting. What's worrying you?",
+    "What's the thing you're most afraid of right now?",
+    "Where do you feel that anxiety in your body?",
+    "What would help you feel even a little safer right now?",
+    "It makes sense to feel anxious about some things. What's at the front of your mind?",
+  ]
+
+  [[rules.decompositions]]
+  pattern  = "i (?:am|feel) (?:anxious|worried|scared|afraid) (?:about|of|that) (.+)"
+  responses = [
+    "What about {1} worries you most?",
+    "How likely do you think it is that {1} will happen?",
+    "What's the worst thing about {1} that you can imagine?",
+    "What would help you feel more prepared for {1}?",
+  ]
+
+[[rules]]
+keyword  = "angry"
+priority = 88
+
+  [[rules.decompositions]]
+  pattern  = "i (?:feel|am|have been) (?:angry|frustrated|annoyed|irritated|upset|mad|furious|resentful)"
+  responses = [
+    "Anger often signals something important. What's going on?",
+    "That sounds really frustrating. What happened?",
+    "It's okay to feel angry. What brought this on?",
+    "What do you need right now when you're feeling this way?",
+    "What would it look like for this situation to feel resolved?",
+  ]
+
+  [[rules.decompositions]]
+  pattern  = "i am (?:angry|frustrated|upset|mad) (?:at|about|because of|with) (.+)"
+  responses = [
+    "What did {1} do or not do that frustrates you?",
+    "How long has {1} been bothering you?",
+    "What would you want {1} to understand about how you feel?",
+    "What would need to change with {1} for you to feel better?",
+  ]
+
+[[rules]]
+keyword  = "overwhelmed"
+priority = 87
+
+  [[rules.decompositions]]
+  pattern  = "i (?:feel|am|have been) (?:overwhelmed|swamped|buried|exhausted|burned out|burnt out|overloaded|struggling)"
+  responses = [
+    "That sounds like a lot. What's piling up?",
+    "When everything feels like too much, it can be hard to know where to start. What's the heaviest thing right now?",
+    "Burnout is real. How long have you been running on empty?",
+    "What would taking care of yourself look like right now?",
+    "What's one small thing that could give you a little relief?",
+  ]
+
+  [[rules.decompositions]]
+  pattern  = "(?:everything is |it's all) (?:too much|overwhelming|falling apart|going wrong)"
+  responses = [
+    "I hear you — it sounds like a lot is happening at once. What feels most urgent?",
+    "That's a lot to carry. Let's slow down for a moment. What's the most pressing thing?",
+    "When everything feels too much, sometimes it helps to name one thing at a time. What's the biggest thing?",
+  ]
+
+[[rules]]
+keyword  = "alone"
+priority = 85
+
+  [[rules.decompositions]]
+  pattern  = "i (?:feel|am) (?:alone|lonely|isolated|disconnected|by myself)"
+  responses = [
+    "Loneliness is one of the hardest feelings. What does it feel like for you?",
+    "I'm here with you right now. Tell me more about feeling alone.",
+    "What kinds of connection do you miss most?",
+    "When did this sense of being alone start for you?",
+    "What has made you feel less alone in the past?",
+  ]
+
+[[rules]]
+keyword  = "nobody"
+priority = 83
+
+  [[rules.decompositions]]
+  pattern  = "nobody (?:understands|cares|listens|gets it|gets me|is there)(?: for me)?"
+  responses = [
+    "It sounds like you feel unseen right now. That's painful. What would it mean to feel understood?",
+    "I want to understand. Tell me what's going on.",
+    "Feeling like no one cares is really isolating. What happened that made you feel that way?",
+    "I hear you. You're not alone in this moment. What do you most need right now?",
+  ]
+
+[[rules]]
+keyword  = "difficult"
+priority = 82
+
+  [[rules.decompositions]]
+  pattern  = "(?:it is |this is |things are |everything is )?(?:so |really |very )?(?:difficult|hard|tough|painful|rough)"
+  responses = [
+    "I can hear that it's hard. What's making things difficult right now?",
+    "You don't have to minimize it — it sounds genuinely difficult. Tell me more.",
+    "What's the hardest part of what you're going through?",
+    "What would make this a little easier?",
+  ]
+
+  [[rules.decompositions]]
+  pattern  = "(?:it is |this is )?(?:difficult|hard|tough) (?:to|for me to|for us to) (.+)"
+  responses = [
+    "What makes {1} so hard for you right now?",
+    "Is {1} hard because of the situation itself, or how you're feeling about it?",
+    "What would need to change for {1} to feel more manageable?",
+    "Who or what has helped you with difficult things like {1} before?",
+  ]
+
+[[rules]]
+keyword  = "mistake"
+priority = 80
+
+  [[rules.decompositions]]
+  pattern  = "i made a mistake (?:when |by |in )?(.+)"
+  responses = [
+    "Mistakes are how we grow. What happened with {1}?",
+    "What do you wish you'd done differently with {1}?",
+    "How are you treating yourself about the mistake in {1}?",
+    "What can be repaired or learned from what happened with {1}?",
+  ]
+
+  [[rules.decompositions]]
+  pattern  = "i (?:made|keep making) (?:mistakes|errors|blunders)"
+  responses = [
+    "How do you talk to yourself when you make mistakes?",
+    "What would you say to a friend who made the same mistake?",
+    "Mistakes can feel defining, but they rarely are. What's the pattern you're noticing?",
+  ]
+
+[[rules]]
+keyword  = "failure"
+priority = 80
+
+  [[rules.decompositions]]
+  pattern  = "i (?:feel like a |am a )?failure"
+  responses = [
+    "That's a heavy thing to carry. What's made you feel that way?",
+    "Feeling like a failure is painful, but feelings aren't facts. What happened?",
+    "What has been hard lately that's led you here?",
+    "What would it mean to you to not be a failure?",
+  ]
+
+  [[rules.decompositions]]
+  pattern  = "(?:it was |this is |that was a )?failure (?:of |because of |due to )?(.+)"
+  responses = [
+    "What part of {1} are you most critical of yourself for?",
+    "What did you learn from what happened with {1}?",
+    "Is there a more compassionate way to frame what happened with {1}?",
+  ]
+
+[[rules]]
+keyword  = "scared"
+priority = 85
+
+  [[rules.decompositions]]
+  pattern  = "i am scared (?:of |that |about )?(.+)"
+  responses = [
+    "Fear about {1} makes sense given what's at stake. What's the core of that fear?",
+    "What's the worst outcome you're imagining with {1}?",
+    "What has helped you manage fear in the past?",
+    "What would help you feel safer about {1}?",
+  ]
+
+  [[rules.decompositions]]
+  pattern  = "i am (?:scared|afraid|terrified|frightened)"
+  responses = [
+    "It's okay to be scared. What's frightening you?",
+    "Fear is information — what is yours telling you?",
+    "You're safe here. What's going on?",
+  ]
+
+[[rules]]
+keyword  = "support"
+priority = 78
+
+  [[rules.decompositions]]
+  pattern  = "i (?:need|want|could use) (?:some )?support (?:with|for|around)? ?(.+)?"
+  responses = [
+    "I'm here. Tell me more about what's going on with {1}.",
+    "What kind of support would help most with {1}?",
+    "You reached out, and that takes courage. What's happening with {1}?",
+    "I'm listening. What do you need to say about {1}?",
+  ]
+
+  [[rules.decompositions]]
+  pattern  = "i don't have (?:any |enough )?support"
+  responses = [
+    "That's really isolating. What kind of support do you wish you had?",
+    "Who in your life has been supportive before?",
+    "What would it feel like to have the support you need?",
+  ]
+
+[[rules]]
+keyword     = "cope"
+priority    = 72
+kg_grounded = true
+
+  [[rules.decompositions]]
+  pattern  = "how (?:do i |can i |should i )?cope (?:with )?(.+)"
+  kg_query = "SELECT ?strategy WHERE { <coping-strategy> <applies-to> \"{1}\" ; rdfs:label ?strategy } LIMIT 3"
+  responses = [
+    "I know of some strategies for {1}: {kg_result}. Do any of those resonate with you?",
+    "For coping with {1}, some approaches include: {kg_result}. What have you tried?",
+  ]
+  fallback_responses = [
+    "Coping with {1} is different for everyone. What has worked for you in the past?",
+    "What gives you the most relief when you're dealing with things like {1}?",
+    "Have you found anything — even small things — that helps with {1}?",
+  ]
+
+[[rules]]
+keyword  = "blame"
+priority = 75
+
+  [[rules.decompositions]]
+  pattern  = "(?:it's |this is |that was )?(?:my|their|his|her|your) fault"
+  responses = [
+    "Blame is heavy to carry. Whose fault do you think it is, really?",
+    "What's behind the need to assign blame here?",
+    "Even if it is someone's fault, what would it mean for things to move forward?",
+  ]
+
+  [[rules.decompositions]]
+  pattern  = "i (?:blame myself|feel responsible) (?:for )?(.+)"
+  responses = [
+    "How much responsibility do you think you actually carry for {1}?",
+    "Is there something you could have done differently regarding {1}, really?",
+    "What would you say to someone else who blamed themselves for {1}?",
+  ]
+
+[[rules]]
+keyword  = "hope"
+priority = 70
+
+  [[rules.decompositions]]
+  pattern  = "i (?:hope|wish|want) (?:things will |it will |this will |everything will )?(?:get better|improve|change|work out)"
+  responses = [
+    "Hope matters. What would 'better' look like for you?",
+    "What small thing would signal things are starting to improve?",
+    "What's one thing that's going okay right now?",
+  ]
+
+  [[rules.decompositions]]
+  pattern  = "i (?:have no|lost all|feel no) hope"
+  responses = [
+    "That sounds incredibly difficult. What's happened that makes everything feel hopeless?",
+    "When did hope start to feel inaccessible?",
+    "Even when hope feels gone, something brought you here to talk. What is that?",
+  ]
+
+[[rules]]
+keyword  = "better"
+priority = 68
+
+  [[rules.decompositions]]
+  pattern  = "i (?:want|need|would like) to (?:feel |get )?better"
+  responses = [
+    "What would 'better' feel like for you?",
+    "What's one small step toward feeling better that you could take today?",
+    "What's standing between you and feeling better?",
+    "What has helped you feel better in difficult times before?",
+  ]
+
+[[rules]]
+keyword  = "tired"
+priority = 80
+
+  [[rules.decompositions]]
+  pattern  = "i am (?:so |really |completely )?tired (?:of )?(.+)?"
+  responses = [
+    "That kind of exhaustion is real. What's drained you most?",
+    "How long have you been carrying this tiredness?",
+    "What would rest look like for you right now?",
+    "What would you need to feel even a little recharged?",
+  ]
