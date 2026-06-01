@@ -267,6 +267,8 @@ pub fn create_goal(
     // Store status.
     let status_sym = engine.resolve_or_create_entity("status:active")?;
     let _ = engine.add_triple(&Triple::new(goal_id, predicates.has_status, status_sym));
+    let status_key = format!("goal_status:{}", goal_id.get());
+    let _ = engine.store().put_meta(status_key.as_bytes(), b"active");
 
     // Store priority.
     let priority_sym = engine.resolve_or_create_entity(&format!("priority:{priority}"))?;
@@ -351,6 +353,8 @@ pub fn update_goal_status(
         predicates.has_status,
         status_sym,
     ));
+    let status_key = format!("goal_status:{}", goal.symbol_id.get());
+    let _ = engine.store().put_meta(status_key.as_bytes(), new_status.as_label().as_bytes());
     goal.status = new_status;
     Ok(())
 }
@@ -434,6 +438,17 @@ pub fn restore_goals(engine: &Engine, predicates: &AgentPredicates) -> AgentResu
                 parent = Some(triple.object);
             } else if triple.predicate == predicates.blocked_by {
                 blocked_by.push(triple.object);
+            }
+        }
+
+        // If the KG didn't supply a status (e.g. SPARQL persistence is disabled
+        // and the store was recreated), fall back to the directly-persisted key.
+        if status_sym_id.is_none() {
+            let key = format!("goal_status:{}", meta.id.get());
+            if let Ok(Some(bytes)) = engine.store().get_meta(key.as_bytes()) {
+                if let Ok(label) = std::str::from_utf8(&bytes) {
+                    status = GoalStatus::from_label(label);
+                }
             }
         }
 

@@ -247,6 +247,7 @@ impl Engine {
         let store = Arc::new(store);
 
         // Restore knowledge graph from persistent SPARQL store.
+        let mut kg_restored_from_sparql = false;
         if let Some(ref sparql) = sparql {
             let restored = sparql.all_triples().unwrap_or_else(|e| {
                 tracing::warn!(error = %e, "KG restore from SPARQL skipped");
@@ -255,6 +256,20 @@ impl Engine {
             if !restored.is_empty() {
                 let count = knowledge_graph.bulk_load(&restored).unwrap_or(0);
                 tracing::info!(triples = count, "knowledge graph restored from SPARQL");
+                kg_restored_from_sparql = true;
+            }
+        }
+
+        // Fall back to the redb-serialized KG snapshot when SPARQL is not persistent
+        // (e.g. sparql-persist feature disabled) or returned no triples.
+        if !kg_restored_from_sparql {
+            if let Ok(Some(bytes)) = store.get_meta(b"kg_triples_v1") {
+                if let Ok(triples) = bincode::deserialize::<Vec<crate::graph::Triple>>(&bytes) {
+                    if !triples.is_empty() {
+                        let count = knowledge_graph.bulk_load(&triples).unwrap_or(0);
+                        tracing::info!(triples = count, "knowledge graph restored from redb fallback");
+                    }
+                }
             }
         }
 
@@ -2632,6 +2647,17 @@ impl Engine {
         // Sync knowledge graph to SPARQL store.
         if let Some(ref sparql) = self.sparql {
             sparql.sync_from(&self.knowledge_graph)?;
+        }
+
+        // Persist KG triples to the durable store as a fallback for environments
+        // where the sparql-persist feature (RocksDB) is not available.
+        {
+            let triples = self.knowledge_graph.all_triples();
+            let encoded =
+                bincode::serialize(&triples).map_err(|e| crate::error::StoreError::Serialization {
+                    message: format!("failed to serialize KG triples: {e}"),
+                })?;
+            self.store.put_meta(b"kg_triples_v1", &encoded)?;
         }
 
         // Persist Phase 9 registries.
