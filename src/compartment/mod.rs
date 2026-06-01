@@ -15,6 +15,7 @@ pub mod error;
 pub mod manager;
 pub mod manifest;
 pub mod microtheory;
+pub mod prompt;
 pub mod psyche;
 
 pub use error::{CompartmentError, CompartmentResult};
@@ -24,4 +25,5 @@ pub use microtheory::{
     ContextAncestryCache, ContextDomain, ContextPredicates, LiftCondition, LiftingRule,
     Microtheory,
 };
+pub use prompt::{PsychePromptInput, PsychePromptSerializer, estimate_tokens};
 pub use psyche::Psyche;
