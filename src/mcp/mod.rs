@@ -728,6 +728,22 @@ pub struct PredicateFilterParams {
     pub limit: Option<usize>,
 }
 
+// ── Cross-Workspace Query Parameter Struct ──────────────────────────────
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CrossWorkspaceQueryParams {
+    #[schemars(
+        description = "Exactly two workspace names to compare, e.g. [\"tecton\", \"default\"]"
+    )]
+    pub workspaces: Vec<String>,
+    #[schemars(
+        description = "Query type: \"entity_diff\" (entities in A not in B and vice versa), \"triple_overlap\" (shared triples), \"predicate_union\" (all predicate types across workspaces), or \"cross_entity\" (compare a named entity across workspaces)"
+    )]
+    pub query_type: String,
+    #[schemars(description = "Entity name — required when query_type is \"cross_entity\"")]
+    pub entity: Option<String>,
+}
+
 // ── Helpers ─────────────────────────────────────────────────────────────
 
 /// Format a `Vec<AkhMessage>` into human-readable text for MCP tool output.
@@ -3483,6 +3499,228 @@ impl AkhMcpServer {
             lines.join("\n"),
         )]))
     }
+
+    // ── Cross-Workspace Query ────────────────────────────────────────
+
+    #[tool(
+        name = "cross_workspace_query",
+        description = "Compare entities, triples, and schema across exactly two loaded workspaces. Query types: \"entity_diff\" (entities in A not in B and vice versa), \"triple_overlap\" (shared triples), \"predicate_union\" (all predicate types across both workspaces), \"cross_entity\" (compare a named entity across workspaces). Useful for detecting cross-workspace contamination or comparing cleaned vs. dirty workspaces."
+    )]
+    async fn cross_workspace_query(
+        &self,
+        Parameters(params): Parameters<CrossWorkspaceQueryParams>,
+    ) -> Result<CallToolResult, McpError> {
+        if params.workspaces.len() != 2 {
+            return Err(McpError::invalid_params(
+                format!(
+                    "cross_workspace_query requires exactly 2 workspace names, got {}",
+                    params.workspaces.len()
+                ),
+                None,
+            ));
+        }
+
+        let name_a = params.workspaces[0].clone();
+        let name_b = params.workspaces[1].clone();
+
+        let engine_a = self.state.get_engine(&name_a).await?;
+        let engine_b = self.state.get_engine(&name_b).await?;
+
+        let query_type = params.query_type.clone();
+        let entity = params.entity.clone();
+
+        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            let info_a = engine_a.info();
+            let info_b = engine_b.info();
+
+            let json_val = match query_type.as_str() {
+                "entity_diff" => {
+                    use std::collections::HashSet;
+                    let labels_a: HashSet<String> = engine_a
+                        .all_symbols()
+                        .into_iter()
+                        .map(|m| m.label)
+                        .collect();
+                    let labels_b: HashSet<String> = engine_b
+                        .all_symbols()
+                        .into_iter()
+                        .map(|m| m.label)
+                        .collect();
+                    let only_in_a = labels_a.difference(&labels_b).count();
+                    let only_in_b = labels_b.difference(&labels_a).count();
+                    let shared_entities = labels_a.intersection(&labels_b).count();
+                    serde_json::json!({
+                        "query_type": "entity_diff",
+                        "workspace_a": {
+                            "name": name_a,
+                            "entities": info_a.symbol_count,
+                            "triples": info_a.triple_count,
+                        },
+                        "workspace_b": {
+                            "name": name_b,
+                            "entities": info_b.symbol_count,
+                            "triples": info_b.triple_count,
+                        },
+                        "only_in_a": only_in_a,
+                        "only_in_b": only_in_b,
+                        "shared_entities": shared_entities,
+                    })
+                }
+                "triple_overlap" => {
+                    use std::collections::HashSet;
+                    let triples_a: HashSet<(String, String, String)> = engine_a
+                        .all_triples()
+                        .into_iter()
+                        .map(|t| {
+                            (
+                                engine_a.resolve_label(t.subject),
+                                engine_a.resolve_label(t.predicate),
+                                engine_a.resolve_label(t.object),
+                            )
+                        })
+                        .collect();
+                    let triples_b: HashSet<(String, String, String)> = engine_b
+                        .all_triples()
+                        .into_iter()
+                        .map(|t| {
+                            (
+                                engine_b.resolve_label(t.subject),
+                                engine_b.resolve_label(t.predicate),
+                                engine_b.resolve_label(t.object),
+                            )
+                        })
+                        .collect();
+                    let only_in_a = triples_a.difference(&triples_b).count();
+                    let only_in_b = triples_b.difference(&triples_a).count();
+                    let shared_triples = triples_a.intersection(&triples_b).count();
+                    serde_json::json!({
+                        "query_type": "triple_overlap",
+                        "workspace_a": {
+                            "name": name_a,
+                            "entities": info_a.symbol_count,
+                            "triples": info_a.triple_count,
+                        },
+                        "workspace_b": {
+                            "name": name_b,
+                            "entities": info_b.symbol_count,
+                            "triples": info_b.triple_count,
+                        },
+                        "only_in_a": only_in_a,
+                        "only_in_b": only_in_b,
+                        "shared_triples": shared_triples,
+                    })
+                }
+                "predicate_union" => {
+                    use std::collections::HashSet;
+                    let preds_a: HashSet<String> = engine_a
+                        .all_triples()
+                        .into_iter()
+                        .map(|t| engine_a.resolve_label(t.predicate))
+                        .collect();
+                    let preds_b: HashSet<String> = engine_b
+                        .all_triples()
+                        .into_iter()
+                        .map(|t| engine_b.resolve_label(t.predicate))
+                        .collect();
+                    let only_in_a: Vec<String> =
+                        preds_a.difference(&preds_b).cloned().collect();
+                    let only_in_b: Vec<String> =
+                        preds_b.difference(&preds_a).cloned().collect();
+                    let shared: Vec<String> =
+                        preds_a.intersection(&preds_b).cloned().collect();
+                    let union_count = preds_a.union(&preds_b).count();
+                    serde_json::json!({
+                        "query_type": "predicate_union",
+                        "workspace_a": {
+                            "name": name_a,
+                            "predicate_count": preds_a.len(),
+                        },
+                        "workspace_b": {
+                            "name": name_b,
+                            "predicate_count": preds_b.len(),
+                        },
+                        "union_count": union_count,
+                        "shared_count": shared.len(),
+                        "only_in_a_count": only_in_a.len(),
+                        "only_in_b_count": only_in_b.len(),
+                        "only_in_a": only_in_a,
+                        "only_in_b": only_in_b,
+                        "shared": shared,
+                    })
+                }
+                "cross_entity" => {
+                    let ent_name = entity
+                        .ok_or_else(|| "cross_entity requires an `entity` name".to_string())?;
+                    let sym_a = engine_a.resolve_symbol(&ent_name).ok();
+                    let sym_b = engine_b.resolve_symbol(&ent_name).ok();
+                    let found_a = sym_a.is_some();
+                    let found_b = sym_b.is_some();
+                    let triples_a: Vec<serde_json::Value> = match sym_a {
+                        Some(id) => {
+                            let mut ts = engine_a.triples_from(id);
+                            ts.extend(engine_a.triples_to(id));
+                            ts.into_iter()
+                                .map(|t| {
+                                    serde_json::json!({
+                                        "s": engine_a.resolve_label(t.subject),
+                                        "p": engine_a.resolve_label(t.predicate),
+                                        "o": engine_a.resolve_label(t.object),
+                                        "conf": t.confidence,
+                                    })
+                                })
+                                .collect()
+                        }
+                        None => vec![],
+                    };
+                    let triples_b: Vec<serde_json::Value> = match sym_b {
+                        Some(id) => {
+                            let mut ts = engine_b.triples_from(id);
+                            ts.extend(engine_b.triples_to(id));
+                            ts.into_iter()
+                                .map(|t| {
+                                    serde_json::json!({
+                                        "s": engine_b.resolve_label(t.subject),
+                                        "p": engine_b.resolve_label(t.predicate),
+                                        "o": engine_b.resolve_label(t.object),
+                                        "conf": t.confidence,
+                                    })
+                                })
+                                .collect()
+                        }
+                        None => vec![],
+                    };
+                    serde_json::json!({
+                        "query_type": "cross_entity",
+                        "entity": ent_name,
+                        "workspace_a": {
+                            "name": name_a,
+                            "found": found_a,
+                            "triple_count": triples_a.len(),
+                            "triples": triples_a,
+                        },
+                        "workspace_b": {
+                            "name": name_b,
+                            "found": found_b,
+                            "triple_count": triples_b.len(),
+                            "triples": triples_b,
+                        },
+                    })
+                }
+                other => {
+                    return Err(format!(
+                        "unknown query_type \"{other}\"; valid: entity_diff, triple_overlap, predicate_union, cross_entity"
+                    ));
+                }
+            };
+
+            serde_json::to_string_pretty(&json_val).map_err(|e| format!("json: {e}"))
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("task panicked: {e}"), None))?
+        .map_err(|e| McpError::internal_error(e, None))?;
+
+        Ok(CallToolResult::success(vec![Content::text(result)]))
+    }
 }
 
 // ── ServerHandler impl ──────────────────────────────────────────────────
@@ -3532,7 +3770,10 @@ impl rmcp::handler::server::ServerHandler for AkhMcpServer {
                  `verify_source_claim` (update trust when claim verified true/false).\n\n\
                  Analytics: `triple_stats` (full workspace diagnostics — predicate distribution, \
                  confidence bands, top-connected entities, orphan count in one call), \
-                 `predicate_filter` (list all entity pairs for a specific predicate)."
+                 `predicate_filter` (list all entity pairs for a specific predicate).\n\n\
+                 Cross-workspace analysis: `cross_workspace_query` (compare entities, triples, and \
+                 predicates across two workspaces — supports entity_diff, triple_overlap, \
+                 predicate_union, cross_entity query types; useful for detecting contamination)."
                     .to_string(),
             ),
         }
