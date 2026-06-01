@@ -246,15 +246,32 @@ impl Engine {
 
         let store = Arc::new(store);
 
-        // Restore knowledge graph from persistent SPARQL store.
-        if let Some(ref sparql) = sparql {
-            let restored = sparql.all_triples().unwrap_or_else(|e| {
+        // Restore knowledge graph. First try SPARQL; if SPARQL returns nothing
+        // (e.g. sparql-persist is disabled and the store is in-memory, so it
+        // was empty after restart), fall back to the KV durable store where
+        // persist() also writes a full triple snapshot.
+        let sparql_triples = if let Some(ref sparql) = sparql {
+            sparql.all_triples().unwrap_or_else(|e| {
                 tracing::warn!(error = %e, "KG restore from SPARQL skipped");
                 vec![]
-            });
-            if !restored.is_empty() {
-                let count = knowledge_graph.bulk_load(&restored).unwrap_or(0);
-                tracing::info!(triples = count, "knowledge graph restored from SPARQL");
+            })
+        } else {
+            vec![]
+        };
+
+        if !sparql_triples.is_empty() {
+            let count = knowledge_graph.bulk_load(&sparql_triples).unwrap_or(0);
+            tracing::info!(triples = count, "knowledge graph restored from SPARQL");
+        } else if let Some(bytes) = store.get_meta(b"kg_triples").ok().flatten() {
+            match bincode::deserialize::<Vec<crate::graph::Triple>>(&bytes) {
+                Ok(triples) if !triples.is_empty() => {
+                    let count = knowledge_graph.bulk_load(&triples).unwrap_or(0);
+                    tracing::info!(triples = count, "knowledge graph restored from KV fallback");
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!(error = %e, "KV KG restore failed to deserialize");
+                }
             }
         }
 
@@ -614,54 +631,62 @@ impl Engine {
 
     /// Re-encode a symbol's hypervector using its relational neighborhood.
     ///
-    /// Reads all outgoing triples from the KG and creates a grounded vector
-    /// that captures the symbol's structural role (holographic reduced
-    /// representation). Updates the symbol's entry in item memory.
+    /// Uses existing ItemMemory vectors for neighbors and predicates so that
+    /// the grounded result captures actual KG structure. Blends the symbol's
+    /// current vector with its neighborhood bundle via probabilistic bit
+    /// selection for reproducible convergence.
     ///
-    /// Returns the number of relations used for grounding (0 = no change).
+    /// Returns the number of neighbor edges used for grounding (0 = no change).
     pub fn ground_symbol(&self, symbol: SymbolId) -> AkhResult<usize> {
-        let relations: Vec<(SymbolId, SymbolId)> = self
-            .triples_from(symbol)
-            .iter()
-            .map(|t| (t.predicate, t.object))
-            .collect();
+        let outgoing = self.triples_from(symbol).len();
+        let incoming = self.triples_to(symbol).len();
+        let n_edges = outgoing + incoming;
 
-        if relations.is_empty() {
+        if n_edges == 0 {
             return Ok(0);
         }
 
-        let grounded = crate::vsa::encode::encode_with_neighborhood(
-            &self.ops, symbol, &relations,
+        let config = crate::vsa::grounding::GroundingConfig::default();
+        let grounded = crate::vsa::grounding::ground_symbol(
+            symbol,
+            self,
+            &self.ops,
+            &self.item_memory,
+            &config,
         )?;
         self.item_memory.insert(symbol, grounded);
-        Ok(relations.len())
+        Ok(n_edges)
     }
 
-    /// Re-encode all symbols that have outgoing relations in the KG.
+    /// Re-encode all symbols using iterative neighborhood aggregation.
+    ///
+    /// Delegates to `vsa::grounding::ground_all` which re-uses existing
+    /// ItemMemory vectors rather than creating fresh random seeds per call,
+    /// correctly propagating KG structure into hypervector space.
     ///
     /// Returns `(grounded_count, total_relations_used)`.
     pub fn ground_all_symbols(&self) -> AkhResult<(usize, usize)> {
-        let all = self.registry.all();
-        let mut grounded = 0usize;
-        let mut total_rels = 0usize;
+        let config = crate::vsa::grounding::GroundingConfig::default();
+        let result =
+            crate::vsa::grounding::ground_all(self, &self.ops, &self.item_memory, &config)?;
 
-        for meta in &all {
-            let n = self.ground_symbol(meta.id)?;
-            if n > 0 {
-                grounded += 1;
-                total_rels += n;
-            }
+        let total_rels = self.knowledge_graph.triple_count();
+
+        if total_rels == 0 {
+            tracing::warn!(
+                symbols = result.symbols_updated,
+                "ground_all_symbols: KG has 0 triples — grounding produced no relational structure"
+            );
         }
 
-        // Rebuild the HNSW index to remove stale entries accumulated from
-        // re-grounding. Without this, similarity_search returns uniform 1.0
-        // because old random vectors remain in the index alongside the new
-        // grounded ones.
-        if grounded > 0 {
+        // Rebuild the HNSW index after re-grounding to remove stale entries.
+        // Without this, similarity_search returns uniform 1.0 because old
+        // random vectors remain alongside the newly grounded ones.
+        if result.symbols_updated > 0 {
             self.item_memory.rebuild_hnsw();
         }
 
-        Ok((grounded, total_rels))
+        Ok((result.symbols_updated, total_rels))
     }
 
     // -----------------------------------------------------------------------
@@ -2632,6 +2657,19 @@ impl Engine {
         // Sync knowledge graph to SPARQL store.
         if let Some(ref sparql) = self.sparql {
             sparql.sync_from(&self.knowledge_graph)?;
+        }
+
+        // Also write a full KG triple snapshot to the durable KV store.
+        // This is the fallback restore path for environments where sparql-persist
+        // is disabled (oxigraph in-memory — data lost on restart). The snapshot
+        // preserves confidence, timestamp, provenance_id, and compartment_id.
+        let all_triples = self.knowledge_graph.all_triples();
+        if !all_triples.is_empty() {
+            let encoded =
+                bincode::serialize(&all_triples).map_err(|e| crate::error::StoreError::Serialization {
+                    message: format!("failed to serialize KG triples: {e}"),
+                })?;
+            self.store.put_meta(b"kg_triples", &encoded)?;
         }
 
         // Persist Phase 9 registries.
