@@ -29,6 +29,11 @@ pub struct Psyche {
     /// Once awakened, the psyche cannot be wholesale-replaced — only evolved.
     #[serde(default)]
     pub awakened: bool,
+    /// Big Five personality profile, set during the Ritual of Awakening.
+    /// `None` when the psyche was constructed without running the ritual;
+    /// the psyche compiler derives equivalent values from archetype weights.
+    #[serde(default)]
+    pub ocean: Option<OceanProfile>,
 }
 
 /// Persona — the mask the agent presents outward.
@@ -96,6 +101,24 @@ pub struct ArchetypeWeights {
     pub guardian: f32,
     /// The Explorer: prefers http_fetch, file_io, shell_exec. Seeks novelty.
     pub explorer: f32,
+}
+
+/// Big Five (OCEAN) personality profile.
+///
+/// Present when the psyche was initialized via the Ritual of Awakening (Phase 14b).
+/// When absent, the psyche compiler derives OCEAN values from archetype weights.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct OceanProfile {
+    /// Intellectual curiosity, imagination, and openness to experience [0.0, 1.0].
+    pub openness: f32,
+    /// Organization, dependability, and goal-directed behavior [0.0, 1.0].
+    pub conscientiousness: f32,
+    /// Sociability, assertiveness, and positive emotionality [0.0, 1.0].
+    pub extraversion: f32,
+    /// Cooperation, empathy, and trust [0.0, 1.0].
+    pub agreeableness: f32,
+    /// Emotional reactivity and negative affect tendency [0.0, 1.0].
+    pub neuroticism: f32,
 }
 
 /// Self / Individuation — the integrative center.
@@ -166,6 +189,7 @@ impl Default for Psyche {
                 dominant_archetype: "sage".into(),
             },
             awakened: false,
+            ocean: None,
         }
     }
 }

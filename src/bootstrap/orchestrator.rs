@@ -1081,6 +1081,7 @@ mod tests {
                 dominant_archetype: "sage".to_string(),
             },
             awakened: false,
+            ocean: None,
         }
     }
 }
