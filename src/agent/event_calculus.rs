@@ -13,7 +13,7 @@
 //! queries the KG to evaluate temporal axioms, and integrates with the causal
 //! manager (Phase 15a) for multi-step action simulation.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use miette::Diagnostic;
 use serde::{Deserialize, Serialize};
@@ -207,6 +207,10 @@ pub struct EventCalculusEngine {
     /// Lazily initialized predicates (not serialized).
     #[serde(skip)]
     predicates: Option<EventCalculusPredicates>,
+    /// In-session dedup guard: (event_id, timestamp) pairs already processed.
+    /// Not persisted — the persistent guard is the history Vec itself.
+    #[serde(skip)]
+    seen_events: HashSet<(u64, u64)>,
 }
 
 impl EventCalculusEngine {
@@ -278,6 +282,11 @@ impl EventCalculusEngine {
     ///
     /// Creates KG entities for the event and any new fluents, then stores
     /// `ec:initiates` / `ec:terminates` / `ec:happens` triples.
+    ///
+    /// Duplicate calls for the same `(event_id, timestamp)` pair are silently
+    /// suppressed to prevent history bloat from repeated wake triggers.
+    /// Two-layer guard: an in-session `HashSet` for fast rejection, and a
+    /// history-Vec scan for cross-restart idempotency.
     pub fn record_event(
         &mut self,
         event: Event,
@@ -287,7 +296,20 @@ impl EventCalculusEngine {
         let event_id = event.symbol_id;
         let ts = event.timestamp;
 
-        // Store ec:happens triple (event → ec:is-event → event)
+        // Layer 1: in-session dedup — O(1) rejection of recent duplicates.
+        let dedup_key = (event_id.get(), ts);
+        if self.seen_events.contains(&dedup_key) {
+            tracing::debug!(
+                event = %event.name,
+                timestamp = ts,
+                "record_event: duplicate suppressed (in-session)"
+            );
+            return Ok(());
+        }
+
+        // Store ec:happens triple (event → ec:is-event → event).
+        // `add_triple` is idempotent at the KG tier — existing edges are upserted,
+        // never duplicated — so these calls are safe even without the dedup guard.
         let marker_sym = engine.resolve_or_create_entity("ec:event-marker")?;
         let marker_triple = Triple::new(event_id, preds.is_event, marker_sym)
             .with_confidence(1.0);
@@ -304,7 +326,6 @@ impl EventCalculusEngine {
         for &fluent_id in &event.initiates {
             // Store ec:initiates triple.
             let init_triple = Triple::new(event_id, preds.initiates, fluent_id)
-                .with_confidence(1.0)
                 .with_confidence(1.0);
             engine.add_triple(&init_triple)?;
 
@@ -325,21 +346,31 @@ impl EventCalculusEngine {
             fluent.last_initiated_by = Some(event_id);
             fluent.last_initiated_at = Some(ts);
 
-            // Record history.
-            self.history
-                .entry(fluent_id.get())
-                .or_default()
-                .push(FluentHistoryEntry {
+            // Layer 2: history dedup — prevents bloat when the engine is restored
+            // from the durable store and seen_events is empty again.
+            let history = self.history.entry(fluent_id.get()).or_default();
+            let already_present = history
+                .iter()
+                .any(|e| e.timestamp == ts && e.by_event == event_id && e.initiated);
+            if !already_present {
+                history.push(FluentHistoryEntry {
                     timestamp: ts,
                     initiated: true,
                     by_event: event_id,
                 });
+            } else {
+                tracing::debug!(
+                    event = %event.name,
+                    fluent = fluent_id.get(),
+                    timestamp = ts,
+                    "record_event: duplicate initiation history entry suppressed"
+                );
+            }
         }
 
         // Process terminations.
         for &fluent_id in &event.terminates {
             let term_triple = Triple::new(event_id, preds.terminates, fluent_id)
-                .with_confidence(1.0)
                 .with_confidence(1.0);
             engine.add_triple(&term_triple)?;
 
@@ -360,19 +391,30 @@ impl EventCalculusEngine {
             fluent.last_terminated_by = Some(event_id);
             fluent.last_terminated_at = Some(ts);
 
-            // Record history.
-            self.history
-                .entry(fluent_id.get())
-                .or_default()
-                .push(FluentHistoryEntry {
+            // Layer 2: history dedup — same guard as above for terminations.
+            let history = self.history.entry(fluent_id.get()).or_default();
+            let already_present = history
+                .iter()
+                .any(|e| e.timestamp == ts && e.by_event == event_id && !e.initiated);
+            if !already_present {
+                history.push(FluentHistoryEntry {
                     timestamp: ts,
                     initiated: false,
                     by_event: event_id,
                 });
+            } else {
+                tracing::debug!(
+                    event = %event.name,
+                    fluent = fluent_id.get(),
+                    timestamp = ts,
+                    "record_event: duplicate termination history entry suppressed"
+                );
+            }
         }
 
-        // Store the event itself.
+        // Store the event itself and mark as seen.
         self.events.insert(event_id.get(), event);
+        self.seen_events.insert(dedup_key);
 
         Ok(())
     }
@@ -1088,5 +1130,150 @@ mod tests {
         let ec = EventCalculusEngine::new(&engine).unwrap();
         let missing = SymbolId::new(99999).unwrap();
         assert!(ec.fluent_history(missing).is_err());
+    }
+
+    // ── Deduplication (triple-bloat prevention) ───────────────────
+
+    #[test]
+    fn record_event_same_id_and_timestamp_is_idempotent() {
+        let engine = test_engine();
+        let mut ec = EventCalculusEngine::new(&engine).unwrap();
+
+        let fluent = make_fluent_id(&engine, "awake");
+        let event = make_event_id(&engine, "wake-trigger");
+
+        let make_event = || Event {
+            symbol_id: event,
+            name: "wake-trigger".into(),
+            timestamp: 100,
+            initiates: vec![fluent],
+            terminates: vec![],
+        };
+
+        // Record three times — only the first should stick.
+        ec.record_event(make_event(), &engine).unwrap();
+        ec.record_event(make_event(), &engine).unwrap();
+        ec.record_event(make_event(), &engine).unwrap();
+
+        // History for the fluent must have exactly one entry, not three.
+        let hist = ec.history.get(&fluent.get()).expect("history missing");
+        assert_eq!(hist.len(), 1, "expected 1 history entry, got {}", hist.len());
+
+        // The events map still contains the event.
+        assert!(ec.get_event(event).is_some());
+    }
+
+    #[test]
+    fn record_event_different_timestamps_are_independent() {
+        let engine = test_engine();
+        let mut ec = EventCalculusEngine::new(&engine).unwrap();
+
+        let fluent = make_fluent_id(&engine, "signal");
+        let event = make_event_id(&engine, "trigger");
+
+        for ts in [100u64, 200, 300] {
+            ec.record_event(
+                Event {
+                    symbol_id: event,
+                    name: "trigger".into(),
+                    timestamp: ts,
+                    initiates: vec![fluent],
+                    terminates: vec![],
+                },
+                &engine,
+            )
+            .unwrap();
+        }
+
+        // Three distinct timestamps → three history entries.
+        let hist = ec.history.get(&fluent.get()).expect("history missing");
+        assert_eq!(hist.len(), 3, "expected 3 history entries, got {}", hist.len());
+    }
+
+    #[test]
+    fn record_event_termination_dedup() {
+        let engine = test_engine();
+        let mut ec = EventCalculusEngine::new(&engine).unwrap();
+
+        let fluent = make_fluent_id(&engine, "awake");
+        let init_event = make_event_id(&engine, "wake-trigger");
+        let term_event = make_event_id(&engine, "sleep-trigger");
+
+        ec.record_event(
+            Event {
+                symbol_id: init_event,
+                name: "wake-trigger".into(),
+                timestamp: 100,
+                initiates: vec![fluent],
+                terminates: vec![],
+            },
+            &engine,
+        )
+        .unwrap();
+
+        // Record the same termination event three times.
+        for _ in 0..3 {
+            ec.record_event(
+                Event {
+                    symbol_id: term_event,
+                    name: "sleep-trigger".into(),
+                    timestamp: 200,
+                    initiates: vec![],
+                    terminates: vec![fluent],
+                },
+                &engine,
+            )
+            .unwrap();
+        }
+
+        // History should have exactly one initiation and one termination.
+        let hist = ec.history.get(&fluent.get()).expect("history missing");
+        let initiations: Vec<_> = hist.iter().filter(|e| e.initiated).collect();
+        let terminations: Vec<_> = hist.iter().filter(|e| !e.initiated).collect();
+        assert_eq!(initiations.len(), 1, "expected 1 initiation");
+        assert_eq!(terminations.len(), 1, "expected 1 termination, got {}", terminations.len());
+    }
+
+    #[test]
+    fn record_event_dedup_persists_across_restore() {
+        let engine = test_engine();
+        let mut ec = EventCalculusEngine::new(&engine).unwrap();
+
+        let fluent = make_fluent_id(&engine, "awake");
+        let event = make_event_id(&engine, "wake-trigger");
+
+        ec.record_event(
+            Event {
+                symbol_id: event,
+                name: "wake-trigger".into(),
+                timestamp: 100,
+                initiates: vec![fluent],
+                terminates: vec![],
+            },
+            &engine,
+        )
+        .unwrap();
+
+        // Simulate restart: serialize and deserialize.
+        let bytes = bincode::serialize(&ec).unwrap();
+        let mut restored: EventCalculusEngine = bincode::deserialize(&bytes).unwrap();
+        restored.ensure_init(&engine).unwrap();
+
+        // Replay the same event after restore — seen_events is gone but history guard holds.
+        restored
+            .record_event(
+                Event {
+                    symbol_id: event,
+                    name: "wake-trigger".into(),
+                    timestamp: 100,
+                    initiates: vec![fluent],
+                    terminates: vec![],
+                },
+                &engine,
+            )
+            .unwrap();
+
+        let hist = restored.history.get(&fluent.get()).expect("history missing");
+        assert_eq!(hist.len(), 1, "history bloated after restore+replay: {}", hist.len());
     }
 }
