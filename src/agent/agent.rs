@@ -1425,6 +1425,61 @@ impl Agent {
         )
     }
 
+    /// Permanently remove a goal by its symbol ID.
+    ///
+    /// Removes all KG triples for the goal so it is not restored on the next session,
+    /// then drops it from the in-memory list.
+    pub fn delete_goal(&mut self, goal_id: SymbolId) -> AgentResult<()> {
+        let pos = self
+            .goals
+            .iter()
+            .position(|g| g.symbol_id == goal_id)
+            .ok_or(AgentError::GoalNotFound {
+                goal_id: goal_id.get(),
+            })?;
+        goal::delete_goal_from_kg(&self.engine, goal_id, &self.predicates)?;
+        self.goals.remove(pos);
+        Ok(())
+    }
+
+    /// Update mutable fields of a goal: priority, status, and/or success criteria.
+    ///
+    /// Only fields with `Some` values are changed. Status is parsed from a
+    /// string label using [`GoalStatus::from_label`].
+    pub fn update_goal(
+        &mut self,
+        goal_id: SymbolId,
+        priority: Option<u8>,
+        status: Option<&str>,
+        criteria: Option<&str>,
+    ) -> AgentResult<()> {
+        // Find index first to avoid borrow issues when calling goal::* helpers.
+        let idx = self
+            .goals
+            .iter()
+            .position(|g| g.symbol_id == goal_id)
+            .ok_or(AgentError::GoalNotFound {
+                goal_id: goal_id.get(),
+            })?;
+
+        if let Some(p) = priority {
+            goal::update_goal_priority(&self.engine, &mut self.goals[idx], p, &self.predicates)?;
+        }
+        if let Some(s) = status {
+            let new_status = GoalStatus::from_label(s);
+            goal::update_goal_status(
+                &self.engine,
+                &mut self.goals[idx],
+                new_status,
+                &self.predicates,
+            )?;
+        }
+        if let Some(c) = criteria {
+            goal::update_goal_criteria(&self.engine, &mut self.goals[idx], c, &self.predicates)?;
+        }
+        Ok(())
+    }
+
     /// Auto-decompose any active goals that have stalled.
     ///
     /// A goal is stalled if it has been worked on for `DEFAULT_STALL_THRESHOLD`

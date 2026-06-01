@@ -246,17 +246,18 @@ pub fn create_goal(
         .unwrap_or_default()
         .as_secs();
 
-    // Remove any stale property triples from a previous generation cycle
-    // (resolve_or_create_entity reuses the same goal_id for the same label).
-    let kg = engine.knowledge_graph();
+    // Remove any stale property triples from a previous generation cycle through
+    // the engine so SPARQL stays in sync (resolve_or_create_entity reuses the same
+    // goal_id for the same label, so old triples must be cleared first).
     for pred in [predicates.has_description, predicates.has_status, predicates.has_priority] {
-        let old: Vec<_> = kg
+        let old: Vec<_> = engine
+            .knowledge_graph()
             .triples_from(goal_id)
             .into_iter()
             .filter(|t| t.predicate == pred)
             .collect();
-        for o in &old {
-            let _ = kg.remove_triple(o.subject, o.predicate, o.object);
+        for o in old {
+            let _ = engine.remove_triple(o.subject, o.predicate, o.object);
         }
     }
 
@@ -333,15 +334,15 @@ pub fn update_goal_status(
     new_status: GoalStatus,
     predicates: &AgentPredicates,
 ) -> AgentResult<()> {
-    // Remove the old status triple so we don't accumulate stale values.
-    let kg = engine.knowledge_graph();
-    let old_status_triples: Vec<_> = kg
+    // Remove old status triples through the engine so the SPARQL store stays in sync.
+    let old_status_triples: Vec<_> = engine
+        .knowledge_graph()
         .triples_from(goal.symbol_id)
         .into_iter()
         .filter(|t| t.predicate == predicates.has_status)
         .collect();
-    for old in &old_status_triples {
-        let _ = kg.remove_triple(old.subject, old.predicate, old.object);
+    for old in old_status_triples {
+        let _ = engine.remove_triple(old.subject, old.predicate, old.object);
     }
 
     let status_label = format!("status:{}", new_status.as_label());
@@ -352,6 +353,92 @@ pub fn update_goal_status(
         status_sym,
     ));
     goal.status = new_status;
+    Ok(())
+}
+
+/// Remove all KG triples for a goal so it is not restored on the next session.
+///
+/// Removes subject-predicate-object entries for the goal's known predicates.
+/// The caller must remove the goal from the in-memory vec separately.
+pub fn delete_goal_from_kg(
+    engine: &Engine,
+    goal_id: SymbolId,
+    predicates: &AgentPredicates,
+) -> AgentResult<()> {
+    // Remove all outgoing triples through the engine so SPARQL stays in sync.
+    let subject_triples: Vec<_> = engine.knowledge_graph().triples_from(goal_id);
+    for t in subject_triples {
+        let _ = engine.remove_triple(t.subject, t.predicate, t.object);
+    }
+    // Remove back-references (parent→child, etc.) so hierarchical integrity is maintained.
+    for pred in [
+        predicates.parent_goal,
+        predicates.child_goal,
+        predicates.blocked_by,
+    ] {
+        let back_refs: Vec<_> = engine
+            .knowledge_graph()
+            .triples_to(goal_id)
+            .into_iter()
+            .filter(|t| t.predicate == pred)
+            .collect();
+        for t in back_refs {
+            let _ = engine.remove_triple(t.subject, t.predicate, t.object);
+        }
+    }
+    Ok(())
+}
+
+/// Update a goal's priority in the KG and in-memory struct.
+pub fn update_goal_priority(
+    engine: &Engine,
+    goal: &mut Goal,
+    priority: u8,
+    predicates: &AgentPredicates,
+) -> AgentResult<()> {
+    let old: Vec<_> = engine
+        .knowledge_graph()
+        .triples_from(goal.symbol_id)
+        .into_iter()
+        .filter(|t| t.predicate == predicates.has_priority)
+        .collect();
+    for t in old {
+        let _ = engine.remove_triple(t.subject, t.predicate, t.object);
+    }
+    let priority_sym = engine.resolve_or_create_entity(&format!("priority:{priority}"))?;
+    let _ = engine.add_triple(&Triple::new(
+        goal.symbol_id,
+        predicates.has_priority,
+        priority_sym,
+    ));
+    goal.priority = priority;
+    goal.priority_rationale = None; // clear argumentation override on manual update
+    Ok(())
+}
+
+/// Update a goal's success criteria in the KG and in-memory struct.
+pub fn update_goal_criteria(
+    engine: &Engine,
+    goal: &mut Goal,
+    criteria: &str,
+    predicates: &AgentPredicates,
+) -> AgentResult<()> {
+    let old: Vec<_> = engine
+        .knowledge_graph()
+        .triples_from(goal.symbol_id)
+        .into_iter()
+        .filter(|t| t.predicate == predicates.has_criteria)
+        .collect();
+    for t in old {
+        let _ = engine.remove_triple(t.subject, t.predicate, t.object);
+    }
+    let criteria_sym = engine.resolve_or_create_entity(&format!("criteria:{criteria}"))?;
+    let _ = engine.add_triple(&Triple::new(
+        goal.symbol_id,
+        predicates.has_criteria,
+        criteria_sym,
+    ));
+    goal.success_criteria = criteria.into();
     Ok(())
 }
 
