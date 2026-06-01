@@ -242,7 +242,7 @@ pub struct AskParams {
     pub workspace: String,
     #[schemars(description = "Natural-language question to investigate")]
     pub question: String,
-    #[schemars(description = "Maximum OODA cycles to run (default: 10)")]
+    #[schemars(description = "Maximum OODA cycles to run (default: scales with graph size, 5–50)")]
     pub max_cycles: Option<u32>,
 }
 
@@ -841,11 +841,17 @@ impl AkhMcpServer {
         let agent = self.state.get_agent(&params.workspace).await?;
         let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
             let mut agent = agent.lock().map_err(|e| format!("agent lock: {e}"))?;
-            let cycles = params.max_cycles.unwrap_or(10) as usize;
+            // Dynamic budget: scale with graph density so sparse workspaces still
+            // get enough cycles, while the early-exit on consecutive no-progress
+            // cycles prevents wasteful spinning.  Caller-supplied value wins.
+            let cycles = params.max_cycles.unwrap_or_else(|| {
+                let sym_count = agent.engine().all_symbols().len() as u32;
+                (sym_count / 25).clamp(5, 50)
+            }) as usize;
             agent.set_max_cycles(cycles);
             agent.clear_goals();
             agent
-                .add_goal(&params.question, 128, "Agent-determined completion")
+                .add_goal(&params.question, 128, &params.question)
                 .map_err(|e| format!("{e}"))?;
             let _ = agent.run_until_complete();
             let summary = agent.synthesize_findings(&params.question);
