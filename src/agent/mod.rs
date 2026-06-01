@@ -35,6 +35,7 @@ pub mod continuous_learning;
 pub mod curiosity;
 pub mod explain;
 pub mod delegation;
+pub mod eliza;
 #[cfg(feature = "daemon")]
 pub mod daemon;
 pub mod decomposition;
@@ -110,6 +111,7 @@ pub use decomposition::{
     DecompositionMethod, DecompositionOutput, DecompositionStrategy, DependencyEdge, MethodRegistry,
     TaskNode, TaskNodeKind, TaskTree,
 };
+pub use eliza::{ElizaEngine, Keyword as ElizaKeyword, Rule as ElizaRule, Script as ElizaScript, ScriptError as ElizaScriptError};
 pub use drives::{DriveKind, DriveSystem};
 pub use epistemic::{
     CommunicationStrategy, EpistemicError, EpistemicEvent, EpistemicModality,
