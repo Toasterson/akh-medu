@@ -23,9 +23,11 @@ use serde::Deserialize;
 use tokio::sync::RwLock;
 
 use crate::agent::{Agent, AgentConfig};
+use crate::config::UpstreamsSection;
 use crate::engine::{Engine, EngineConfig};
 use crate::message::AkhMessage;
 use crate::paths::AkhPaths;
+use crate::upstream_client::UpstreamMcpClient;
 use crate::vsa::Dimension;
 
 // ── Shared state ─────────────────────────────────────────────────────────
@@ -49,6 +51,8 @@ pub struct McpState {
     /// Per-workspace gates that serialize Engine::new() so two concurrent
     /// MCP calls never collide on the redb file-lock open.
     pub loading_gates: RwLock<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// Upstream MCP endpoint configuration (anima, seshat).
+    pub upstreams: UpstreamsSection,
 }
 
 /// Pause control for a single workspace daemon.
@@ -72,6 +76,7 @@ impl McpState {
         paths: AkhPaths,
         workspaces: Arc<RwLock<HashMap<String, Arc<Engine>>>>,
         agents: Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>,
+        upstreams: UpstreamsSection,
     ) -> Self {
         Self {
             paths,
@@ -80,6 +85,7 @@ impl McpState {
             nlu_pipelines: RwLock::new(HashMap::new()),
             daemon_pauses: RwLock::new(HashMap::new()),
             loading_gates: RwLock::new(HashMap::new()),
+            upstreams,
         }
     }
 
@@ -726,6 +732,38 @@ pub struct PredicateFilterParams {
     pub predicate: String,
     #[schemars(description = "Maximum number of entity pairs to return (default: 50)")]
     pub limit: Option<usize>,
+}
+
+// ── Cross-MCP Context Bridge Parameter Structs ──────────────────────────
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ImportAnimaProjectParams {
+    #[schemars(description = "Target workspace (default: \"default\")")]
+    #[serde(default = "default_workspace")]
+    pub workspace: String,
+    #[schemars(
+        description = "Anima project ID to import (e.g. \"019d9844-ce74-7993-a9f0-c953b8f04a4e\")"
+    )]
+    pub project_id: String,
+    #[schemars(
+        description = "Maximum work items to fetch (default: 200). Set lower for large projects."
+    )]
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct LinkSeshatDocParams {
+    #[schemars(description = "Target workspace (default: \"default\")")]
+    #[serde(default = "default_workspace")]
+    pub workspace: String,
+    #[schemars(
+        description = "Seshat document ID or slug to register as a reference source in the graph"
+    )]
+    pub doc_id: String,
+    #[schemars(description = "Human-readable title for the document (enriches the graph node)")]
+    pub title: Option<String>,
+    #[schemars(description = "Source URL or file path of the document")]
+    pub url: Option<String>,
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────
@@ -3431,6 +3469,270 @@ impl AkhMcpServer {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
+    // ── Cross-MCP Context Bridge ────────────────────────────────────
+
+    #[tool(
+        name = "import_anima_project",
+        description = "Import an Anima project and its open work items into the local knowledge \
+                       graph. Asserts triples for project metadata and each work item \
+                       (has-title, in-phase, has-priority, has-status). Idempotent — \
+                       calling again refreshes state without creating duplicates. \
+                       Requires [upstreams.anima] in config.toml."
+    )]
+    async fn import_anima_project(
+        &self,
+        Parameters(params): Parameters<ImportAnimaProjectParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let anima_config = self.state.upstreams.anima.clone().ok_or_else(|| {
+            McpError::invalid_params(
+                "anima upstream not configured — add [upstreams.anima] with url to config.toml",
+                None,
+            )
+        })?;
+        let engine = self.state.get_engine(&params.workspace).await?;
+
+        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            let client = UpstreamMcpClient::new(&anima_config);
+            let limit = params.limit.unwrap_or(200);
+            let project_id = &params.project_id;
+
+            // Fetch work items from anima.
+            let raw_text = client
+                .call_tool_text(
+                    "list_work_items",
+                    serde_json::json!({
+                        "project_id": project_id,
+                        "limit": limit
+                    }),
+                )
+                .map_err(|e| format!("upstream call failed: {e}"))?;
+
+            // Parse response — accept JSON array, JSON {items:[...]}, or plain text.
+            let items: Vec<serde_json::Value> = {
+                let parsed = serde_json::from_str::<serde_json::Value>(&raw_text).ok();
+                match parsed {
+                    Some(serde_json::Value::Array(arr)) => arr,
+                    Some(obj) if obj["items"].is_array() => {
+                        obj["items"].as_array().cloned().unwrap_or_default()
+                    }
+                    Some(obj) if obj["work_items"].is_array() => {
+                        obj["work_items"].as_array().cloned().unwrap_or_default()
+                    }
+                    _ => vec![],
+                }
+            };
+
+            let proj_label = format!("anima:project:{project_id}");
+
+            // Base project triples.
+            let mut triples: Vec<(String, String, String)> = vec![
+                (proj_label.clone(), "is-a".into(), "anima-project".into()),
+                (proj_label.clone(), "source-service".into(), "anima".into()),
+            ];
+
+            // Per-work-item triples.
+            let mut wi_count = 0usize;
+            for item in &items {
+                let wi_id = item["id"]
+                    .as_str()
+                    .or_else(|| item["work_item_id"].as_str())
+                    .unwrap_or_else(|| item["_id"].as_str().unwrap_or("unknown"));
+                let wi_label = format!("anima:item:{wi_id}");
+
+                triples.push((
+                    proj_label.clone(),
+                    "has-work-item".into(),
+                    wi_label.clone(),
+                ));
+                triples.push((wi_label.clone(), "is-a".into(), "work-item".into()));
+                triples.push((
+                    wi_label.clone(),
+                    "source-service".into(),
+                    "anima".into(),
+                ));
+
+                if let Some(title) = item["title"]
+                    .as_str()
+                    .or_else(|| item["name"].as_str())
+                {
+                    triples.push((wi_label.clone(), "has-title".into(), title.into()));
+                }
+                if let Some(phase) = item["phase"]
+                    .as_str()
+                    .or_else(|| item["current_phase"].as_str())
+                {
+                    triples.push((wi_label.clone(), "in-phase".into(), phase.into()));
+                }
+                if let Some(priority) = item["priority"].as_str() {
+                    triples.push((wi_label.clone(), "has-priority".into(), priority.into()));
+                }
+                if let Some(status) = item["status"].as_str() {
+                    triples.push((wi_label.clone(), "has-status".into(), status.into()));
+                }
+
+                wi_count += 1;
+            }
+
+            // If upstream returned no parseable items, store raw response as a note.
+            if wi_count == 0 && !raw_text.trim().is_empty() {
+                let truncated: String = raw_text.chars().take(500).collect();
+                triples.push((
+                    proj_label.clone(),
+                    "has-raw-response".into(),
+                    truncated,
+                ));
+            }
+
+            let (asserted, errors) = engine.add_triples_batch(&triples, 0.9);
+            let _ = engine.persist();
+
+            let mut msg = format!(
+                "Imported anima project {project_id}: {wi_count} work items, \
+                 {asserted}/{} triples asserted.",
+                triples.len()
+            );
+            if !errors.is_empty() {
+                msg.push_str(&format!(
+                    "\nTriple errors ({}):",
+                    errors.len()
+                ));
+                for e in errors.iter().take(5) {
+                    msg.push_str(&format!("\n  - {e}"));
+                }
+            }
+            Ok(msg)
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("task panicked: {e}"), None))?
+        .map_err(|e| McpError::internal_error(e, None))?;
+
+        Ok(CallToolResult::success(vec![Content::text(result)]))
+    }
+
+    #[tool(
+        name = "link_seshat_doc",
+        description = "Register a Seshat document as a referenced source in the local knowledge \
+                       graph. Asserts is-a, source-service, and (if provided) has-title and \
+                       source-url triples for the document node. If Seshat upstream is configured, \
+                       also fetches the document's slug and tags from Seshat to enrich the node. \
+                       Idempotent — re-linking the same doc refreshes metadata. \
+                       Seshat upstream is optional — the doc node is always created locally."
+    )]
+    async fn link_seshat_doc(
+        &self,
+        Parameters(params): Parameters<LinkSeshatDocParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let engine = self.state.get_engine(&params.workspace).await?;
+        let seshat_config = self.state.upstreams.seshat.clone();
+
+        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            let doc_label = format!("seshat:doc:{}", params.doc_id);
+
+            let mut triples: Vec<(String, String, String)> = vec![
+                (doc_label.clone(), "is-a".into(), "seshat-document".into()),
+                (doc_label.clone(), "source-service".into(), "seshat".into()),
+            ];
+
+            if let Some(title) = &params.title {
+                triples.push((doc_label.clone(), "has-title".into(), title.clone()));
+            }
+            if let Some(url) = &params.url {
+                triples.push((doc_label.clone(), "source-url".into(), url.clone()));
+            }
+
+            // Optionally enrich from Seshat upstream.
+            let mut seshat_note = String::new();
+            if let Some(cfg) = &seshat_config {
+                let client = UpstreamMcpClient::new(cfg);
+                match client.call_tool_text(
+                    "list_documents",
+                    serde_json::json!({"limit": 1, "offset": 0}),
+                ) {
+                    Ok(raw) => {
+                        // Try to match the doc_id in the response and extract fields.
+                        if let Ok(serde_json::Value::Array(docs)) =
+                            serde_json::from_str::<serde_json::Value>(&raw)
+                                .map(|v| {
+                                    if v["documents"].is_array() {
+                                        v["documents"].clone()
+                                    } else {
+                                        v
+                                    }
+                                })
+                                .map(|v| {
+                                    if let serde_json::Value::Array(a) = v {
+                                        Ok(serde_json::Value::Array(a))
+                                    } else {
+                                        Err(())
+                                    }
+                                })
+                                .unwrap_or_else(|_| Ok(serde_json::Value::Array(vec![])))
+                        {
+                            for doc in &docs {
+                                let matches = doc["id"].as_str() == Some(&params.doc_id)
+                                    || doc["slug"].as_str() == Some(&params.doc_id);
+                                if matches {
+                                    if let Some(slug) = doc["slug"].as_str() {
+                                        triples.push((
+                                            doc_label.clone(),
+                                            "has-slug".into(),
+                                            slug.into(),
+                                        ));
+                                    }
+                                    if let Some(title) = doc["title"].as_str() {
+                                        if params.title.is_none() {
+                                            triples.push((
+                                                doc_label.clone(),
+                                                "has-title".into(),
+                                                title.into(),
+                                            ));
+                                        }
+                                    }
+                                    if let Some(tags) = doc["tags"].as_array() {
+                                        for tag in tags {
+                                            if let Some(t) = tag.as_str() {
+                                                triples.push((
+                                                    doc_label.clone(),
+                                                    "has-tag".into(),
+                                                    t.into(),
+                                                ));
+                                            }
+                                        }
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        seshat_note = format!(" (Seshat enrichment skipped: {e})");
+                    }
+                }
+            }
+
+            let (asserted, errors) = engine.add_triples_batch(&triples, 0.9);
+            let _ = engine.persist();
+
+            let mut msg = format!(
+                "Linked seshat doc {} as \"{doc_label}\": {asserted}/{} triples asserted.{seshat_note}",
+                params.doc_id,
+                triples.len()
+            );
+            if !errors.is_empty() {
+                msg.push_str(&format!("\nTriple errors ({}):", errors.len()));
+                for e in errors.iter().take(5) {
+                    msg.push_str(&format!("\n  - {e}"));
+                }
+            }
+            Ok(msg)
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("task panicked: {e}"), None))?
+        .map_err(|e| McpError::internal_error(e, None))?;
+
+        Ok(CallToolResult::success(vec![Content::text(result)]))
+    }
+
     #[tool(
         name = "predicate_filter",
         description = "List all entity pairs (subject → object) connected by a specific predicate. \
@@ -3532,7 +3834,11 @@ impl rmcp::handler::server::ServerHandler for AkhMcpServer {
                  `verify_source_claim` (update trust when claim verified true/false).\n\n\
                  Analytics: `triple_stats` (full workspace diagnostics — predicate distribution, \
                  confidence bands, top-connected entities, orphan count in one call), \
-                 `predicate_filter` (list all entity pairs for a specific predicate)."
+                 `predicate_filter` (list all entity pairs for a specific predicate).\n\n\
+                 Cross-MCP context bridge: `import_anima_project` (pull Anima project + work items \
+                 into the graph as typed triples — requires [upstreams.anima] in config.toml), \
+                 `link_seshat_doc` (register a Seshat document as a reference source — \
+                 [upstreams.seshat] optional, enriches metadata when present)."
                     .to_string(),
             ),
         }
