@@ -989,8 +989,18 @@ impl Agent {
     pub fn run_until_complete(&mut self) -> AgentResult<Vec<OodaCycleResult>> {
         let mut results = Vec::new();
         let max = self.config.max_cycles;
+        let mut current_cycles: usize = 0;
 
-        for _ in 0..max {
+        loop {
+            // Enforce the cycle cap before doing any work.
+            if current_cycles >= max {
+                tracing::warn!(
+                    max_cycles = max,
+                    "run_until_complete: cycle limit reached with active goals remaining"
+                );
+                break;
+            }
+
             let active = goal::active_goals(&self.goals);
             if active.is_empty() {
                 break;
@@ -998,6 +1008,7 @@ impl Agent {
 
             let result = ooda::run_ooda_cycle(self)?;
             results.push(result);
+            current_cycles += 1;
 
             // Auto-decompose stalled goals.
             self.decompose_stalled_goals();
@@ -1011,8 +1022,8 @@ impl Agent {
             }
         }
 
-        // Check if we hit the limit with active goals remaining.
-        if !goal::active_goals(&self.goals).is_empty() && results.len() >= max {
+        // Return a typed error so callers can detect and surface the cap.
+        if !goal::active_goals(&self.goals).is_empty() && current_cycles >= max {
             return Err(AgentError::MaxCyclesReached { max_cycles: max });
         }
 

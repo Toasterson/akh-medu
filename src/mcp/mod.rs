@@ -22,7 +22,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use tokio::sync::RwLock;
 
-use crate::agent::{Agent, AgentConfig};
+use crate::agent::{Agent, AgentConfig, AgentError};
 use crate::engine::{Engine, EngineConfig};
 use crate::message::AkhMessage;
 use crate::paths::AkhPaths;
@@ -228,6 +228,38 @@ impl McpState {
 
 // ── Tool parameter structs ──────────────────────────────────────────────
 
+/// Deserialize an optional cycle count that the LLM may provide as either a
+/// JSON integer (`5`) or a JSON string (`"5"`).  Accepts `null` / absent →
+/// `None`.  Rejects negative numbers or non-numeric strings.
+fn deserialize_opt_u32_or_str<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde_json::Value;
+
+    let opt = Option::<Value>::deserialize(deserializer)?;
+    match opt {
+        None => Ok(None),
+        Some(Value::Number(n)) => n
+            .as_u64()
+            .and_then(|v| u32::try_from(v).ok())
+            .map(Some)
+            .ok_or_else(|| serde::de::Error::custom("max_cycles must be a non-negative integer")),
+        Some(Value::String(s)) => s
+            .trim()
+            .parse::<u32>()
+            .map(Some)
+            .map_err(|_| {
+                serde::de::Error::custom(format!(
+                    "max_cycles: cannot parse {s:?} as integer"
+                ))
+            }),
+        Some(other) => Err(serde::de::Error::custom(format!(
+            "max_cycles: expected integer or string, got {other}"
+        ))),
+    }
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct WorkspaceParam {
     #[schemars(description = "Target workspace (default: \"default\")")]
@@ -243,6 +275,7 @@ pub struct AskParams {
     #[schemars(description = "Natural-language question to investigate")]
     pub question: String,
     #[schemars(description = "Maximum OODA cycles to run (default: 10)")]
+    #[serde(default, deserialize_with = "deserialize_opt_u32_or_str")]
     pub max_cycles: Option<u32>,
 }
 
@@ -314,6 +347,7 @@ pub struct RunAgentParams {
     #[schemars(description = "Comma-separated goals for the agent to pursue")]
     pub goals: String,
     #[schemars(description = "Maximum OODA cycles (default: 10)")]
+    #[serde(default, deserialize_with = "deserialize_opt_u32_or_str")]
     pub max_cycles: Option<u32>,
 }
 
@@ -847,10 +881,21 @@ impl AkhMcpServer {
             agent
                 .add_goal(&params.question, 128, "Agent-determined completion")
                 .map_err(|e| format!("{e}"))?;
-            let _ = agent.run_until_complete();
+            let capped = matches!(
+                agent.run_until_complete(),
+                Err(AgentError::MaxCyclesReached { .. })
+            );
             let summary = agent.synthesize_findings(&params.question);
             let _ = agent.persist_session();
-            Ok(summary.overview)
+            let mut output = summary.overview;
+            if capped {
+                output.push_str(&format!(
+                    "\n\n[Note: investigation capped at {cycles} cycle{}. \
+                     Pass a larger max_cycles for a more complete result.]",
+                    if cycles == 1 { "" } else { "s" }
+                ));
+            }
+            Ok(output)
         })
         .await
         .map_err(|e| McpError::internal_error(format!("task panicked: {e}"), None))?
@@ -1200,7 +1245,10 @@ impl AkhMcpServer {
                     .add_goal(g, 128, "Agent-determined completion")
                     .map_err(|e| format!("{e}"))?;
             }
-            let _ = agent.run_until_complete();
+            let capped = matches!(
+                agent.run_until_complete(),
+                Err(AgentError::MaxCyclesReached { .. })
+            );
             let summary = agent.synthesize_findings(&params.goals);
             let _ = agent.persist_session();
 
@@ -1210,6 +1258,13 @@ impl AkhMcpServer {
                 for gap in &summary.gaps {
                     output.push_str(&format!("- {gap}\n"));
                 }
+            }
+            if capped {
+                output.push_str(&format!(
+                    "\n\n[Note: investigation capped at {cycles} cycle{}. \
+                     Pass a larger max_cycles for a more complete result.]",
+                    if cycles == 1 { "" } else { "s" }
+                ));
             }
             Ok(output)
         })
