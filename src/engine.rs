@@ -246,15 +246,25 @@ impl Engine {
 
         let store = Arc::new(store);
 
-        // Restore knowledge graph from persistent SPARQL store.
-        if let Some(ref sparql) = sparql {
-            let restored = sparql.all_triples().unwrap_or_else(|e| {
-                tracing::warn!(error = %e, "KG restore from SPARQL skipped");
-                vec![]
-            });
-            if !restored.is_empty() {
-                let count = knowledge_graph.bulk_load(&restored).unwrap_or(0);
+        // Restore knowledge graph. Prefer SPARQL (persistent store) when available,
+        // otherwise fall back to the redb snapshot saved by engine.persist().
+        {
+            let sparql_triples = sparql.as_ref().and_then(|s| s.all_triples().ok()).unwrap_or_default();
+            if !sparql_triples.is_empty() {
+                let count = knowledge_graph.bulk_load(&sparql_triples).unwrap_or(0);
                 tracing::info!(triples = count, "knowledge graph restored from SPARQL");
+            } else {
+                // SPARQL is in-memory (no rocksdb) — try the redb snapshot.
+                let redb_triples: Vec<crate::graph::Triple> = store
+                    .get_meta(b"kg:triples")
+                    .ok()
+                    .flatten()
+                    .and_then(|b| bincode::deserialize(&b).ok())
+                    .unwrap_or_default();
+                if !redb_triples.is_empty() {
+                    let count = knowledge_graph.bulk_load(&redb_triples).unwrap_or(0);
+                    tracing::info!(triples = count, "knowledge graph restored from redb snapshot");
+                }
             }
         }
 
@@ -2632,6 +2642,18 @@ impl Engine {
         // Sync knowledge graph to SPARQL store.
         if let Some(ref sparql) = self.sparql {
             sparql.sync_from(&self.knowledge_graph)?;
+        }
+
+        // Also persist KG triples directly to redb so they survive restarts
+        // even when the SPARQL store is in-memory (e.g. without rocksdb feature).
+        {
+            let triples = self.knowledge_graph.all_triples();
+            let bytes = bincode::serialize(&triples).map_err(|e| {
+                crate::error::StoreError::Serialization {
+                    message: format!("kg triples serialize: {e}"),
+                }
+            })?;
+            self.store.put_meta(b"kg:triples", &bytes)?;
         }
 
         // Persist Phase 9 registries.

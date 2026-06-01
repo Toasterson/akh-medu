@@ -114,6 +114,8 @@ pub struct AgentPredicates {
     pub memory_type: SymbolId,
     /// HTN dependency: the object goal must complete before the subject goal.
     pub blocked_by: SymbolId,
+    /// Affective valence at consolidation time — used for mood-congruent retrieval (Phase 23).
+    pub has_affective_valence: SymbolId,
 }
 
 impl AgentPredicates {
@@ -134,6 +136,8 @@ impl AgentPredicates {
             from_cycle: engine.resolve_or_create_relation("agent:from_cycle")?,
             memory_type: engine.resolve_or_create_relation("agent:memory_type")?,
             blocked_by: engine.resolve_or_create_relation("agent:blocked_by")?,
+            has_affective_valence: engine
+                .resolve_or_create_relation("agent:has_affective_valence")?,
         })
     }
 }
@@ -1021,6 +1025,7 @@ impl Agent {
 
     /// Trigger memory consolidation.
     pub fn consolidate(&mut self) -> AgentResult<ConsolidationResult> {
+        let current_affect = *self.affective_system.current_affect();
         consolidate(
             &mut self.working_memory,
             &self.engine,
@@ -1028,12 +1033,14 @@ impl Agent {
             &self.config.consolidation,
             &self.predicates,
             self.cycle_count,
+            Some(&current_affect),
         )
     }
 
     /// Recall episodic memories by query symbols.
     pub fn recall(&self, query: &[SymbolId], top_k: usize) -> AgentResult<Vec<EpisodicEntry>> {
-        recall_episodes(&self.engine, query, &self.predicates, top_k)
+        let current_affect = *self.affective_system.current_affect();
+        recall_episodes(&self.engine, query, &self.predicates, top_k, Some(&current_affect))
     }
 
     /// Get current goals.

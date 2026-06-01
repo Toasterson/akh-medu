@@ -56,11 +56,12 @@ impl Tool for MemoryRecallTool {
             return Ok(ToolOutput::ok("No valid query symbols resolved."));
         }
 
-        let episodes = memory::recall_episodes(engine, &query_ids, &self.predicates, top_k)
-            .map_err(|e| AgentError::ToolExecution {
-                tool_name: "memory_recall".into(),
-                message: format!("{e}"),
-            })?;
+        let episodes =
+            memory::recall_episodes(engine, &query_ids, &self.predicates, top_k, None)
+                .map_err(|e| AgentError::ToolExecution {
+                    tool_name: "memory_recall".into(),
+                    message: format!("{e}"),
+                })?;
 
         if episodes.is_empty() {
             return Ok(ToolOutput::ok_with_symbols(

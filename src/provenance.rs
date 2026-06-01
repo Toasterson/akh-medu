@@ -635,6 +635,18 @@ pub enum DerivationKind {
         source_text: String,
     },
 
+    // --- Phase 23: Affective System ------------------------------------------
+
+    /// An affective appraisal was processed and mood state updated (Phase 23).
+    AffectiveAppraisal {
+        /// The appraisal trigger kind (e.g. "GoalCompleted", "GoalFailed").
+        trigger_kind: String,
+        /// Outcome valence of the appraisal (-1.0 to 1.0).
+        valence: f32,
+        /// Resulting mood valence after EMA update.
+        resulting_mood_valence: f32,
+    },
+
     // --- Phase 36: Delegation ------------------------------------------------
 
     /// A task was delegated to an external worker (Phase 36).
@@ -782,12 +794,13 @@ impl DerivationKind {
             Self::GameTheoreticModel { .. } => 87,
             Self::NeuralProbe { .. } => 88,
             Self::Delegation { .. } => 89,
-            Self::ArticleCreated { .. } => 90,
-            Self::ArticleUpdated { .. } => 91,
-            Self::ArticleCited { .. } => 92,
-            Self::ArticleFederated { .. } => 93,
-            Self::OpinionExpressed { .. } => 94,
-            Self::DebateContribution { .. } => 95,
+            Self::AffectiveAppraisal { .. } => 90,
+            Self::ArticleCreated { .. } => 91,
+            Self::ArticleUpdated { .. } => 92,
+            Self::ArticleCited { .. } => 93,
+            Self::ArticleFederated { .. } => 94,
+            Self::OpinionExpressed { .. } => 95,
+            Self::DebateContribution { .. } => 96,
         }
     }
 }
