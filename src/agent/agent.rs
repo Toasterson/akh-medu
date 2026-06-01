@@ -570,6 +570,35 @@ impl Agent {
         // Load tools from active skills.
         agent.load_skill_tools();
 
+        // Bootstrap causal world model from the full tool registry (Phase 15a / WI 019e1ab7).
+        //
+        // Runs after load_skill_tools() so skill-contributed tools are included.
+        // Existing schemas (manually tuned or restored from disk) are preserved.
+        {
+            let signatures = agent.tool_registry.list();
+            if !signatures.is_empty() {
+                match agent
+                    .causal_manager
+                    .bootstrap_from_signatures(&signatures, &agent.engine)
+                {
+                    Ok(n) if n > 0 => {
+                        tracing::info!(
+                            new_schemas = n,
+                            total = agent.causal_manager.schemas.len(),
+                            "causal world model bootstrapped from tool registry",
+                        );
+                        if let Err(e) = agent.causal_manager.persist(&agent.engine) {
+                            tracing::warn!("failed to persist bootstrapped causal schemas: {e}");
+                        }
+                    }
+                    Ok(_) => {} // all schemas already present
+                    Err(e) => {
+                        tracing::warn!("failed to bootstrap causal schemas from tool registry: {e}");
+                    }
+                }
+            }
+        }
+
         Ok(agent)
     }
 
@@ -2855,6 +2884,32 @@ impl Agent {
 
         // Load tools from active skills.
         agent.load_skill_tools();
+
+        // Bootstrap causal world model from the full tool registry (Phase 15a / WI 019e1ab7).
+        {
+            let signatures = agent.tool_registry.list();
+            if !signatures.is_empty() {
+                match agent
+                    .causal_manager
+                    .bootstrap_from_signatures(&signatures, &agent.engine)
+                {
+                    Ok(n) if n > 0 => {
+                        tracing::info!(
+                            new_schemas = n,
+                            total = agent.causal_manager.schemas.len(),
+                            "causal world model bootstrapped from tool registry (resume)",
+                        );
+                        if let Err(e) = agent.causal_manager.persist(&agent.engine) {
+                            tracing::warn!("failed to persist bootstrapped causal schemas: {e}");
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::warn!("failed to bootstrap causal schemas from tool registry: {e}");
+                    }
+                }
+            }
+        }
 
         Ok(agent)
     }

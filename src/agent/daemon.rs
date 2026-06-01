@@ -206,6 +206,11 @@ impl AgentDaemon {
             "daemon started — background learning active",
         ));
 
+        // Startup: ensure causal world model covers all registered tools.
+        // Runs before goal generation so the world model is available for the
+        // first OODA cycle.
+        self.bootstrap_causal_schemas();
+
         // Startup burst: seed goals so the akh can start acting immediately.
         // Continuous learning is deliberately NOT run at startup — it holds the
         // agent mutex for 30-120s (network I/O + ingestion), blocking all HTTP
@@ -972,6 +977,49 @@ impl AgentDaemon {
                 && let Ok(mut st) = status.try_lock()
             {
                 st.last_persist_at = Some(now_secs());
+            }
+        }
+    }
+
+    /// Ensure the causal world model has schemas for all registered tools.
+    ///
+    /// Called once at daemon startup so that any tools added after the agent
+    /// was last persisted (e.g. new skills installed between runs) are
+    /// immediately reflected in the world model.  Existing schemas are not
+    /// overwritten, so learned success rates are preserved.
+    fn bootstrap_causal_schemas(&mut self) {
+        let mut agent = self.agent.lock().unwrap();
+        let signatures = agent.tool_registry.list();
+        if signatures.is_empty() {
+            return;
+        }
+        match agent
+            .causal_manager
+            .bootstrap_from_signatures(&signatures, &agent.engine)
+        {
+            Ok(0) => {
+                tracing::debug!(
+                    total = agent.causal_manager.schemas.len(),
+                    "daemon: causal world model already up-to-date",
+                );
+            }
+            Ok(n) => {
+                agent.sink().emit(&AkhMessage::system(format!(
+                    "[daemon:causal] bootstrapped {n} new action schema(s) from tool registry \
+                     ({} total)",
+                    agent.causal_manager.schemas.len(),
+                )));
+                tracing::info!(
+                    new_schemas = n,
+                    total = agent.causal_manager.schemas.len(),
+                    "daemon: causal world model bootstrapped",
+                );
+                if let Err(e) = agent.causal_manager.persist(&agent.engine) {
+                    tracing::warn!("daemon: failed to persist causal schemas: {e}");
+                }
+            }
+            Err(e) => {
+                tracing::warn!("daemon: failed to bootstrap causal schemas: {e}");
             }
         }
     }

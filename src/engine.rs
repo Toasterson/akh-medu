@@ -246,15 +246,38 @@ impl Engine {
 
         let store = Arc::new(store);
 
-        // Restore knowledge graph from persistent SPARQL store.
-        if let Some(ref sparql) = sparql {
-            let restored = sparql.all_triples().unwrap_or_else(|e| {
-                tracing::warn!(error = %e, "KG restore from SPARQL skipped");
-                vec![]
-            });
-            if !restored.is_empty() {
-                let count = knowledge_graph.bulk_load(&restored).unwrap_or(0);
-                tracing::info!(triples = count, "knowledge graph restored from SPARQL");
+        // Restore knowledge graph.
+        //
+        // Primary path: SPARQL store (persistent when `sparql-persist` is enabled).
+        // Fallback path: bincode snapshot in the TieredStore metadata, written by
+        // `Engine::persist()`.  This allows triple persistence in environments
+        // without RocksDB (e.g., test mode, single-binary deployments).
+        let sparql_triples = sparql
+            .as_ref()
+            .map(|s| {
+                s.all_triples().unwrap_or_else(|e| {
+                    tracing::warn!(error = %e, "KG restore from SPARQL skipped");
+                    vec![]
+                })
+            })
+            .unwrap_or_default();
+
+        if !sparql_triples.is_empty() {
+            let count = knowledge_graph.bulk_load(&sparql_triples).unwrap_or(0);
+            tracing::info!(triples = count, "knowledge graph restored from SPARQL");
+        } else {
+            // SPARQL is unavailable or empty — try the bincode fallback.
+            let fallback = store
+                .get_meta(b"kg_triples_snapshot")
+                .ok()
+                .flatten()
+                .and_then(|bytes| {
+                    bincode::deserialize::<Vec<crate::graph::Triple>>(&bytes).ok()
+                })
+                .unwrap_or_default();
+            if !fallback.is_empty() {
+                let count = knowledge_graph.bulk_load(&fallback).unwrap_or(0);
+                tracing::info!(triples = count, "knowledge graph restored from bincode snapshot");
             }
         }
 
@@ -2629,9 +2652,22 @@ impl Engine {
             .unwrap()
             .persist_to_store(&self.store)?;
 
-        // Sync knowledge graph to SPARQL store.
+        // Sync knowledge graph to SPARQL store (primary persistence path).
         if let Some(ref sparql) = self.sparql {
             sparql.sync_from(&self.knowledge_graph)?;
+        }
+
+        // Always write a bincode snapshot of KG triples so restores work even
+        // when `sparql-persist` is disabled (e.g., in tests or single-binary mode).
+        if self.config.data_dir.is_some() {
+            let triples = self.knowledge_graph.all_triples();
+            let snapshot = bincode::serialize(&triples).map_err(|e| {
+                crate::error::StoreError::Serialization {
+                    message: format!("failed to serialize KG snapshot: {e}"),
+                }
+            })?;
+            self.store.put_meta(b"kg_triples_snapshot", &snapshot)?;
+            tracing::debug!(triples = triples.len(), "KG bincode snapshot written");
         }
 
         // Persist Phase 9 registries.
