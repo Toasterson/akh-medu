@@ -38,6 +38,30 @@ fn default_workspace() -> String {
 ///
 /// Holds Arc-wrapped workspace and agent maps shared with `ServerState`,
 /// enabling lazy-loaded access to any workspace without pre-warming.
+///
+/// # Locking discipline
+///
+/// Each workspace gets its own independent `Arc<Mutex<Agent>>`.  A panic
+/// (and the resulting mutex poison) inside workspace A's `spawn_blocking`
+/// closure affects **only** that workspace's `Mutex<Agent>`; workspace B's
+/// handle is a completely separate allocation.  To preserve this isolation:
+///
+/// * Never share one workspace's `Arc<Mutex<Agent>>` with another workspace.
+/// * Always recover from poison via `lock().unwrap_or_else(|e| e.into_inner())`
+///   rather than propagating it — the poison error becomes a permanent failure
+///   otherwise, blocking every future MCP call to that workspace until restart.
+/// * The outer maps (`workspaces`, `agents`, `nlu_pipelines`) use Tokio's
+///   `RwLock` which does **not** poison on panic, so the maps themselves are
+///   safe; only the inner `std::sync::Mutex<Agent>` values can be poisoned.
+///
+/// # Psyche state source of truth
+///
+/// The engine compartment manager is the authoritative, persisted psyche store.
+/// `ritual_of_awakening` and `awaken` both write there directly via
+/// `CompartmentManager::force_set_psyche`.  The agent's in-memory `psyche`
+/// field is a cache loaded at agent creation.  After awakening, the tools sync
+/// the new psyche into the agent's cache so that `agent_psyche` and `awaken`
+/// agree on the awakened state without reloading the agent from disk.
 pub struct McpState {
     pub paths: AkhPaths,
     pub workspaces: Arc<RwLock<HashMap<String, Arc<Engine>>>>,
@@ -840,7 +864,10 @@ impl AkhMcpServer {
     ) -> Result<CallToolResult, McpError> {
         let agent = self.state.get_agent(&params.workspace).await?;
         let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
-            let mut agent = agent.lock().map_err(|e| format!("agent lock: {e}"))?;
+            let mut agent = agent.lock().unwrap_or_else(|e| {
+                tracing::warn!("agent mutex was poisoned; recovering — workspace isolation is per-Arc<Mutex<Agent>>");
+                e.into_inner()
+            });
             let cycles = params.max_cycles.unwrap_or(10) as usize;
             agent.set_max_cycles(cycles);
             agent.clear_goals();
@@ -1190,7 +1217,10 @@ impl AkhMcpServer {
     ) -> Result<CallToolResult, McpError> {
         let agent = self.state.get_agent(&params.workspace).await?;
         let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
-            let mut agent = agent.lock().map_err(|e| format!("agent lock: {e}"))?;
+            let mut agent = agent.lock().unwrap_or_else(|e| {
+                tracing::warn!("agent mutex was poisoned; recovering — workspace isolation is per-Arc<Mutex<Agent>>");
+                e.into_inner()
+            });
             let cycles = params.max_cycles.unwrap_or(10) as usize;
             agent.set_max_cycles(cycles);
             agent.clear_goals();
@@ -1424,10 +1454,16 @@ impl AkhMcpServer {
         Parameters(params): Parameters<AwakenParams>,
     ) -> Result<CallToolResult, McpError> {
         let engine = self.state.get_engine(&params.workspace).await?;
+        // Also get the shared agent so we can sync its in-memory psyche cache
+        // after the orchestrator runs. The orchestrator calls ritual_of_awakening
+        // which writes to the engine compartment, but the agent's cached psyche
+        // field is not updated unless we do it here explicitly.
+        let agent = self.state.get_agent(&params.workspace).await?;
+
         let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
             use crate::bootstrap::OrchestratorConfig;
 
-            // Status-only request.
+            // Status-only request (no awakening, no sync needed).
             if params.status {
                 let session = crate::bootstrap::BootstrapOrchestrator::status(&engine)
                     .map_err(|e| format!("{e}"))?;
@@ -1470,6 +1506,17 @@ impl AkhMcpServer {
 
             let (result, checkpoints) =
                 orchestrator.run(&engine).map_err(|e| format!("{e}"))?;
+
+            // If the orchestrator ran the identity stage it may have updated the
+            // engine compartment's psyche. Sync that to the agent's in-memory
+            // cache so agent_psyche and awaken agree on the awakened state.
+            if let Some(psyche) = engine.compartments().and_then(|cm| cm.psyche()) {
+                let mut agent_guard = agent.lock().unwrap_or_else(|e| {
+                    tracing::warn!("agent mutex was poisoned; recovering for psyche sync after awaken");
+                    e.into_inner()
+                });
+                agent_guard.force_set_psyche(psyche);
+            }
 
             let mut lines = vec![
                 format!("Domain: {}", result.intent.purpose.domain),
@@ -1613,6 +1660,12 @@ impl AkhMcpServer {
         Parameters(params): Parameters<RitualOfAwakeningParams>,
     ) -> Result<CallToolResult, McpError> {
         let engine = self.state.get_engine(&params.workspace).await?;
+        // Also get the shared agent so we can sync its in-memory psyche cache
+        // after the ritual updates the engine compartment. Without this sync,
+        // agent_psyche would read agent.psyche() → None while awaken reads
+        // engine.compartments().psyche() → Some(..., awakened=true), causing
+        // the two tools to disagree on the workspace's awakened state.
+        let agent = self.state.get_agent(&params.workspace).await?;
 
         let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
             use crate::bootstrap::identity::{
@@ -1663,6 +1716,17 @@ impl AkhMcpServer {
 
             let ritual_result =
                 ritual_of_awakening(&character, &purpose, &engine).map_err(|e| format!("{e}"))?;
+
+            // Sync the awakened psyche to the agent's in-memory cache so that
+            // agent_psyche and awaken/ritual_of_awakening agree on this workspace's
+            // state going forward. Recover from a poisoned mutex rather than failing.
+            let psyche_to_sync = ritual_result.psyche.clone();
+            let mut agent_guard = agent.lock().unwrap_or_else(|e| {
+                tracing::warn!("agent mutex was poisoned; recovering for psyche sync after ritual_of_awakening");
+                e.into_inner()
+            });
+            agent_guard.force_set_psyche(psyche_to_sync);
+            drop(agent_guard);
 
             let _ = engine.persist();
 
@@ -2136,7 +2200,10 @@ impl AkhMcpServer {
         let agent = self.state.get_agent(&params.workspace).await?;
 
         let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
-            let mut agent = agent.lock().map_err(|e| format!("agent lock: {e}"))?;
+            let mut agent = agent.lock().unwrap_or_else(|e| {
+                tracing::warn!("agent mutex was poisoned; recovering — workspace isolation is per-Arc<Mutex<Agent>>");
+                e.into_inner()
+            });
             let cycle = agent.run_cycle().map_err(|e| format!("{e}"))?;
             let _ = agent.persist_session();
 
@@ -2167,7 +2234,10 @@ impl AkhMcpServer {
         let agent = self.state.get_agent(&params.workspace).await?;
 
         let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
-            let agent = agent.lock().map_err(|e| format!("agent lock: {e}"))?;
+            let agent = agent.lock().unwrap_or_else(|e| {
+                tracing::warn!("agent mutex was poisoned; recovering — workspace isolation is per-Arc<Mutex<Agent>>");
+                e.into_inner()
+            });
             let goals = agent.goals();
 
             if goals.is_empty() {
@@ -2210,7 +2280,10 @@ impl AkhMcpServer {
         let top_k = params.top_k.unwrap_or(5);
 
         let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
-            let agent = agent.lock().map_err(|e| format!("agent lock: {e}"))?;
+            let agent = agent.lock().unwrap_or_else(|e| {
+                tracing::warn!("agent mutex was poisoned; recovering — workspace isolation is per-Arc<Mutex<Agent>>");
+                e.into_inner()
+            });
 
             // Resolve query terms to symbol IDs
             let query_ids: Vec<crate::symbol::SymbolId> = query_terms
@@ -2270,12 +2343,31 @@ impl AkhMcpServer {
         Parameters(params): Parameters<WorkspaceParam>,
     ) -> Result<CallToolResult, McpError> {
         let agent = self.state.get_agent(&params.workspace).await?;
+        // The engine compartment is the authoritative, persisted psyche store.
+        // ritual_of_awakening and awaken write there directly; the agent's
+        // in-memory field is a cache loaded at startup. We read both and prefer
+        // whichever is populated so the two tools agree on awakened state.
+        let engine = self.state.get_engine(&params.workspace).await?;
 
         let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
-            let agent = agent.lock().map_err(|e| format!("agent lock: {e}"))?;
+            // Recover from a poisoned mutex rather than propagating the error.
+            // Poison means a previous task panicked while holding this workspace's
+            // lock; recovering clears the flag so future calls succeed normally.
+            let agent = agent.lock().unwrap_or_else(|e| {
+                tracing::warn!("agent mutex was poisoned; recovering for agent_psyche read");
+                e.into_inner()
+            });
 
-            match agent.psyche() {
-                Some(psyche) => {
+            // Prefer the agent's in-memory psyche (may have evolved since the
+            // last compartment persist); fall back to the engine compartment
+            // which ritual_of_awakening / awaken write to synchronously.
+            let psyche_opt: Option<crate::compartment::psyche::Psyche> = agent
+                .psyche()
+                .cloned()
+                .or_else(|| engine.compartments().and_then(|cm| cm.psyche()));
+
+            match psyche_opt {
+                Some(ref psyche) => {
                     let mut lines = vec![
                         format!("Persona: {}", psyche.persona.name),
                         format!("Traits: {}", psyche.persona.traits.join(", ")),
@@ -2581,7 +2673,10 @@ impl AkhMcpServer {
                 terminates: terminates.clone(),
             };
 
-            let mut agent = agent.lock().map_err(|e| format!("agent lock: {e}"))?;
+            let mut agent = agent.lock().unwrap_or_else(|e| {
+                tracing::warn!("agent mutex was poisoned; recovering — workspace isolation is per-Arc<Mutex<Agent>>");
+                e.into_inner()
+            });
             agent
                 .ec_engine_mut()
                 .record_event(event, &engine)
@@ -2619,7 +2714,10 @@ impl AkhMcpServer {
                 .resolve_or_create_entity(&format!("ec:fluent:{fluent_label}"))
                 .map_err(|e| format!("{e}"))?;
 
-            let agent = agent.lock().map_err(|e| format!("agent lock: {e}"))?;
+            let agent = agent.lock().unwrap_or_else(|e| {
+                tracing::warn!("agent mutex was poisoned; recovering — workspace isolation is per-Arc<Mutex<Agent>>");
+                e.into_inner()
+            });
             let holds = agent.ec_engine().holds_at(fluent_id, time);
 
             Ok(format!(
@@ -2647,7 +2745,10 @@ impl AkhMcpServer {
         let to_time = params.to_time;
 
         let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
-            let agent = agent.lock().map_err(|e| format!("agent lock: {e}"))?;
+            let agent = agent.lock().unwrap_or_else(|e| {
+                tracing::warn!("agent mutex was poisoned; recovering — workspace isolation is per-Arc<Mutex<Agent>>");
+                e.into_inner()
+            });
             let proj = agent.ec_engine().project_state(from_time, to_time);
 
             let mut lines = Vec::new();
@@ -2697,7 +2798,10 @@ impl AkhMcpServer {
                 action_ids.push(id);
             }
 
-            let agent = agent.lock().map_err(|e| format!("agent lock: {e}"))?;
+            let agent = agent.lock().unwrap_or_else(|e| {
+                tracing::warn!("agent mutex was poisoned; recovering — workspace isolation is per-Arc<Mutex<Agent>>");
+                e.into_inner()
+            });
             let sim = agent
                 .ec_engine()
                 .simulate_actions(&action_ids, agent.causal_manager(), &engine)
@@ -2748,7 +2852,10 @@ impl AkhMcpServer {
         let since = params.since;
 
         let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
-            let agent = agent.lock().map_err(|e| format!("agent lock: {e}"))?;
+            let agent = agent.lock().unwrap_or_else(|e| {
+                tracing::warn!("agent mutex was poisoned; recovering — workspace isolation is per-Arc<Mutex<Agent>>");
+                e.into_inner()
+            });
             let changes = agent.ec_engine().what_changed_since(since);
 
             if changes.is_empty() {
@@ -2791,7 +2898,10 @@ impl AkhMcpServer {
                 .resolve_or_create_entity(&format!("ec:fluent:{fluent_label}"))
                 .map_err(|e| format!("{e}"))?;
 
-            let agent = agent.lock().map_err(|e| format!("agent lock: {e}"))?;
+            let agent = agent.lock().unwrap_or_else(|e| {
+                tracing::warn!("agent mutex was poisoned; recovering — workspace isolation is per-Arc<Mutex<Agent>>");
+                e.into_inner()
+            });
             let history = agent
                 .ec_engine()
                 .fluent_history(fluent_id)
@@ -2869,7 +2979,10 @@ impl AkhMcpServer {
                     .as_secs(),
             };
 
-            let agent = agent.lock().map_err(|e| format!("agent lock: {e}"))?;
+            let agent = agent.lock().unwrap_or_else(|e| {
+                tracing::warn!("agent mutex was poisoned; recovering — workspace isolation is per-Arc<Mutex<Agent>>");
+                e.into_inner()
+            });
             let result = crate::agent::counterfactual_query(
                 &query,
                 agent.causal_manager(),
@@ -2929,7 +3042,10 @@ impl AkhMcpServer {
         let engine = self.state.get_engine(&params.workspace).await?;
 
         let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
-            let agent = agent.lock().map_err(|e| format!("agent lock: {e}"))?;
+            let agent = agent.lock().unwrap_or_else(|e| {
+                tracing::warn!("agent mutex was poisoned; recovering — workspace isolation is per-Arc<Mutex<Agent>>");
+                e.into_inner()
+            });
             let tracker = agent.prediction_tracker();
 
             let mut lines = Vec::new();
@@ -3003,7 +3119,10 @@ impl AkhMcpServer {
                 .resolve_or_create_entity(&claim_label)
                 .map_err(|e| format!("{e}"))?;
 
-            let agent = agent.lock().map_err(|e| format!("agent lock: {e}"))?;
+            let agent = agent.lock().unwrap_or_else(|e| {
+                tracing::warn!("agent mutex was poisoned; recovering — workspace isolation is per-Arc<Mutex<Agent>>");
+                e.into_inner()
+            });
             let assessment = agent.evidence_manager().assess_claim(claim_id);
 
             let mut lines = Vec::new();
@@ -3072,7 +3191,10 @@ impl AkhMcpServer {
                 provenance_id: None,
             };
 
-            let mut agent = agent.lock().map_err(|e| format!("agent lock: {e}"))?;
+            let mut agent = agent.lock().unwrap_or_else(|e| {
+                tracing::warn!("agent mutex was poisoned; recovering — workspace isolation is per-Arc<Mutex<Agent>>");
+                e.into_inner()
+            });
             agent.evidence_manager_mut().add_evidence(claim_id, item);
 
             // Check for alerts.
@@ -3129,7 +3251,10 @@ impl AkhMcpServer {
                 .resolve_or_create_entity(&source_label)
                 .map_err(|e| format!("{e}"))?;
 
-            let agent = agent.lock().map_err(|e| format!("agent lock: {e}"))?;
+            let agent = agent.lock().unwrap_or_else(|e| {
+                tracing::warn!("agent mutex was poisoned; recovering — workspace isolation is per-Arc<Mutex<Agent>>");
+                e.into_inner()
+            });
             let rating = agent.reliability_manager().rate_source(source_id);
             let trust = agent.reliability_manager().sources.get(&source_id.get());
 
@@ -3183,7 +3308,10 @@ impl AkhMcpServer {
                 .resolve_or_create_entity(&source_label)
                 .map_err(|e| format!("{e}"))?;
 
-            let mut agent = agent.lock().map_err(|e| format!("agent lock: {e}"))?;
+            let mut agent = agent.lock().unwrap_or_else(|e| {
+                tracing::warn!("agent mutex was poisoned; recovering — workspace isolation is per-Arc<Mutex<Agent>>");
+                e.into_inner()
+            });
             agent.reliability_manager_mut().verify_claim(source_id, was_true);
 
             let rating = agent.reliability_manager().rate_source(source_id);
@@ -3232,7 +3360,10 @@ impl AkhMcpServer {
         let max_depth = params.max_depth.unwrap_or(5);
 
         let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
-            let agent = agent.lock().map_err(|e| format!("agent lock: {e}"))?;
+            let agent = agent.lock().unwrap_or_else(|e| {
+                tracing::warn!("agent mutex was poisoned; recovering — workspace isolation is per-Arc<Mutex<Agent>>");
+                e.into_inner()
+            });
 
             let config = crate::agent::MctsConfig {
                 max_iterations,
@@ -3301,12 +3432,18 @@ impl AkhMcpServer {
         let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
             // Clone the shared pipeline — models are Arc-shared (cheap),
             // ranker is cloned by value for per-session learning.
-            let session_pipeline = nlu_cached.lock().unwrap().clone();
+            let session_pipeline = nlu_cached
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
 
             let mut chat_processor =
                 crate::chat::ChatProcessor::new(&engine, session_pipeline);
 
-            let mut agent = agent.lock().map_err(|e| format!("agent lock: {e}"))?;
+            let mut agent = agent.lock().unwrap_or_else(|e| {
+                tracing::warn!("agent mutex was poisoned; recovering for chat");
+                e.into_inner()
+            });
             let responses = chat_processor.process_input(&message, &mut agent, &engine);
 
             // Persist NLU ranker state and engine.
