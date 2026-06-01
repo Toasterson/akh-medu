@@ -128,6 +128,7 @@ const ONTOLOGY_TOML: &str = include_str!("../../data/seeds/ontology/seed.toml");
 const COMMON_SENSE_TOML: &str = include_str!("../../data/seeds/common-sense/seed.toml");
 const COMPUTING_TOML: &str = include_str!("../../data/seeds/computing/seed.toml");
 const ARCHITECTURE_TOML: &str = include_str!("../../data/seeds/architecture/seed.toml");
+const TECTON_TOML: &str = include_str!("../../data/seeds/tecton/seed.toml");
 
 fn parse_seed_toml(toml_str: &str, source: SeedSource) -> SeedResult<SeedPack> {
     let parsed: SeedToml = toml::from_str(toml_str).map_err(|e| SeedError::Parse {
@@ -152,6 +153,7 @@ fn bundled_packs() -> Vec<SeedPack> {
         (COMMON_SENSE_TOML, "common-sense"),
         (COMPUTING_TOML, "computing"),
         (ARCHITECTURE_TOML, "architecture"),
+        (TECTON_TOML, "tecton"),
     ]
     .iter()
     .filter_map(
@@ -269,7 +271,8 @@ fn is_seed_applied(engine: &Engine, seed_id: &str) -> bool {
         triples.iter().any(|t| {
             let pred_label = engine.resolve_label(t.predicate);
             let obj_label = engine.resolve_label(t.object);
-            pred_label == SEED_APPLIED_PREDICATE && obj_label == seed_id
+            pred_label == SEED_APPLIED_PREDICATE
+                && obj_label.eq_ignore_ascii_case(seed_id)
         })
     } else {
         false
@@ -393,12 +396,13 @@ mod tests {
     #[test]
     fn bundled_packs_parse() {
         let packs = bundled_packs();
-        assert_eq!(packs.len(), 5);
+        assert_eq!(packs.len(), 6);
         assert!(packs.iter().any(|p| p.id == "identity"));
         assert!(packs.iter().any(|p| p.id == "ontology"));
         assert!(packs.iter().any(|p| p.id == "common-sense"));
         assert!(packs.iter().any(|p| p.id == "computing"));
         assert!(packs.iter().any(|p| p.id == "architecture"));
+        assert!(packs.iter().any(|p| p.id == "tecton"));
     }
 
     #[test]
@@ -441,12 +445,75 @@ mod tests {
         let reg = SeedRegistry::bundled();
         let ids: Vec<String> = reg.list().iter().map(|p| p.id.clone()).collect();
         let reports = reg.apply_all(&ids, &engine).unwrap();
-        assert_eq!(reports.len(), 5);
+        assert_eq!(reports.len(), 6);
 
         let total: usize = reports.iter().map(|r| r.triples_applied).sum();
         assert!(
             total > 100,
             "Expected 100+ triples from all seeds, got {total}"
         );
+    }
+
+    #[test]
+    fn apply_tecton_seed() {
+        let engine = Engine::new(EngineConfig {
+            dimension: Dimension::TEST,
+            ..Default::default()
+        })
+        .unwrap();
+
+        let reg = SeedRegistry::bundled();
+        let report = reg.apply("tecton", &engine).unwrap();
+        assert!(!report.already_applied);
+        assert!(report.triples_applied > 0, "Expected Tecton triples to be applied");
+
+        // Tecton symbol must exist.
+        assert!(engine.resolve_symbol("Tecton").is_ok());
+
+        // Verify the full self-model triple coverage.
+        let tecton_id = engine.resolve_symbol("Tecton").unwrap();
+        let triples = engine.triples_from(tecton_id);
+        let pred_obj_pairs: Vec<(String, String)> = triples
+            .iter()
+            .map(|t| {
+                (
+                    engine.resolve_label(t.predicate),
+                    engine.resolve_label(t.object),
+                )
+            })
+            .collect();
+
+        let has = |pred: &str, obj: &str| {
+            pred_obj_pairs
+                .iter()
+                .any(|(p, o)| p == pred && o == obj)
+        };
+
+        assert!(has("is-a", "DigitalArchitect"), "Tecton --is-a--> DigitalArchitect");
+        assert!(has("inspired-by", "Ptah"), "Tecton --inspired-by--> Ptah");
+        assert!(has("has-role", "Creator"), "Tecton --has-role--> Creator");
+        assert!(has("has-role", "Architect"), "Tecton --has-role--> Architect");
+        assert!(has("operates-on", "cluster"), "Tecton --operates-on--> cluster");
+        assert!(has("runs-on", "MacMini"), "Tecton --runs-on--> MacMini");
+        assert!(has("runs-on", "Hephaistos"), "Tecton --runs-on--> Hephaistos");
+        assert!(has("created-by", "Toasty"), "Tecton --created-by--> Toasty");
+        assert!(has("part-of", "Ennead"), "Tecton --part-of--> Ennead");
+
+        // Verify related entities have type context for "who is X?" queries.
+        let toasty_id = engine.resolve_symbol("Toasty").unwrap();
+        let toasty_triples = engine.triples_from(toasty_id);
+        assert!(
+            toasty_triples.iter().any(|t| engine.resolve_label(t.predicate) == "is-a"
+                && engine.resolve_label(t.object) == "person"),
+            "Toasty --is-a--> person"
+        );
+
+        // Verify the seed-applied tracking triple was recorded.
+        assert!(engine.resolve_symbol("akh-medu").is_ok(), "akh-medu entity must exist after seed application");
+        assert!(is_seed_applied_public(&engine, "tecton"), "is_seed_applied must be true after first apply");
+
+        // Idempotency.
+        let report2 = reg.apply("tecton", &engine).unwrap();
+        assert!(report2.already_applied);
     }
 }
