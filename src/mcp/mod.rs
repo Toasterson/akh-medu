@@ -384,6 +384,27 @@ pub struct ChatParams {
     pub message: String,
 }
 
+// ── Goal Management ─────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ManageGoalsParams {
+    #[schemars(description = "Target workspace (default: \"default\")")]
+    #[serde(default = "default_workspace")]
+    pub workspace: String,
+    #[schemars(
+        description = "Action to perform: cancel | suspend | resume | list | prioritize"
+    )]
+    pub action: String,
+    #[schemars(
+        description = "Numeric goal symbol ID — required for cancel, suspend, resume"
+    )]
+    pub goal_id: Option<String>,
+    #[schemars(
+        description = "Status filter for the list action: active | suspended | pending | proposed | dormant | completed | failed | all (default: active)"
+    )]
+    pub status: Option<String>,
+}
+
 // ── Batch Operations ────────────────────────────────────────────────────
 
 /// A single triple in a batch assertion.
@@ -2197,6 +2218,265 @@ impl AkhMcpServer {
     }
 
     #[tool(
+        name = "manage_goals",
+        description = "Goal lifecycle management: cancel, suspend, resume, list, or VSA-prioritize agent goals. \
+                       cancel/suspend/resume require goal_id (the numeric symbol ID shown by agent_goals or manage_goals?action=list). \
+                       Cancel is idempotent — calling it on an already-cancelled goal is a no-op. \
+                       prioritize re-ranks active goals by VSA similarity to the current working-memory context."
+    )]
+    async fn manage_goals(
+        &self,
+        Parameters(params): Parameters<ManageGoalsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let agent = self.state.get_agent(&params.workspace).await?;
+        let engine = self.state.get_engine(&params.workspace).await?;
+
+        let action = params.action.clone();
+        let goal_id_str = params.goal_id.clone();
+        let status_filter = params.status.clone();
+
+        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            match action.as_str() {
+                "cancel" => {
+                    let raw = goal_id_str
+                        .ok_or_else(|| "goal_id is required for cancel".to_string())?
+                        .parse::<u64>()
+                        .map_err(|e| format!("invalid goal_id: {e}"))?;
+                    let goal_id = crate::symbol::SymbolId::new(raw)
+                        .ok_or_else(|| "goal_id must be non-zero".to_string())?;
+
+                    let mut agent = agent.lock().map_err(|e| format!("agent lock: {e}"))?;
+
+                    let already = agent.goals().iter().find(|g| g.symbol_id == goal_id)
+                        .is_some_and(|g| matches!(&g.status,
+                            crate::agent::goal::GoalStatus::Failed { reason } if reason == "cancelled"));
+                    if already {
+                        return Ok(format!("Goal {raw} is already cancelled (no-op)."));
+                    }
+
+                    agent.fail_goal(goal_id, "cancelled").map_err(|e| format!("{e}"))?;
+                    let _ = agent.persist_session();
+                    Ok(format!("Goal {raw} cancelled."))
+                }
+
+                "suspend" => {
+                    let raw = goal_id_str
+                        .ok_or_else(|| "goal_id is required for suspend".to_string())?
+                        .parse::<u64>()
+                        .map_err(|e| format!("invalid goal_id: {e}"))?;
+                    let goal_id = crate::symbol::SymbolId::new(raw)
+                        .ok_or_else(|| "goal_id must be non-zero".to_string())?;
+
+                    let mut agent = agent.lock().map_err(|e| format!("agent lock: {e}"))?;
+
+                    let already = agent.goals().iter().find(|g| g.symbol_id == goal_id)
+                        .is_some_and(|g| matches!(g.status, crate::agent::goal::GoalStatus::Suspended));
+                    if already {
+                        return Ok(format!("Goal {raw} is already suspended (no-op)."));
+                    }
+
+                    agent.suspend_goal(goal_id).map_err(|e| format!("{e}"))?;
+                    let _ = agent.persist_session();
+                    Ok(format!("Goal {raw} suspended."))
+                }
+
+                "resume" => {
+                    let raw = goal_id_str
+                        .ok_or_else(|| "goal_id is required for resume".to_string())?
+                        .parse::<u64>()
+                        .map_err(|e| format!("invalid goal_id: {e}"))?;
+                    let goal_id = crate::symbol::SymbolId::new(raw)
+                        .ok_or_else(|| "goal_id must be non-zero".to_string())?;
+
+                    let mut agent = agent.lock().map_err(|e| format!("agent lock: {e}"))?;
+                    agent.resume_goal(goal_id).map_err(|e| format!("{e}"))?;
+                    let _ = agent.persist_session();
+                    Ok(format!("Goal {raw} resumed."))
+                }
+
+                "list" => {
+                    let agent = agent.lock().map_err(|e| format!("agent lock: {e}"))?;
+                    let goals = agent.goals();
+                    let filter = status_filter.as_deref().unwrap_or("active");
+
+                    let filtered: Vec<&crate::agent::goal::Goal> = goals
+                        .iter()
+                        .filter(|g| match filter {
+                            "all" => true,
+                            "active" => {
+                                matches!(g.status, crate::agent::goal::GoalStatus::Active)
+                            }
+                            "suspended" => {
+                                matches!(g.status, crate::agent::goal::GoalStatus::Suspended)
+                            }
+                            "pending" => {
+                                matches!(g.status, crate::agent::goal::GoalStatus::Pending)
+                            }
+                            "proposed" => {
+                                matches!(g.status, crate::agent::goal::GoalStatus::Proposed)
+                            }
+                            "dormant" => {
+                                matches!(g.status, crate::agent::goal::GoalStatus::Dormant)
+                            }
+                            "completed" => {
+                                matches!(g.status, crate::agent::goal::GoalStatus::Completed)
+                            }
+                            "failed" => {
+                                matches!(
+                                    g.status,
+                                    crate::agent::goal::GoalStatus::Failed { .. }
+                                )
+                            }
+                            _ => true,
+                        })
+                        .collect();
+
+                    if filtered.is_empty() {
+                        return Ok(format!("No {filter} goals."));
+                    }
+
+                    let cycle = agent.cycle_count();
+                    let mut lines: Vec<String> = filtered
+                        .iter()
+                        .map(|g| {
+                            let blocked = if g.is_blocked(goals) { " [BLOCKED]" } else { "" };
+                            let stalled = if g.is_stalled(cycle, 10) { " [STALLED]" } else { "" };
+                            format!(
+                                "- [{}] id={} \"{}\" (priority={}, computed={}{}{})",
+                                g.status,
+                                g.symbol_id.get(),
+                                g.description,
+                                g.priority,
+                                g.computed_priority(),
+                                blocked,
+                                stalled,
+                            )
+                        })
+                        .collect();
+                    lines.sort();
+
+                    Ok(format!(
+                        "Goals ({filter}, {}):\n{}",
+                        filtered.len(),
+                        lines.join("\n")
+                    ))
+                }
+
+                "prioritize" => {
+                    let agent = agent.lock().map_err(|e| format!("agent lock: {e}"))?;
+                    let goals = agent.goals();
+                    let ops = engine.ops();
+                    let item_memory = engine.item_memory();
+
+                    // Collect active goals and working-memory content before dropping the lock.
+                    let active: Vec<crate::agent::goal::Goal> = goals
+                        .iter()
+                        .filter(|g| matches!(g.status, crate::agent::goal::GoalStatus::Active))
+                        .cloned()
+                        .collect();
+
+                    if active.is_empty() {
+                        return Ok("No active goals to prioritize.".to_string());
+                    }
+
+                    let wm_contents: Vec<String> = agent
+                        .working_memory()
+                        .entries()
+                        .iter()
+                        .map(|e| e.content.clone())
+                        .collect();
+
+                    // Build context vector by bundling working-memory entry encodings.
+                    let context_vec: Option<crate::vsa::HyperVec> = {
+                        let vecs: Vec<crate::vsa::HyperVec> = wm_contents
+                            .iter()
+                            .filter_map(|text| {
+                                crate::vsa::grounding::encode_text_as_vector(
+                                    text,
+                                    &engine,
+                                    ops,
+                                    item_memory,
+                                )
+                                .ok()
+                            })
+                            .collect();
+                        if vecs.is_empty() {
+                            None
+                        } else {
+                            let refs: Vec<&crate::vsa::HyperVec> = vecs.iter().collect();
+                            ops.bundle(&refs).ok()
+                        }
+                    };
+
+                    // Score each active goal by similarity to the context vector.
+                    let mut scored: Vec<(f32, crate::agent::goal::Goal)> = active
+                        .into_iter()
+                        .map(|g| {
+                            let score = if let Some(ctx) = &context_vec {
+                                crate::vsa::grounding::encode_text_as_vector(
+                                    &g.description,
+                                    &engine,
+                                    ops,
+                                    item_memory,
+                                )
+                                .ok()
+                                .and_then(|gv| ops.similarity(ctx, &gv).ok())
+                                .unwrap_or(0.0)
+                            } else {
+                                g.computed_priority() as f32 / 255.0
+                            };
+                            (score, g)
+                        })
+                        .collect();
+
+                    scored.sort_by(|a, b| {
+                        b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal)
+                    });
+
+                    let lines: Vec<String> = scored
+                        .iter()
+                        .enumerate()
+                        .map(|(rank, (score, g))| {
+                            format!(
+                                "{}. [sim={:.3}] id={} \"{}\" (priority={})",
+                                rank + 1,
+                                score,
+                                g.symbol_id.get(),
+                                g.description,
+                                g.computed_priority(),
+                            )
+                        })
+                        .collect();
+
+                    let ctx_note = if context_vec.is_some() {
+                        format!(
+                            "ranked by VSA similarity to {} working-memory entries",
+                            wm_contents.len()
+                        )
+                    } else {
+                        "no working memory — ranked by computed_priority".to_string()
+                    };
+
+                    Ok(format!(
+                        "Prioritized {} active goals ({ctx_note}):\n{}",
+                        scored.len(),
+                        lines.join("\n")
+                    ))
+                }
+
+                other => Err(format!(
+                    "Unknown action \"{other}\". Valid: cancel | suspend | resume | list | prioritize"
+                )),
+            }
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("task panicked: {e}"), None))?
+        .map_err(|e| McpError::internal_error(e, None))?;
+
+        Ok(CallToolResult::success(vec![Content::text(result)]))
+    }
+
+    #[tool(
         name = "agent_recall",
         description = "Search the agent's episodic memory by query terms. Returns matching episodes with summaries and learnings."
     )]
@@ -3516,6 +3796,7 @@ impl rmcp::handler::server::ServerHandler for AkhMcpServer {
                  independently, handle errors per-stage, and fill gaps (e.g. provide identity data \
                  when resolution fails).\n\n\
                  Agent introspection: `agent_run_cycle` (single OODA step), `agent_goals`, \
+                 `manage_goals` (cancel/suspend/resume/list/prioritize goal lifecycle), \
                  `agent_recall` (episodic memory), `agent_psyche`.\n\n\
                  Knowledge introspection: `triples_of`, `provenance_of`, `export_symbols`, \
                  `infer_analogy`, `remove_triple`.\n\n\

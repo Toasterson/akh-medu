@@ -1263,6 +1263,8 @@ fn reference_count_incremented_during_decide() {
     );
 }
 
+// Requires file-backed SPARQL persistence to survive engine restarts.
+#[cfg_attr(not(feature = "sparql-persist"), ignore)]
 #[test]
 fn goal_status_restore_deterministic() {
     let dir = tempfile::TempDir::new().unwrap();

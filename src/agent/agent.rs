@@ -2514,6 +2514,20 @@ impl Agent {
                 message: format!("failed to persist curiosity config: {e}"),
             })?;
 
+        // Persist goal list as a TieredStore fallback so goals survive
+        // across sessions even when the SPARQL store is not file-backed
+        // (e.g. when the `sparql-persist` feature is not enabled).
+        let goals_bytes = bincode::serialize(&self.goals).map_err(|e| {
+            AgentError::ConsolidationFailed {
+                message: format!("failed to serialize goals: {e}"),
+            }
+        })?;
+        store
+            .put_meta(b"agent:goals", &goals_bytes)
+            .map_err(|e| AgentError::ConsolidationFailed {
+                message: format!("failed to persist goals: {e}"),
+            })?;
+
         // Flush the engine's durable store.
         self.engine
             .persist()
@@ -2560,8 +2574,21 @@ impl Agent {
             .and_then(|bytes| bincode::deserialize::<u64>(&bytes).ok())
             .unwrap_or(0);
 
-        // Restore goals from KG.
-        let goals = goal::restore_goals(&engine, &predicates).unwrap_or_default();
+        // Restore goals: prefer the TieredStore snapshot (always accurate, full
+        // struct) over KG restoration (only accurate when SPARQL persistence is
+        // enabled — without it, all goals default to Pending status because KG
+        // triples are in-memory only and are lost on restart).
+        let goals = {
+            let ts_goals = store
+                .get_meta(b"agent:goals")
+                .ok()
+                .flatten()
+                .and_then(|bytes| bincode::deserialize::<Vec<goal::Goal>>(&bytes).ok());
+            match ts_goals {
+                Some(goals) if !goals.is_empty() => goals,
+                _ => goal::restore_goals(&engine, &predicates).unwrap_or_default(),
+            }
+        };
 
         // Restore psyche: prefer persisted state, fall back to compartment manager.
         let psyche = store
