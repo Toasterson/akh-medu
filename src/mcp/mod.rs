@@ -19,7 +19,7 @@ use rmcp::model::*;
 use rmcp::schemars;
 use rmcp::{ErrorData as McpError, tool, tool_router};
 use schemars::JsonSchema;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
 use crate::agent::{Agent, AgentConfig};
@@ -726,6 +726,61 @@ pub struct PredicateFilterParams {
     pub predicate: String,
     #[schemars(description = "Maximum number of entity pairs to return (default: 50)")]
     pub limit: Option<usize>,
+}
+
+// ── Config Inspect Parameter + Response Structs ──────────────────────────
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ConfigInspectParams {
+    #[schemars(description = "Target workspace (default: \"default\")")]
+    #[serde(default = "default_workspace")]
+    pub workspace: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ConfigInspectDaemon {
+    max_cycles: usize,
+    persist_interval_seconds: u64,
+    auto_start: bool,
+    running: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct ConfigInspectCompartment {
+    name: String,
+    loaded: bool,
+    active: bool,
+    size_triples: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct ConfigInspectRuleEngine {
+    min_confidence: f32,
+    max_iterations: usize,
+    builtin_rules: Vec<String>,
+    noise_filter_enabled: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct ConfigInspectVsa {
+    dimension: usize,
+    item_memory_size: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct ConfigInspectPaths {
+    workspace_root: String,
+    kg_dir: String,
+    compartments_dir: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ConfigInspectResponse {
+    daemon: ConfigInspectDaemon,
+    compartments: Vec<ConfigInspectCompartment>,
+    rule_engine: ConfigInspectRuleEngine,
+    vsa: ConfigInspectVsa,
+    paths: ConfigInspectPaths,
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────
@@ -3482,6 +3537,90 @@ impl AkhMcpServer {
         Ok(CallToolResult::success(vec![Content::text(
             lines.join("\n"),
         )]))
+    }
+
+    // ── Config Inspect ──────────────────────────────────────────────
+
+    #[tool(
+        name = "config_inspect",
+        description = "Return a read-only snapshot of the current akhomed runtime configuration: daemon settings, compartment states, rule engine parameters, VSA dimensions, and workspace paths."
+    )]
+    async fn config_inspect(
+        &self,
+        Parameters(params): Parameters<ConfigInspectParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let config_path = self.state.paths.global_config_file();
+        let global_cfg = crate::config::AkhomedConfig::load(&config_path).unwrap_or_default();
+        let daemon_cfg = global_cfg.daemon.to_daemon_config();
+        let auto_start = global_cfg.daemon.auto_start.contains(&params.workspace);
+        let running = self
+            .state
+            .daemon_pauses
+            .read()
+            .await
+            .contains_key(&params.workspace);
+
+        let engine = self.state.get_engine(&params.workspace).await?;
+
+        let compartments: Vec<ConfigInspectCompartment> =
+            if let Some(mgr) = engine.compartments() {
+                mgr.all_compartments()
+                    .into_iter()
+                    .map(|(manifest, state, size_triples)| {
+                        let loaded = state != crate::compartment::CompartmentState::Dormant;
+                        let active = state == crate::compartment::CompartmentState::Active;
+                        ConfigInspectCompartment {
+                            name: manifest.name,
+                            loaded,
+                            active,
+                            size_triples,
+                        }
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+
+        let rule_cfg = crate::autonomous::RuleEngineConfig::default();
+        let builtin_rules: Vec<String> = crate::autonomous::RuleSet::builtin()
+            .rules
+            .into_iter()
+            .map(|r| r.name)
+            .collect();
+
+        let dim = engine.config().dimension.0;
+        let item_memory_size = engine.item_memory().len();
+
+        let ws_paths = self.state.paths.workspace(&params.workspace);
+
+        let response = ConfigInspectResponse {
+            daemon: ConfigInspectDaemon {
+                max_cycles: daemon_cfg.max_cycles,
+                persist_interval_seconds: daemon_cfg.persist_interval.as_secs(),
+                auto_start,
+                running,
+            },
+            compartments,
+            rule_engine: ConfigInspectRuleEngine {
+                min_confidence: rule_cfg.min_confidence,
+                max_iterations: rule_cfg.max_iterations,
+                builtin_rules,
+                noise_filter_enabled: true,
+            },
+            vsa: ConfigInspectVsa {
+                dimension: dim,
+                item_memory_size,
+            },
+            paths: ConfigInspectPaths {
+                workspace_root: ws_paths.root.display().to_string(),
+                kg_dir: ws_paths.kg_dir.display().to_string(),
+                compartments_dir: ws_paths.compartments_dir.display().to_string(),
+            },
+        };
+
+        let json = serde_json::to_string_pretty(&response)
+            .map_err(|e| McpError::internal_error(format!("serialization error: {e}"), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 }
 
