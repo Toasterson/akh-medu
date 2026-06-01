@@ -29,6 +29,7 @@ pub mod constraint_check;
 pub mod conversation;
 pub mod credibility;
 pub mod chunking;
+pub mod compaction;
 pub mod dialogue;
 pub mod cli_tool;
 pub mod continuous_learning;

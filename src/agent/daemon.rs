@@ -79,6 +79,13 @@ pub struct DaemonConfig {
     /// Runs bridge encoder alignment training during idle periods.
     /// Only starts after sufficient training data has accumulated.
     pub bridge_training_interval: Duration,
+    /// KG compaction interval (default: 30 min).
+    ///
+    /// Removes episode/agent scaffolding triples that accumulate over time and
+    /// degrade KG query quality. Runs the [`compaction::run_kg_compaction`]
+    /// heuristic on a periodic timer so the graph stays clean without manual
+    /// intervention.
+    pub kg_compaction_interval: Duration,
     /// Maximum OODA cycles (0 = unlimited).
     pub max_cycles: usize,
 }
@@ -100,6 +107,7 @@ impl Default for DaemonConfig {
             trigger_evaluation_interval: Duration::from_secs(15),
             knowledge_extraction_interval: Duration::from_secs(2700), // 45 min
             bridge_training_interval: Duration::from_secs(7200), // 2 hours
+            kg_compaction_interval: Duration::from_secs(1800), // 30 min
             max_cycles: 0,
         }
     }
@@ -201,6 +209,7 @@ impl AgentDaemon {
         let mut trigger_tick = interval(self.config.trigger_evaluation_interval);
         let mut extraction_tick = interval(self.config.knowledge_extraction_interval);
         let mut bridge_training_tick = interval(self.config.bridge_training_interval);
+        let mut kg_compaction_tick = interval(self.config.kg_compaction_interval);
 
         self.agent.lock().unwrap().sink().emit(&AkhMessage::system(
             "daemon started — background learning active",
@@ -269,6 +278,9 @@ impl AgentDaemon {
                 }
                 _ = bridge_training_tick.tick() => {
                     self.run_bridge_training();
+                }
+                _ = kg_compaction_tick.tick() => {
+                    self.run_kg_compaction();
                 }
                 _ = self.wait_for_shutdown() => {
                     self.agent.lock().unwrap().sink().emit(&AkhMessage::system(
@@ -961,6 +973,52 @@ impl AgentDaemon {
         });
     }
 
+    /// Run one KG compaction pass: remove episode/agent scaffolding triples.
+    ///
+    /// Releases the agent lock before the scan (CPU-bound) to avoid blocking
+    /// HTTP handlers during the triple classification loop.
+    fn run_kg_compaction(&self) {
+        use super::compaction::{CompactionConfig, run_kg_compaction};
+
+        // Brief lock: clone the engine Arc, then release.
+        let engine = {
+            let agent = self.agent.lock().unwrap();
+            agent.engine.clone()
+        };
+
+        let config = CompactionConfig::default();
+        match run_kg_compaction(&engine, &config) {
+            Ok(metrics) => {
+                if metrics.scaffolding_removed > 0 {
+                    if let Ok(agent) = self.agent.lock() {
+                        agent.sink().emit(&AkhMessage::system(format!(
+                            "[daemon:compaction] removed {}/{} scaffolding triples, density {:.1}%",
+                            metrics.scaffolding_removed,
+                            metrics.scaffolding_found,
+                            metrics.knowledge_density * 100.0,
+                        )));
+                    }
+                }
+                tracing::info!(
+                    total_before = metrics.total_before,
+                    scaffolding_found = metrics.scaffolding_found,
+                    scaffolding_removed = metrics.scaffolding_removed,
+                    knowledge_density = metrics.knowledge_density,
+                    "daemon: KG compaction complete",
+                );
+                if let Some(ref status) = self.status
+                    && let Ok(mut st) = status.try_lock()
+                {
+                    st.knowledge_density = Some(metrics.knowledge_density);
+                    st.last_compaction_at = Some(now_secs());
+                }
+            }
+            Err(e) => {
+                tracing::debug!(error = %e, "daemon: KG compaction skipped");
+            }
+        }
+    }
+
     fn persist(&self) {
         let agent = self.agent.lock().unwrap();
         if let Err(e) = agent.persist_session() {
@@ -1000,6 +1058,7 @@ mod tests {
             config.knowledge_extraction_interval,
             Duration::from_secs(2700)
         );
+        assert_eq!(config.kg_compaction_interval, Duration::from_secs(1800));
         assert_eq!(config.max_cycles, 0);
     }
 }
