@@ -1,0 +1,12 @@
+[package]
+name = "anima-ai"
+version = "0.1.0"
+edition = "2024"
+description = "Multi-engine NL routing for akh-medu: ELIZA, Gemma+Psyche, and Hybrid paths with fallback chain"
+license = "GPL-3.0-only"
+
+[dependencies]
+miette = { version = "7", features = ["fancy"] }
+thiserror = "2"
+regex = "1"
+tracing = "0.1"
