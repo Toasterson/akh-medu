@@ -473,6 +473,17 @@ impl CausalManager {
         self.schemas.values().collect()
     }
 
+    /// Remove all action schemas registered by a specific skill.
+    ///
+    /// Schemas registered from skills use the naming convention
+    /// `"skill/{skill_id}/{action_name}"`.  Returns the number removed.
+    pub fn remove_schemas_by_skill(&mut self, skill_id: &str) -> usize {
+        let prefix = format!("skill/{skill_id}/");
+        let before = self.schemas.len();
+        self.schemas.retain(|name, _| !name.starts_with(&prefix));
+        before - self.schemas.len()
+    }
+
     /// Bootstrap action schemas from the tool registry.
     ///
     /// Creates a minimal schema for each tool with no preconditions

@@ -5,18 +5,20 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::RwLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::RwLock;
 
 use egg::{Pattern, Rewrite};
 
 use crate::error::{SkillError, SkillResult};
-use crate::graph::Triple;
 use crate::graph::index::KnowledgeGraph;
+use crate::graph::Triple;
 use crate::reason::AkhLang;
 use crate::symbol::SymbolId;
 
-use super::{LoadedSkill, SkillActivation, SkillInfo, SkillManifest, SkillState};
+use super::{
+    LoadedSkill, SkillAction, SkillActivation, SkillInfo, SkillManifest, SkillPlan, SkillState,
+};
 
 /// Manages the lifecycle of skillpacks.
 pub struct SkillManager {
@@ -114,11 +116,16 @@ impl SkillManager {
                             cli_tools: Vec::new(),
                             wasm_tools: Vec::new(),
                             tool_config: std::collections::HashMap::new(),
+                            actions_file: None,
+                            plans_file: None,
+                            procedures_file: None,
                         },
                         state: SkillState::Cold,
                         triple_count: 0,
                         rule_count: 0,
                         memory_bytes: 0,
+                        actions: Vec::new(),
+                        plans: Vec::new(),
                     },
                 );
                 count += 1;
@@ -260,6 +267,51 @@ impl SkillManager {
             memory_estimate += content.len();
         }
 
+        // ── Phase 30: Load action schemas (actions.json) ────────────────────
+        let actions_file = skill
+            .manifest
+            .actions_file
+            .clone()
+            .unwrap_or_else(|| "actions.json".into());
+        let actions_path = skill_dir.join(&actions_file);
+        let mut loaded_actions: Vec<SkillAction> = Vec::new();
+        if actions_path.exists() {
+            let content = std::fs::read_to_string(&actions_path).map_err(|e| SkillError::Io {
+                skill_id: skill_id.into(),
+                source: e,
+            })?;
+            loaded_actions =
+                serde_json::from_str(&content).map_err(|e| SkillError::InvalidManifest {
+                    path: actions_path.display().to_string(),
+                    message: format!("actions parse error: {e}"),
+                })?;
+            memory_estimate += content.len();
+        }
+
+        // ── Phase 30: Load plan templates (plans.json) ───────────────────────
+        let plans_file = skill
+            .manifest
+            .plans_file
+            .clone()
+            .unwrap_or_else(|| "plans.json".into());
+        let plans_path = skill_dir.join(&plans_file);
+        let mut loaded_plans: Vec<SkillPlan> = Vec::new();
+        if plans_path.exists() {
+            let content = std::fs::read_to_string(&plans_path).map_err(|e| SkillError::Io {
+                skill_id: skill_id.into(),
+                source: e,
+            })?;
+            loaded_plans =
+                serde_json::from_str(&content).map_err(|e| SkillError::InvalidManifest {
+                    path: plans_path.display().to_string(),
+                    message: format!("plans parse error: {e}"),
+                })?;
+            memory_estimate += content.len();
+        }
+
+        let actions_loaded = loaded_actions.len();
+        let plans_loaded = loaded_plans.len();
+
         // Check memory budget.
         let current = self.loaded_bytes.load(Ordering::Relaxed);
         if current + memory_estimate > self.max_bytes {
@@ -276,6 +328,8 @@ impl SkillManager {
         skill.triple_count = triples_loaded;
         skill.rule_count = rules_loaded;
         skill.memory_bytes = memory_estimate;
+        skill.actions = loaded_actions;
+        skill.plans = loaded_plans;
 
         if !rule_tuples.is_empty() {
             self.rule_sources
@@ -284,11 +338,20 @@ impl SkillManager {
                 .insert(skill_id.to_string(), rule_tuples);
         }
 
+        if actions_loaded > 0 {
+            tracing::debug!(skill_id, actions_loaded, "loaded procedural action schemas");
+        }
+        if plans_loaded > 0 {
+            tracing::debug!(skill_id, plans_loaded, "loaded procedural plan templates");
+        }
+
         Ok(SkillActivation {
             skill_id: skill_id.into(),
             triples_loaded,
             rules_loaded,
             memory_bytes: memory_estimate,
+            actions_loaded,
+            plans_loaded,
         })
     }
 
@@ -314,6 +377,9 @@ impl SkillManager {
             .fetch_sub(skill.memory_bytes, Ordering::Relaxed);
         skill.state = SkillState::Warm;
         skill.memory_bytes = 0;
+        // Clear procedural data (Phase 30).
+        skill.actions.clear();
+        skill.plans.clear();
 
         self.rule_sources
             .write()
@@ -341,6 +407,8 @@ impl SkillManager {
             triples_loaded: skill.triple_count,
             rules_loaded: skill.rule_count,
             memory_bytes: skill.memory_bytes,
+            actions_loaded: skill.actions.len(),
+            plans_loaded: skill.plans.len(),
         })
     }
 
@@ -366,6 +434,58 @@ impl SkillManager {
                 domains: s.manifest.domains.clone(),
                 triple_count: s.triple_count,
                 rule_count: s.rule_count,
+                action_count: s.actions.len(),
+                plan_count: s.plans.len(),
+            })
+            .collect()
+    }
+
+    /// Return the action schemas loaded for a Hot skill (Phase 30).
+    pub fn actions(&self, skill_id: &str) -> Vec<SkillAction> {
+        let skills = self.skills.read().expect("skills lock poisoned");
+        skills
+            .get(skill_id)
+            .filter(|s| s.state == SkillState::Hot)
+            .map(|s| s.actions.clone())
+            .unwrap_or_default()
+    }
+
+    /// Return the plan templates loaded for a Hot skill (Phase 30).
+    pub fn plans(&self, skill_id: &str) -> Vec<SkillPlan> {
+        let skills = self.skills.read().expect("skills lock poisoned");
+        skills
+            .get(skill_id)
+            .filter(|s| s.state == SkillState::Hot)
+            .map(|s| s.plans.clone())
+            .unwrap_or_default()
+    }
+
+    /// Return all action schemas from all Hot skills (Phase 30).
+    pub fn all_active_actions(&self) -> Vec<(String, SkillAction)> {
+        let skills = self.skills.read().expect("skills lock poisoned");
+        skills
+            .values()
+            .filter(|s| s.state == SkillState::Hot)
+            .flat_map(|s| {
+                s.actions
+                    .iter()
+                    .map(|a| (s.manifest.id.clone(), a.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    /// Return all plan templates from all Hot skills (Phase 30).
+    pub fn all_active_plans(&self) -> Vec<(String, SkillPlan)> {
+        let skills = self.skills.read().expect("skills lock poisoned");
+        skills
+            .values()
+            .filter(|s| s.state == SkillState::Hot)
+            .flat_map(|s| {
+                s.plans
+                    .iter()
+                    .map(|p| (s.manifest.id.clone(), p.clone()))
+                    .collect::<Vec<_>>()
             })
             .collect()
     }
@@ -423,6 +543,8 @@ impl SkillManager {
             domains: skill.manifest.domains.clone(),
             triple_count: skill.triple_count,
             rule_count: skill.rule_count,
+            action_count: skill.actions.len(),
+            plan_count: skill.plans.len(),
         })
     }
 }
@@ -515,6 +637,8 @@ mod tests {
         let activation = mgr.activate("astronomy", &kg).unwrap();
 
         assert_eq!(activation.triples_loaded, 2);
+        assert_eq!(activation.actions_loaded, 0);
+        assert_eq!(activation.plans_loaded, 0);
         assert!(kg.triple_count() >= 2);
     }
 
@@ -531,6 +655,101 @@ mod tests {
 
         let rules = mgr.active_rules();
         assert_eq!(rules.len(), 1);
+    }
+
+    #[test]
+    fn activate_loads_actions_and_plans() {
+        let (dir, skills_dir) = setup_skill_dir();
+        let skill_dir = dir.path().join("skills").join("astronomy");
+
+        // Write actions.json
+        let actions = serde_json::json!([
+            {
+                "action": "observe_star",
+                "description": "Observe a star to determine its properties",
+                "preconditions": ["telescope_available"],
+                "effects": {
+                    "initiates": ["star_observed"],
+                    "terminates": ["star_unknown"]
+                },
+                "estimated_duration": "medium"
+            }
+        ]);
+        std::fs::write(
+            skill_dir.join("actions.json"),
+            serde_json::to_string_pretty(&actions).unwrap(),
+        )
+        .unwrap();
+
+        // Write plans.json
+        let plans = serde_json::json!([
+            {
+                "goal": "classify_star",
+                "method": {"type": "sequential"},
+                "steps": ["observe_star"],
+                "preconditions": ["has_star_to_classify"]
+            }
+        ]);
+        std::fs::write(
+            skill_dir.join("plans.json"),
+            serde_json::to_string_pretty(&plans).unwrap(),
+        )
+        .unwrap();
+
+        let mgr = SkillManager::new(skills_dir, 100);
+        let kg = KnowledgeGraph::new();
+
+        mgr.discover().unwrap();
+        mgr.warm("astronomy").unwrap();
+        let activation = mgr.activate("astronomy", &kg).unwrap();
+
+        assert_eq!(activation.actions_loaded, 1);
+        assert_eq!(activation.plans_loaded, 1);
+
+        let actions = mgr.actions("astronomy");
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].action, "observe_star");
+
+        let plans = mgr.plans("astronomy");
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].goal, "classify_star");
+
+        let all_actions = mgr.all_active_actions();
+        assert_eq!(all_actions.len(), 1);
+        assert_eq!(all_actions[0].0, "astronomy");
+    }
+
+    #[test]
+    fn deactivate_clears_procedural_data() {
+        let (dir, skills_dir) = setup_skill_dir();
+        let skill_dir = dir.path().join("skills").join("astronomy");
+
+        let actions = serde_json::json!([{
+            "action": "observe_star",
+            "description": "Observe a star",
+            "preconditions": [],
+            "effects": {"initiates": [], "terminates": []},
+            "estimated_duration": "fast"
+        }]);
+        std::fs::write(
+            skill_dir.join("actions.json"),
+            serde_json::to_string(&actions).unwrap(),
+        )
+        .unwrap();
+
+        let mgr = SkillManager::new(skills_dir, 100);
+        let kg = KnowledgeGraph::new();
+        mgr.discover().unwrap();
+        mgr.warm("astronomy").unwrap();
+        let activation = mgr.activate("astronomy", &kg).unwrap();
+        assert_eq!(activation.actions_loaded, 1);
+
+        mgr.deactivate("astronomy").unwrap();
+
+        let actions = mgr.actions("astronomy");
+        assert!(actions.is_empty(), "actions cleared after deactivate");
+        let all = mgr.all_active_actions();
+        assert!(all.is_empty());
     }
 
     #[test]

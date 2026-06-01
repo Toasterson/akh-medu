@@ -902,6 +902,22 @@ impl Engine {
             .unwrap_or_default()
     }
 
+    /// Return the action schemas loaded for a Hot skill (Phase 30b).
+    pub fn skill_actions(&self, skill_id: &str) -> Vec<crate::skills::SkillAction> {
+        self.skill_manager
+            .as_ref()
+            .map(|mgr| mgr.actions(skill_id))
+            .unwrap_or_default()
+    }
+
+    /// Return the plan templates loaded for a Hot skill (Phase 30b).
+    pub fn skill_plans(&self, skill_id: &str) -> Vec<crate::skills::SkillPlan> {
+        self.skill_manager
+            .as_ref()
+            .map(|mgr| mgr.plans(skill_id))
+            .unwrap_or_default()
+    }
+
     /// Get info about a specific skill.
     pub fn skill_info(&self, name: &str) -> AkhResult<SkillInfo> {
         let mgr = self

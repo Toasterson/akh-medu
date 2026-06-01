@@ -1,10 +1,13 @@
 {
   "id": "language",
   "name": "Language Structure",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Parts of speech, sentence structure, and linguistic relations",
   "domains": ["language", "linguistics"],
   "weight_size_bytes": 0,
   "triples_file": "triples.json",
-  "rules_file": "rules.txt"
+  "rules_file": "rules.txt",
+  "actions_file": "actions.json",
+  "plans_file": "plans.json",
+  "procedures_file": "procedures.md"
 }

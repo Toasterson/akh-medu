@@ -399,6 +399,188 @@ impl Agent {
         }
     }
 
+    /// Wire procedural knowledge from all active (Hot) skills into the agent's
+    /// reasoning subsystems — Phase 30b.
+    ///
+    /// For each Hot skill:
+    /// - Converts `SkillAction` schemas → `ActionSchema` and registers with `causal_manager`.
+    /// - Converts `SkillPlan` templates → `DecompositionMethod` and registers with
+    ///   `method_registry_htn`.
+    ///
+    /// Named schemas/methods use the convention `skill/{skill_id}/{name}` so they can
+    /// be cleanly removed via `remove_schemas_by_skill` / `remove_methods_by_skill`
+    /// when the skill is deactivated.
+    pub(crate) fn wire_skill_procedures(&mut self) {
+        use super::causal::{ActionSchema, CausalEffect, CausalPattern, EffectKind, PatternElement};
+        use super::decomposition::{DecompositionMethod, DecompositionStrategy, SubtaskTemplate};
+        use crate::skills::{PlanMethod, SkillState};
+
+        let hot_skills: Vec<String> = self
+            .engine
+            .list_skills()
+            .into_iter()
+            .filter(|info| info.state == SkillState::Hot)
+            .map(|info| info.id)
+            .collect();
+
+        for skill_id in &hot_skills {
+            // ── Actions → CausalManager ─────────────────────────────────────
+            let actions = self.engine.skill_actions(skill_id);
+            if !actions.is_empty() {
+                // Resolve shared predicate + context entity once per skill.
+                let Ok(has_state_pred) =
+                    self.engine.resolve_or_create_relation("skill:has-state")
+                else {
+                    tracing::warn!(skill = %skill_id, "wire_skill_procedures: resolve skill:has-state failed");
+                    continue;
+                };
+                let Ok(ctx_sym) = self.engine.resolve_or_create_entity("agent:context") else {
+                    tracing::warn!(skill = %skill_id, "wire_skill_procedures: resolve agent:context failed");
+                    continue;
+                };
+
+                for action in &actions {
+                    let schema_name = format!("skill/{skill_id}/{}", action.action);
+                    let Ok(action_sym) = self.engine.resolve_or_create_entity(&schema_name) else {
+                        tracing::warn!(skill = %skill_id, action = %action.action,
+                            "wire_skill_procedures: failed to resolve action symbol");
+                        continue;
+                    };
+
+                    // Preconditions: each fluent → check `(?, skill:has-state, fluent_sym)`.
+                    let mut preconditions = Vec::new();
+                    for fluent in &action.preconditions {
+                        if let Ok(fluent_sym) = self.engine.resolve_or_create_entity(fluent) {
+                            preconditions.push(CausalPattern {
+                                subject: PatternElement::Wildcard,
+                                predicate: PatternElement::Concrete(has_state_pred),
+                                object: PatternElement::Concrete(fluent_sym),
+                                negated: false,
+                            });
+                        }
+                    }
+
+                    // Effects: initiates → Assert, terminates → Retract.
+                    let mut effects = Vec::new();
+                    for fluent in &action.effects.initiates {
+                        if let Ok(fluent_sym) = self.engine.resolve_or_create_entity(fluent) {
+                            effects.push(CausalEffect {
+                                kind: EffectKind::Assert,
+                                subject: PatternElement::Concrete(ctx_sym),
+                                predicate: PatternElement::Concrete(has_state_pred),
+                                object: PatternElement::Concrete(fluent_sym),
+                                confidence: 0.9,
+                            });
+                        }
+                    }
+                    for fluent in &action.effects.terminates {
+                        if let Ok(fluent_sym) = self.engine.resolve_or_create_entity(fluent) {
+                            effects.push(CausalEffect {
+                                kind: EffectKind::Retract,
+                                subject: PatternElement::Concrete(ctx_sym),
+                                predicate: PatternElement::Concrete(has_state_pred),
+                                object: PatternElement::Concrete(fluent_sym),
+                                confidence: 0.9,
+                            });
+                        }
+                    }
+
+                    self.causal_manager.register_action_schema(ActionSchema {
+                        action_id: action_sym,
+                        name: schema_name,
+                        preconditions,
+                        effects,
+                        success_rate: 1.0,
+                        execution_count: 0,
+                    });
+                }
+
+                tracing::debug!(skill = %skill_id, count = actions.len(),
+                    "wire_skill_procedures: registered causal action schemas");
+            }
+
+            // ── Plans → MethodRegistry ───────────────────────────────────────
+            let plans = self.engine.skill_plans(skill_id);
+            for plan in &plans {
+                let method_name = format!("skill/{skill_id}/{}", plan.goal);
+
+                let strategy = match &plan.method {
+                    PlanMethod::Sequential => DecompositionStrategy::Construction,
+                    PlanMethod::Parallel => DecompositionStrategy::Research,
+                    PlanMethod::Conditional { .. } => DecompositionStrategy::Investigation,
+                };
+
+                // Keyword hints from goal name + precondition words.
+                let mut keyword_hints: Vec<String> = plan
+                    .goal
+                    .split('_')
+                    .filter(|w| !w.is_empty())
+                    .map(|w| w.to_string())
+                    .collect();
+                for pre in &plan.preconditions {
+                    for word in pre.split('_') {
+                        if !word.is_empty() && !keyword_hints.contains(&word.to_string()) {
+                            keyword_hints.push(word.to_string());
+                        }
+                    }
+                }
+
+                // Each plan step → one SubtaskTemplate.
+                let subtask_templates: Vec<SubtaskTemplate> = plan
+                    .steps
+                    .iter()
+                    .map(|step| SubtaskTemplate {
+                        description_template: format!("Execute {step} for {{goal}}"),
+                        priority_offset: 0,
+                        criteria_template: format!("{step} completed for {{goal}}"),
+                    })
+                    .collect();
+
+                // Sequential ordering constraints (pairs of consecutive indices).
+                let ordering: Vec<(usize, usize)> = match &plan.method {
+                    PlanMethod::Sequential => (0..plan.steps.len().saturating_sub(1))
+                        .map(|i| (i, i + 1))
+                        .collect(),
+                    _ => Vec::new(),
+                };
+
+                self.method_registry_htn.register(DecompositionMethod {
+                    name: method_name,
+                    strategy,
+                    precondition_sparql: String::new(),
+                    keyword_hints,
+                    subtask_templates,
+                    ordering,
+                    semantic_vector: None,
+                    usage_count: 0,
+                    success_rate: 1.0,
+                });
+            }
+
+            if !plans.is_empty() {
+                tracing::debug!(skill = %skill_id, count = plans.len(),
+                    "wire_skill_procedures: registered HTN decomposition methods");
+            }
+        }
+    }
+
+    /// Remove procedural knowledge for a deactivated skill — Phase 30b.
+    ///
+    /// Cleans up `CausalManager` schemas and `MethodRegistry` methods registered
+    /// from `skill_id`.  Should be called after `engine.unload_skill(skill_id)`.
+    pub fn unwire_skill_procedures(&mut self, skill_id: &str) {
+        let removed_schemas = self.causal_manager.remove_schemas_by_skill(skill_id);
+        let removed_methods = self.method_registry_htn.remove_methods_by_skill(skill_id);
+        if removed_schemas > 0 || removed_methods > 0 {
+            tracing::debug!(
+                skill = skill_id,
+                removed_schemas,
+                removed_methods,
+                "unwired procedural knowledge from deactivated skill"
+            );
+        }
+    }
+
     /// Read a skill's manifest JSON from its directory.
     fn read_skill_manifest(
         skill_dir: &std::path::Path,
@@ -569,6 +751,8 @@ impl Agent {
 
         // Load tools from active skills.
         agent.load_skill_tools();
+        // Wire procedural knowledge (Phase 30b).
+        agent.wire_skill_procedures();
 
         Ok(agent)
     }
@@ -2855,6 +3039,8 @@ impl Agent {
 
         // Load tools from active skills.
         agent.load_skill_tools();
+        // Wire procedural knowledge (Phase 30b).
+        agent.wire_skill_procedures();
 
         Ok(agent)
     }

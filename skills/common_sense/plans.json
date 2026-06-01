@@ -1,0 +1,23 @@
+[
+  {
+    "goal": "explain_event",
+    "method": {"type": "sequential"},
+    "steps": [
+      "infer_implicit_cause",
+      "predict_typical_effect"
+    ],
+    "preconditions": ["event_observed"],
+    "alternatives": [],
+    "quality_gate": "cause_inferred"
+  },
+  {
+    "goal": "validate_scenario",
+    "method": {"type": "sequential"},
+    "steps": [
+      "check_physical_possibility",
+      "infer_implicit_cause"
+    ],
+    "preconditions": ["situation_described"],
+    "alternatives": []
+  }
+]

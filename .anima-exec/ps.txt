@@ -1,0 +1,5 @@
+# anima-exec ps snapshot — pid, ppid, state, comm, cmdline
+# 2026-06-01T17:51:19.225444606+00:00
+    1     0 S tini                 /usr/bin/tini -g -- anima-exec
+    7     1 S anima-exec           anima-exec
+  140     1 S sccache              /usr/local/bin/sccache

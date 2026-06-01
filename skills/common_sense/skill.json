@@ -1,10 +1,12 @@
 {
   "id": "common_sense",
   "name": "Common Sense Knowledge",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Animal taxonomy, material properties, part-whole relations, and common attributes",
   "domains": ["common_sense", "taxonomy", "properties"],
   "weight_size_bytes": 0,
   "triples_file": "triples.json",
-  "rules_file": "rules.txt"
+  "rules_file": "rules.txt",
+  "actions_file": "actions.json",
+  "plans_file": "plans.json"
 }

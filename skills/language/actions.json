@@ -1,0 +1,42 @@
+[
+  {
+    "action": "identify_part_of_speech",
+    "description": "Determine the part of speech for a word in context",
+    "preconditions": ["word_in_context"],
+    "effects": {
+      "initiates": ["pos_identified"],
+      "terminates": ["pos_unknown"]
+    },
+    "estimated_duration": "fast"
+  },
+  {
+    "action": "parse_sentence_structure",
+    "description": "Identify the syntactic structure of a sentence (subject, predicate, object)",
+    "preconditions": ["sentence_available"],
+    "effects": {
+      "initiates": ["structure_parsed"],
+      "terminates": ["structure_unknown"]
+    },
+    "estimated_duration": "medium"
+  },
+  {
+    "action": "detect_discourse_relation",
+    "description": "Identify how two clauses relate (contrast, cause, elaboration, etc.)",
+    "preconditions": ["two_clauses_available"],
+    "effects": {
+      "initiates": ["discourse_relation_identified"],
+      "terminates": []
+    },
+    "estimated_duration": "fast"
+  },
+  {
+    "action": "resolve_anaphora",
+    "description": "Identify the antecedent of a pronoun or definite noun phrase",
+    "preconditions": ["anaphoric_expression_found", "prior_context_available"],
+    "effects": {
+      "initiates": ["anaphora_resolved"],
+      "terminates": ["reference_ambiguous"]
+    },
+    "estimated_duration": "medium"
+  }
+]
