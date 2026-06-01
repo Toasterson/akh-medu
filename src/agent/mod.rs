@@ -57,6 +57,7 @@ pub mod metacognition;
 pub mod multi_agent;
 pub mod nlp;
 pub mod ooda;
+pub mod output;
 pub mod pim;
 pub mod plan;
 pub mod plan_monitor;
@@ -218,6 +219,7 @@ pub use source_reliability::{
 pub use state_value::{
     AgentState, Reward, StateRoleVectors, ValueFunction, encode_state, encode_state_with_vsa,
 };
+pub use output::{CandleFormatError, CandleFormatResult, CandleFormatter, FormatOutput, FormatSource};
 pub use synthesize::NarrativeSummary;
 pub use temporal_experience::TemporalExperience;
 pub use tool::{Tool, ToolInput, ToolOutput, ToolRegistry, ToolSignature};
