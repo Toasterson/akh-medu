@@ -452,10 +452,16 @@ fn persist_episode(
     // Link the episode to its summary via has_summary predicate.
     // We store the summary as the episode's own label (already done above),
     // but also create a dedicated summary entity.
-    let summary_label = if entry.content.len() > 80 {
-        format!("summary:{}", &entry.content[..80])
-    } else {
-        format!("summary:{}", entry.content)
+    // Use char_indices to find a safe UTF-8 truncation boundary; byte-slicing
+    // at a fixed offset panics on multi-byte sequences.
+    let summary_label = {
+        let end = entry
+            .content
+            .char_indices()
+            .nth(80)
+            .map(|(i, _)| i)
+            .unwrap_or(entry.content.len());
+        format!("summary:{}", &entry.content[..end])
     };
     let summary_sym = engine.resolve_or_create_entity(&summary_label)?;
     let _ = engine.add_triple(&Triple::new(
@@ -488,17 +494,23 @@ fn persist_episode(
         mem_type_sym,
     ));
 
-    // Store provenance.
-    let reason = format!(
-        "Consolidated from WM entry {} ({}): {}",
-        entry.id,
-        kind_tag_label.trim_start_matches("tag:"),
-        if entry.content.len() > 60 {
-            format!("{}...", &entry.content[..60])
-        } else {
-            entry.content.clone()
-        }
-    );
+    // Store provenance. Use char_indices to find a safe UTF-8 truncation boundary;
+    // byte-slicing at a fixed offset panics on multi-byte sequences.
+    let reason = {
+        let end = entry
+            .content
+            .char_indices()
+            .nth(60)
+            .map(|(i, _)| i)
+            .unwrap_or(entry.content.len());
+        let truncated = &entry.content[..end];
+        let suffix = if end < entry.content.len() { "..." } else { "" };
+        format!(
+            "Consolidated from WM entry {} ({}): {truncated}{suffix}",
+            entry.id,
+            kind_tag_label.trim_start_matches("tag:"),
+        )
+    };
 
     let mut prov = ProvenanceRecord::new(
         episode.id,
