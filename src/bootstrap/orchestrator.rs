@@ -191,9 +191,7 @@ impl Default for OrchestratorConfig {
 // ── Bootstrap Stage ─────────────────────────────────────────────────────
 
 /// Ordered stages in the bootstrap pipeline.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum BootstrapStage {
     ParsePurpose = 0,
     ResolveIdentity = 1,
@@ -314,9 +312,7 @@ pub enum Checkpoint {
         has_identity: bool,
     },
     /// Identity resolved and Ritual of Awakening complete.
-    IdentityConstructed {
-        chosen_name: String,
-    },
+    IdentityConstructed { chosen_name: String },
     /// Domain expansion + prerequisite analysis done; learning plan ready.
     LearningPlan {
         concept_count: usize,
@@ -447,8 +443,7 @@ impl BootstrapOrchestrator {
         // ── Stage 2b: Ritual of Awakening ───────────────────────────
         if self.session.current_stage <= BootstrapStage::RitualOfAwakening {
             if let Some(ref ck) = character {
-                let ritual_result =
-                    identity::ritual_of_awakening(ck, &intent.purpose, engine)?;
+                let ritual_result = identity::ritual_of_awakening(ck, &intent.purpose, engine)?;
                 self.session.chosen_name = Some(ritual_result.chosen_name.clone());
                 self.session.psyche = Some(ritual_result.psyche.clone());
                 provenance_ids.extend(ritual_result.provenance_ids);
@@ -485,9 +480,8 @@ impl BootstrapOrchestrator {
         }
 
         // If resuming past stage 3, reconstruct expansion from labels.
-        let expansion = expansion_result.unwrap_or_else(|| {
-            reconstruct_expansion(&self.session.expansion_labels)
-        });
+        let expansion = expansion_result
+            .unwrap_or_else(|| reconstruct_expansion(&self.session.expansion_labels));
 
         // ── Learning Loop (stages 4–7) ──────────────────────────────
         let mut final_report: Option<CompetenceReport> = None;
@@ -511,13 +505,9 @@ impl BootstrapOrchestrator {
             let prereq_result = match PrerequisiteAnalyzer::new(engine, prereq_cfg) {
                 Ok(analyzer) => match analyzer.analyze(&expansion, engine) {
                     Ok(r) => r,
-                    Err(_) => {
-                        resources::synthetic_curriculum_from_expansion(&expansion, engine)
-                    }
+                    Err(_) => resources::synthetic_curriculum_from_expansion(&expansion, engine),
                 },
-                Err(_) => {
-                    resources::synthetic_curriculum_from_expansion(&expansion, engine)
-                }
+                Err(_) => resources::synthetic_curriculum_from_expansion(&expansion, engine),
             };
             provenance_ids.extend(&prereq_result.provenance_ids);
 
@@ -567,8 +557,11 @@ impl BootstrapOrchestrator {
             }
 
             // ── Stage 7: Competence Assessment ──────────────────────
-            let report = CompetenceAssessor::new(engine, competence_cfg)?
-                .assess(&prereq_result, &intent.purpose, engine)?;
+            let report = CompetenceAssessor::new(engine, competence_cfg)?.assess(
+                &prereq_result,
+                &intent.purpose,
+                engine,
+            )?;
             provenance_ids.extend(&report.provenance_ids);
 
             let assessment = SessionAssessment {
@@ -755,12 +748,10 @@ fn load_session(engine: &Engine) -> OrchestratorResult<BootstrapSession> {
         .get_meta(SESSION_KEY)
         .map_err(|e| OrchestratorError::Engine(Box::new(e.into())))?;
     match data {
-        Some(bytes) => {
-            bincode::deserialize(&bytes).map_err(|e| OrchestratorError::StageFailed {
-                stage: "session_load".to_string(),
-                reason: format!("deserialization failed: {e}"),
-            })
-        }
+        Some(bytes) => bincode::deserialize(&bytes).map_err(|e| OrchestratorError::StageFailed {
+            stage: "session_load".to_string(),
+            reason: format!("deserialization failed: {e}"),
+        }),
         None => Err(OrchestratorError::NoSessionToResume),
     }
 }
@@ -914,7 +905,9 @@ mod tests {
     fn error_from_bootstrap_error() {
         let inner = crate::bootstrap::purpose::BootstrapError::EmptyInput;
         let err: OrchestratorError = inner.into();
-        assert!(matches!(err, OrchestratorError::StageFailed { stage, .. } if stage == "parse_purpose"));
+        assert!(
+            matches!(err, OrchestratorError::StageFailed { stage, .. } if stage == "parse_purpose")
+        );
     }
 
     // 7. Error From<CompetenceError>
@@ -1081,6 +1074,7 @@ mod tests {
                 dominant_archetype: "sage".to_string(),
             },
             awakened: false,
+            ennead_role: None,
         }
     }
 }

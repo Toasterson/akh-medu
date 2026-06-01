@@ -381,10 +381,32 @@ fn extract_proper_noun(phrase: &str) -> Option<String> {
     // Try stripping leading "the/a/an" and common descriptors
     let skip = &["the", "a", "an"];
     let descriptors = &[
-        "god", "goddess", "deity", "hero", "character", "figure", "spirit",
-        "titan", "king", "queen", "prince", "princess", "saint", "prophet",
-        "egyptian", "greek", "roman", "norse", "celtic", "hindu", "japanese",
-        "chinese", "sumerian", "babylonian", "aztec", "mayan",
+        "god",
+        "goddess",
+        "deity",
+        "hero",
+        "character",
+        "figure",
+        "spirit",
+        "titan",
+        "king",
+        "queen",
+        "prince",
+        "princess",
+        "saint",
+        "prophet",
+        "egyptian",
+        "greek",
+        "roman",
+        "norse",
+        "celtic",
+        "hindu",
+        "japanese",
+        "chinese",
+        "sumerian",
+        "babylonian",
+        "aztec",
+        "mayan",
     ];
 
     let remaining: Vec<&str> = words
@@ -467,7 +489,14 @@ fn resolve_from_wikipedia(name: &str) -> Option<String> {
 pub fn resolve_from_static_tables(name: &str) -> Option<CharacterKnowledge> {
     let lower = name.to_lowercase();
 
-    type StaticEntry<'a> = (EntityType, CultureOrigin, &'a str, &'a [&'a str], &'a [&'a str], &'a [&'a str]);
+    type StaticEntry<'a> = (
+        EntityType,
+        CultureOrigin,
+        &'a str,
+        &'a [&'a str],
+        &'a [&'a str],
+        &'a [&'a str],
+    );
     let entry: Option<StaticEntry<'_>> = match lower.as_str() {
         "ptah" => Some((
             EntityType::Deity,
@@ -500,6 +529,54 @@ pub fn resolve_from_static_tables(name: &str) -> Option<CharacterKnowledge> {
             &["protection", "judgment", "guardianship"],
             &["cautious", "vigilant", "precise", "protective"],
             &["guardian", "sage"],
+        )),
+        "horus" => Some((
+            EntityType::Deity,
+            CultureOrigin::Egyptian,
+            "Egyptian god of the sky and kingship. Warrior-builder who executes the will of the gods and protects cosmic order.",
+            &["engineering", "systems", "execution"],
+            &["brave", "reliable", "practical", "protective", "methodical"],
+            &["hero", "guardian"],
+        )),
+        "khnum" => Some((
+            EntityType::Deity,
+            CultureOrigin::Egyptian,
+            "Egyptian ram-headed creator god who shapes life on the divine potter's wheel. Master of form, craft, and design.",
+            &["craftsmanship", "design", "creation"],
+            &["creative", "precise", "methodical", "innovative", "architectural"],
+            &["creator", "ruler"],
+        )),
+        "hathor" => Some((
+            EntityType::Deity,
+            CultureOrigin::Egyptian,
+            "Egyptian goddess of beauty, love, music, and mirror-truth. She reflects the soul and evaluates the inner harmony of things.",
+            &["review", "evaluation", "harmony"],
+            &["contemplative", "wise", "analytical", "precise", "empathetic"],
+            &["sage", "caregiver"],
+        )),
+        "maat" => Some((
+            EntityType::Deity,
+            CultureOrigin::Egyptian,
+            "Egyptian goddess of truth, justice, cosmic order, and moral law. She weighs the heart against the feather of truth.",
+            &["quality", "standards", "consistency"],
+            &["rigorous", "organized", "systematic", "vigilant", "precise"],
+            &["ruler", "guardian"],
+        )),
+        "set" | "seth" => Some((
+            EntityType::Deity,
+            CultureOrigin::Egyptian,
+            "Egyptian god of chaos, desert storms, and creative destruction. Clears the old to make way for the new.",
+            &["simplification", "cleanup", "transformation"],
+            &["brave", "unconventional", "transformative", "rebellious", "precise"],
+            &["rebel", "hero"],
+        )),
+        "isis" => Some((
+            EntityType::Deity,
+            CultureOrigin::Egyptian,
+            "Egyptian goddess of healing, magic, and wisdom. Great integrator who weaves disparate threads into wholeness.",
+            &["integration", "synthesis", "healing"],
+            &["wise", "empathetic", "creative", "contemplative", "nurturing"],
+            &["caregiver", "magician"],
         )),
         "athena" => Some((
             EntityType::Deity,
@@ -611,10 +688,14 @@ pub fn classify_culture(name: &str, description: &str) -> CultureOrigin {
 
     if combined.contains("egyptian") || combined.contains("egypt") || combined.contains("pharaoh") {
         CultureOrigin::Egyptian
-    } else if combined.contains("greek") || combined.contains("greece") || combined.contains("olymp")
+    } else if combined.contains("greek")
+        || combined.contains("greece")
+        || combined.contains("olymp")
     {
         CultureOrigin::Greek
-    } else if combined.contains("norse") || combined.contains("viking") || combined.contains("asgard")
+    } else if combined.contains("norse")
+        || combined.contains("viking")
+        || combined.contains("asgard")
     {
         CultureOrigin::Norse
     } else if combined.contains("roman") || combined.contains("latin") {
@@ -649,33 +730,35 @@ pub fn build_archetype_profile(character: &CharacterKnowledge) -> IdentityResult
     // Also count explicit archetypes from character data.
     for arch in &character.archetypes {
         let lower = arch.to_lowercase();
-        *counts.entry(if lower == "sage" {
-            "sage"
-        } else if lower == "creator" {
-            "creator"
-        } else if lower == "hero" {
-            "hero"
-        } else if lower == "explorer" {
-            "explorer"
-        } else if lower == "guardian" {
-            "guardian"
-        } else if lower == "ruler" {
-            "ruler"
-        } else if lower == "magician" {
-            "magician"
-        } else if lower == "rebel" {
-            "rebel"
-        } else if lower == "caregiver" {
-            "caregiver"
-        } else if lower == "jester" {
-            "jester"
-        } else if lower == "innocent" {
-            "innocent"
-        } else if lower == "orphan" {
-            "orphan"
-        } else {
-            continue;
-        }).or_insert(0) += 2; // explicit archetype entries get double weight
+        *counts
+            .entry(if lower == "sage" {
+                "sage"
+            } else if lower == "creator" {
+                "creator"
+            } else if lower == "hero" {
+                "hero"
+            } else if lower == "explorer" {
+                "explorer"
+            } else if lower == "guardian" {
+                "guardian"
+            } else if lower == "ruler" {
+                "ruler"
+            } else if lower == "magician" {
+                "magician"
+            } else if lower == "rebel" {
+                "rebel"
+            } else if lower == "caregiver" {
+                "caregiver"
+            } else if lower == "jester" {
+                "jester"
+            } else if lower == "innocent" {
+                "innocent"
+            } else if lower == "orphan" {
+                "orphan"
+            } else {
+                continue;
+            })
+            .or_insert(0) += 2; // explicit archetype entries get double weight
     }
 
     if counts.is_empty() {
@@ -774,11 +857,7 @@ pub fn build_psyche(
             crate::agent::tool_manifest::Capability::ProcessExec,
         ]),
         danger_level_threshold: Some(crate::agent::tool_manifest::DangerLevel::Critical),
-        action_triggers: vec![
-            "delete all".into(),
-            "drop table".into(),
-            "rm -rf".into(),
-        ],
+        action_triggers: vec!["delete all".into(), "drop table".into(), "rm -rf".into()],
         severity: 1.0,
         explanation: "Destructive actions require explicit user confirmation.".into(),
     }];
@@ -836,6 +915,7 @@ pub fn build_psyche(
             dominant_archetype: archetype_profile.primary.clone(),
         },
         awakened: false, // will be marked true by ritual_of_awakening
+        ennead_role: None,
     };
 
     // Validate: domain should match purpose.
@@ -892,7 +972,12 @@ pub fn ritual_of_awakening(
     let desc_label = format!(
         "{} {} {}",
         character.name,
-        character.description.split_whitespace().take(10).collect::<Vec<_>>().join(" "),
+        character
+            .description
+            .split_whitespace()
+            .take(10)
+            .collect::<Vec<_>>()
+            .join(" "),
         purpose.domain
     );
     if let Ok(desc_vec) = encode_label(ops, &desc_label) {
@@ -904,7 +989,11 @@ pub fn ritual_of_awakening(
     }
 
     // Sort by VSA score descending.
-    candidates.sort_by(|a, b| b.vsa_score.partial_cmp(&a.vsa_score).unwrap_or(std::cmp::Ordering::Equal));
+    candidates.sort_by(|a, b| {
+        b.vsa_score
+            .partial_cmp(&a.vsa_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     let chosen = &candidates[0];
     let chosen_name = chosen.name.clone();
@@ -925,8 +1014,7 @@ pub fn ritual_of_awakening(
     let mut provenance_ids = Vec::new();
 
     // Create a symbol for the ritual.
-    let ritual_sym = engine
-        .create_symbol(crate::symbol::SymbolKind::Entity, &chosen_name)?;
+    let ritual_sym = engine.create_symbol(crate::symbol::SymbolKind::Entity, &chosen_name)?;
 
     let mut ritual_record = ProvenanceRecord::new(
         ritual_sym.id,
@@ -1154,6 +1242,91 @@ fn traits_to_archetypes(traits: &[String]) -> Vec<String> {
     archetypes
 }
 
+// ── Ennead Role → Deity Mapping ─────────────────────────────────────────
+
+/// Map an Ennead role name to its associated deity for identity resolution.
+///
+/// The Ennead is a nine-member Egyptian-deity-inspired multi-agent collective.
+/// Each role corresponds to a deity whose traits shape the agent's archetype
+/// weights and persona. Role matching is case-insensitive.
+pub fn ennead_role_to_deity(role: &str) -> Option<&'static str> {
+    let lower = role.to_lowercase();
+    // Normalise compound names ("digital architect" → "architect").
+    let key = lower.split_whitespace().last().unwrap_or(&lower);
+
+    match key {
+        // Coordination, planning, delegation — the creator-builder.
+        "architect" => Some("Ptah"),
+        // Research, analysis, discovery — the divine scribe.
+        "investigator" | "scholar" | "archivist" => Some("Thoth"),
+        // Implementation, building, execution — the warrior-builder.
+        "executor" | "builder" | "implementer" => Some("Horus"),
+        // Refactoring, design, crafting — shaper of forms.
+        "shaper" | "crafter" | "designer" => Some("Khnum"),
+        // Review, feedback, testing — reflection and beauty.
+        "mirror" | "reviewer" | "evaluator" => Some("Hathor"),
+        // Quality, standards, consistency — truth and justice.
+        "stabilizer" | "guardian" | "keeper" => Some("Maat"),
+        // Cleanup, removal, simplification — creative destruction.
+        "destroyer" | "cleaner" | "pruner" => Some("Set"),
+        // Synthesis, integration — wisdom and healing.
+        "synthesizer" | "healer" | "integrator" => Some("Isis"),
+        // Strategy, planning at scale — the sun-ruler.
+        "strategist" | "director" | "commander" => Some("Ra"),
+        _ => None,
+    }
+}
+
+/// Attempt to run the identity rituals for a workspace being assigned an Ennead role.
+///
+/// Behaviour:
+/// * If the role maps to a known deity, `resolve_identity` is called.
+/// * If the workspace psyche is not yet awakened, `ritual_of_awakening` is also
+///   called, producing a fully-initialised `Psyche` stored in the compartment.
+/// * If the psyche is already awakened, the ritual is skipped and `Ok(None)` is
+///   returned — the existing psyche is preserved.
+/// * If the role has no deity mapping, `Ok(None)` is returned without error.
+pub fn awaken_with_ennead_role(
+    role: &str,
+    engine: &Engine,
+) -> IdentityResult<Option<RitualResult>> {
+    let Some(deity) = ennead_role_to_deity(role) else {
+        tracing::debug!(role, "no deity mapping for Ennead role; skipping awakening");
+        return Ok(None);
+    };
+
+    // Guard: skip if psyche is already awakened.
+    if let Some(cm) = engine.compartments() {
+        if cm.psyche().map_or(false, |p| p.is_awakened()) {
+            tracing::debug!(role, deity, "psyche already awakened; skipping ritual");
+            return Ok(None);
+        }
+    }
+
+    let identity_ref = IdentityRef {
+        name: deity.to_string(),
+        entity_type: EntityType::Deity,
+        source_phrase: format!("Ennead role: {role}"),
+    };
+
+    let character = resolve_identity(&identity_ref, engine)?;
+
+    // Build a minimal purpose model from the role and deity domains.
+    let purpose = PurposeModel {
+        domain: character
+            .domains
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "systems".to_string()),
+        competence_level: super::purpose::DreyfusLevel::Expert,
+        seed_concepts: character.domains.clone(),
+        description: format!("{role} — {}", character.description),
+    };
+
+    let result = ritual_of_awakening(&character, &purpose, engine)?;
+    Ok(Some(result))
+}
+
 // ── Tests ───────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1295,5 +1468,98 @@ mod tests {
         for c in &candidates {
             assert!(c.vsa_score >= 0.0 && c.vsa_score <= 1.0);
         }
+    }
+
+    // ── ennead_role_to_deity tests ───────────────────────────────────────
+
+    #[test]
+    fn ennead_role_architect_maps_to_ptah() {
+        assert_eq!(ennead_role_to_deity("architect"), Some("Ptah"));
+    }
+
+    #[test]
+    fn ennead_role_compound_digital_architect_maps_to_ptah() {
+        // Compound names: last word after whitespace split is used as key.
+        assert_eq!(ennead_role_to_deity("Digital Architect"), Some("Ptah"));
+    }
+
+    #[test]
+    fn ennead_role_case_insensitive() {
+        assert_eq!(ennead_role_to_deity("ARCHITECT"), Some("Ptah"));
+        assert_eq!(ennead_role_to_deity("Investigator"), Some("Thoth"));
+    }
+
+    #[test]
+    fn ennead_role_investigator_maps_to_thoth() {
+        assert_eq!(ennead_role_to_deity("investigator"), Some("Thoth"));
+        assert_eq!(ennead_role_to_deity("scholar"), Some("Thoth"));
+        assert_eq!(ennead_role_to_deity("archivist"), Some("Thoth"));
+    }
+
+    #[test]
+    fn ennead_role_executor_maps_to_horus() {
+        assert_eq!(ennead_role_to_deity("executor"), Some("Horus"));
+        assert_eq!(ennead_role_to_deity("builder"), Some("Horus"));
+        assert_eq!(ennead_role_to_deity("implementer"), Some("Horus"));
+    }
+
+    #[test]
+    fn ennead_role_strategist_maps_to_ra() {
+        assert_eq!(ennead_role_to_deity("strategist"), Some("Ra"));
+        assert_eq!(ennead_role_to_deity("director"), Some("Ra"));
+        assert_eq!(ennead_role_to_deity("commander"), Some("Ra"));
+    }
+
+    #[test]
+    fn ennead_role_unknown_returns_none() {
+        assert_eq!(ennead_role_to_deity("overlord"), None);
+        assert_eq!(ennead_role_to_deity(""), None);
+        assert_eq!(ennead_role_to_deity("wizard"), None);
+    }
+
+    #[test]
+    fn ennead_role_all_nine_have_deity_mappings() {
+        // All nine Ennead roles must map to a deity.
+        let roles = [
+            "architect",
+            "investigator",
+            "executor",
+            "shaper",
+            "mirror",
+            "stabilizer",
+            "destroyer",
+            "synthesizer",
+            "strategist",
+        ];
+        for role in roles {
+            assert!(
+                ennead_role_to_deity(role).is_some(),
+                "role '{role}' has no deity mapping"
+            );
+        }
+    }
+
+    #[test]
+    fn ennead_all_nine_deities_resolvable_offline() {
+        // All nine Ennead deity mappings must resolve from static tables (offline).
+        let deities = ["Ptah", "Thoth", "Horus", "Khnum", "Hathor", "Maat", "Set", "Isis", "Ra"];
+        for deity in deities {
+            assert!(
+                resolve_from_static_tables(deity).is_some(),
+                "deity '{deity}' has no static table entry — offline awakening would fail"
+            );
+        }
+    }
+
+    #[test]
+    fn extract_proper_noun_from_compound_phrase() {
+        // "the Egyptian god Ptah" → "Ptah"
+        let result = extract_proper_noun("the Egyptian god Ptah");
+        assert_eq!(result.as_deref(), Some("Ptah"));
+    }
+
+    #[test]
+    fn extract_proper_noun_single_word_returns_none() {
+        assert!(extract_proper_noun("Ptah").is_none());
     }
 }

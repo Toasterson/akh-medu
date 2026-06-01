@@ -29,6 +29,10 @@ pub struct Psyche {
     /// Once awakened, the psyche cannot be wholesale-replaced — only evolved.
     #[serde(default)]
     pub awakened: bool,
+    /// Ennead role assigned to this workspace (e.g. "Digital Architect").
+    /// Written alongside the `ennead-role` file for inter-agent discovery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ennead_role: Option<String>,
 }
 
 /// Persona — the mask the agent presents outward.
@@ -166,6 +170,7 @@ impl Default for Psyche {
                 dominant_archetype: "sage".into(),
             },
             awakened: false,
+            ennead_role: None,
         }
     }
 }
@@ -225,6 +230,21 @@ impl Psyche {
     /// Mark this psyche as awakened (post-ritual). Irreversible.
     pub fn mark_awakened(&mut self) {
         self.awakened = true;
+    }
+
+    /// Assign an Ennead role to this psyche.
+    ///
+    /// Idempotent: assigning the same role twice is a no-op; assigning a
+    /// different role to an already-assigned psyche returns the existing role.
+    pub fn set_ennead_role(&mut self, role: &str) -> Option<String> {
+        if let Some(ref existing) = self.ennead_role {
+            if existing == role {
+                return None;
+            }
+            return Some(existing.clone());
+        }
+        self.ennead_role = Some(role.to_string());
+        None
     }
 
     /// Returns the name of the highest-weighted archetype.
@@ -541,5 +561,39 @@ mod tests {
         let manifest = safe_manifest("kg_query");
         let bias = p.check_bias(&manifest, "normal query");
         assert!((bias - 0.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn set_ennead_role_initial_assignment_returns_none() {
+        let mut p = Psyche::default();
+        assert!(p.ennead_role.is_none());
+        let prev = p.set_ennead_role("architect");
+        assert!(prev.is_none(), "first assignment should return None");
+        assert_eq!(p.ennead_role.as_deref(), Some("architect"));
+    }
+
+    #[test]
+    fn set_ennead_role_same_role_is_idempotent() {
+        let mut p = Psyche::default();
+        p.set_ennead_role("architect");
+        let prev = p.set_ennead_role("architect");
+        assert!(prev.is_none(), "same role re-assignment should return None (no-op)");
+        assert_eq!(p.ennead_role.as_deref(), Some("architect"));
+    }
+
+    #[test]
+    fn set_ennead_role_conflict_returns_existing_role() {
+        let mut p = Psyche::default();
+        p.set_ennead_role("architect");
+        let prev = p.set_ennead_role("investigator");
+        assert_eq!(prev.as_deref(), Some("architect"), "conflict should return the existing role");
+        // Role must not be overwritten.
+        assert_eq!(p.ennead_role.as_deref(), Some("architect"));
+    }
+
+    #[test]
+    fn default_psyche_ennead_role_is_none() {
+        let p = Psyche::default();
+        assert!(p.ennead_role.is_none());
     }
 }

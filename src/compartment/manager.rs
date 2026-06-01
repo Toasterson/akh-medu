@@ -352,8 +352,7 @@ impl CompartmentManager {
                 id: "psyche".into(),
                 name: "Psyche".into(),
                 kind: CompartmentKind::Core,
-                description: "Jungian psyche configuration — persona, shadow, archetypes."
-                    .into(),
+                description: "Jungian psyche configuration — persona, shadow, archetypes.".into(),
                 triples_file: None,
                 rules_file: None,
                 grammar_ref: None,
@@ -415,5 +414,155 @@ impl CompartmentManager {
     /// Get the compartments directory path.
     pub fn compartments_dir(&self) -> &std::path::Path {
         &self.compartments_dir
+    }
+
+    /// Write the Ennead role to the psyche compartment.
+    ///
+    /// Persists the role in two places for inter-agent discovery:
+    /// 1. `compartments/psyche/ennead-role` — plain-text file for filesystem scanning.
+    /// 2. `psyche.toml` — `ennead_role` field in the serialised `Psyche`.
+    ///
+    /// If the psyche compartment directory doesn't exist yet it is created along
+    /// with a minimal `compartment.toml` manifest, mirroring what
+    /// `persist_psyche_to_disk` does.
+    ///
+    /// Returns the previously-assigned role if one was already present, or `None`
+    /// if this is a fresh assignment.
+    pub fn write_ennead_role_file(&self, role: &str) -> CompartmentResult<Option<String>> {
+        let psyche_dir = self.compartments_dir.join("psyche");
+        std::fs::create_dir_all(&psyche_dir).map_err(|e| CompartmentError::Io {
+            id: "psyche".into(),
+            source: e,
+        })?;
+
+        // Ensure compartment.toml exists so discover() can find the compartment.
+        let manifest_path = psyche_dir.join("compartment.toml");
+        if !manifest_path.exists() {
+            let manifest = CompartmentManifest {
+                id: "psyche".into(),
+                name: "Psyche".into(),
+                kind: CompartmentKind::Core,
+                description: "Jungian psyche configuration — persona, shadow, archetypes.".into(),
+                triples_file: None,
+                rules_file: None,
+                grammar_ref: None,
+                tags: vec!["identity".into(), "core".into()],
+            };
+            let toml_str = toml::to_string_pretty(&manifest).map_err(|e| {
+                CompartmentError::InvalidManifest {
+                    path: manifest_path.display().to_string(),
+                    message: e.to_string(),
+                }
+            })?;
+            std::fs::write(&manifest_path, toml_str).map_err(|e| CompartmentError::Io {
+                id: "psyche".into(),
+                source: e,
+            })?;
+        }
+
+        // Check whether an ennead-role file already exists.
+        let role_file_path = psyche_dir.join("ennead-role");
+        let existing_role = if role_file_path.exists() {
+            std::fs::read_to_string(&role_file_path)
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        } else {
+            None
+        };
+
+        // Write the plain-text role file.
+        std::fs::write(&role_file_path, role).map_err(|e| CompartmentError::Io {
+            id: "psyche".into(),
+            source: e,
+        })?;
+
+        // Update the in-memory psyche and re-persist psyche.toml.
+        let mut guard = self.psyche.write().expect("psyche lock poisoned");
+        let psyche = guard.get_or_insert_with(Psyche::default);
+        psyche.ennead_role = Some(role.to_string());
+        let updated = psyche.clone();
+        drop(guard);
+        self.persist_psyche_to_disk(&updated)?;
+
+        tracing::info!(
+            role,
+            "wrote ennead-role file to {}",
+            role_file_path.display()
+        );
+        Ok(existing_role)
+    }
+
+    /// Read the Ennead role from the psyche compartment's `ennead-role` file.
+    ///
+    /// Returns `None` if the file does not exist or is empty.
+    pub fn read_ennead_role_file(&self) -> Option<String> {
+        let role_path = self.compartments_dir.join("psyche").join("ennead-role");
+        std::fs::read_to_string(role_path)
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_manager() -> (CompartmentManager, tempfile::TempDir) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let manager = CompartmentManager::new(dir.path().to_path_buf());
+        (manager, dir)
+    }
+
+    #[test]
+    fn read_ennead_role_returns_none_when_file_absent() {
+        let (manager, _dir) = make_manager();
+        assert!(manager.read_ennead_role_file().is_none());
+    }
+
+    #[test]
+    fn write_then_read_ennead_role_roundtrip() {
+        let (manager, _dir) = make_manager();
+        let prev = manager.write_ennead_role_file("architect").unwrap();
+        assert!(prev.is_none(), "first write should return no prior role");
+        assert_eq!(
+            manager.read_ennead_role_file().as_deref(),
+            Some("architect")
+        );
+    }
+
+    #[test]
+    fn write_ennead_role_creates_psyche_compartment_dir() {
+        let (manager, dir) = make_manager();
+        manager.write_ennead_role_file("investigator").unwrap();
+        assert!(dir.path().join("psyche").join("ennead-role").exists());
+        assert!(dir.path().join("psyche").join("compartment.toml").exists());
+    }
+
+    #[test]
+    fn write_ennead_role_updates_in_memory_psyche() {
+        let (manager, _dir) = make_manager();
+        manager.write_ennead_role_file("executor").unwrap();
+        let psyche = manager
+            .psyche()
+            .expect("psyche should be populated after write");
+        assert_eq!(psyche.ennead_role.as_deref(), Some("executor"));
+    }
+
+    #[test]
+    fn write_ennead_role_returns_existing_role_on_overwrite() {
+        let (manager, _dir) = make_manager();
+        manager.write_ennead_role_file("architect").unwrap();
+        let prev = manager.write_ennead_role_file("investigator").unwrap();
+        assert_eq!(
+            prev.as_deref(),
+            Some("architect"),
+            "should return the prior role"
+        );
     }
 }
