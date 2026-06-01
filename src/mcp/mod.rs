@@ -19,7 +19,7 @@ use rmcp::model::*;
 use rmcp::schemars;
 use rmcp::{ErrorData as McpError, tool, tool_router};
 use schemars::JsonSchema;
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use tokio::sync::RwLock;
 
 use crate::agent::{Agent, AgentConfig};
@@ -32,6 +32,16 @@ use crate::vsa::Dimension;
 
 fn default_workspace() -> String {
     "default".into()
+}
+
+/// Deserialize the `workspace` field accepting a JSON string, `null`, or an
+/// absent key.  `null` and `""` both map to the `"default"` workspace so that
+/// JSON-syntax callers (e.g. `mcporter call … '{"workspace":"tecton"}'`) that
+/// omit or null the field behave identically to function-syntax callers that
+/// never supply it.
+fn deserialize_workspace<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    Option::<String>::deserialize(d)
+        .map(|opt| opt.filter(|s| !s.is_empty()).unwrap_or_else(default_workspace))
 }
 
 /// Shared state needed by MCP tool handlers.
@@ -231,14 +241,14 @@ impl McpState {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct WorkspaceParam {
     #[schemars(description = "Target workspace (default: \"default\")")]
-    #[serde(default = "default_workspace")]
+    #[serde(default = "default_workspace", deserialize_with = "deserialize_workspace")]
     pub workspace: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct AskParams {
     #[schemars(description = "Target workspace (default: \"default\")")]
-    #[serde(default = "default_workspace")]
+    #[serde(default = "default_workspace", deserialize_with = "deserialize_workspace")]
     pub workspace: String,
     #[schemars(description = "Natural-language question to investigate")]
     pub question: String,
@@ -249,7 +259,7 @@ pub struct AskParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SparqlParams {
     #[schemars(description = "Target workspace (default: \"default\")")]
-    #[serde(default = "default_workspace")]
+    #[serde(default = "default_workspace", deserialize_with = "deserialize_workspace")]
     pub workspace: String,
     #[schemars(description = "SPARQL SELECT query string")]
     pub query: String,
@@ -258,7 +268,7 @@ pub struct SparqlParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SearchParams {
     #[schemars(description = "Target workspace (default: \"default\")")]
-    #[serde(default = "default_workspace")]
+    #[serde(default = "default_workspace", deserialize_with = "deserialize_workspace")]
     pub workspace: String,
     #[schemars(description = "Search term (entity name or partial match)")]
     pub term: String,
@@ -267,7 +277,7 @@ pub struct SearchParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct AssertTripleParams {
     #[schemars(description = "Target workspace (default: \"default\")")]
-    #[serde(default = "default_workspace")]
+    #[serde(default = "default_workspace", deserialize_with = "deserialize_workspace")]
     pub workspace: String,
     #[schemars(description = "Subject entity (e.g. 'Sun')")]
     pub subject: String,
@@ -282,7 +292,7 @@ pub struct AssertTripleParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct IngestTextParams {
     #[schemars(description = "Target workspace (default: \"default\")")]
-    #[serde(default = "default_workspace")]
+    #[serde(default = "default_workspace", deserialize_with = "deserialize_workspace")]
     pub workspace: String,
     #[schemars(description = "Text to extract knowledge from")]
     pub text: String,
@@ -291,7 +301,7 @@ pub struct IngestTextParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct IngestUrlParams {
     #[schemars(description = "Target workspace (default: \"default\")")]
-    #[serde(default = "default_workspace")]
+    #[serde(default = "default_workspace", deserialize_with = "deserialize_workspace")]
     pub workspace: String,
     #[schemars(description = "URL to fetch and ingest")]
     pub url: String,
@@ -300,7 +310,7 @@ pub struct IngestUrlParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct CompartmentIdParams {
     #[schemars(description = "Target workspace (default: \"default\")")]
-    #[serde(default = "default_workspace")]
+    #[serde(default = "default_workspace", deserialize_with = "deserialize_workspace")]
     pub workspace: String,
     #[schemars(description = "Compartment ID")]
     pub id: String,
@@ -309,7 +319,7 @@ pub struct CompartmentIdParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct RunAgentParams {
     #[schemars(description = "Target workspace (default: \"default\")")]
-    #[serde(default = "default_workspace")]
+    #[serde(default = "default_workspace", deserialize_with = "deserialize_workspace")]
     pub workspace: String,
     #[schemars(description = "Comma-separated goals for the agent to pursue")]
     pub goals: String,
@@ -336,7 +346,7 @@ pub struct DeleteWorkspaceParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ApplySeedParams {
     #[schemars(description = "Target workspace (default: \"default\")")]
-    #[serde(default = "default_workspace")]
+    #[serde(default = "default_workspace", deserialize_with = "deserialize_workspace")]
     pub workspace: String,
     #[schemars(description = "Seed pack ID to apply (e.g. 'foundation', 'reasoning')")]
     pub pack_name: String,
@@ -345,7 +355,7 @@ pub struct ApplySeedParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct AwakenParams {
     #[schemars(description = "Target workspace (default: \"default\")")]
-    #[serde(default = "default_workspace")]
+    #[serde(default = "default_workspace", deserialize_with = "deserialize_workspace")]
     pub workspace: String,
     #[schemars(
         description = "Purpose statement (e.g. 'I want to learn about stellar evolution'). Required for fresh bootstrap."
@@ -367,7 +377,7 @@ pub struct AwakenParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct AwakenParseParams {
     #[schemars(description = "Target workspace (default: \"default\")")]
-    #[serde(default = "default_workspace")]
+    #[serde(default = "default_workspace", deserialize_with = "deserialize_workspace")]
     pub workspace: String,
     #[schemars(description = "Purpose statement to parse (preview only — nothing is committed)")]
     pub statement: String,
@@ -376,7 +386,7 @@ pub struct AwakenParseParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ChatParams {
     #[schemars(description = "Target workspace (default: \"default\")")]
-    #[serde(default = "default_workspace")]
+    #[serde(default = "default_workspace", deserialize_with = "deserialize_workspace")]
     pub workspace: String,
     #[schemars(
         description = "User message to process through the full NLU pipeline (dialogue acts, facts, queries, goals)"
@@ -402,7 +412,7 @@ pub struct TripleEntry {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct AssertBatchParams {
     #[schemars(description = "Target workspace (default: \"default\")")]
-    #[serde(default = "default_workspace")]
+    #[serde(default = "default_workspace", deserialize_with = "deserialize_workspace")]
     pub workspace: String,
     #[schemars(
         description = "Array of triples to assert: [{s, p, o, c?}, ...]. Example: [{\"s\":\"Sun\",\"p\":\"is-a\",\"o\":\"Star\"}]"
@@ -413,7 +423,7 @@ pub struct AssertBatchParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct RemoveBatchParams {
     #[schemars(description = "Target workspace (default: \"default\")")]
-    #[serde(default = "default_workspace")]
+    #[serde(default = "default_workspace", deserialize_with = "deserialize_workspace")]
     pub workspace: String,
     #[schemars(description = "Array of triples to remove: [{s, p, o}, ...]")]
     pub triples: Vec<TripleEntry>,
@@ -424,7 +434,7 @@ pub struct RemoveBatchParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ResolveIdentityParams {
     #[schemars(description = "Target workspace (default: \"default\")")]
-    #[serde(default = "default_workspace")]
+    #[serde(default = "default_workspace", deserialize_with = "deserialize_workspace")]
     pub workspace: String,
     #[schemars(description = "Name of the figure to resolve (e.g. 'Ptah', 'Gandalf', 'Turing')")]
     pub name: String,
@@ -437,7 +447,7 @@ pub struct ResolveIdentityParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct RitualOfAwakeningParams {
     #[schemars(description = "Target workspace (default: \"default\")")]
-    #[serde(default = "default_workspace")]
+    #[serde(default = "default_workspace", deserialize_with = "deserialize_workspace")]
     pub workspace: String,
     #[schemars(description = "Character name (must match a previously resolved identity)")]
     pub name: String,
@@ -458,7 +468,7 @@ pub struct RitualOfAwakeningParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ExpandDomainParams {
     #[schemars(description = "Target workspace (default: \"default\")")]
-    #[serde(default = "default_workspace")]
+    #[serde(default = "default_workspace", deserialize_with = "deserialize_workspace")]
     pub workspace: String,
     #[schemars(description = "Seed concepts to expand from (e.g. ['architecture', 'creation', 'craftsmanship'])")]
     pub seed_concepts: Vec<String>,
@@ -471,7 +481,7 @@ pub struct ExpandDomainParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct AnalyzePrerequisitesParams {
     #[schemars(description = "Target workspace (default: \"default\")")]
-    #[serde(default = "default_workspace")]
+    #[serde(default = "default_workspace", deserialize_with = "deserialize_workspace")]
     pub workspace: String,
     #[schemars(description = "Domain to analyze prerequisites for")]
     pub domain: String,
@@ -480,7 +490,7 @@ pub struct AnalyzePrerequisitesParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct AssessCompetenceParams {
     #[schemars(description = "Target workspace (default: \"default\")")]
-    #[serde(default = "default_workspace")]
+    #[serde(default = "default_workspace", deserialize_with = "deserialize_workspace")]
     pub workspace: String,
     #[schemars(description = "Domain to assess")]
     pub domain: String,
@@ -493,7 +503,7 @@ pub struct AssessCompetenceParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct RemoveTripleParams {
     #[schemars(description = "Target workspace (default: \"default\")")]
-    #[serde(default = "default_workspace")]
+    #[serde(default = "default_workspace", deserialize_with = "deserialize_workspace")]
     pub workspace: String,
     #[schemars(description = "Subject entity label")]
     pub subject: String,
@@ -508,14 +518,14 @@ pub struct RemoveTripleParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct AgentRunCycleParams {
     #[schemars(description = "Target workspace (default: \"default\")")]
-    #[serde(default = "default_workspace")]
+    #[serde(default = "default_workspace", deserialize_with = "deserialize_workspace")]
     pub workspace: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct AgentRecallParams {
     #[schemars(description = "Target workspace (default: \"default\")")]
-    #[serde(default = "default_workspace")]
+    #[serde(default = "default_workspace", deserialize_with = "deserialize_workspace")]
     pub workspace: String,
     #[schemars(description = "Query terms to search episodic memory for")]
     pub query: Vec<String>,
@@ -528,7 +538,7 @@ pub struct AgentRecallParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct TriplesOfParams {
     #[schemars(description = "Target workspace (default: \"default\")")]
-    #[serde(default = "default_workspace")]
+    #[serde(default = "default_workspace", deserialize_with = "deserialize_workspace")]
     pub workspace: String,
     #[schemars(description = "Entity label to get triples for")]
     pub entity: String,
@@ -537,7 +547,7 @@ pub struct TriplesOfParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ProvenanceOfParams {
     #[schemars(description = "Target workspace (default: \"default\")")]
-    #[serde(default = "default_workspace")]
+    #[serde(default = "default_workspace", deserialize_with = "deserialize_workspace")]
     pub workspace: String,
     #[schemars(description = "Entity label to trace provenance for")]
     pub entity: String,
@@ -546,7 +556,7 @@ pub struct ProvenanceOfParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct InferAnalogyParams {
     #[schemars(description = "Target workspace (default: \"default\")")]
-    #[serde(default = "default_workspace")]
+    #[serde(default = "default_workspace", deserialize_with = "deserialize_workspace")]
     pub workspace: String,
     #[schemars(description = "First term (A in 'A is to B as C is to ?')")]
     pub a: String,
@@ -563,7 +573,7 @@ pub struct InferAnalogyParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct RecordEventParams {
     #[schemars(description = "Target workspace (default: \"default\")")]
-    #[serde(default = "default_workspace")]
+    #[serde(default = "default_workspace", deserialize_with = "deserialize_workspace")]
     pub workspace: String,
     #[schemars(description = "Name of the event (e.g. 'switch-on', 'deploy-v2')")]
     pub name: String,
@@ -582,7 +592,7 @@ pub struct RecordEventParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct HoldsAtParams {
     #[schemars(description = "Target workspace (default: \"default\")")]
-    #[serde(default = "default_workspace")]
+    #[serde(default = "default_workspace", deserialize_with = "deserialize_workspace")]
     pub workspace: String,
     #[schemars(description = "Fluent label to check (e.g. 'light-on', 'server-running')")]
     pub fluent: String,
@@ -593,7 +603,7 @@ pub struct HoldsAtParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ProjectStateParams {
     #[schemars(description = "Target workspace (default: \"default\")")]
-    #[serde(default = "default_workspace")]
+    #[serde(default = "default_workspace", deserialize_with = "deserialize_workspace")]
     pub workspace: String,
     #[schemars(description = "Start of interval (seconds since UNIX epoch)")]
     pub from_time: u64,
@@ -604,7 +614,7 @@ pub struct ProjectStateParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SimulateActionsParams {
     #[schemars(description = "Target workspace (default: \"default\")")]
-    #[serde(default = "default_workspace")]
+    #[serde(default = "default_workspace", deserialize_with = "deserialize_workspace")]
     pub workspace: String,
     #[schemars(
         description = "Ordered list of action names to simulate (must have causal schemas registered)"
@@ -615,7 +625,7 @@ pub struct SimulateActionsParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct WhatChangedSinceParams {
     #[schemars(description = "Target workspace (default: \"default\")")]
-    #[serde(default = "default_workspace")]
+    #[serde(default = "default_workspace", deserialize_with = "deserialize_workspace")]
     pub workspace: String,
     #[schemars(description = "Return changes after this timestamp (seconds since UNIX epoch)")]
     pub since: u64,
@@ -624,7 +634,7 @@ pub struct WhatChangedSinceParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct FluentHistoryParams {
     #[schemars(description = "Target workspace (default: \"default\")")]
-    #[serde(default = "default_workspace")]
+    #[serde(default = "default_workspace", deserialize_with = "deserialize_workspace")]
     pub workspace: String,
     #[schemars(description = "Fluent label to get history for")]
     pub fluent: String,
@@ -635,7 +645,7 @@ pub struct FluentHistoryParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct CounterfactualParams {
     #[schemars(description = "Target workspace (default: \"default\")")]
-    #[serde(default = "default_workspace")]
+    #[serde(default = "default_workspace", deserialize_with = "deserialize_workspace")]
     pub workspace: String,
     #[schemars(description = "The action that was actually taken (tool name)")]
     pub actual_action: String,
@@ -648,7 +658,7 @@ pub struct CounterfactualParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct RateSourceParams {
     #[schemars(description = "Target workspace (default: \"default\")")]
-    #[serde(default = "default_workspace")]
+    #[serde(default = "default_workspace", deserialize_with = "deserialize_workspace")]
     pub workspace: String,
     #[schemars(description = "Source entity label to rate")]
     pub source: String,
@@ -657,7 +667,7 @@ pub struct RateSourceParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct VerifySourceClaimParams {
     #[schemars(description = "Target workspace (default: \"default\")")]
-    #[serde(default = "default_workspace")]
+    #[serde(default = "default_workspace", deserialize_with = "deserialize_workspace")]
     pub workspace: String,
     #[schemars(description = "Source entity label")]
     pub source: String,
@@ -670,7 +680,7 @@ pub struct VerifySourceClaimParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct AssessEvidenceParams {
     #[schemars(description = "Target workspace (default: \"default\")")]
-    #[serde(default = "default_workspace")]
+    #[serde(default = "default_workspace", deserialize_with = "deserialize_workspace")]
     pub workspace: String,
     #[schemars(description = "Claim/entity label to assess")]
     pub claim: String,
@@ -679,7 +689,7 @@ pub struct AssessEvidenceParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct AddEvidenceParams {
     #[schemars(description = "Target workspace (default: \"default\")")]
-    #[serde(default = "default_workspace")]
+    #[serde(default = "default_workspace", deserialize_with = "deserialize_workspace")]
     pub workspace: String,
     #[schemars(description = "Claim/entity label")]
     pub claim: String,
@@ -698,7 +708,7 @@ pub struct AddEvidenceParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct MctsPlanParams {
     #[schemars(description = "Target workspace (default: \"default\")")]
-    #[serde(default = "default_workspace")]
+    #[serde(default = "default_workspace", deserialize_with = "deserialize_workspace")]
     pub workspace: String,
     #[schemars(description = "Maximum MCTS iterations (default: 100)")]
     pub max_iterations: Option<usize>,
@@ -711,7 +721,7 @@ pub struct MctsPlanParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct TripleStatsParams {
     #[schemars(description = "Target workspace (default: \"default\")")]
-    #[serde(default = "default_workspace")]
+    #[serde(default = "default_workspace", deserialize_with = "deserialize_workspace")]
     pub workspace: String,
     #[schemars(description = "Number of top-connected entities to return (default: 10)")]
     pub top_n: Option<usize>,
@@ -720,7 +730,7 @@ pub struct TripleStatsParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct PredicateFilterParams {
     #[schemars(description = "Target workspace (default: \"default\")")]
-    #[serde(default = "default_workspace")]
+    #[serde(default = "default_workspace", deserialize_with = "deserialize_workspace")]
     pub workspace: String,
     #[schemars(description = "Predicate label to filter by (e.g. \"child-of\", \"is-a\")")]
     pub predicate: String,
@@ -3536,5 +3546,116 @@ impl rmcp::handler::server::ServerHandler for AkhMcpServer {
                     .to_string(),
             ),
         }
+    }
+}
+
+// ── Tests ────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // ── workspace deserialization ─────────────────────────────────────────
+
+    /// JSON syntax: explicit string value must be honoured.
+    #[test]
+    fn workspace_string_value() {
+        let params: WorkspaceParam = serde_json::from_value(json!({"workspace": "tecton"})).unwrap();
+        assert_eq!(params.workspace, "tecton");
+    }
+
+    /// Absent key must fall back to "default".
+    #[test]
+    fn workspace_absent_defaults() {
+        let params: WorkspaceParam = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(params.workspace, "default");
+    }
+
+    /// `null` must fall back to "default" — not produce a type error.
+    #[test]
+    fn workspace_null_defaults() {
+        let params: WorkspaceParam =
+            serde_json::from_value(json!({"workspace": null})).unwrap();
+        assert_eq!(params.workspace, "default");
+    }
+
+    /// Empty string must fall back to "default".
+    #[test]
+    fn workspace_empty_string_defaults() {
+        let params: WorkspaceParam =
+            serde_json::from_value(json!({"workspace": ""})).unwrap();
+        assert_eq!(params.workspace, "default");
+    }
+
+    /// Full ask params round-trip: workspace + question both present.
+    #[test]
+    fn ask_params_full_json() {
+        let params: AskParams =
+            serde_json::from_value(json!({"workspace": "tecton", "question": "who am i"}))
+                .unwrap();
+        assert_eq!(params.workspace, "tecton");
+        assert_eq!(params.question, "who am i");
+    }
+
+    /// Ask params: missing workspace uses "default".
+    #[test]
+    fn ask_params_default_workspace() {
+        let params: AskParams =
+            serde_json::from_value(json!({"question": "who am i"})).unwrap();
+        assert_eq!(params.workspace, "default");
+        assert_eq!(params.question, "who am i");
+    }
+
+    /// Ask params: null workspace uses "default".
+    #[test]
+    fn ask_params_null_workspace() {
+        let params: AskParams =
+            serde_json::from_value(json!({"workspace": null, "question": "who am i"})).unwrap();
+        assert_eq!(params.workspace, "default");
+    }
+
+    /// AssertTripleParams with explicit workspace.
+    #[test]
+    fn assert_triple_workspace_json() {
+        let params: AssertTripleParams = serde_json::from_value(json!({
+            "workspace": "tecton",
+            "subject": "Sun",
+            "predicate": "is-a",
+            "object": "Star"
+        }))
+        .unwrap();
+        assert_eq!(params.workspace, "tecton");
+        assert_eq!(params.subject, "Sun");
+    }
+
+    /// ChatParams with explicit workspace via JSON.
+    #[test]
+    fn chat_params_workspace_json() {
+        let params: ChatParams =
+            serde_json::from_value(json!({"workspace": "tecton", "message": "hello"})).unwrap();
+        assert_eq!(params.workspace, "tecton");
+    }
+
+    /// ChatParams: null workspace falls back to "default".
+    #[test]
+    fn chat_params_null_workspace() {
+        let params: ChatParams =
+            serde_json::from_value(json!({"workspace": null, "message": "hello"})).unwrap();
+        assert_eq!(params.workspace, "default");
+    }
+
+    /// SparqlParams with explicit workspace.
+    #[test]
+    fn sparql_params_workspace_json() {
+        let params: SparqlParams =
+            serde_json::from_value(json!({"workspace": "tecton", "query": "SELECT * WHERE {}"}))
+                .unwrap();
+        assert_eq!(params.workspace, "tecton");
+    }
+
+    #[test]
+    fn default_workspace_returns_default() {
+        assert_eq!(default_workspace(), "default");
     }
 }
