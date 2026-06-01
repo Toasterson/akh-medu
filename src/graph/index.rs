@@ -396,6 +396,47 @@ impl KnowledgeGraph {
             })
             .collect()
     }
+
+    /// Adjust the confidence of an existing triple by `delta`, clamped to `[min_conf, max_conf]`.
+    ///
+    /// Unlike `insert_triple` (which always takes the max of old and new confidence),
+    /// this method can both increase and decrease confidence — required for RL updates
+    /// where unsuccessful actions must reduce confidence.
+    ///
+    /// Returns `true` if the triple was found and updated, `false` if not present.
+    pub fn update_triple_confidence(
+        &self,
+        subject: SymbolId,
+        predicate: SymbolId,
+        object: SymbolId,
+        delta: f32,
+        min_conf: f32,
+        max_conf: f32,
+    ) -> bool {
+        let subj_idx = match self.node_index.get(&subject) {
+            Some(idx) => *idx.value(),
+            None => return false,
+        };
+        let obj_idx = match self.node_index.get(&object) {
+            Some(idx) => *idx.value(),
+            None => return false,
+        };
+
+        let mut graph = self.graph.write().expect("graph lock poisoned");
+        let edge_id = graph
+            .edges_directed(subj_idx, Direction::Outgoing)
+            .find(|e| e.target() == obj_idx && e.weight().predicate == predicate)
+            .map(|e| e.id());
+
+        if let Some(eid) = edge_id {
+            if let Some(weight) = graph.edge_weight_mut(eid) {
+                weight.confidence = (weight.confidence + delta).clamp(min_conf, max_conf);
+            }
+            true
+        } else {
+            false
+        }
+    }
 }
 
 impl Default for KnowledgeGraph {

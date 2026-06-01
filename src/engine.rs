@@ -1958,6 +1958,27 @@ impl Engine {
             .remove_triples_in_compartment(compartment_id)
     }
 
+    /// Adjust the confidence of an existing triple by `delta`, clamped to `[min_conf, max_conf]`.
+    ///
+    /// Unlike `add_triple` (which always promotes to the maximum confidence seen),
+    /// this method can both increase and decrease confidence — required for RL updates
+    /// where unsuccessful actions must reduce the learned action-quality score.
+    ///
+    /// Returns `true` if the triple was found and updated, `false` if it does not exist.
+    /// Use `add_triple` first to insert new triples; this method only updates existing ones.
+    pub fn update_triple_confidence(
+        &self,
+        subject: SymbolId,
+        predicate: SymbolId,
+        object: SymbolId,
+        delta: f32,
+        min_conf: f32,
+        max_conf: f32,
+    ) -> bool {
+        self.knowledge_graph
+            .update_triple_confidence(subject, predicate, object, delta, min_conf, max_conf)
+    }
+
     /// Add multiple triples in a single operation.
     ///
     /// Resolves all symbols upfront and inserts each triple into the KG.

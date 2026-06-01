@@ -686,6 +686,16 @@ pub enum DerivationKind {
         topic: String,
         contribution_kind: String,
     },
+
+    /// A VSA-native RL update adjusted the confidence of an action-quality triple.
+    ///
+    /// Records the tool that was used, the cosine-similarity reward, and the
+    /// OODA cycle in which the Act→Observe transition occurred.
+    VsaRlUpdate {
+        tool: SymbolId,
+        reward: f32,
+        cycle: u64,
+    },
 }
 
 impl DerivationKind {
@@ -788,6 +798,7 @@ impl DerivationKind {
             Self::ArticleFederated { .. } => 93,
             Self::OpinionExpressed { .. } => 94,
             Self::DebateContribution { .. } => 95,
+            Self::VsaRlUpdate { .. } => 96,
         }
     }
 }

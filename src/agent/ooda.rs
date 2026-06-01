@@ -70,6 +70,9 @@ pub struct Decision {
     pub reasoning: String,
     /// Which goal this serves.
     pub goal_id: SymbolId,
+    /// Predicted outcome hypervector, encoded from success criteria for the RL signal.
+    /// Compared against the actual outcome in the Act phase to compute a reward.
+    pub predicted_outcome_vec: Option<crate::vsa::HyperVec>,
 }
 
 /// Result of executing the chosen action.
@@ -83,6 +86,9 @@ pub struct ActionResult {
     pub new_wm_entries: Vec<u64>,
     /// Discrepancy between expected and actual effects (Phase 11e).
     pub discrepancy: Option<super::watch::Discrepancy>,
+    /// VSA RL signal for this Act→Observe transition.
+    /// `None` when predicted outcome encoding was unavailable or tool was vetoed.
+    pub rl_signal: Option<super::vsa_rl::RlSignal>,
 }
 
 /// How a goal progressed as a result of the action.
@@ -408,6 +414,15 @@ fn decide(
     // Store impasse on agent for goal generation to pick up.
     agent.last_impasse = impasse;
 
+    // Encode the predicted outcome hypervector from goal success criteria.
+    // This is captured now (before the tool runs) so it represents the agent's
+    // expectation and can be compared against the actual outcome in Act.
+    let predicted_outcome_vec = {
+        let ops = agent.engine.ops();
+        let im = agent.engine.item_memory();
+        super::vsa_rl::encode_predicted_outcome(top_goal, &agent.engine, ops, im).ok()
+    };
+
     // Record decision in WM.
     let dec_content =
         format!("Decide: tool={tool_name}, goal=\"{goal_desc}\", reason={reasoning}",);
@@ -439,6 +454,7 @@ fn decide(
         tool_input,
         reasoning,
         goal_id,
+        predicted_outcome_vec,
     })
 }
 
@@ -1389,6 +1405,7 @@ fn act(agent: &mut Agent, decision: &Decision, cycle: u64) -> AgentResult<Action
                     },
                     new_wm_entries: wm_id.into_iter().collect(),
                     discrepancy: None,
+                    rl_signal: None,
                 });
             }
 
@@ -1487,11 +1504,29 @@ fn act(agent: &mut Agent, decision: &Decision, cycle: u64) -> AgentResult<Action
         }
     }
 
+    // VSA RL signal: compare predicted outcome (Decide) against actual (Act).
+    // Adjusts the (goal, agent:rl_quality, tool) triple confidence via EMA.
+    let rl_signal = decision
+        .predicted_outcome_vec
+        .as_ref()
+        .and_then(|predicted| {
+            super::vsa_rl::compute_and_apply(
+                &agent.engine,
+                decision.goal_id,
+                &decision.chosen_tool,
+                predicted,
+                &tool_output,
+                &super::vsa_rl::VsaRlConfig::default(),
+                cycle,
+            )
+        });
+
     Ok(ActionResult {
         tool_output,
         goal_progress,
         new_wm_entries: wm_id.into_iter().collect(),
         discrepancy: None,
+        rl_signal,
     })
 }
 

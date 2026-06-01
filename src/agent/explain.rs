@@ -1128,6 +1128,12 @@ pub fn derivation_kind_prose(kind: &DerivationKind) -> String {
         } => {
             format!("debate contribution on \"{topic}\": {contribution_kind}")
         }
+        DerivationKind::VsaRlUpdate { tool, reward, cycle } => {
+            format!(
+                "VSA RL update at cycle {cycle}: tool sym:{} received reward {reward:.3}",
+                tool.get()
+            )
+        }
     }
 }
 
