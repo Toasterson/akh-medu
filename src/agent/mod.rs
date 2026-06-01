@@ -76,6 +76,7 @@ pub mod tool;
 pub mod tool_manifest;
 pub mod tool_semantics;
 pub mod tools;
+pub mod vsa_decide;
 pub mod trigger;
 pub mod watch;
 #[cfg(feature = "wasm-tools")]
@@ -221,6 +222,7 @@ pub use state_value::{
 pub use synthesize::NarrativeSummary;
 pub use temporal_experience::TemporalExperience;
 pub use tool::{Tool, ToolInput, ToolOutput, ToolRegistry, ToolSignature};
+pub use vsa_decide::{DecideMode, VsaDecideConfig, VsaDecideDiagnostics};
 pub use tool_manifest::{Capability, DangerInfo, DangerLevel, ToolManifest, ToolSource};
 pub use trigger::{Trigger, TriggerAction, TriggerCondition, TriggerStore};
 pub use watch::{

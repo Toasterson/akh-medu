@@ -15,6 +15,7 @@ use super::goal::{self, Goal, GoalStatus};
 use super::memory::{EpisodicEntry, WorkingMemory, WorkingMemoryEntry, WorkingMemoryKind};
 use super::tool::{ToolInput, ToolOutput};
 use super::tool_semantics::{encode_criteria, encode_goal_semantics};
+use super::vsa_decide::{DecideMode, VsaDecideConfig, vsa_native_decide};
 
 // ---------------------------------------------------------------------------
 // OODA cycle types
@@ -126,8 +127,19 @@ pub enum ImpasseKind {
 // OODA cycle implementation
 // ---------------------------------------------------------------------------
 
-/// Run one full OODA cycle on the agent.
+/// Run one full OODA cycle on the agent using the default (LLM-driven) decide mode.
 pub fn run_ooda_cycle(agent: &mut Agent) -> AgentResult<OodaCycleResult> {
+    run_ooda_cycle_with_mode(agent, DecideMode::default())
+}
+
+/// Run one full OODA cycle with the specified decide mode.
+///
+/// - [`DecideMode::LlmDriven`]: heuristic-enhanced VSA scoring (legacy default).
+/// - [`DecideMode::VsaNative`]: pure VSA similarity ranking with UCB1-MCTS fallback.
+pub fn run_ooda_cycle_with_mode(
+    agent: &mut Agent,
+    mode: DecideMode,
+) -> AgentResult<OodaCycleResult> {
     agent.cycle_count += 1;
     let cycle = agent.cycle_count;
 
@@ -138,7 +150,7 @@ pub fn run_ooda_cycle(agent: &mut Agent) -> AgentResult<OodaCycleResult> {
     let orientation = orient(agent, &observation)?;
 
     // ── Decide ──────────────────────────────────────────────────────────
-    let decision = decide(agent, &observation, &orientation, cycle)?;
+    let decision = decide(agent, &observation, &orientation, cycle, mode)?;
 
     // ── Act ─────────────────────────────────────────────────────────────
     let action_result = act(agent, &decision, cycle)?;
@@ -315,6 +327,7 @@ fn decide(
     observation: &Observation,
     orientation: &Orientation,
     cycle: u64,
+    mode: DecideMode,
 ) -> AgentResult<Decision> {
     // Get the top-priority active goal, scoped to the active project when available.
     let active = goal::active_goals(&agent.goals);
@@ -394,16 +407,40 @@ fn decide(
         agent.working_memory.increment_reference(*entry_id, cycle);
     }
 
-    // Rule-based strategy to select tool + build input.
-    let (tool_name, tool_input, reasoning, impasse) = select_tool(
-        top_goal,
-        observation,
-        orientation,
-        &agent.engine,
-        &agent.working_memory,
-        agent.psyche.as_ref(),
-        &agent.tool_registry,
-    );
+    // Select tool + build input via the chosen decide mode.
+    let (tool_name, tool_input, reasoning, impasse) = match mode {
+        DecideMode::VsaNative => {
+            let config = VsaDecideConfig::default();
+            let outcome = vsa_native_decide(
+                top_goal,
+                observation,
+                orientation,
+                &agent.engine,
+                &agent.working_memory,
+                agent.psyche.as_ref(),
+                &agent.tool_registry,
+                &config,
+            );
+            tracing::debug!(
+                mode = "vsa_native",
+                tool = %outcome.tool_name,
+                similarity = outcome.diagnostics.best_similarity,
+                used_mcts = outcome.diagnostics.used_mcts,
+                tools_scored = outcome.diagnostics.tools_scored,
+                "VSA-native decide",
+            );
+            (outcome.tool_name, outcome.tool_input, outcome.reasoning, outcome.impasse)
+        }
+        DecideMode::LlmDriven => select_tool(
+            top_goal,
+            observation,
+            orientation,
+            &agent.engine,
+            &agent.working_memory,
+            agent.psyche.as_ref(),
+            &agent.tool_registry,
+        ),
+    };
 
     // Store impasse on agent for goal generation to pick up.
     agent.last_impasse = impasse;

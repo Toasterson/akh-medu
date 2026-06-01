@@ -179,3 +179,7 @@ harness = false
 [[bench]]
 name = "phase26"
 harness = false
+
+[[bench]]
+name = "vsa_decide"
+harness = false
