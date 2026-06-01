@@ -117,9 +117,12 @@ impl CompartmentManager {
     /// Load a compartment's triples into the knowledge graph.
     ///
     /// For the "psyche" core compartment, also deserializes the `Psyche` struct
-    /// from `psyche.toml` in the compartment directory.
+    /// from `psyche.toml` in the compartment directory and translates its fields
+    /// (archetypes, shadow patterns, persona traits, individuation level) into
+    /// KG triples so the reasoning pipeline can inspect identity state at runtime.
     pub fn load(&self, id: &str, engine: &crate::engine::Engine) -> CompartmentResult<()> {
         let compartment_dir = self.compartments_dir.join(id);
+        let mut psyche_triple_count = 0usize;
 
         // Load psyche if this is the psyche compartment.
         if id == "psyche" {
@@ -134,6 +137,15 @@ impl CompartmentManager {
             } else {
                 Psyche::default()
             };
+
+            // Translate persona metadata into KG triples before storing the psyche.
+            psyche_triple_count = psyche.inject_into_kg(engine, id).map_err(|e| {
+                CompartmentError::InvalidManifest {
+                    path: compartment_dir.display().to_string(),
+                    message: format!("failed to inject psyche triples into KG: {e}"),
+                }
+            })?;
+
             *self.psyche.write().expect("psyche lock poisoned") = Some(psyche);
         }
 
@@ -149,8 +161,8 @@ impl CompartmentManager {
             return Err(CompartmentError::AlreadyLoaded { id: id.into() });
         }
 
-        // Load triples if specified.
-        let mut triple_count = 0;
+        // Load triples if specified; start the count from any psyche-injected triples.
+        let mut triple_count = psyche_triple_count;
         if let Some(ref triples_file) = compartment.manifest.triples_file {
             let triples_path = compartment_dir.join(triples_file);
             if triples_path.exists() {
@@ -222,6 +234,9 @@ impl CompartmentManager {
         if compartment.state == CompartmentState::Dormant {
             return Ok(());
         }
+
+        // Remove all KG triples tagged with this compartment (includes psyche-injected triples).
+        engine.remove_triples_in_compartment(id);
 
         // Remove triples from the named graph in SPARQL store.
         if let Some(sparql) = engine.sparql() {

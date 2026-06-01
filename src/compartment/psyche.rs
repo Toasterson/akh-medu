@@ -361,6 +361,109 @@ impl Psyche {
     pub fn record_shadow_encounter(&mut self) {
         self.self_integration.shadow_encounters += 1;
     }
+
+    /// Translate all persona metadata into knowledge-graph triples and insert them.
+    ///
+    /// Populates the Psyche compartment's portion of the KG so reasoning tools
+    /// (`kg_query`, `reason`) can inspect identity structure at runtime.
+    ///
+    /// Encoding conventions:
+    /// - Archetype weights and the individuation level live in the triple's
+    ///   `confidence` field (naturally in [0.0, 1.0]).
+    /// - Shadow encounter count is normalized to [0.0, 1.0] by dividing by 100
+    ///   so it fits in confidence.
+    /// - Persona traits, grammar preference, and shadow-pattern names become
+    ///   object entities linked from the persona or `psyche:self` node.
+    ///
+    /// All generated triples carry `compartment_id = compartment_id` so that
+    /// `engine.remove_triples_in_compartment()` can clean them up on unload.
+    ///
+    /// Returns the number of triples successfully inserted.
+    pub fn inject_into_kg(
+        &self,
+        engine: &crate::engine::Engine,
+        compartment_id: &str,
+    ) -> Result<usize, crate::error::AkhError> {
+        let preds = PsychePredicates::init(engine)?;
+        let cid = compartment_id.to_string();
+        let mut count = 0usize;
+
+        // Root entity representing the agent's own psyche.
+        let self_sym = engine.resolve_or_create_entity("psyche:self")?;
+        // Marker objects whose confidence carries a scalar value.
+        let integration_sym = engine.resolve_or_create_entity("psyche:integration")?;
+        let shadow_count_sym = engine.resolve_or_create_entity("psyche:shadow_count")?;
+
+        // Archetype entity nodes.
+        let sage_sym = engine.resolve_or_create_entity("sage")?;
+        let healer_sym = engine.resolve_or_create_entity("healer")?;
+        let guardian_sym = engine.resolve_or_create_entity("guardian")?;
+        let explorer_sym = engine.resolve_or_create_entity("explorer")?;
+
+        macro_rules! add {
+            ($s:expr, $p:expr, $o:expr, $c:expr) => {{
+                let t = crate::graph::Triple::new($s, $p, $o)
+                    .with_confidence($c)
+                    .with_compartment(cid.clone());
+                engine.add_triple(&t)?;
+                count += 1;
+            }};
+        }
+
+        // Persona.
+        let persona_sym = engine.resolve_or_create_entity(&self.persona.name)?;
+        add!(self_sym, preds.has_persona, persona_sym, 1.0);
+
+        let grammar_sym = engine.resolve_or_create_entity(&self.persona.grammar_preference)?;
+        add!(persona_sym, preds.grammar_preference, grammar_sym, 1.0);
+
+        for trait_name in &self.persona.traits {
+            let trait_sym = engine.resolve_or_create_entity(trait_name)?;
+            add!(persona_sym, preds.has_trait, trait_sym, 1.0);
+        }
+
+        // Archetype weights — confidence encodes the weight value.
+        add!(self_sym, preds.has_archetype_weight, sage_sym, self.archetypes.sage);
+        add!(self_sym, preds.has_archetype_weight, healer_sym, self.archetypes.healer);
+        add!(self_sym, preds.has_archetype_weight, guardian_sym, self.archetypes.guardian);
+        add!(self_sym, preds.has_archetype_weight, explorer_sym, self.archetypes.explorer);
+
+        let dominant_sym = engine.resolve_or_create_entity(self.dominant_archetype())?;
+        add!(self_sym, preds.dominant_archetype, dominant_sym, 1.0);
+
+        // Shadow patterns — severity encoded in confidence.
+        for pattern in &self.shadow.veto_patterns {
+            let pat_sym = engine.resolve_or_create_entity(&pattern.name)?;
+            add!(self_sym, preds.has_veto_pattern, pat_sym, pattern.severity);
+            add!(self_sym, preds.has_shadow_pattern, pat_sym, pattern.severity);
+        }
+        for pattern in &self.shadow.bias_patterns {
+            let pat_sym = engine.resolve_or_create_entity(&pattern.name)?;
+            add!(self_sym, preds.has_bias_pattern, pat_sym, pattern.severity);
+            add!(self_sym, preds.has_shadow_pattern, pat_sym, pattern.severity);
+        }
+
+        // Self-integration — individuation level and shadow encounter count.
+        add!(
+            self_sym,
+            preds.individuation_level,
+            integration_sym,
+            self.self_integration.individuation_level
+        );
+        // Normalize encounter count into [0.0, 1.0] (saturates at 100 encounters).
+        let normalized_encounters =
+            (self.self_integration.shadow_encounters as f32 / 100.0).min(1.0);
+        add!(self_sym, preds.shadow_encounter, shadow_count_sym, normalized_encounters);
+
+        tracing::debug!(
+            persona = %self.persona.name,
+            individuation = self.self_integration.individuation_level,
+            triples = count,
+            "injected psyche triples into knowledge graph"
+        );
+
+        Ok(count)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -375,6 +478,16 @@ pub struct PsychePredicates {
     pub has_shadow_pattern: SymbolId,
     pub individuation_level: SymbolId,
     pub shadow_encounter: SymbolId,
+    /// Veto patterns (hard blocks on action execution).
+    pub has_veto_pattern: SymbolId,
+    /// Bias patterns (scoring penalties without hard block).
+    pub has_bias_pattern: SymbolId,
+    /// The current dominant archetype (derived from weights).
+    pub dominant_archetype: SymbolId,
+    /// Individual persona trait (e.g., "precise", "curious").
+    pub has_trait: SymbolId,
+    /// Grammar preference registered on the persona node.
+    pub grammar_preference: SymbolId,
 }
 
 impl PsychePredicates {
@@ -387,6 +500,11 @@ impl PsychePredicates {
             has_shadow_pattern: engine.resolve_or_create_relation("psyche:has_shadow_pattern")?,
             individuation_level: engine.resolve_or_create_relation("psyche:individuation_level")?,
             shadow_encounter: engine.resolve_or_create_relation("psyche:shadow_encounter")?,
+            has_veto_pattern: engine.resolve_or_create_relation("psyche:has_veto_pattern")?,
+            has_bias_pattern: engine.resolve_or_create_relation("psyche:has_bias_pattern")?,
+            dominant_archetype: engine.resolve_or_create_relation("psyche:dominant_archetype")?,
+            has_trait: engine.resolve_or_create_relation("psyche:has_trait")?,
+            grammar_preference: engine.resolve_or_create_relation("psyche:grammar_preference")?,
         })
     }
 }
