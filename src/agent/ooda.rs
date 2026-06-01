@@ -33,6 +33,9 @@ pub struct OodaCycleResult {
     pub decision: Decision,
     /// Result of the chosen action.
     pub action_result: ActionResult,
+    /// Number of contaminated is-a/child-of triples purged after this cycle.
+    /// Non-zero signals that inference or seed loading regenerated contaminants.
+    pub contaminants_purged: usize,
 }
 
 /// State gathered during the Observe phase.
@@ -143,12 +146,33 @@ pub fn run_ooda_cycle(agent: &mut Agent) -> AgentResult<OodaCycleResult> {
     // ── Act ─────────────────────────────────────────────────────────────
     let action_result = act(agent, &decision, cycle)?;
 
+    // ── Post-cycle contaminant guard ─────────────────────────────────────
+    // Purge any is-a/child-of triples that were (re-)generated during this
+    // cycle, e.g. via forward-chaining on stale topology or a seed pack that
+    // asserts infrastructure labels as type-hierarchy parents of agent nodes.
+    // Contaminants (CI runners, ForgejoActions, Stor01 …) re-emerge across
+    // cleanup sessions because infer_rules fires every cycle; this guard
+    // removes them unconditionally so they cannot accumulate.
+    let contaminants_purged = agent
+        .engine
+        .purge_contaminated_inferences()
+        .unwrap_or(0);
+    if contaminants_purged > 0 {
+        tracing::warn!(
+            cycle,
+            contaminants_purged,
+            "Post-cycle guard removed contaminated is-a/child-of triple(s); \
+             check inference rules and seed packs for topology leaks"
+        );
+    }
+
     Ok(OodaCycleResult {
         cycle_number: cycle,
         observation,
         orientation,
         decision,
         action_result,
+        contaminants_purged,
     })
 }
 
