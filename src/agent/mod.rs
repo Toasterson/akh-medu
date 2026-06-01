@@ -31,6 +31,8 @@ pub mod credibility;
 pub mod chunking;
 pub mod dialogue;
 pub mod cli_tool;
+#[cfg(feature = "eliza")]
+pub mod eliza;
 pub mod continuous_learning;
 pub mod curiosity;
 pub mod explain;

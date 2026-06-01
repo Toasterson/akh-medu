@@ -1,0 +1,329 @@
+//! Filesystem watcher for hot-reloading ELIZA KDL scripts.
+//!
+//! [`ScriptLoader`] watches a directory for `.kdl` file changes and atomically
+//! updates the shared [`ScriptBank`] within two seconds of each save. Invalid
+//! files emit a warning and leave the previous script active (graceful degradation).
+//!
+//! Works on Linux (inotify) and macOS (kqueue) via the `notify` crate's
+//! [`RecommendedWatcher`], which selects the best available OS backend.
+//!
+//! # Lifecycle
+//!
+//! 1. Call [`ScriptLoader::start`] to load all `.kdl` files and spawn the watcher task.
+//! 2. The returned [`ScriptEngine`] is shared with the rest of the agent; the watcher
+//!    updates its inner bank transparently.
+//! 3. Drop the [`ScriptLoader`] to stop the watcher (the spawned task exits when
+//!    the event channel closes).
+
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, RwLock};
+use std::time::Duration;
+
+use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use tokio::sync::mpsc;
+use tracing::{debug, info, warn};
+
+use super::{ElizaError, ElizaResult, ScriptBank, ScriptEngine, load_directory, parse_scripts};
+
+// ── ScriptLoader ──────────────────────────────────────────────────────────────
+
+/// Watches a templates directory and hot-reloads `.kdl` files on change.
+///
+/// Keep this alive for as long as you want hot-reload to be active;
+/// dropping it stops the watcher and background task.
+pub struct ScriptLoader {
+    /// The engine whose bank is updated on file changes.
+    engine: ScriptEngine,
+    /// Watched directory path.
+    dir: PathBuf,
+    /// Keeps the `notify` watcher alive.
+    _watcher: RecommendedWatcher,
+    /// Signals the background task to stop.
+    _stop_tx: mpsc::Sender<()>,
+}
+
+impl ScriptLoader {
+    /// Load all `.kdl` files from `dir`, then start the filesystem watcher.
+    ///
+    /// Returns the [`ScriptEngine`] (shared with the watcher) and the [`ScriptLoader`]
+    /// that must be kept alive to continue receiving updates.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ElizaError::NoTemplateDir`] if `dir` does not exist,
+    /// [`ElizaError::Watcher`] if the OS watcher cannot be initialised.
+    pub fn start(dir: &Path) -> ElizaResult<(ScriptEngine, Self)> {
+        let bank = load_directory(dir)?;
+        let script_count = bank.len();
+        let engine = ScriptEngine::new(bank);
+        info!(
+            "eliza: loaded {script_count} script(s) from {}",
+            dir.display()
+        );
+
+        let bank_arc: Arc<RwLock<ScriptBank>> = engine.bank_arc();
+        let dir_owned = dir.to_path_buf();
+
+        // Channel: notify callback → tokio watcher task.
+        // Capacity 64 handles bursts of events from rapid saves.
+        let (event_tx, event_rx) = mpsc::channel::<notify::Result<notify::Event>>(64);
+        // Stop signal: dropping ScriptLoader closes _stop_tx → task exits.
+        let (stop_tx, stop_rx) = mpsc::channel::<()>(1);
+
+        // Build the OS watcher.
+        let watcher_tx = event_tx.clone();
+        let mut watcher = RecommendedWatcher::new(
+            move |res| {
+                // `blocking_send` works from the OS watcher thread.
+                let _ = watcher_tx.blocking_send(res);
+            },
+            notify::Config::default(),
+        )
+        .map_err(|e| ElizaError::Watcher {
+            message: e.to_string(),
+        })?;
+
+        watcher
+            .watch(dir, RecursiveMode::NonRecursive)
+            .map_err(|e| ElizaError::Watcher {
+                message: e.to_string(),
+            })?;
+
+        // Spawn the async task that processes events with debouncing.
+        tokio::spawn(watcher_task(
+            bank_arc,
+            dir_owned.clone(),
+            event_rx,
+            stop_rx,
+        ));
+
+        let loader = Self {
+            engine: engine.clone(),
+            dir: dir_owned,
+            _watcher: watcher,
+            _stop_tx: stop_tx,
+        };
+
+        Ok((engine, loader))
+    }
+
+    /// The shared script engine updated by this watcher.
+    pub fn engine(&self) -> &ScriptEngine {
+        &self.engine
+    }
+
+    /// Directory being watched.
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+}
+
+// ── Background watcher task ───────────────────────────────────────────────────
+
+/// Tokio task: receives raw notify events, debounces, and reloads changed files.
+async fn watcher_task(
+    bank: Arc<RwLock<ScriptBank>>,
+    dir: PathBuf,
+    mut event_rx: mpsc::Receiver<notify::Result<notify::Event>>,
+    mut stop_rx: mpsc::Receiver<()>,
+) {
+    // Set of files pending reload after the debounce window.
+    let mut pending: HashSet<PathBuf> = HashSet::new();
+    // Debounce window — absorbs repeated events from a single save.
+    const DEBOUNCE: Duration = Duration::from_millis(200);
+
+    loop {
+        tokio::select! {
+            // Stop signal: ScriptLoader was dropped.
+            _ = stop_rx.recv() => {
+                debug!("eliza: watcher task stopping");
+                break;
+            }
+
+            // Incoming filesystem event.
+            maybe = event_rx.recv() => {
+                let Some(res) = maybe else { break };
+                match res {
+                    Ok(event) => handle_event(&mut pending, event),
+                    Err(e) => warn!("eliza: watcher error: {e}"),
+                }
+            }
+
+            // Debounce window expired — process accumulated changes.
+            _ = tokio::time::sleep(DEBOUNCE), if !pending.is_empty() => {
+                let to_reload: Vec<PathBuf> = pending.drain().collect();
+                for path in to_reload {
+                    reload_file(&bank, &dir, &path);
+                }
+            }
+        }
+    }
+}
+
+/// Classify a notify event and add modified `.kdl` files to `pending`.
+fn handle_event(pending: &mut HashSet<PathBuf>, event: notify::Event) {
+    let is_write = matches!(
+        event.kind,
+        EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
+    );
+    if !is_write {
+        return;
+    }
+    for path in event.paths {
+        if path.extension().and_then(|e| e.to_str()) == Some("kdl") {
+            debug!("eliza: queuing reload for {}", path.display());
+            pending.insert(path);
+        }
+    }
+}
+
+/// Reload a single `.kdl` file and atomically update the bank.
+///
+/// On parse error the old scripts stay active and a warning is logged.
+/// On removal (file no longer exists), the scripts from that file are dropped.
+fn reload_file(bank: &Arc<RwLock<ScriptBank>>, dir: &Path, path: &Path) {
+    // Guard: only reload files inside the watched directory.
+    if !path.starts_with(dir) {
+        return;
+    }
+
+    if !path.exists() {
+        // File was deleted — remove its scripts from the bank.
+        if let Ok(mut guard) = bank.write() {
+            guard.remove_file(path);
+            info!("eliza: removed scripts from deleted {}", path.display());
+        }
+        return;
+    }
+
+    let source = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            warn!("eliza: cannot read {}: {e}", path.display());
+            return;
+        }
+    };
+
+    match parse_scripts(path, &source) {
+        Ok(scripts) => {
+            let names: Vec<String> = scripts.iter().map(|s| s.name.clone()).collect();
+            match bank.write() {
+                Ok(mut guard) => {
+                    guard.replace_from_file(path, scripts);
+                    info!(
+                        "eliza: reloaded {} — scripts: {:?}",
+                        path.display(),
+                        names
+                    );
+                }
+                Err(e) => warn!("eliza: bank lock poisoned: {e}"),
+            }
+        }
+        Err(e) => {
+            warn!(
+                "eliza: parse error in {} — keeping previous script active: {e}",
+                path.display()
+            );
+        }
+    }
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use tempfile::TempDir;
+
+    fn write_kdl(dir: &Path, filename: &str, content: &str) -> PathBuf {
+        let path = dir.join(filename);
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(content.as_bytes()).unwrap();
+        f.flush().unwrap();
+        path
+    }
+
+    #[tokio::test]
+    async fn test_script_loader_initial_load() {
+        let dir = TempDir::new().unwrap();
+        let kdl = r#"
+script name="test-script" priority=10 {
+    rule pattern="(?i)hello" {
+        response "Hi there!"
+    }
+}
+"#;
+        write_kdl(dir.path(), "test.kdl", kdl);
+
+        let (engine, _loader) = ScriptLoader::start(dir.path()).unwrap();
+        assert!(engine.script_names().contains(&"test-script".to_string()));
+        assert_eq!(engine.match_input("hello"), Some("Hi there!".into()));
+    }
+
+    #[tokio::test]
+    async fn test_script_loader_hot_reload() {
+        let dir = TempDir::new().unwrap();
+
+        let kdl_v1 = r#"
+script name="reload-test" priority=10 {
+    rule {
+        response "Version one."
+    }
+}
+"#;
+        write_kdl(dir.path(), "reload.kdl", kdl_v1);
+
+        let (engine, _loader) = ScriptLoader::start(dir.path()).unwrap();
+        assert_eq!(engine.match_input("anything"), Some("Version one.".into()));
+
+        // Overwrite with v2.
+        let kdl_v2 = r#"
+script name="reload-test" priority=10 {
+    rule {
+        response "Version two."
+    }
+}
+"#;
+        write_kdl(dir.path(), "reload.kdl", kdl_v2);
+
+        // Wait up to 2 s for the watcher to pick up the change.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            if engine.match_input("anything") == Some("Version two.".into()) {
+                break;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                panic!("hot-reload did not apply within 2 s");
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn test_invalid_kdl_keeps_previous() {
+        let dir = TempDir::new().unwrap();
+
+        let valid_kdl = r#"
+script name="stable" priority=10 {
+    rule {
+        response "Stable response."
+    }
+}
+"#;
+        write_kdl(dir.path(), "stable.kdl", valid_kdl);
+
+        let (engine, _loader) = ScriptLoader::start(dir.path()).unwrap();
+        assert_eq!(engine.match_input("anything"), Some("Stable response.".into()));
+
+        // Overwrite with invalid KDL.
+        write_kdl(dir.path(), "stable.kdl", "this is not { valid kdl !!!");
+
+        // Wait a bit for the watcher to attempt the reload.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        // The old response must still work.
+        assert_eq!(engine.match_input("anything"), Some("Stable response.".into()));
+    }
+}

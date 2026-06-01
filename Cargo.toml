@@ -101,6 +101,10 @@ native-tls = { version = "0.2", optional = true }
 lettre = { version = "0.11", optional = true, default-features = false, features = ["builder", "smtp-transport", "rustls-tls"] }
 regex = "1"
 
+# ELIZA hot-reload (feature-gated)
+notify = { version = "6", optional = true }
+knuffel = { version = "3", optional = true }
+
 # Archive extraction (for ONNX Runtime setup)
 flate2 = "1"
 tar = "0.4"
@@ -158,6 +162,7 @@ burn-training = ["candle-backend"]  # will add "burn" when sqlite3 conflict reso
 training-data = []
 wiki = ["dep:comrak", "dep:syntect", "dep:minijinja", "dep:tantivy", "dep:blake3"]
 sparql-persist = ["oxigraph/rocksdb"]
+eliza = ["daemon", "dep:notify", "dep:knuffel"]
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
