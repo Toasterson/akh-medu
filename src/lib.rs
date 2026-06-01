@@ -61,6 +61,7 @@ pub mod paths;
 pub mod pipeline;
 pub mod provenance;
 pub mod reason;
+pub mod reasoning;
 pub mod registry;
 pub mod rule_macro;
 pub mod seeds;
