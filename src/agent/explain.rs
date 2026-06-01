@@ -1128,6 +1128,17 @@ pub fn derivation_kind_prose(kind: &DerivationKind) -> String {
         } => {
             format!("debate contribution on \"{topic}\": {contribution_kind}")
         }
+        DerivationKind::ClusterTopologyIngested {
+            nodes,
+            storage_classes,
+            pods,
+            triples_asserted,
+        } => {
+            format!(
+                "K8s cluster topology ingested: {nodes} node(s), {storage_classes} storage class(es), \
+                 {pods} pod(s) → {triples_asserted} triple(s)"
+            )
+        }
     }
 }
 

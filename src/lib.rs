@@ -31,6 +31,7 @@
 
 pub mod agent;
 pub mod api_types;
+pub mod cluster;
 pub mod argumentation;
 pub mod audit;
 pub mod bootstrap;

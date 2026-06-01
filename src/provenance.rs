@@ -686,6 +686,16 @@ pub enum DerivationKind {
         topic: String,
         contribution_kind: String,
     },
+
+    // --- Cluster topology ingestion ------------------------------------------
+
+    /// Kubernetes cluster topology was queried and asserted as triples.
+    ClusterTopologyIngested {
+        nodes: usize,
+        storage_classes: usize,
+        pods: usize,
+        triples_asserted: usize,
+    },
 }
 
 impl DerivationKind {
@@ -788,6 +798,7 @@ impl DerivationKind {
             Self::ArticleFederated { .. } => 93,
             Self::OpinionExpressed { .. } => 94,
             Self::DebateContribution { .. } => 95,
+            Self::ClusterTopologyIngested { .. } => 96,
         }
     }
 }

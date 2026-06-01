@@ -231,6 +231,12 @@ enum Commands {
         #[command(subcommand)]
         action: WikiAction,
     },
+
+    /// Kubernetes cluster topology ingestion and query.
+    Cluster {
+        #[command(subcommand)]
+        action: ClusterAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -295,6 +301,18 @@ enum WikiBlogAction {
         #[arg(long)]
         topic: String,
     },
+}
+
+#[derive(Subcommand)]
+enum ClusterAction {
+    /// Query the live Kubernetes cluster and assert topology triples.
+    Ingest {
+        /// Print triples without writing to the knowledge graph.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Show cluster-topology triples already in the knowledge graph.
+    Show,
 }
 
 #[derive(Subcommand)]
@@ -3725,6 +3743,39 @@ fn main() -> Result<()> {
         Commands::Wiki { action } => {
             let engine = Engine::new(config).into_diagnostic()?;
             dispatch_wiki(action, &engine)?;
+        }
+
+        // ── Cluster topology ─────────────────────────────────────────────
+        Commands::Cluster { action } => {
+            let engine = Engine::new(config).into_diagnostic()?;
+            match action {
+                ClusterAction::Ingest { dry_run } => {
+                    let report =
+                        akh_medu::cluster::ingest_topology(&engine, dry_run)
+                            .into_diagnostic()?;
+                    if dry_run {
+                        println!("\n[dry-run] Would assert {} triple(s).", report.triples_asserted);
+                    } else {
+                        println!(
+                            "Cluster topology ingested: {} node(s), {} storage class(es), \
+                             {} pod(s) → {} triple(s) asserted.",
+                            report.nodes_processed,
+                            report.storage_classes_processed,
+                            report.pods_processed,
+                            report.triples_asserted,
+                        );
+                    }
+                    if !report.errors.is_empty() {
+                        eprintln!("Warnings ({}):", report.errors.len());
+                        for e in &report.errors {
+                            eprintln!("  - {e}");
+                        }
+                    }
+                }
+                ClusterAction::Show => {
+                    akh_medu::cluster::show_topology(&engine);
+                }
+            }
         }
     }
 
