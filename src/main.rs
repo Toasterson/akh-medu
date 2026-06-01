@@ -2554,6 +2554,7 @@ fn main() -> Result<()> {
                                 &knowledge,
                                 &purpose,
                                 &engine,
+                                false,
                             ) {
                                 Ok(ritual) => {
                                     println!("\nRitual of Awakening complete!");

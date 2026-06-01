@@ -448,7 +448,7 @@ impl BootstrapOrchestrator {
         if self.session.current_stage <= BootstrapStage::RitualOfAwakening {
             if let Some(ref ck) = character {
                 let ritual_result =
-                    identity::ritual_of_awakening(ck, &intent.purpose, engine)?;
+                    identity::ritual_of_awakening(ck, &intent.purpose, engine, false)?;
                 self.session.chosen_name = Some(ritual_result.chosen_name.clone());
                 self.session.psyche = Some(ritual_result.psyche.clone());
                 provenance_ids.extend(ritual_result.provenance_ids);

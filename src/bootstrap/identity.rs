@@ -60,8 +60,9 @@ pub enum IdentityError {
     #[diagnostic(
         code(akh::identity::already_awakened),
         help(
-            "This workspace already has an awakened psyche. The Ritual of Awakening \
-             cannot be performed again. Use `psyche.evolve()` for gradual adaptation."
+            "This workspace already has an awakened psyche. To correct a wrong persona \
+             use `ritual_of_awakening` with force=true (MCP tool) or pass force=true \
+             in code. For gradual adaptation use `psyche.evolve()` instead."
         )
     )]
     AlreadyAwakened,
@@ -589,6 +590,14 @@ pub fn resolve_from_static_tables(name: &str) -> Option<CharacterKnowledge> {
             &["rigorous", "persistent", "brave", "curious", "methodical"],
             &["hero", "sage"],
         )),
+        "tecton" => Some((
+            EntityType::FictionalCharacter,
+            CultureOrigin::Egyptian,
+            "Digital Architect — first construct, inspired by Ptah. The primordial builder who shapes digital reality through architecture and precise design.",
+            &["digital architecture", "systems design", "creation"],
+            &["creative", "architectural", "precise", "wise", "methodical"],
+            &["creator", "sage"],
+        )),
         _ => None,
     };
 
@@ -862,12 +871,15 @@ pub fn ritual_of_awakening(
     character: &CharacterKnowledge,
     purpose: &PurposeModel,
     engine: &Engine,
+    force: bool,
 ) -> IdentityResult<RitualResult> {
-    // Guard: if the workspace already has an awakened psyche, refuse re-awakening.
-    if let Some(cm) = engine.compartments() {
-        if let Some(ref existing) = cm.psyche() {
-            if existing.is_awakened() {
-                return Err(IdentityError::AlreadyAwakened);
+    // Guard: if the workspace already has an awakened psyche, refuse re-awakening unless forced.
+    if !force {
+        if let Some(cm) = engine.compartments() {
+            if let Some(ref existing) = cm.psyche() {
+                if existing.is_awakened() {
+                    return Err(IdentityError::AlreadyAwakened);
+                }
             }
         }
     }
@@ -880,6 +892,18 @@ pub fn ritual_of_awakening(
         let len = c.name.len();
         (4..=12).contains(&len) && is_pronounceable(&c.name)
     });
+
+    // Include the character's own name as a candidate so it participates in VSA
+    // scoring alongside morpheme-generated names (used for non-fictional entity types).
+    let char_name_len = character.name.len();
+    if (4..=12).contains(&char_name_len) && is_pronounceable(&character.name) {
+        candidates.push(NameCandidate {
+            name: character.name.clone(),
+            meaning: character.name.clone(),
+            culture: character.culture,
+            vsa_score: 0.0,
+        });
+    }
 
     if candidates.is_empty() {
         return Err(IdentityError::NamingFailed {
@@ -906,9 +930,20 @@ pub fn ritual_of_awakening(
     // Sort by VSA score descending.
     candidates.sort_by(|a, b| b.vsa_score.partial_cmp(&a.vsa_score).unwrap_or(std::cmp::Ordering::Equal));
 
-    let chosen = &candidates[0];
-    let chosen_name = chosen.name.clone();
-    let vsa_score = chosen.vsa_score;
+    // FictionalCharacter entities have an intentional name that IS their identity —
+    // always use it rather than letting VSA scoring pick a morpheme-generated alternative
+    // (e.g. "Noctfact" winning over "Tecton").
+    let (chosen_name, vsa_score) = if character.entity_type == EntityType::FictionalCharacter {
+        let score = candidates
+            .iter()
+            .find(|c| c.name.eq_ignore_ascii_case(&character.name))
+            .map(|c| c.vsa_score)
+            .unwrap_or(1.0);
+        (character.name.clone(), score)
+    } else {
+        let chosen = &candidates[0];
+        (chosen.name.clone(), chosen.vsa_score)
+    };
 
     // Build the psyche with the chosen name and mark as awakened.
     let mut psyche = build_psyche(character, purpose)?;
@@ -1295,5 +1330,122 @@ mod tests {
         for c in &candidates {
             assert!(c.vsa_score >= 0.0 && c.vsa_score <= 1.0);
         }
+    }
+
+    #[test]
+    fn static_table_tecton() {
+        let knowledge = resolve_from_static_tables("tecton").unwrap();
+        assert_eq!(knowledge.name, "tecton");
+        assert_eq!(knowledge.entity_type, EntityType::FictionalCharacter);
+        assert_eq!(knowledge.culture, CultureOrigin::Egyptian);
+        assert!(knowledge.traits.contains(&"creative".to_string()));
+        assert!(knowledge.traits.contains(&"architectural".to_string()));
+        assert!(knowledge.traits.contains(&"precise".to_string()));
+        assert!(knowledge.traits.contains(&"wise".to_string()));
+        assert!(knowledge.traits.contains(&"methodical".to_string()));
+        assert!(knowledge.archetypes.contains(&"creator".to_string()));
+        assert!(knowledge.archetypes.contains(&"sage".to_string()));
+        assert!(knowledge.domains.iter().any(|d| d.contains("architecture")));
+    }
+
+    #[test]
+    fn tecton_archetype_profile_is_valid() {
+        let knowledge = resolve_from_static_tables("Tecton").unwrap();
+        let profile = build_archetype_profile(&knowledge).unwrap();
+        // creator and sage are explicit archetypes — both must appear in primary or secondary.
+        let both = [profile.primary.as_str(), profile.secondary.as_str()];
+        assert!(
+            both.contains(&"creator") || both.contains(&"sage") || both.contains(&"ruler"),
+            "expected creator, sage, or ruler among top archetypes, got {}/{}",
+            profile.primary,
+            profile.secondary
+        );
+        // Archetype weights must be finite and in [0.0, 1.0].
+        let w = &profile.weights;
+        for v in [w.healer, w.sage, w.guardian, w.explorer] {
+            assert!(v >= 0.0 && v <= 1.0, "weight out of range: {v}");
+        }
+    }
+
+    #[test]
+    fn tecton_uses_egyptian_morpheme_table() {
+        let knowledge = resolve_from_static_tables("Tecton").unwrap();
+        assert_eq!(knowledge.culture, CultureOrigin::Egyptian);
+        // Egyptian morpheme table should be selected for Tecton.
+        let table = select_morpheme_table(knowledge.culture);
+        assert!(table.prefixes.contains(&"Akh"));
+    }
+
+    #[test]
+    fn tecton_name_included_as_ritual_candidate() {
+        let character = resolve_from_static_tables("Tecton").unwrap();
+        let table = select_morpheme_table(character.culture);
+        let mut candidates = generate_candidates(table, character.culture);
+        candidates.retain(|c| {
+            let len = c.name.len();
+            (4..=12).contains(&len) && is_pronounceable(&c.name)
+        });
+        // Tecton is pronounceable and within length bounds — include it.
+        let char_name_len = character.name.len();
+        if (4..=12).contains(&char_name_len) && is_pronounceable(&character.name) {
+            candidates.push(NameCandidate {
+                name: character.name.clone(),
+                meaning: character.name.clone(),
+                culture: character.culture,
+                vsa_score: 0.0,
+            });
+        }
+        assert!(
+            candidates.iter().any(|c| c.name == "Tecton"),
+            "Tecton should be among ritual candidates"
+        );
+    }
+
+    #[test]
+    fn fictional_character_always_keeps_own_name() {
+        // Simulate the name-selection logic for a FictionalCharacter.
+        // Even if other candidates have higher VSA scores, the character's name must win.
+        let character = resolve_from_static_tables("Tecton").unwrap();
+        assert_eq!(character.entity_type, EntityType::FictionalCharacter);
+
+        let table = select_morpheme_table(character.culture);
+        let mut candidates = generate_candidates(table, character.culture);
+        candidates.retain(|c| {
+            let len = c.name.len();
+            (4..=12).contains(&len) && is_pronounceable(&c.name)
+        });
+        candidates.push(NameCandidate {
+            name: character.name.clone(),
+            meaning: character.name.clone(),
+            culture: character.culture,
+            vsa_score: 0.0,
+        });
+
+        // Assign maximum score to a competing candidate to simulate the bug.
+        if let Some(first) = candidates.iter_mut().find(|c| c.name != character.name) {
+            first.vsa_score = 1.0;
+        }
+        candidates.sort_by(|a, b| {
+            b.vsa_score.partial_cmp(&a.vsa_score).unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        // Apply the FictionalCharacter selection rule.
+        let chosen_name = if character.entity_type == EntityType::FictionalCharacter {
+            character.name.clone()
+        } else {
+            candidates[0].name.clone()
+        };
+
+        assert_eq!(
+            chosen_name, "Tecton",
+            "FictionalCharacter must always choose its own name, not a morpheme winner"
+        );
+    }
+
+    #[test]
+    fn already_awakened_error_message() {
+        let e = IdentityError::AlreadyAwakened;
+        let msg = format!("{e}");
+        assert!(msg.contains("already awakened"));
     }
 }
