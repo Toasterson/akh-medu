@@ -227,6 +227,31 @@ impl Goal {
     }
 }
 
+/// Truncate `text` at the last sentence boundary (`.`, `?`, `!`, `\n`) that
+/// falls within `max_chars`, falling back to the last word boundary (space),
+/// then to a hard character cut. Returns the original string when it is short
+/// enough to fit without truncation.
+fn truncate_at_boundary(text: &str, max_chars: usize) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= max_chars {
+        return text.to_string();
+    }
+    // Sentence boundary: last `.`, `?`, `!`, or `\n` within [0, max_chars).
+    for i in (0..max_chars).rev() {
+        if matches!(chars[i], '.' | '?' | '!' | '\n') {
+            return chars[..=i].iter().collect();
+        }
+    }
+    // Word boundary: last space within [0, max_chars).
+    for i in (0..max_chars).rev() {
+        if chars[i] == ' ' {
+            return chars[..i].iter().collect();
+        }
+    }
+    // Hard cut at max_chars.
+    chars[..max_chars].iter().collect()
+}
+
 /// Create a goal and persist it in the knowledge graph.
 ///
 /// If a symbol with the same goal label already exists (e.g. from a previous
@@ -238,7 +263,7 @@ pub fn create_goal(
     criteria: &str,
     predicates: &AgentPredicates,
 ) -> AgentResult<Goal> {
-    let label = format!("goal:{}", description.chars().take(40).collect::<String>());
+    let label = format!("goal:{}", truncate_at_boundary(description, 120));
     let goal_id = engine.resolve_or_create_entity(&label)?;
 
     let now = std::time::SystemTime::now()
@@ -551,6 +576,36 @@ pub fn reformulate_goal(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn truncate_at_boundary_short_string() {
+        assert_eq!(truncate_at_boundary("Hello world", 60), "Hello world");
+    }
+
+    #[test]
+    fn truncate_at_boundary_sentence_end() {
+        let s = "Find all dependencies. Then analyse them in detail and more.";
+        // First sentence ends at index 22 (the dot), within 40 chars.
+        let got = truncate_at_boundary(s, 40);
+        assert!(got.ends_with('.'), "expected sentence cut, got: {got:?}");
+        assert!(got.len() <= 40);
+    }
+
+    #[test]
+    fn truncate_at_boundary_word_boundary() {
+        let s = "Find relationships without any sentence terminators here extra";
+        let got = truncate_at_boundary(s, 40);
+        // Should end at a space (word boundary).
+        assert!(!got.ends_with(' '));
+        assert!(got.len() < 40);
+    }
+
+    #[test]
+    fn truncate_at_boundary_hard_cut() {
+        let s = "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz";
+        let got = truncate_at_boundary(s, 10);
+        assert_eq!(got.len(), 10);
+    }
 
     #[test]
     fn goal_status_roundtrip() {
