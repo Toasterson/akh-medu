@@ -1,7 +1,7 @@
 # Phase 32 — Knowledge Extraction for Bootstrap
 
 > Date: 2026-03-26 (revised 2026-03-27)
-> Status: Planned
+> Status: Implemented (2026-05-22)
 > Phase: 32
 > Depends on: Phase 26b (Candle backend), Phase 35 (T5 training infrastructure)
 > Optional enhancement: Phase 26d (neural bridge, for hallucination detection)

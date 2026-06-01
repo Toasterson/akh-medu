@@ -99,6 +99,13 @@ pub struct IngestionConfig {
     pub grounding_rounds: usize,
     /// Override catalog directory (default: XDG data dir).
     pub catalog_dir: Option<PathBuf>,
+    /// Phase 32: optional domain hint for LLM elicitation.
+    ///
+    /// When set and the `candle-backend` feature is enabled, the ingestor
+    /// runs `KnowledgeElicitor::elicit(Properties + Relationships)` for each
+    /// curriculum concept after web-source ingestion.  Falls back gracefully
+    /// when the model file is absent.
+    pub elicit_domain: Option<String>,
 }
 
 impl Default for IngestionConfig {
@@ -112,6 +119,7 @@ impl Default for IngestionConfig {
             url_timeout_secs: 15,
             grounding_rounds: 2,
             catalog_dir: None,
+            elicit_domain: None,
         }
     }
 }
@@ -441,6 +449,22 @@ impl CurriculumIngestor {
                     // Ground the concept's VSA vector.
                     if self.ground_concept(engine, entry.concept) {
                         result.symbols_grounded += 1;
+                    }
+
+                    // Phase 32 — LLM elicitation for this concept.
+                    //
+                    // Runs after web-source ingestion so that the LLM pass
+                    // complements (not duplicates) what web sources provided.
+                    // Falls back silently when the model file is absent.
+                    if let Some(ref domain) = self.config.elicit_domain.clone()
+                        && let Some(ref data_dir) = engine.config().data_dir
+                    {
+                        let _ = crate::bootstrap::knowledge_elicit::elicit_for_concept(
+                            &entry.label,
+                            domain,
+                            engine,
+                            Some(data_dir.clone()),
+                        );
                     }
                 }
             }

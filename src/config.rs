@@ -129,6 +129,8 @@ pub struct IntervalOverrides {
     pub sleep_cycle_secs: Option<u64>,
     pub trigger_evaluation_secs: Option<u64>,
     pub knowledge_extraction_secs: Option<u64>,
+    /// Phase 32: LLM knowledge elicitation interval (default: 30 min).
+    pub knowledge_elicitation_secs: Option<u64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -182,6 +184,9 @@ impl DaemonSection {
                 .knowledge_extraction_secs
                 .map_or(defaults.knowledge_extraction_interval, Duration::from_secs),
             bridge_training_interval: defaults.bridge_training_interval,
+            knowledge_elicitation_interval: ov
+                .knowledge_elicitation_secs
+                .map_or(defaults.knowledge_elicitation_interval, Duration::from_secs),
             max_cycles: self.max_cycles,
         }
     }

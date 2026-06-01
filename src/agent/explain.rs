@@ -1128,6 +1128,16 @@ pub fn derivation_kind_prose(kind: &DerivationKind) -> String {
         } => {
             format!("debate contribution on \"{topic}\": {contribution_kind}")
         }
+        DerivationKind::KnowledgeElicitation {
+            model_id,
+            pass,
+            self_consistency,
+            ..
+        } => {
+            format!(
+                "LLM-elicited triple (model: {model_id}, pass: {pass}, self-consistency: {self_consistency:.2})"
+            )
+        }
     }
 }
 

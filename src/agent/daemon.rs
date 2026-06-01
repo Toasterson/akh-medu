@@ -79,6 +79,14 @@ pub struct DaemonConfig {
     /// Runs bridge encoder alignment training during idle periods.
     /// Only starts after sufficient training data has accumulated.
     pub bridge_training_interval: Duration,
+    /// LLM knowledge elicitation interval (default: 30 min).
+    ///
+    /// Phase 32: proactively generates structured triples about domains with
+    /// detected knowledge gaps using the T5 Knowledge model (Phase 35).
+    /// Distinct from `knowledge_extraction_interval` which extracts triples
+    /// from already-fetched text.  Falls back gracefully when the model file
+    /// is absent.
+    pub knowledge_elicitation_interval: Duration,
     /// Maximum OODA cycles (0 = unlimited).
     pub max_cycles: usize,
 }
@@ -100,6 +108,7 @@ impl Default for DaemonConfig {
             trigger_evaluation_interval: Duration::from_secs(15),
             knowledge_extraction_interval: Duration::from_secs(2700), // 45 min
             bridge_training_interval: Duration::from_secs(7200), // 2 hours
+            knowledge_elicitation_interval: Duration::from_secs(1800), // 30 min
             max_cycles: 0,
         }
     }
@@ -201,6 +210,7 @@ impl AgentDaemon {
         let mut trigger_tick = interval(self.config.trigger_evaluation_interval);
         let mut extraction_tick = interval(self.config.knowledge_extraction_interval);
         let mut bridge_training_tick = interval(self.config.bridge_training_interval);
+        let mut elicitation_tick = interval(self.config.knowledge_elicitation_interval);
 
         self.agent.lock().unwrap().sink().emit(&AkhMessage::system(
             "daemon started — background learning active",
@@ -269,6 +279,9 @@ impl AgentDaemon {
                 }
                 _ = bridge_training_tick.tick() => {
                     self.run_bridge_training();
+                }
+                _ = elicitation_tick.tick() => {
+                    self.run_knowledge_elicitation_task();
                 }
                 _ = self.wait_for_shutdown() => {
                     self.agent.lock().unwrap().sink().emit(&AkhMessage::system(
@@ -961,6 +974,129 @@ impl AgentDaemon {
         });
     }
 
+    /// Phase 32 — proactive LLM knowledge elicitation for gap domains.
+    ///
+    /// Identifies domains with low triple density from recent gap analysis,
+    /// then runs the KnowledgeElicitor (taxonomy + relationships pass) on each.
+    /// Falls back silently when the `candle-backend` feature is disabled or the
+    /// model file is absent — bootstrap continues via web-API-only mode.
+    fn run_knowledge_elicitation_task(&self) {
+        use crate::bootstrap::knowledge_elicit::{
+            ElicitConfig, ElicitPass, ElicitValidator, KnowledgeElicitor, ingest_validated,
+        };
+
+        // Extract engine + data_dir without holding the agent lock.
+        let (engine, data_dir) = {
+            let agent = self.agent.lock().unwrap();
+            let dir = agent.engine.config().data_dir.clone();
+            (agent.engine.clone(), dir)
+        };
+
+        // Locate domains with few outgoing concept triples as elicitation targets.
+        // Strategy: look for symbols whose label contains no `:` prefix (plain
+        // concept labels) and that have fewer than 5 outgoing relations.
+        let expand_pred = engine.resolve_symbol("expand:subclass_of").ok();
+        let is_a_pred = engine.resolve_symbol("is-a").ok();
+
+        if expand_pred.is_none() && is_a_pred.is_none() {
+            // No domain ontology present yet — nothing to elicit for.
+            return;
+        }
+
+        // Collect candidate domain labels by sampling concept symbols with low
+        // outgoing degree.  Limit to 3 domains per cycle to avoid rate pressure.
+        let mut domain_concepts: Vec<(String, Vec<String>)> = Vec::new();
+
+        let all_symbols = engine.item_memory().all_symbols();
+        let mut candidates: Vec<(String, usize)> = all_symbols
+            .iter()
+            .filter_map(|sym| {
+                let label = engine.resolve_label(*sym);
+                // Skip relation / namespace symbols.
+                if label.contains(':') || label.len() < 3 {
+                    return None;
+                }
+                let degree = engine.triples_from(*sym).len();
+                // Elicitation targets: concepts with 1–8 outgoing relations
+                // (seeded but sparse).
+                if degree >= 1 && degree <= 8 {
+                    Some((label, degree))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Sort by ascending degree (sparsest first).
+        candidates.sort_by_key(|(_, d)| *d);
+        candidates.truncate(30);
+
+        // Group into domain buckets by shared prefix heuristic or just take the
+        // top-N concepts as seeds for a single "general" elicitation.
+        if !candidates.is_empty() {
+            let seeds: Vec<String> = candidates
+                .iter()
+                .take(10)
+                .map(|(label, _)| label.clone())
+                .collect();
+            // Use the most common 2-grams as a domain hint, or "general knowledge"
+            // as fallback.
+            let domain = guess_domain(&seeds).unwrap_or_else(|| "general knowledge".to_string());
+            domain_concepts.push((domain, seeds));
+        }
+
+        if domain_concepts.is_empty() {
+            return;
+        }
+
+        let config = ElicitConfig::default();
+        let mut elicitor = KnowledgeElicitor::new(config, data_dir);
+
+        if !elicitor.is_available() {
+            tracing::debug!("daemon:elicitation: backend unavailable, skipping");
+            return;
+        }
+
+        let mut total_inserted = 0usize;
+        let validator = ElicitValidator::new(None);
+
+        for (domain, seeds) in &domain_concepts {
+            let batch = elicitor.elicit(
+                domain,
+                seeds,
+                &[ElicitPass::Taxonomy, ElicitPass::Relationships],
+            );
+
+            if batch.triples.is_empty() {
+                continue;
+            }
+
+            let validated = validator.validate(&batch.triples, batch.total_rounds, &engine);
+            let inserted = ingest_validated(&validated, &engine, &batch, ElicitPass::Taxonomy);
+            total_inserted += inserted;
+
+            tracing::info!(
+                domain,
+                elicited = batch.triples.len(),
+                accepted = validated.accepted.len(),
+                rejected = validated.rejected.len(),
+                inserted,
+                "daemon:elicitation: domain pass complete"
+            );
+        }
+
+        if total_inserted > 0 {
+            let _ = engine.persist();
+            if let Ok(agent) = self.agent.lock() {
+                agent.sink().emit(&AkhMessage::system(format!(
+                    "[daemon:elicitation] {} triples generated across {} domain(s)",
+                    total_inserted,
+                    domain_concepts.len(),
+                )));
+            }
+        }
+    }
+
     fn persist(&self) {
         let agent = self.agent.lock().unwrap();
         if let Err(e) = agent.persist_session() {
@@ -975,6 +1111,35 @@ impl AgentDaemon {
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Module-level helpers
+// ---------------------------------------------------------------------------
+
+/// Heuristically guess a domain label from a set of seed concept labels.
+///
+/// Uses the longest common word among all seeds, falling back to `None`.
+fn guess_domain(seeds: &[String]) -> Option<String> {
+    if seeds.is_empty() {
+        return None;
+    }
+    // Collect all words from all seed labels.
+    let all_words: Vec<&str> = seeds
+        .iter()
+        .flat_map(|s| s.split_whitespace())
+        .collect();
+    // Find the word that appears in the most seeds.
+    let mut freq: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for w in &all_words {
+        if w.len() >= 4 {
+            *freq.entry(w).or_insert(0) += 1;
+        }
+    }
+    freq.into_iter()
+        .max_by_key(|(_, count)| *count)
+        .filter(|(_, count)| *count >= 2)
+        .map(|(word, _)| word.to_string())
 }
 
 #[cfg(test)]
@@ -999,6 +1164,10 @@ mod tests {
         assert_eq!(
             config.knowledge_extraction_interval,
             Duration::from_secs(2700)
+        );
+        assert_eq!(
+            config.knowledge_elicitation_interval,
+            Duration::from_secs(1800)
         );
         assert_eq!(config.max_cycles, 0);
     }

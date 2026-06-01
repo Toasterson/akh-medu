@@ -246,15 +246,28 @@ impl Engine {
 
         let store = Arc::new(store);
 
-        // Restore knowledge graph from persistent SPARQL store.
+        // Restore knowledge graph — try SPARQL store first, then fall back to
+        // the redb snapshot written by persist() when sparql-persist is absent.
+        let mut kg_restored = 0usize;
         if let Some(ref sparql) = sparql {
             let restored = sparql.all_triples().unwrap_or_else(|e| {
                 tracing::warn!(error = %e, "KG restore from SPARQL skipped");
                 vec![]
             });
             if !restored.is_empty() {
-                let count = knowledge_graph.bulk_load(&restored).unwrap_or(0);
-                tracing::info!(triples = count, "knowledge graph restored from SPARQL");
+                kg_restored = knowledge_graph.bulk_load(&restored).unwrap_or(0);
+                tracing::info!(triples = kg_restored, "knowledge graph restored from SPARQL");
+            }
+        }
+        if kg_restored == 0 {
+            // Fallback: restore from redb snapshot persisted by engine.persist().
+            if let Ok(Some(bytes)) = store.get_meta(b"kg:triples")
+                && let Ok(triples) = bincode::deserialize::<Vec<crate::graph::Triple>>(&bytes)
+            {
+                kg_restored = knowledge_graph.bulk_load(&triples).unwrap_or(0);
+                if kg_restored > 0 {
+                    tracing::info!(triples = kg_restored, "knowledge graph restored from redb snapshot");
+                }
             }
         }
 
@@ -2632,6 +2645,18 @@ impl Engine {
         // Sync knowledge graph to SPARQL store.
         if let Some(ref sparql) = self.sparql {
             sparql.sync_from(&self.knowledge_graph)?;
+        }
+
+        // Persist KG triples to durable store so they survive restarts even
+        // without the sparql-persist feature (Oxigraph RocksDB backend).
+        if self.store.durable.is_some() {
+            let triples = self.knowledge_graph.all_triples();
+            let encoded = bincode::serialize(&triples).map_err(|e| {
+                crate::error::StoreError::Serialization {
+                    message: format!("failed to serialize KG triples: {e}"),
+                }
+            })?;
+            self.store.put_meta(b"kg:triples", &encoded)?;
         }
 
         // Persist Phase 9 registries.
