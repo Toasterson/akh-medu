@@ -300,6 +300,9 @@ impl Agent {
 
         // Audit log.
         registry.register(Box::new(tools::AuditLogTool));
+
+        // Tool-graph query (peer/federation discovery).
+        registry.register(Box::new(tools::ToolQueryTool));
     }
 
     /// Attach the audit ledger to the tool registry if persistence is configured.
@@ -542,6 +545,20 @@ impl Agent {
             mv.declare_multi_valued(agent.predicates.child_goal);
             mv.declare_multi_valued(agent.predicates.has_criteria);
             mv.declare_multi_valued(agent.predicates.blocked_by);
+            // tool:access is one-to-many: a tool may be granted to multiple agents.
+            if let Ok(access_pred) =
+                agent.engine.resolve_or_create_relation("tool:access")
+            {
+                mv.declare_multi_valued(access_pred);
+            }
+        }
+
+        // Register all built-in tool manifests as KG triples for peer discovery.
+        if let Ok(registrar) = super::tool_graph::ToolGraphRegistrar::init(&agent.engine) {
+            let count = registrar.register_all(&agent.tool_registry, "akhomed", &["agent:any"]);
+            tracing::debug!(count, "tool_graph: registered tool manifests in KG");
+        } else {
+            tracing::warn!("tool_graph: failed to initialise ToolGraphRegistrar");
         }
 
         // Initialize causal manager (Phase 15a): try restoring persisted
