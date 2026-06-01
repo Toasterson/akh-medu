@@ -1020,15 +1020,74 @@ impl Agent {
     }
 
     /// Trigger memory consolidation.
+    ///
+    /// After persisting episodic memories, runs VSA competence gap detection
+    /// and auto-generates up to 10 `Proposed` investigation goals at priority 64
+    /// for knowledge areas with coverage score < 0.70.  Duplicate goals (by VSA
+    /// similarity) are silently skipped.  Human operators can promote, demote, or
+    /// cancel auto-generated goals via normal goal management.
     pub fn consolidate(&mut self) -> AgentResult<ConsolidationResult> {
-        consolidate(
+        let mut result = consolidate(
             &mut self.working_memory,
             &self.engine,
             &self.goals,
             &self.config.consolidation,
             &self.predicates,
             self.cycle_count,
-        )
+        )?;
+
+        // Post-consolidation: VSA competence gap → investigation goals.
+        let gap_proposals = goal_generation::generate_competence_gap_goals(
+            &self.engine,
+            &self.goals,
+            &self.config.goal_generation,
+        );
+
+        let mut vsa_goals_created = 0usize;
+        for proposal in &gap_proposals {
+            if vsa_goals_created >= goal_generation::MAX_COMPETENCE_GAP_GOALS {
+                break;
+            }
+            match goal::create_goal(
+                &self.engine,
+                &proposal.description,
+                proposal.priority_suggestion,
+                &proposal.success_criteria,
+                &self.predicates,
+            ) {
+                Ok(mut g) => {
+                    g.source = Some(proposal.source.clone());
+                    g.justification = Some(goal::GoalJustification::DefaultAssumption {
+                        rationale: proposal.rationale.clone(),
+                    });
+                    // Auto-generated goals start as Proposed so humans can review.
+                    if let Err(e) = goal::update_goal_status(
+                        &self.engine,
+                        &mut g,
+                        GoalStatus::Proposed,
+                        &self.predicates,
+                    ) {
+                        tracing::debug!("failed to set Proposed status for gap goal: {e}");
+                    }
+                    self.goals.push(g);
+                    vsa_goals_created += 1;
+                }
+                Err(e) => {
+                    tracing::debug!("failed to create competence gap goal: {e}");
+                }
+            }
+        }
+
+        result.vsa_gap_goals_created = vsa_goals_created;
+
+        if vsa_goals_created > 0 {
+            tracing::debug!(
+                count = vsa_goals_created,
+                "consolidation: auto-generated VSA competence gap goals"
+            );
+        }
+
+        Ok(result)
     }
 
     /// Recall episodic memories by query symbols.
