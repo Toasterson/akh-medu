@@ -227,7 +227,30 @@ impl Goal {
     }
 }
 
+/// Strip any internal `goal:` / `desc:` prefixes that a caller may have
+/// accidentally embedded in the description text. These prefixes belong on
+/// the KG label, not inside the human-readable description itself.
+///
+/// Examples:
+/// - `"goal: investigate Tecton"` → `"investigate Tecton"`
+/// - `"desc:my objective"` → `"my objective"`
+/// - `"investigate: Tecton"` → unchanged (single colon mid-sentence is fine)
+pub fn normalize_goal_description(description: &str) -> &str {
+    // Each prefix is tried in order; the first match wins.
+    for prefix in ["goal: ", "goal:", "desc: ", "desc:"] {
+        if let Some(rest) = description.strip_prefix(prefix) {
+            return rest.trim_start();
+        }
+    }
+    description.trim_start()
+}
+
 /// Create a goal and persist it in the knowledge graph.
+///
+/// A goal is stored as a **single** entity whose label is
+/// `goal:<full description>`. No separate `desc:` entity is created.
+/// The description is normalized to strip any accidental `goal:` / `desc:`
+/// leading prefixes before the label is formed.
 ///
 /// If a symbol with the same goal label already exists (e.g. from a previous
 /// persisted session), it is reused rather than causing a duplicate-label error.
@@ -238,7 +261,8 @@ pub fn create_goal(
     criteria: &str,
     predicates: &AgentPredicates,
 ) -> AgentResult<Goal> {
-    let label = format!("goal:{}", description.chars().take(40).collect::<String>());
+    let description = normalize_goal_description(description);
+    let label = format!("goal:{description}");
     let goal_id = engine.resolve_or_create_entity(&label)?;
 
     let now = std::time::SystemTime::now()
@@ -249,7 +273,7 @@ pub fn create_goal(
     // Remove any stale property triples from a previous generation cycle
     // (resolve_or_create_entity reuses the same goal_id for the same label).
     let kg = engine.knowledge_graph();
-    for pred in [predicates.has_description, predicates.has_status, predicates.has_priority] {
+    for pred in [predicates.has_status, predicates.has_priority] {
         let old: Vec<_> = kg
             .triples_from(goal_id)
             .into_iter()
@@ -259,10 +283,6 @@ pub fn create_goal(
             let _ = kg.remove_triple(o.subject, o.predicate, o.object);
         }
     }
-
-    // Store description.
-    let desc_sym = engine.resolve_or_create_entity(&format!("desc:{description}"))?;
-    let _ = engine.add_triple(&Triple::new(goal_id, predicates.has_description, desc_sym));
 
     // Store status.
     let status_sym = engine.resolve_or_create_entity("status:active")?;
@@ -398,7 +418,8 @@ pub fn restore_goals(engine: &Engine, predicates: &AgentPredicates) -> AgentResu
         }
 
         let triples = engine.triples_from(meta.id);
-        let mut description = description_raw.to_string();
+        // Normalize the label-derived description (strip stale goal:/desc: prefixes).
+        let mut description = normalize_goal_description(description_raw).to_string();
         let mut status = GoalStatus::Pending;
         // Track the SymbolId of the status object so we pick the most recent one
         // (highest SymbolId = most recently created, since IDs are monotonic).
@@ -412,7 +433,10 @@ pub fn restore_goals(engine: &Engine, predicates: &AgentPredicates) -> AgentResu
         for triple in &triples {
             let obj_label = engine.resolve_label(triple.object);
             if triple.predicate == predicates.has_description {
-                description = obj_label.trim_start_matches("desc:").to_string();
+                // Backward compat: old sessions stored the full description in a
+                // separate `desc:` entity; use that when available.
+                let raw = obj_label.trim_start_matches("desc:");
+                description = normalize_goal_description(raw).to_string();
             } else if triple.predicate == predicates.has_status {
                 // Only accept this status if it's more recent (higher SymbolId)
                 // than any previously seen status triple for this goal.
@@ -845,5 +869,96 @@ mod tests {
         assert!(user.entrenchment() > decomp.entrenchment());
         assert!(decomp.entrenchment() > inferred.entrenchment());
         assert!(inferred.entrenchment() > default.entrenchment());
+    }
+
+    #[test]
+    fn normalize_goal_description_strips_prefixes() {
+        // Leading goal: prefix is stripped.
+        assert_eq!(
+            normalize_goal_description("goal:investigate Tecton"),
+            "investigate Tecton"
+        );
+        assert_eq!(
+            normalize_goal_description("goal: investigate Tecton"),
+            "investigate Tecton"
+        );
+        // Leading desc: prefix is stripped.
+        assert_eq!(
+            normalize_goal_description("desc:my objective"),
+            "my objective"
+        );
+        assert_eq!(
+            normalize_goal_description("desc: my objective"),
+            "my objective"
+        );
+        // A colon mid-sentence is NOT stripped.
+        assert_eq!(
+            normalize_goal_description("investigate: I am Tecton"),
+            "investigate: I am Tecton"
+        );
+        // Already clean descriptions pass through unchanged.
+        assert_eq!(
+            normalize_goal_description("find all dependencies"),
+            "find all dependencies"
+        );
+        // Empty-after-strip falls back to empty.
+        assert_eq!(normalize_goal_description("goal:"), "");
+        // Nested prefix: only the outermost is stripped.
+        assert_eq!(
+            normalize_goal_description("goal:desc:inner"),
+            "desc:inner"
+        );
+    }
+
+    fn test_engine() -> crate::engine::Engine {
+        use crate::engine::{Engine, EngineConfig};
+        use crate::vsa::Dimension;
+        Engine::new(EngineConfig {
+            dimension: Dimension(1000),
+            ..EngineConfig::default()
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn create_goal_label_uses_full_description() {
+        let engine = test_engine();
+        let preds = crate::agent::agent::AgentPredicates::init(&engine).unwrap();
+
+        let description = "investigate: I am Tecton, the AI agent who exists to reason";
+        let goal = create_goal(&engine, description, 128, "done", &preds).unwrap();
+
+        // The goal entity label must be goal:<full description> with no truncation.
+        let label = engine.resolve_label(goal.symbol_id);
+        assert_eq!(label, format!("goal:{description}"));
+
+        // The restored description must match exactly.
+        assert_eq!(goal.description, description);
+
+        // No separate desc: entity should exist for this goal.
+        let all: Vec<_> = engine
+            .all_symbols()
+            .into_iter()
+            .filter(|m| m.label.starts_with("desc:"))
+            .collect();
+        assert!(
+            all.is_empty(),
+            "no desc: entities should be created; found: {all:?}"
+        );
+    }
+
+    #[test]
+    fn create_goal_normalizes_prefixed_description() {
+        let engine = test_engine();
+        let preds = crate::agent::agent::AgentPredicates::init(&engine).unwrap();
+
+        // Caller accidentally passes a description already prefixed with goal:.
+        let raw = "goal: investigate who Tecton is";
+        let goal = create_goal(&engine, raw, 128, "done", &preds).unwrap();
+
+        // Label should not double-prefix.
+        let label = engine.resolve_label(goal.symbol_id);
+        assert_eq!(label, "goal:investigate who Tecton is");
+        assert_eq!(goal.description, "investigate who Tecton is");
     }
 }
