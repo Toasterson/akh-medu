@@ -110,6 +110,11 @@ pub struct Phase9Config {
     pub hierarchy_in_inference: bool,
     /// Expand rule macros on matching triple insertions.
     pub macro_expansion_on_insert: bool,
+    /// Reject triples where subject == object (self-referential).
+    ///
+    /// Defaults to `true`. Set to `false` only when inserting intentionally
+    /// reflexive triples (e.g., from second-order reflexivity inference).
+    pub reject_self_referential: bool,
 }
 
 impl Default for Phase9Config {
@@ -123,6 +128,7 @@ impl Default for Phase9Config {
             temporal_decay_enabled: true,
             hierarchy_in_inference: true,
             macro_expansion_on_insert: true,
+            reject_self_referential: true,
         }
     }
 }
@@ -446,6 +452,16 @@ impl Engine {
     /// 2. **Insert**: KG + hypervector creation + SPARQL sync
     /// 3. **Post-insert**: Hierarchy invalidation, Skolem auto-grounding, rule macro expansion
     pub fn add_triple(&self, triple: &Triple) -> AkhResult<()> {
+        // --- Self-referential guard ---
+        if self.phase9_config.reject_self_referential && triple.subject == triple.object {
+            return Err(EngineError::SelfReferentialTriple {
+                subject_label: self.resolve_label(triple.subject),
+                predicate_label: self.resolve_label(triple.predicate),
+                subject_id: triple.subject.get(),
+            }
+            .into());
+        }
+
         // --- Phase 9 pre-insert: constraint check ---
         if self.phase9_config.enforce_constraints {
             let registry = self.constraint_registry.read().unwrap();
@@ -1378,6 +1394,33 @@ impl Engine {
                 }
                 removed += 1;
             }
+        }
+
+        Ok(removed)
+    }
+
+    /// Remove all self-referential triples (where subject == object) from the KG and SPARQL store.
+    ///
+    /// Self-referential triples are rejected by `add_triple` when
+    /// `Phase9Config::reject_self_referential` is `true`.  This method
+    /// retroactively purges any that slipped in before the guard was active.
+    ///
+    /// Returns the number of triples removed.
+    pub fn purge_self_referential_triples(&self) -> AkhResult<usize> {
+        let candidates: Vec<Triple> = self
+            .all_triples()
+            .into_iter()
+            .filter(|t| t.subject == t.object)
+            .collect();
+
+        let mut removed = 0usize;
+        for triple in candidates {
+            self.knowledge_graph
+                .remove_triple(triple.subject, triple.predicate, triple.object);
+            if let Some(ref sparql) = self.sparql {
+                let _ = sparql.remove_triple(triple.subject, triple.predicate, triple.object);
+            }
+            removed += 1;
         }
 
         Ok(removed)
