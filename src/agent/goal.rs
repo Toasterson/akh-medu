@@ -25,6 +25,10 @@ pub enum GoalStatus {
     Dormant,
     /// Reformulated: replaced by a simpler version (Phase 11f).
     Reformulated { replacement: SymbolId },
+    /// Auto-cancelled by the hygiene pass (stale or exceeded child depth).
+    Cancelled { reason: String },
+    /// Collapsed into a primary goal by the deduplication hygiene pass.
+    Duplicate { primary: SymbolId },
 }
 
 impl GoalStatus {
@@ -39,6 +43,8 @@ impl GoalStatus {
             Self::Proposed => "proposed".into(),
             Self::Dormant => "dormant".into(),
             Self::Reformulated { replacement } => format!("reformulated:{}", replacement.get()),
+            Self::Cancelled { reason } => format!("cancelled:{reason}"),
+            Self::Duplicate { primary } => format!("duplicate:{}", primary.get()),
         }
     }
 
@@ -53,6 +59,17 @@ impl GoalStatus {
                 && let Some(sym) = SymbolId::new(id)
             {
                 return Self::Reformulated { replacement: sym };
+            }
+            Self::Pending
+        } else if let Some(reason) = label.strip_prefix("cancelled:") {
+            Self::Cancelled {
+                reason: reason.into(),
+            }
+        } else if let Some(id_str) = label.strip_prefix("duplicate:") {
+            if let Ok(id) = id_str.parse::<u64>()
+                && let Some(sym) = SymbolId::new(id)
+            {
+                return Self::Duplicate { primary: sym };
             }
             Self::Pending
         } else {
@@ -79,9 +96,9 @@ impl std::fmt::Display for GoalStatus {
             Self::Suspended => write!(f, "suspended"),
             Self::Proposed => write!(f, "proposed"),
             Self::Dormant => write!(f, "dormant"),
-            Self::Reformulated { replacement } => {
-                write!(f, "reformulated → {replacement}")
-            }
+            Self::Reformulated { replacement } => write!(f, "reformulated → {replacement}"),
+            Self::Cancelled { reason } => write!(f, "cancelled: {reason}"),
+            Self::Duplicate { primary } => write!(f, "duplicate → {primary}"),
         }
     }
 }
@@ -222,7 +239,13 @@ impl Goal {
             all_goals
                 .iter()
                 .find(|g| g.symbol_id == *blocker_id)
-                .is_some_and(|g| !matches!(g.status, GoalStatus::Completed | GoalStatus::Failed { .. }))
+                .is_some_and(|g| !matches!(
+                    g.status,
+                    GoalStatus::Completed
+                        | GoalStatus::Failed { .. }
+                        | GoalStatus::Cancelled { .. }
+                        | GoalStatus::Duplicate { .. }
+                ))
         })
     }
 }
@@ -564,6 +587,12 @@ mod tests {
             GoalStatus::Suspended,
             GoalStatus::Proposed,
             GoalStatus::Dormant,
+            GoalStatus::Cancelled {
+                reason: "idle for 20 cycles".into(),
+            },
+            GoalStatus::Duplicate {
+                primary: SymbolId::new(7).unwrap(),
+            },
         ];
         for status in statuses {
             let label = status.as_label();

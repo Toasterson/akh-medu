@@ -71,6 +71,8 @@ pub struct AgentConfig {
     pub sleep: super::sleep::SleepConfig,
     /// Directed curiosity settings (Phase 11j).
     pub curiosity: super::curiosity::DirectedCuriosityConfig,
+    /// Goal queue hygiene settings.
+    pub hygiene: super::hygiene::HygieneConfig,
 }
 
 impl Default for AgentConfig {
@@ -87,6 +89,7 @@ impl Default for AgentConfig {
             chunking: ChunkingConfig::default(),
             sleep: super::sleep::SleepConfig::default(),
             curiosity: super::curiosity::DirectedCuriosityConfig::default(),
+            hygiene: super::hygiene::HygieneConfig::default(),
         }
     }
 }
@@ -242,6 +245,8 @@ pub struct Agent {
     pub(crate) sleep_cycle: super::sleep::SleepCycle,
     /// Directed curiosity configuration (Phase 11j).
     pub(crate) curiosity_config: super::curiosity::DirectedCuriosityConfig,
+    /// Goal queue hygiene configuration.
+    pub(crate) hygiene_config: super::hygiene::HygieneConfig,
     /// Optional WASM tool runtime (only when `wasm-tools` feature is enabled).
     #[cfg(feature = "wasm-tools")]
     pub(crate) wasm_runtime: Option<super::wasm_runtime::WasmToolRuntime>,
@@ -435,6 +440,7 @@ impl Agent {
         let chunking_config = config.chunking.clone();
         let sleep_cycle = super::sleep::SleepCycle::new(config.sleep.clone());
         let curiosity_config = config.curiosity.clone();
+        let hygiene_config = config.hygiene.clone();
 
         let mut htn_registry = MethodRegistry::new();
         decomposition::register_builtin_methods(&mut htn_registry);
@@ -492,6 +498,7 @@ impl Agent {
             dialogue_manager,
             sleep_cycle,
             curiosity_config,
+            hygiene_config,
             #[cfg(feature = "wasm-tools")]
             wasm_runtime: super::wasm_runtime::WasmToolRuntime::new().ok(),
         };
@@ -901,6 +908,29 @@ impl Agent {
             }
 
             self.last_watch_firings = firings;
+        }
+
+        // Periodic goal queue hygiene (dedup, staleness, depth cap).
+        let hyg_interval = self.hygiene_config.run_every_n_cycles;
+        if hyg_interval > 0 && self.cycle_count.is_multiple_of(hyg_interval) {
+            let hr = super::hygiene::run_hygiene_pass(
+                &mut self.goals,
+                &self.engine,
+                &self.predicates,
+                self.cycle_count,
+                self.session_start_cycle,
+                &self.hygiene_config,
+            );
+            if hr.cancelled_stale + hr.cancelled_deep + hr.deduplicated > 0 {
+                tracing::info!(
+                    stale = hr.cancelled_stale,
+                    deep = hr.cancelled_deep,
+                    dedup = hr.deduplicated,
+                    before = hr.total_before,
+                    after = hr.total_after,
+                    "goal hygiene pass complete"
+                );
+            }
         }
 
         // Periodic autonomous goal generation.
@@ -2771,6 +2801,7 @@ impl Agent {
             })
             .unwrap_or_else(|| config.curiosity.clone());
 
+        let hygiene_config = config.hygiene.clone();
         let session_start_cycle = cycle_count;
         let chunking_config = config.chunking.clone();
 
@@ -2827,6 +2858,7 @@ impl Agent {
             dialogue_manager,
             sleep_cycle,
             curiosity_config,
+            hygiene_config,
             #[cfg(feature = "wasm-tools")]
             wasm_runtime: super::wasm_runtime::WasmToolRuntime::new().ok(),
         };
