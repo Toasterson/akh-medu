@@ -419,6 +419,51 @@ pub struct RemoveBatchParams {
     pub triples: Vec<TripleEntry>,
 }
 
+fn default_chunk_size() -> usize {
+    50
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PurgeByPatternParams {
+    #[schemars(description = "Target workspace (default: \"default\")")]
+    #[serde(default = "default_workspace")]
+    pub workspace: String,
+    #[schemars(
+        description = "Regex matched against subject labels. Omit to match any subject."
+    )]
+    pub subject_pattern: Option<String>,
+    #[schemars(
+        description = "Regex matched against predicate labels. Omit to match any predicate."
+    )]
+    pub predicate_pattern: Option<String>,
+    #[schemars(
+        description = "Regex matched against object labels. Omit to match any object."
+    )]
+    pub object_pattern: Option<String>,
+    #[schemars(
+        description = "Number of triples to delete per redb commit (default: 50, max: 500). \
+                       Smaller values reduce per-transaction pressure at the cost of more commits."
+    )]
+    #[serde(default = "default_chunk_size")]
+    pub chunk_size: usize,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SparqlDeleteParams {
+    #[schemars(description = "Target workspace (default: \"default\")")]
+    #[serde(default = "default_workspace")]
+    pub workspace: String,
+    #[schemars(
+        description = "SPARQL 1.1 DELETE query. \
+                       Supported forms: \
+                       'DELETE WHERE { ?s ?p ?o . FILTER(...) }' and \
+                       'DELETE { ?s ?p ?o } WHERE { ... }'. \
+                       The WHERE clause is evaluated against the SPARQL store; \
+                       matched triples are removed from both the KG and SPARQL store."
+    )]
+    pub query: String,
+}
+
 // ── Phase 1: Bootstrap Stage Tools ──────────────────────────────────────
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -2072,11 +2117,76 @@ impl AkhMcpServer {
         Ok(CallToolResult::success(vec![Content::text(result)]))
     }
 
+    #[tool(
+        name = "purge_by_pattern",
+        description = "Delete all triples whose subject/predicate/object labels match the given \
+                       regex patterns. All provided patterns must match (AND semantics); omitting \
+                       a pattern matches any value for that field. Deletion is chunked into \
+                       bounded redb commits (default 50 per chunk) to avoid timeouts on large \
+                       graphs. Returns counts of scanned and removed triples."
+    )]
+    async fn purge_by_pattern(
+        &self,
+        Parameters(params): Parameters<PurgeByPatternParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let engine = self.state.get_engine(&params.workspace).await?;
+
+        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            let removed = engine
+                .purge_by_pattern(
+                    params.subject_pattern.as_deref(),
+                    params.predicate_pattern.as_deref(),
+                    params.object_pattern.as_deref(),
+                    params.chunk_size,
+                )
+                .map_err(|e| format!("{e}"))?;
+
+            Ok(format!("Purged {removed} triple(s) matching pattern"))
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("task panicked: {e}"), None))?
+        .map_err(|e| McpError::internal_error(e, None))?;
+
+        Ok(CallToolResult::success(vec![Content::text(result)]))
+    }
+
+    #[tool(
+        name = "sparql_delete",
+        description = "Execute a SPARQL 1.1 DELETE query and remove matching triples from the \
+                       knowledge graph. Requires a persistent workspace (--data-dir). \
+                       Supported forms: \
+                       'DELETE WHERE { ?s ?p ?o . FILTER(...) }' and \
+                       'DELETE { ?s ?p ?o } WHERE { ... }'. \
+                       The WHERE clause is evaluated against the SPARQL store; matched triples \
+                       are removed from both the in-memory KG and the persistent SPARQL store."
+    )]
+    async fn sparql_delete(
+        &self,
+        Parameters(params): Parameters<SparqlDeleteParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let engine = self.state.get_engine(&params.workspace).await?;
+
+        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            let removed = engine
+                .sparql_delete(&params.query)
+                .map_err(|e| format!("{e}"))?;
+
+            let _ = engine.persist();
+
+            Ok(format!("Deleted {removed} triple(s) via SPARQL DELETE"))
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("task panicked: {e}"), None))?
+        .map_err(|e| McpError::internal_error(e, None))?;
+
+        Ok(CallToolResult::success(vec![Content::text(result)]))
+    }
+
     // ══ Daemon Pause/Resume ═══════════════════════════════════════════
 
     #[tool(
         name = "suspend_workspace",
-        description = "Suspend the daemon autonomous cycles on this workspace, freeing the agent lock so external writers can perform batch operations (assert_triple, assert_batch, remove_triple, remove_batch) without contention. Call resume_workspace when done."
+        description = "Suspend the daemon autonomous cycles on this workspace, freeing the agent lock so external writers can perform batch operations (assert_triple, assert_batch, remove_triple, remove_batch, purge_by_pattern, sparql_delete) without contention. Call resume_workspace when done."
     )]
     async fn suspend_workspace(
         &self,

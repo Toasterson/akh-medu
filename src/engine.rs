@@ -2078,6 +2078,169 @@ impl Engine {
         Ok(removed)
     }
 
+    /// Delete all triples whose resolved labels match the given regex patterns.
+    ///
+    /// At least one of `subject_pattern`, `predicate_pattern`, or `object_pattern`
+    /// must be `Some`. A triple is selected when **all** provided patterns match
+    /// their respective field labels (vacuous truth for omitted patterns).
+    ///
+    /// Removes from the in-memory KG and (if present) the SPARQL store in batches
+    /// of `chunk_size` to bound per-transaction write pressure.  After each chunk
+    /// `persist()` is called so that partial progress survives if the caller is
+    /// interrupted. Returns the total number of triples removed.
+    pub fn purge_by_pattern(
+        &self,
+        subject_pattern: Option<&str>,
+        predicate_pattern: Option<&str>,
+        object_pattern: Option<&str>,
+        chunk_size: usize,
+    ) -> AkhResult<usize> {
+        use regex::Regex;
+
+        if subject_pattern.is_none() && predicate_pattern.is_none() && object_pattern.is_none() {
+            return Err(EngineError::InvalidPattern {
+                message: "at least one of subject_pattern, predicate_pattern, \
+                          object_pattern must be provided"
+                    .into(),
+            }
+            .into());
+        }
+
+        let s_re = subject_pattern
+            .map(Regex::new)
+            .transpose()
+            .map_err(|e| EngineError::InvalidPattern {
+                message: format!("subject pattern: {e}"),
+            })?;
+        let p_re = predicate_pattern
+            .map(Regex::new)
+            .transpose()
+            .map_err(|e| EngineError::InvalidPattern {
+                message: format!("predicate pattern: {e}"),
+            })?;
+        let o_re = object_pattern
+            .map(Regex::new)
+            .transpose()
+            .map_err(|e| EngineError::InvalidPattern {
+                message: format!("object pattern: {e}"),
+            })?;
+
+        let chunk_sz = chunk_size.clamp(1, 500);
+
+        // Collect matching (s, p, o) SymbolId triples without holding graph lock.
+        let candidates: Vec<(SymbolId, SymbolId, SymbolId)> = self
+            .knowledge_graph
+            .all_triples()
+            .into_iter()
+            .filter(|t| {
+                s_re.as_ref()
+                    .map_or(true, |re| re.is_match(&self.registry.resolve_label(t.subject)))
+                    && p_re.as_ref().map_or(true, |re| {
+                        re.is_match(&self.registry.resolve_label(t.predicate))
+                    })
+                    && o_re.as_ref().map_or(true, |re| {
+                        re.is_match(&self.registry.resolve_label(t.object))
+                    })
+            })
+            .map(|t| (t.subject, t.predicate, t.object))
+            .collect();
+
+        let mut removed = 0usize;
+
+        for chunk in candidates.chunks(chunk_sz) {
+            for &(s, p, o) in chunk {
+                if self.knowledge_graph.remove_triple(s, p, o) {
+                    if let Some(ref sparql) = self.sparql {
+                        let _ = sparql.remove_triple(s, p, o);
+                    }
+                    removed += 1;
+                }
+            }
+            // Persist metadata after each chunk to bound redb write-transaction size.
+            let _ = self.persist();
+        }
+
+        Ok(removed)
+    }
+
+    /// Execute a basic SPARQL DELETE query and remove matching triples from
+    /// the KG (and SPARQL store if present).
+    ///
+    /// Supported forms:
+    /// - `DELETE WHERE { ?s ?p ?o ... }`
+    /// - `DELETE { ?s ?p ?o } WHERE { ... }`
+    ///
+    /// The WHERE clause is re-executed as a `SELECT ?s ?p ?o` against the
+    /// SPARQL store; matched triples are then removed from both stores.
+    /// Returns the number of triples removed.
+    pub fn sparql_delete(&self, query: &str) -> AkhResult<usize> {
+        use crate::graph::sparql::SparqlStore;
+
+        let sparql_store = self.sparql.as_ref().ok_or(EngineError::InvalidConfig {
+            message: "SPARQL DELETE requires persistence (--data-dir)".into(),
+        })?;
+
+        let select_query = Self::sparql_delete_to_select(query).ok_or_else(|| {
+            EngineError::SparqlDeleteParse {
+                message: format!("unrecognised query: {query}"),
+            }
+        })?;
+
+        let rows = sparql_store
+            .query_select(&select_query)
+            .map_err(|e| EngineError::SparqlDeleteParse {
+                message: format!("SELECT failed: {e}"),
+            })?;
+
+        let candidates: Vec<(SymbolId, SymbolId, SymbolId)> = rows
+            .iter()
+            .filter_map(|row| {
+                let find = |var: &str| {
+                    row.iter()
+                        .find(|(k, _)| k.as_str() == var)
+                        .map(|(_, v)| v.trim_matches(|c: char| c == '<' || c == '>').to_string())
+                };
+                let s_iri = find("s")?;
+                let p_iri = find("p")?;
+                let o_iri = find("o")?;
+                let s_id = SparqlStore::iri_to_symbol(&s_iri)?;
+                let p_id = SparqlStore::iri_to_symbol(&p_iri)?;
+                let o_id = SparqlStore::iri_to_symbol(&o_iri)?;
+                Some((s_id, p_id, o_id))
+            })
+            .collect();
+
+        let mut removed = 0usize;
+        for &(s, p, o) in &candidates {
+            if self.knowledge_graph.remove_triple(s, p, o) {
+                let _ = sparql_store.remove_triple(s, p, o);
+                removed += 1;
+            }
+        }
+
+        Ok(removed)
+    }
+
+    /// Convert a `DELETE WHERE { ... }` or `DELETE { ?s ?p ?o } WHERE { ... }`
+    /// query into an equivalent `SELECT ?s ?p ?o WHERE { ... }` query.
+    fn sparql_delete_to_select(query: &str) -> Option<String> {
+        let trimmed = query.trim();
+        let upper = trimmed.to_uppercase();
+
+        // Find WHERE keyword position; must come after DELETE.
+        let delete_pos = upper.find("DELETE")?;
+        let where_search_start = delete_pos + "DELETE".len();
+        let where_pos = upper[where_search_start..].find("WHERE").map(|p| where_search_start + p)?;
+
+        // Extract WHERE body from the original (case-preserving) string.
+        let after_where = trimmed[where_pos + "WHERE".len()..].trim_start();
+        if after_where.starts_with('{') {
+            return Some(format!("SELECT ?s ?p ?o WHERE {after_where}"));
+        }
+
+        None
+    }
+
     // -----------------------------------------------------------------------
     // Predicate Hierarchy (Phase 9b)
     // -----------------------------------------------------------------------
@@ -2975,5 +3138,69 @@ mod tests {
         assert!(names.contains(&"formal"));
         assert!(names.contains(&"terse"));
         assert!(names.contains(&"narrative"));
+    }
+
+    #[test]
+    fn purge_by_pattern_object_match() {
+        let engine = Engine::new(EngineConfig {
+            dimension: Dimension::TEST,
+            ..Default::default()
+        })
+        .unwrap();
+
+        let sun = engine.create_symbol(SymbolKind::Entity, "Sun").unwrap();
+        let moon = engine.create_symbol(SymbolKind::Entity, "Moon").unwrap();
+        let is_a = engine.create_symbol(SymbolKind::Relation, "is-a").unwrap();
+        let star = engine.create_symbol(SymbolKind::Entity, "Star").unwrap();
+        let planet = engine.create_symbol(SymbolKind::Entity, "Planet").unwrap();
+
+        engine.add_triple(&Triple::new(sun.id, is_a.id, star.id)).unwrap();
+        engine.add_triple(&Triple::new(moon.id, is_a.id, planet.id)).unwrap();
+        assert_eq!(engine.all_triples().len(), 2);
+
+        // Purge only triples whose object label starts with "Star".
+        let removed = engine
+            .purge_by_pattern(None, None, Some("^Star$"), 10)
+            .unwrap();
+        assert_eq!(removed, 1);
+        assert_eq!(engine.all_triples().len(), 1);
+        // The moon triple should survive.
+        assert!(engine.has_triple(moon.id, is_a.id, planet.id));
+    }
+
+    #[test]
+    fn purge_by_pattern_requires_at_least_one_pattern() {
+        let engine = Engine::new(EngineConfig {
+            dimension: Dimension::TEST,
+            ..Default::default()
+        })
+        .unwrap();
+
+        let result = engine.purge_by_pattern(None, None, None, 10);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn sparql_delete_to_select_delete_where() {
+        let q = "DELETE WHERE { ?s ?p ?o }";
+        let sel = Engine::sparql_delete_to_select(q).unwrap();
+        assert!(sel.starts_with("SELECT ?s ?p ?o WHERE"));
+        assert!(sel.contains("{ ?s ?p ?o }"));
+    }
+
+    #[test]
+    fn sparql_delete_to_select_delete_where_filter() {
+        let q = "delete where { ?s ?p ?o . FILTER(regex(str(?o), \"^sim\")) }";
+        let sel = Engine::sparql_delete_to_select(q).unwrap();
+        assert!(sel.starts_with("SELECT ?s ?p ?o WHERE"));
+        assert!(sel.contains("FILTER"));
+    }
+
+    #[test]
+    fn sparql_delete_to_select_delete_graph_where() {
+        let q = "DELETE { ?s ?p ?o } WHERE { ?s ?p ?o . FILTER(?p = <urn:x>) }";
+        let sel = Engine::sparql_delete_to_select(q).unwrap();
+        assert!(sel.starts_with("SELECT ?s ?p ?o WHERE"));
+        assert!(sel.contains("FILTER"));
     }
 }
