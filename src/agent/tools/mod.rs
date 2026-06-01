@@ -1,7 +1,8 @@
 //! Built-in tools for the agent: KG query, KG mutate, memory recall, reason,
 //! similarity search, library search, file I/O, HTTP fetch, shell exec,
 //! user interaction, infer rules, gap analysis, CSV ingest, text ingest,
-//! code ingest, content ingest, doc gen, pattern mine, audit log.
+//! code ingest, content ingest, doc gen, pattern mine, audit log,
+//! and MCP client for remote tool access.
 
 pub mod audit_log;
 pub mod code_gen;
@@ -27,6 +28,7 @@ pub mod similarity_search;
 pub mod text_ingest;
 pub mod user_interact;
 pub mod agent_management;
+pub mod mcp;
 pub mod trigger_manage;
 
 pub use code_gen::CodeGenTool;
@@ -54,3 +56,4 @@ pub use agent_management::{AgentListTool, AgentMessageTool, AgentRetireTool, Age
 pub use trigger_manage::TriggerManageTool;
 pub use audit_log::AuditLogTool;
 pub use delegate::DelegateTool;
+pub use mcp::{McpCallTool, McpClient, McpDiscoverTool, McpError, McpServerConfig};
