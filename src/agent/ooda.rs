@@ -1354,6 +1354,7 @@ fn act(agent: &mut Agent, decision: &Decision, cycle: u64) -> AgentResult<Action
                 if let Some(ref mut p) = agent.psyche {
                     p.record_shadow_encounter();
                 }
+                agent.sync_psyche_snapshot();
 
                 let veto_output = ToolOutput {
                     result: format!(

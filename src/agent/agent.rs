@@ -160,6 +160,10 @@ pub struct Agent {
     pub(crate) sink: Arc<dyn crate::message::MessageSink>,
     /// Optional Jungian psyche (loaded from the psyche compartment).
     pub(crate) psyche: Option<crate::compartment::psyche::Psyche>,
+    /// Non-blocking read-only snapshot of the current psyche.
+    /// Shared via `Arc` so monitoring tools can read it without acquiring the
+    /// agent mutex.  Kept in sync after every psyche mutation.
+    pub(crate) psyche_snapshot: Arc<std::sync::RwLock<Option<crate::compartment::psyche::Psyche>>>,
     /// Motivational drive system for autonomous goal generation.
     pub(crate) drives: DriveSystem,
     /// Value ordering for argumentation-based priority reasoning (Phase 11c).
@@ -450,6 +454,7 @@ impl Agent {
             plans: std::collections::HashMap::new(),
             last_reflection: None,
             sink: Arc::new(crate::message::StdoutSink),
+            psyche_snapshot: Arc::new(std::sync::RwLock::new(psyche.clone())),
             psyche,
             drives,
             audience: Audience::exploration(),
@@ -786,6 +791,8 @@ impl Agent {
                     tracing::warn!("failed to apply structural adjustments: {e}");
                 }
             }
+            // Psyche may have evolved during reflect() — keep snapshot in sync.
+            self.sync_psyche_snapshot();
 
             // Argumentation-based reprioritization replaces raw ±30 adjustments.
             let stall_threshold = self.config.reflection.stagnation_threshold;
@@ -1086,6 +1093,30 @@ impl Agent {
         self.psyche.as_ref()
     }
 
+    /// Return a cloned handle to the non-blocking psyche snapshot.
+    ///
+    /// Callers can read the snapshot without holding the agent mutex,
+    /// enabling concurrent monitoring during long OODA cycles.
+    pub fn psyche_snapshot(
+        &self,
+    ) -> Arc<std::sync::RwLock<Option<crate::compartment::psyche::Psyche>>> {
+        Arc::clone(&self.psyche_snapshot)
+    }
+
+    /// Sync `psyche_snapshot` to match the current `self.psyche`.
+    ///
+    /// Called after every mutation of `self.psyche` so monitoring reads
+    /// always see a fresh copy without acquiring the agent mutex.
+    /// Uses `try_write` so the OODA loop is never stalled by active readers.
+    /// If the write lock is unavailable, the snapshot stays at the previous
+    /// state until the next mutation (readers see data that is at most one
+    /// cycle stale).
+    pub(crate) fn sync_psyche_snapshot(&self) {
+        if let Ok(mut g) = self.psyche_snapshot.try_write() {
+            *g = self.psyche.clone();
+        }
+    }
+
     /// Set or replace the agent's psyche.
     ///
     /// Returns `PsycheImmutable` if the existing psyche is awakened.
@@ -1100,12 +1131,14 @@ impl Agent {
             }
         }
         self.psyche = Some(psyche);
+        self.sync_psyche_snapshot();
         Ok(())
     }
 
     /// Unconditionally replace the agent's psyche (admin override).
     pub fn force_set_psyche(&mut self, psyche: crate::compartment::psyche::Psyche) {
         self.psyche = Some(psyche);
+        self.sync_psyche_snapshot();
     }
 
     // ── Channel registry (Phase 12a) ────────────────────────────────────
@@ -2785,6 +2818,7 @@ impl Agent {
             plans: std::collections::HashMap::new(),
             last_reflection: None,
             sink: Arc::new(crate::message::StdoutSink),
+            psyche_snapshot: Arc::new(std::sync::RwLock::new(psyche.clone())),
             psyche,
             drives,
             audience,
