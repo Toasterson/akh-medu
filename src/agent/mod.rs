@@ -53,10 +53,12 @@ pub mod idle;
 pub mod library_learn;
 pub mod mcts;
 pub mod memory;
+pub mod memory_sync;
 pub mod metacognition;
 pub mod multi_agent;
 pub mod nlp;
 pub mod ooda;
+pub mod openclaw;
 pub mod pim;
 pub mod plan;
 pub mod plan_monitor;
@@ -227,3 +229,5 @@ pub use watch::{
     Discrepancy, Expectation, TriplePattern, Watch, WatchAction, WatchCondition, WatchFiring,
     WorldSnapshot,
 };
+pub use memory_sync::{MemorySyncConfig, MemorySyncResult};
+pub use openclaw::{OpenClawConfig, OpenClawError};

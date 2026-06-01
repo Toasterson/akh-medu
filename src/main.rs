@@ -231,6 +231,12 @@ enum Commands {
         #[command(subcommand)]
         action: WikiAction,
     },
+
+    /// Sync OpenClaw daily memory journals into Tecton episodic memory.
+    MemorySync {
+        #[command(subcommand)]
+        action: MemorySyncAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -295,6 +301,21 @@ enum WikiBlogAction {
         #[arg(long)]
         topic: String,
     },
+}
+
+#[derive(Subcommand)]
+enum MemorySyncAction {
+    /// Run an immediate OpenClaw journal sync into episodic memory.
+    ///
+    /// Reads OPENCLAW_API_KEY and OPENCLAW_ENDPOINT from the environment.
+    /// Journals already imported are skipped (idempotent).
+    Sync {
+        /// Maximum number of journal entries to ingest in this run.
+        #[arg(long, default_value = "30")]
+        max: usize,
+    },
+    /// Show OpenClaw sync status: last sync time and imported journal count.
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -3726,6 +3747,14 @@ fn main() -> Result<()> {
             let engine = Engine::new(config).into_diagnostic()?;
             dispatch_wiki(action, &engine)?;
         }
+
+        // ── Memory Sync (OpenClaw journals → episodic memory) ────────────
+        Commands::MemorySync { action } => {
+            let engine = Engine::new(config).into_diagnostic()?;
+            let agent_cfg = AgentConfig::default();
+            let agent = Agent::new(Arc::new(engine), agent_cfg).into_diagnostic()?;
+            dispatch_memory_sync(action, agent.predicates(), agent.engine())?;
+        }
     }
 
     Ok(())
@@ -3973,6 +4002,83 @@ fn print_daemon_status(status: &akh_medu::client::DaemonStatus) {
     if let Some(ts) = status.last_goal_gen_at {
         println!("  Last goal gen:  {}", format_timestamp(ts));
     }
+}
+
+/// Dispatch `akh memory-sync` subcommands (requires local engine access).
+#[cfg(not(feature = "client-only"))]
+fn dispatch_memory_sync(
+    action: MemorySyncAction,
+    predicates: &akh_medu::agent::AgentPredicates,
+    engine: &akh_medu::engine::Engine,
+) -> Result<()> {
+    use akh_medu::agent::memory_sync;
+
+    match action {
+        MemorySyncAction::Sync { max } => {
+            let Some(openclaw_cfg) = akh_medu::agent::OpenClawConfig::from_env() else {
+                eprintln!(
+                    "error: OPENCLAW_API_KEY is not set.\n\
+                     Export your OpenClaw bearer token before running sync:\n\
+                     \n  export OPENCLAW_API_KEY=<your-key>\n"
+                );
+                std::process::exit(1);
+            };
+
+            let sync_cfg = akh_medu::agent::MemorySyncConfig {
+                max_per_run: max,
+                ..Default::default()
+            };
+
+            println!("Syncing OpenClaw journals into episodic memory (max {max} entries)...");
+
+            let result = memory_sync::sync_openclaw_journals(
+                engine,
+                &openclaw_cfg,
+                &sync_cfg,
+                predicates,
+                0,
+            )
+            .into_diagnostic()?;
+
+            println!("Done.");
+            println!("  Journals fetched : {}", result.journals_fetched);
+            println!("  Ingested         : {}", result.ingested);
+            println!("  Skipped (cached) : {}", result.skipped);
+
+            if result.ingested > 0 {
+                engine.persist().into_diagnostic()?;
+                println!("  KG persisted.");
+            }
+        }
+
+        MemorySyncAction::Status => {
+            let last_sync = memory_sync::last_sync_timestamp(engine);
+            let count = memory_sync::imported_journal_count(engine);
+
+            println!("OpenClaw Memory Sync Status");
+            println!("===========================");
+            println!(
+                "  Last sync:        {}",
+                last_sync
+                    .map(format_timestamp)
+                    .unwrap_or_else(|| "never".into())
+            );
+            println!("  Journals on file: {count}");
+
+            let key_set = std::env::var("OPENCLAW_API_KEY")
+                .map(|k| !k.is_empty())
+                .unwrap_or(false);
+            println!(
+                "  API key:          {}",
+                if key_set { "configured" } else { "not set (OPENCLAW_API_KEY)" }
+            );
+            let endpoint = std::env::var("OPENCLAW_ENDPOINT")
+                .unwrap_or_else(|_| "https://api.openclaw.dev (default)".into());
+            println!("  Endpoint:         {endpoint}");
+        }
+    }
+
+    Ok(())
 }
 
 /// Format a unix timestamp as a human-readable relative or absolute string.
@@ -5234,6 +5340,14 @@ fn run_client_only(cli: Cli) -> Result<()> {
         // ── Wiki (Akhipedia) — not yet available via remote client ───────
         Commands::Wiki { .. } => {
             eprintln!("Wiki commands require local engine access. Run without --server flag.");
+            std::process::exit(1);
+        }
+
+        // ── Memory Sync — requires local engine access ───────────────────
+        Commands::MemorySync { .. } => {
+            eprintln!(
+                "memory-sync commands require local engine access. Run without --server flag."
+            );
             std::process::exit(1);
         }
     }
