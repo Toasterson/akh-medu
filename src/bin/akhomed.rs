@@ -2965,7 +2965,7 @@ async fn awaken_resolve_handler(
             description: knowledge.description.clone(),
         };
         let ritual = akh_medu::bootstrap::identity::ritual_of_awakening(
-            &knowledge, &purpose, &engine,
+            &knowledge, &purpose, &engine, false,
         )
         .ok();
 

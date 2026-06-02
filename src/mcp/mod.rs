@@ -616,6 +616,12 @@ pub struct RitualOfAwakeningParams {
     pub name: String,
     #[schemars(description = "Culture of origin: 'egyptian', 'greek', 'norse', 'latin', 'fictional'")]
     pub culture: String,
+    #[schemars(
+        description = "Entity type override: 'deity', 'fictional_character', 'historical_figure'. \
+                       When omitted the static character table is consulted first; if the name is \
+                       not found there the type is inferred from culture."
+    )]
+    pub entity_type: Option<String>,
     #[schemars(description = "Character personality traits (e.g. ['creative', 'precise', 'wise'])")]
     pub traits: Vec<String>,
     #[schemars(description = "Jungian archetypes (e.g. ['creator', 'ruler'])")]
@@ -626,6 +632,11 @@ pub struct RitualOfAwakeningParams {
         description = "Target competence level: 'novice', 'advanced_beginner', 'competent', 'proficient', 'expert'"
     )]
     pub competence_level: Option<String>,
+    #[schemars(
+        description = "Force re-awakening even if this workspace already has an awakened psyche (default: false). Use to correct a wrong persona."
+    )]
+    #[serde(default)]
+    pub force: bool,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1985,20 +1996,58 @@ impl AkhMcpServer {
             let culture = CultureOrigin::from_label(&params.culture)
                 .unwrap_or(CultureOrigin::Unknown);
 
-            let entity_type = match culture {
-                CultureOrigin::Egyptian | CultureOrigin::Greek | CultureOrigin::Norse => {
-                    EntityType::Deity
+            // Resolve entity_type, description, and domains in priority order:
+            //  1. Explicit entity_type override from caller.
+            //  2. Static character table — catches fictional characters like Tecton that
+            //     share a culture (Egyptian) with deities but must not be treated as deities.
+            //     Also provides the canonical description so the psyche self-model is complete.
+            //  3. Culture-based heuristic as last resort.
+            let static_knowledge =
+                crate::bootstrap::identity::resolve_from_static_tables(&params.name);
+
+            let entity_type = if let Some(ref hint) = params.entity_type {
+                match hint.to_lowercase().as_str() {
+                    "deity" => EntityType::Deity,
+                    "fictional_character" | "fictional" => EntityType::FictionalCharacter,
+                    "historical_figure" | "historical" => EntityType::HistoricalFigure,
+                    _ => EntityType::Deity,
                 }
-                CultureOrigin::Fictional => EntityType::FictionalCharacter,
-                _ => EntityType::HistoricalFigure,
+            } else if let Some(ref known) = static_knowledge {
+                known.entity_type
+            } else {
+                match culture {
+                    CultureOrigin::Egyptian | CultureOrigin::Greek | CultureOrigin::Norse => {
+                        EntityType::Deity
+                    }
+                    CultureOrigin::Fictional => EntityType::FictionalCharacter,
+                    _ => EntityType::HistoricalFigure,
+                }
             };
+
+            // Use the static table description when available so the psyche self-model
+            // reflects the full canonical identity (e.g. Tecton's "Digital Architect —
+            // first construct, inspired by Ptah…" rather than a bare placeholder).
+            let description = static_knowledge
+                .as_ref()
+                .map(|k| k.description.clone())
+                .unwrap_or_else(|| format!("Identity for {}", params.name));
+
+            // Domains: use caller-provided domain, supplemented by static table domains.
+            let mut domains = vec![params.domain.clone()];
+            if let Some(ref known) = static_knowledge {
+                for d in &known.domains {
+                    if !domains.contains(d) {
+                        domains.push(d.clone());
+                    }
+                }
+            }
 
             let character = CharacterKnowledge {
                 name: params.name.clone(),
                 entity_type,
                 culture,
-                description: format!("Identity for {}", params.name),
-                domains: vec![params.domain.clone()],
+                description,
+                domains,
                 traits: params.traits,
                 archetypes: params.archetypes,
             };
@@ -2024,7 +2073,8 @@ impl AkhMcpServer {
             };
 
             let ritual_result =
-                ritual_of_awakening(&character, &purpose, &engine).map_err(|e| format!("{e}"))?;
+                ritual_of_awakening(&character, &purpose, &engine, params.force)
+                    .map_err(|e| format!("{e}"))?;
 
             // Sync the awakened psyche to the agent's in-memory cache so that
             // agent_psyche and awaken/ritual_of_awakening agree on this workspace's
