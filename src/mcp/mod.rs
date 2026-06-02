@@ -404,6 +404,29 @@ pub struct CompartmentIdParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct CreateCompartmentParams {
+    #[schemars(description = "Target workspace (default: \"default\")")]
+    #[serde(default = "default_workspace")]
+    pub workspace: String,
+    #[schemars(description = "Unique compartment id (e.g. \"tecton:identity\")")]
+    pub id: String,
+    #[schemars(description = "Human-readable display name")]
+    pub name: String,
+    #[schemars(
+        description = "Kind: Core | Skill | Project | Library | Person | Workspace"
+    )]
+    pub kind: String,
+    #[schemars(description = "Optional description")]
+    pub description: Option<String>,
+    #[schemars(description = "Optional parent compartment id for hierarchical grouping")]
+    pub parent: Option<String>,
+    #[schemars(description = "Access scope: Public (default) | Protected | Private")]
+    pub scope: Option<String>,
+    #[schemars(description = "Optional domain tags")]
+    pub tags: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct RunAgentParams {
     #[schemars(description = "Target workspace (default: \"default\")")]
     #[serde(default = "default_workspace")]
@@ -1291,9 +1314,14 @@ impl AkhMcpServer {
         let lines: Vec<String> = all
             .into_iter()
             .map(|(m, st, tc)| {
+                let parent_info = m
+                    .parent
+                    .as_deref()
+                    .map(|p| format!(", parent={p}"))
+                    .unwrap_or_default();
                 format!(
-                    "- {} (id={}, kind={:?}, state={}, triples={}): {}",
-                    m.name, m.id, m.kind, st, tc, m.description
+                    "- {} (id={}, kind={}, scope={}, state={}, triples={}{}): {}",
+                    m.name, m.id, m.kind, m.scope, st, tc, parent_info, m.description
                 )
             })
             .collect();
@@ -1400,6 +1428,79 @@ impl AkhMcpServer {
         Ok(CallToolResult::success(vec![Content::text(format!(
             "Compartment \"{}\" deactivated — triples still loaded but inactive",
             params.id
+        ))]))
+    }
+
+    #[tool(
+        name = "create_compartment",
+        description = "Create a new knowledge compartment on disk and register it as Dormant. \
+                       Use parent= to attach it under a Workspace compartment."
+    )]
+    async fn create_compartment(
+        &self,
+        Parameters(params): Parameters<CreateCompartmentParams>,
+    ) -> Result<CallToolResult, McpError> {
+        use crate::compartment::{CompartmentKind, CompartmentManifest, CompartmentScope};
+
+        let kind = match params.kind.as_str() {
+            "Core" => CompartmentKind::Core,
+            "Skill" => CompartmentKind::Skill,
+            "Project" => CompartmentKind::Project,
+            "Library" => CompartmentKind::Library,
+            "Person" => CompartmentKind::Person,
+            "Workspace" => CompartmentKind::Workspace,
+            other => {
+                return Err(McpError::invalid_params(
+                    format!(
+                        "unknown kind \"{other}\"; expected Core | Skill | Project | Library | Person | Workspace"
+                    ),
+                    None,
+                ));
+            }
+        };
+
+        let scope = match params.scope.as_deref().unwrap_or("Public") {
+            "Public" => CompartmentScope::Public,
+            "Protected" => CompartmentScope::Protected,
+            "Private" => CompartmentScope::Private,
+            other => {
+                return Err(McpError::invalid_params(
+                    format!("unknown scope \"{other}\"; expected Public | Protected | Private"),
+                    None,
+                ));
+            }
+        };
+
+        let manifest = CompartmentManifest {
+            id: params.id.clone(),
+            name: params.name.clone(),
+            kind,
+            description: params.description.unwrap_or_default(),
+            triples_file: None,
+            rules_file: None,
+            grammar_ref: None,
+            tags: params.tags.unwrap_or_default(),
+            parent: params.parent.clone(),
+            scope,
+        };
+
+        let engine = self.state.get_engine(&params.workspace).await?;
+        let mgr = engine.compartments().ok_or_else(|| {
+            McpError::internal_error("compartment manager not available".to_string(), None)
+        })?;
+
+        mgr.create_compartment(manifest)
+            .map_err(|e| McpError::invalid_params(format!("{e}"), None))?;
+
+        let parent_info = params
+            .parent
+            .as_deref()
+            .map(|p| format!(", parent=\"{p}\""))
+            .unwrap_or_default();
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Compartment \"{}\" created (kind={}, scope={}{parent_info}) — use load_compartment to activate",
+            params.id, params.kind, params.scope.as_deref().unwrap_or("Public"),
         ))]))
     }
 
