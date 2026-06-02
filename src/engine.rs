@@ -2810,6 +2810,12 @@ impl Engine {
     // -----------------------------------------------------------------------
 
     /// Assign a role to this workspace's agent. Write-once: errors if already assigned.
+    ///
+    /// Side-effects beyond KG/metadata:
+    /// 1. Writes `compartments/psyche/ennead-role` for inter-agent discovery.
+    /// 2. Updates `ennead_role` in `psyche.toml`.
+    /// 3. If the Ennead role maps to a known deity **and** the psyche has not yet been
+    ///    awakened, runs `resolve_identity` + `ritual_of_awakening` automatically.
     pub fn assign_role(&self, role: &str) -> AkhResult<()> {
         if let Some(existing) = self
             .store
@@ -2823,6 +2829,29 @@ impl Engine {
         }
         self.ingest_label_triples(&[("self".into(), "has-role".into(), role.into(), 1.0)])?;
         self.store.put_meta(b"ws:role", role.as_bytes())?;
+
+        // Persist ennead-role file to the psyche compartment for discovery.
+        if let Some(cm) = &self.compartment_manager {
+            if let Err(e) = cm.write_ennead_role_file(role) {
+                tracing::warn!(error = %e, "failed to write ennead-role file; role stored in KG only");
+            }
+        }
+
+        // Run identity rituals if the psyche has not yet been awakened.
+        match crate::bootstrap::identity::awaken_with_ennead_role(role, self) {
+            Ok(Some(result)) => {
+                tracing::info!(
+                    role,
+                    chosen_name = %result.chosen_name,
+                    "awakening ritual completed for Ennead role assignment"
+                );
+            }
+            Ok(None) => {}
+            Err(e) => {
+                tracing::warn!(error = %e, role, "awakening ritual failed; psyche unchanged");
+            }
+        }
+
         Ok(())
     }
 
@@ -3407,5 +3436,64 @@ mod tests {
         let sel = Engine::sparql_delete_to_select(q).unwrap();
         assert!(sel.starts_with("SELECT ?s ?p ?o WHERE"));
         assert!(sel.contains("FILTER"));
+    }
+
+    #[test]
+    fn assigned_role_is_none_before_assignment() {
+        let engine = Engine::new(EngineConfig {
+            dimension: Dimension::TEST,
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(engine.assigned_role().is_none());
+    }
+
+    #[test]
+    fn assign_role_stores_role_in_metadata() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let engine = Engine::new(EngineConfig {
+            dimension: Dimension::TEST,
+            data_dir: Some(dir.path().to_path_buf()),
+            ..Default::default()
+        })
+        .unwrap();
+
+        engine.assign_role("architect").unwrap();
+        assert_eq!(engine.assigned_role().as_deref(), Some("architect"));
+    }
+
+    #[test]
+    fn assign_role_write_once_rejects_second_call() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let engine = Engine::new(EngineConfig {
+            dimension: Dimension::TEST,
+            data_dir: Some(dir.path().to_path_buf()),
+            ..Default::default()
+        })
+        .unwrap();
+
+        engine.assign_role("architect").unwrap();
+        let err = engine.assign_role("investigator").unwrap_err();
+        // Should be a WorkspaceError::RoleAlreadyAssigned.
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("architect") || msg.contains("already"),
+            "unexpected error message: {msg}"
+        );
+    }
+
+    #[test]
+    fn assign_role_same_role_twice_is_rejected() {
+        // Write-once semantics: even the same role cannot be re-assigned.
+        let dir = tempfile::TempDir::new().unwrap();
+        let engine = Engine::new(EngineConfig {
+            dimension: Dimension::TEST,
+            data_dir: Some(dir.path().to_path_buf()),
+            ..Default::default()
+        })
+        .unwrap();
+
+        engine.assign_role("architect").unwrap();
+        assert!(engine.assign_role("architect").is_err());
     }
 }
