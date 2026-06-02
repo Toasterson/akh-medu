@@ -1,14 +1,26 @@
 //! Symbol registry: bidirectional label ↔ ID mapping.
 //!
 //! The [`SymbolRegistry`] provides O(1) lookups in both directions
-//! using two `DashMap`s. Labels are normalized to lowercase for
-//! case-insensitive matching.
+//! using two `DashMap`s. Labels are normalized to lowercase with
+//! apostrophes stripped for deduplication-safe, case-insensitive matching.
 
 use dashmap::DashMap;
 
 use crate::error::{AkhResult, SymbolError};
 use crate::store::TieredStore;
 use crate::symbol::{SymbolId, SymbolMeta};
+
+/// Normalize a label into a deduplication key: lowercase and strip apostrophe
+/// variants so that "Maat", "Ma'at" (ASCII U+0027), and "Ma\u{2019}at"
+/// (Unicode RIGHT SINGLE QUOTATION MARK) all produce the same key "maat".
+///
+/// Stripped characters: U+0027 APOSTROPHE, U+2018 LEFT SINGLE QUOTATION MARK,
+/// U+2019 RIGHT SINGLE QUOTATION MARK, U+02BC MODIFIER LETTER APOSTROPHE.
+pub(crate) fn normalize_label_key(label: &str) -> String {
+    label
+        .to_lowercase()
+        .replace(['\u{0027}', '\u{2018}', '\u{2019}', '\u{02BC}'], "")
+}
 
 /// Bidirectional symbol registry mapping IDs to metadata and labels to IDs.
 pub struct SymbolRegistry {
@@ -29,7 +41,7 @@ impl SymbolRegistry {
 
     /// Register a symbol. Errors if the label is already taken.
     pub fn register(&self, meta: SymbolMeta) -> AkhResult<()> {
-        let normalized = meta.label.to_lowercase();
+        let normalized = normalize_label_key(&meta.label);
 
         // Check for duplicate label.
         if let Some(existing) = self.label_to_id.get(&normalized) {
@@ -50,9 +62,9 @@ impl SymbolRegistry {
         self.id_to_meta.get(&id).map(|r| r.value().clone())
     }
 
-    /// Look up a symbol ID by label (case-insensitive).
+    /// Look up a symbol ID by label (case-insensitive, apostrophe-normalised).
     pub fn lookup(&self, label: &str) -> Option<SymbolId> {
-        let normalized = label.to_lowercase();
+        let normalized = normalize_label_key(label);
         self.label_to_id.get(&normalized).map(|r| *r.value())
     }
 
@@ -129,7 +141,7 @@ impl SymbolRegistry {
                         message: format!("failed to deserialize symbol meta: {e}"),
                     }
                 })?;
-                let normalized = meta.label.to_lowercase();
+                let normalized = normalize_label_key(&meta.label);
                 registry.label_to_id.insert(normalized, meta.id);
                 registry.id_to_meta.insert(meta.id, meta);
             }

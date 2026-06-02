@@ -501,6 +501,15 @@ pub fn resolve_from_static_tables(name: &str) -> Option<CharacterKnowledge> {
             &["cautious", "vigilant", "precise", "protective"],
             &["guardian", "sage"],
         )),
+        // Accept both "maat" (ASCII-only) and "ma'at" (with apostrophe) as the same deity.
+        "maat" | "ma'at" => Some((
+            EntityType::Deity,
+            CultureOrigin::Egyptian,
+            "Egyptian goddess of truth, justice, cosmic order, and balance. Embodiment of the fundamental principles that hold the universe together.",
+            &["truth", "justice", "order", "balance"],
+            &["principled", "precise", "fair", "consistent", "methodical"],
+            &["sage", "ruler"],
+        )),
         "athena" => Some((
             EntityType::Deity,
             CultureOrigin::Greek,
