@@ -28,6 +28,7 @@ pub mod similarity_search;
 pub mod text_ingest;
 pub mod user_interact;
 pub mod agent_management;
+pub mod tool_query;
 pub mod trigger_manage;
 
 pub use code_gen::CodeGenTool;
@@ -53,6 +54,7 @@ pub use similarity_search::SimilaritySearchTool;
 pub use text_ingest::TextIngestTool;
 pub use user_interact::UserInteractTool;
 pub use agent_management::{AgentListTool, AgentMessageTool, AgentRetireTool, AgentSpawnTool};
+pub use tool_query::ToolQueryTool;
 pub use trigger_manage::TriggerManageTool;
 pub use audit_log::AuditLogTool;
 pub use delegate::DelegateTool;

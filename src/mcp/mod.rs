@@ -1009,6 +1009,39 @@ pub struct LinkSeshatDocParams {
     pub url: Option<String>,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ToolManifestQueryParams {
+    #[schemars(description = "Target workspace (default: \"default\")")]
+    #[serde(default = "default_workspace")]
+    pub workspace: String,
+    #[schemars(
+        description = "Agent label to filter by (e.g. \"agent:tecton\"). Omit to list all tools."
+    )]
+    pub agent: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ToolRegisterRemoteParams {
+    #[schemars(description = "Target workspace (default: \"default\")")]
+    #[serde(default = "default_workspace")]
+    pub workspace: String,
+    #[schemars(description = "Tool name (becomes tool:{name} in the KG)")]
+    pub name: String,
+    #[schemars(description = "Remote endpoint URL (e.g. \"http://localhost:8200\")")]
+    pub endpoint: String,
+    #[schemars(
+        description = "JSON schema for the tool's parameters (e.g. \
+                        '{\"type\":\"object\",\"properties\":{\"term\":{\"type\":\"string\"}}}')"
+    )]
+    pub schema_json: String,
+    #[schemars(description = "Provider name (e.g. \"seshat\", \"akhomed\")")]
+    pub provider: String,
+    #[schemars(
+        description = "Comma-separated agent labels that may invoke this tool (e.g. \"agent:tecton,agent:thoth\")"
+    )]
+    pub access_agents: Option<String>,
+}
+
 // ── Helpers ─────────────────────────────────────────────────────────────
 
 /// Format a `Vec<AkhMessage>` into human-readable text for MCP tool output.
@@ -4522,6 +4555,80 @@ impl AkhMcpServer {
         Ok(CallToolResult::success(vec![Content::text(
             lines.join("\n"),
         )]))
+    }
+
+    // ── Tool-graph (peer discovery) ───────────────────────────────────────
+
+    #[tool(
+        name = "tool_manifest_query",
+        description = "Query tool manifests registered in the knowledge graph. \
+                       Returns all tools an agent may invoke, or every registered tool \
+                       when no agent filter is given. Tool entries are stored as KG triples: \
+                       tool:{name} → tool:schema / tool:provider / tool:access / tool:endpoint."
+    )]
+    async fn tool_manifest_query(
+        &self,
+        Parameters(params): Parameters<ToolManifestQueryParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let engine = self.state.get_engine(&params.workspace).await?;
+        let registrar = crate::agent::tool_graph::ToolGraphRegistrar::init(&engine)
+            .map_err(|e| McpError::internal_error(format!("tool_graph init: {e}"), None))?;
+
+        let tools = if let Some(ref agent) = params.agent {
+            registrar.query_tools_for_agent(agent)
+        } else {
+            registrar.list_all_tools()
+        };
+
+        let json = serde_json::json!({
+            "agent": params.agent,
+            "count": tools.len(),
+            "tools": tools,
+        });
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&json)
+                .map_err(|e| McpError::internal_error(format!("json: {e}"), None))?,
+        )]))
+    }
+
+    #[tool(
+        name = "tool_register_remote",
+        description = "Register a remote MCP tool in the knowledge graph for federation / peer discovery. \
+                       Records endpoint, schema, provider, and access grants as triples so other agents \
+                       can discover the tool via tool_manifest_query."
+    )]
+    async fn tool_register_remote(
+        &self,
+        Parameters(params): Parameters<ToolRegisterRemoteParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let engine = self.state.get_engine(&params.workspace).await?;
+        let registrar = crate::agent::tool_graph::ToolGraphRegistrar::init(&engine)
+            .map_err(|e| McpError::internal_error(format!("tool_graph init: {e}"), None))?;
+
+        let access: Vec<&str> = params
+            .access_agents
+            .as_deref()
+            .unwrap_or("agent:any")
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        registrar
+            .register_remote(
+                &params.name,
+                &params.endpoint,
+                &params.schema_json,
+                &params.provider,
+                &access,
+            )
+            .map_err(|e| McpError::internal_error(format!("register_remote: {e}"), None))?;
+
+        let msg = format!(
+            "Registered remote tool \"{}\" (endpoint: {}, provider: {}, access: {:?})",
+            params.name, params.endpoint, params.provider, access
+        );
+        Ok(CallToolResult::success(vec![Content::text(msg)]))
     }
 }
 
