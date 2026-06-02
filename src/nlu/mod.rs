@@ -11,8 +11,12 @@
 //!    semantic parsing with GBNF-constrained AbsTree JSON output
 //! 4. **VSA parse ranker** — ranks candidate parses using exemplar memory
 
+pub mod bandit;
+pub mod cache;
 pub mod error;
+pub mod kg_context;
 pub mod parse_ranker;
+pub mod router;
 
 #[cfg(feature = "nlu-ml")]
 pub mod micro_ml;
@@ -21,6 +25,7 @@ pub mod llm_translator;
 pub mod candle_backend;
 
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 use crate::grammar::abs::AbsTree;
 use crate::grammar::concrete::ParseContext;
@@ -28,6 +33,7 @@ use crate::grammar::parser::{self, ParseResult};
 
 use self::error::{NluError, NluResult};
 use self::parse_ranker::ParseRanker;
+use self::router::{BackendId, NakhRouter};
 
 /// The result of NLU parsing, including provenance about which tier succeeded.
 #[derive(Debug, Clone)]
@@ -77,12 +83,15 @@ pub struct NluPipeline {
     #[cfg(feature = "candle-backend")]
     candle_backend: Option<std::sync::Arc<std::sync::Mutex<candle_backend::CandleBackend>>>,
     /// Training data collector (Phase 27f) — logs parse successes as training pairs.
-    training_collector: Option<std::sync::Arc<std::sync::Mutex<crate::training::TrainingDataCollector>>>,
+    training_collector: Option<Arc<Mutex<crate::training::TrainingDataCollector>>>,
+    /// n akh semantic router (Phase 28) — shared across clones so all sessions
+    /// contribute to the same bandit.  `None` until `enable_router()` is called.
+    router: Option<Arc<Mutex<NakhRouter>>>,
 }
 
 impl Clone for NluPipeline {
     /// Clone the pipeline: ranker is cloned by value (per-session learning),
-    /// model layers are shared via Arc (cheap).
+    /// model layers and router are shared via Arc (cheap).
     fn clone(&self) -> Self {
         Self {
             ranker: self.ranker.clone(),
@@ -93,6 +102,7 @@ impl Clone for NluPipeline {
             #[cfg(feature = "candle-backend")]
             candle_backend: self.candle_backend.clone(),
             training_collector: self.training_collector.clone(),
+            router: self.router.clone(),
         }
     }
 }
@@ -109,6 +119,7 @@ impl NluPipeline {
             #[cfg(feature = "candle-backend")]
             candle_backend: None,
             training_collector: None,
+            router: None,
         }
     }
 
@@ -123,15 +134,52 @@ impl NluPipeline {
             #[cfg(feature = "candle-backend")]
             candle_backend: None,
             training_collector: None,
+            router: None,
         }
     }
 
     /// Attach a training data collector for logging parse successes.
     pub fn set_training_collector(
         &mut self,
-        collector: std::sync::Arc<std::sync::Mutex<crate::training::TrainingDataCollector>>,
+        collector: Arc<Mutex<crate::training::TrainingDataCollector>>,
     ) {
         self.training_collector = Some(collector);
+    }
+
+    /// Enable the n akh semantic router with production defaults.
+    ///
+    /// Once enabled the router is shared across all clones of this pipeline
+    /// so every session contributes to the same bandit learning state.
+    pub fn enable_router(&mut self) {
+        let router = NakhRouter::with_defaults();
+        self.router = Some(Arc::new(Mutex::new(router)));
+        tracing::info!("n akh semantic router enabled");
+    }
+
+    /// Attach an externally created router (e.g., restored from persisted state).
+    pub fn set_router(&mut self, router: Arc<Mutex<NakhRouter>>) {
+        self.router = Some(router);
+    }
+
+    /// Signal that model weights have been hot-swapped (Phase 27 integration hook).
+    ///
+    /// Bumps the router's exploration rate so the bandit re-evaluates the
+    /// `BurnLocal` backend with fresh eyes.
+    pub fn on_model_weights_updated(&self, delta: f32) {
+        if let Some(router_arc) = &self.router {
+            if let Ok(mut router) = router_arc.lock() {
+                router.on_model_weights_updated(delta);
+            }
+        }
+    }
+
+    /// Invalidate the router's semantic cache after KG mutations.
+    pub fn invalidate_router_cache(&self) {
+        if let Some(router_arc) = &self.router {
+            if let Ok(mut router) = router_arc.lock() {
+                router.invalidate_cache();
+            }
+        }
     }
 
     /// Create a pipeline with a pre-existing ranker and attempt to load models
@@ -305,47 +353,136 @@ impl NluPipeline {
         }
     }
 
-    /// Parse input through the NLU cascade.
+    /// Parse input through the NLU pipeline.
     ///
-    /// Returns a structured parse result if any tier succeeds, or `NluError::ParseFailed`
-    /// if all tiers fail.
+    /// When the n akh router is enabled (Phase 28) the router selects the most
+    /// likely backend, that backend runs first, and the full cascade is only
+    /// used as a fallback on failure.  Without a router the classic sequential
+    /// cascade runs unchanged.
+    ///
+    /// Returns a structured parse result or `NluError::ParseFailed` when every
+    /// path fails.
     pub fn parse(&mut self, input: &str, ctx: &ParseContext) -> NluResult<NluParseResult> {
-        // Tier 1: Rule parser (extended parse_prose)
+        self.parse_with_context(input, ctx, None)
+    }
+
+    /// Parse with an optional KG context block that is passed to LLM tiers.
+    ///
+    /// `kg_context` is forwarded to Tier 3 (LLM/Candle) prompt construction
+    /// so the model can ground entity references against known KG facts.
+    /// Tiers 1, 2, and 4 ignore the context (they are rule- or exemplar-based).
+    ///
+    /// When the n akh router is enabled (Phase 28) the router selects the most
+    /// likely backend, that backend runs first, and the full cascade is only
+    /// used as a fallback on failure.  Without a router the classic sequential
+    /// cascade runs unchanged.
+    #[allow(unused_variables)] // kg_context used only when nlu-llm or candle-backend is enabled
+    pub fn parse_with_context(
+        &mut self,
+        input: &str,
+        ctx: &ParseContext,
+        kg_context: Option<&str>,
+    ) -> NluResult<NluParseResult> {
+        // n akh router path (Phase 28) ─────────────────────────────────────────
+        let router_arc = self.router.as_ref().map(Arc::clone);
+        if let Some(router_arc) = router_arc {
+            // Semantic cache check — serve identical/near-identical queries instantly.
+            if let Some(cached) = router_arc.lock().unwrap().find_cached(input) {
+                tracing::debug!(router = "cache_hit", "n akh: semantic cache served result");
+                return Ok(cached);
+            }
+
+            // Bandit selects the backend most likely to succeed for this query.
+            let decision = match router_arc.lock().unwrap().route(input) {
+                Ok(d) => d,
+                Err(e) => {
+                    tracing::warn!(error = %e, "n akh router failed; falling back to cascade");
+                    return self.cascade_parse(input, ctx, kg_context);
+                }
+            };
+
+            tracing::debug!(
+                router = "dispatch",
+                backend = %decision.backend,
+                "n akh dispatching to backend"
+            );
+
+            // Execute the bandit-selected backend.
+            let result = match decision.backend {
+                BackendId::RuleParser => self.tier1_parse(input, ctx),
+                BackendId::OnnxNer => self.tier2_parse(input, ctx),
+                BackendId::CandleLlm => self.tier3_parse(input, kg_context),
+                BackendId::VsaDirect => self.tier4_parse(input),
+                // CloudApi and BurnLocal are not yet implemented; cascade handles them.
+                BackendId::CloudApi | BackendId::BurnLocal => {
+                    Err(NluError::ParseFailed { input: input.to_string() })
+                }
+            };
+
+            let (result, reward_override) = match result {
+                Ok(r) => (r, None),
+                Err(_) => {
+                    tracing::debug!(
+                        backend = %decision.backend,
+                        "n akh: selected backend failed; cascade fallback"
+                    );
+                    // Cascade may also fail; propagate that error.
+                    let cascaded = self.cascade_parse(input, ctx, kg_context)?;
+                    // Penalise the bandit arm that caused the fallback.
+                    (cascaded, Some(0.0f32))
+                }
+            };
+
+            // Update bandit and populate cache.
+            router_arc
+                .lock()
+                .unwrap()
+                .report_reward(&decision, &result, input, reward_override);
+
+            return Ok(result);
+        }
+
+        // No router — sequential cascade (original behaviour).
+        self.cascade_parse(input, ctx, kg_context)
+    }
+
+    // ── Per-tier helpers (called directly by router dispatch) ────────────────
+
+    fn tier1_parse(&mut self, input: &str, ctx: &ParseContext) -> NluResult<NluParseResult> {
         tracing::debug!(tier = 1, "attempting rule parser");
         let result = parser::parse_prose(input, ctx);
-
         match &result {
-            // Structured parse succeeded
             ParseResult::Facts(facts) if !facts.is_empty() => {
                 let tree = if facts.len() == 1 {
                     facts[0].clone()
                 } else {
                     AbsTree::and(facts.clone())
                 };
-
                 tracing::info!(tier = 1, confidence = 0.85, "rule parser succeeded");
                 self.ranker.record_success(input, &tree, 1, 0.85);
-                return Ok(self.make_result(input, tree, 1, 0.85, None));
+                Ok(self.make_result(input, tree, 1, 0.85, None))
             }
             ParseResult::Query { subject: _, tree } => {
                 tracing::info!(tier = 1, confidence = 0.80, "rule parser query matched");
                 let tree = tree.clone();
                 self.ranker.record_success(input, &tree, 1, 0.80);
-                return Ok(self.make_result(input, tree, 1, 0.80, None));
+                Ok(self.make_result(input, tree, 1, 0.80, None))
             }
             ParseResult::Goal { description } => {
                 tracing::info!(tier = 1, confidence = 0.75, "rule parser goal matched");
                 let tree = AbsTree::Freeform(description.clone());
-                return Ok(self.make_result(input, tree, 1, 0.75, None));
+                Ok(self.make_result(input, tree, 1, 0.75, None))
             }
             _ => {
                 tracing::debug!(tier = 1, "rule parser did not match");
+                Err(NluError::ParseFailed { input: input.to_string() })
             }
         }
+    }
 
-        // Tier 2: Micro-ML NER (feature-gated)
+    fn tier2_parse(&mut self, input: &str, ctx: &ParseContext) -> NluResult<NluParseResult> {
         #[cfg(feature = "nlu-ml")]
-        if let Some(ml_arc) = self.ml_layer.as_ref().map(std::sync::Arc::clone) {
+        if let Some(ml_arc) = self.ml_layer.as_ref().map(Arc::clone) {
             tracing::debug!(tier = 2, "attempting ML NER augmentation");
             let augmented_result = ml_arc.lock().unwrap().augment_parse(input, ctx);
             match augmented_result {
@@ -363,44 +500,19 @@ impl NluPipeline {
                 }
             }
         }
+        #[cfg(not(feature = "nlu-ml"))]
+        let _ = ctx;
+        Err(NluError::ParseFailed { input: input.to_string() })
+    }
 
-        // Tier 3: Small LLM translator (feature-gated)
-        // Wrapped in catch_unwind because llama.cpp can GGML_ASSERT → abort().
-        #[cfg(feature = "nlu-llm")]
-        if let Some(ref llm_arc) = self.llm_translator {
-            let llm = std::sync::Arc::clone(llm_arc);
-            let input_owned = input.to_string();
-            tracing::debug!(tier = 3, "attempting LLM translation");
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-                llm.translate(&input_owned)
-            }));
-            match result {
-                Ok(Ok(translation)) => {
-                    tracing::info!(
-                        tier = 3,
-                        confidence = 0.70,
-                        tokens = translation.tokens_generated,
-                        "LLM translation succeeded"
-                    );
-                    self.ranker
-                        .record_success(input, &translation.tree, 3, 0.70);
-                    return Ok(self.make_result(input, translation.tree, 3, 0.70, None));
-                }
-                Ok(Err(e)) => {
-                    tracing::warn!(tier = 3, error = %e, "LLM translation failed");
-                }
-                Err(_) => {
-                    tracing::error!(tier = 3, "LLM translation panicked (llama.cpp assertion failure)");
-                }
-            }
-        }
-
+    #[allow(unused_variables)] // kg_context used only when nlu-llm or candle-backend is enabled
+    fn tier3_parse(&mut self, input: &str, kg_context: Option<&str>) -> NluResult<NluParseResult> {
         // Tier 3 (Candle): Alternative LLM backend with hidden state access.
         // Preferred over llama-cpp-2 when both are loaded.
         #[cfg(feature = "candle-backend")]
-        if let Some(candle_arc) = self.candle_backend.as_ref().map(std::sync::Arc::clone) {
-            tracing::debug!(tier = 3, backend = "candle", "attempting Candle translation");
-            let translation_result = candle_arc.lock().unwrap().translate(input);
+        if let Some(candle_arc) = self.candle_backend.as_ref().map(Arc::clone) {
+            tracing::debug!(tier = 3, backend = "candle", has_kg_context = kg_context.is_some(), "attempting Candle translation");
+            let translation_result = candle_arc.lock().unwrap().translate_with_context(input, kg_context);
             match translation_result {
                 Ok(translation) => {
                     tracing::info!(
@@ -420,7 +532,41 @@ impl NluPipeline {
             }
         }
 
-        // Tier 4: VSA Parse Ranker — check if we have a similar exemplar
+        // Fallback: llama-cpp-2 LLM (Wrapped in catch_unwind: llama.cpp may abort).
+        #[cfg(feature = "nlu-llm")]
+        if let Some(ref llm_arc) = self.llm_translator {
+            let llm = Arc::clone(llm_arc);
+            let input_owned = input.to_string();
+            let ctx_owned = kg_context.map(str::to_string);
+            tracing::debug!(tier = 3, has_kg_context = ctx_owned.is_some(), "attempting LLM translation");
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                llm.translate_with_context(&input_owned, ctx_owned.as_deref())
+            }));
+            match result {
+                Ok(Ok(translation)) => {
+                    tracing::info!(
+                        tier = 3,
+                        confidence = 0.70,
+                        tokens = translation.tokens_generated,
+                        "LLM translation succeeded"
+                    );
+                    self.ranker
+                        .record_success(input, &translation.tree, 3, 0.70);
+                    return Ok(self.make_result(input, translation.tree, 3, 0.70, None));
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!(tier = 3, error = %e, "LLM translation failed");
+                }
+                Err(_) => {
+                    tracing::error!(tier = 3, "LLM translation panicked (llama.cpp assertion)");
+                }
+            }
+        }
+
+        Err(NluError::ParseFailed { input: input.to_string() })
+    }
+
+    fn tier4_parse(&mut self, input: &str) -> NluResult<NluParseResult> {
         tracing::debug!(tier = 4, "checking parse ranker exemplars");
         if let Some(ranked) = self.ranker.find_similar(input) {
             tracing::info!(
@@ -437,8 +583,29 @@ impl NluPipeline {
                 Some(ranked.similarity),
             ));
         }
+        Err(NluError::ParseFailed { input: input.to_string() })
+    }
 
-        // All tiers failed
+    /// Sequential cascade: tries each tier in order, returns first success.
+    #[allow(unused_variables)] // kg_context used only when nlu-llm or candle-backend is enabled
+    fn cascade_parse(
+        &mut self,
+        input: &str,
+        ctx: &ParseContext,
+        kg_context: Option<&str>,
+    ) -> NluResult<NluParseResult> {
+        if let Ok(r) = self.tier1_parse(input, ctx) {
+            return Ok(r);
+        }
+        if let Ok(r) = self.tier2_parse(input, ctx) {
+            return Ok(r);
+        }
+        if let Ok(r) = self.tier3_parse(input, kg_context) {
+            return Ok(r);
+        }
+        if let Ok(r) = self.tier4_parse(input) {
+            return Ok(r);
+        }
         tracing::warn!("all NLU tiers failed for input");
         Err(NluError::ParseFailed {
             input: input.to_string(),
@@ -493,7 +660,13 @@ impl NluPipeline {
     }
 
     /// Generate a brief dialogue act response (greeting, farewell, etc.)
-    /// using the LLM with persona context. Returns `None` if LLM unavailable.
+    /// using the LLM with persona and optional KG context.
+    ///
+    /// `context` is the active conversation topic (e.g. "the Ennead").
+    /// `kg_context` is the pre-built KG context block from [`kg_context::build_kg_context`];
+    /// when present it is injected into the system prompt to ground the response.
+    ///
+    /// Returns `None` when no LLM backend is loaded.
     #[allow(unused_variables)] // params used only when nlu-llm feature is enabled
     pub fn generate_dialogue(
         &self,
@@ -501,11 +674,35 @@ impl NluPipeline {
         persona_name: &str,
         traits: &[String],
         context: Option<&str>,
+        kg_context: Option<&str>,
+    ) -> Option<String> {
+        self.generate_dialogue_with_kg(act, persona_name, traits, context, None)
+    }
+
+    /// Generate a dialogue act response with an optional KG context block.
+    ///
+    /// `kg_context` is injected into the system prompt so the model can ground
+    /// its response in actual knowledge-graph facts. The combined prompt is
+    /// designed to stay under 3 800 tokens (Psyche prompt + KG context).
+    #[allow(unused_variables)] // params used only when nlu-llm feature is enabled
+    pub fn generate_dialogue_with_kg(
+        &self,
+        act: &str,
+        persona_name: &str,
+        traits: &[String],
+        context: Option<&str>,
+        kg_context: Option<&str>,
     ) -> Option<String> {
         #[cfg(feature = "nlu-llm")]
         if let Some(ref llm_arc) = self.llm_translator {
             let llm = std::sync::Arc::clone(llm_arc);
-            let prompt = llm_translator::build_dialogue_prompt(act, persona_name, traits, context);
+            let prompt = llm_translator::build_dialogue_prompt_with_kg(
+                act,
+                persona_name,
+                traits,
+                context,
+                kg_context,
+            );
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
                 llm.generate(&prompt, 64)
             }));

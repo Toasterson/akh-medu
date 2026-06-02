@@ -1091,6 +1091,15 @@ pub fn derivation_kind_prose(kind: &DerivationKind) -> String {
                 "delegated to {target} (model: {model}, {wall_time_ms}ms): {task_description}"
             )
         }
+        DerivationKind::AffectiveAppraisal {
+            trigger_kind,
+            valence,
+            resulting_mood_valence,
+        } => {
+            format!(
+                "affective appraisal: {trigger_kind} (valence: {valence:+.2} → mood: {resulting_mood_valence:+.2})"
+            )
+        }
         DerivationKind::ArticleCreated {
             title,
             block_count,
@@ -1153,6 +1162,31 @@ pub fn derivation_kind_prose(kind: &DerivationKind) -> String {
             format!(
                 "VSA RL update at cycle {cycle}: tool sym:{} received reward {reward:.3}",
                 tool.get()
+            )
+        }
+        DerivationKind::FileImport {
+            source_path,
+            format,
+        } => {
+            format!("imported from file \"{source_path}\" ({format})")
+        }
+        DerivationKind::KgCompaction {
+            scaffolding_removed,
+            total_before,
+            knowledge_density,
+        } => {
+            format!(
+                "KG compaction: removed {scaffolding_removed}/{total_before} scaffolding triples, density {:.1}%",
+                knowledge_density * 100.0
+            )
+        }
+        DerivationKind::Perceived {
+            modality,
+            confidence,
+            source_id,
+        } => {
+            format!(
+                "perceived via {modality} (confidence: {confidence:.2}, source: {source_id})"
             )
         }
     }

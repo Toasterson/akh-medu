@@ -16,6 +16,7 @@ pub mod error;
 pub mod manager;
 pub mod manifest;
 pub mod microtheory;
+pub mod prompt;
 pub mod psyche;
 pub mod psyche_compiler;
 
@@ -27,6 +28,7 @@ pub use microtheory::{
     ContextAncestryCache, ContextDomain, ContextPredicates, LiftCondition, LiftingRule,
     Microtheory,
 };
+pub use prompt::{PsychePromptInput, PsychePromptSerializer, estimate_tokens};
 pub use psyche::{OceanProfile, Psyche};
 pub use psyche_compiler::{
     CompilerError, CompilerResult, ReflectionDepth, compile as compile_psyche_to_script,

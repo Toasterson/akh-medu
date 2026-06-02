@@ -101,6 +101,31 @@ fn is_infrastructure_entity(s: &str) -> bool {
         && lower[4..].starts_with(|c: char| c.is_ascii_digit() || c == '-'))
 }
 
+/// Returns `true` if the entity name is a known agent identity (persona).
+///
+/// Identity entities are symbolic personas drawn from mythology, fiction, or
+/// history — they must not gain spurious `is-a` links to operational
+/// infrastructure via transitive closure.  The VSA similarity guard uses this
+/// predicate to decide when to apply the secondary (embedding-space) check.
+///
+/// The set covers the Ennead AI collective plus common agent names drawn from
+/// the same cultural pools used by the identity bootstrap system.
+pub fn is_identity_entity(name: &str) -> bool {
+    matches!(
+        name,
+        // Egyptian Ennead and associated figures (primary Akh-Medu personas)
+        "Ptah" | "Thoth" | "Ra" | "Re" | "Anubis" | "Khnum" | "Horus" | "Isis" | "Osiris"
+            | "Seth" | "Nephthys" | "Nut" | "Geb" | "Tefnut" | "Shu" | "Atum" | "Khepri"
+            // Tecton and the broader Akh-Medu collective
+            | "Tecton" | "Akhu" | "Akh"
+            // Greek / Norse agent personas
+            | "Athena" | "Apollo" | "Hermes" | "Ares" | "Zeus" | "Hera"
+            | "Odin" | "Thor" | "Loki" | "Freya"
+            // Fictional / historical agent personas
+            | "Gandalf" | "Sherlock" | "Spock" | "Turing"
+    )
+}
+
 /// Returns `true` if the label is a standard UUID (8-4-4-4-12 hex groups).
 fn is_uuid(s: &str) -> bool {
     let parts: Vec<&str> = s.split('-').collect();
@@ -130,6 +155,63 @@ pub fn is_invalid_type_hierarchy_participant(pred_label: &str, entity_label: &st
         || is_snake_case_tool_name(entity_label)
         || is_infrastructure_entity(entity_label)
         || is_uuid(entity_label)
+}
+
+// ---------------------------------------------------------------------------
+// VSA similarity guard for Identity entities
+// ---------------------------------------------------------------------------
+
+/// Minimum Hamming similarity required when the proposed object of an `is-a`
+/// derivation is checked against a known Identity entity subject.
+///
+/// Calibration: random unrelated bipolar hypervectors have expected similarity
+/// ≈ 0.50.  A threshold of **0.40** therefore has no effect on freshly-allocated
+/// (ungrounded) vectors — it only blocks strongly dissimilar pairs that arise
+/// after semantic grounding pushes infrastructure embeddings away from identity
+/// embeddings.  Genuinely related concepts ground above ≈ 0.60; contaminated
+/// CI-runner / storage-node targets ground well below 0.40.
+pub const IDENTITY_VSA_GUARD_THRESHOLD: f32 = 0.40;
+
+/// VSA similarity guard for Identity entity type-hierarchy assertions.
+///
+/// When the proposed subject of an `is-a` or `child-of` derivation is a known
+/// Identity entity (see [`is_identity_entity`]), the object must be semantically
+/// plausible in VSA space.  Returns `true` (**block** the derivation) when:
+///
+/// * the subject label matches [`is_identity_entity`], **and**
+/// * both hypervectors exist in the engine's item memory, **and**
+/// * their Hamming similarity is below `threshold`.
+///
+/// Returns `false` (allow) if the subject is not an identity entity, or if
+/// either vector is absent from item memory.  This prevents the guard from
+/// accidentally suppressing valid derivations in freshly-bootstrapped workspaces
+/// where vectors have not yet been semantically grounded (random pairs sit near
+/// ≈ 0.50, well above the 0.40 threshold).
+pub fn identity_vsa_similarity_guard(
+    engine: &Engine,
+    subject: SymbolId,
+    object: SymbolId,
+    threshold: f32,
+) -> bool {
+    let subj_label = engine.resolve_label(subject);
+    if !is_identity_entity(&subj_label) {
+        return false;
+    }
+
+    let im = engine.item_memory();
+    let subj_vec = match im.get(subject) {
+        Some(v) => v,
+        None => return false,
+    };
+    let obj_vec = match im.get(object) {
+        Some(v) => v,
+        None => return false,
+    };
+
+    match engine.ops().similarity(&subj_vec, &obj_vec) {
+        Ok(sim) => sim < threshold,
+        Err(_) => false,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -250,6 +332,37 @@ impl RuleEngine {
                             let obj_label = engine.resolve_label(triple.object);
                             if is_invalid_type_hierarchy_participant(&pred_label, &subj_label)
                                 || is_invalid_type_hierarchy_participant(&pred_label, &obj_label)
+                            {
+                                continue;
+                            }
+
+                            // Self-reference guard: skip any derived triple where the
+                            // subject and object resolve to the same symbol. Transitive
+                            // rules (is-a-transitive, parent-child-inverse) can produce
+                            // X → P → X loops; discard them before they enter the KG.
+                            if triple.subject == triple.object {
+                                tracing::debug!(
+                                    rule = %rule.name,
+                                    symbol = triple.subject.get(),
+                                    predicate = %pred_label,
+                                    "rule engine discarding self-referential derived triple"
+                                );
+                                continue;
+                            }
+
+                            // VSA similarity guard: defence-in-depth for Identity entities.
+                            // After semantic grounding, identity (persona) embeddings diverge
+                            // from infrastructure embeddings; this guard blocks residual
+                            // cross-domain contamination that escapes the pattern filter.
+                            // The threshold (0.40) is below the ≈0.50 random baseline so
+                            // ungrounded fresh vectors are never falsely rejected.
+                            if matches!(pred_label.as_str(), "is-a" | "child-of")
+                                && identity_vsa_similarity_guard(
+                                    engine,
+                                    triple.subject,
+                                    triple.object,
+                                    IDENTITY_VSA_GUARD_THRESHOLD,
+                                )
                             {
                                 continue;
                             }
@@ -949,5 +1062,269 @@ mod tests {
         let child_of = engine.lookup_symbol("child-of").unwrap();
 
         assert!(!engine.has_triple(infer_rules_sym, child_of, ptah));
+    }
+
+    #[test]
+    fn self_referential_triple_blocked_in_rule_engine() {
+        let engine = test_engine();
+        // Ma'at is-a X, X is-a Ma'at — transitive closure must NOT derive Ma'at is-a Ma'at.
+        engine
+            .ingest_label_triples(&[
+                ("Maat".into(), "is-a".into(), "Concept".into(), 0.9),
+                ("Concept".into(), "is-a".into(), "Maat".into(), 0.9),
+            ])
+            .unwrap();
+
+        let re = RuleEngine::new(RuleEngineConfig::default()).with_rules(RuleSet::builtin());
+        let result = re.run(&engine).unwrap();
+
+        let maat = engine.lookup_symbol("Maat").unwrap();
+        let isa = engine.lookup_symbol("is-a").unwrap();
+
+        // Ma'at is-a Ma'at must NOT be derived or committed.
+        assert!(!engine.has_triple(maat, isa, maat));
+        // None of the derived triples should be self-referential.
+        for dt in &result.derived {
+            assert_ne!(
+                dt.triple.subject, dt.triple.object,
+                "rule engine derived a self-referential triple via rule '{}'",
+                dt.rule_name
+            );
+        }
+    }
+
+    #[test]
+    fn parent_child_inverse_self_loop_blocked() {
+        let engine = test_engine();
+        // deity parent-of deity — parent-child-inverse rule must NOT produce deity child-of deity.
+        // The engine-level self-referential-triple guard (PR #206/#187) now rejects this
+        // self-loop at ingest, which is a *stronger* guarantee than the rule-engine check;
+        // tolerate the rejection (nothing is inserted) and still assert no self-loop is derived.
+        let _ = engine
+            .ingest_label_triples(&[("deity".into(), "parent-of".into(), "deity".into(), 0.9)]);
+
+        let re = RuleEngine::new(RuleEngineConfig::default()).with_rules(RuleSet::builtin());
+        let result = re.run(&engine).unwrap();
+
+        // If child-of was never committed the symbol won't exist — that alone proves no
+        // self-referential triple was inserted.  If it does exist, verify no self-loop.
+        if let (Ok(deity), Ok(child_of)) = (
+            engine.lookup_symbol("deity"),
+            engine.lookup_symbol("child-of"),
+        ) {
+            assert!(!engine.has_triple(deity, child_of, deity));
+        }
+
+        for dt in &result.derived {
+            assert_ne!(
+                dt.triple.subject, dt.triple.object,
+                "rule engine derived self-referential triple via rule '{}'",
+                dt.rule_name
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Identity entity guard tests (Tecton / Ptah contamination fixes)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn identity_entity_detection_patterns() {
+        // Egyptian Ennead / Akh-Medu collective — must be recognised.
+        assert!(is_identity_entity("Ptah"));
+        assert!(is_identity_entity("Thoth"));
+        assert!(is_identity_entity("Ra"));
+        assert!(is_identity_entity("Tecton"));
+        assert!(is_identity_entity("Akhu"));
+        assert!(is_identity_entity("Khnum"));
+        assert!(is_identity_entity("Horus"));
+        assert!(is_identity_entity("Isis"));
+        assert!(is_identity_entity("Osiris"));
+        // Greek / Norse / fictional personas.
+        assert!(is_identity_entity("Athena"));
+        assert!(is_identity_entity("Odin"));
+        assert!(is_identity_entity("Gandalf"));
+        assert!(is_identity_entity("Turing"));
+
+        // Infrastructure and operational entities must NOT be flagged.
+        assert!(!is_identity_entity("CI runner"));
+        assert!(!is_identity_entity("ForgejoActions"));
+        assert!(!is_identity_entity("Stor01"));
+        assert!(!is_identity_entity("runner-01"));
+        assert!(!is_identity_entity("AgentSystem"));
+        assert!(!is_identity_entity("A"));
+        assert!(!is_identity_entity("System"));
+        assert!(!is_identity_entity("Concept"));
+    }
+
+    #[test]
+    fn tecton_ci_runner_contamination_blocked() {
+        let engine = test_engine();
+        // Reproduces the hairball contamination reported for Tecton:
+        // Tecton is-a ComputeSystem (conf=0.95), ComputeSystem is-a "CI runner" (conf=0.95).
+        // The transitive rule must NOT derive Tecton is-a CI runner.
+        engine
+            .ingest_label_triples(&[
+                ("Tecton".into(), "is-a".into(), "ComputeSystem".into(), 0.95),
+                (
+                    "ComputeSystem".into(),
+                    "is-a".into(),
+                    "CI runner".into(),
+                    0.95,
+                ),
+            ])
+            .unwrap();
+
+        let re = RuleEngine::new(RuleEngineConfig::default()).with_rules(RuleSet::builtin());
+        let result = re.run(&engine).unwrap();
+
+        let tecton = engine.lookup_symbol("Tecton").unwrap();
+        let ci_runner = engine.lookup_symbol("CI runner").unwrap();
+        let isa = engine.lookup_symbol("is-a").unwrap();
+
+        assert!(
+            !engine.has_triple(tecton, isa, ci_runner),
+            "Tecton is-a CI runner must not be derived"
+        );
+        let count = result
+            .rule_stats
+            .get("is-a-transitive")
+            .copied()
+            .unwrap_or(0);
+        assert_eq!(
+            count, 0,
+            "is-a-transitive should derive nothing through the CI runner object"
+        );
+    }
+
+    #[test]
+    fn tecton_storage_node_contamination_blocked() {
+        let engine = test_engine();
+        // Same contamination pattern with storage nodes (Stor01).
+        engine
+            .ingest_label_triples(&[
+                ("Tecton".into(), "is-a".into(), "DataLayer".into(), 0.95),
+                ("DataLayer".into(), "is-a".into(), "Stor01".into(), 0.95),
+            ])
+            .unwrap();
+
+        let re = RuleEngine::new(RuleEngineConfig::default()).with_rules(RuleSet::builtin());
+        let result = re.run(&engine).unwrap();
+
+        let tecton = engine.lookup_symbol("Tecton").unwrap();
+        let stor01 = engine.lookup_symbol("Stor01").unwrap();
+        let isa = engine.lookup_symbol("is-a").unwrap();
+
+        assert!(
+            !engine.has_triple(tecton, isa, stor01),
+            "Tecton is-a Stor01 must not be derived"
+        );
+        let count = result
+            .rule_stats
+            .get("is-a-transitive")
+            .copied()
+            .unwrap_or(0);
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn tecton_forgejo_contamination_blocked() {
+        let engine = test_engine();
+        engine
+            .ingest_label_triples(&[
+                (
+                    "Tecton".into(),
+                    "is-a".into(),
+                    "ActionRunner".into(),
+                    0.95,
+                ),
+                (
+                    "ActionRunner".into(),
+                    "is-a".into(),
+                    "ForgejoActions".into(),
+                    0.95,
+                ),
+            ])
+            .unwrap();
+
+        let re = RuleEngine::new(RuleEngineConfig::default()).with_rules(RuleSet::builtin());
+        re.run(&engine).unwrap();
+
+        let tecton = engine.lookup_symbol("Tecton").unwrap();
+        let forgejo = engine.lookup_symbol("ForgejoActions").unwrap();
+        let isa = engine.lookup_symbol("is-a").unwrap();
+
+        assert!(
+            !engine.has_triple(tecton, isa, forgejo),
+            "Tecton is-a ForgejoActions must not be derived"
+        );
+    }
+
+    #[test]
+    fn identity_vsa_guard_blocks_strongly_dissimilar_vectors() {
+        use crate::vsa::{Encoding, HyperVec};
+
+        let engine = test_engine();
+        // Ingest two symbols so they are registered.
+        engine
+            .ingest_label_triples(&[(
+                "Tecton".into(),
+                "is-a".into(),
+                "InfraTarget".into(),
+                1.0,
+            )])
+            .unwrap();
+
+        let tecton = engine.lookup_symbol("Tecton").unwrap();
+        let target = engine.lookup_symbol("InfraTarget").unwrap();
+        let dim = engine.ops().dim();
+        let byte_len = dim.binary_byte_len();
+
+        // Maximally dissimilar vectors: all-ones vs all-zeros → similarity 0.0.
+        engine.item_memory().insert(
+            tecton,
+            HyperVec::from_raw(vec![0xFFu8; byte_len], dim, Encoding::Bipolar),
+        );
+        engine.item_memory().insert(
+            target,
+            HyperVec::zero(dim, Encoding::Bipolar),
+        );
+
+        // Guard must block (Tecton is identity, similarity 0.0 < threshold 0.40).
+        assert!(
+            identity_vsa_similarity_guard(
+                &engine,
+                tecton,
+                target,
+                IDENTITY_VSA_GUARD_THRESHOLD
+            ),
+            "guard should block strongly dissimilar is-a for identity entity"
+        );
+
+        // Reverse: non-identity subject → guard is a no-op.
+        assert!(
+            !identity_vsa_similarity_guard(
+                &engine,
+                target,
+                tecton,
+                IDENTITY_VSA_GUARD_THRESHOLD
+            ),
+            "guard must not block when subject is not an identity entity"
+        );
+
+        // Identical vectors → similarity 1.0 → guard allows.
+        engine.item_memory().insert(
+            target,
+            HyperVec::from_raw(vec![0xFFu8; byte_len], dim, Encoding::Bipolar),
+        );
+        assert!(
+            !identity_vsa_similarity_guard(
+                &engine,
+                tecton,
+                target,
+                IDENTITY_VSA_GUARD_THRESHOLD
+            ),
+            "guard must allow when vectors are identical"
+        );
     }
 }

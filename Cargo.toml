@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/seshat", "crates/heka"]
+members = [".", "crates/seshat", "crates/heka", "crates/anima-ai"]
 resolver = "3"
 
 [package]
@@ -182,6 +182,10 @@ path = "src/main.rs"
 name = "akhomed"
 path = "src/bin/akhomed.rs"
 required-features = ["server"]
+
+[[bin]]
+name = "generate_qa_dataset"
+path = "src/bin/generate_qa_dataset.rs"
 
 [[bench]]
 name = "vsa_ops"

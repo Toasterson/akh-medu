@@ -3,6 +3,10 @@
 //! This tool enables the OODA loop to offload tasks that require LLM-class
 //! capability (code generation, document synthesis, deep research) to an
 //! external Claude Code subprocess.
+//!
+//! The tool is synchronous: it enqueues the task into the DelegationManager's
+//! pending queue. The daemon's delegation tick drains the queue and performs
+//! the async subprocess dispatch.
 
 use std::collections::HashSet;
 
@@ -13,8 +17,33 @@ use crate::agent::tool_manifest::{
 };
 use crate::engine::Engine;
 
+#[cfg(feature = "delegation")]
+use std::sync::{Arc, Mutex};
+#[cfg(feature = "delegation")]
+use crate::agent::delegation::DelegationTask;
+
 /// Delegate a task to an external worker (Claude Code subprocess or peer).
-pub struct DelegateTool;
+pub struct DelegateTool {
+    /// Shared pending task queue; the daemon drains this on each delegation tick.
+    #[cfg(feature = "delegation")]
+    pending: Arc<Mutex<Vec<DelegationTask>>>,
+}
+
+impl DelegateTool {
+    /// Create without a pending queue (no-op delegation).
+    pub fn new_noop() -> Self {
+        Self {
+            #[cfg(feature = "delegation")]
+            pending: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    /// Create with a shared pending queue from the DelegationManager.
+    #[cfg(feature = "delegation")]
+    pub fn new(pending: Arc<Mutex<Vec<DelegationTask>>>) -> Self {
+        Self { pending }
+    }
+}
 
 impl Tool for DelegateTool {
     fn signature(&self) -> ToolSignature {
@@ -34,7 +63,8 @@ impl Tool for DelegateTool {
                 ToolParam {
                     name: "target".into(),
                     description:
-                        "Target hint: 'local' for Claude Code subprocess (default)."
+                        "Target hint: 'local' for Claude Code subprocess (default), \
+                         'remote' for cloud trigger, 'peer' for another akh-medu instance."
                             .into(),
                     required: false,
                 },
@@ -44,18 +74,32 @@ impl Tool for DelegateTool {
 
     fn execute(&self, _engine: &Engine, input: ToolInput) -> AgentResult<ToolOutput> {
         let task_desc = input.require("task", "delegate")?;
-        let target_hint = input.get("target");
+        let target_hint = input.get("target").map(str::to_string);
 
-        // The actual dispatch happens through the DelegationManager which
-        // requires async + the manager instance. From the synchronous tool
-        // context we build the task spec and return it; the OODA loop or
-        // daemon will pick it up and dispatch.
-        //
-        // For now, we report the task as queued. The daemon integration
-        // (Phase 36e) will wire this into the async dispatch path.
+        #[cfg(feature = "delegation")]
+        {
+            let task = DelegationTask {
+                description: task_desc.to_string(),
+                context_triples: Vec::new(),
+                required_capabilities: Vec::new(),
+                goal_id: 0,
+                priority: 0.5,
+                target_hint: target_hint.clone(),
+            };
+            if let Ok(mut q) = self.pending.lock() {
+                q.push(task);
+                return Ok(ToolOutput::ok(format!(
+                    "Delegation queued: \"{task_desc}\" → target: {} \
+                     (will dispatch on next daemon tick)",
+                    target_hint.as_deref().unwrap_or("auto"),
+                )));
+            }
+        }
+
+        // Feature not enabled or lock poisoned — report queued anyway so OODA
+        // continues rather than failing the whole cycle.
         Ok(ToolOutput::ok(format!(
-            "Delegation queued: \"{task_desc}\" → target: {}",
-            target_hint.unwrap_or("auto"),
+            "Delegation noted: \"{task_desc}\" (delegation feature not active)"
         )))
     }
 
@@ -69,7 +113,7 @@ impl Tool for DelegateTool {
                 ToolParamSchema::required("task", "Description of the task to delegate"),
                 ToolParamSchema::optional(
                     "target",
-                    "Target hint: 'local' for Claude Code subprocess",
+                    "Target hint: 'local', 'remote', or 'peer'",
                 ),
             ],
             danger: DangerInfo {

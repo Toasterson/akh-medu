@@ -635,6 +635,18 @@ pub enum DerivationKind {
         source_text: String,
     },
 
+    // --- Phase 23: Affective System ------------------------------------------
+
+    /// An affective appraisal was processed and mood state updated (Phase 23).
+    AffectiveAppraisal {
+        /// The appraisal trigger kind (e.g. "GoalCompleted", "GoalFailed").
+        trigger_kind: String,
+        /// Outcome valence of the appraisal (-1.0 to 1.0).
+        valence: f32,
+        /// Resulting mood valence after EMA update.
+        resulting_mood_valence: f32,
+    },
+
     // --- Phase 36: Delegation ------------------------------------------------
 
     /// A task was delegated to an external worker (Phase 36).
@@ -736,6 +748,43 @@ pub enum DerivationKind {
         tool: SymbolId,
         reward: f32,
         cycle: u64,
+    },
+
+    // --- Import/Export (MCP import_export tools) ------------------------------
+
+    /// Triples were imported from a file (MCP import_triples tool).
+    FileImport {
+        source_path: String,
+        format: String,
+    },
+
+    // --- KG Compaction -------------------------------------------------------
+
+    /// Episodic scaffolding triples were removed from the KG (daemon compaction).
+    ///
+    /// Records how many `episode:N → agent:learned → *` and reverse child-of
+    /// links were purged, and the resulting knowledge density.
+    KgCompaction {
+        /// Number of scaffolding triples actually deleted this run.
+        scaffolding_removed: usize,
+        /// Total triples in the KG before this compaction run.
+        total_before: usize,
+        /// Knowledge density (knowledge triples / total triples) after compaction.
+        knowledge_density: f32,
+    },
+
+    // --- Phase 24: Sensory Grounding -----------------------------------------
+
+    /// Knowledge grounded from direct sensory observation (Phase 24).
+    ///
+    /// The agent perceived this through image, audio, or structured sensor input.
+    Perceived {
+        /// Modality: "image", "audio", or "structured".
+        modality: String,
+        /// Extraction confidence in [0, 1].
+        confidence: f32,
+        /// Opaque source identifier (e.g. file path, device name, or URI).
+        source_id: String,
     },
 }
 
@@ -842,6 +891,10 @@ impl DerivationKind {
             Self::ClusterTopologyIngested { .. } => 96,
             Self::KnowledgeElicitation { .. } => 97,
             Self::VsaRlUpdate { .. } => 98,
+            Self::FileImport { .. } => 99,
+            Self::KgCompaction { .. } => 100,
+            Self::AffectiveAppraisal { .. } => 101,
+            Self::Perceived { .. } => 102,
         }
     }
 }

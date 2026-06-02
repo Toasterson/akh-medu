@@ -42,6 +42,13 @@ pub struct GoalGenerationConfig {
     pub drive_thresholds: [f32; 4],
     /// Maximum dormant goals to retain. Default: 20.
     pub max_dormant: usize,
+    /// Hard cap on concurrent non-terminal goals (Active + Pending + Proposed + Dormant +
+    /// Suspended). New goals are not activated when this limit is reached. Default: 5.
+    pub max_open_goals: usize,
+    /// Mark an autonomous goal as `Failed` (abandoned) when it has been Active for at
+    /// least this many cycles without making progress. User-requested goals (entrenchment
+    /// >= 2) are exempt. Default: 15.
+    pub abandon_after_cycles: u64,
 }
 
 impl Default for GoalGenerationConfig {
@@ -53,6 +60,8 @@ impl Default for GoalGenerationConfig {
             min_feasibility: 0.2,
             drive_thresholds: [0.6, 0.3, 0.5, 0.5],
             max_dormant: 20,
+            max_open_goals: 5,
+            abandon_after_cycles: 15,
         }
     }
 }
@@ -204,20 +213,20 @@ fn proposals_from_drives(drives: &DriveSystem) -> Vec<GoalProposal> {
         .map(|drive| {
             let (desc, criteria) = match drive.kind {
                 DriveKind::Curiosity => (
-                    "Explore new knowledge areas to expand understanding".to_string(),
-                    "KG has gained new triples in unexplored domains".to_string(),
+                    "Explore new knowledge areas to expand understanding.".to_string(),
+                    "KG has gained new triples in unexplored domains.".to_string(),
                 ),
                 DriveKind::Coherence => (
-                    "Investigate and resolve contradictions in knowledge".to_string(),
-                    "Contradiction count reduced from current level".to_string(),
+                    "Investigate and resolve contradictions in knowledge.".to_string(),
+                    "Contradiction count reduced from current level.".to_string(),
                 ),
                 DriveKind::Completeness => (
-                    "Complete gaps in existing knowledge coverage".to_string(),
-                    "Coverage score above 0.7".to_string(),
+                    "Complete gaps in existing knowledge coverage.".to_string(),
+                    "Coverage score above 0.7.".to_string(),
                 ),
                 DriveKind::Efficiency => (
-                    "Improve tool strategy effectiveness and reduce failures".to_string(),
-                    "Tool success rate above 0.5".to_string(),
+                    "Improve tool strategy effectiveness and reduce failures.".to_string(),
+                    "Tool success rate above 0.5.".to_string(),
                 ),
             };
 
@@ -260,9 +269,16 @@ fn proposals_from_gaps(engine: &Engine, goal_symbols: &[SymbolId]) -> Vec<GoalPr
         .take(5) // Don't flood with gap proposals.
         .map(|gap| {
             let entity_label = engine.resolve_label(gap.entity);
+            // Truncate long entity labels so descriptions stay concise and
+            // fit within the goal-label character limit without mid-word cuts.
+            let short_label: String = if entity_label.chars().count() > 40 {
+                format!("{}…", entity_label.chars().take(40).collect::<String>())
+            } else {
+                entity_label.clone()
+            };
             let (desc, kind_str) = match &gap.kind {
                 GapKind::DeadEnd { .. } => (
-                    format!("Discover relationships for '{entity_label}'"),
+                    format!("Discover relationships for '{short_label}'."),
                     "dead_end".to_string(),
                 ),
                 GapKind::MissingPredicate {
@@ -270,14 +286,14 @@ fn proposals_from_gaps(engine: &Engine, goal_symbols: &[SymbolId]) -> Vec<GoalPr
                 } => {
                     let pred_label = engine.resolve_label(*expected_predicate);
                     (
-                        format!("Find {pred_label} for '{entity_label}'"),
+                        format!("Find {pred_label} for '{short_label}'."),
                         "missing_predicate".to_string(),
                     )
                 }
                 GapKind::IncompleteType { entity_type, .. } => {
                     let type_label = engine.resolve_label(*entity_type);
                     (
-                        format!("Complete '{entity_label}' as {type_label}"),
+                        format!("Complete '{short_label}' as {type_label}."),
                         "incomplete_type".to_string(),
                     )
                 }
@@ -379,7 +395,7 @@ fn proposals_from_anomalies(engine: &Engine, goals: &[Goal]) -> Vec<GoalProposal
         .map(|r| {
             let derived_label = engine.resolve_label(r.derived_id);
             GoalProposal {
-                description: format!("Resolve contradiction involving '{derived_label}'"),
+                description: format!("Resolve contradiction involving '{derived_label}'."),
                 rationale: format!("ContradictionDetected provenance for symbol {}", r.derived_id),
                 source: GoalSource::ContradictionDetected {
                     existing: Triple::new(
@@ -395,7 +411,7 @@ fn proposals_from_anomalies(engine: &Engine, goals: &[Goal]) -> Vec<GoalProposal
                 },
                 priority_suggestion: 170,
                 success_criteria: format!(
-                    "Contradiction for '{derived_label}' resolved or documented"
+                    "Contradiction for '{derived_label}' resolved or documented."
                 ),
                 conflicts_with: Vec::new(),
                 feasibility: 0.8,
@@ -432,10 +448,12 @@ fn proposals_from_opportunities(engine: &Engine, goals: &[Goal]) -> Vec<GoalProp
             let satisfied = newly_available.join(", ");
             let boost_priority = g.priority.saturating_add(30);
 
+            // Ensure the retry description ends at a sentence boundary.
+            let base_desc = g.description.trim_end_matches('.');
             Some(GoalProposal {
-                description: format!("Retry: {}", g.description),
+                description: format!("Retry: {base_desc}."),
                 rationale: format!(
-                    "Previously {} goal now has prerequisite knowledge: {satisfied}",
+                    "Previously {} goal now has prerequisite knowledge: {satisfied}.",
                     g.status
                 ),
                 source: GoalSource::OpportunityDetected {
@@ -465,8 +483,8 @@ fn proposal_from_impasse(impasse: &DecisionImpasse) -> GoalProposal {
     };
 
     GoalProposal {
-        description: format!("Resolve decision impasse for goal {}", impasse.goal_id),
-        rationale: format!("OODA impasse: {kind_str}, best score {:.2}", impasse.best_score),
+        description: format!("Resolve decision impasse for goal {}.", impasse.goal_id),
+        rationale: format!("OODA impasse: {kind_str}, best score {:.2}.", impasse.best_score),
         source: GoalSource::ImpasseDetected {
             goal_id: impasse.goal_id,
             impasse_kind: kind_str,
@@ -945,6 +963,8 @@ mod tests {
         assert_eq!(config.dedup_hamming_threshold, 2000);
         assert!((config.min_feasibility - 0.2).abs() < f32::EPSILON);
         assert_eq!(config.max_dormant, 20);
+        assert_eq!(config.max_open_goals, 5);
+        assert_eq!(config.abandon_after_cycles, 15);
     }
 
     #[test]

@@ -10,8 +10,9 @@ use serde::{Deserialize, Serialize};
 use crate::engine::Engine;
 use crate::graph::Triple;
 use crate::provenance::{DerivationKind, ProvenanceRecord};
-use crate::symbol::{SymbolId, SymbolKind};
+use crate::symbol::SymbolId;
 
+use super::affect::{AffectiveState, emotional_salience, mood_congruence_bias};
 use super::agent::AgentPredicates;
 use super::error::{AgentError, AgentResult};
 use super::goal::Goal;
@@ -243,6 +244,8 @@ pub struct EpisodicEntry {
     pub relevance_score: f32,
     /// When this was consolidated (seconds since UNIX epoch).
     pub timestamp: u64,
+    /// Affective valence (mood) at consolidation time — used for mood-congruent retrieval (Phase 23).
+    pub affective_valence: f32,
 }
 
 // ---------------------------------------------------------------------------
@@ -262,6 +265,11 @@ pub struct ConsolidationConfig {
     pub utility_weight: f32,
     /// Trigger auto-consolidation when WM reaches this count (default: 50).
     pub auto_consolidate_at: usize,
+    /// Multiplier for emotional salience boost on consolidation scores (Phase 23, default: 0.2).
+    ///
+    /// When non-zero, emotionally significant moments (high |valence| × arousal) boost
+    /// the consolidation score, making those memories more likely to be persisted.
+    pub affective_salience_weight: f32,
 }
 
 impl Default for ConsolidationConfig {
@@ -272,6 +280,7 @@ impl Default for ConsolidationConfig {
             novelty_weight: 0.3,
             utility_weight: 0.3,
             auto_consolidate_at: 50,
+            affective_salience_weight: 0.2,
         }
     }
 }
@@ -327,12 +336,16 @@ pub fn actr_activation(entry: &WorkingMemoryEntry, current_cycle: u64) -> f32 {
 }
 
 /// Score a working memory entry for consolidation.
+///
+/// When `affect` is provided, emotionally significant moments receive a salience
+/// boost — high |valence| × arousal increases the consolidation priority (Phase 23).
 fn score_entry(
     entry: &WorkingMemoryEntry,
     goals: &[Goal],
     engine: &Engine,
     config: &ConsolidationConfig,
     current_cycle: u64,
+    affect: Option<&AffectiveState>,
 ) -> f32 {
     // Goal relevance: does this entry's symbols overlap with any active goal's symbols?
     let goal_relevance = {
@@ -376,15 +389,28 @@ fn score_entry(
     // Utility: ACT-R activation-based (replaces raw reference_count * 0.25).
     let utility = actr_activation(entry, current_cycle);
 
-    config.goal_relevance_weight * goal_relevance
+    let base_score = config.goal_relevance_weight * goal_relevance
         + config.novelty_weight * novelty
-        + config.utility_weight * utility
+        + config.utility_weight * utility;
+
+    // Affective salience boost (Phase 23): emotionally intense moments are more memorable.
+    if config.affective_salience_weight > 0.0
+        && let Some(state) = affect
+    {
+        let salience = emotional_salience(state); // 1.0–2.0
+        base_score * (1.0 + (salience - 1.0) * config.affective_salience_weight)
+    } else {
+        base_score
+    }
 }
 
 /// Run the deliberate consolidation process.
 ///
 /// Scores each working memory entry, persists qualifying ones as episodic
 /// memories in the knowledge graph, records provenance, and evicts processed entries.
+///
+/// When `affect` is `Some`, emotionally significant episodes receive a salience
+/// boost and the current mood valence is stored for future mood-congruent recall (Phase 23).
 pub fn consolidate(
     working_memory: &mut WorkingMemory,
     engine: &Engine,
@@ -392,6 +418,7 @@ pub fn consolidate(
     config: &ConsolidationConfig,
     predicates: &AgentPredicates,
     current_cycle: u64,
+    affect: Option<&AffectiveState>,
 ) -> AgentResult<ConsolidationResult> {
     let entries_scored = working_memory.len();
     let mut entries_to_persist = Vec::new();
@@ -411,7 +438,7 @@ pub fn consolidate(
             continue;
         }
 
-        let score = score_entry(entry, goals, engine, config, current_cycle);
+        let score = score_entry(entry, goals, engine, config, current_cycle, affect);
         if score >= config.min_relevance {
             entries_to_persist.push((entry.clone(), score));
         } else {
@@ -420,10 +447,11 @@ pub fn consolidate(
     }
 
     let mut episodes_created = Vec::new();
+    let affective_valence = affect.map(|s| s.valence).unwrap_or(0.0);
 
     // Persist qualifying entries as episodic memories.
     for (entry, score) in &entries_to_persist {
-        match persist_episode(engine, entry, *score, predicates) {
+        match persist_episode(engine, entry, *score, affective_valence, predicates) {
             Ok(episode_id) => {
                 episodes_created.push(episode_id);
                 entries_to_evict.push(entry.id);
@@ -458,6 +486,7 @@ fn persist_episode(
     engine: &Engine,
     entry: &WorkingMemoryEntry,
     relevance_score: f32,
+    affective_valence: f32,
     predicates: &AgentPredicates,
 ) -> AgentResult<SymbolId> {
     // Embed a truncated content excerpt in the episode entity's label so the
@@ -470,11 +499,13 @@ fn persist_episode(
         entry.content.as_str()
     };
     let episode_label = format!("episode:{}:{}", entry.id, excerpt);
-    let episode = engine.create_symbol(SymbolKind::Entity, &episode_label)?;
+    let episode_id = engine
+        .create_symbol(crate::symbol::SymbolKind::Entity, &episode_label)?
+        .id;
 
     // Link to learned symbols.
     for sym in &entry.symbols {
-        let _ = engine.add_triple(&Triple::new(episode.id, predicates.learned, *sym));
+        let _ = engine.add_triple(&Triple::new(episode_id, predicates.learned, *sym));
     }
 
     // Create a tag for the entry kind.
@@ -486,30 +517,45 @@ fn persist_episode(
         WorkingMemoryKind::ToolResult => "tag:tool_result",
     };
     let tag_sym = engine.resolve_or_create_entity(kind_tag_label)?;
-    let _ = engine.add_triple(&Triple::new(episode.id, predicates.has_tag, tag_sym));
+    let _ = engine.add_triple(&Triple::new(episode_id, predicates.has_tag, tag_sym));
 
     // Mark as episodic memory type.
     let mem_type_sym = engine.resolve_or_create_entity("episodic_memory")?;
     let _ = engine.add_triple(&Triple::new(
-        episode.id,
+        episode_id,
         predicates.memory_type,
         mem_type_sym,
     ));
 
-    // Store provenance.
-    let reason = format!(
-        "Consolidated from WM entry {} ({}): {}",
-        entry.id,
-        kind_tag_label.trim_start_matches("tag:"),
-        if entry.content.len() > 60 {
-            format!("{}...", &entry.content[..60])
-        } else {
-            entry.content.clone()
-        }
-    );
+    // Store affective valence for mood-congruent retrieval (Phase 23).
+    let valence_label = format!("affect_valence:{:.3}", affective_valence);
+    let valence_sym = engine.resolve_or_create_entity(&valence_label)?;
+    let _ = engine.add_triple(&Triple::new(
+        episode_id,
+        predicates.has_affective_valence,
+        valence_sym,
+    ));
+
+    // Store provenance. Use char_indices to find a safe UTF-8 truncation boundary;
+    // byte-slicing at a fixed offset panics on multi-byte sequences.
+    let reason = {
+        let end = entry
+            .content
+            .char_indices()
+            .nth(60)
+            .map(|(i, _)| i)
+            .unwrap_or(entry.content.len());
+        let truncated = &entry.content[..end];
+        let suffix = if end < entry.content.len() { "..." } else { "" };
+        format!(
+            "Consolidated from WM entry {} ({}): {truncated}{suffix}",
+            entry.id,
+            kind_tag_label.trim_start_matches("tag:"),
+        )
+    };
 
     let mut prov = ProvenanceRecord::new(
-        episode.id,
+        episode_id,
         DerivationKind::AgentConsolidation {
             reason: reason.clone(),
             relevance_score,
@@ -520,15 +566,19 @@ fn persist_episode(
 
     let _ = engine.store_provenance(&mut prov);
 
-    Ok(episode.id)
+    Ok(episode_id)
 }
 
 /// Recall episodic memories from the KG by querying related symbols.
+///
+/// When `affect` is `Some`, mood-congruent retrieval is applied: memories with
+/// valence matching the current mood are ranked higher (Phase 23).
 pub fn recall_episodes(
     engine: &Engine,
     query_symbols: &[SymbolId],
     predicates: &AgentPredicates,
     top_k: usize,
+    affect: Option<&AffectiveState>,
 ) -> AgentResult<Vec<EpisodicEntry>> {
     let mut episodes: Vec<EpisodicEntry> = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -556,17 +606,143 @@ pub fn recall_episodes(
         }
     }
 
-    // Sort by timestamp (most recent first), then relevance.
+    // Sort with mood-congruent bias (Phase 23) or plain recency + relevance.
+    if let Some(mood) = affect {
+        episodes.sort_by(|a, b| {
+            let bias_a = mood_congruence_bias(mood, a.affective_valence);
+            let bias_b = mood_congruence_bias(mood, b.affective_valence);
+            let score_a = a.relevance_score * bias_a;
+            let score_b = b.relevance_score * bias_b;
+            // Primary: biased score; secondary: recency.
+            score_b
+                .partial_cmp(&score_a)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(b.timestamp.cmp(&a.timestamp))
+        });
+    } else {
+        episodes.sort_by(|a, b| {
+            b.timestamp.cmp(&a.timestamp).then(
+                b.relevance_score
+                    .partial_cmp(&a.relevance_score)
+                    .unwrap_or(std::cmp::Ordering::Equal),
+            )
+        });
+    }
+    episodes.truncate(top_k);
+
+    Ok(episodes)
+}
+
+/// Recall the most recent episodic memories from the KG without requiring query symbols.
+///
+/// Scans all episodes by following reverse links from the well-known `episodic_memory`
+/// marker entity and returns the `top_k` most recent, sorted by symbol creation timestamp.
+/// Returns an empty vec (not an error) when no episodes exist yet.
+pub fn recall_recent_episodes(
+    engine: &Engine,
+    predicates: &AgentPredicates,
+    top_k: usize,
+) -> AgentResult<Vec<EpisodicEntry>> {
+    // The "episodic_memory" label is the type marker written by persist_episode and
+    // index_cycle_episode. If it has never been created, no episodes exist yet.
+    let mem_type_id = match engine.resolve_symbol("episodic_memory") {
+        Ok(id) => id,
+        Err(_) => return Ok(Vec::new()),
+    };
+
+    // All episodes have a triple: episode -[memory_type]-> episodic_memory.
+    let incoming = engine.triples_to(mem_type_id);
+    let mut episodes: Vec<EpisodicEntry> = incoming
+        .iter()
+        .filter(|t| t.predicate == predicates.memory_type)
+        .filter_map(|t| reconstruct_episode(engine, t.subject, predicates))
+        .collect();
+
+    // Most recent first: primary sort by creation timestamp, secondary by SymbolId
+    // (monotonically increasing) so episodes within the same second are deterministic.
     episodes.sort_by(|a, b| {
-        b.timestamp.cmp(&a.timestamp).then(
-            b.relevance_score
-                .partial_cmp(&a.relevance_score)
-                .unwrap_or(std::cmp::Ordering::Equal),
-        )
+        b.timestamp
+            .cmp(&a.timestamp)
+            .then(b.symbol_id.get().cmp(&a.symbol_id.get()))
     });
     episodes.truncate(top_k);
 
     Ok(episodes)
+}
+
+/// Create and index an episodic memory entry directly from an OODA cycle result.
+///
+/// This bypasses the consolidation threshold so that every OODA cycle immediately
+/// leaves a retrievable trace. Episodes created here are identical in structure to
+/// consolidated ones and are found by both `recall_episodes` and `recall_recent_episodes`.
+pub fn index_cycle_episode(
+    engine: &Engine,
+    predicates: &AgentPredicates,
+    cycle_count: u64,
+    goal_label: &str,
+    goal_id: Option<SymbolId>,
+    chosen_tool: &str,
+    progress: &str,
+) -> AgentResult<()> {
+    // Resolve or create the episode entity. A deterministic label means crash-recovery
+    // or session restarts with overlapping cycle numbers reuse the existing symbol and
+    // add triples idempotently rather than failing with DuplicateLabel.
+    let episode_label = format!("cycle_episode:{cycle_count}");
+    let episode_id = engine.resolve_or_create_entity(&episode_label)?;
+
+    // Summary — truncated to 80 chars so it fits comfortably in recall output.
+    let summary_text = format!(
+        "Cycle {cycle_count}: tool={chosen_tool} goal=\"{goal_label}\" progress={progress}"
+    );
+    let summary_label = if summary_text.len() > 80 {
+        format!("summary:{}", &summary_text[..80])
+    } else {
+        format!("summary:{summary_text}")
+    };
+    let summary_sym = engine.resolve_or_create_entity(&summary_label)?;
+    let _ = engine.add_triple(&Triple::new(episode_id, predicates.has_summary, summary_sym));
+
+    // Tag: marks this as a direct cycle episode (as opposed to a consolidated one).
+    let cycle_tag = engine.resolve_or_create_entity("tag:cycle_episode")?;
+    let _ = engine.add_triple(&Triple::new(episode_id, predicates.has_tag, cycle_tag));
+
+    // Tag: progress outcome for targeted queries.
+    let progress_tag_label = format!("tag:progress_{progress}");
+    let progress_tag = engine.resolve_or_create_entity(&progress_tag_label)?;
+    let _ = engine.add_triple(&Triple::new(episode_id, predicates.has_tag, progress_tag));
+
+    // Link to the goal so symbol-based recall can find this episode.
+    if let Some(gid) = goal_id {
+        let _ = engine.add_triple(&Triple::new(episode_id, predicates.learned, gid));
+    }
+
+    // Mark as episodic memory — this is how recall_recent_episodes discovers all episodes.
+    let mem_type_sym = engine.resolve_or_create_entity("episodic_memory")?;
+    let _ = engine.add_triple(&Triple::new(episode_id, predicates.memory_type, mem_type_sym));
+
+    // from_cycle: link to a cycle-number entity for temporal ordering queries.
+    let cycle_entity_label = format!("cycle:{cycle_count}");
+    let cycle_sym = engine.resolve_or_create_entity(&cycle_entity_label)?;
+    let _ = engine.add_triple(&Triple::new(episode_id, predicates.from_cycle, cycle_sym));
+
+    // Provenance — record at full confidence since this is a direct agent action.
+    let reason = format!(
+        "Direct episode from OODA cycle {cycle_count}: tool={chosen_tool} progress={progress}"
+    );
+    let mut prov = ProvenanceRecord::new(
+        episode_id,
+        DerivationKind::AgentConsolidation {
+            reason,
+            relevance_score: 1.0,
+        },
+    )
+    .with_confidence(1.0);
+    if let Some(gid) = goal_id {
+        prov = prov.with_sources(vec![gid]);
+    }
+    let _ = engine.store_provenance(&mut prov);
+
+    Ok(())
 }
 
 /// Reconstruct an EpisodicEntry from its KG triples.
@@ -591,6 +767,7 @@ fn reconstruct_episode(
     let mut summary = String::new();
     let mut learnings = Vec::new();
     let mut tags = Vec::new();
+    let mut affective_valence = 0.0f32;
 
     // New format: summary is embedded in the episode entity's own label as
     // "episode:{id}:{content}".  Extract the third colon-delimited segment.
@@ -616,6 +793,11 @@ fn reconstruct_episode(
             learnings.push(triple.object);
         } else if triple.predicate == predicates.has_tag {
             tags.push(triple.object);
+        } else if triple.predicate == predicates.has_affective_valence {
+            let label = engine.resolve_label(triple.object);
+            if let Some(val_str) = label.strip_prefix("affect_valence:") {
+                affective_valence = val_str.parse().unwrap_or(0.0);
+            }
         }
     }
 
@@ -633,6 +815,7 @@ fn reconstruct_episode(
         consolidation_reason: String::new(), // would need provenance lookup for full detail
         relevance_score: 0.0,                // would need provenance lookup
         timestamp,
+        affective_valence,
     })
 }
 
@@ -1166,7 +1349,7 @@ mod tests {
             ..ConsolidationConfig::default()
         };
 
-        let result = consolidate(&mut wm, &engine, &goals, &config, &predicates, 5).unwrap();
+        let result = consolidate(&mut wm, &engine, &goals, &config, &predicates, 5, None).unwrap();
 
         // Both entries evicted, neither persisted as episodes.
         assert_eq!(result.entries_persisted, 0);
@@ -1221,7 +1404,7 @@ mod tests {
             ..ConsolidationConfig::default()
         };
 
-        let result = consolidate(&mut wm, &engine, &goals, &config, &predicates, 5).unwrap();
+        let result = consolidate(&mut wm, &engine, &goals, &config, &predicates, 5, None).unwrap();
 
         assert_eq!(result.entries_persisted, 1);
         assert_eq!(result.episodes_created.len(), 1);
@@ -1250,5 +1433,92 @@ mod tests {
             episode_label.contains("Tool result"),
             "episode label should embed content excerpt: {episode_label}"
         );
+    }
+
+    // -- KG-backed episodic memory tests --
+
+    fn test_predicates(engine: &crate::engine::Engine) -> super::super::agent::AgentPredicates {
+        super::super::agent::AgentPredicates::init(engine).unwrap()
+    }
+
+    #[test]
+    fn index_and_recall_recent_cycle_episode() {
+        let engine = crate::engine::Engine::new(crate::engine::EngineConfig::default()).unwrap();
+        let predicates = test_predicates(&engine);
+
+        let goal_sym = engine
+            .resolve_or_create_entity("goal:learn_rust")
+            .unwrap();
+
+        index_cycle_episode(&engine, &predicates, 1, "learn rust", Some(goal_sym), "nlu_parse", "advanced").unwrap();
+
+        let episodes = recall_recent_episodes(&engine, &predicates, 10).unwrap();
+        assert_eq!(episodes.len(), 1);
+        assert!(
+            episodes[0].summary.contains("learn rust"),
+            "summary should contain goal text: got {:?}",
+            episodes[0].summary
+        );
+        assert!(
+            !episodes[0].summary.starts_with("summary:"),
+            "summary should not have 'summary:' prefix: got {:?}",
+            episodes[0].summary
+        );
+    }
+
+    #[test]
+    fn multiple_cycle_episodes_ordered_by_recency() {
+        let engine = crate::engine::Engine::new(crate::engine::EngineConfig::default()).unwrap();
+        let predicates = test_predicates(&engine);
+
+        index_cycle_episode(&engine, &predicates, 1, "goal A", None, "tool_a", "advanced").unwrap();
+        index_cycle_episode(&engine, &predicates, 2, "goal B", None, "tool_b", "completed").unwrap();
+        index_cycle_episode(&engine, &predicates, 3, "goal C", None, "tool_c", "no_change").unwrap();
+
+        let episodes = recall_recent_episodes(&engine, &predicates, 2).unwrap();
+        assert_eq!(episodes.len(), 2);
+        // Most recent (highest symbol id / created latest) should come first.
+        // Cycle 3 was created last.
+        assert!(
+            episodes[0].summary.contains("goal C") || episodes[0].summary.contains('3'),
+            "Expected most recent episode first: {:?}",
+            episodes[0].summary
+        );
+    }
+
+    #[test]
+    fn recall_episodes_by_symbol_finds_goal_link() {
+        let engine = crate::engine::Engine::new(crate::engine::EngineConfig::default()).unwrap();
+        let predicates = test_predicates(&engine);
+
+        let goal_sym = engine.resolve_or_create_entity("goal:my_goal").unwrap();
+        index_cycle_episode(&engine, &predicates, 5, "my goal", Some(goal_sym), "search", "advanced").unwrap();
+
+        let episodes = recall_episodes(&engine, &[goal_sym], &predicates, 5, None).unwrap();
+        assert_eq!(episodes.len(), 1);
+        assert!(episodes[0].summary.contains("my goal") || episodes[0].summary.contains('5'));
+    }
+
+    #[test]
+    fn index_cycle_episode_idempotent_on_same_label() {
+        let engine = crate::engine::Engine::new(crate::engine::EngineConfig::default()).unwrap();
+        let predicates = test_predicates(&engine);
+
+        // Indexing the same cycle twice should not error (resolve_or_create_entity is idempotent).
+        index_cycle_episode(&engine, &predicates, 7, "goal X", None, "tool_x", "advanced").unwrap();
+        index_cycle_episode(&engine, &predicates, 7, "goal X", None, "tool_x", "advanced").unwrap();
+
+        // Still exactly one episode (triples are deduplicated).
+        let episodes = recall_recent_episodes(&engine, &predicates, 10).unwrap();
+        assert_eq!(episodes.len(), 1);
+    }
+
+    #[test]
+    fn recall_recent_empty_when_no_episodes() {
+        let engine = crate::engine::Engine::new(crate::engine::EngineConfig::default()).unwrap();
+        let predicates = test_predicates(&engine);
+
+        let episodes = recall_recent_episodes(&engine, &predicates, 5).unwrap();
+        assert!(episodes.is_empty());
     }
 }

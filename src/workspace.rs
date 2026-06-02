@@ -4,14 +4,54 @@
 //! Workspace configuration is persisted as TOML in `$XDG_CONFIG_HOME/akh-medu/workspaces/`.
 
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 use miette::Diagnostic;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::grammar::Language;
 use crate::paths::{AkhPaths, WorkspacePaths};
 use crate::vsa::{Dimension, Encoding};
+
+/// Compiled workspace name validator. Names must be 1–63 lowercase alphanumeric
+/// characters, hyphens, or underscores, and must start with a letter or digit.
+static NAME_RE: OnceLock<Regex> = OnceLock::new();
+
+fn name_re() -> &'static Regex {
+    NAME_RE.get_or_init(|| Regex::new(r"^[a-z0-9][a-z0-9_-]{0,62}$").unwrap())
+}
+
+/// Validate a proposed workspace name.
+///
+/// Returns `Ok(())` if valid, or `Err(WorkspaceError::InvalidName)` with a
+/// diagnostic explaining what is wrong.
+pub fn validate_workspace_name(name: &str) -> WorkspaceResult<()> {
+    if name_re().is_match(name) {
+        return Ok(());
+    }
+
+    let detail = if name.is_empty() {
+        "name is empty".to_string()
+    } else if name.len() > 63 {
+        format!("name is {} characters (max 63)", name.len())
+    } else if name.contains(':') {
+        "name contains a colon — workspace names must not contain query-like syntax".to_string()
+    } else if name.contains(' ') {
+        "name contains spaces".to_string()
+    } else if name.chars().next().is_none_or(|c| !c.is_ascii_alphanumeric()) {
+        "name must start with a lowercase letter or digit".to_string()
+    } else {
+        "name contains characters other than lowercase letters, digits, hyphens, and underscores"
+            .to_string()
+    };
+
+    Err(WorkspaceError::InvalidName {
+        name: name.to_string(),
+        detail,
+    })
+}
 
 /// Errors from workspace operations.
 #[derive(Debug, Error, Diagnostic)]
@@ -74,6 +114,17 @@ pub enum WorkspaceError {
         help("Workspace role is write-once and cannot be changed after assignment.")
     )]
     RoleAlreadyAssigned { current_role: String },
+
+    #[error("invalid workspace name \"{name}\": {detail}")]
+    #[diagnostic(
+        code(akh::workspace::invalid_name),
+        help(
+            "Workspace names must be 1–63 characters: lowercase letters (a-z), digits (0-9), \
+             hyphens (-), or underscores (_), and must start with a letter or digit. \
+             Names containing colons, spaces, or uppercase letters are rejected."
+        )
+    )]
+    InvalidName { name: String, detail: String },
 }
 
 pub type WorkspaceResult<T> = std::result::Result<T, WorkspaceError>;
@@ -98,8 +149,11 @@ pub struct WorkspaceConfig {
     /// Maximum expected symbols.
     #[serde(default = "default_max_symbols")]
     pub max_symbols: u64,
+    /// Maximum triples before ingestion is rejected with a capacity error.
+    #[serde(default = "default_max_triples")]
+    pub max_triples: u64,
     /// Seed pack IDs to apply on first initialization.
-    #[serde(default)]
+    #[serde(default = "default_seed_packs")]
     pub seed_packs: Vec<String>,
     /// Shared partition names to mount.
     #[serde(default)]
@@ -121,6 +175,22 @@ fn default_max_memory_mb() -> usize {
 fn default_max_symbols() -> u64 {
     1_000_000
 }
+fn default_seed_packs() -> Vec<String> {
+    vec![
+        "identity".into(),
+        "ontology".into(),
+        "common-sense".into(),
+        "computing".into(),
+        "architecture".into(),
+    ]
+}
+
+fn default_max_triples() -> u64 {
+    DEFAULT_MAX_TRIPLES
+}
+
+/// Default triple ceiling applied when no workspace config exists.
+pub const DEFAULT_MAX_TRIPLES: u64 = 500_000;
 
 impl Default for WorkspaceConfig {
     fn default() -> Self {
@@ -131,7 +201,14 @@ impl Default for WorkspaceConfig {
             language: default_language(),
             max_memory_mb: default_max_memory_mb(),
             max_symbols: default_max_symbols(),
-            seed_packs: vec!["identity".into(), "ontology".into(), "common-sense".into(), "computing".into(), "tecton".into()],
+            max_triples: default_max_triples(),
+            seed_packs: vec![
+                "identity".into(),
+                "ontology".into(),
+                "common-sense".into(),
+                "computing".into(),
+                "architecture".into(),
+            ],
             shared_partitions: Vec::new(),
         }
     }
@@ -214,6 +291,8 @@ impl WorkspaceManager {
 
     /// Create a new workspace with default or provided config.
     pub fn create(&self, config: WorkspaceConfig) -> WorkspaceResult<WorkspacePaths> {
+        validate_workspace_name(&config.name)?;
+
         let ws_paths = self.paths.workspace(&config.name);
 
         if ws_paths.exists() {
@@ -267,6 +346,33 @@ impl WorkspaceManager {
         Ok(())
     }
 
+    /// Return workspace names that fail the name validation rule.
+    ///
+    /// These are candidates for cleanup — they were typically created by agent
+    /// OODA loops that passed query fragments or status strings as workspace names.
+    pub fn list_invalid_names(&self) -> Vec<String> {
+        self.list()
+            .into_iter()
+            .filter(|name| validate_workspace_name(name).is_err())
+            .collect()
+    }
+
+    /// Delete all workspaces whose names fail validation.
+    ///
+    /// Returns the names of workspaces that were deleted and, separately, any
+    /// that could not be deleted (with their error messages).
+    pub fn delete_junk_workspaces(&self) -> (Vec<String>, Vec<(String, String)>) {
+        let mut deleted = Vec::new();
+        let mut errors = Vec::new();
+        for name in self.list_invalid_names() {
+            match self.delete(&name) {
+                Ok(()) => deleted.push(name),
+                Err(e) => errors.push((name, e.to_string())),
+            }
+        }
+        (deleted, errors)
+    }
+
     /// Get info about a workspace (load its config).
     pub fn info(&self, name: &str) -> WorkspaceResult<WorkspaceConfig> {
         let config_path = self.paths.workspace_config_file(name);
@@ -313,11 +419,145 @@ mod tests {
     use super::*;
 
     #[test]
+    fn valid_workspace_names_accepted() {
+        for name in &["default", "tecton", "my-ws", "ws_2", "a", "abc123", "x-y_z"] {
+            assert!(
+                validate_workspace_name(name).is_ok(),
+                "expected \"{name}\" to be valid"
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_workspace_names_rejected() {
+        let junk = [
+            "status:active",
+            "criteria:find star entities",
+            "interlocutor:last-interaction",
+            "docker build host",
+            "episode:848",
+            "",
+            "Uppercase",
+            "has space",
+            "-leading-dash",
+            &"a".repeat(64),
+        ];
+        for name in &junk {
+            assert!(
+                validate_workspace_name(name).is_err(),
+                "expected \"{name}\" to be invalid"
+            );
+        }
+    }
+
+    #[test]
+    fn create_rejects_invalid_name() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = AkhPaths {
+            config_dir: tmp.path().join("config"),
+            data_dir: tmp.path().join("data"),
+            state_dir: tmp.path().join("state"),
+            runtime_dir: tmp.path().join("run"),
+            cache_dir: tmp.path().join("cache"),
+        };
+        paths.ensure_dirs().unwrap();
+        let mgr = WorkspaceManager::new(paths);
+        let err = mgr
+            .create(WorkspaceConfig::with_name("status:active"))
+            .unwrap_err();
+        assert!(matches!(err, WorkspaceError::InvalidName { .. }));
+    }
+
+    #[test]
+    fn list_invalid_names_finds_junk() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = AkhPaths {
+            config_dir: tmp.path().join("config"),
+            data_dir: tmp.path().join("data"),
+            state_dir: tmp.path().join("state"),
+            runtime_dir: tmp.path().join("run"),
+            cache_dir: tmp.path().join("cache"),
+        };
+        paths.ensure_dirs().unwrap();
+        let mgr = WorkspaceManager::new(paths.clone());
+
+        // Create a valid workspace normally.
+        mgr.create(WorkspaceConfig::with_name("good")).unwrap();
+
+        // Simulate junk workspaces created by older agent runs: directly create
+        // the directories that would have been made without name validation.
+        let junk_names = ["status:active", "episode:848", "docker build host"];
+        for junk in &junk_names {
+            let junk_dir = paths.data_dir.join("workspaces").join(junk);
+            std::fs::create_dir_all(&junk_dir).unwrap();
+        }
+
+        let invalid = mgr.list_invalid_names();
+        for junk in &junk_names {
+            assert!(invalid.contains(&junk.to_string()), "expected \"{junk}\" in invalid list");
+        }
+        assert!(!invalid.contains(&"good".to_string()));
+    }
+
+    #[test]
+    fn delete_junk_workspaces_removes_them() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = AkhPaths {
+            config_dir: tmp.path().join("config"),
+            data_dir: tmp.path().join("data"),
+            state_dir: tmp.path().join("state"),
+            runtime_dir: tmp.path().join("run"),
+            cache_dir: tmp.path().join("cache"),
+        };
+        paths.ensure_dirs().unwrap();
+        let mgr = WorkspaceManager::new(paths.clone());
+
+        mgr.create(WorkspaceConfig::with_name("keep")).unwrap();
+        for junk in &["status:active", "episode:848"] {
+            std::fs::create_dir_all(paths.data_dir.join("workspaces").join(junk)).unwrap();
+        }
+
+        let (deleted, errors) = mgr.delete_junk_workspaces();
+        assert_eq!(errors.len(), 0);
+        assert_eq!(deleted.len(), 2);
+        assert!(mgr.list().contains(&"keep".to_string()));
+        assert!(!mgr.list().contains(&"status:active".to_string()));
+    }
+
+    #[test]
     fn default_config_has_seed_packs() {
         let cfg = WorkspaceConfig::default();
         assert_eq!(cfg.name, "default");
-        assert!(!cfg.seed_packs.is_empty());
-        assert!(cfg.seed_packs.contains(&"identity".to_string()));
+        assert_eq!(cfg.seed_packs.len(), 5);
+        for pack in &["identity", "ontology", "common-sense", "computing", "architecture"] {
+            assert!(
+                cfg.seed_packs.contains(&pack.to_string()),
+                "default seed_packs missing: {pack}"
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_config_without_seed_packs_gets_defaults() {
+        // A workspace config saved before seed_packs existed (field absent from TOML)
+        // must deserialize with the full default seed list so Tecton and other
+        // pre-existing workspaces pick up seeds on next engine open.
+        let toml = r#"
+name = "tecton"
+dimension = 10000
+encoding = "bipolar"
+language = "auto"
+max_memory_mb = 1024
+max_symbols = 1000000
+"#;
+        let cfg: WorkspaceConfig = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.seed_packs.len(), 5, "missing seed_packs field must default to 5 packs");
+        for pack in &["identity", "ontology", "common-sense", "computing", "architecture"] {
+            assert!(
+                cfg.seed_packs.contains(&pack.to_string()),
+                "default seed_packs missing: {pack}"
+            );
+        }
     }
 
     #[test]
@@ -335,6 +575,31 @@ mod tests {
         let loaded = WorkspaceConfig::load(&path).unwrap();
         assert_eq!(loaded.name, "test-ws");
         assert_eq!(loaded.dimension, 5000);
+        assert_eq!(loaded.max_triples, DEFAULT_MAX_TRIPLES);
+    }
+
+    #[test]
+    fn config_max_triples_persists() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("bounded.toml");
+
+        let cfg = WorkspaceConfig {
+            name: "bounded".into(),
+            max_triples: 10_000,
+            ..Default::default()
+        };
+        cfg.save(&path).unwrap();
+
+        let loaded = WorkspaceConfig::load(&path).unwrap();
+        assert_eq!(loaded.max_triples, 10_000);
+    }
+
+    #[test]
+    fn config_missing_max_triples_defaults() {
+        // TOML without max_triples should deserialise with the default value.
+        let toml = r#"name = "legacy""#;
+        let cfg: WorkspaceConfig = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.max_triples, DEFAULT_MAX_TRIPLES);
     }
 
     #[test]

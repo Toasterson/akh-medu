@@ -11,7 +11,9 @@
 //! defaults to `"default"`.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use rmcp::handler::server::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
@@ -19,10 +21,10 @@ use rmcp::model::*;
 use rmcp::schemars;
 use rmcp::{ErrorData as McpError, tool, tool_router};
 use schemars::JsonSchema;
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer, Serialize};
 use tokio::sync::RwLock;
 
-use crate::agent::{Agent, AgentConfig, AgentError};
+use crate::agent::{Agent, AgentConfig, AgentError, GoalStatus};
 use crate::config::UpstreamsSection;
 use crate::engine::{Engine, EngineConfig};
 use crate::message::AkhMessage;
@@ -49,6 +51,20 @@ pub type PsycheSnapshotMap = Arc<
         >,
     >,
 >;
+
+/// Deserialize the `workspace` field accepting a JSON string, `null`, or an
+/// absent key.  `null` and `""` both map to the `"default"` workspace so that
+/// JSON-syntax callers (e.g. `mcporter call … '{"workspace":"tecton"}'`) that
+/// omit or null the field behave identically to function-syntax callers that
+/// never supply it.
+fn deserialize_workspace<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    Option::<String>::deserialize(d)
+        .map(|opt| opt.filter(|s| !s.is_empty()).unwrap_or_else(default_workspace))
+}
+
+fn default_dry_run() -> bool {
+    true
+}
 
 /// Shared state needed by MCP tool handlers.
 ///
@@ -94,22 +110,35 @@ pub struct McpState {
     pub psyche_snapshots: PsycheSnapshotMap,
     /// Upstream MCP endpoint configuration (anima, seshat).
     pub upstreams: UpstreamsSection,
+    /// Lifecycle stats tracked by daemon_run_bounded / workspace_unload.
+    pub workspace_stats: RwLock<HashMap<String, WorkspaceStats>>,
 }
 
 /// Pause control for a single workspace daemon.
 #[derive(Clone)]
 pub struct DaemonPauseHandle {
-    pub paused: Arc<std::sync::atomic::AtomicBool>,
+    pub paused: Arc<AtomicBool>,
     pub cycle_done: Arc<tokio::sync::Notify>,
 }
 
 impl DaemonPauseHandle {
     pub fn new() -> Self {
         Self {
-            paused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            paused: Arc::new(AtomicBool::new(false)),
             cycle_done: Arc::new(tokio::sync::Notify::new()),
         }
     }
+}
+
+/// Lightweight tracking for workspace lifecycle events surfaced by daemon_status.
+#[derive(Debug, Default, Clone)]
+pub struct WorkspaceStats {
+    /// Total OODA cycles run via daemon_run_bounded for this workspace.
+    pub bounded_cycles: usize,
+    /// Unix timestamp (seconds) of the most recent daemon_run_bounded persist.
+    pub last_bounded_persist_at: Option<u64>,
+    /// True when workspace_unload was called and the engine is out of memory.
+    pub is_unloaded: bool,
 }
 
 impl McpState {
@@ -129,6 +158,7 @@ impl McpState {
             daemon_pauses: RwLock::new(HashMap::new()),
             loading_gates: RwLock::new(HashMap::new()),
             upstreams,
+            workspace_stats: RwLock::new(HashMap::new()),
         }
     }
 
@@ -214,11 +244,26 @@ impl McpState {
             ));
         }
 
-        let config = EngineConfig {
-            dimension: Dimension::DEFAULT,
-            data_dir: Some(ws_paths.kg_dir.clone()),
-            compartments_dir: Some(ws_paths.compartments_dir.clone()),
-            ..Default::default()
+        // Load per-workspace config to honour dimension, memory and symbol limits;
+        // fall back to defaults when no config file is present.
+        let config_path = self.paths.workspace_config_file(name);
+        let config = if config_path.exists() {
+            match crate::workspace::WorkspaceConfig::load(&config_path) {
+                Ok(ws_cfg) => ws_cfg.to_engine_config(&ws_paths),
+                Err(_) => EngineConfig {
+                    dimension: Dimension::DEFAULT,
+                    data_dir: Some(ws_paths.kg_dir.clone()),
+                    compartments_dir: Some(ws_paths.compartments_dir.clone()),
+                    ..Default::default()
+                },
+            }
+        } else {
+            EngineConfig {
+                dimension: Dimension::DEFAULT,
+                data_dir: Some(ws_paths.kg_dir.clone()),
+                compartments_dir: Some(ws_paths.compartments_dir.clone()),
+                ..Default::default()
+            }
         };
 
         // Run the expensive DB open on a blocking thread so Tokio isn't frozen.
@@ -286,6 +331,41 @@ impl McpState {
 
         Ok(result)
     }
+
+    /// Return an error if the workspace has reached its configured triple limit.
+    ///
+    /// Reads the workspace config (if present) to determine `max_triples`; falls
+    /// back to [`crate::workspace::DEFAULT_MAX_TRIPLES`]. Call this before any
+    /// operation that would add new triples to the knowledge graph.
+    pub async fn check_ingestion_capacity(
+        &self,
+        name: &str,
+        engine: &Engine,
+    ) -> Result<(), McpError> {
+        let config_path = self.paths.workspace_config_file(name);
+        let max_triples = if config_path.exists() {
+            crate::workspace::WorkspaceConfig::load(&config_path)
+                .ok()
+                .map(|c| c.max_triples)
+                .unwrap_or(crate::workspace::DEFAULT_MAX_TRIPLES)
+        } else {
+            crate::workspace::DEFAULT_MAX_TRIPLES
+        };
+        let current = engine.info().triple_count as u64;
+        if current >= max_triples {
+            Err(McpError::invalid_params(
+                format!(
+                    "workspace \"{name}\" has reached its ingestion limit: \
+                     {current} / {max_triples} triples. \
+                     Use archive_workspace to freeze it or remove_triple / \
+                     remove_batch to free space first."
+                ),
+                None,
+            ))
+        } else {
+            Ok(())
+        }
+    }
 }
 
 // ── Tool parameter structs ──────────────────────────────────────────────
@@ -325,14 +405,14 @@ where
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct WorkspaceParam {
     #[schemars(description = "Target workspace (default: \"default\")")]
-    #[serde(default = "default_workspace")]
+    #[serde(default = "default_workspace", deserialize_with = "deserialize_workspace")]
     pub workspace: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct AskParams {
     #[schemars(description = "Target workspace (default: \"default\")")]
-    #[serde(default = "default_workspace")]
+    #[serde(default = "default_workspace", deserialize_with = "deserialize_workspace")]
     pub workspace: String,
     #[schemars(description = "Natural-language question to investigate")]
     pub question: String,
@@ -352,7 +432,7 @@ pub struct AskParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SparqlParams {
     #[schemars(description = "Target workspace (default: \"default\")")]
-    #[serde(default = "default_workspace")]
+    #[serde(default = "default_workspace", deserialize_with = "deserialize_workspace")]
     pub workspace: String,
     #[schemars(description = "SPARQL SELECT query string")]
     pub query: String,
@@ -361,7 +441,7 @@ pub struct SparqlParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SearchParams {
     #[schemars(description = "Target workspace (default: \"default\")")]
-    #[serde(default = "default_workspace")]
+    #[serde(default = "default_workspace", deserialize_with = "deserialize_workspace")]
     pub workspace: String,
     #[schemars(description = "Search term (entity name or partial match)")]
     pub term: String,
@@ -370,7 +450,7 @@ pub struct SearchParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct AssertTripleParams {
     #[schemars(description = "Target workspace (default: \"default\")")]
-    #[serde(default = "default_workspace")]
+    #[serde(default = "default_workspace", deserialize_with = "deserialize_workspace")]
     pub workspace: String,
     #[schemars(description = "Subject entity (e.g. 'Sun')")]
     pub subject: String,
@@ -385,7 +465,7 @@ pub struct AssertTripleParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct IngestTextParams {
     #[schemars(description = "Target workspace (default: \"default\")")]
-    #[serde(default = "default_workspace")]
+    #[serde(default = "default_workspace", deserialize_with = "deserialize_workspace")]
     pub workspace: String,
     #[schemars(description = "Text to extract knowledge from")]
     pub text: String,
@@ -414,7 +494,7 @@ pub struct JournalIngestParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct IngestUrlParams {
     #[schemars(description = "Target workspace (default: \"default\")")]
-    #[serde(default = "default_workspace")]
+    #[serde(default = "default_workspace", deserialize_with = "deserialize_workspace")]
     pub workspace: String,
     #[schemars(description = "URL to fetch and ingest")]
     pub url: String,
@@ -423,7 +503,7 @@ pub struct IngestUrlParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct CompartmentIdParams {
     #[schemars(description = "Target workspace (default: \"default\")")]
-    #[serde(default = "default_workspace")]
+    #[serde(default = "default_workspace", deserialize_with = "deserialize_workspace")]
     pub workspace: String,
     #[schemars(description = "Compartment ID")]
     pub id: String,
@@ -455,7 +535,7 @@ pub struct CreateCompartmentParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct RunAgentParams {
     #[schemars(description = "Target workspace (default: \"default\")")]
-    #[serde(default = "default_workspace")]
+    #[serde(default = "default_workspace", deserialize_with = "deserialize_workspace")]
     pub workspace: String,
     #[schemars(description = "Comma-separated goals for the agent to pursue")]
     pub goals: String,
@@ -468,7 +548,11 @@ pub struct RunAgentParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct CreateWorkspaceParams {
-    #[schemars(description = "Name for the new workspace")]
+    #[schemars(
+        description = "Name for the new workspace. Must be 1–63 characters: lowercase letters \
+                       (a-z), digits (0-9), hyphens, or underscores. Must start with a letter \
+                       or digit. Colons, spaces, and uppercase letters are not allowed."
+    )]
     pub name: String,
     #[schemars(description = "Optional role to assign (e.g. 'astronomy researcher')")]
     pub role: Option<String>,
@@ -481,9 +565,15 @@ pub struct DeleteWorkspaceParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct ArchiveWorkspaceParams {
+    #[schemars(description = "Name of the workspace to archive")]
+    pub name: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct ApplySeedParams {
     #[schemars(description = "Target workspace (default: \"default\")")]
-    #[serde(default = "default_workspace")]
+    #[serde(default = "default_workspace", deserialize_with = "deserialize_workspace")]
     pub workspace: String,
     #[schemars(description = "Seed pack ID to apply (e.g. 'foundation', 'reasoning')")]
     pub pack_name: String,
@@ -492,7 +582,7 @@ pub struct ApplySeedParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct AwakenParams {
     #[schemars(description = "Target workspace (default: \"default\")")]
-    #[serde(default = "default_workspace")]
+    #[serde(default = "default_workspace", deserialize_with = "deserialize_workspace")]
     pub workspace: String,
     #[schemars(
         description = "Purpose statement (e.g. 'I want to learn about stellar evolution'). Required for fresh bootstrap."
@@ -514,7 +604,7 @@ pub struct AwakenParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct AwakenParseParams {
     #[schemars(description = "Target workspace (default: \"default\")")]
-    #[serde(default = "default_workspace")]
+    #[serde(default = "default_workspace", deserialize_with = "deserialize_workspace")]
     pub workspace: String,
     #[schemars(description = "Purpose statement to parse (preview only — nothing is committed)")]
     pub statement: String,
@@ -523,7 +613,7 @@ pub struct AwakenParseParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ChatParams {
     #[schemars(description = "Target workspace (default: \"default\")")]
-    #[serde(default = "default_workspace")]
+    #[serde(default = "default_workspace", deserialize_with = "deserialize_workspace")]
     pub workspace: String,
     #[schemars(
         description = "User message to process through the full NLU pipeline (dialogue acts, facts, queries, goals)"
@@ -559,6 +649,31 @@ pub struct ManageGoalsParams {
     pub status: Option<String>,
 }
 
+// ── Daemon Lifecycle Parameter Structs ─────────────────────────────────
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DaemonRunBoundedParams {
+    #[schemars(description = "Target workspace (default: \"default\")")]
+    #[serde(default = "default_workspace")]
+    pub workspace: String,
+    #[schemars(description = "Maximum OODA cycles to run (default: 10)")]
+    pub max_cycles: Option<u32>,
+    #[schemars(description = "Wall-clock timeout in seconds (default: 300). Whichever limit fires first causes a soft stop.")]
+    pub max_duration_seconds: Option<u64>,
+    #[schemars(description = "Optional goals to add before running. Existing goals are preserved.")]
+    pub goal_filter: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct WorkspacePersistParams {
+    #[schemars(description = "Target workspace (default: \"default\")")]
+    #[serde(default = "default_workspace")]
+    pub workspace: String,
+    #[schemars(description = "Force a full snapshot (no-op pre-ADR-049; always flushes the redb store)")]
+    #[serde(default)]
+    pub force_snapshot: bool,
+}
+
 // ── Batch Operations ────────────────────────────────────────────────────
 
 /// A single triple in a batch assertion.
@@ -577,7 +692,7 @@ pub struct TripleEntry {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct AssertBatchParams {
     #[schemars(description = "Target workspace (default: \"default\")")]
-    #[serde(default = "default_workspace")]
+    #[serde(default = "default_workspace", deserialize_with = "deserialize_workspace")]
     pub workspace: String,
     #[schemars(
         description = "Array of triples to assert: [{s, p, o, c?}, ...]. Example: [{\"s\":\"Sun\",\"p\":\"is-a\",\"o\":\"Star\"}]"
@@ -588,7 +703,7 @@ pub struct AssertBatchParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct RemoveBatchParams {
     #[schemars(description = "Target workspace (default: \"default\")")]
-    #[serde(default = "default_workspace")]
+    #[serde(default = "default_workspace", deserialize_with = "deserialize_workspace")]
     pub workspace: String,
     #[schemars(description = "Array of triples to remove: [{s, p, o}, ...]")]
     pub triples: Vec<TripleEntry>,
@@ -644,7 +759,7 @@ pub struct SparqlDeleteParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ResolveIdentityParams {
     #[schemars(description = "Target workspace (default: \"default\")")]
-    #[serde(default = "default_workspace")]
+    #[serde(default = "default_workspace", deserialize_with = "deserialize_workspace")]
     pub workspace: String,
     #[schemars(description = "Name of the figure to resolve (e.g. 'Ptah', 'Gandalf', 'Turing')")]
     pub name: String,
@@ -657,7 +772,7 @@ pub struct ResolveIdentityParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct RitualOfAwakeningParams {
     #[schemars(description = "Target workspace (default: \"default\")")]
-    #[serde(default = "default_workspace")]
+    #[serde(default = "default_workspace", deserialize_with = "deserialize_workspace")]
     pub workspace: String,
     #[schemars(description = "Character name (must match a previously resolved identity)")]
     pub name: String,
@@ -689,7 +804,7 @@ pub struct RitualOfAwakeningParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ExpandDomainParams {
     #[schemars(description = "Target workspace (default: \"default\")")]
-    #[serde(default = "default_workspace")]
+    #[serde(default = "default_workspace", deserialize_with = "deserialize_workspace")]
     pub workspace: String,
     #[schemars(description = "Seed concepts to expand from (e.g. ['architecture', 'creation', 'craftsmanship'])")]
     pub seed_concepts: Vec<String>,
@@ -702,7 +817,7 @@ pub struct ExpandDomainParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct AnalyzePrerequisitesParams {
     #[schemars(description = "Target workspace (default: \"default\")")]
-    #[serde(default = "default_workspace")]
+    #[serde(default = "default_workspace", deserialize_with = "deserialize_workspace")]
     pub workspace: String,
     #[schemars(description = "Domain to analyze prerequisites for")]
     pub domain: String,
@@ -711,7 +826,7 @@ pub struct AnalyzePrerequisitesParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct AssessCompetenceParams {
     #[schemars(description = "Target workspace (default: \"default\")")]
-    #[serde(default = "default_workspace")]
+    #[serde(default = "default_workspace", deserialize_with = "deserialize_workspace")]
     pub workspace: String,
     #[schemars(description = "Domain to assess")]
     pub domain: String,
@@ -724,7 +839,7 @@ pub struct AssessCompetenceParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct RemoveTripleParams {
     #[schemars(description = "Target workspace (default: \"default\")")]
-    #[serde(default = "default_workspace")]
+    #[serde(default = "default_workspace", deserialize_with = "deserialize_workspace")]
     pub workspace: String,
     #[schemars(description = "Subject entity label")]
     pub subject: String,
@@ -739,7 +854,7 @@ pub struct RemoveTripleParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct AgentRunCycleParams {
     #[schemars(description = "Target workspace (default: \"default\")")]
-    #[serde(default = "default_workspace")]
+    #[serde(default = "default_workspace", deserialize_with = "deserialize_workspace")]
     pub workspace: String,
     #[schemars(
         description = "Decide mode: \"vsa_native\" for pure VSA similarity ranking \
@@ -753,7 +868,7 @@ pub struct AgentRunCycleParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct AgentRecallParams {
     #[schemars(description = "Target workspace (default: \"default\")")]
-    #[serde(default = "default_workspace")]
+    #[serde(default = "default_workspace", deserialize_with = "deserialize_workspace")]
     pub workspace: String,
     #[schemars(description = "Query terms to search episodic memory for")]
     pub query: Vec<String>,
@@ -800,12 +915,26 @@ pub struct AgentUpdateGoalParams {
     pub criteria: Option<String>,
 }
 
+// ── Journal Ingest Tool ─────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct IngestJournalParams {
+    #[schemars(description = "Target workspace (default: \"default\")")]
+    #[serde(default = "default_workspace")]
+    pub workspace: String,
+    #[schemars(
+        description = "Path to a directory of *.md journals or a single .md file. \
+                       Defaults to $AKH_JOURNAL_DIR or $XDG_DATA_HOME/akh-medu/journals/."
+    )]
+    pub path: Option<String>,
+}
+
 // ── Phase 3: Knowledge Introspection Tools ──────────────────────────────
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct TriplesOfParams {
     #[schemars(description = "Target workspace (default: \"default\")")]
-    #[serde(default = "default_workspace")]
+    #[serde(default = "default_workspace", deserialize_with = "deserialize_workspace")]
     pub workspace: String,
     #[schemars(description = "Entity label to get triples for")]
     pub entity: String,
@@ -814,7 +943,7 @@ pub struct TriplesOfParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ProvenanceOfParams {
     #[schemars(description = "Target workspace (default: \"default\")")]
-    #[serde(default = "default_workspace")]
+    #[serde(default = "default_workspace", deserialize_with = "deserialize_workspace")]
     pub workspace: String,
     #[schemars(description = "Entity label to trace provenance for")]
     pub entity: String,
@@ -823,7 +952,7 @@ pub struct ProvenanceOfParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct InferAnalogyParams {
     #[schemars(description = "Target workspace (default: \"default\")")]
-    #[serde(default = "default_workspace")]
+    #[serde(default = "default_workspace", deserialize_with = "deserialize_workspace")]
     pub workspace: String,
     #[schemars(description = "First term (A in 'A is to B as C is to ?')")]
     pub a: String,
@@ -840,7 +969,7 @@ pub struct InferAnalogyParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct RecordEventParams {
     #[schemars(description = "Target workspace (default: \"default\")")]
-    #[serde(default = "default_workspace")]
+    #[serde(default = "default_workspace", deserialize_with = "deserialize_workspace")]
     pub workspace: String,
     #[schemars(description = "Name of the event (e.g. 'switch-on', 'deploy-v2')")]
     pub name: String,
@@ -859,7 +988,7 @@ pub struct RecordEventParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct HoldsAtParams {
     #[schemars(description = "Target workspace (default: \"default\")")]
-    #[serde(default = "default_workspace")]
+    #[serde(default = "default_workspace", deserialize_with = "deserialize_workspace")]
     pub workspace: String,
     #[schemars(description = "Fluent label to check (e.g. 'light-on', 'server-running')")]
     pub fluent: String,
@@ -870,7 +999,7 @@ pub struct HoldsAtParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ProjectStateParams {
     #[schemars(description = "Target workspace (default: \"default\")")]
-    #[serde(default = "default_workspace")]
+    #[serde(default = "default_workspace", deserialize_with = "deserialize_workspace")]
     pub workspace: String,
     #[schemars(description = "Start of interval (seconds since UNIX epoch)")]
     pub from_time: u64,
@@ -881,7 +1010,7 @@ pub struct ProjectStateParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SimulateActionsParams {
     #[schemars(description = "Target workspace (default: \"default\")")]
-    #[serde(default = "default_workspace")]
+    #[serde(default = "default_workspace", deserialize_with = "deserialize_workspace")]
     pub workspace: String,
     #[schemars(
         description = "Ordered list of action names to simulate (must have causal schemas registered)"
@@ -892,7 +1021,7 @@ pub struct SimulateActionsParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct WhatChangedSinceParams {
     #[schemars(description = "Target workspace (default: \"default\")")]
-    #[serde(default = "default_workspace")]
+    #[serde(default = "default_workspace", deserialize_with = "deserialize_workspace")]
     pub workspace: String,
     #[schemars(description = "Return changes after this timestamp (seconds since UNIX epoch)")]
     pub since: u64,
@@ -901,7 +1030,7 @@ pub struct WhatChangedSinceParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct FluentHistoryParams {
     #[schemars(description = "Target workspace (default: \"default\")")]
-    #[serde(default = "default_workspace")]
+    #[serde(default = "default_workspace", deserialize_with = "deserialize_workspace")]
     pub workspace: String,
     #[schemars(description = "Fluent label to get history for")]
     pub fluent: String,
@@ -912,7 +1041,7 @@ pub struct FluentHistoryParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct CounterfactualParams {
     #[schemars(description = "Target workspace (default: \"default\")")]
-    #[serde(default = "default_workspace")]
+    #[serde(default = "default_workspace", deserialize_with = "deserialize_workspace")]
     pub workspace: String,
     #[schemars(description = "The action that was actually taken (tool name)")]
     pub actual_action: String,
@@ -925,7 +1054,7 @@ pub struct CounterfactualParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct RateSourceParams {
     #[schemars(description = "Target workspace (default: \"default\")")]
-    #[serde(default = "default_workspace")]
+    #[serde(default = "default_workspace", deserialize_with = "deserialize_workspace")]
     pub workspace: String,
     #[schemars(description = "Source entity label to rate")]
     pub source: String,
@@ -934,7 +1063,7 @@ pub struct RateSourceParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct VerifySourceClaimParams {
     #[schemars(description = "Target workspace (default: \"default\")")]
-    #[serde(default = "default_workspace")]
+    #[serde(default = "default_workspace", deserialize_with = "deserialize_workspace")]
     pub workspace: String,
     #[schemars(description = "Source entity label")]
     pub source: String,
@@ -947,7 +1076,7 @@ pub struct VerifySourceClaimParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct AssessEvidenceParams {
     #[schemars(description = "Target workspace (default: \"default\")")]
-    #[serde(default = "default_workspace")]
+    #[serde(default = "default_workspace", deserialize_with = "deserialize_workspace")]
     pub workspace: String,
     #[schemars(description = "Claim/entity label to assess")]
     pub claim: String,
@@ -956,7 +1085,7 @@ pub struct AssessEvidenceParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct AddEvidenceParams {
     #[schemars(description = "Target workspace (default: \"default\")")]
-    #[serde(default = "default_workspace")]
+    #[serde(default = "default_workspace", deserialize_with = "deserialize_workspace")]
     pub workspace: String,
     #[schemars(description = "Claim/entity label")]
     pub claim: String,
@@ -975,7 +1104,7 @@ pub struct AddEvidenceParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct MctsPlanParams {
     #[schemars(description = "Target workspace (default: \"default\")")]
-    #[serde(default = "default_workspace")]
+    #[serde(default = "default_workspace", deserialize_with = "deserialize_workspace")]
     pub workspace: String,
     #[schemars(description = "Maximum MCTS iterations (default: 100)")]
     pub max_iterations: Option<usize>,
@@ -988,7 +1117,7 @@ pub struct MctsPlanParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct TripleStatsParams {
     #[schemars(description = "Target workspace (default: \"default\")")]
-    #[serde(default = "default_workspace")]
+    #[serde(default = "default_workspace", deserialize_with = "deserialize_workspace")]
     pub workspace: String,
     #[schemars(description = "Number of top-connected entities to return (default: 10)")]
     pub top_n: Option<usize>,
@@ -997,7 +1126,7 @@ pub struct TripleStatsParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct PredicateFilterParams {
     #[schemars(description = "Target workspace (default: \"default\")")]
-    #[serde(default = "default_workspace")]
+    #[serde(default = "default_workspace", deserialize_with = "deserialize_workspace")]
     pub workspace: String,
     #[schemars(description = "Predicate label to filter by (e.g. \"child-of\", \"is-a\")")]
     pub predicate: String,
@@ -1068,6 +1197,169 @@ pub struct ToolRegisterRemoteParams {
         description = "Comma-separated agent labels that may invoke this tool (e.g. \"agent:tecton,agent:thoth\")"
     )]
     pub access_agents: Option<String>,
+}
+
+// ── Phase 36: Delegation Parameter Structs ───────────────────────────────
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DelegateTaskParams {
+    #[schemars(description = "Target workspace (default: \"default\")")]
+    #[serde(default = "default_workspace")]
+    pub workspace: String,
+    #[schemars(description = "Description of the task to delegate to an external worker")]
+    pub task: String,
+    #[schemars(
+        description = "Target hint: 'local' (Claude Code subprocess), 'remote' (cloud trigger), 'peer' (another akh-medu)"
+    )]
+    pub target: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DelegationStatusParams {
+    #[schemars(description = "Target workspace (default: \"default\")")]
+    #[serde(default = "default_workspace")]
+    pub workspace: String,
+}
+
+// ── Config Inspect Parameter + Response Structs ──────────────────────────
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ConfigInspectParams {
+    #[schemars(description = "Target workspace (default: \"default\")")]
+    #[serde(default = "default_workspace")]
+    pub workspace: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ConfigInspectDaemon {
+    max_cycles: usize,
+    persist_interval_seconds: u64,
+    auto_start: bool,
+    running: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct ConfigInspectCompartment {
+    name: String,
+    loaded: bool,
+    active: bool,
+    size_triples: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct ConfigInspectRuleEngine {
+    min_confidence: f32,
+    max_iterations: usize,
+    builtin_rules: Vec<String>,
+    noise_filter_enabled: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct ConfigInspectVsa {
+    dimension: usize,
+    item_memory_size: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct ConfigInspectPaths {
+    workspace_root: String,
+    kg_dir: String,
+    compartments_dir: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ConfigInspectResponse {
+    daemon: ConfigInspectDaemon,
+    compartments: Vec<ConfigInspectCompartment>,
+    rule_engine: ConfigInspectRuleEngine,
+    vsa: ConfigInspectVsa,
+    paths: ConfigInspectPaths,
+}
+
+// ── Cross-Workspace Query Parameter Struct ──────────────────────────────
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CrossWorkspaceQueryParams {
+    #[schemars(
+        description = "Exactly two workspace names to compare, e.g. [\"tecton\", \"default\"]"
+    )]
+    pub workspaces: Vec<String>,
+    #[schemars(
+        description = "Query type: \"entity_diff\" (entities in A not in B and vice versa), \"triple_overlap\" (shared triples), \"predicate_union\" (all predicate types across workspaces), or \"cross_entity\" (compare a named entity across workspaces)"
+    )]
+    pub query_type: String,
+    #[schemars(description = "Entity name — required when query_type is \"cross_entity\"")]
+    pub entity: Option<String>,
+}
+
+// ── Import/Export Parameter Structs ─────────────────────────────────────
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ExportTriplesParams {
+    #[schemars(description = "Target workspace (default: \"default\")")]
+    #[serde(default = "default_workspace")]
+    pub workspace: String,
+    #[schemars(
+        description = "Serialization format: \"json\" (label-based array), \"json-ld\" (JSON-LD @graph), or \"n-triples\" (RDF N-Triples with akh: prefix)"
+    )]
+    pub format: String,
+    #[schemars(
+        description = "Optional predicate labels to include (e.g. [\"is-a\", \"part-of\"]). Omit to export all predicates."
+    )]
+    pub predicate_filter: Option<Vec<String>>,
+    #[schemars(
+        description = "Optional subject label to include (e.g. \"Tecton\"). Omit to export all subjects."
+    )]
+    pub subject_filter: Option<String>,
+    #[schemars(
+        description = "Absolute path to write output. If omitted, content is returned inline. Must be an absolute path."
+    )]
+    pub output_path: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ImportTriplesParams {
+    #[schemars(description = "Target workspace (default: \"default\")")]
+    #[serde(default = "default_workspace")]
+    pub workspace: String,
+    #[schemars(
+        description = "File format: \"json\" (label-based array), \"json-ld\" (JSON-LD @graph), or \"n-triples\" (N-Triples with akh: prefix)"
+    )]
+    pub format: String,
+    #[schemars(description = "Absolute path to the file to import")]
+    pub input_path: String,
+    #[schemars(
+        description = "If true, simulate the import and report conflicts without modifying the workspace"
+    )]
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CleanupByPatternParams {
+    #[schemars(description = "Target workspace (default: \"default\")")]
+    #[serde(default = "default_workspace")]
+    pub workspace: String,
+    #[schemars(description = "Prefix match on subject label (e.g. \"episode:\" matches all episode entities)")]
+    pub subject_pattern: Option<String>,
+    #[schemars(description = "Exact predicate label to match (e.g. \"child-of\", \"agent:learned\")")]
+    pub predicate: Option<String>,
+    #[schemars(description = "Prefix match on object label")]
+    pub object_pattern: Option<String>,
+    #[schemars(description = "Only include triples with confidence strictly below this value (e.g. 0.5)")]
+    pub confidence_below: Option<f64>,
+    #[schemars(description = "When true (default), preview what would be removed without committing. Set false to execute the removal.")]
+    #[serde(default = "default_dry_run")]
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CancelDelegationParams {
+    #[schemars(description = "Target workspace (default: \"default\")")]
+    #[serde(default = "default_workspace")]
+    pub workspace: String,
+    #[schemars(description = "Delegation ID to cancel (numeric)")]
+    pub delegation_id: u64,
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────
@@ -1147,6 +1439,169 @@ fn format_messages(msgs: &[AkhMessage]) -> String {
         }
     }
     lines.join("\n")
+}
+
+// ── Import/Export Helpers ───────────────────────────────────────────────
+
+/// A triple in label form used for import/export.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct LabelTriple {
+    s: String,
+    p: String,
+    o: String,
+    confidence: f32,
+}
+
+fn serialize_triples_json(triples: &[LabelTriple]) -> Result<String, String> {
+    serde_json::to_string_pretty(triples).map_err(|e| format!("json serialize: {e}"))
+}
+
+fn serialize_triples_jsonld(triples: &[LabelTriple]) -> Result<String, String> {
+    let graph: Vec<serde_json::Value> = triples
+        .iter()
+        .map(|t| {
+            serde_json::json!({
+                "subject": t.s,
+                "predicate": t.p,
+                "object": t.o,
+                "confidence": t.confidence
+            })
+        })
+        .collect();
+    let doc = serde_json::json!({
+        "@context": {
+            "@vocab": "https://akh-medu.dev/sym/",
+            "subject": "https://akh-medu.dev/triple/subject",
+            "predicate": "https://akh-medu.dev/triple/predicate",
+            "object": "https://akh-medu.dev/triple/object",
+            "confidence": "https://akh-medu.dev/meta/confidence"
+        },
+        "@graph": graph
+    });
+    serde_json::to_string_pretty(&doc).map_err(|e| format!("json-ld serialize: {e}"))
+}
+
+fn serialize_triples_ntriples(triples: &[LabelTriple]) -> String {
+    let mut out = String::new();
+    for t in triples {
+        out.push_str(&format!(
+            "<akh:{}> <akh:{}> <akh:{}> .\n",
+            t.s.replace(' ', "_"),
+            t.p.replace(' ', "_"),
+            t.o.replace(' ', "_"),
+        ));
+    }
+    out
+}
+
+fn parse_triples_json(content: &str) -> Result<Vec<LabelTriple>, String> {
+    serde_json::from_str(content).map_err(|e| format!("json parse: {e}"))
+}
+
+fn parse_triples_jsonld(content: &str) -> Result<Vec<LabelTriple>, String> {
+    let doc: serde_json::Value =
+        serde_json::from_str(content).map_err(|e| format!("json-ld parse: {e}"))?;
+    let graph = doc
+        .get("@graph")
+        .and_then(|g| g.as_array())
+        .ok_or("missing @graph array")?;
+    let mut triples = Vec::with_capacity(graph.len());
+    for (i, entry) in graph.iter().enumerate() {
+        let s = entry
+            .get("subject")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| format!("@graph[{i}]: missing subject"))?
+            .to_string();
+        let p = entry
+            .get("predicate")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| format!("@graph[{i}]: missing predicate"))?
+            .to_string();
+        let o = entry
+            .get("object")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| format!("@graph[{i}]: missing object"))?
+            .to_string();
+        let confidence = entry
+            .get("confidence")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(1.0) as f32;
+        triples.push(LabelTriple { s, p, o, confidence });
+    }
+    Ok(triples)
+}
+
+fn parse_triples_ntriples(content: &str) -> Result<Vec<LabelTriple>, String> {
+    let mut triples = Vec::new();
+    for (line_num, line) in content.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        // Expected: <akh:SUBJ> <akh:PRED> <akh:OBJ> .
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 4 {
+            return Err(format!("line {}: expected 4 tokens, got {}", line_num + 1, parts.len()));
+        }
+        let parse_iri = |tok: &str, field: &str| -> Result<String, String> {
+            if !tok.starts_with('<') || !tok.ends_with('>') {
+                return Err(format!("line {}: {field} must be wrapped in < >", line_num + 1));
+            }
+            let inner = &tok[1..tok.len() - 1];
+            let label = if let Some(rest) = inner.strip_prefix("akh:") {
+                rest.replace('_', " ")
+            } else {
+                inner.to_string()
+            };
+            Ok(label)
+        };
+        let s = parse_iri(parts[0], "subject")?;
+        let p = parse_iri(parts[1], "predicate")?;
+        let o = parse_iri(parts[2], "object")?;
+        triples.push(LabelTriple { s, p, o, confidence: 1.0 });
+    }
+    Ok(triples)
+}
+
+/// Validate a path for writing: must be absolute, no null bytes, parent must exist.
+fn validate_write_path(path_str: &str) -> Result<std::path::PathBuf, McpError> {
+    if path_str.contains('\0') {
+        return Err(McpError::invalid_params(
+            format!("output_path contains null bytes"),
+            None,
+        ));
+    }
+    let p = std::path::PathBuf::from(path_str);
+    if !p.is_absolute() {
+        return Err(McpError::invalid_params(
+            format!("output_path must be an absolute path"),
+            None,
+        ));
+    }
+    let parent = p.parent().unwrap_or(&p);
+    let canonical_parent = parent.canonicalize().map_err(|e| {
+        McpError::invalid_params(
+            format!("output_path parent directory not accessible: {e}"),
+            None,
+        )
+    })?;
+    let filename = p.file_name().ok_or_else(|| {
+        McpError::invalid_params(format!("output_path has no filename component"), None)
+    })?;
+    Ok(canonical_parent.join(filename))
+}
+
+/// Validate a path for reading: must exist and be a regular file.
+fn validate_read_path(path_str: &str) -> Result<std::path::PathBuf, McpError> {
+    if path_str.contains('\0') {
+        return Err(McpError::invalid_params(
+            format!("input_path contains null bytes"),
+            None,
+        ));
+    }
+    std::path::PathBuf::from(path_str)
+        .canonicalize()
+        .map_err(|e| McpError::invalid_params(format!("cannot access input_path: {e}"), None))
 }
 
 // ── MCP Server ──────────────────────────────────────────────────────────
@@ -1309,6 +1764,7 @@ impl AkhMcpServer {
         Parameters(params): Parameters<AssertTripleParams>,
     ) -> Result<CallToolResult, McpError> {
         let engine = self.state.get_engine(&params.workspace).await?;
+        self.state.check_ingestion_capacity(&params.workspace, &engine).await?;
         let conf = params.confidence.unwrap_or(0.9) as f32;
 
         let s = engine
@@ -1342,6 +1798,7 @@ impl AkhMcpServer {
         Parameters(params): Parameters<AssertBatchParams>,
     ) -> Result<CallToolResult, McpError> {
         let engine = self.state.get_engine(&params.workspace).await?;
+        self.state.check_ingestion_capacity(&params.workspace, &engine).await?;
 
         let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
             // Use Engine::add_triples_batch for single-call batch assertion
@@ -1378,6 +1835,7 @@ impl AkhMcpServer {
         Parameters(params): Parameters<IngestTextParams>,
     ) -> Result<CallToolResult, McpError> {
         let engine = self.state.get_engine(&params.workspace).await?;
+        self.state.check_ingestion_capacity(&params.workspace, &engine).await?;
         let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
             use crate::agent::tool::{Tool, ToolInput};
             use crate::agent::tools::TextIngestTool;
@@ -1439,6 +1897,7 @@ impl AkhMcpServer {
         Parameters(params): Parameters<IngestUrlParams>,
     ) -> Result<CallToolResult, McpError> {
         let engine = self.state.get_engine(&params.workspace).await?;
+        self.state.check_ingestion_capacity(&params.workspace, &engine).await?;
         let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
             use crate::agent::tool::{Tool, ToolInput};
             use crate::agent::tools::ContentIngestTool;
@@ -1807,9 +2266,13 @@ impl AkhMcpServer {
             name: name.clone(),
             ..Default::default()
         };
-        manager
-            .create(config)
-            .map_err(|e| McpError::internal_error(format!("{e}"), None))?;
+        manager.create(config).map_err(|e| {
+            if matches!(e, crate::workspace::WorkspaceError::InvalidName { .. }) {
+                McpError::invalid_params(format!("{e}"), None)
+            } else {
+                McpError::internal_error(format!("{e}"), None)
+            }
+        })?;
 
         let mut extra = String::new();
 
@@ -1857,6 +2320,82 @@ impl AkhMcpServer {
 
         Ok(CallToolResult::success(vec![Content::text(format!(
             "Workspace \"{name}\" deleted"
+        ))]))
+    }
+
+    #[tool(
+        name = "archive_workspace",
+        description = "Archive a workspace by suspending its daemon and renaming its data \
+                       directory to a timestamped archive name. Use this to freeze a \
+                       contaminated or over-capacity workspace without permanently deleting \
+                       it. The archive is kept on disk and can be restored by renaming it \
+                       back. Returns a snapshot of the triple and symbol counts at archive time."
+    )]
+    async fn archive_workspace(
+        &self,
+        Parameters(params): Parameters<ArchiveWorkspaceParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let name = params.name.as_str();
+
+        // Snapshot before evicting so the report is accurate.
+        let snapshot = if let Ok(engine) = self.state.get_engine(name).await {
+            let info = engine.info();
+            format!("{} triples, {} symbols", info.triple_count, info.symbol_count)
+        } else {
+            "stats unavailable".to_string()
+        };
+
+        // Pause daemon if one is registered for this workspace.
+        {
+            let pauses = self.state.daemon_pauses.read().await;
+            if let Some(h) = pauses.get(name) {
+                h.paused
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+
+        // Evict engine and agent from the in-memory cache so file handles are released.
+        {
+            let mut map = self.state.workspaces.write().await;
+            map.remove(name);
+        }
+        {
+            let mut agents = self.state.agents.write().await;
+            agents.remove(name);
+        }
+
+        let ws_paths = self.state.paths.workspace(name);
+        if !ws_paths.root.exists() {
+            return Err(McpError::invalid_params(
+                format!("workspace \"{name}\" not found"),
+                None,
+            ));
+        }
+
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let archive_name = format!("{name}-archived-{timestamp}");
+        let archive_paths = self.state.paths.workspace(&archive_name);
+
+        std::fs::rename(&ws_paths.root, &archive_paths.root).map_err(|e| {
+            McpError::internal_error(
+                format!("failed to archive workspace \"{name}\": {e}"),
+                None,
+            )
+        })?;
+
+        // Move config file if present.
+        let config_src = self.state.paths.workspace_config_file(name);
+        if config_src.exists() {
+            let config_dst = self.state.paths.workspace_config_file(&archive_name);
+            let _ = std::fs::rename(&config_src, &config_dst);
+        }
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Workspace \"{name}\" archived as \"{archive_name}\" — {snapshot}. \
+             Daemon suspended. Create a fresh workspace to resume operations."
         ))]))
     }
 
@@ -1933,6 +2472,10 @@ impl AkhMcpServer {
         // field is not updated unless we do it here explicitly.
         let agent = self.state.get_agent(&params.workspace).await?;
 
+        // Skip capacity check for status-only reads.
+        if !params.status {
+            self.state.check_ingestion_capacity(&params.workspace, &engine).await?;
+        }
         let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
             use crate::bootstrap::OrchestratorConfig;
 
@@ -2288,6 +2831,7 @@ impl AkhMcpServer {
         Parameters(params): Parameters<ExpandDomainParams>,
     ) -> Result<CallToolResult, McpError> {
         let engine = self.state.get_engine(&params.workspace).await?;
+        self.state.check_ingestion_capacity(&params.workspace, &engine).await?;
 
         let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
             use crate::bootstrap::expand::{DomainExpander, ExpansionConfig};
@@ -2763,6 +3307,343 @@ impl AkhMcpServer {
         }
     }
 
+    // ══ Bounded Daemon Runs / Workspace Lifecycle ═════════════════════════
+
+    #[tool(
+        name = "daemon_run_bounded",
+        description = "Run the OODA agent loop on this workspace for at most max_cycles cycles OR \
+                       max_duration_seconds wall-clock seconds — whichever limit fires first triggers \
+                       a soft stop (current cycle completes, then the loop exits). Optionally supply \
+                       goal_filter to add goals before running; existing goals are preserved. \
+                       Returns cycle count, elapsed time, and remaining active goals."
+    )]
+    async fn daemon_run_bounded(
+        &self,
+        Parameters(params): Parameters<DaemonRunBoundedParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let ws = params.workspace.clone();
+        let agent = self.state.get_agent(&ws).await?;
+
+        let max_cycles = params.max_cycles.unwrap_or(10) as usize;
+        let max_dur_secs = params.max_duration_seconds.unwrap_or(300);
+        let goal_filter = params.goal_filter.clone().unwrap_or_default();
+
+        // Shared stop flag: timer task flips it after wall-clock deadline.
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_for_timer = Arc::clone(&stop);
+
+        let timer_handle = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(max_dur_secs)).await;
+            stop_for_timer.store(true, Ordering::SeqCst);
+        });
+
+        let stop_for_task = Arc::clone(&stop);
+        let result = tokio::task::spawn_blocking(move || -> Result<(usize, f64, usize), String> {
+            let mut agent = agent.lock().map_err(|e| format!("agent lock: {e}"))?;
+
+            for goal in &goal_filter {
+                let _ = agent.add_goal(goal, 128, "Bounded run goal");
+            }
+
+            let mut cycles = 0usize;
+            let started = Instant::now();
+
+            loop {
+                if cycles >= max_cycles || stop_for_task.load(Ordering::Relaxed) {
+                    break;
+                }
+                match agent.run_cycle() {
+                    Ok(_) => cycles += 1,
+                    Err(crate::agent::AgentError::NoGoals) => break,
+                    Err(crate::agent::AgentError::MaxCyclesReached { .. }) => break,
+                    Err(e) => return Err(format!("cycle {cycles}: {e}")),
+                }
+            }
+
+            let elapsed = started.elapsed().as_secs_f64();
+            let _ = agent.persist_session();
+
+            let remaining = agent
+                .goals()
+                .iter()
+                .filter(|g| matches!(g.status, GoalStatus::Active | GoalStatus::Pending))
+                .count();
+
+            Ok((cycles, elapsed, remaining))
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("task panicked: {e}"), None))?
+        .map_err(|e| McpError::internal_error(e, None))?;
+
+        timer_handle.abort();
+
+        let (cycles, elapsed, remaining) = result;
+
+        // Record stats for daemon_status.
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        {
+            let mut stats = self.state.workspace_stats.write().await;
+            let entry = stats.entry(ws.clone()).or_default();
+            entry.bounded_cycles += cycles;
+            entry.last_bounded_persist_at = Some(now_secs);
+            entry.is_unloaded = false;
+        }
+
+        let stopped_by = if stop.load(Ordering::Relaxed) {
+            "wall-clock timeout"
+        } else {
+            "cycle limit"
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "daemon_run_bounded: ran {cycles} cycle(s) in {elapsed:.1}s (stopped by {stopped_by}). \
+             {remaining} active goal(s) remaining.",
+        ))]))
+    }
+
+    #[tool(
+        name = "workspace_persist",
+        description = "Force a WAL flush and engine persist for this workspace. Ensures all \
+                       in-memory knowledge-graph changes are durably written to the redb store. \
+                       The force_snapshot flag is accepted for forward-compatibility with ADR-049 \
+                       (Postgres WAL + snapshots) but is currently a no-op beyond the normal persist."
+    )]
+    async fn workspace_persist(
+        &self,
+        Parameters(params): Parameters<WorkspacePersistParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let ws = params.workspace.clone();
+        let engine = self.state.get_engine(&ws).await?;
+
+        tokio::task::spawn_blocking(move || {
+            let _ = engine.persist();
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("persist task panicked: {e}"), None))?;
+
+        // Also persist the agent session if one is loaded.
+        {
+            let agents = self.state.agents.read().await;
+            if let Some(agent) = agents.get(&ws) {
+                let agent = Arc::clone(agent);
+                tokio::task::spawn_blocking(move || {
+                    if let Ok(a) = agent.lock() {
+                        let _ = a.persist_session();
+                    }
+                })
+                .await
+                .map_err(|e| {
+                    McpError::internal_error(format!("agent persist task panicked: {e}"), None)
+                })?;
+            }
+        }
+
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        {
+            let mut stats = self.state.workspace_stats.write().await;
+            let entry = stats.entry(ws.clone()).or_default();
+            entry.last_bounded_persist_at = Some(now_secs);
+        }
+
+        let snapshot_note = if params.force_snapshot {
+            " (force_snapshot requested — no-op pre-ADR-049)"
+        } else {
+            ""
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Workspace \"{ws}\" persisted successfully{snapshot_note}.",
+        ))]))
+    }
+
+    #[tool(
+        name = "workspace_unload",
+        description = "Persist all in-memory state for this workspace, then drop the Engine, \
+                       Agent, and NLU pipeline from memory. The daemon pause handle is kept so \
+                       the background task can be resumed. The next MCP tool call that accesses \
+                       this workspace will transparently reload it from disk (lazy-load). \
+                       Use this to free memory between long-running tasks on many workspaces."
+    )]
+    async fn workspace_unload(
+        &self,
+        Parameters(params): Parameters<WorkspaceParam>,
+    ) -> Result<CallToolResult, McpError> {
+        let ws = params.workspace.clone();
+
+        // Persist engine + agent before dropping.
+        {
+            let workspaces = self.state.workspaces.read().await;
+            if let Some(engine) = workspaces.get(&ws) {
+                let engine = Arc::clone(engine);
+                tokio::task::spawn_blocking(move || {
+                    let _ = engine.persist();
+                })
+                .await
+                .map_err(|e| {
+                    McpError::internal_error(format!("persist task panicked: {e}"), None)
+                })?;
+            }
+        }
+        {
+            let agents = self.state.agents.read().await;
+            if let Some(agent) = agents.get(&ws) {
+                let agent = Arc::clone(agent);
+                tokio::task::spawn_blocking(move || {
+                    if let Ok(a) = agent.lock() {
+                        let _ = a.persist_session();
+                    }
+                })
+                .await
+                .map_err(|e| {
+                    McpError::internal_error(format!("agent persist task panicked: {e}"), None)
+                })?;
+            }
+        }
+
+        // Drop heavy in-memory structures; keep daemon_pauses intact.
+        {
+            let mut workspaces = self.state.workspaces.write().await;
+            workspaces.remove(&ws);
+        }
+        {
+            let mut agents = self.state.agents.write().await;
+            agents.remove(&ws);
+        }
+        {
+            let mut nlu = self.state.nlu_pipelines.write().await;
+            nlu.remove(&ws);
+        }
+
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        {
+            let mut stats = self.state.workspace_stats.write().await;
+            let entry = stats.entry(ws.clone()).or_default();
+            entry.last_bounded_persist_at = Some(now_secs);
+            entry.is_unloaded = true;
+        }
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Workspace \"{ws}\" unloaded: engine, agent, and NLU pipeline dropped from memory. \
+             Daemon pause handle retained. Next access will reload from disk.",
+        ))]))
+    }
+
+    #[tool(
+        name = "daemon_status",
+        description = "Return the current lifecycle status of a workspace: whether the engine is \
+                       loaded in memory, whether a daemon pause handle exists (indicating a daemon \
+                       was started), bounded-run cycle count, last persist timestamp, active goal \
+                       count, and current KG size."
+    )]
+    async fn daemon_status(
+        &self,
+        Parameters(params): Parameters<WorkspaceParam>,
+    ) -> Result<CallToolResult, McpError> {
+        let ws = params.workspace.clone();
+
+        let is_loaded = {
+            let workspaces = self.state.workspaces.read().await;
+            workspaces.contains_key(&ws)
+        };
+
+        let has_daemon = {
+            let pauses = self.state.daemon_pauses.read().await;
+            pauses.contains_key(&ws)
+        };
+
+        let is_paused = {
+            let pauses = self.state.daemon_pauses.read().await;
+            pauses
+                .get(&ws)
+                .map(|h| h.paused.load(Ordering::SeqCst))
+                .unwrap_or(false)
+        };
+
+        let stats = {
+            let stats = self.state.workspace_stats.read().await;
+            stats.get(&ws).cloned().unwrap_or_default()
+        };
+
+        // Goal count requires a loaded agent — skip if unloaded to avoid re-loading.
+        let (active_goals, kg_symbols, kg_triples) = if is_loaded {
+            let agent_count = {
+                let agents = self.state.agents.read().await;
+                if let Some(agent) = agents.get(&ws) {
+                    let agent = Arc::clone(agent);
+                    tokio::task::spawn_blocking(move || {
+                        agent
+                            .lock()
+                            .ok()
+                            .map(|a| {
+                                a.goals()
+                                    .iter()
+                                    .filter(|g| {
+                                        matches!(g.status, GoalStatus::Active | GoalStatus::Pending)
+                                    })
+                                    .count()
+                            })
+                            .unwrap_or(0)
+                    })
+                    .await
+                    .unwrap_or(0)
+                } else {
+                    0
+                }
+            };
+            let (syms, triples) = {
+                let workspaces = self.state.workspaces.read().await;
+                if let Some(engine) = workspaces.get(&ws) {
+                    let engine = Arc::clone(engine);
+                    tokio::task::spawn_blocking(move || {
+                        (engine.all_symbols().len(), engine.all_triples().len())
+                    })
+                    .await
+                    .unwrap_or((0, 0))
+                } else {
+                    (0, 0)
+                }
+            };
+            (agent_count, syms, triples)
+        } else {
+            (0, 0, 0)
+        };
+
+        let last_persist_str = stats
+            .last_bounded_persist_at
+            .map(|ts| format!("{ts}"))
+            .unwrap_or_else(|| "never".into());
+
+        let daemon_str = if has_daemon {
+            if is_paused {
+                "running (paused)"
+            } else {
+                "running"
+            }
+        } else {
+            "none"
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "workspace: {ws}\n\
+             loaded: {is_loaded}\n\
+             daemon: {daemon_str}\n\
+             bounded_cycles: {}\n\
+             last_persist: {last_persist_str}\n\
+             active_goals: {active_goals}\n\
+             kg_symbols: {kg_symbols}\n\
+             kg_triples: {kg_triples}",
+            stats.bounded_cycles,
+        ))]))
+    }
 
     // ── Phase 2: Agent Introspection Tools ─────────────────────────
 
@@ -3225,20 +4106,29 @@ impl AkhMcpServer {
                 e.into_inner()
             });
 
-            // Resolve query terms to symbol IDs
+            // Resolve query terms to symbol IDs. Generic words ("recent", "memory",
+            // "events") won't resolve — in that case fall back to temporal recall.
             let query_ids: Vec<crate::symbol::SymbolId> = query_terms
                 .iter()
                 .filter_map(|term| engine.resolve_symbol(term).ok())
                 .collect();
 
-            if query_ids.is_empty() {
-                return Ok("No query terms could be resolved to known symbols.".to_string());
-            }
-
-            let episodes = agent.recall(&query_ids, top_k).map_err(|e| format!("{e}"))?;
+            let (episodes, mode) = if query_ids.is_empty() {
+                // No terms resolved: do a pure recency scan across all episodes.
+                let eps = agent.recall_recent(top_k).map_err(|e| format!("{e}"))?;
+                (eps, "recent")
+            } else {
+                // Symbol-based recall (falls back to recency internally when empty).
+                let eps = agent.recall(&query_ids, top_k).map_err(|e| format!("{e}"))?;
+                (eps, "matched")
+            };
 
             if episodes.is_empty() {
-                return Ok("No matching episodes found.".to_string());
+                return Ok(
+                    "No episodic memories found. The agent may not have run any OODA cycles \
+                     yet, or consolidation has not occurred."
+                        .to_string(),
+                );
             }
 
             let lines: Vec<String> = episodes
@@ -3262,9 +4152,77 @@ impl AkhMcpServer {
                 .collect();
 
             Ok(format!(
-                "Episodes ({}):\n{}",
+                "Episodes [{mode}] ({}):\n{}",
                 episodes.len(),
                 lines.join("\n")
+            ))
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("task panicked: {e}"), None))?
+        .map_err(|e| McpError::internal_error(e, None))?;
+
+        Ok(CallToolResult::success(vec![Content::text(result)]))
+    }
+
+    #[tool(
+        name = "ingest_journal",
+        description = "Ingest OpenClaw daily memory journals (*.md files) into the episodic KG \
+                       store so they are searchable via agent_recall. Accepts an optional path to \
+                       a directory of markdown files or a single file; defaults to the configured \
+                       journal directory ($AKH_JOURNAL_DIR or $XDG_DATA_HOME/akh-medu/journals/). \
+                       Re-running is idempotent: already-ingested files are skipped."
+    )]
+    async fn ingest_journal(
+        &self,
+        Parameters(params): Parameters<IngestJournalParams>,
+    ) -> Result<CallToolResult, McpError> {
+        use crate::agent::agent::AgentPredicates;
+        use crate::agent::journal_ingest;
+
+        let engine = self.state.get_engine(&params.workspace).await?;
+        let paths = self.state.paths.clone();
+        let path_override = params.path.clone();
+
+        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            let predicates = AgentPredicates::init(&engine).map_err(|e| format!("{e}"))?;
+
+            let (files_scanned, files_ingested, files_skipped, episodes_created) =
+                if let Some(p) = path_override {
+                    let target = std::path::Path::new(&p);
+                    if target.is_file() {
+                        let n = journal_ingest::ingest_journal_file(&engine, target, &predicates)
+                            .map_err(|e| format!("{e}"))?;
+                        let _ = engine.persist();
+                        (1usize, if n > 0 { 1 } else { 0 }, if n == 0 { 1 } else { 0 }, n)
+                    } else {
+                        let stats =
+                            journal_ingest::ingest_journals_from_dir(&engine, target, &predicates)
+                                .map_err(|e| format!("{e}"))?;
+                        let _ = engine.persist();
+                        (
+                            stats.files_scanned,
+                            stats.files_ingested,
+                            stats.files_skipped,
+                            stats.episodes_created,
+                        )
+                    }
+                } else {
+                    let journal_dir = paths.memory_journals_dir();
+                    let stats =
+                        journal_ingest::ingest_journals_from_dir(&engine, &journal_dir, &predicates)
+                            .map_err(|e| format!("{e}"))?;
+                    let _ = engine.persist();
+                    (
+                        stats.files_scanned,
+                        stats.files_ingested,
+                        stats.files_skipped,
+                        stats.episodes_created,
+                    )
+                };
+
+            Ok(format!(
+                "Journal ingest: {files_scanned} file(s) scanned, {files_ingested} ingested, \
+                 {files_skipped} skipped, {episodes_created} episode(s) created."
             ))
         })
         .await
@@ -4888,6 +5846,65 @@ impl AkhMcpServer {
         )]))
     }
 
+    // ── Phase 36: Delegation Management ────────────────────────────────
+
+    #[tool(
+        name = "delegation_status",
+        description = "List active and recently-completed delegations for a workspace. \
+                       Shows task descriptions, targets, status, and elapsed time."
+    )]
+    async fn delegation_status(
+        &self,
+        Parameters(params): Parameters<DelegationStatusParams>,
+    ) -> Result<CallToolResult, McpError> {
+        #[cfg(feature = "delegation")]
+        {
+            let agent = self.state.get_agent(&params.workspace).await?;
+            let lines = tokio::task::spawn_blocking(move || {
+                let agent = agent.lock().map_err(|e| format!("lock: {e}"))?;
+                let mgr = agent.delegation_manager();
+                let active = mgr.active_delegations();
+                let mut lines = vec![format!(
+                    "Delegation status — enabled: {}, active: {}, pending: {}, capacity: {}/{}",
+                    mgr.is_enabled(),
+                    mgr.active_count(),
+                    mgr.pending_count(),
+                    mgr.active_count(),
+                    mgr.config().max_concurrent,
+                )];
+                let cg = mgr.cost_guard();
+                lines.push(format!(
+                    "Budget: {} cents/day, spent today: {} cents, remaining: {} cents",
+                    cg.daily_budget_cents(),
+                    cg.spent_today_cents(),
+                    cg.remaining_cents(),
+                ));
+                if active.is_empty() {
+                    lines.push("No active delegations.".to_string());
+                } else {
+                    for del in &active {
+                        lines.push(format!(
+                            "  [{}] {} → {} ({:?})",
+                            del.id, del.task_description, del.target, del.status,
+                        ));
+                    }
+                }
+                Ok::<Vec<String>, String>(lines)
+            })
+            .await
+            .map_err(|e| McpError::internal_error(format!("task panicked: {e}"), None))?
+            .map_err(|e| McpError::internal_error(e, None))?;
+
+            return Ok(CallToolResult::success(vec![Content::text(lines.join("\n"))]));
+        }
+        #[cfg(not(feature = "delegation"))]
+        Ok(CallToolResult::success(vec![Content::text(
+            "Delegation feature is not enabled in this build. \
+             Rebuild with --features delegation to enable."
+                .to_string(),
+        )]))
+    }
+
     #[tool(
         name = "tool_register_remote",
         description = "Register a remote MCP tool in the knowledge graph for federation / peer discovery. \
@@ -4927,6 +5944,886 @@ impl AkhMcpServer {
         );
         Ok(CallToolResult::success(vec![Content::text(msg)]))
     }
+
+    // ── Config Inspect ──────────────────────────────────────────────
+
+    #[tool(
+        name = "config_inspect",
+        description = "Return a read-only snapshot of the current akhomed runtime configuration: daemon settings, compartment states, rule engine parameters, VSA dimensions, and workspace paths."
+    )]
+    async fn config_inspect(
+        &self,
+        Parameters(params): Parameters<ConfigInspectParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let config_path = self.state.paths.global_config_file();
+        let global_cfg = crate::config::AkhomedConfig::load(&config_path).unwrap_or_default();
+        let daemon_cfg = global_cfg.daemon.to_daemon_config();
+        let auto_start = global_cfg.daemon.auto_start.contains(&params.workspace);
+        let running = self
+            .state
+            .daemon_pauses
+            .read()
+            .await
+            .contains_key(&params.workspace);
+
+        let engine = self.state.get_engine(&params.workspace).await?;
+
+        let compartments: Vec<ConfigInspectCompartment> =
+            if let Some(mgr) = engine.compartments() {
+                mgr.all_compartments()
+                    .into_iter()
+                    .map(|(manifest, state, size_triples)| {
+                        let loaded = state != crate::compartment::CompartmentState::Dormant;
+                        let active = state == crate::compartment::CompartmentState::Active;
+                        ConfigInspectCompartment {
+                            name: manifest.name,
+                            loaded,
+                            active,
+                            size_triples,
+                        }
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+
+        let rule_cfg = crate::autonomous::RuleEngineConfig::default();
+        let builtin_rules: Vec<String> = crate::autonomous::RuleSet::builtin()
+            .rules
+            .into_iter()
+            .map(|r| r.name)
+            .collect();
+
+        let dim = engine.config().dimension.0;
+        let item_memory_size = engine.item_memory().len();
+
+        let ws_paths = self.state.paths.workspace(&params.workspace);
+
+        let response = ConfigInspectResponse {
+            daemon: ConfigInspectDaemon {
+                max_cycles: daemon_cfg.max_cycles,
+                persist_interval_seconds: daemon_cfg.persist_interval.as_secs(),
+                auto_start,
+                running,
+            },
+            compartments,
+            rule_engine: ConfigInspectRuleEngine {
+                min_confidence: rule_cfg.min_confidence,
+                max_iterations: rule_cfg.max_iterations,
+                builtin_rules,
+                noise_filter_enabled: true,
+            },
+            vsa: ConfigInspectVsa {
+                dimension: dim,
+                item_memory_size,
+            },
+            paths: ConfigInspectPaths {
+                workspace_root: ws_paths.root.display().to_string(),
+                kg_dir: ws_paths.kg_dir.display().to_string(),
+                compartments_dir: ws_paths.compartments_dir.display().to_string(),
+            },
+        };
+
+        let json = serde_json::to_string_pretty(&response)
+            .map_err(|e| McpError::internal_error(format!("serialization error: {e}"), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    // ── Cross-Workspace Query ────────────────────────────────────────
+
+    #[tool(
+        name = "cross_workspace_query",
+        description = "Compare entities, triples, and schema across exactly two loaded workspaces. Query types: \"entity_diff\" (entities in A not in B and vice versa), \"triple_overlap\" (shared triples), \"predicate_union\" (all predicate types across both workspaces), \"cross_entity\" (compare a named entity across workspaces). Useful for detecting cross-workspace contamination or comparing cleaned vs. dirty workspaces."
+    )]
+    async fn cross_workspace_query(
+        &self,
+        Parameters(params): Parameters<CrossWorkspaceQueryParams>,
+    ) -> Result<CallToolResult, McpError> {
+        if params.workspaces.len() != 2 {
+            return Err(McpError::invalid_params(
+                format!(
+                    "cross_workspace_query requires exactly 2 workspace names, got {}",
+                    params.workspaces.len()
+                ),
+                None,
+            ));
+        }
+
+        let name_a = params.workspaces[0].clone();
+        let name_b = params.workspaces[1].clone();
+
+        let engine_a = self.state.get_engine(&name_a).await?;
+        let engine_b = self.state.get_engine(&name_b).await?;
+
+        let query_type = params.query_type.clone();
+        let entity = params.entity.clone();
+
+        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            let info_a = engine_a.info();
+            let info_b = engine_b.info();
+
+            let json_val = match query_type.as_str() {
+                "entity_diff" => {
+                    use std::collections::HashSet;
+                    let labels_a: HashSet<String> = engine_a
+                        .all_symbols()
+                        .into_iter()
+                        .map(|m| m.label)
+                        .collect();
+                    let labels_b: HashSet<String> = engine_b
+                        .all_symbols()
+                        .into_iter()
+                        .map(|m| m.label)
+                        .collect();
+                    let only_in_a = labels_a.difference(&labels_b).count();
+                    let only_in_b = labels_b.difference(&labels_a).count();
+                    let shared_entities = labels_a.intersection(&labels_b).count();
+                    serde_json::json!({
+                        "query_type": "entity_diff",
+                        "workspace_a": {
+                            "name": name_a,
+                            "entities": info_a.symbol_count,
+                            "triples": info_a.triple_count,
+                        },
+                        "workspace_b": {
+                            "name": name_b,
+                            "entities": info_b.symbol_count,
+                            "triples": info_b.triple_count,
+                        },
+                        "only_in_a": only_in_a,
+                        "only_in_b": only_in_b,
+                        "shared_entities": shared_entities,
+                    })
+                }
+                "triple_overlap" => {
+                    use std::collections::HashSet;
+                    let triples_a: HashSet<(String, String, String)> = engine_a
+                        .all_triples()
+                        .into_iter()
+                        .map(|t| {
+                            (
+                                engine_a.resolve_label(t.subject),
+                                engine_a.resolve_label(t.predicate),
+                                engine_a.resolve_label(t.object),
+                            )
+                        })
+                        .collect();
+                    let triples_b: HashSet<(String, String, String)> = engine_b
+                        .all_triples()
+                        .into_iter()
+                        .map(|t| {
+                            (
+                                engine_b.resolve_label(t.subject),
+                                engine_b.resolve_label(t.predicate),
+                                engine_b.resolve_label(t.object),
+                            )
+                        })
+                        .collect();
+                    let only_in_a = triples_a.difference(&triples_b).count();
+                    let only_in_b = triples_b.difference(&triples_a).count();
+                    let shared_triples = triples_a.intersection(&triples_b).count();
+                    serde_json::json!({
+                        "query_type": "triple_overlap",
+                        "workspace_a": {
+                            "name": name_a,
+                            "entities": info_a.symbol_count,
+                            "triples": info_a.triple_count,
+                        },
+                        "workspace_b": {
+                            "name": name_b,
+                            "entities": info_b.symbol_count,
+                            "triples": info_b.triple_count,
+                        },
+                        "only_in_a": only_in_a,
+                        "only_in_b": only_in_b,
+                        "shared_triples": shared_triples,
+                    })
+                }
+                "predicate_union" => {
+                    use std::collections::HashSet;
+                    let preds_a: HashSet<String> = engine_a
+                        .all_triples()
+                        .into_iter()
+                        .map(|t| engine_a.resolve_label(t.predicate))
+                        .collect();
+                    let preds_b: HashSet<String> = engine_b
+                        .all_triples()
+                        .into_iter()
+                        .map(|t| engine_b.resolve_label(t.predicate))
+                        .collect();
+                    let only_in_a: Vec<String> =
+                        preds_a.difference(&preds_b).cloned().collect();
+                    let only_in_b: Vec<String> =
+                        preds_b.difference(&preds_a).cloned().collect();
+                    let shared: Vec<String> =
+                        preds_a.intersection(&preds_b).cloned().collect();
+                    let union_count = preds_a.union(&preds_b).count();
+                    serde_json::json!({
+                        "query_type": "predicate_union",
+                        "workspace_a": {
+                            "name": name_a,
+                            "predicate_count": preds_a.len(),
+                        },
+                        "workspace_b": {
+                            "name": name_b,
+                            "predicate_count": preds_b.len(),
+                        },
+                        "union_count": union_count,
+                        "shared_count": shared.len(),
+                        "only_in_a_count": only_in_a.len(),
+                        "only_in_b_count": only_in_b.len(),
+                        "only_in_a": only_in_a,
+                        "only_in_b": only_in_b,
+                        "shared": shared,
+                    })
+                }
+                "cross_entity" => {
+                    let ent_name = entity
+                        .ok_or_else(|| "cross_entity requires an `entity` name".to_string())?;
+                    let sym_a = engine_a.resolve_symbol(&ent_name).ok();
+                    let sym_b = engine_b.resolve_symbol(&ent_name).ok();
+                    let found_a = sym_a.is_some();
+                    let found_b = sym_b.is_some();
+                    let triples_a: Vec<serde_json::Value> = match sym_a {
+                        Some(id) => {
+                            let mut ts = engine_a.triples_from(id);
+                            ts.extend(engine_a.triples_to(id));
+                            ts.into_iter()
+                                .map(|t| {
+                                    serde_json::json!({
+                                        "s": engine_a.resolve_label(t.subject),
+                                        "p": engine_a.resolve_label(t.predicate),
+                                        "o": engine_a.resolve_label(t.object),
+                                        "conf": t.confidence,
+                                    })
+                                })
+                                .collect()
+                        }
+                        None => vec![],
+                    };
+                    let triples_b: Vec<serde_json::Value> = match sym_b {
+                        Some(id) => {
+                            let mut ts = engine_b.triples_from(id);
+                            ts.extend(engine_b.triples_to(id));
+                            ts.into_iter()
+                                .map(|t| {
+                                    serde_json::json!({
+                                        "s": engine_b.resolve_label(t.subject),
+                                        "p": engine_b.resolve_label(t.predicate),
+                                        "o": engine_b.resolve_label(t.object),
+                                        "conf": t.confidence,
+                                    })
+                                })
+                                .collect()
+                        }
+                        None => vec![],
+                    };
+                    serde_json::json!({
+                        "query_type": "cross_entity",
+                        "entity": ent_name,
+                        "workspace_a": {
+                            "name": name_a,
+                            "found": found_a,
+                            "triple_count": triples_a.len(),
+                            "triples": triples_a,
+                        },
+                        "workspace_b": {
+                            "name": name_b,
+                            "found": found_b,
+                            "triple_count": triples_b.len(),
+                            "triples": triples_b,
+                        },
+                    })
+                }
+                other => {
+                    return Err(format!(
+                        "unknown query_type \"{other}\"; valid: entity_diff, triple_overlap, predicate_union, cross_entity"
+                    ));
+                }
+            };
+
+            serde_json::to_string_pretty(&json_val).map_err(|e| format!("json: {e}"))
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("task panicked: {e}"), None))?
+        .map_err(|e| McpError::internal_error(e, None))?;
+
+        Ok(CallToolResult::success(vec![Content::text(result)]))
+    }
+
+    // ── Import / Export ─────────────────────────────────────────────────
+
+    #[tool(
+        name = "export_triples",
+        description = "Export knowledge-graph triples to JSON, JSON-LD, or N-Triples format. \
+                       Optional predicate_filter and subject_filter narrow the export. \
+                       If output_path is omitted the serialized content is returned inline; \
+                       otherwise it is written to that absolute path."
+    )]
+    async fn export_triples(
+        &self,
+        Parameters(params): Parameters<ExportTriplesParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let engine = self.state.get_engine(&params.workspace).await?;
+
+        // Validate output path upfront (before doing expensive work).
+        let output_path = params
+            .output_path
+            .as_deref()
+            .map(validate_write_path)
+            .transpose()?;
+
+        let format = params.format.to_lowercase();
+        if !matches!(format.as_str(), "json" | "json-ld" | "n-triples") {
+            return Err(McpError::invalid_params(
+                format!("format must be one of: json, json-ld, n-triples"),
+                None,
+            ));
+        }
+
+        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            let all_triples = engine.all_triples();
+
+            // Resolve optional subject filter.
+            let subject_id = if let Some(ref subj) = params.subject_filter {
+                Some(
+                    engine
+                        .resolve_symbol(subj)
+                        .map_err(|e| format!("subject_filter: {e}"))?,
+                )
+            } else {
+                None
+            };
+
+            // Resolve optional predicate filters.
+            let predicate_ids: Option<Vec<_>> = if let Some(ref preds) = params.predicate_filter {
+                let ids: Result<Vec<_>, _> = preds
+                    .iter()
+                    .map(|p| {
+                        engine
+                            .resolve_symbol(p)
+                            .map_err(|e| format!("predicate_filter \"{p}\": {e}"))
+                    })
+                    .collect();
+                Some(ids?)
+            } else {
+                None
+            };
+
+            // Filter triples.
+            let filtered: Vec<LabelTriple> = all_triples
+                .into_iter()
+                .filter(|t| {
+                    subject_id.map_or(true, |sid| t.subject == sid)
+                        && predicate_ids
+                            .as_ref()
+                            .map_or(true, |ids| ids.contains(&t.predicate))
+                })
+                .map(|t| LabelTriple {
+                    s: engine.resolve_label(t.subject),
+                    p: engine.resolve_label(t.predicate),
+                    o: engine.resolve_label(t.object),
+                    confidence: t.confidence,
+                })
+                .collect();
+
+            let count = filtered.len();
+
+            let serialized = match format.as_str() {
+                "json" => serialize_triples_json(&filtered)?,
+                "json-ld" => serialize_triples_jsonld(&filtered)?,
+                _ => serialize_triples_ntriples(&filtered),
+            };
+
+            // Write to file if requested.
+            if let Some(ref path) = output_path {
+                std::fs::write(path, &serialized)
+                    .map_err(|e| format!("write to {}: {e}", path.display()))?;
+                return Ok(format!(
+                    "Exported {count} triples ({format}) to \"{}\"",
+                    path.display()
+                ));
+            }
+
+            Ok(format!("Exported {count} triples ({format}):\n{serialized}"))
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("task panicked: {e}"), None))?
+        .map_err(|e| McpError::internal_error(e, None))?;
+
+        Ok(CallToolResult::success(vec![Content::text(result)]))
+    }
+
+    #[tool(
+        name = "import_triples",
+        description = "Import triples from a JSON, JSON-LD, or N-Triples file into a workspace. \
+                       With dry_run:true, reports what would be imported (new vs. conflicts) \
+                       without modifying the workspace. With dry_run:false, new triples are \
+                       asserted with provenance source=file_import; conflicting triples \
+                       (already present) are skipped."
+    )]
+    async fn import_triples(
+        &self,
+        Parameters(params): Parameters<ImportTriplesParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let input_path = validate_read_path(&params.input_path)?;
+        let engine = self.state.get_engine(&params.workspace).await?;
+
+        let format = params.format.to_lowercase();
+        if !matches!(format.as_str(), "json" | "json-ld" | "n-triples") {
+            return Err(McpError::invalid_params(
+                format!("format must be one of: json, json-ld, n-triples"),
+                None,
+            ));
+        }
+
+        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            // Read and parse file.
+            let content = std::fs::read_to_string(&input_path)
+                .map_err(|e| format!("read \"{}\": {e}", input_path.display()))?;
+
+            let label_triples = match format.as_str() {
+                "json" => parse_triples_json(&content)?,
+                "json-ld" => parse_triples_jsonld(&content)?,
+                _ => parse_triples_ntriples(&content)?,
+            };
+
+            let triples_read = label_triples.len();
+            let mut new_count = 0usize;
+            let mut conflicts = 0usize;
+            let source_path = input_path.display().to_string();
+
+            for lt in &label_triples {
+                // Try to resolve all three labels to existing symbols.
+                let s_id = engine.resolve_symbol(&lt.s).ok();
+                let p_id = engine.resolve_symbol(&lt.p).ok();
+                let o_id = engine.resolve_symbol(&lt.o).ok();
+
+                let already_exists = match (s_id, p_id, o_id) {
+                    (Some(s), Some(p), Some(o)) => engine.has_triple(s, p, o),
+                    _ => false,
+                };
+
+                if already_exists {
+                    conflicts += 1;
+                } else {
+                    new_count += 1;
+                }
+            }
+
+            let mut imported = 0usize;
+
+            if !params.dry_run {
+                use crate::provenance::{DerivationKind, ProvenanceRecord};
+
+                for lt in &label_triples {
+                    let s_id = engine.resolve_symbol(&lt.s).ok();
+                    let p_id = engine.resolve_symbol(&lt.p).ok();
+                    let o_id = engine.resolve_symbol(&lt.o).ok();
+
+                    let already_exists = match (s_id, p_id, o_id) {
+                        (Some(s), Some(p), Some(o)) => engine.has_triple(s, p, o),
+                        _ => false,
+                    };
+
+                    if already_exists {
+                        continue;
+                    }
+
+                    // Create or resolve symbols, then assert triple.
+                    let s = engine
+                        .resolve_or_create_entity(&lt.s)
+                        .map_err(|e| format!("subject \"{}\": {e}", lt.s))?;
+                    let p = engine
+                        .resolve_or_create_relation(&lt.p)
+                        .map_err(|e| format!("predicate \"{}\": {e}", lt.p))?;
+                    let o = engine
+                        .resolve_or_create_entity(&lt.o)
+                        .map_err(|e| format!("object \"{}\": {e}", lt.o))?;
+
+                    let triple = crate::graph::Triple::new(s, p, o).with_confidence(lt.confidence);
+                    engine
+                        .add_triple(&triple)
+                        .map_err(|e| format!("assert {} {} {}: {e}", lt.s, lt.p, lt.o))?;
+
+                    // Record provenance.
+                    let mut prov = ProvenanceRecord::new(
+                        s,
+                        DerivationKind::FileImport {
+                            source_path: source_path.clone(),
+                            format: format.clone(),
+                        },
+                    )
+                    .with_confidence(lt.confidence)
+                    .with_sources(vec![p, o]);
+                    let _ = engine.store_provenance(&mut prov);
+
+                    imported += 1;
+                }
+
+                let _ = engine.persist();
+            }
+
+            let summary = serde_json::json!({
+                "triples_read": triples_read,
+                "new": new_count,
+                "conflicts": conflicts,
+                "imported": imported,
+                "skipped_conflicts": conflicts
+            });
+            serde_json::to_string_pretty(&summary)
+                .map_err(|e| format!("json response: {e}"))
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("task panicked: {e}"), None))?
+        .map_err(|e| McpError::internal_error(e, None))?;
+
+        Ok(CallToolResult::success(vec![Content::text(result)]))
+    }
+
+    #[tool(
+        name = "cleanup_by_pattern",
+        description = "Bulk-remove knowledge-graph triples matching subject/predicate/object patterns \
+                       with an optional confidence threshold. At least one filter must be supplied. \
+                       Use dry_run=true (the default) to preview the count and a sample of what would \
+                       be removed before committing. dry_run=false executes the deletion and returns \
+                       removed, cascade_retracted, and affected_entities counts."
+    )]
+    async fn cleanup_by_pattern(
+        &self,
+        Parameters(params): Parameters<CleanupByPatternParams>,
+    ) -> Result<CallToolResult, McpError> {
+        if params.subject_pattern.is_none()
+            && params.predicate.is_none()
+            && params.object_pattern.is_none()
+            && params.confidence_below.is_none()
+        {
+            return Err(McpError::invalid_params(
+                "at least one filter is required (subject_pattern, predicate, object_pattern, or confidence_below)",
+                None,
+            ));
+        }
+
+        let engine = self.state.get_engine(&params.workspace).await?;
+
+        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            let all = engine.all_triples();
+            let conf_threshold = params.confidence_below.map(|c| c as f32);
+
+            let matched: Vec<_> = all.iter().filter(|t| {
+                if let Some(ref sp) = params.subject_pattern {
+                    if !engine.resolve_label(t.subject).starts_with(sp.as_str()) {
+                        return false;
+                    }
+                }
+                if let Some(ref pred) = params.predicate {
+                    if engine.resolve_label(t.predicate) != *pred {
+                        return false;
+                    }
+                }
+                if let Some(ref op) = params.object_pattern {
+                    if !engine.resolve_label(t.object).starts_with(op.as_str()) {
+                        return false;
+                    }
+                }
+                if let Some(threshold) = conf_threshold {
+                    if t.confidence >= threshold {
+                        return false;
+                    }
+                }
+                true
+            }).collect();
+
+            let would_remove = matched.len();
+
+            if params.dry_run {
+                let mut pred_breakdown: HashMap<String, usize> = HashMap::new();
+                for t in &matched {
+                    *pred_breakdown.entry(engine.resolve_label(t.predicate)).or_insert(0) += 1;
+                }
+
+                let samples: Vec<String> = matched.iter().take(10).map(|t| {
+                    format!(
+                        "{} → {} → {} (conf={:.2})",
+                        engine.resolve_label(t.subject),
+                        engine.resolve_label(t.predicate),
+                        engine.resolve_label(t.object),
+                        t.confidence,
+                    )
+                }).collect();
+
+                let out = serde_json::json!({
+                    "would_remove": would_remove,
+                    "samples": samples,
+                    "predicate_breakdown": pred_breakdown,
+                });
+                return serde_json::to_string_pretty(&out).map_err(|e| format!("json: {e}"));
+            }
+
+            if would_remove == 0 {
+                let out = serde_json::json!({
+                    "removed": 0,
+                    "cascade_retracted": 0,
+                    "affected_entities": 0,
+                });
+                return serde_json::to_string_pretty(&out).map_err(|e| format!("json: {e}"));
+            }
+
+            // Collect unique entity IDs and build the removal list using numeric IDs
+            // so that resolve_symbol's u64-first parse handles the round-trip correctly.
+            let mut entity_ids = std::collections::HashSet::new();
+            let triples_to_remove: Vec<(String, String, String)> = matched.iter().map(|t| {
+                entity_ids.insert(t.subject.get());
+                entity_ids.insert(t.object.get());
+                (
+                    t.subject.get().to_string(),
+                    t.predicate.get().to_string(),
+                    t.object.get().to_string(),
+                )
+            }).collect();
+            let affected_entities = entity_ids.len();
+
+            // Record pre-removal count to derive cascade_retracted afterward.
+            let before_count = all.len();
+
+            let removed = engine
+                .remove_triples_batch(&triples_to_remove)
+                .map_err(|e| format!("{e}"))?;
+
+            let after_count = engine.all_triples().len();
+            let cascade_retracted = (before_count - after_count).saturating_sub(removed);
+
+            let _ = engine.persist();
+
+            let out = serde_json::json!({
+                "removed": removed,
+                "cascade_retracted": cascade_retracted,
+                "affected_entities": affected_entities,
+            });
+            serde_json::to_string_pretty(&out).map_err(|e| format!("json: {e}"))
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("task panicked: {e}"), None))?
+        .map_err(|e| McpError::internal_error(e, None))?;
+
+        Ok(CallToolResult::success(vec![Content::text(result)]))
+    }
+
+    #[tool(
+        name = "delegate_task",
+        description = "Manually delegate a task to an external Claude Code worker or peer agent. \
+                       The task runs asynchronously; use delegation_status to check progress."
+    )]
+    async fn delegate_task(
+        &self,
+        Parameters(params): Parameters<DelegateTaskParams>,
+    ) -> Result<CallToolResult, McpError> {
+        #[cfg(feature = "delegation")]
+        {
+            let agent = self.state.get_agent(&params.workspace).await?;
+            let task_desc = params.task.clone();
+            let target_hint = params.target.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                let agent = agent.lock().map_err(|e| format!("lock: {e}"))?;
+                let task = crate::agent::delegation::DelegationTask {
+                    description: task_desc.clone(),
+                    context_triples: Vec::new(),
+                    required_capabilities: Vec::new(),
+                    goal_id: 0,
+                    priority: 0.7,
+                    target_hint: target_hint.clone(),
+                };
+                agent
+                    .delegation_manager()
+                    .enqueue(task)
+                    .map(|_| format!(
+                        "Task queued for delegation: \"{task_desc}\" → target: {} \
+                         (will dispatch on next daemon tick ~10s)",
+                        target_hint.as_deref().unwrap_or("auto"),
+                    ))
+                    .map_err(|e| e.to_string())
+            })
+            .await
+            .map_err(|e| McpError::internal_error(format!("task panicked: {e}"), None))?
+            .map_err(|e| McpError::internal_error(e, None))?;
+
+            return Ok(CallToolResult::success(vec![Content::text(result)]));
+        }
+        #[cfg(not(feature = "delegation"))]
+        Ok(CallToolResult::success(vec![Content::text(
+            "Delegation feature is not enabled in this build.".to_string(),
+        )]))
+    }
+
+    #[tool(
+        name = "delegation_cost_report",
+        description = "Show today's delegation cost breakdown: budget, amount spent, \
+                       remaining allowance, and per-model pricing."
+    )]
+    async fn delegation_cost_report(
+        &self,
+        Parameters(params): Parameters<DelegationStatusParams>,
+    ) -> Result<CallToolResult, McpError> {
+        #[cfg(feature = "delegation")]
+        {
+            let agent = self.state.get_agent(&params.workspace).await?;
+            let report = tokio::task::spawn_blocking(move || {
+                let agent = agent.lock().map_err(|e| format!("lock: {e}"))?;
+                let mgr = agent.delegation_manager();
+                let cg = mgr.cost_guard();
+                let cfg = mgr.config();
+                let mut lines = vec!["=== Delegation Cost Report ===".to_string()];
+                lines.push(format!(
+                    "Daily budget: {} cents ({:.2} USD)",
+                    cg.daily_budget_cents(),
+                    cg.daily_budget_cents() as f64 / 100.0,
+                ));
+                lines.push(format!(
+                    "Spent today: {} cents ({:.4} USD)",
+                    cg.spent_today_cents(),
+                    cg.spent_today_cents() as f64 / 100.0,
+                ));
+                lines.push(format!(
+                    "Remaining: {} cents ({:.4} USD)",
+                    cg.remaining_cents(),
+                    cg.remaining_cents() as f64 / 100.0,
+                ));
+                lines.push(format!(
+                    "Per-task cap: {} cents ({:.2} USD)",
+                    cfg.per_task_max_cents,
+                    cfg.per_task_max_cents as f64 / 100.0,
+                ));
+                lines.push(String::new());
+                lines.push("Model pricing (cents per 1M input tokens):".to_string());
+                lines.push("  haiku: 25c  ($0.25/M)".to_string());
+                lines.push("  sonnet: 300c ($3.00/M)".to_string());
+                lines.push("  opus: 1500c  ($15.00/M)".to_string());
+                lines.push(String::new());
+                if cg.is_local_only() {
+                    lines.push(
+                        "Mode: LOCAL ONLY (daily_cost_budget_cents = 0, \
+                         no API costs incurred)"
+                            .to_string(),
+                    );
+                }
+                // Peer registry summary.
+                let peers = mgr.peer_registry().list();
+                if !peers.is_empty() {
+                    lines.push(String::new());
+                    lines.push(format!("Known peers: {}", peers.len()));
+                    for peer in &peers {
+                        lines.push(format!(
+                            "  {} — load: {:.0}%, success: {:.0}%, avg: {:.0}ms",
+                            peer.endpoint,
+                            peer.load * 100.0,
+                            peer.success_rate * 100.0,
+                            peer.avg_response_ms,
+                        ));
+                    }
+                }
+                Ok::<Vec<String>, String>(lines)
+            })
+            .await
+            .map_err(|e| McpError::internal_error(format!("task panicked: {e}"), None))?
+            .map_err(|e| McpError::internal_error(e, None))?;
+
+            return Ok(CallToolResult::success(vec![Content::text(report.join("\n"))]));
+        }
+        #[cfg(not(feature = "delegation"))]
+        Ok(CallToolResult::success(vec![Content::text(
+            "Delegation feature is not enabled in this build.".to_string(),
+        )]))
+    }
+
+    #[tool(
+        name = "list_peers",
+        description = "List known peer akh-medu instances, their capabilities, \
+                       current load, and historical performance metrics."
+    )]
+    async fn list_peers(
+        &self,
+        Parameters(params): Parameters<DelegationStatusParams>,
+    ) -> Result<CallToolResult, McpError> {
+        #[cfg(feature = "delegation")]
+        {
+            let agent = self.state.get_agent(&params.workspace).await?;
+            let output = tokio::task::spawn_blocking(move || -> Result<String, String> {
+                let agent = agent.lock().map_err(|e| format!("lock: {e}"))?;
+                let registry = agent.delegation_manager().peer_registry();
+                let peers = registry.list();
+                if peers.is_empty() {
+                    return Ok("No peers configured. Add endpoints to [delegation.peers] in akh.toml.".to_string());
+                }
+                let mut lines = vec![format!("Known peers ({}):", peers.len())];
+                for peer in &peers {
+                    lines.push(format!("  Endpoint: {}", peer.endpoint));
+                    lines.push(format!(
+                        "    Load: {:.0}%  Success: {:.0}%  Avg response: {:.0}ms  Tasks: {}",
+                        peer.load * 100.0,
+                        peer.success_rate * 100.0,
+                        peer.avg_response_ms,
+                        peer.tasks_completed,
+                    ));
+                    if !peer.capabilities.is_empty() {
+                        lines.push(format!("    Capabilities: {}", peer.capabilities.join(", ")));
+                    }
+                    if !peer.active_skills.is_empty() {
+                        lines.push(format!("    Active skills: {}", peer.active_skills.join(", ")));
+                    }
+                }
+                Ok(lines.join("\n"))
+            })
+            .await
+            .map_err(|e| McpError::internal_error(format!("task panicked: {e}"), None))?
+            .map_err(|e| McpError::internal_error(e, None))?;
+
+            return Ok(CallToolResult::success(vec![Content::text(output)]));
+        }
+        #[cfg(not(feature = "delegation"))]
+        Ok(CallToolResult::success(vec![Content::text(
+            "Delegation feature is not enabled in this build.".to_string(),
+        )]))
+    }
+
+    #[tool(
+        name = "cancel_delegation",
+        description = "Cancel an active delegation by ID. \
+                       The delegation is removed from tracking; the subprocess may \
+                       still be running (local processes are not killed)."
+    )]
+    async fn cancel_delegation(
+        &self,
+        Parameters(params): Parameters<CancelDelegationParams>,
+    ) -> Result<CallToolResult, McpError> {
+        #[cfg(feature = "delegation")]
+        {
+            let agent = self.state.get_agent(&params.workspace).await?;
+            let delegation_id = params.delegation_id;
+            let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+                let agent = agent.lock().map_err(|e| format!("lock: {e}"))?;
+                let id = crate::agent::delegation::DelegationId(delegation_id);
+                match agent.delegation_manager().complete(id) {
+                    Some(del) => Ok(format!(
+                        "Delegation {} cancelled: \"{}\" (was {:?})",
+                        delegation_id, del.task_description, del.status,
+                    )),
+                    None => Ok(format!(
+                        "Delegation {} not found (may have already completed).",
+                        delegation_id
+                    )),
+                }
+            })
+            .await
+            .map_err(|e| McpError::internal_error(format!("task panicked: {e}"), None))?
+            .map_err(|e| McpError::internal_error(e, None))?;
+
+            return Ok(CallToolResult::success(vec![Content::text(result)]));
+        }
+        #[cfg(not(feature = "delegation"))]
+        Ok(CallToolResult::success(vec![Content::text(
+            "Delegation feature is not enabled in this build.".to_string(),
+        )]))
+    }
 }
 
 // ── ServerHandler impl ──────────────────────────────────────────────────
@@ -4962,7 +6859,7 @@ impl rmcp::handler::server::ServerHandler for AkhMcpServer {
                  Agent introspection: `agent_run_cycle` (single OODA step), `agent_goals`, \
                  `manage_goals` (cancel/suspend/resume/list/prioritize goal lifecycle), \
                  `agent_recall` (episodic memory), `agent_psyche`, \
-                 `journal_ingest` (load OpenClaw markdown journals into episodic memory).\n\n\
+                 `ingest_journal` (ingest OpenClaw memory/*.md journals into episodic store).\n\n\
                  Knowledge introspection: `triples_of`, `provenance_of`, `export_symbols`, \
                  `infer_analogy`, `remove_triple`.\n\n\
                  Event calculus (temporal reasoning): `record_event` (create events that initiate/terminate \
@@ -4980,13 +6877,133 @@ impl rmcp::handler::server::ServerHandler for AkhMcpServer {
                  `verify_source_claim` (update trust when claim verified true/false).\n\n\
                  Analytics: `triple_stats` (full workspace diagnostics — predicate distribution, \
                  confidence bands, top-connected entities, orphan count in one call), \
-                 `predicate_filter` (list all entity pairs for a specific predicate).\n\n\
+                 `predicate_filter` (list all entity pairs for a specific predicate), \
+                 `cleanup_by_pattern` (bulk-remove triples by subject/predicate/object prefix and \
+                 confidence threshold; use dry_run=true to preview before committing).\n\n\
                  Cross-MCP context bridge: `import_anima_project` (pull Anima project + work items \
                  into the graph as typed triples — requires [upstreams.anima] in config.toml), \
                  `link_seshat_doc` (register a Seshat document as a reference source — \
-                 [upstreams.seshat] optional, enriches metadata when present)."
+                 [upstreams.seshat] optional, enriches metadata when present).\n\n\
+                 Cross-workspace analysis: `cross_workspace_query` (compare entities, triples, and \
+                 predicates across two workspaces — supports entity_diff, triple_overlap, \
+                 predicate_union, cross_entity query types; useful for detecting contamination).\n\n\
+                 Import/export: `export_triples` (serialize KG triples to JSON, JSON-LD, or \
+                 N-Triples — optionally filtered by subject/predicate, optionally written to a file), \
+                 `import_triples` (load triples from a file; dry_run:true shows new vs. conflicts \
+                 without mutating; dry_run:false asserts new triples with provenance source=file_import)."
                     .to_string(),
             ),
         }
+    }
+}
+
+// ── Tests ────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // ── workspace deserialization ─────────────────────────────────────────
+
+    /// JSON syntax: explicit string value must be honoured.
+    #[test]
+    fn workspace_string_value() {
+        let params: WorkspaceParam = serde_json::from_value(json!({"workspace": "tecton"})).unwrap();
+        assert_eq!(params.workspace, "tecton");
+    }
+
+    /// Absent key must fall back to "default".
+    #[test]
+    fn workspace_absent_defaults() {
+        let params: WorkspaceParam = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(params.workspace, "default");
+    }
+
+    /// `null` must fall back to "default" — not produce a type error.
+    #[test]
+    fn workspace_null_defaults() {
+        let params: WorkspaceParam =
+            serde_json::from_value(json!({"workspace": null})).unwrap();
+        assert_eq!(params.workspace, "default");
+    }
+
+    /// Empty string must fall back to "default".
+    #[test]
+    fn workspace_empty_string_defaults() {
+        let params: WorkspaceParam =
+            serde_json::from_value(json!({"workspace": ""})).unwrap();
+        assert_eq!(params.workspace, "default");
+    }
+
+    /// Full ask params round-trip: workspace + question both present.
+    #[test]
+    fn ask_params_full_json() {
+        let params: AskParams =
+            serde_json::from_value(json!({"workspace": "tecton", "question": "who am i"}))
+                .unwrap();
+        assert_eq!(params.workspace, "tecton");
+        assert_eq!(params.question, "who am i");
+    }
+
+    /// Ask params: missing workspace uses "default".
+    #[test]
+    fn ask_params_default_workspace() {
+        let params: AskParams =
+            serde_json::from_value(json!({"question": "who am i"})).unwrap();
+        assert_eq!(params.workspace, "default");
+        assert_eq!(params.question, "who am i");
+    }
+
+    /// Ask params: null workspace uses "default".
+    #[test]
+    fn ask_params_null_workspace() {
+        let params: AskParams =
+            serde_json::from_value(json!({"workspace": null, "question": "who am i"})).unwrap();
+        assert_eq!(params.workspace, "default");
+    }
+
+    /// AssertTripleParams with explicit workspace.
+    #[test]
+    fn assert_triple_workspace_json() {
+        let params: AssertTripleParams = serde_json::from_value(json!({
+            "workspace": "tecton",
+            "subject": "Sun",
+            "predicate": "is-a",
+            "object": "Star"
+        }))
+        .unwrap();
+        assert_eq!(params.workspace, "tecton");
+        assert_eq!(params.subject, "Sun");
+    }
+
+    /// ChatParams with explicit workspace via JSON.
+    #[test]
+    fn chat_params_workspace_json() {
+        let params: ChatParams =
+            serde_json::from_value(json!({"workspace": "tecton", "message": "hello"})).unwrap();
+        assert_eq!(params.workspace, "tecton");
+    }
+
+    /// ChatParams: null workspace falls back to "default".
+    #[test]
+    fn chat_params_null_workspace() {
+        let params: ChatParams =
+            serde_json::from_value(json!({"workspace": null, "message": "hello"})).unwrap();
+        assert_eq!(params.workspace, "default");
+    }
+
+    /// SparqlParams with explicit workspace.
+    #[test]
+    fn sparql_params_workspace_json() {
+        let params: SparqlParams =
+            serde_json::from_value(json!({"workspace": "tecton", "query": "SELECT * WHERE {}"}))
+                .unwrap();
+        assert_eq!(params.workspace, "tecton");
+    }
+
+    #[test]
+    fn default_workspace_returns_default() {
+        assert_eq!(default_workspace(), "default");
     }
 }

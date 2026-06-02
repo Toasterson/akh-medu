@@ -29,8 +29,8 @@ use super::resource::{self, EffortIndex, ImprovementHistory};
 use super::watch::{self, Watch, WatchFiring};
 use super::memory::{
     ConsolidationConfig, ConsolidationResult, EpisodicEntry, SessionSummary, WorkingMemory,
-    WorkingMemoryEntry, WorkingMemoryKind, consolidate, generate_session_summary, recall_episodes,
-    restore_session_summary,
+    WorkingMemoryEntry, WorkingMemoryKind, consolidate, generate_session_summary, index_cycle_episode,
+    recall_episodes, recall_recent_episodes, restore_session_summary,
 };
 use super::ooda::{self, DecisionImpasse, OodaCycleResult};
 use super::vsa_decide::DecideMode;
@@ -125,6 +125,8 @@ pub struct AgentPredicates {
     pub memory_type: SymbolId,
     /// HTN dependency: the object goal must complete before the subject goal.
     pub blocked_by: SymbolId,
+    /// Affective valence at consolidation time — used for mood-congruent retrieval (Phase 23).
+    pub has_affective_valence: SymbolId,
 }
 
 impl AgentPredicates {
@@ -145,6 +147,8 @@ impl AgentPredicates {
             from_cycle: engine.resolve_or_create_relation("agent:from_cycle")?,
             memory_type: engine.resolve_or_create_relation("agent:memory_type")?,
             blocked_by: engine.resolve_or_create_relation("agent:blocked_by")?,
+            has_affective_valence: engine
+                .resolve_or_create_relation("agent:has_affective_valence")?,
         })
     }
 }
@@ -262,6 +266,11 @@ pub struct Agent {
     /// Optional WASM tool runtime (only when `wasm-tools` feature is enabled).
     #[cfg(feature = "wasm-tools")]
     pub(crate) wasm_runtime: Option<super::wasm_runtime::WasmToolRuntime>,
+    /// Per-agent model manager for local Gemma inference via Ollama (optional).
+    pub(crate) model_manager: Option<std::sync::Arc<super::model_manager::AgentModelManager>>,
+    /// Delegation manager for offloading LLM-class tasks (Phase 36).
+    #[cfg(feature = "delegation")]
+    pub(crate) delegation_manager: super::delegation::DelegationManager,
 }
 
 impl Agent {
@@ -270,6 +279,8 @@ impl Agent {
         registry: &mut ToolRegistry,
         predicates: &AgentPredicates,
         engine: &Engine,
+        #[cfg(feature = "delegation")]
+        delegation_pending: std::sync::Arc<std::sync::Mutex<Vec<super::delegation::DelegationTask>>>,
     ) {
         // Core KG tools.
         registry.register(Box::new(tools::KgQueryTool));
@@ -321,6 +332,12 @@ impl Agent {
 
         // Tool-graph query (peer/federation discovery).
         registry.register(Box::new(tools::ToolQueryTool));
+
+        // Delegation tool (Phase 36) — wired to pending task queue.
+        #[cfg(feature = "delegation")]
+        registry.register(Box::new(tools::DelegateTool::new(delegation_pending)));
+        #[cfg(not(feature = "delegation"))]
+        registry.register(Box::new(tools::DelegateTool::new_noop()));
     }
 
     /// Attach the audit ledger to the tool registry if persistence is configured.
@@ -440,16 +457,72 @@ impl Agent {
         let dialogue_predicates = super::dialogue::DialoguePredicates::init(&engine)?;
         let dialogue_manager = super::dialogue::DialogueManager::new(dialogue_predicates, "operator");
 
+        // Create delegation manager early so we can pass the pending queue to DelegateTool.
+        #[cfg(feature = "delegation")]
+        let delegation_manager =
+            super::delegation::DelegationManager::new(super::delegation::DelegationConfig::default());
+        #[cfg(feature = "delegation")]
+        let delegation_pending = delegation_manager.pending_queue();
+
         let mut tool_registry = ToolRegistry::new();
-        Self::register_builtin_tools(&mut tool_registry, &predicates, &engine);
+        Self::register_builtin_tools(
+            &mut tool_registry,
+            &predicates,
+            &engine,
+            #[cfg(feature = "delegation")]
+            delegation_pending,
+        );
         Self::wire_audit_ledger(&mut tool_registry, &engine);
 
         let working_memory = WorkingMemory::new(config.working_memory_capacity);
 
         // Try to restore goals: prefer durable-store blob (survives without
         // sparql-persist), fall back to KG-triple reconstruction.
-        let goals = goal::restore_goals_from_store(&engine)
+        let mut goals = goal::restore_goals_from_store(&engine)
             .unwrap_or_else(|| goal::restore_goals(&engine, &predicates).unwrap_or_default());
+
+        // Startup cap: prune excess non-terminal goals carried over from a previous
+        // session.  Autonomous investigation goals can accumulate to 72+ in a degraded
+        // session; capping here prevents them from blocking the OODA loop on restart.
+        // We keep at most max_open_goals * 2 non-terminal goals, preferring goals with
+        // higher priority (sorted descending).  Excess goals are marked Failed with an
+        // "excess from previous session" reason so they remain auditable.
+        {
+            let max_restore = config.goal_generation.max_open_goals.saturating_mul(2);
+            let non_terminal_ids: Vec<SymbolId> = {
+                let mut nt: Vec<&Goal> = goals
+                    .iter()
+                    .filter(|g| {
+                        !matches!(
+                            g.status,
+                            GoalStatus::Completed
+                                | GoalStatus::Failed { .. }
+                                | GoalStatus::Reformulated { .. }
+                        )
+                    })
+                    .collect();
+                // Prefer higher-priority and user-requested goals; discard the rest.
+                nt.sort_by(|a, b| {
+                    let ea = a.justification.as_ref().map(|j| j.entrenchment()).unwrap_or(0);
+                    let eb = b.justification.as_ref().map(|j| j.entrenchment()).unwrap_or(0);
+                    eb.cmp(&ea).then(b.computed_priority().cmp(&a.computed_priority()))
+                });
+                nt.iter().skip(max_restore).map(|g| g.symbol_id).collect()
+            };
+            for goal_id in non_terminal_ids {
+                if let Some(g) = goals.iter_mut().find(|g| g.symbol_id == goal_id) {
+                    tracing::debug!(goal = %goal_id, "startup cap: pruning excess open goal from previous session");
+                    let _ = goal::update_goal_status(
+                        &engine,
+                        g,
+                        GoalStatus::Failed {
+                            reason: "pruned: excess open goals from previous session".to_string(),
+                        },
+                        &predicates,
+                    );
+                }
+            }
+        }
 
         // Load psyche from compartment manager if available.
         let psyche = engine.compartments().and_then(|cm| cm.psyche());
@@ -520,6 +593,9 @@ impl Agent {
             hygiene_config,
             #[cfg(feature = "wasm-tools")]
             wasm_runtime: super::wasm_runtime::WasmToolRuntime::new().ok(),
+            model_manager: None,
+            #[cfg(feature = "delegation")]
+            delegation_manager,
         };
 
         // Initialize interlocutor predicates.
@@ -642,6 +718,33 @@ impl Agent {
         Ok(agent)
     }
 
+    // -----------------------------------------------------------------------
+    // Delegation manager accessors (Phase 36)
+    // -----------------------------------------------------------------------
+
+    /// Immutable access to the delegation manager.
+    #[cfg(feature = "delegation")]
+    pub fn delegation_manager(&self) -> &super::delegation::DelegationManager {
+        &self.delegation_manager
+    }
+
+    /// Mutable access to the delegation manager.
+    #[cfg(feature = "delegation")]
+    pub fn delegation_manager_mut(&mut self) -> &mut super::delegation::DelegationManager {
+        &mut self.delegation_manager
+    }
+
+    /// Replace the delegation manager (e.g. after loading config from akh.toml).
+    #[cfg(feature = "delegation")]
+    pub fn set_delegation_manager(&mut self, manager: super::delegation::DelegationManager) {
+        // Migrate the pending queue so any tasks queued before the swap are preserved.
+        let pending = self.delegation_manager.drain_pending();
+        self.delegation_manager = manager;
+        for task in pending {
+            let _ = self.delegation_manager.enqueue(task);
+        }
+    }
+
     /// Add a new goal. Returns the goal's symbol ID.
     pub fn add_goal(
         &mut self,
@@ -703,6 +806,35 @@ impl Agent {
         }
 
         let result = ooda::run_ooda_cycle_with_mode(self, mode)?;
+
+        // Index the cycle immediately as a retrievable episode so agent_recall can
+        // surface it without waiting for the WM auto-consolidation threshold.
+        {
+            let goal_id = result.decision.goal_id;
+            let goal_label = self
+                .goals
+                .iter()
+                .find(|g| g.symbol_id == goal_id)
+                .map(|g| g.description.as_str())
+                .unwrap_or("unknown goal");
+            let progress = match &result.action_result.goal_progress {
+                ooda::GoalProgress::Completed => "completed",
+                ooda::GoalProgress::Advanced { .. } => "advanced",
+                ooda::GoalProgress::Failed { .. } => "failed",
+                ooda::GoalProgress::NoChange => "no_change",
+            };
+            if let Err(e) = index_cycle_episode(
+                &self.engine,
+                &self.predicates,
+                self.cycle_count,
+                goal_label,
+                Some(goal_id),
+                &result.decision.chosen_tool,
+                progress,
+            ) {
+                tracing::debug!(cycle = self.cycle_count, error = %e, "failed to index cycle episode");
+            }
+        }
 
         // Advance plan tracking based on the cycle result.
         let goal_id = result.decision.goal_id;
@@ -1015,6 +1147,9 @@ impl Agent {
             tracing::debug!("autonomous goal generation failed: {e}");
         }
 
+        // Prune autonomous goals that have been stuck for too long.
+        self.prune_abandoned_goals();
+
         // Auto-decompose stalled goals.
         self.decompose_stalled_goals();
 
@@ -1116,7 +1251,10 @@ impl Agent {
                 break;
             }
 
-            let result = ooda::run_ooda_cycle(self)?;
+            // Use run_cycle (not ooda::run_ooda_cycle directly) so that episode
+            // indexing, plan tracking, metacognition, and other per-cycle housekeeping
+            // happen on every iteration — not just when the caller uses agent_run_cycle.
+            let result = self.run_cycle()?;
 
             // Track consecutive no-progress cycles.
             match result.action_result.goal_progress {
@@ -1169,6 +1307,7 @@ impl Agent {
     /// similarity) are silently skipped.  Human operators can promote, demote, or
     /// cancel auto-generated goals via normal goal management.
     pub fn consolidate(&mut self) -> AgentResult<ConsolidationResult> {
+        let current_affect = *self.affective_system.current_affect();
         let mut result = consolidate(
             &mut self.working_memory,
             &self.engine,
@@ -1176,6 +1315,7 @@ impl Agent {
             &self.config.consolidation,
             &self.predicates,
             self.cycle_count,
+            Some(&current_affect),
         )?;
 
         // Post-consolidation: VSA competence gap → investigation goals.
@@ -1234,7 +1374,16 @@ impl Agent {
 
     /// Recall episodic memories by query symbols.
     pub fn recall(&self, query: &[SymbolId], top_k: usize) -> AgentResult<Vec<EpisodicEntry>> {
-        recall_episodes(&self.engine, query, &self.predicates, top_k)
+        let current_affect = *self.affective_system.current_affect();
+        recall_episodes(&self.engine, query, &self.predicates, top_k, Some(&current_affect))
+    }
+
+    /// Recall the most recent episodic memories without requiring resolved symbols.
+    ///
+    /// Scans all episodes indexed under `episodic_memory` and returns the `top_k`
+    /// most recent. Use this when query terms don't map to known symbols.
+    pub fn recall_recent(&self, top_k: usize) -> AgentResult<Vec<EpisodicEntry>> {
+        recall_recent_episodes(&self.engine, &self.predicates, top_k)
     }
 
     /// Get current goals.
@@ -1333,6 +1482,63 @@ impl Agent {
     pub fn force_set_psyche(&mut self, psyche: crate::compartment::psyche::Psyche) {
         self.psyche = Some(psyche);
         self.sync_psyche_snapshot();
+    }
+
+    // ── Model manager (per-agent Gemma via Ollama) ─────────────────────────
+
+    /// Attach a model manager so this agent can run local Gemma inference.
+    pub fn with_model_manager(
+        mut self,
+        manager: std::sync::Arc<super::model_manager::AgentModelManager>,
+    ) -> Self {
+        self.model_manager = Some(manager);
+        self
+    }
+
+    /// Set or replace the model manager.
+    pub fn set_model_manager(
+        &mut self,
+        manager: std::sync::Arc<super::model_manager::AgentModelManager>,
+    ) {
+        self.model_manager = Some(manager);
+    }
+
+    /// Get a reference to the model manager, if one is attached.
+    pub fn model_manager(
+        &self,
+    ) -> Option<&super::model_manager::AgentModelManager> {
+        self.model_manager.as_deref()
+    }
+
+    /// Register this agent with its attached model manager using the current
+    /// psyche (if any).
+    ///
+    /// The agent is identified by its engine workspace name, or by the provided
+    /// `agent_id` string.  Idempotent — safe to call on every OODA cycle.
+    ///
+    /// Returns `true` if a model manager is attached; `false` otherwise.
+    pub fn register_with_model_manager(&self, agent_id: &str, agent_name: &str) -> bool {
+        let Some(ref mgr) = self.model_manager else {
+            return false;
+        };
+        mgr.load_agent(agent_id, agent_name, self.psyche.as_ref());
+        true
+    }
+
+    /// Generate text from the attached model manager using this agent's Psyche
+    /// encoding.
+    ///
+    /// Returns `None` when no model manager is attached.
+    /// Callers should handle `ModelManagerError` variants as follows:
+    /// - `AgentNotLoaded` → call `register_with_model_manager()` first.
+    /// - `NoBackendAvailable` → start Ollama or configure `fallback_api`.
+    pub fn generate_with_model(
+        &self,
+        agent_id: &str,
+        user_prompt: &str,
+    ) -> Option<super::model_manager::ModelManagerResult<String>> {
+        let mgr = self.model_manager.as_deref()?;
+        Some(mgr.generate(agent_id, user_prompt))
     }
 
     // ── Channel registry (Phase 12a) ────────────────────────────────────
@@ -1705,6 +1911,85 @@ impl Agent {
             goal::update_goal_criteria(&self.engine, &mut self.goals[idx], c, &self.predicates)?;
         }
         Ok(())
+    }
+
+    /// Mark long-stalled autonomous goals as `Failed` (abandoned).
+    ///
+    /// Goals whose `justification` entrenchment is < 2 (i.e. not `UserRequested`
+    /// or `DecomposedFrom`) are considered autonomous investigations. If such a
+    /// goal has been Active for at least `abandon_after_cycles` cycles without
+    /// any progress (or has had `cycles_worked > 0` and no recent progress), it
+    /// is failed with an "abandoned" reason so the slot can be reused.
+    fn prune_abandoned_goals(&mut self) {
+        let threshold = self.config.goal_generation.abandon_after_cycles;
+        let cycle = self.cycle_count;
+
+        // 1. Active goals with no recent progress.
+        let active_to_abandon: Vec<SymbolId> = self
+            .goals
+            .iter()
+            .filter(|g| matches!(g.status, GoalStatus::Active))
+            // Exempt user-requested and decomposed-from goals (entrenchment >= 2).
+            .filter(|g| {
+                g.justification
+                    .as_ref()
+                    .map(|j| j.entrenchment())
+                    .unwrap_or(0)
+                    < 2
+            })
+            // Only abandon after meaningful work has been done (cycles_worked > 0)
+            // and no progress for the configured threshold.
+            .filter(|g| {
+                g.cycles_worked > 0
+                    && cycle.saturating_sub(g.last_progress_cycle) >= threshold
+            })
+            .map(|g| g.symbol_id)
+            .collect();
+
+        // 2. Pending/Dormant goals that have never been worked on for too long.
+        //    These accumulate from goal generation cycles that produce goals which
+        //    never get selected by the OODA loop (e.g., excess goals restored from a
+        //    previous session, or low-priority dormant goals).
+        //    Prune them after 3× the normal threshold, giving them a generous window.
+        let pending_threshold = threshold.saturating_mul(3);
+        let pending_to_abandon: Vec<SymbolId> = self
+            .goals
+            .iter()
+            .filter(|g| matches!(g.status, GoalStatus::Pending | GoalStatus::Dormant))
+            .filter(|g| {
+                g.justification
+                    .as_ref()
+                    .map(|j| j.entrenchment())
+                    .unwrap_or(0)
+                    < 2
+            })
+            // Only prune if the agent has run long enough (cycle >= pending_threshold)
+            // AND the goal has never been worked on.
+            .filter(|g| g.cycles_worked == 0 && cycle >= pending_threshold)
+            .map(|g| g.symbol_id)
+            .collect();
+
+        for goal_id in active_to_abandon.into_iter().chain(pending_to_abandon) {
+            if let Some(g) = self.goals.iter_mut().find(|g| g.symbol_id == goal_id) {
+                let reason = if matches!(g.status, GoalStatus::Active) {
+                    format!("abandoned: no progress for {threshold} cycles")
+                } else {
+                    format!("abandoned: pending/dormant with no work for {pending_threshold} cycles")
+                };
+                tracing::debug!(
+                    goal = %goal_id,
+                    status = ?g.status,
+                    cycles_worked = g.cycles_worked,
+                    "Pruning abandoned investigation goal"
+                );
+                let _ = goal::update_goal_status(
+                    &self.engine,
+                    g,
+                    GoalStatus::Failed { reason },
+                    &self.predicates,
+                );
+            }
+        }
     }
 
     /// Auto-decompose any active goals that have stalled.
@@ -2170,8 +2455,34 @@ impl Agent {
             }
         }
 
-        // Activate generated goals by creating them in the goals list.
+        // Count currently open (non-terminal) goals to enforce the hard cap.
+        let max_open = self.config.goal_generation.max_open_goals;
+
+        // Activate generated goals by creating them in the goals list,
+        // respecting the max-open-goals cap.
         for proposal in &gen_result.activated {
+            let current_open = self
+                .goals
+                .iter()
+                .filter(|g| {
+                    matches!(
+                        g.status,
+                        GoalStatus::Active
+                            | GoalStatus::Pending
+                            | GoalStatus::Proposed
+                            | GoalStatus::Dormant
+                            | GoalStatus::Suspended
+                    )
+                })
+                .count();
+            if current_open >= max_open {
+                tracing::debug!(
+                    max_open,
+                    "max_open_goals reached — skipping remaining activations"
+                );
+                break;
+            }
+
             let mut g = goal::create_goal(
                 &self.engine,
                 &proposal.description,
@@ -2199,8 +2510,27 @@ impl Agent {
             self.goals.push(g);
         }
 
-        // Store dormant proposals as goals with Dormant status.
+        // Store dormant proposals as goals with Dormant status,
+        // also respecting the max-open-goals cap.
         for proposal in &gen_result.dormant {
+            let current_open = self
+                .goals
+                .iter()
+                .filter(|g| {
+                    matches!(
+                        g.status,
+                        GoalStatus::Active
+                            | GoalStatus::Pending
+                            | GoalStatus::Proposed
+                            | GoalStatus::Dormant
+                            | GoalStatus::Suspended
+                    )
+                })
+                .count();
+            if current_open >= max_open {
+                break;
+            }
+
             let mut g = goal::create_goal(
                 &self.engine,
                 &proposal.description,
@@ -2218,15 +2548,31 @@ impl Agent {
             self.goals.push(g);
         }
 
-        // Log generation result to WM.
+        // Log generation result to WM (include open-goal count for observability).
+        let current_open = self
+            .goals
+            .iter()
+            .filter(|g| {
+                matches!(
+                    g.status,
+                    GoalStatus::Active
+                        | GoalStatus::Pending
+                        | GoalStatus::Proposed
+                        | GoalStatus::Dormant
+                        | GoalStatus::Suspended
+                )
+            })
+            .count();
         if let Err(e) = self.working_memory.push(WorkingMemoryEntry {
             id: 0,
             content: format!(
-                "Goal generation: {} activated, {} dormant, {} deduplicated, {} infeasible. Drives: curiosity={:.2} coherence={:.2} completeness={:.2} efficiency={:.2}",
+                "Goal generation: {} activated, {} dormant, {} deduplicated, {} infeasible (open={}/{} cap). Drives: curiosity={:.2} coherence={:.2} completeness={:.2} efficiency={:.2}",
                 gen_result.activated.len(),
                 gen_result.dormant.len(),
                 gen_result.deduplicated,
                 gen_result.infeasible,
+                current_open,
+                max_open,
                 gen_result.drive_strengths[0],
                 gen_result.drive_strengths[1],
                 gen_result.drive_strengths[2],
@@ -2842,8 +3188,22 @@ impl Agent {
         let dialogue_predicates = super::dialogue::DialoguePredicates::init(&engine)?;
         let dialogue_manager = super::dialogue::DialogueManager::new(dialogue_predicates, "operator");
 
+        // Create delegation manager (delegation state is not persisted between sessions
+        // — active delegations are transient; the config reloads from defaults).
+        #[cfg(feature = "delegation")]
+        let delegation_manager =
+            super::delegation::DelegationManager::new(super::delegation::DelegationConfig::default());
+        #[cfg(feature = "delegation")]
+        let delegation_pending = delegation_manager.pending_queue();
+
         let mut tool_registry = ToolRegistry::new();
-        Self::register_builtin_tools(&mut tool_registry, &predicates, &engine);
+        Self::register_builtin_tools(
+            &mut tool_registry,
+            &predicates,
+            &engine,
+            #[cfg(feature = "delegation")]
+            delegation_pending,
+        );
         Self::wire_audit_ledger(&mut tool_registry, &engine);
 
         let store = engine.store();
@@ -3145,6 +3505,9 @@ impl Agent {
             hygiene_config,
             #[cfg(feature = "wasm-tools")]
             wasm_runtime: super::wasm_runtime::WasmToolRuntime::new().ok(),
+            model_manager: None,
+            #[cfg(feature = "delegation")]
+            delegation_manager,
         };
 
         // Initialize interlocutor predicates.

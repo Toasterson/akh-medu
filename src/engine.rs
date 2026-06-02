@@ -287,6 +287,20 @@ impl Engine {
             }
         }
 
+        // Fallback: restore KG triples from redb if SPARQL didn't provide any
+        // (e.g. sparql-persist feature is disabled or this is the first run after
+        //  upgrading to redb-backed triple persistence).
+        if knowledge_graph.triple_count() == 0 {
+            if let Ok(Some(bytes)) = store.get_meta(b"kg:triples") {
+                if let Ok(triples) = bincode::deserialize::<Vec<crate::graph::Triple>>(&bytes) {
+                    if !triples.is_empty() {
+                        let count = knowledge_graph.bulk_load(&triples).unwrap_or(0);
+                        tracing::info!(triples = count, "knowledge graph restored from redb fallback");
+                    }
+                }
+            }
+        }
+
         // Restore registry and allocator from persistent storage if available.
         let registry = SymbolRegistry::restore(&store).unwrap_or_else(|e| {
             tracing::debug!(error = %e, "registry restore skipped, starting fresh");
@@ -1412,7 +1426,8 @@ impl Engine {
             let subj_label = self.resolve_label(triple.subject);
             let obj_label = self.resolve_label(triple.object);
 
-            let contaminated = is_noise_entity(&subj_label)
+            let contaminated = triple.subject == triple.object
+                || is_noise_entity(&subj_label)
                 || is_noise_entity(&obj_label)
                 || is_invalid_type_hierarchy_participant(&pred_label, &subj_label)
                 || is_invalid_type_hierarchy_participant(&pred_label, &obj_label);
@@ -2795,6 +2810,12 @@ impl Engine {
     // -----------------------------------------------------------------------
 
     /// Assign a role to this workspace's agent. Write-once: errors if already assigned.
+    ///
+    /// Side-effects beyond KG/metadata:
+    /// 1. Writes `compartments/psyche/ennead-role` for inter-agent discovery.
+    /// 2. Updates `ennead_role` in `psyche.toml`.
+    /// 3. If the Ennead role maps to a known deity **and** the psyche has not yet been
+    ///    awakened, runs `resolve_identity` + `ritual_of_awakening` automatically.
     pub fn assign_role(&self, role: &str) -> AkhResult<()> {
         if let Some(existing) = self
             .store
@@ -2808,6 +2829,29 @@ impl Engine {
         }
         self.ingest_label_triples(&[("self".into(), "has-role".into(), role.into(), 1.0)])?;
         self.store.put_meta(b"ws:role", role.as_bytes())?;
+
+        // Persist ennead-role file to the psyche compartment for discovery.
+        if let Some(cm) = &self.compartment_manager {
+            if let Err(e) = cm.write_ennead_role_file(role) {
+                tracing::warn!(error = %e, "failed to write ennead-role file; role stored in KG only");
+            }
+        }
+
+        // Run identity rituals if the psyche has not yet been awakened.
+        match crate::bootstrap::identity::awaken_with_ennead_role(role, self) {
+            Ok(Some(result)) => {
+                tracing::info!(
+                    role,
+                    chosen_name = %result.chosen_name,
+                    "awakening ritual completed for Ennead role assignment"
+                );
+            }
+            Ok(None) => {}
+            Err(e) => {
+                tracing::warn!(error = %e, role, "awakening ritual failed; psyche unchanged");
+            }
+        }
+
         Ok(())
     }
 
@@ -2948,6 +2992,7 @@ impl Engine {
 
         // Always write a bincode snapshot of KG triples so restores work even
         // when `sparql-persist` is disabled (e.g., in tests or single-binary mode).
+        // Write under both keys consulted by the restore path on startup.
         if self.config.data_dir.is_some() {
             let triples = self.knowledge_graph.all_triples();
             let snapshot = bincode::serialize(&triples).map_err(|e| {
@@ -2956,6 +3001,7 @@ impl Engine {
                 }
             })?;
             self.store.put_meta(b"kg_triples_snapshot", &snapshot)?;
+            self.store.put_meta(b"kg:triples", &snapshot)?;
             tracing::debug!(triples = triples.len(), "KG bincode snapshot written");
         }
 
@@ -3151,6 +3197,34 @@ mod tests {
 
         let objects = engine.knowledge_graph().objects_of(sun.id, is_a.id);
         assert_eq!(objects, vec![star.id]);
+    }
+
+    #[test]
+    fn add_triple_self_reference_is_dropped() {
+        let engine = Engine::new(EngineConfig {
+            dimension: Dimension::TEST,
+            ..Default::default()
+        })
+        .unwrap();
+
+        let maat = engine.create_symbol(SymbolKind::Entity, "Maat").unwrap();
+        let child_of = engine
+            .create_symbol(SymbolKind::Relation, "child-of")
+            .unwrap();
+
+        // With the default `reject_self_referential` guard, adding a self-referential
+        // triple is rejected and must never be stored in the KG.
+        let result = engine.add_triple(&Triple::new(maat.id, child_of.id, maat.id));
+        assert!(
+            result.is_err(),
+            "self-referential triple must be rejected by the guard"
+        );
+
+        let objects = engine.knowledge_graph().objects_of(maat.id, child_of.id);
+        assert!(
+            objects.is_empty(),
+            "self-referential triple must not be inserted into the KG"
+        );
     }
 
     #[test]
@@ -3364,5 +3438,64 @@ mod tests {
         let sel = Engine::sparql_delete_to_select(q).unwrap();
         assert!(sel.starts_with("SELECT ?s ?p ?o WHERE"));
         assert!(sel.contains("FILTER"));
+    }
+
+    #[test]
+    fn assigned_role_is_none_before_assignment() {
+        let engine = Engine::new(EngineConfig {
+            dimension: Dimension::TEST,
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(engine.assigned_role().is_none());
+    }
+
+    #[test]
+    fn assign_role_stores_role_in_metadata() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let engine = Engine::new(EngineConfig {
+            dimension: Dimension::TEST,
+            data_dir: Some(dir.path().to_path_buf()),
+            ..Default::default()
+        })
+        .unwrap();
+
+        engine.assign_role("architect").unwrap();
+        assert_eq!(engine.assigned_role().as_deref(), Some("architect"));
+    }
+
+    #[test]
+    fn assign_role_write_once_rejects_second_call() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let engine = Engine::new(EngineConfig {
+            dimension: Dimension::TEST,
+            data_dir: Some(dir.path().to_path_buf()),
+            ..Default::default()
+        })
+        .unwrap();
+
+        engine.assign_role("architect").unwrap();
+        let err = engine.assign_role("investigator").unwrap_err();
+        // Should be a WorkspaceError::RoleAlreadyAssigned.
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("architect") || msg.contains("already"),
+            "unexpected error message: {msg}"
+        );
+    }
+
+    #[test]
+    fn assign_role_same_role_twice_is_rejected() {
+        // Write-once semantics: even the same role cannot be re-assigned.
+        let dir = tempfile::TempDir::new().unwrap();
+        let engine = Engine::new(EngineConfig {
+            dimension: Dimension::TEST,
+            data_dir: Some(dir.path().to_path_buf()),
+            ..Default::default()
+        })
+        .unwrap();
+
+        engine.assign_role("architect").unwrap();
+        assert!(engine.assign_role("architect").is_err());
     }
 }

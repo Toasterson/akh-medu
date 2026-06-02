@@ -1,0 +1,60 @@
+{
+  "default": {
+    "rank": 16,
+    "alpha": 32.0,
+    "target_modules": ["q_proj", "v_proj"],
+    "base_model": "gemma2:2b-instruct-q4_K_M",
+    "batch_size": 4,
+    "epochs": 3,
+    "learning_rate": 2e-4,
+    "max_seq_len": 512,
+    "warmup_steps": 50,
+    "lora_dropout": 0.05,
+    "grad_checkpoint": true
+  },
+  "agents": {
+    "tecton": {
+      "description": "Master builder, Ptah / Sage+Creator",
+      "epochs": 3,
+      "rank": 16,
+      "notes": "Architectural precision; benefits from longer max_seq_len for design explanations"
+    },
+    "thoth": {
+      "description": "Knowledge seeker, Thoth / Sage+Explorer",
+      "epochs": 3,
+      "rank": 16,
+      "notes": "Research and evidence style; ensure diverse QA categories"
+    },
+    "horus": {
+      "description": "Decisive executor, Horus / Hero+Guardian",
+      "epochs": 2,
+      "rank": 16,
+      "notes": "Terse, action-oriented; fewer epochs to avoid over-smoothing direct style"
+    },
+    "maat": {
+      "description": "Balance keeper, Maat / Guardian+Healer",
+      "epochs": 3,
+      "rank": 16,
+      "notes": "Ethical nuance; ethics category pairs should be ~30% of training data"
+    },
+    "set": {
+      "description": "Disruptor, Set / Rebel+Explorer",
+      "epochs": 2,
+      "rank": 16,
+      "learning_rate": 3e-4,
+      "notes": "Contrarian style needs slightly higher LR to shift base model priors"
+    },
+    "khnum": {
+      "description": "Craftsman, Khnum / Creator+Sage",
+      "epochs": 3,
+      "rank": 16,
+      "notes": "Generative, show-your-work style; ensure domain pairs include code examples"
+    }
+  },
+  "quality_bar": {
+    "min_eval_accuracy": 0.60,
+    "max_load_overhead_ms": 100,
+    "max_adapter_size_mb": 50,
+    "min_training_pairs": 500
+  }
+}
