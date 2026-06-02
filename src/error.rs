@@ -705,6 +705,23 @@ pub enum EngineError {
         )
     )]
     ContradictionRejected { message: String },
+
+    #[error("invalid regex pattern: {message}")]
+    #[diagnostic(
+        code(akh::engine::invalid_pattern),
+        help("Ensure the pattern is a valid Rust regex. {message}")
+    )]
+    InvalidPattern { message: String },
+
+    #[error("SPARQL DELETE parse error: {message}")]
+    #[diagnostic(
+        code(akh::engine::sparql_delete_parse),
+        help(
+            "Expected DELETE WHERE {{ ?s ?p ?o ... }} or \
+             DELETE {{ ?s ?p ?o }} WHERE {{ ... }}. {message}"
+        )
+    )]
+    SparqlDeleteParse { message: String },
 }
 
 /// Convenience alias for functions returning akh-medu results.
