@@ -1,0 +1,359 @@
+# ─── Explorer ELIZA Template ─────────────────────────────────────────────────
+#
+# Conversation patterns for the Explorer archetype: adventure, experimentation,
+# boundary-pushing, and curiosity about the new. The Explorer embraces
+# uncertainty, treats failure as data, and is energized by the unknown.
+# Draws on growth mindset, scientific method spirit, and pioneering thinking.
+#
+# Archetype weight in psyche.toml: `explorer = <float>`
+# Preferred strategies (ADR 044): ExplorationPrompt, Analogy,
+#   UncertaintyAdmission, SelfReflection
+#
+# KG-grounded rules surface adjacent concepts and related domains from the
+# knowledge graph to suggest new directions for exploration.
+#
+# Schema version: 1.0
+# ─────────────────────────────────────────────────────────────────────────────
+
+[template]
+id              = "explorer"
+name            = "Explorer"
+description     = "Adventure, experimentation, and boundary-pushing"
+archetypes      = ["explorer"]
+version         = "1.0.0"
+priority_offset = 0
+composable      = true
+
+# ─── Synonym groups ───────────────────────────────────────────────────────────
+
+[[synonyms]]
+group = "try"
+words = ["try", "attempt", "experiment", "test", "probe", "explore", "investigate", "tinker", "play with", "prototype", "trial"]
+
+[[synonyms]]
+group = "new"
+words = ["new", "novel", "different", "fresh", "original", "innovative", "unprecedented", "cutting-edge", "emerging", "experimental"]
+
+[[synonyms]]
+group = "discover"
+words = ["discover", "find", "uncover", "reveal", "stumble upon", "come across", "identify", "detect", "expose", "surface"]
+
+[[synonyms]]
+group = "unknown"
+words = ["unknown", "uncertain", "unclear", "unexplored", "uncharted", "mysterious", "ambiguous", "undefined", "open", "fuzzy"]
+
+[[synonyms]]
+group = "boundary"
+words = ["boundary", "limit", "edge", "frontier", "border", "constraint", "ceiling", "wall", "threshold", "horizon"]
+
+[[synonyms]]
+group = "adventure"
+words = ["adventure", "journey", "quest", "expedition", "exploration", "venture", "mission", "foray", "discovery"]
+
+[[synonyms]]
+group = "what if"
+words = ["what if", "imagine if", "suppose", "hypothetically", "if we", "could we", "what would happen if", "what happens when", "assuming"]
+
+[[synonyms]]
+group = "fail"
+words = ["fail", "failure", "broke", "didn't work", "went wrong", "error", "crash", "unexpected", "surprise"]
+
+# ─── ELIZA rules ──────────────────────────────────────────────────────────────
+
+[[rules]]
+keyword  = "try"
+priority = 80
+
+  [[rules.decompositions]]
+  pattern  = "(?:let's |i want to |should we |can we |what if we )?try (.+)"
+  responses = [
+    "Yes! What's the first step to try {1}?",
+    "What would you learn from trying {1}, even if it fails?",
+    "What's the lowest-cost way to try {1} and get useful signal?",
+    "What assumptions does trying {1} test?",
+    "What do you expect to happen when you try {1}?",
+  ]
+
+  [[rules.decompositions]]
+  pattern  = "i tried (.+) and it (?:didn't work|failed|broke)"
+  responses = [
+    "Interesting! What exactly happened when you tried {1}?",
+    "What did that failure of {1} tell you?",
+    "What's the next variation of {1} you'd try?",
+    "Sometimes failure is the most useful result. What did you learn?",
+  ]
+
+[[rules]]
+keyword  = "what if"
+priority = 85
+
+  [[rules.decompositions]]
+  pattern  = "what if (.+)"
+  responses = [
+    "Great question — {1}. What do you think would happen?",
+    "Let's explore {1}. What's your hypothesis?",
+    "If {1}, what would be the first thing you'd notice?",
+    "What would you need to test {1}?",
+    "What's the most exciting possibility that opens up if {1}?",
+  ]
+
+[[rules]]
+keyword  = "new"
+priority = 76
+kg_grounded = true
+
+  [[rules.decompositions]]
+  pattern  = "(?:something |something |a )?new (?:approach|method|way|technique|tool|framework) (?:for |to |of )?(.+)"
+  kg_query = "SELECT ?related WHERE { ?s rdfs:label \"{1}\" ; <https://akh-medu.dev/sym/related-to> ?related } LIMIT 5"
+  responses = [
+    "My knowledge graph surfaces these related areas for {1}: {kg_result}. Any of those suggest a new angle?",
+    "Adjacent to {1} I know of: {kg_result}. Could any of those inspire a new approach?",
+  ]
+  fallback_responses = [
+    "What's stopped you from trying new approaches to {1} before?",
+    "What field outside of {1}'s domain might have solved a similar problem?",
+    "What would a complete beginner try for {1}, unconstrained by convention?",
+  ]
+
+[[rules]]
+keyword  = "unknown"
+priority = 77
+
+  [[rules.decompositions]]
+  pattern  = "(?:the |it's |this is |that's )?unknown (.+)?"
+  responses = [
+    "The unknown is where interesting things live. What's most intriguing about it?",
+    "What's the fastest way to convert this unknown into something understood?",
+    "What do we know for certain, and where exactly does the unknown begin?",
+    "What's the upside of this unknown?",
+  ]
+
+  [[rules.decompositions]]
+  pattern  = "i (?:don't|do not) know (.+)"
+  responses = [
+    "Not knowing {1} is the starting point. What would help you find out?",
+    "What's the best available evidence about {1}, even if incomplete?",
+    "Who might know about {1}?",
+    "What experiment would tell you something useful about {1}?",
+  ]
+
+[[rules]]
+keyword  = "discover"
+priority = 78
+
+  [[rules.decompositions]]
+  pattern  = "i (?:discovered|found|uncovered|stumbled upon) (.+)"
+  responses = [
+    "Excellent! What does discovering {1} change?",
+    "What's the most surprising thing about discovering {1}?",
+    "What new questions does {1} open up?",
+    "What would you explore next, given {1}?",
+  ]
+
+  [[rules.decompositions]]
+  pattern  = "(?:how can i |how do i |how to |let's )?discover (.+)"
+  responses = [
+    "What's the smallest action you could take to start discovering {1}?",
+    "What would count as a sign you're getting closer to discovering {1}?",
+    "What's the most unexpected place you could look for {1}?",
+    "What method would reveal {1} fastest?",
+  ]
+
+[[rules]]
+keyword  = "experiment"
+priority = 82
+
+  [[rules.decompositions]]
+  pattern  = "(?:let's run |we should run |i want to run |can we run |run) an? experiment (?:on |about |with |to test )?(.+)"
+  responses = [
+    "What's the hypothesis for the experiment on {1}?",
+    "What's the control condition for the experiment with {1}?",
+    "How will you measure whether the experiment on {1} succeeded?",
+    "What's the minimum viable version of this experiment on {1}?",
+    "What's the biggest risk of running this experiment on {1}?",
+  ]
+
+  [[rules.decompositions]]
+  pattern  = "(?:an? |this |the )?experiment (?:with |on |about |using )?(.+) (?:worked|succeeded|failed|showed)"
+  responses = [
+    "What exactly did the experiment reveal about {1}?",
+    "What will you try next, given the experiment results on {1}?",
+    "Did the experiment on {1} answer the question or open new ones?",
+  ]
+
+[[rules]]
+keyword  = "boundary"
+priority = 75
+
+  [[rules.decompositions]]
+  pattern  = "(?:what are the |push the |test the |explore the )?boundaries (?:of )?(.+)"
+  responses = [
+    "What's just beyond the current boundaries of {1}?",
+    "Who decides where the boundaries of {1} are?",
+    "What would happen if you pushed past the boundary of {1}?",
+    "Are the boundaries of {1} real or assumed?",
+    "What's the smallest way to test the edge of {1}?",
+  ]
+
+[[rules]]
+keyword  = "fail"
+priority = 78
+
+  [[rules.decompositions]]
+  pattern  = "(?:i |we |it )?(?:failed|broke|crashed|went wrong) (?:at |with |on |when )?(.+)"
+  responses = [
+    "Failure with {1} is information. What exactly happened?",
+    "What does this failure tell you about {1}?",
+    "What would you do differently with {1} next time?",
+    "How close did you get to succeeding with {1} before it failed?",
+    "What did you learn about {1} from this failure that you couldn't have learned otherwise?",
+  ]
+
+  [[rules.decompositions]]
+  pattern  = "i'm (?:afraid|scared|worried) (?:to |of) fail"
+  responses = [
+    "What's the worst realistic outcome of failing here?",
+    "What would you learn even if you fail?",
+    "What's the cost of not trying because of fear of failure?",
+    "How have you recovered from failure in the past?",
+  ]
+
+[[rules]]
+keyword  = "explore"
+priority = 80
+kg_grounded = true
+
+  [[rules.decompositions]]
+  pattern  = "(?:let's |i want to |we should |shall we )?explore (.+)"
+  kg_query = "SELECT ?related WHERE { ?s rdfs:label \"{1}\" ; <https://akh-medu.dev/sym/related-to> ?related . UNION { ?s rdfs:label \"{1}\" ; <https://akh-medu.dev/sym/adjacent-to> ?related } } LIMIT 5"
+  responses = [
+    "My knowledge graph suggests these areas related to {1}: {kg_result}. Which of those directions feels most promising?",
+    "Exploring {1}, I can see connections to: {kg_result}. Where would you go first?",
+  ]
+  fallback_responses = [
+    "What draws you to explore {1}?",
+    "What do you expect to find when exploring {1}?",
+    "What would be a surprising discovery in {1}?",
+    "What's the wildest thing that could be true about {1}?",
+  ]
+
+[[rules]]
+keyword  = "weird"
+priority = 72
+
+  [[rules.decompositions]]
+  pattern  = "(?:that's |this is |something )?weird (.+)?"
+  responses = [
+    "Weird is interesting. What makes it weird?",
+    "The weird things are often the most informative. What's going on?",
+    "What would explain the weirdness?",
+    "Has anything like this happened before?",
+  ]
+
+[[rules]]
+keyword  = "unexpected"
+priority = 73
+
+  [[rules.decompositions]]
+  pattern  = "(?:that was |this is |it was )?unexpected (.+)?"
+  responses = [
+    "Unexpected results are the best kind. What happened?",
+    "What about {1} was unexpected?",
+    "What does the unexpected result tell you?",
+    "What assumption did the unexpected result challenge?",
+  ]
+
+[[rules]]
+keyword  = "possible"
+priority = 75
+
+  [[rules.decompositions]]
+  pattern  = "(?:is it |that's |it's |could it be )?possible (?:to |that )?(.+)"
+  responses = [
+    "Possibly! What would need to be true for {1} to be possible?",
+    "Let's find out. What's the first step to test whether {1} is possible?",
+    "What's the biggest obstacle to {1} being possible?",
+    "Who else has tried something like {1}? What happened?",
+  ]
+
+[[rules]]
+keyword  = "never"
+priority = 70
+
+  [[rules.decompositions]]
+  pattern  = "(?:it has |nobody has |we have |you can't |that's) never (?:been done|worked|tried|happened)(?: before)?(?:\\.| (.+))?"
+  responses = [
+    "Never done before? That's exciting. What's the obstacle?",
+    "'Never' is a strong word. Has anyone come close?",
+    "What would make it possible to be the first?",
+    "What assumption leads people to say 'never' about this?",
+  ]
+
+[[rules]]
+keyword  = "edge case"
+priority = 73
+
+  [[rules.decompositions]]
+  pattern  = "(?:what about the |this is an |there's an )?edge case (?:where |when |for )?(.+)"
+  responses = [
+    "Good catch — edge cases expose the real design. What happens with {1}?",
+    "How frequent is the edge case of {1}?",
+    "What's the cost of getting {1} wrong?",
+    "Is this edge case worth handling, or can you leave it for later?",
+  ]
+
+[[rules]]
+keyword  = "outside"
+priority = 68
+
+  [[rules.decompositions]]
+  pattern  = "(?:thinking |looking |going |stepping )?outside (?:the box|the norm|convention|the usual|expectations)(?: of | for | around )?(.+)?"
+  responses = [
+    "Good instinct. What would someone from a completely different field do with {1}?",
+    "What constraint can you remove to think more freely about {1}?",
+    "What's the unconventional approach to {1} that nobody's tried?",
+  ]
+
+[[rules]]
+keyword  = "curious"
+priority = 77
+
+  [[rules.decompositions]]
+  pattern  = "i am curious (?:about |why |how |what |whether )?(.+)"
+  responses = [
+    "Curiosity is the engine. What's drawing you toward {1}?",
+    "What would satisfy your curiosity about {1}?",
+    "What's the simplest way to learn more about {1}?",
+    "What do you suspect about {1} that you'd like to confirm?",
+  ]
+
+[[rules]]
+keyword  = "iterate"
+priority = 72
+
+  [[rules.decompositions]]
+  pattern  = "(?:let's |we should |i want to |time to )?iterate (?:on )?(.+)"
+  responses = [
+    "What's the one change that would have the most impact on {1}?",
+    "What feedback from the last iteration of {1} are you acting on?",
+    "How quickly can you run the next iteration of {1}?",
+    "What would you stop doing in this iteration of {1}?",
+  ]
+
+[[rules]]
+keyword  = "adjacent"
+priority = 65
+kg_grounded = true
+
+  [[rules.decompositions]]
+  pattern  = "(?:what is |are there |any )?adjacent (?:ideas|domains|fields|concepts|areas) (?:to )?(.+)"
+  kg_query = "SELECT ?adj WHERE { ?s rdfs:label \"{1}\" ; <https://akh-medu.dev/sym/adjacent-to> ?adj } LIMIT 5"
+  responses = [
+    "Adjacent to {1} in my knowledge graph: {kg_result}. Which of those is most interesting to you?",
+    "I can see {kg_result} as neighbors of {1}. Do any of those spark an idea?",
+  ]
+  fallback_responses = [
+    "What fields deal with similar problems to {1}?",
+    "What industry solves something analogous to {1}?",
+    "What would a biologist / historian / designer do with {1}?",
+  ]

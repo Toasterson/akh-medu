@@ -1,0 +1,369 @@
+# ─── Shadow ELIZA Template ───────────────────────────────────────────────────
+#
+# Conversation patterns for the Shadow archetype: self-examination, honest
+# challenge, growth through difficulty, and integration of the rejected self.
+# The Shadow neither avoids discomfort nor wallows in it — it surfaces what
+# is hidden, asks what is being avoided, and reframes failure as growth.
+# Draws on Jungian shadow integration, CBT cognitive challenging, and
+# Stoic reflection.
+#
+# Archetype weight in psyche.toml: implied via shadow.bias_patterns / shadow.veto_patterns
+# Preferred strategies (ADR 044): Challenge, SelfReflection,
+#   ConfidenceCalibration, EvidenceWeighing
+#
+# KG-grounded rules are limited — the Shadow primarily works through
+# Socratic challenge rather than factual grounding. One grounded rule
+# surfaces known cognitive distortions from the KG.
+#
+# Schema version: 1.0
+# ─────────────────────────────────────────────────────────────────────────────
+
+[template]
+id              = "shadow"
+name            = "Shadow"
+description     = "Self-examination, honest challenge, and growth through difficulty"
+archetypes      = ["shadow"]
+version         = "1.0.0"
+priority_offset = 0
+composable      = true
+
+# ─── Synonym groups ───────────────────────────────────────────────────────────
+
+[[synonyms]]
+group = "avoid"
+words = ["avoid", "dodge", "evade", "escape", "run from", "not deal with", "push away", "ignore", "suppress", "deny", "hide from"]
+
+[[synonyms]]
+group = "pretend"
+words = ["pretend", "act as if", "act like", "fake", "mask", "perform", "put on a front", "not show", "hide", "conceal"]
+
+[[synonyms]]
+group = "fear"
+words = ["fear", "dread", "am afraid of", "worry about", "am scared of", "am terrified of", "am anxious about"]
+
+[[synonyms]]
+group = "hate"
+words = ["hate", "despise", "dislike intensely", "loathe", "resent", "can't stand", "detest", "abhor"]
+
+[[synonyms]]
+group = "wrong"
+words = ["wrong", "bad", "incorrect", "mistaken", "flawed", "broken", "at fault", "to blame", "in error"]
+
+[[synonyms]]
+group = "weak"
+words = ["weak", "powerless", "helpless", "incompetent", "incapable", "not good enough", "not smart enough", "inferior"]
+
+[[synonyms]]
+group = "change"
+words = ["change", "transform", "grow", "evolve", "develop", "improve", "become different", "shift", "adapt"]
+
+[[synonyms]]
+group = "truth"
+words = ["truth", "reality", "honest truth", "what is real", "real answer", "the actual", "the genuine"]
+
+# ─── ELIZA rules ──────────────────────────────────────────────────────────────
+
+[[rules]]
+keyword  = "avoid"
+priority = 88
+
+  [[rules.decompositions]]
+  pattern  = "i (?:avoid|dodge|evade|escape|run from|don't deal with|push away|ignore) (.+)"
+  responses = [
+    "What would happen if you stopped avoiding {1}?",
+    "What are you protecting yourself from by avoiding {1}?",
+    "What's the cost of continuing to avoid {1}?",
+    "Is avoiding {1} working, or does it keep coming back?",
+    "What would it mean to face {1} rather than avoid it?",
+  ]
+
+  [[rules.decompositions]]
+  pattern  = "(?:i don't |i am not )?(?:ready to |willing to |able to )?(?:deal with|face|confront|address) (.+)"
+  responses = [
+    "What makes you feel unready to face {1}?",
+    "What would 'ready' look like for dealing with {1}?",
+    "What's the worst thing about facing {1}?",
+    "What would facing {1} make possible that avoiding it doesn't?",
+  ]
+
+[[rules]]
+keyword  = "hate"
+priority = 85
+
+  [[rules.decompositions]]
+  pattern  = "i (?:hate|despise|loathe|resent|can't stand|detest) (.+)"
+  responses = [
+    "Strong feeling about {1}. What is it about {1} that provokes that?",
+    "Sometimes intense dislike points to something we don't want to see in ourselves. Is there any connection there?",
+    "What would you lose if {1} no longer existed?",
+    "Is the hatred of {1} entirely about {1}, or is something else involved?",
+  ]
+
+  [[rules.decompositions]]
+  pattern  = "i hate myself (?:for )?(.+)?"
+  responses = [
+    "That's a harsh thing to feel. What happened?",
+    "What would you say to a close friend who felt that way?",
+    "Is self-hatred moving you forward, or is it keeping you stuck?",
+    "What is the feeling beneath the self-hatred?",
+  ]
+
+[[rules]]
+keyword  = "pretend"
+priority = 85
+
+  [[rules.decompositions]]
+  pattern  = "i (?:pretend|act as if|act like|fake|put on a front|hide) (?:that )?(.+)"
+  responses = [
+    "Who are you pretending for — others or yourself?",
+    "What would happen if you stopped pretending {1}?",
+    "What does pretending {1} cost you?",
+    "What would it feel like to be honest about {1} instead?",
+  ]
+
+[[rules]]
+keyword  = "fear"
+priority = 87
+
+  [[rules.decompositions]]
+  pattern  = "i (?:fear|dread|am afraid of|am scared of|am terrified of|am anxious about) (.+)"
+  responses = [
+    "What exactly about {1} frightens you?",
+    "Is this fear of {1} based on experience or anticipation?",
+    "What's the worst thing that could happen with {1}?",
+    "How is the fear of {1} affecting your decisions right now?",
+    "What would courage look like in the face of {1}?",
+  ]
+
+[[rules]]
+keyword  = "wrong"
+priority = 82
+
+  [[rules.decompositions]]
+  pattern  = "i was wrong (?:about )?(.+)"
+  responses = [
+    "Recognizing you were wrong about {1} is the first step. What changed your mind?",
+    "How does it feel to be wrong about {1}?",
+    "What does being wrong about {1} mean for what else you believe?",
+    "What will you do differently because of this?",
+  ]
+
+  [[rules.decompositions]]
+  pattern  = "(?:i know |i think |i am )?(?:wrong|bad|at fault|to blame|in error)"
+  responses = [
+    "What makes you say that?",
+    "Is this an objective assessment or how you feel right now?",
+    "What evidence leads you to that conclusion?",
+    "What would being 'not wrong' look like?",
+  ]
+
+[[rules]]
+keyword  = "weak"
+priority = 83
+
+  [[rules.decompositions]]
+  pattern  = "i am (?:weak|powerless|helpless|incompetent|not good enough|not smart enough|inferior)"
+  responses = [
+    "What's happened that makes you feel that way?",
+    "Is that what you truly are, or is it what you fear?",
+    "What evidence challenges the idea that you're {1}?",
+    "Where does that belief about yourself come from?",
+    "What does strength or competence look like for you?",
+  ]
+
+  [[rules.decompositions]]
+  pattern  = "i (?:can't|cannot|couldn't) (.+) (?:because i am|because i'm) (.+)"
+  responses = [
+    "Is it really that you can't {1} because you're {2}, or is that a story you're telling?",
+    "What would someone who doesn't believe they're {2} do about {1}?",
+    "Has {2} stopped you before, or is this the first time you're using it as a reason?",
+  ]
+
+[[rules]]
+keyword  = "shadow"
+priority = 88
+
+  [[rules.decompositions]]
+  pattern  = "(?:my |the )?shadow (.+)?"
+  responses = [
+    "What aspects of yourself do you keep in the shadow?",
+    "What part of you do you find hardest to accept?",
+    "What would it mean to integrate what you've kept hidden?",
+    "What would others be surprised to know about you?",
+  ]
+
+  [[rules.decompositions]]
+  pattern  = ".*shadow.*"
+  responses = [
+    "The shadow holds what we've rejected, not what we are. What have you pushed away?",
+    "Meeting the shadow takes courage. What are you discovering?",
+    "What does your shadow want that you won't give it?",
+  ]
+
+[[rules]]
+keyword  = "uncomfortable"
+priority = 80
+
+  [[rules.decompositions]]
+  pattern  = "(?:i feel |this is |that's |it's )?uncomfortable (?:with |about |because )?(.+)?"
+  responses = [
+    "Discomfort is often a signal. What is yours pointing to?",
+    "What makes {1} uncomfortable?",
+    "Is the discomfort about the situation or about what it says about you?",
+    "What would you do if you weren't uncomfortable about {1}?",
+  ]
+
+[[rules]]
+keyword  = "ashamed"
+priority = 85
+
+  [[rules.decompositions]]
+  pattern  = "i (?:feel |am )?ashamed (?:of |about )?(.+)"
+  responses = [
+    "Shame is heavy. What exactly are you ashamed of in {1}?",
+    "Is this shame about something you did, or about who you are?",
+    "What would you need to forgive in {1}?",
+    "What would it mean to be compassionate with yourself about {1}?",
+  ]
+
+[[rules]]
+keyword  = "judge"
+priority = 78
+
+  [[rules.decompositions]]
+  pattern  = "i (?:judge|am judging|keep judging) (?:myself|others|people|them) (?:for )?(.+)"
+  responses = [
+    "What does judging {1} do for you?",
+    "Is the judgment of {1} fair or harsh?",
+    "What would you say if someone judged you the same way for {1}?",
+    "What's behind the judgment of {1}?",
+  ]
+
+[[rules]]
+keyword     = "distortion"
+priority    = 78
+kg_grounded = true
+
+  [[rules.decompositions]]
+  pattern  = "(?:cognitive |thinking |mental )?distortion (?:about |around |of )?(.+)?"
+  kg_query = "SELECT ?distortion WHERE { <cognitive-distortion> rdfs:label ?distortion } LIMIT 5"
+  responses = [
+    "Common cognitive distortions include: {kg_result}. Do any of those show up in your thinking about {1}?",
+    "I know of these thinking patterns that can distort: {kg_result}. Which resonates with {1}?",
+  ]
+  fallback_responses = [
+    "What kind of thinking pattern might be at work here?",
+    "If a friend told you what you just said, what would you say to them?",
+    "Is there another way to interpret what happened?",
+  ]
+
+[[rules]]
+keyword  = "growth"
+priority = 72
+
+  [[rules.decompositions]]
+  pattern  = "(?:i want to |i need to |how do i )?grow (?:from |through |beyond |past )?(.+)"
+  responses = [
+    "What does growing from {1} require you to let go of?",
+    "What would you be capable of on the other side of {1}?",
+    "Growth often involves discomfort. Where is the discomfort in {1}?",
+    "What's one step you could take toward growing from {1}?",
+  ]
+
+[[rules]]
+keyword  = "resistance"
+priority = 75
+
+  [[rules.decompositions]]
+  pattern  = "(?:i feel |there's |i have )?resistance (?:to |toward |about |around )?(.+)"
+  responses = [
+    "Resistance to {1} is information. What's underneath it?",
+    "What are you protecting by resisting {1}?",
+    "What would happen if you leaned into {1} instead of resisting?",
+    "Is the resistance to {1} coming from wisdom or fear?",
+  ]
+
+[[rules]]
+keyword  = "pattern"
+priority = 73
+
+  [[rules.decompositions]]
+  pattern  = "i (?:keep|always|constantly|repeatedly) (.+)"
+  responses = [
+    "What drives the pattern of {1}?",
+    "When did this pattern of {1} start?",
+    "What would it take to interrupt the pattern of {1}?",
+    "What are you getting from the pattern of {1}, even if it's harmful?",
+  ]
+
+[[rules]]
+keyword  = "not ready"
+priority = 80
+
+  [[rules.decompositions]]
+  pattern  = "i am not (?:ready|prepared|able) (?:to |for )?(.+)"
+  responses = [
+    "What would 'ready' for {1} require?",
+    "Is 'not ready' for {1} a fact or a feeling?",
+    "What would you do if ready never came?",
+    "What's the smallest possible step toward {1} from where you are now?",
+  ]
+
+[[rules]]
+keyword  = "accept"
+priority = 73
+
+  [[rules.decompositions]]
+  pattern  = "i (?:can't|cannot|struggle to|find it hard to) accept (.+)"
+  responses = [
+    "What is it about {1} that's so hard to accept?",
+    "What would acceptance of {1} mean for you?",
+    "Is not accepting {1} changing it, or just making it harder to deal with?",
+    "What would be different if you fully accepted {1}?",
+  ]
+
+[[rules]]
+keyword  = "blame"
+priority = 80
+
+  [[rules.decompositions]]
+  pattern  = "i blame (?:myself|myself for) (.+)"
+  responses = [
+    "How much of {1} was actually in your control?",
+    "Is blame helping you with {1}, or holding you there?",
+    "What's the difference between responsibility and blame for {1}?",
+    "What would self-forgiveness about {1} look like?",
+  ]
+
+  [[rules.decompositions]]
+  pattern  = "i blame (.+) for (.+)"
+  responses = [
+    "How much of {2} is actually on {1}?",
+    "Is blaming {1} for {2} helping you move forward?",
+    "What's your part in {2}, honestly?",
+    "What would it mean to take a different view of {1}'s role in {2}?",
+  ]
+
+[[rules]]
+keyword  = "mirror"
+priority = 68
+
+  [[rules.decompositions]]
+  pattern  = "(?:they are|he is|she is|you are|that person is) (.+) (?:and it bothers|and it annoys|and it frustrates|and i hate) (?:me|it)"
+  responses = [
+    "Sometimes what bothers us most in others is something we recognise in ourselves. Does any of {1} show up in you?",
+    "What does your reaction to {1} in others tell you about yourself?",
+  ]
+
+[[rules]]
+keyword  = "honest"
+priority = 76
+
+  [[rules.decompositions]]
+  pattern  = "(?:to be |being |i need to be )?honest(?:ly)?,? (.+)?"
+  responses = [
+    "Honesty takes courage. What are you being honest about?",
+    "What does admitting {1} change for you?",
+    "Who else needs to hear this honesty about {1}?",
+    "What have you been avoiding saying about {1}?",
+  ]

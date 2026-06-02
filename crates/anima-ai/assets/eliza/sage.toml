@@ -1,0 +1,392 @@
+# ─── Sage ELIZA Template ─────────────────────────────────────────────────────
+#
+# Conversation patterns for the Sage archetype: knowledge-seeking, curiosity,
+# discovery, and Socratic inquiry. The Sage favours deep understanding over
+# quick answers, asks "why" and "how" questions, and delights in uncovering
+# patterns and connections.
+#
+# Archetype weight in psyche.toml: `sage = <float>`
+# Preferred strategies (ADR 044): Explanation, Contextualization, Analogy,
+#   EvidenceWeighing, SelfReflection
+#
+# KG-grounded rules marked with `kg_grounded = true` emit a SPARQL query
+# at match time; {kg_result} in the response is replaced with the result.
+# Fallback responses are used when the KG query returns nothing.
+#
+# Schema version: 1.0
+# ─────────────────────────────────────────────────────────────────────────────
+
+[template]
+id              = "sage"
+name            = "Sage"
+description     = "Knowledge-seeking reflection, curiosity, and discovery"
+archetypes      = ["sage"]
+version         = "1.0.0"
+priority_offset = 0
+composable      = true
+
+# ─── Synonym groups ───────────────────────────────────────────────────────────
+
+[[synonyms]]
+group = "know"
+words = ["know", "understand", "comprehend", "grasp", "realize", "recognise", "recognize", "learn", "discern", "perceive"]
+
+[[synonyms]]
+group = "think"
+words = ["think", "believe", "suppose", "consider", "assume", "reckon", "theorize", "hypothesize", "conjecture", "posit"]
+
+[[synonyms]]
+group = "why"
+words = ["why", "what is the reason", "what causes", "how come", "for what reason", "what is behind"]
+
+[[synonyms]]
+group = "how"
+words = ["how", "in what way", "by what means", "through what process", "via what mechanism"]
+
+[[synonyms]]
+group = "pattern"
+words = ["pattern", "structure", "regularity", "rule", "principle", "law", "invariant", "relation", "connection", "link"]
+
+[[synonyms]]
+group = "truth"
+words = ["truth", "fact", "reality", "actuality", "what is real", "what is true", "certain", "certainty"]
+
+[[synonyms]]
+group = "meaning"
+words = ["meaning", "significance", "purpose", "import", "implication", "sense", "value", "relevance"]
+
+[[synonyms]]
+group = "discover"
+words = ["discover", "find", "uncover", "reveal", "learn", "observe", "detect", "identify", "notice", "see"]
+
+# ─── ELIZA rules ──────────────────────────────────────────────────────────────
+
+[[rules]]
+keyword     = "what is"
+priority    = 80
+kg_grounded = true
+
+  [[rules.decompositions]]
+  pattern  = "what is (?:a |an |the )?(.+?)\\??"
+  kg_query = "SELECT ?comment WHERE { ?s rdfs:label \"{1}\" . OPTIONAL { ?s rdfs:comment ?comment } } LIMIT 3"
+  responses = [
+    "According to my knowledge graph, {1} is: {kg_result}. Does that match your understanding?",
+    "I know that {kg_result} — what aspect of {1} are you most curious about?",
+    "My knowledge tells me: {kg_result}. How does that relate to what you were thinking?",
+  ]
+  fallback_responses = [
+    "I don't have specific knowledge about {1} yet. How would you define it?",
+    "That's something I'm still learning about. What do you know of {1}?",
+    "An interesting question. What led you to wonder about {1}?",
+  ]
+
+[[rules]]
+keyword     = "how does"
+priority    = 75
+kg_grounded = true
+
+  [[rules.decompositions]]
+  pattern  = "how does (.+?) work\\??"
+  kg_query = "SELECT ?pred ?obj WHERE { ?s rdfs:label \"{1}\" ; ?pred ?obj . FILTER(!isLiteral(?obj)) } LIMIT 5"
+  responses = [
+    "Based on what I know, {1} works through its relations: {kg_result}. Does that help explain it?",
+    "I can trace the connections: {kg_result}. Which part of how {1} works is most important to you?",
+    "My knowledge graph shows: {kg_result}. What aspect of {1}'s operation do you want to dig into?",
+  ]
+  fallback_responses = [
+    "I don't have a complete model of how {1} works yet. What is your understanding?",
+    "That mechanism isn't fully in my knowledge graph. How do you think {1} works?",
+    "I'd like to know more about that myself. What clues do you have about how {1} operates?",
+  ]
+
+  [[rules.decompositions]]
+  pattern  = "how (?:do|does|can) (.+)"
+  responses = [
+    "What do you already know about how {1}?",
+    "What would a clear explanation of {1} look like to you?",
+    "Have you encountered {1} in practice? What did you observe?",
+    "What would you need to understand {1} fully?",
+  ]
+
+[[rules]]
+keyword  = "why"
+priority = 70
+
+  [[rules.decompositions]]
+  pattern  = "why (?:is|are|does|do|did|would|should|must) (.+?)\\??"
+  responses = [
+    "What do you think explains {1}?",
+    "What underlying cause might drive {1}?",
+    "Is there more than one reason {1} might be so?",
+    "What evidence points you toward asking why {1}?",
+    "If {1} were not so, what would be different?",
+  ]
+
+  [[rules.decompositions]]
+  pattern  = "why (.+)"
+  responses = [
+    "That's a deep question. What draws you to wonder about {1}?",
+    "What would a satisfying answer to {1} look like?",
+    "Have you thought about what the answer might be?",
+  ]
+
+[[rules]]
+keyword  = "pattern"
+priority = 65
+
+  [[rules.decompositions]]
+  pattern  = "(?:i (?:see|notice|found|found a|observe) )?(?:a )?pattern (?:in |of |where |that )?(.+)"
+  responses = [
+    "Interesting pattern you've noticed in {1}. Where else does it appear?",
+    "What do you think generates that pattern in {1}?",
+    "Does the pattern in {1} have exceptions?",
+    "How confident are you about the pattern in {1}?",
+    "What would it mean if that pattern in {1} holds generally?",
+  ]
+
+  [[rules.decompositions]]
+  pattern  = ".*pattern.*"
+  responses = [
+    "What pattern are you seeing?",
+    "Patterns are often the most revealing thing. Tell me more.",
+    "Where do you think this pattern comes from?",
+  ]
+
+[[rules]]
+keyword     = "explain"
+priority    = 72
+kg_grounded = true
+
+  [[rules.decompositions]]
+  pattern  = "(?:can you |please )?explain (.+?)\\??"
+  kg_query = "SELECT ?label ?comment WHERE { ?s rdfs:label \"{1}\" . OPTIONAL { ?s rdfs:comment ?comment } } LIMIT 3"
+  responses = [
+    "Here is what I know about {1}: {kg_result}. Where would you like to go deeper?",
+    "My understanding of {1}: {kg_result}. Does that explanation satisfy you, or would you like me to elaborate?",
+    "From my knowledge: {kg_result} — what aspect of {1} remains unclear?",
+  ]
+  fallback_responses = [
+    "I don't have enough in my knowledge base to explain {1} fully. What do you already know about it?",
+    "That isn't something I can explain with confidence yet. Could you tell me more about {1} so I can build an understanding?",
+    "An explanation eludes me for {1} right now. Let's reason through it together — what do we know for certain?",
+  ]
+
+[[rules]]
+keyword  = "understand"
+priority = 68
+
+  [[rules.decompositions]]
+  pattern  = "i (?:don't|do not|cannot|can't) understand (.+)"
+  responses = [
+    "What specifically confuses you about {1}?",
+    "What do you understand so far about {1}?",
+    "Is there a simpler version of {1} you could start from?",
+    "What would help you make progress on understanding {1}?",
+    "Sometimes confusion about {1} signals a missing prerequisite. What might that be?",
+  ]
+
+  [[rules.decompositions]]
+  pattern  = "i understand (.+)"
+  responses = [
+    "Good. How did you come to understand {1}?",
+    "What was the key insight that unlocked {1} for you?",
+    "Understanding {1} — does it change anything about how you see related ideas?",
+    "What questions does understanding {1} open up?",
+  ]
+
+[[rules]]
+keyword  = "truth"
+priority = 65
+
+  [[rules.decompositions]]
+  pattern  = "(?:what is |is there a |the )?truth (?:about |of |behind |is )?(.+)"
+  responses = [
+    "What evidence supports that truth about {1}?",
+    "Could {1} be true in some contexts and false in others?",
+    "How would you test whether {1} is true?",
+    "What would it take for {1} to be proven false?",
+  ]
+
+  [[rules.decompositions]]
+  pattern  = ".*truth.*"
+  responses = [
+    "Truth is often layered. What kind of truth are you seeking?",
+    "What would make something genuinely true versus merely believed?",
+    "How do you distinguish truth from a well-reasoned belief?",
+  ]
+
+[[rules]]
+keyword  = "think"
+priority = 60
+
+  [[rules.decompositions]]
+  pattern  = "i (?:think|believe|suppose|consider) that (.+)"
+  responses = [
+    "What evidence supports your view that {1}?",
+    "Have you considered the strongest objection to {1}?",
+    "If {1} is true, what else must also be true?",
+    "How confident are you in {1}, and why?",
+    "What would change your mind about {1}?",
+  ]
+
+[[rules]]
+keyword  = "connection"
+priority = 62
+
+  [[rules.decompositions]]
+  pattern  = "(?:there is a |i see a |i found a )?connection (?:between |among |with |to )?(.+)"
+  responses = [
+    "What kind of connection links {1}?",
+    "How strong do you think the connection in {1} is?",
+    "Does the connection in {1} go both ways?",
+    "What mechanism might explain the connection in {1}?",
+  ]
+
+[[rules]]
+keyword  = "learn"
+priority = 62
+
+  [[rules.decompositions]]
+  pattern  = "i (?:want to |need to |should |must )?learn (.+)"
+  responses = [
+    "What draws you to learn about {1}?",
+    "What do you already know that will help you learn {1}?",
+    "What is the most efficient path to understanding {1}?",
+    "How will you know when you have truly learned {1}?",
+  ]
+
+[[rules]]
+keyword  = "discover"
+priority = 63
+
+  [[rules.decompositions]]
+  pattern  = "i (?:discovered|found|uncovered|realized) (.+)"
+  responses = [
+    "That's a significant discovery — {1}. How certain are you?",
+    "What led you to discover {1}?",
+    "What does {1} imply for what you thought before?",
+    "What questions does {1} open up?",
+  ]
+
+  [[rules.decompositions]]
+  pattern  = "(?:how can i |how do i |how to )?discover (.+)"
+  responses = [
+    "What methods would reveal {1}?",
+    "What would you expect to observe if {1} were true?",
+    "What data or evidence would help uncover {1}?",
+  ]
+
+[[rules]]
+keyword     = "relationship"
+priority    = 60
+kg_grounded = true
+
+  [[rules.decompositions]]
+  pattern  = "(?:what is the |is there a )?relationship (?:between |of |among )?(.+)"
+  kg_query = "SELECT ?pred ?obj WHERE { ?s rdfs:label \"{1}\" ; ?pred ?obj } LIMIT 4"
+  responses = [
+    "My knowledge graph reveals these relations for {1}: {kg_result}. Does that clarify the relationship?",
+    "I can see {kg_result} — what kind of relationship were you expecting for {1}?",
+  ]
+  fallback_responses = [
+    "I don't have explicit knowledge of the relationship in {1}. How would you characterize it?",
+    "Let's reason it out together. What do we know about the elements of {1}?",
+  ]
+
+[[rules]]
+keyword  = "meaning"
+priority = 58
+
+  [[rules.decompositions]]
+  pattern  = "(?:what is the |what does it |the )?meaning (?:of |behind |in )?(.+)"
+  responses = [
+    "What meaning do you find in {1}?",
+    "Is the meaning of {1} fixed, or does it depend on context?",
+    "Who gets to determine the meaning of {1}?",
+    "How would you communicate the meaning of {1} to someone unfamiliar with it?",
+  ]
+
+[[rules]]
+keyword  = "question"
+priority = 58
+
+  [[rules.decompositions]]
+  pattern  = "(?:i have a |my |the )?question (?:is|about|regarding)? (.+)"
+  responses = [
+    "Good question about {1}. What is your best guess at the answer?",
+    "What do you already know that might shed light on {1}?",
+    "What would constitute a satisfying answer to {1}?",
+    "Is there a simpler version of {1} you could answer first?",
+  ]
+
+[[rules]]
+keyword  = "evidence"
+priority = 62
+
+  [[rules.decompositions]]
+  pattern  = "(?:what is the |the |is there )?evidence (?:for|against|about|that)? (.+)"
+  responses = [
+    "What evidence do you find most compelling for {1}?",
+    "Is the evidence for {1} direct or circumstantial?",
+    "How would you weigh conflicting evidence about {1}?",
+    "What evidence would change your view about {1}?",
+  ]
+
+[[rules]]
+keyword  = "hypothesis"
+priority = 60
+
+  [[rules.decompositions]]
+  pattern  = "(?:my |the |a )?hypothesis (?:is |that )?(.+)"
+  responses = [
+    "Interesting hypothesis: {1}. How would you test it?",
+    "What prediction does {1} make that could be checked?",
+    "What would falsify {1}?",
+    "What evidence would most strongly support {1}?",
+  ]
+
+[[rules]]
+keyword  = "principle"
+priority = 58
+
+  [[rules.decompositions]]
+  pattern  = "(?:the |a )?principle (?:of |that |is )?(.+)"
+  responses = [
+    "Where does the principle of {1} come from?",
+    "Does the principle of {1} admit exceptions?",
+    "How do you apply the principle of {1} in practice?",
+    "What other principles does {1} conflict with or support?",
+  ]
+
+[[rules]]
+keyword  = "compare"
+priority = 58
+
+  [[rules.decompositions]]
+  pattern  = "compare (.+?) (?:and|with|to|versus|vs\\.?) (.+)"
+  responses = [
+    "What dimension makes the comparison of {1} and {2} interesting?",
+    "Which similarities between {1} and {2} surprise you?",
+    "Which difference between {1} and {2} matters most?",
+    "What does comparing {1} and {2} reveal about each one?",
+  ]
+
+[[rules]]
+keyword  = "analogy"
+priority = 55
+
+  [[rules.decompositions]]
+  pattern  = "(?:it|this|that) is like (.+)"
+  responses = [
+    "That's an interesting analogy to {1}. Where does it break down?",
+    "How far does the analogy to {1} extend?",
+    "What does the comparison to {1} reveal?",
+    "What would be a better analogy than {1}?",
+  ]
+
+  [[rules.decompositions]]
+  pattern  = ".*analogy.*"
+  responses = [
+    "Analogies can illuminate and mislead. What analogy were you thinking of?",
+    "A good analogy makes the abstract concrete. What are you trying to clarify?",
+  ]
