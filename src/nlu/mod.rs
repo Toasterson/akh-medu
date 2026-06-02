@@ -716,6 +716,46 @@ impl NluPipeline {
         None
     }
 
+    /// Generate an open-ended LLM response for creative or novel queries.
+    ///
+    /// Unlike `generate_dialogue` (which handles short dialogue acts), this method
+    /// is designed for multi-sentence responses: creative writing, hypotheticals, etc.
+    /// KG facts are injected into the prompt to reduce hallucination on factual claims.
+    ///
+    /// Returns `None` if no LLM is available (graceful degradation).
+    #[allow(unused_variables)] // params used only when nlu-llm feature is enabled
+    pub fn generate_open_ended(
+        &self,
+        query: &str,
+        persona_name: &str,
+        traits: &[String],
+        kg_context: Option<&str>,
+    ) -> Option<String> {
+        #[cfg(feature = "nlu-llm")]
+        if let Some(ref llm_arc) = self.llm_translator {
+            let llm = std::sync::Arc::clone(llm_arc);
+            let prompt = llm_translator::build_open_ended_prompt(query, persona_name, traits, kg_context);
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                llm.generate(&prompt, 256)
+            }));
+            match result {
+                Ok(Ok(text)) if !text.is_empty() => {
+                    return Some(text);
+                }
+                Ok(Ok(_)) => {
+                    tracing::debug!("LLM open-ended generation returned empty text");
+                }
+                Ok(Err(e)) => {
+                    tracing::debug!(error = %e, "LLM open-ended generation failed");
+                }
+                Err(_) => {
+                    tracing::warn!("LLM open-ended generation panicked");
+                }
+            }
+        }
+        None
+    }
+
     /// Report which NLU tiers are currently available.
     pub fn tier_status(&self) -> NluTierStatus {
         NluTierStatus {

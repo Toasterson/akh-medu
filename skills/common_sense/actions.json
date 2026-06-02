@@ -1,0 +1,32 @@
+[
+  {
+    "action": "check_physical_possibility",
+    "description": "Determine whether a described situation is physically possible",
+    "preconditions": ["situation_described"],
+    "effects": {
+      "initiates": ["possibility_assessed"],
+      "terminates": ["possibility_unknown"]
+    },
+    "estimated_duration": "fast"
+  },
+  {
+    "action": "infer_implicit_cause",
+    "description": "Identify the most likely cause of an observed event using default reasoning",
+    "preconditions": ["event_observed"],
+    "effects": {
+      "initiates": ["cause_inferred"],
+      "terminates": ["cause_unknown"]
+    },
+    "estimated_duration": "medium"
+  },
+  {
+    "action": "predict_typical_effect",
+    "description": "Predict what typically happens after an action using script knowledge",
+    "preconditions": ["action_performed"],
+    "effects": {
+      "initiates": ["effect_predicted"],
+      "terminates": []
+    },
+    "estimated_duration": "fast"
+  }
+]

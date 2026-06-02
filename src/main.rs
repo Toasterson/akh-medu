@@ -418,6 +418,19 @@ enum SkillAction {
         /// Path to skill directory containing skill.json, triples.json, rules.txt.
         path: String,
     },
+    /// Export a skill to a portable .akhskill archive (Phase 31f).
+    Export {
+        /// Skill name (directory name under skills/).
+        name: String,
+        /// Output archive path (e.g. astronomy.akhskill). Defaults to <name>.akhskill.
+        #[arg(long)]
+        output: Option<String>,
+    },
+    /// Import a .akhskill archive into the skills directory (Phase 31f).
+    Import {
+        /// Path to the .akhskill archive file.
+        path: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1335,7 +1348,11 @@ fn main() -> Result<()> {
                         "domains": [&name],
                         "weight_size_bytes": 0,
                         "triples_file": "triples.json",
-                        "rules_file": "rules.txt"
+                        "rules_file": "rules.txt",
+                        "depends": [],
+                        "conflicts": [],
+                        "provides": [],
+                        "requires": []
                     });
                     std::fs::write(
                         skill_dir.join("skill.json"),
@@ -1372,6 +1389,38 @@ fn main() -> Result<()> {
                     println!("  skill.json   - manifest (edit name, domains, description)");
                     println!("  triples.json - knowledge triples (label-based format)");
                     println!("  rules.txt    - rewrite rules");
+                }
+
+                // Export and Import are purely local filesystem operations (Phase 31f).
+                SkillAction::Export { name, output } => {
+                    let skill_base = data_dir
+                        .as_deref()
+                        .unwrap_or_else(|| std::path::Path::new(".akh-medu"));
+                    let skill_dir = skill_base.join("skills").join(&name);
+                    if !skill_dir.exists() {
+                        return Err(miette::miette!(
+                            "skill directory not found: {}",
+                            skill_dir.display()
+                        ));
+                    }
+                    let archive_name =
+                        output.unwrap_or_else(|| format!("{name}.akhskill"));
+                    let archive_path = std::path::Path::new(&archive_name);
+                    akh_medu::skills::share::export_skill(&skill_dir, archive_path)
+                        .map_err(|e| miette::miette!("{e}"))?;
+                    println!("Exported skill '{}' to {}", name, archive_path.display());
+                }
+                SkillAction::Import { path } => {
+                    let archive_path = std::path::Path::new(&path);
+                    let skill_base = data_dir
+                        .as_deref()
+                        .unwrap_or_else(|| std::path::Path::new(".akh-medu"));
+                    let skills_dir = skill_base.join("skills");
+                    std::fs::create_dir_all(&skills_dir).into_diagnostic()?;
+                    let skill_id =
+                        akh_medu::skills::share::import_skill(archive_path, &skills_dir)
+                            .map_err(|e| miette::miette!("{e}"))?;
+                    println!("Imported skill '{}' into {}", skill_id, skills_dir.display());
                 }
 
                 // All other skill actions route through AkhClient.
@@ -1461,6 +1510,8 @@ fn main() -> Result<()> {
                             println!("  memory:  {} bytes", activation.memory_bytes);
                         }
                         SkillAction::Scaffold { .. } => unreachable!(),
+                        SkillAction::Export { .. } => unreachable!(),
+                        SkillAction::Import { .. } => unreachable!(),
                     }
                 }
             }

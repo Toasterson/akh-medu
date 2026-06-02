@@ -575,6 +575,56 @@ pub enum SkillError {
         #[source]
         source: std::io::Error,
     },
+
+    #[error("circular dependency in skill graph involving '{cycle:?}'")]
+    #[diagnostic(
+        code(akh::skill::circular_dependency),
+        help(
+            "The skill dependency graph has a cycle. Remove the circular \
+             dependency from one of the skills' 'depends' lists."
+        )
+    )]
+    CircularDependency { cycle: Vec<String> },
+
+    #[error("skill conflict: activating '{skill_id}' conflicts with active skill '{conflict}'")]
+    #[diagnostic(
+        code(akh::skill::conflict),
+        help(
+            "Two skills cannot be active at the same time due to declared conflicts. \
+             Deactivate '{conflict}' before activating '{skill_id}'."
+        )
+    )]
+    SkillConflict { skill_id: String, conflict: String },
+
+    #[error("unresolvable capability requirement '{capability}' — no loaded skill provides it")]
+    #[diagnostic(
+        code(akh::skill::unresolved_capability),
+        help(
+            "No active or warm skill declares the required capability in its \
+             'provides' list. Install or activate a skill that provides this capability."
+        )
+    )]
+    UnresolvedCapability { capability: String },
+
+    #[error("skill archive error: {message}")]
+    #[diagnostic(
+        code(akh::skill::archive),
+        help(
+            "Failed to create or unpack a .akhskill archive. \
+             Ensure the skill directory is valid and you have write permissions."
+        )
+    )]
+    ArchiveError { message: String },
+
+    #[error("skill archive checksum mismatch: expected {expected:#010x}, got {actual:#010x}")]
+    #[diagnostic(
+        code(akh::skill::checksum_mismatch),
+        help(
+            "The .akhskill archive is corrupt or was tampered with. \
+             Re-download or re-export the skill archive."
+        )
+    )]
+    ChecksumMismatch { expected: u32, actual: u32 },
 }
 
 // ---------------------------------------------------------------------------

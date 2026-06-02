@@ -11,7 +11,9 @@ Goal: merge the newest open pulls, analyze + fix each gap locally, land on `main
 - **Wave 2 — the remaining ~35 older open PRs:** 30 more integrated across the Gemma+Psyche,
   MCP-tooling, contamination/memory/tecton-hygiene, OODA-tuning, and small/medium phase-scaffold
   clusters; 2 skipped as superseded (#217, #159 — their fixes were already present); 5 deferred.
-- **Total: 78 PR branches integrated** into `goal/integrate-merge-main`.
+- **Total: 78 PR branches integrated** in the two waves; a **follow-up pass then integrated the
+  5 previously-deferred PRs too** (see "Follow-up" below) → **all 85 open PRs now integrated/closed.**
+  Version bumped `0.6.0 → 0.7.0`.
 - All branches reported `mergeable:false` by Forgejo (stale — each merged against an older
   `develop`; the real work was **cross-PR + against-already-merged conflict resolution**).
 - **Compile gate** (after both waves): `cargo check --bin akhomed` with the full feature set
@@ -77,7 +79,26 @@ Goal: merge the newest open pulls, analyze + fix each gap locally, land on `main
   `eliza` feature), VSA fuzzy match (173) + Seshat script store (179) as a sibling `src/eliza/`
   module, psyche-to-script generator (175).
 
-## Skipped PRs (analyzed gaps — NOT integrated)
+## Follow-up — the 5 initially-deferred PRs were subsequently integrated
+
+After the two waves, the 5 deferred PRs were each tackled one-by-one (all now **closed/integrated**):
+- **#174** (ELIZA KG-grounded templates) — lifted into a new non-colliding `src/eliza/kg_template.rs`
+  (Template fact-insertion + session cache + 100ms query timeout), preserving the existing engines.
+- **#176** (ELIZA chat integration) — routing classifier lifted into `src/agent/eliza/routing.rs`
+  (`ElizaRouter`/`ElizaRouting`/`FallbackReason`), wired into `ChatProcessor` (creative → LLM/KG
+  fallback → OODA escalation).
+- **#224** (Phase 21 game theory / grammar) — focused-subset 3-way merge of the 11 substantive
+  files (`game_theory.rs` +598, grammar lexer/parser/etc.); the ~167 incidental stale rewrites and
+  `.anima-exec/` junk were discarded.
+- **#116** (Phase 30 Procedural Skills) — `src/skills/{author,quality,refine}.rs` + skill data
+  (`skills/*/actions.json`,`plans.json`,`procedures.md`); fixed `ActionSchema` API drift.
+- **#117** (Phase 31 Skill Intelligence) — `src/skills/{bridge,curriculum,discover,graph,share,synthesis}.rs`;
+  reconciled `SkillManifest`/`LoadedSkill`/`SkillInfo`/manager across Phase 30+31.
+
+Lib tests after the follow-up: **2467 passed / 0 failed** (full feature set compiles). `.anima-exec/`
+runtime junk was kept out of all commits (gitignored).
+
+## Original deferral rationale (historical — these are now integrated per above)
 
 | PR | Branch | Why skipped |
 |----|--------|-------------|

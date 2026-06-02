@@ -43,6 +43,18 @@ pub enum ElizaError {
     )]
     Vsa { message: String },
 
+    // ── KG-grounded response templates (PR #174) ──────────────────────────────
+    #[error("template parse error: {message}")]
+    #[diagnostic(
+        code(akh::eliza::template_parse),
+        help(
+            "Check the template syntax. Use {{N}} for regex capture groups (1-indexed) \
+             and {{fact_N:type:entity}} for KG facts. \
+             Types: 'triple', 'vsa' (optionally ':k' for top-k), 'competence'."
+        )
+    )]
+    TemplateParse { message: String },
+
     // ── Seshat script store + hot-reloader (PR #179) ──────────────────────────
     #[error("Seshat HTTP error: {0}")]
     #[diagnostic(

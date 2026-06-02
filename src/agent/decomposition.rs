@@ -404,6 +404,17 @@ impl MethodRegistry {
     pub fn methods_mut(&mut self) -> &mut [DecompositionMethod] {
         &mut self.methods
     }
+
+    /// Remove all methods registered by a specific skill.
+    ///
+    /// Skill methods use the naming convention `"skill/{skill_id}/{goal_name}"`.
+    /// Returns the number of methods removed.
+    pub fn remove_methods_by_skill(&mut self, skill_id: &str) -> usize {
+        let prefix = format!("skill/{skill_id}/");
+        let before = self.methods.len();
+        self.methods.retain(|m| !m.name.starts_with(&prefix));
+        before - self.methods.len()
+    }
 }
 
 impl Default for MethodRegistry {

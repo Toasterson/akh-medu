@@ -59,6 +59,10 @@
 pub mod engine;
 pub mod script;
 
+// PR #174 — KG-grounded response templates (fact insertion). Reconciled as a
+// non-colliding capability module the VSA engine and chat path can call.
+pub mod kg_template;
+
 // Shared error type (union of both subsystems' variants).
 pub mod error;
 
@@ -69,6 +73,10 @@ pub mod seshat;
 
 pub use engine::ElizaEngine;
 pub use error::{ElizaError, ElizaResult};
+pub use kg_template::{
+    EntityRef, ElizaSession, FactQuery, FactQueryKind, Template, format_facts, query_with_timeout,
+    triple_to_nl,
+};
 pub use script::Script;
 pub use seshat::{SaveResult, ScriptContent, ScriptInfo, SeshatScriptStore};
 

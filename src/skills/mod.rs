@@ -1,10 +1,27 @@
 //! Skillpack manager: MoE-style modular expert loading.
 //!
 //! Skillpacks are loadable modules containing domain-specific knowledge
-//! (triples), rewrite rules, and metadata. They follow a lifecycle:
-//! Cold (on disk) → Warm (manifest parsed) → Hot (active in memory).
+//! (triples), rewrite rules, metadata, and procedural knowledge (Phase 30).
+//! They follow a lifecycle: Cold (on disk) → Warm (manifest parsed) → Hot
+//! (active in memory).
+//!
+//! Phase 30 extends skills with:
+//! - `actions.json`  — causal action schemas (preconditions + effects)
+//! - `plans.json`    — HTN decomposition templates
+//! - `procedures.md` — natural language source of truth (for LLM re-generation)
 
+pub mod author;
+pub mod bridge;
+pub mod curriculum;
+pub mod discover;
+pub mod graph;
 pub mod manager;
+pub mod quality;
+pub mod refine;
+pub mod share;
+pub mod synthesis;
+
+use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
@@ -32,6 +49,9 @@ impl std::fmt::Display for SkillState {
 }
 
 /// Metadata describing a skillpack.
+///
+/// Extended in Phase 31 with dependency tracking (31a), curriculum support (31h),
+/// and remote sharing (31f).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SkillManifest {
     /// Unique skillpack identifier.
@@ -62,7 +82,145 @@ pub struct SkillManifest {
     pub wasm_tools: Vec<String>,
     /// Key-value configuration passed to tools (e.g., API keys, base URLs).
     #[serde(default)]
-    pub tool_config: std::collections::HashMap<String, String>,
+    pub tool_config: HashMap<String, String>,
+
+    // ── Phase 30: Procedural knowledge ──────────────────────────────────────
+    /// Path to action schemas JSON file relative to skill directory (default: "actions.json").
+    #[serde(default)]
+    pub actions_file: Option<String>,
+    /// Path to HTN plan templates JSON file relative to skill directory (default: "plans.json").
+    #[serde(default)]
+    pub plans_file: Option<String>,
+    /// Path to natural language procedures source file relative to skill directory
+    /// (default: "procedures.md"). This is the human-editable source of truth used
+    /// for LLM-assisted re-generation (Phase 30c).
+    #[serde(default)]
+    pub procedures_file: Option<String>,
+
+    // ── Phase 31a: Dependency graph ────────────────────────────────────────
+    /// Skill IDs that must be active before this skill can be activated.
+    #[serde(default)]
+    pub depends: Vec<String>,
+    /// Skill IDs that cannot be co-active with this skill.
+    #[serde(default)]
+    pub conflicts: Vec<String>,
+    /// Capability tags this skill provides (for loose-coupling via `requires`).
+    #[serde(default)]
+    pub provides: Vec<String>,
+    /// Capability tags this skill needs; resolved to provider skill IDs at activation.
+    #[serde(default)]
+    pub requires: Vec<String>,
+
+    // ── Phase 31f: Sharing / remote URL ───────────────────────────────────
+    /// Optional canonical remote URL for this skill archive (e.g., from a registry).
+    #[serde(default)]
+    pub remote_url: Option<String>,
+
+    // ── Phase 31h: Curriculum ──────────────────────────────────────────────
+    /// Path to the curriculum JSON file relative to the skill directory.
+    #[serde(default)]
+    pub curriculum_file: Option<String>,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 30: Procedural knowledge types
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Effects that a skill action has on world state (event-calculus style).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct SkillEffects {
+    /// Fluent names initiated (started) by this action.
+    #[serde(default)]
+    pub initiates: Vec<String>,
+    /// Fluent names terminated (ended) by this action.
+    #[serde(default)]
+    pub terminates: Vec<String>,
+}
+
+/// Estimated duration class for a skill action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ActionDuration {
+    /// Completes within a single OODA cycle.
+    #[default]
+    Fast,
+    /// Completes within a few cycles.
+    Medium,
+    /// Takes many cycles or involves external I/O.
+    Slow,
+}
+
+/// A causal action schema stored in `actions.json`.
+///
+/// Maps to `CausalManager::register_action_schema()` when activated.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillAction {
+    /// Action name — becomes the entity label in the KG (`skill:<skill_id>:<action>`).
+    pub action: String,
+    /// Human-readable purpose.
+    #[serde(default)]
+    pub description: String,
+    /// Fluent names that must hold before this action is applicable.
+    #[serde(default)]
+    pub preconditions: Vec<String>,
+    /// Fluents initiated/terminated by this action.
+    #[serde(default)]
+    pub effects: SkillEffects,
+    /// Rough execution cost hint for planning.
+    #[serde(default)]
+    pub estimated_duration: ActionDuration,
+}
+
+/// One conditional branch within a `PlanMethod::Conditional` plan.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ConditionalStep {
+    /// Fluent to test at runtime.
+    pub condition: String,
+    /// Action name to execute when the fluent holds.
+    pub then_step: String,
+    /// Action name to execute when the fluent does not hold (optional).
+    #[serde(default)]
+    pub else_step: Option<String>,
+}
+
+/// How the steps within a plan template are organized.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "lowercase", tag = "type")]
+pub enum PlanMethod {
+    /// Steps must execute in listed order.
+    #[default]
+    Sequential,
+    /// Steps may execute concurrently.
+    Parallel,
+    /// Steps depend on runtime conditions.
+    Conditional {
+        /// The conditional branches.
+        branches: Vec<ConditionalStep>,
+    },
+}
+
+/// An HTN plan template stored in `plans.json`.
+///
+/// Maps to `MethodRegistry::register()` when activated.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillPlan {
+    /// Goal name — used to match incoming goal descriptions.
+    pub goal: String,
+    /// How steps within this plan are organized.
+    #[serde(default)]
+    pub method: PlanMethod,
+    /// Ordered list of action names (references into `actions.json`).
+    #[serde(default)]
+    pub steps: Vec<String>,
+    /// Fluent names that must hold for this plan template to apply.
+    #[serde(default)]
+    pub preconditions: Vec<String>,
+    /// Names of alternative plan templates that achieve the same goal.
+    #[serde(default)]
+    pub alternatives: Vec<String>,
+    /// Optional quality gate: fluent that must hold after the last step.
+    #[serde(default)]
+    pub quality_gate: Option<String>,
 }
 
 /// A skillpack with its manifest and current state.
@@ -78,10 +236,16 @@ pub struct LoadedSkill {
     pub rule_count: usize,
     /// Estimated memory usage in bytes.
     pub memory_bytes: usize,
+    /// Loaded action schemas (populated when Hot; empty otherwise).
+    pub actions: Vec<SkillAction>,
+    /// Loaded plan templates (populated when Hot; empty otherwise).
+    pub plans: Vec<SkillPlan>,
+    /// Timestamp of the most recent access (Phase 31c idle-deactivation tracking).
+    pub last_used_at: Option<std::time::Instant>,
 }
 
 /// Summary info for listing skills.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SkillInfo {
     /// Skill identifier.
     pub id: String,
@@ -99,6 +263,16 @@ pub struct SkillInfo {
     pub triple_count: usize,
     /// Rules loaded.
     pub rule_count: usize,
+    /// Number of action schemas loaded.
+    pub action_count: usize,
+    /// Number of plan templates loaded.
+    pub plan_count: usize,
+    /// Capabilities provided by this skill.
+    #[serde(default)]
+    pub provides: Vec<String>,
+    /// Capabilities required by this skill.
+    #[serde(default)]
+    pub requires: Vec<String>,
 }
 
 /// Result of activating a skillpack.
@@ -112,6 +286,10 @@ pub struct SkillActivation {
     pub rules_loaded: usize,
     /// Memory used in bytes.
     pub memory_bytes: usize,
+    /// Number of action schemas loaded (Phase 30).
+    pub actions_loaded: usize,
+    /// Number of plan templates loaded (Phase 30).
+    pub plans_loaded: usize,
 }
 
 /// Payload for installing a skill remotely.

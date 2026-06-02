@@ -296,7 +296,6 @@ pub enum AbsTree {
     },
 
     // ── NLU extensions (Phase 14j) ──────────────────────────────────────
-
     /// Logical negation of an inner expression.
     Negation { inner: Box<AbsTree> },
 
@@ -339,7 +338,6 @@ pub enum AbsTree {
     },
 
     // ── Dialogue acts ──────────────────────────────────────────────────
-
     /// Greeting speech act ("hello", "good morning").
     Greeting { addressee: Option<Box<AbsTree>> },
     /// Farewell speech act ("goodbye", "see you").
@@ -601,9 +599,7 @@ impl AbsTree {
                 consequent,
             } => 1 + condition.node_count() + consequent.node_count(),
 
-            AbsTree::RelativeClause { head, clause } => {
-                1 + head.node_count() + clause.node_count()
-            }
+            AbsTree::RelativeClause { head, clause } => 1 + head.node_count() + clause.node_count(),
 
             AbsTree::Greeting { addressee } | AbsTree::Farewell { addressee } => {
                 1 + addressee.as_ref().map_or(0, |a| a.node_count())
@@ -911,37 +907,52 @@ impl AbsTree {
 
     /// Create a greeting speech act.
     pub fn greeting(addressee: Option<AbsTree>) -> Self {
-        AbsTree::Greeting { addressee: addressee.map(Box::new) }
+        AbsTree::Greeting {
+            addressee: addressee.map(Box::new),
+        }
     }
 
     /// Create a farewell speech act.
     pub fn farewell(addressee: Option<AbsTree>) -> Self {
-        AbsTree::Farewell { addressee: addressee.map(Box::new) }
+        AbsTree::Farewell {
+            addressee: addressee.map(Box::new),
+        }
     }
 
     /// Create an acknowledgment.
     pub fn acknowledgment(referent: Option<AbsTree>) -> Self {
-        AbsTree::Acknowledgment { referent: referent.map(Box::new) }
+        AbsTree::Acknowledgment {
+            referent: referent.map(Box::new),
+        }
     }
 
     /// Create a follow-up request.
     pub fn follow_up_request(topic: Option<AbsTree>) -> Self {
-        AbsTree::FollowUpRequest { topic: topic.map(Box::new) }
+        AbsTree::FollowUpRequest {
+            topic: topic.map(Box::new),
+        }
     }
 
     /// Create a meta-query about self/capabilities.
     pub fn meta_query(about: AbsTree) -> Self {
-        AbsTree::MetaQuery { about: Box::new(about) }
+        AbsTree::MetaQuery {
+            about: Box::new(about),
+        }
     }
 
     /// Create a goal-setting request.
     pub fn goal_request(description: AbsTree) -> Self {
-        AbsTree::GoalRequest { description: Box::new(description) }
+        AbsTree::GoalRequest {
+            description: Box::new(description),
+        }
     }
 
     /// Create a structural command.
     pub fn structural_command(command: impl Into<String>, args: Vec<String>) -> Self {
-        AbsTree::StructuralCommand { command: command.into(), args }
+        AbsTree::StructuralCommand {
+            command: command.into(),
+            args,
+        }
     }
 
     /// Whether this tree contains assertable relational content (triples,
@@ -964,8 +975,9 @@ impl AbsTree {
             | AbsTree::CodeFact { .. } => true,
 
             // Wrappers — check the inner node.
-            AbsTree::WithConfidence { inner, .. }
-            | AbsTree::WithProvenance { inner, .. } => inner.is_assertable(),
+            AbsTree::WithConfidence { inner, .. } | AbsTree::WithProvenance { inner, .. } => {
+                inner.is_assertable()
+            }
 
             // Conjunction/disjunction — assertable if any child is.
             AbsTree::Conjunction { items, .. } => items.iter().any(|i| i.is_assertable()),
@@ -1279,10 +1291,9 @@ impl AbsTree {
             } => condition
                 .first_unresolved()
                 .or_else(|| consequent.first_unresolved()),
-            AbsTree::RelativeClause { head, clause } => {
-                head.first_unresolved()
-                    .or_else(|| clause.first_unresolved())
-            }
+            AbsTree::RelativeClause { head, clause } => head
+                .first_unresolved()
+                .or_else(|| clause.first_unresolved()),
             _ => None,
         }
     }

@@ -1,0 +1,31 @@
+[
+  {
+    "goal": "analyse_sentence",
+    "method": {"type": "sequential"},
+    "steps": [
+      "parse_sentence_structure",
+      "identify_part_of_speech",
+      "resolve_anaphora"
+    ],
+    "preconditions": ["sentence_available"],
+    "alternatives": ["quick_pos_tag"],
+    "quality_gate": "structure_parsed"
+  },
+  {
+    "goal": "quick_pos_tag",
+    "method": {"type": "sequential"},
+    "steps": ["identify_part_of_speech"],
+    "preconditions": ["word_in_context"],
+    "alternatives": ["analyse_sentence"]
+  },
+  {
+    "goal": "understand_discourse",
+    "method": {"type": "sequential"},
+    "steps": [
+      "parse_sentence_structure",
+      "detect_discourse_relation"
+    ],
+    "preconditions": ["two_clauses_available"],
+    "alternatives": []
+  }
+]

@@ -11,11 +11,58 @@
 
 use std::collections::HashMap;
 
+use miette::Diagnostic;
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 use crate::symbol::SymbolId;
 
-use super::epistemic::{EpistemicModality, PropositionRef, ToMLevel};
+use super::epistemic::ToMLevel;
+
+// ═══════════════════════════════════════════════════════════════════════
+// Error types
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Errors from the game-theory reasoning subsystem.
+#[derive(Debug, Error, Diagnostic)]
+pub enum GameTheoryError {
+    #[error("game model not found for agent {agent_id}")]
+    #[diagnostic(
+        code(akh::agent::game_theory::model_not_found),
+        help("Build a game model first via the GameModeler before querying it.")
+    )]
+    ModelNotFound { agent_id: u64 },
+
+    #[error("payoff matrix is empty or malformed")]
+    #[diagnostic(
+        code(akh::agent::game_theory::empty_matrix),
+        help("Ensure strategies are populated before building the payoff matrix.")
+    )]
+    EmptyMatrix,
+
+    #[error("strategy index {index} out of range (matrix has {size} rows)")]
+    #[diagnostic(
+        code(akh::agent::game_theory::strategy_out_of_range),
+        help("Check that the strategy index is within the payoff matrix dimensions.")
+    )]
+    StrategyOutOfRange { index: usize, size: usize },
+
+    #[error("{0}")]
+    #[diagnostic(
+        code(akh::agent::game_theory::engine),
+        help("An engine-level error occurred during game-theory reasoning.")
+    )]
+    Engine(Box<crate::error::AkhError>),
+}
+
+impl From<crate::error::AkhError> for GameTheoryError {
+    fn from(e: crate::error::AkhError) -> Self {
+        Self::Engine(Box::new(e))
+    }
+}
+
+/// Convenience result alias for game-theory operations.
+pub type GameTheoryResult<T> = Result<T, GameTheoryError>;
 
 // ═══════════════════════════════════════════════════════════════════════
 // 21a — Interaction Game Modeling
@@ -75,9 +122,7 @@ pub struct PayoffFactors {
 impl PayoffFactors {
     /// Compute scalar payoff from factors.
     pub fn total(&self) -> f32 {
-        self.goal_progress * 0.4
-            + self.trust_change * 0.2
-            + self.information_gain * 0.2
+        self.goal_progress * 0.4 + self.trust_change * 0.2 + self.information_gain * 0.2
             - self.resource_cost * 0.2
     }
 }
@@ -149,7 +194,8 @@ pub fn classify_game(payoff_matrix: &[Vec<(f32, f32)>]) -> GameType {
         let our_at_best = payoff_matrix[bi][bj].0;
         let their_at_best = payoff_matrix[bi][bj].1;
         let our_tempted = (0..rows).any(|k| k != bi && payoff_matrix[k][bj].0 > our_at_best + 0.01);
-        let their_tempted = (0..cols).any(|k| k != bj && payoff_matrix[bi][k].1 > their_at_best + 0.01);
+        let their_tempted =
+            (0..cols).any(|k| k != bj && payoff_matrix[bi][k].1 > their_at_best + 0.01);
 
         if our_tempted || their_tempted {
             return GameType::MixedMotive;
@@ -211,10 +257,7 @@ pub fn find_nash_equilibria(payoff_matrix: &[Vec<(f32, f32)>]) -> Vec<(usize, us
 ///
 /// A strategy is dominant if it's at least as good as all alternatives
 /// against every opponent strategy.
-pub fn find_dominant_strategy(
-    payoff_matrix: &[Vec<(f32, f32)>],
-    for_us: bool,
-) -> Option<usize> {
+pub fn find_dominant_strategy(payoff_matrix: &[Vec<(f32, f32)>], for_us: bool) -> Option<usize> {
     let rows = payoff_matrix.len();
     if rows == 0 {
         return None;
@@ -399,8 +442,7 @@ pub fn analyze_signal(
     source_reliability: f32,
 ) -> SignalingAnalysis {
     // Deception incentive: misaligned goals + cheap talk
-    let deception_incentive =
-        goal_alignment < 0.0 && signal_type == SignalType::CheapTalk;
+    let deception_incentive = goal_alignment < 0.0 && signal_type == SignalType::CheapTalk;
 
     let incentive_credibility = if deception_incentive {
         source_reliability * 0.5 // heavily discount
@@ -590,6 +632,299 @@ pub fn should_cooperate(game_type: GameType, trust: f32, alignment: f32) -> bool
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+// Manager structs (Phase 21a–c)
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Manages interaction game modeling (Phase 21a).
+///
+/// Builds payoff matrices from goal alignment + theory-of-mind models,
+/// classifies games, finds Nash equilibria, and recommends strategies.
+#[derive(Debug, Clone, Default)]
+pub struct GameModeler {
+    /// Most recent game model per interacting agent.
+    models: HashMap<u64, InteractionGame>,
+}
+
+impl GameModeler {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Build a game model for an interaction with `other_agent`.
+    ///
+    /// `our_strategies` and `their_strategies` define the action space.
+    /// `payoff_matrix` is pre-computed from goal alignment scores.
+    /// Returns `Err(EmptyMatrix)` if either strategy list is empty.
+    pub fn model_interaction(
+        &mut self,
+        self_agent: SymbolId,
+        other_agent: SymbolId,
+        our_strategies: Vec<Strategy>,
+        their_strategies: Vec<Strategy>,
+        payoff_matrix: Vec<Vec<(f32, f32)>>,
+        confidence: f32,
+    ) -> GameTheoryResult<&InteractionGame> {
+        if our_strategies.is_empty() || their_strategies.is_empty() || payoff_matrix.is_empty() {
+            return Err(GameTheoryError::EmptyMatrix);
+        }
+
+        let game_type = classify_game(&payoff_matrix);
+        let equilibria = find_nash_equilibria(&payoff_matrix);
+
+        let mut game = InteractionGame {
+            self_agent,
+            other_agent,
+            game_type,
+            our_strategies,
+            their_strategies,
+            payoff_matrix,
+            equilibria,
+            recommended_strategy: None,
+            confidence,
+        };
+        game.recommended_strategy = recommend_strategy(&game);
+
+        self.models.insert(other_agent.get(), game);
+        Ok(self.models.get(&other_agent.get()).unwrap())
+    }
+
+    /// Retrieve the stored game model for a given agent.
+    pub fn get_model(&self, other_agent: SymbolId) -> GameTheoryResult<&InteractionGame> {
+        self.models
+            .get(&other_agent.get())
+            .ok_or(GameTheoryError::ModelNotFound {
+                agent_id: other_agent.get(),
+            })
+    }
+
+    /// Return all stored game models.
+    pub fn all_models(&self) -> impl Iterator<Item = &InteractionGame> {
+        self.models.values()
+    }
+
+    /// Remove all stored game models.
+    pub fn clear(&mut self) {
+        self.models.clear();
+    }
+}
+
+/// Analyzes signaling credibility and level-k reasoning (Phase 21b).
+///
+/// Given a game model and source-reliability score, evaluates whether
+/// a communication is trustworthy and how sophisticated the sender is.
+#[derive(Debug, Clone, Default)]
+pub struct SignalingAnalyzer;
+
+impl SignalingAnalyzer {
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Analyze a signal from `sender` given the active game context.
+    ///
+    /// `goal_alignment` is in [-1.0, 1.0]; `source_reliability` in [0.0, 1.0].
+    pub fn analyze(
+        &self,
+        sender: SymbolId,
+        signal_type: SignalType,
+        goal_alignment: f32,
+        source_reliability: f32,
+    ) -> SignalingAnalysis {
+        analyze_signal(sender, signal_type, goal_alignment, source_reliability)
+    }
+
+    /// Evaluate cheap-talk credibility for `sender` given goal alignment.
+    pub fn analyze_cheap_talk(&self, goal_alignment: f32) -> CheapTalkAnalysis {
+        analyze_cheap_talk(goal_alignment)
+    }
+
+    /// Estimate the sender's level-k sophistication from observation count.
+    pub fn estimate_level(&self, observation_count: u32) -> LevelKModel {
+        LevelKModel::estimate(observation_count)
+    }
+}
+
+/// Plans socially-aware action sequences (Phase 21c).
+///
+/// Accounts for predicted responses from other agents, coalition
+/// opportunities, and cooperative vs. competitive environment framing.
+#[derive(Debug, Clone, Default)]
+pub struct StrategicPlanner;
+
+impl StrategicPlanner {
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Detect the overall social environment from a set of game summaries.
+    ///
+    /// Each element is `(agent_id, game_type, goal_alignment)`.
+    pub fn detect_dynamics(&self, games: &[(SymbolId, GameType, f32)]) -> SocialDynamics {
+        detect_dynamics(games)
+    }
+
+    /// Predict another agent's likely response to our action.
+    ///
+    /// Uses game type and ToM level to reason about the response.
+    pub fn predict_response(
+        &self,
+        agent: SymbolId,
+        game_type: GameType,
+        tom_level: ToMLevel,
+        alignment: f32,
+    ) -> PredictedResponse {
+        let (likely_action, probability, impact) = match game_type {
+            GameType::Cooperative => (
+                "cooperate".to_string(),
+                0.8_f32.min(0.5 + alignment * 0.5),
+                PlanImpact::Beneficial,
+            ),
+            GameType::ZeroSum => ("compete".to_string(), 0.8, PlanImpact::Detrimental),
+            GameType::MixedMotive => {
+                if alignment > 0.3 {
+                    ("cooperate".to_string(), 0.6, PlanImpact::Beneficial)
+                } else {
+                    ("defect".to_string(), 0.6, PlanImpact::Detrimental)
+                }
+            }
+            _ => ("unknown".to_string(), 0.4, PlanImpact::Neutral),
+        };
+
+        PredictedResponse {
+            agent,
+            likely_action,
+            probability,
+            based_on: tom_level,
+            impact,
+        }
+    }
+
+    /// Compute expected social utility given our actions and predicted responses.
+    pub fn evaluate_outcome(
+        &self,
+        goal_progress: f32,
+        responses: &[PredictedResponse],
+    ) -> SocialOutcome {
+        let trust_changes: Vec<(SymbolId, f32)> = responses
+            .iter()
+            .map(|r| {
+                let delta = match r.impact {
+                    PlanImpact::Beneficial => 0.1,
+                    PlanImpact::Neutral => 0.0,
+                    PlanImpact::Detrimental => -0.1,
+                    PlanImpact::Blocking => -0.3,
+                };
+                (r.agent, delta)
+            })
+            .collect();
+
+        let social_penalty: f32 = responses
+            .iter()
+            .map(|r| match r.impact {
+                PlanImpact::Blocking => -0.5 * r.probability,
+                PlanImpact::Detrimental => -0.2 * r.probability,
+                PlanImpact::Beneficial => 0.1 * r.probability,
+                PlanImpact::Neutral => 0.0,
+            })
+            .sum();
+
+        let expected_utility = (goal_progress + social_penalty).clamp(-1.0, 1.0);
+
+        SocialOutcome {
+            goal_progress,
+            trust_changes,
+            expected_utility,
+        }
+    }
+
+    /// Attempt to form a coalition from agents with aligned goals.
+    ///
+    /// Returns `None` if no beneficial coalition exists (value < threshold).
+    pub fn form_coalition(
+        &self,
+        agents: &[(SymbolId, f32)],
+        shared_goals: Vec<String>,
+        value_threshold: f32,
+    ) -> Option<Coalition> {
+        let cooperators: Vec<SymbolId> = agents
+            .iter()
+            .filter(|&&(_, align)| align > 0.3)
+            .map(|&(id, _)| id)
+            .collect();
+
+        if cooperators.is_empty() {
+            return None;
+        }
+
+        let avg_alignment: f32 = agents
+            .iter()
+            .filter(|&&(_, a)| a > 0.3)
+            .map(|&(_, a)| a)
+            .sum::<f32>()
+            / cooperators.len() as f32;
+
+        let value = avg_alignment * cooperators.len() as f32 / (agents.len() as f32 + 1.0);
+
+        if value < value_threshold {
+            return None;
+        }
+
+        // A coalition is stable if average alignment is high enough that
+        // no member would gain by defecting unilaterally.
+        let stable = avg_alignment > 0.6;
+
+        Some(Coalition {
+            members: cooperators,
+            shared_goals,
+            value,
+            stable,
+        })
+    }
+
+    /// Choose the minimax (worst-case-optimal) strategy index for a competitive game.
+    pub fn minimax_strategy(&self, payoff_matrix: &[Vec<(f32, f32)>]) -> Option<usize> {
+        if payoff_matrix.is_empty() {
+            return None;
+        }
+        // Maximize the minimum payoff across opponent strategies.
+        payoff_matrix
+            .iter()
+            .enumerate()
+            .map(|(i, row)| {
+                let min_p = row.iter().map(|(p, _)| *p).fold(f32::INFINITY, f32::min);
+                (i, min_p)
+            })
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(i, _)| i)
+    }
+
+    /// Choose the cooperative (joint-optimum) strategy index.
+    pub fn cooperative_strategy(&self, payoff_matrix: &[Vec<(f32, f32)>]) -> Option<usize> {
+        if payoff_matrix.is_empty() {
+            return None;
+        }
+        // Pick our strategy that maximises the joint payoff sum.
+        payoff_matrix
+            .iter()
+            .enumerate()
+            .map(|(i, row)| {
+                let best_joint = row
+                    .iter()
+                    .map(|(a, b)| a + b)
+                    .fold(f32::NEG_INFINITY, f32::max);
+                (i, best_joint)
+            })
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(i, _)| i)
+    }
+
+    /// Determine whether to cooperate given game type, trust, and alignment.
+    pub fn should_cooperate(&self, game_type: GameType, trust: f32, alignment: f32) -> bool {
+        should_cooperate(game_type, trust, alignment)
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 // Tests
 // ═══════════════════════════════════════════════════════════════════════
 
@@ -614,20 +949,14 @@ mod tests {
 
     #[test]
     fn classify_cooperative() {
-        let matrix = vec![
-            vec![(3.0, 3.0), (0.0, 0.0)],
-            vec![(0.0, 0.0), (1.0, 1.0)],
-        ];
+        let matrix = vec![vec![(3.0, 3.0), (0.0, 0.0)], vec![(0.0, 0.0), (1.0, 1.0)]];
         assert_eq!(classify_game(&matrix), GameType::Cooperative);
     }
 
     #[test]
     fn classify_mixed_motive() {
         // Prisoner's dilemma structure.
-        let matrix = vec![
-            vec![(3.0, 3.0), (0.0, 5.0)],
-            vec![(5.0, 0.0), (1.0, 1.0)],
-        ];
+        let matrix = vec![vec![(3.0, 3.0), (0.0, 5.0)], vec![(5.0, 0.0), (1.0, 1.0)]];
         assert_eq!(classify_game(&matrix), GameType::MixedMotive);
     }
 
@@ -641,10 +970,7 @@ mod tests {
     #[test]
     fn nash_equilibrium_prisoners_dilemma() {
         // PD: (C,C)=3,3  (C,D)=0,5  (D,C)=5,0  (D,D)=1,1
-        let matrix = vec![
-            vec![(3.0, 3.0), (0.0, 5.0)],
-            vec![(5.0, 0.0), (1.0, 1.0)],
-        ];
+        let matrix = vec![vec![(3.0, 3.0), (0.0, 5.0)], vec![(5.0, 0.0), (1.0, 1.0)]];
         let eq = find_nash_equilibria(&matrix);
         assert_eq!(eq, vec![(1, 1)]); // (Defect, Defect) is the Nash equilibrium
     }
@@ -652,10 +978,7 @@ mod tests {
     #[test]
     fn nash_equilibrium_coordination() {
         // Pure coordination: both prefer same choices.
-        let matrix = vec![
-            vec![(2.0, 2.0), (0.0, 0.0)],
-            vec![(0.0, 0.0), (1.0, 1.0)],
-        ];
+        let matrix = vec![vec![(2.0, 2.0), (0.0, 0.0)], vec![(0.0, 0.0), (1.0, 1.0)]];
         let eq = find_nash_equilibria(&matrix);
         assert_eq!(eq.len(), 2); // (0,0) and (1,1) are both NE
     }
@@ -664,10 +987,7 @@ mod tests {
 
     #[test]
     fn dominant_strategy_pd() {
-        let matrix = vec![
-            vec![(3.0, 3.0), (0.0, 5.0)],
-            vec![(5.0, 0.0), (1.0, 1.0)],
-        ];
+        let matrix = vec![vec![(3.0, 3.0), (0.0, 5.0)], vec![(5.0, 0.0), (1.0, 1.0)]];
         // Defect dominates cooperate in PD.
         assert_eq!(find_dominant_strategy(&matrix, true), Some(1));
     }
@@ -676,16 +996,10 @@ mod tests {
 
     #[test]
     fn prisoners_dilemma_detection() {
-        let matrix = vec![
-            vec![(3.0, 3.0), (0.0, 5.0)],
-            vec![(5.0, 0.0), (1.0, 1.0)],
-        ];
+        let matrix = vec![vec![(3.0, 3.0), (0.0, 5.0)], vec![(5.0, 0.0), (1.0, 1.0)]];
         assert!(is_prisoners_dilemma(&matrix));
 
-        let not_pd = vec![
-            vec![(2.0, 2.0), (0.0, 0.0)],
-            vec![(0.0, 0.0), (1.0, 1.0)],
-        ];
+        let not_pd = vec![vec![(2.0, 2.0), (0.0, 0.0)], vec![(0.0, 0.0), (1.0, 1.0)]];
         assert!(!is_prisoners_dilemma(&not_pd));
     }
 
@@ -708,12 +1022,7 @@ mod tests {
 
     #[test]
     fn signal_verifiable_high_credibility() {
-        let analysis = analyze_signal(
-            sym(1),
-            SignalType::VerifiableClaim,
-            0.5,
-            0.8,
-        );
+        let analysis = analyze_signal(sym(1), SignalType::VerifiableClaim, 0.5, 0.8);
         assert!(analysis.incentive_credibility > 0.9);
         assert!(!analysis.deception_incentive);
     }
@@ -794,5 +1103,249 @@ mod tests {
     #[test]
     fn social_environment_labels() {
         assert_eq!(SocialEnvironment::Mixed.as_label(), "mixed");
+    }
+
+    // ── Manager structs ───────────────────────────────────────────
+
+    #[test]
+    fn game_modeler_builds_model() {
+        let cooperate = Strategy {
+            name: "cooperate".into(),
+            actions: vec![],
+            description: "cooperate".into(),
+        };
+        let compete = Strategy {
+            name: "compete".into(),
+            actions: vec![],
+            description: "compete".into(),
+        };
+        let their_cooperate = Strategy {
+            name: "cooperate".into(),
+            actions: vec![],
+            description: "cooperate".into(),
+        };
+        let their_compete = Strategy {
+            name: "compete".into(),
+            actions: vec![],
+            description: "compete".into(),
+        };
+        let matrix = vec![vec![(3.0, 3.0), (0.0, 5.0)], vec![(5.0, 0.0), (1.0, 1.0)]];
+        let mut modeler = GameModeler::new();
+        let game = modeler
+            .model_interaction(
+                sym(1),
+                sym(2),
+                vec![cooperate, compete],
+                vec![their_cooperate, their_compete],
+                matrix,
+                0.8,
+            )
+            .unwrap();
+        assert_eq!(game.game_type, GameType::MixedMotive);
+        assert_eq!(game.equilibria, vec![(1, 1)]);
+    }
+
+    #[test]
+    fn game_modeler_empty_matrix_error() {
+        let mut modeler = GameModeler::new();
+        let result = modeler.model_interaction(sym(1), sym(2), vec![], vec![], vec![], 0.5);
+        assert!(matches!(result, Err(GameTheoryError::EmptyMatrix)));
+    }
+
+    #[test]
+    fn game_modeler_get_model() {
+        let s = |n: &str| Strategy {
+            name: n.into(),
+            actions: vec![],
+            description: n.into(),
+        };
+        let matrix = vec![vec![(1.0, 1.0)]];
+        let mut modeler = GameModeler::new();
+        modeler
+            .model_interaction(sym(1), sym(2), vec![s("a")], vec![s("b")], matrix, 0.5)
+            .unwrap();
+        assert!(modeler.get_model(sym(2)).is_ok());
+        assert!(matches!(
+            modeler.get_model(sym(99)),
+            Err(GameTheoryError::ModelNotFound { .. })
+        ));
+    }
+
+    #[test]
+    fn signaling_analyzer_wraps_analyze_signal() {
+        let analyzer = SignalingAnalyzer::new();
+        let analysis = analyzer.analyze(sym(1), SignalType::CostlySignal, 0.5, 0.9);
+        assert!(!analysis.deception_incentive);
+        assert!(analysis.incentive_credibility > 0.7);
+    }
+
+    #[test]
+    fn strategic_planner_predict_response_cooperative() {
+        let planner = StrategicPlanner::new();
+        let resp = planner.predict_response(sym(2), GameType::Cooperative, ToMLevel::Level1, 0.8);
+        assert_eq!(resp.impact, PlanImpact::Beneficial);
+        assert!(resp.probability > 0.5);
+    }
+
+    #[test]
+    fn strategic_planner_predict_response_zero_sum() {
+        let planner = StrategicPlanner::new();
+        let resp = planner.predict_response(sym(2), GameType::ZeroSum, ToMLevel::Level0, -0.5);
+        assert_eq!(resp.impact, PlanImpact::Detrimental);
+    }
+
+    #[test]
+    fn strategic_planner_evaluate_outcome() {
+        let planner = StrategicPlanner::new();
+        let responses = vec![PredictedResponse {
+            agent: sym(2),
+            likely_action: "cooperate".into(),
+            probability: 0.8,
+            based_on: ToMLevel::Level1,
+            impact: PlanImpact::Beneficial,
+        }];
+        let outcome = planner.evaluate_outcome(0.6, &responses);
+        assert!(outcome.expected_utility > 0.5);
+        assert_eq!(outcome.trust_changes.len(), 1);
+    }
+
+    #[test]
+    fn strategic_planner_form_coalition_beneficial() {
+        let planner = StrategicPlanner::new();
+        let agents = vec![(sym(1), 0.8), (sym(2), 0.7)];
+        let coalition = planner.form_coalition(&agents, vec!["shared_goal".into()], 0.1);
+        assert!(coalition.is_some());
+        let c = coalition.unwrap();
+        assert_eq!(c.members.len(), 2);
+        assert!(c.value > 0.1);
+    }
+
+    #[test]
+    fn strategic_planner_form_coalition_none_when_no_cooperators() {
+        let planner = StrategicPlanner::new();
+        let agents = vec![(sym(1), 0.1), (sym(2), -0.5)];
+        let coalition = planner.form_coalition(&agents, vec![], 0.1);
+        assert!(coalition.is_none());
+    }
+
+    #[test]
+    fn strategic_planner_minimax() {
+        let planner = StrategicPlanner::new();
+        let matrix = vec![vec![(3.0, 3.0), (0.0, 5.0)], vec![(5.0, 0.0), (1.0, 1.0)]];
+        // minimax: row 1 has min=1.0 (best minimum), row 0 has min=0.0
+        let idx = planner.minimax_strategy(&matrix);
+        assert_eq!(idx, Some(1));
+    }
+
+    #[test]
+    fn strategic_planner_cooperative_strategy() {
+        let planner = StrategicPlanner::new();
+        // Coordination game: joint payoff at (0,0) is 4.0, at (1,1) is 2.0
+        let matrix = vec![vec![(2.0, 2.0), (0.0, 0.0)], vec![(0.0, 0.0), (1.0, 1.0)]];
+        let idx = planner.cooperative_strategy(&matrix);
+        assert_eq!(idx, Some(0));
+    }
+
+    // ── 21a additional tests ──────────────────────────────────────────
+
+    #[test]
+    fn recommend_cautious_for_zero_sum() {
+        // In a zero-sum game, dominant strategy or minimax should be chosen.
+        let matrix = vec![
+            vec![(1.0, -1.0), (-1.0, 1.0)],
+            vec![(-1.0, 1.0), (1.0, -1.0)],
+        ];
+        let equilibria = find_nash_equilibria(&matrix);
+        // No pure-strategy Nash equilibrium in this particular zero-sum game.
+        // minimax should give a safe strategy.
+        let planner = StrategicPlanner::new();
+        let mm = planner.minimax_strategy(&matrix);
+        // Both rows have the same minimum (-1.0), so either index is acceptable.
+        assert!(mm.is_some());
+    }
+
+    #[test]
+    fn goal_alignment_high_signals_cooperative() {
+        // High goal alignment → cooperative or at most mixed-motive.
+        let matrix = vec![vec![(2.0, 2.0), (1.0, 1.0)], vec![(1.0, 1.0), (0.5, 0.5)]];
+        let gt = classify_game(&matrix);
+        assert!(
+            gt == GameType::Cooperative || gt == GameType::MixedMotive,
+            "unexpected type: {gt:?}"
+        );
+    }
+
+    #[test]
+    fn goal_alignment_low_signals_competitive() {
+        // Zero-sum structure reflects misaligned goals.
+        let matrix = vec![
+            vec![(1.0, -1.0), (-0.5, 0.5)],
+            vec![(-0.5, 0.5), (1.0, -1.0)],
+        ];
+        assert_eq!(classify_game(&matrix), GameType::ZeroSum);
+    }
+
+    #[test]
+    fn dominant_strategy_for_opponent() {
+        let matrix = vec![vec![(3.0, 3.0), (0.0, 5.0)], vec![(5.0, 0.0), (1.0, 1.0)]];
+        // In PD, the opponent's dominant strategy is also to defect (col 1).
+        assert_eq!(find_dominant_strategy(&matrix, false), Some(1));
+    }
+
+    // ── 21c additional tests ──────────────────────────────────────────
+
+    #[test]
+    fn detect_competitive_dynamics() {
+        let games = vec![
+            (sym(1), GameType::ZeroSum, -0.8),
+            (sym(2), GameType::ZeroSum, -0.5),
+        ];
+        let dynamics = detect_dynamics(&games);
+        assert_eq!(dynamics.environment, SocialEnvironment::Competitive);
+        assert_eq!(dynamics.competitors.len(), 2);
+        assert!(dynamics.cooperators.is_empty());
+    }
+
+    #[test]
+    fn coalition_stability_high_alignment() {
+        let planner = StrategicPlanner::new();
+        // Very high alignment → stable coalition.
+        let agents = vec![(sym(1), 0.9), (sym(2), 0.85)];
+        let coalition = planner
+            .form_coalition(&agents, vec!["goal_a".into()], 0.1)
+            .unwrap();
+        assert!(coalition.stable, "coalition with high alignment should be stable");
+    }
+
+    #[test]
+    fn coalition_not_stable_low_alignment() {
+        let planner = StrategicPlanner::new();
+        // Below 0.6 average alignment → unstable coalition.
+        let agents = vec![(sym(1), 0.5), (sym(2), 0.4)];
+        let coalition = planner.form_coalition(&agents, vec!["goal_a".into()], 0.01);
+        if let Some(c) = coalition {
+            assert!(!c.stable, "coalition with low alignment should be unstable");
+        }
+        // (It's fine if no coalition forms at all given the threshold.)
+    }
+
+    #[test]
+    fn social_plan_accounts_for_adversarial_response() {
+        let planner = StrategicPlanner::new();
+        // A blocking response from an adversary should push expected utility down.
+        let responses = vec![PredictedResponse {
+            agent: sym(2),
+            likely_action: "block".into(),
+            probability: 0.9,
+            based_on: ToMLevel::Level1,
+            impact: PlanImpact::Blocking,
+        }];
+        let outcome = planner.evaluate_outcome(0.8, &responses);
+        // The blocking response with 0.9 probability should significantly reduce utility.
+        assert!(
+            outcome.expected_utility < 0.5,
+            "blocking response should reduce utility, got {:.2}",
+            outcome.expected_utility
+        );
     }
 }

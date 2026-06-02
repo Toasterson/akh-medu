@@ -13,11 +13,9 @@ use serde::{Deserialize, Serialize};
 use crate::engine::Engine;
 use crate::symbol::SymbolId;
 
-use super::causal::CausalManager;
-use super::counterfactual::PredictionTracker;
-use super::mcts::{MctsConfig, MctsPlanner, MctsReflection, MctsResult};
+use super::mcts::MctsResult;
 use super::plan::{Plan, PlanStatus, PlanStep, StepStatus};
-use super::state_value::{AgentState, Reward, ValueFunction, encode_state};
+use super::state_value::{AgentState, Reward, ValueFunction};
 use super::tool::ToolInput;
 
 // ═══════════════════════════════════════════════════════════════════════

@@ -455,9 +455,7 @@ impl NarrativeGrammar {
                 let pred_1p = morpho::first_person_predicate(&pred_raw);
 
                 // For "is a" predicates, insert the article if needed.
-                if pred_1p.starts_with("am a ")
-                    || pred_1p.starts_with("am an ")
-                    || pred_1p == "am"
+                if pred_1p.starts_with("am a ") || pred_1p.starts_with("am an ") || pred_1p == "am"
                 {
                     if pred_1p == "am" {
                         Ok(format!("I am {obj_name}."))
@@ -751,7 +749,13 @@ mod tests {
             "double conjunction in: {result}"
         );
         // The final form should be: "I am Akh, powered by Akh-Medu, and have reasoning."
-        assert!(result.contains("have reasoning"), "missing have-clause in: {result}");
-        assert!(result.contains("and have reasoning"), "Oxford comma join should produce 'and have': {result}");
+        assert!(
+            result.contains("have reasoning"),
+            "missing have-clause in: {result}"
+        );
+        assert!(
+            result.contains("and have reasoning"),
+            "Oxford comma join should produce 'and have': {result}"
+        );
     }
 }

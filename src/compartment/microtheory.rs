@@ -484,8 +484,8 @@ impl ContextAncestryCache {
 mod tests {
     use super::*;
     use crate::engine::EngineConfig;
-    use crate::vsa::Dimension;
     use crate::symbol::SymbolKind;
+    use crate::vsa::Dimension;
 
     fn test_engine() -> Engine {
         Engine::new(EngineConfig {
@@ -632,16 +632,12 @@ mod tests {
 
         // Parent context: dog is-a mammal
         engine
-            .add_triple(
-                &Triple::new(dog, is_a, mammal).with_compartment("parent-ctx".into()),
-            )
+            .add_triple(&Triple::new(dog, is_a, mammal).with_compartment("parent-ctx".into()))
             .unwrap();
 
         // Child context: dog is-a pet
         engine
-            .add_triple(
-                &Triple::new(dog, is_a, pet).with_compartment("child-ctx".into()),
-            )
+            .add_triple(&Triple::new(dog, is_a, pet).with_compartment("child-ctx".into()))
             .unwrap();
 
         // Query in child context should see both triples
@@ -719,12 +715,8 @@ mod tests {
             .resolve_or_create_relation("ctx:specializes")
             .unwrap();
 
-        let root = engine
-            .create_symbol(SymbolKind::Entity, "root")
-            .unwrap();
-        let child = engine
-            .create_symbol(SymbolKind::Entity, "child")
-            .unwrap();
+        let root = engine.create_symbol(SymbolKind::Entity, "root").unwrap();
+        let child = engine.create_symbol(SymbolKind::Entity, "child").unwrap();
         engine
             .add_triple(&Triple::new(child.id, spec, root.id))
             .unwrap();

@@ -84,10 +84,7 @@ impl GrammarRegistry {
             "narrative".into(),
             Box::new(narrative::NarrativeGrammar::new()),
         );
-        grammars.insert(
-            "rust-gen".into(),
-            Box::new(rust_gen::RustCodeGrammar),
-        );
+        grammars.insert("rust-gen".into(), Box::new(rust_gen::RustCodeGrammar));
 
         Self {
             grammars,

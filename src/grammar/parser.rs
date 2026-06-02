@@ -285,7 +285,17 @@ fn try_conditional(input: &str, tokens: &[Token], lexicon: &Lexicon) -> Option<A
 /// Split conditional body into condition and consequent parts.
 fn split_conditional<'a>(input: &'a str, _lexicon: &Lexicon) -> Option<(&'a str, &'a str)> {
     // Try splitting at known delimiters: "then", "то", "entonces", "alors", comma
-    let delimiters = [", then ", " then ", ",then ", ", то ", " то ", ", entonces ", " entonces ", ", alors ", " alors "];
+    let delimiters = [
+        ", then ",
+        " then ",
+        ",then ",
+        ", то ",
+        " то ",
+        ", entonces ",
+        " entonces ",
+        ", alors ",
+        " alors ",
+    ];
     for delim in &delimiters {
         if let Some(pos) = input.to_lowercase().find(delim) {
             let cond = &input[..pos];
