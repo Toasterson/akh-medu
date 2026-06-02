@@ -1349,7 +1349,7 @@ mod tests {
             ..ConsolidationConfig::default()
         };
 
-        let result = consolidate(&mut wm, &engine, &goals, &config, &predicates, 5).unwrap();
+        let result = consolidate(&mut wm, &engine, &goals, &config, &predicates, 5, None).unwrap();
 
         // Both entries evicted, neither persisted as episodes.
         assert_eq!(result.entries_persisted, 0);
@@ -1404,7 +1404,7 @@ mod tests {
             ..ConsolidationConfig::default()
         };
 
-        let result = consolidate(&mut wm, &engine, &goals, &config, &predicates, 5).unwrap();
+        let result = consolidate(&mut wm, &engine, &goals, &config, &predicates, 5, None).unwrap();
 
         assert_eq!(result.entries_persisted, 1);
         assert_eq!(result.episodes_created.len(), 1);
@@ -1494,7 +1494,7 @@ mod tests {
         let goal_sym = engine.resolve_or_create_entity("goal:my_goal").unwrap();
         index_cycle_episode(&engine, &predicates, 5, "my goal", Some(goal_sym), "search", "advanced").unwrap();
 
-        let episodes = recall_episodes(&engine, &[goal_sym], &predicates, 5).unwrap();
+        let episodes = recall_episodes(&engine, &[goal_sym], &predicates, 5, None).unwrap();
         assert_eq!(episodes.len(), 1);
         assert!(episodes[0].summary.contains("my goal") || episodes[0].summary.contains('5'));
     }
