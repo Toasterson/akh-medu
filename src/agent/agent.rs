@@ -33,6 +33,7 @@ use super::memory::{
     restore_session_summary,
 };
 use super::ooda::{self, DecisionImpasse, OodaCycleResult};
+use super::vsa_decide::DecideMode;
 use super::plan::{self, Plan, PlanStatus};
 use super::priority_reasoning::Audience;
 use super::project::{
@@ -660,11 +661,20 @@ impl Agent {
         Ok(id)
     }
 
-    /// Run a single OODA cycle.
+    /// Run a single OODA cycle using the default (LLM-driven) decide mode.
     ///
     /// Also triggers plan-aware execution (advances plan steps), periodic
     /// reflection, auto-decomposition of stalled goals, and auto-consolidation.
     pub fn run_cycle(&mut self) -> AgentResult<OodaCycleResult> {
+        self.run_cycle_with_mode(DecideMode::default())
+    }
+
+    /// Run a single OODA cycle with the specified [`DecideMode`].
+    ///
+    /// Use [`DecideMode::VsaNative`] for the fast VSA-native path (100-1000×
+    /// faster than the LLM-driven path), or [`DecideMode::LlmDriven`] for the
+    /// heuristic-enhanced legacy path.
+    pub fn run_cycle_with_mode(&mut self, mode: DecideMode) -> AgentResult<OodaCycleResult> {
         if goal::active_goals(&self.goals).is_empty() {
             return Err(AgentError::NoGoals);
         }
@@ -692,7 +702,7 @@ impl Agent {
             }
         }
 
-        let result = ooda::run_ooda_cycle(self)?;
+        let result = ooda::run_ooda_cycle_with_mode(self, mode)?;
 
         // Advance plan tracking based on the cycle result.
         let goal_id = result.decision.goal_id;

@@ -81,6 +81,7 @@ pub mod tool_graph;
 pub mod tool_manifest;
 pub mod tool_semantics;
 pub mod tools;
+pub mod vsa_decide;
 pub mod trigger;
 pub mod vsa_rl;
 pub mod watch;
@@ -231,6 +232,7 @@ pub use synthesize::NarrativeSummary;
 pub use temporal_experience::TemporalExperience;
 pub use tool::{Tool, ToolInput, ToolOutput, ToolRegistry, ToolSignature};
 pub use tool_graph::{ToolGraphPredicates, ToolGraphRegistrar};
+pub use vsa_decide::{DecideMode, VsaDecideConfig, VsaDecideDiagnostics};
 pub use tool_manifest::{Capability, DangerInfo, DangerLevel, ToolManifest, ToolSource};
 pub use trigger::{Trigger, TriggerAction, TriggerCondition, TriggerStore};
 pub use watch::{

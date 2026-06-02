@@ -193,3 +193,7 @@ harness = false
 [[bench]]
 name = "vsa_rl_cycles"
 harness = false
+
+[[bench]]
+name = "vsa_decide"
+harness = false

@@ -741,6 +741,13 @@ pub struct AgentRunCycleParams {
     #[schemars(description = "Target workspace (default: \"default\")")]
     #[serde(default = "default_workspace")]
     pub workspace: String,
+    #[schemars(
+        description = "Decide mode: \"vsa_native\" for pure VSA similarity ranking \
+                       (100-1000× faster) or \"llm_driven\" for heuristic-enhanced \
+                       VSA scoring (default)."
+    )]
+    #[serde(default)]
+    pub mode: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -2761,7 +2768,7 @@ impl AkhMcpServer {
 
     #[tool(
         name = "agent_run_cycle",
-        description = "Run a single OODA cycle (Observe → Orient → Decide → Act) instead of the full agent loop. Returns detailed cycle results. Agent must have active goals."
+        description = "Run a single OODA cycle (Observe → Orient → Decide → Act) instead of the full agent loop. Returns detailed cycle results. Agent must have active goals. Accepts optional mode: \"vsa_native\" for pure VSA similarity ranking (100-1000× faster) or \"llm_driven\" for the legacy heuristic path."
     )]
     async fn agent_run_cycle(
         &self,
@@ -2769,16 +2776,26 @@ impl AkhMcpServer {
     ) -> Result<CallToolResult, McpError> {
         let agent = self.state.get_agent(&params.workspace).await?;
 
+        let mode = params
+            .mode
+            .as_deref()
+            .and_then(crate::agent::vsa_decide::DecideMode::from_str)
+            .unwrap_or_default();
+
         let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
             let mut agent = agent.lock().unwrap_or_else(|e| {
                 tracing::warn!("agent mutex was poisoned; recovering — workspace isolation is per-Arc<Mutex<Agent>>");
                 e.into_inner()
             });
-            let cycle = agent.run_cycle().map_err(|e| format!("{e}"))?;
+            let cycle = agent.run_cycle_with_mode(mode).map_err(|e| format!("{e}"))?;
             let _ = agent.persist_session();
 
+            let mode_label = match mode {
+                crate::agent::vsa_decide::DecideMode::VsaNative => "vsa_native",
+                crate::agent::vsa_decide::DecideMode::LlmDriven => "llm_driven",
+            };
             let lines = vec![
-                format!("Cycle #{}", cycle.cycle_number),
+                format!("Cycle #{} [mode={}]", cycle.cycle_number, mode_label),
                 format!("Observation: {:?}", cycle.observation),
                 format!("Orientation: {:?}", cycle.orientation),
                 format!("Decision: {:?}", cycle.decision),
