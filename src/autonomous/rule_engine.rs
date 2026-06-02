@@ -1097,9 +1097,11 @@ mod tests {
     fn parent_child_inverse_self_loop_blocked() {
         let engine = test_engine();
         // deity parent-of deity — parent-child-inverse rule must NOT produce deity child-of deity.
-        engine
-            .ingest_label_triples(&[("deity".into(), "parent-of".into(), "deity".into(), 0.9)])
-            .unwrap();
+        // The engine-level self-referential-triple guard (PR #206/#187) now rejects this
+        // self-loop at ingest, which is a *stronger* guarantee than the rule-engine check;
+        // tolerate the rejection (nothing is inserted) and still assert no self-loop is derived.
+        let _ = engine
+            .ingest_label_triples(&[("deity".into(), "parent-of".into(), "deity".into(), 0.9)]);
 
         let re = RuleEngine::new(RuleEngineConfig::default()).with_rules(RuleSet::builtin());
         let result = re.run(&engine).unwrap();

@@ -528,7 +528,7 @@ pub fn build_dialogue_prompt(
     context: Option<&str>,
     kg_context: Option<&str>,
 ) -> String {
-    build_dialogue_prompt_with_kg(act, persona_name, traits, context, None)
+    build_dialogue_prompt_with_kg(act, persona_name, traits, context, kg_context)
 }
 
 /// Build a dialogue-act prompt with an optional KG context block.

@@ -530,7 +530,8 @@ mod tests {
         let reg = SeedRegistry::bundled();
         let ids: Vec<String> = reg.list().iter().map(|p| p.id.clone()).collect();
         let reports = reg.apply_all(&ids, &engine).unwrap();
-        assert_eq!(reports.len(), 6);
+        // 7 bundled packs after PR #213 added the `ennead` pack.
+        assert_eq!(reports.len(), 7);
 
         let total: usize = reports.iter().map(|r| r.triples_applied).sum();
         assert!(
