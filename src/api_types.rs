@@ -77,7 +77,7 @@ pub struct AgentRunRequest {
 }
 
 fn default_max_cycles() -> usize {
-    10
+    50
 }
 
 /// Response for `POST /workspaces/{ws}/agent/run`.

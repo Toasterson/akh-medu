@@ -1934,14 +1934,10 @@ fn evaluate_goal_progress(
                 "VSA interference: tool={tool_interference:.3}, KG={kg_interference:.3} (threshold={completion_threshold:.2})",
             ),
         }
-    } else if !tool_output.symbols_involved.is_empty() {
-        GoalProgress::Advanced {
-            detail: format!(
-                "Tool produced {} symbols, weak interference: {best_interference:.3}.",
-                tool_output.symbols_involved.len()
-            ),
-        }
     } else {
+        // Below advancement threshold: treat as no-progress regardless of symbol count.
+        // Without this, any tool output with symbols resets the consecutive-empty counter
+        // and prevents the early-exit from firing on sparse graphs.
         GoalProgress::NoChange
     }
 }
@@ -2014,14 +2010,9 @@ fn evaluate_goal_progress_keyword_fallback(
                 kg_ratio * 100.0,
             ),
         }
-    } else if !tool_output.symbols_involved.is_empty() {
-        GoalProgress::Advanced {
-            detail: format!(
-                "Tool produced {} symbols, no criteria keywords matched yet.",
-                tool_output.symbols_involved.len()
-            ),
-        }
     } else {
+        // No keywords matched: treat as no-progress so the consecutive-empty
+        // early-exit fires correctly on sparse graphs.
         GoalProgress::NoChange
     }
 }

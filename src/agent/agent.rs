@@ -71,6 +71,12 @@ pub struct AgentConfig {
     pub sleep: super::sleep::SleepConfig,
     /// Directed curiosity settings (Phase 11j).
     pub curiosity: super::curiosity::DirectedCuriosityConfig,
+    /// Maximum consecutive OODA cycles with no goal progress before stopping early (default: 4).
+    ///
+    /// After this many back-to-back `NoChange` cycles the loop terminates without
+    /// error, yielding the best findings so far.  This prevents the agent from
+    /// spinning against a sparse knowledge graph.  Set to 0 to disable.
+    pub max_empty_cycles: usize,
 }
 
 impl Default for AgentConfig {
@@ -87,6 +93,7 @@ impl Default for AgentConfig {
             chunking: ChunkingConfig::default(),
             sleep: super::sleep::SleepConfig::default(),
             curiosity: super::curiosity::DirectedCuriosityConfig::default(),
+            max_empty_cycles: 4,
         }
     }
 }
@@ -986,10 +993,17 @@ impl Agent {
     }
 
     /// Run cycles until all goals are complete or max_cycles is reached.
+    ///
+    /// Early-exit: if `config.max_empty_cycles > 0` and that many consecutive
+    /// cycles all return `NoChange`, the loop stops without error so the caller
+    /// can synthesize the best available findings rather than spinning against
+    /// a sparse graph.
     pub fn run_until_complete(&mut self) -> AgentResult<Vec<OodaCycleResult>> {
         let mut results = Vec::new();
         let max = self.config.max_cycles;
+        let max_empty = self.config.max_empty_cycles;
         let mut current_cycles: usize = 0;
+        let mut consecutive_empty: usize = 0;
 
         loop {
             // Enforce the cycle cap before doing any work.
@@ -1007,8 +1021,29 @@ impl Agent {
             }
 
             let result = ooda::run_ooda_cycle(self)?;
+
+            // Track consecutive no-progress cycles.
+            match result.action_result.goal_progress {
+                ooda::GoalProgress::NoChange => {
+                    consecutive_empty += 1;
+                }
+                _ => {
+                    consecutive_empty = 0;
+                }
+            }
+
             results.push(result);
             current_cycles += 1;
+
+            // Early exit when the graph is yielding nothing new.
+            if max_empty > 0 && consecutive_empty >= max_empty {
+                tracing::debug!(
+                    consecutive_empty,
+                    "OODA early exit: {} consecutive no-progress cycles",
+                    consecutive_empty
+                );
+                break;
+            }
 
             // Auto-decompose stalled goals.
             self.decompose_stalled_goals();
