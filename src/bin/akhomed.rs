@@ -1394,6 +1394,8 @@ async fn start_daemon_handler(
         active_goals: 0,
         kg_symbols: 0,
         kg_triples: 0,
+        knowledge_density: None,
+        last_compaction_at: None,
     }));
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
@@ -1473,6 +1475,8 @@ async fn daemon_status_handler(
             active_goals: 0,
             kg_symbols: 0,
             kg_triples: 0,
+            knowledge_density: None,
+            last_compaction_at: None,
         }))
     }
 }
@@ -3535,6 +3539,8 @@ async fn main() {
                         active_goals: 0,
                         kg_symbols: 0,
                         kg_triples: 0,
+                        knowledge_density: None,
+                        last_compaction_at: None,
                     }));
                     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
                     let daemon_status = Arc::clone(&status);
