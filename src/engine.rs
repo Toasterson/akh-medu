@@ -653,54 +653,62 @@ impl Engine {
 
     /// Re-encode a symbol's hypervector using its relational neighborhood.
     ///
-    /// Reads all outgoing triples from the KG and creates a grounded vector
-    /// that captures the symbol's structural role (holographic reduced
-    /// representation). Updates the symbol's entry in item memory.
+    /// Uses existing ItemMemory vectors for neighbors and predicates so that
+    /// the grounded result captures actual KG structure. Blends the symbol's
+    /// current vector with its neighborhood bundle via probabilistic bit
+    /// selection for reproducible convergence.
     ///
-    /// Returns the number of relations used for grounding (0 = no change).
+    /// Returns the number of neighbor edges used for grounding (0 = no change).
     pub fn ground_symbol(&self, symbol: SymbolId) -> AkhResult<usize> {
-        let relations: Vec<(SymbolId, SymbolId)> = self
-            .triples_from(symbol)
-            .iter()
-            .map(|t| (t.predicate, t.object))
-            .collect();
+        let outgoing = self.triples_from(symbol).len();
+        let incoming = self.triples_to(symbol).len();
+        let n_edges = outgoing + incoming;
 
-        if relations.is_empty() {
+        if n_edges == 0 {
             return Ok(0);
         }
 
-        let grounded = crate::vsa::encode::encode_with_neighborhood(
-            &self.ops, symbol, &relations,
+        let config = crate::vsa::grounding::GroundingConfig::default();
+        let grounded = crate::vsa::grounding::ground_symbol(
+            symbol,
+            self,
+            &self.ops,
+            &self.item_memory,
+            &config,
         )?;
         self.item_memory.insert(symbol, grounded);
-        Ok(relations.len())
+        Ok(n_edges)
     }
 
-    /// Re-encode all symbols that have outgoing relations in the KG.
+    /// Re-encode all symbols using iterative neighborhood aggregation.
+    ///
+    /// Delegates to `vsa::grounding::ground_all` which re-uses existing
+    /// ItemMemory vectors rather than creating fresh random seeds per call,
+    /// correctly propagating KG structure into hypervector space.
     ///
     /// Returns `(grounded_count, total_relations_used)`.
     pub fn ground_all_symbols(&self) -> AkhResult<(usize, usize)> {
-        let all = self.registry.all();
-        let mut grounded = 0usize;
-        let mut total_rels = 0usize;
+        let config = crate::vsa::grounding::GroundingConfig::default();
+        let result =
+            crate::vsa::grounding::ground_all(self, &self.ops, &self.item_memory, &config)?;
 
-        for meta in &all {
-            let n = self.ground_symbol(meta.id)?;
-            if n > 0 {
-                grounded += 1;
-                total_rels += n;
-            }
+        let total_rels = self.knowledge_graph.triple_count();
+
+        if total_rels == 0 {
+            tracing::warn!(
+                symbols = result.symbols_updated,
+                "ground_all_symbols: KG has 0 triples — grounding produced no relational structure"
+            );
         }
 
-        // Rebuild the HNSW index to remove stale entries accumulated from
-        // re-grounding. Without this, similarity_search returns uniform 1.0
-        // because old random vectors remain in the index alongside the new
-        // grounded ones.
-        if grounded > 0 {
+        // Rebuild the HNSW index after re-grounding to remove stale entries.
+        // Without this, similarity_search returns uniform 1.0 because old
+        // random vectors remain alongside the newly grounded ones.
+        if result.symbols_updated > 0 {
             self.item_memory.rebuild_hnsw();
         }
 
-        Ok((grounded, total_rels))
+        Ok((result.symbols_updated, total_rels))
     }
 
     // -----------------------------------------------------------------------

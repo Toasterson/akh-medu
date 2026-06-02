@@ -157,12 +157,23 @@ impl SparqlStore {
     /// Retrieve all triples from the SPARQL store as in-memory Triple objects.
     /// Used to restore the KnowledgeGraph on engine restart.
     ///
+    /// Queries both the default graph and all named compartment graphs using a
+    /// SPARQL UNION so that skill/compartment triples (stored in named graphs
+    /// via their compartment_id) are also restored. Without the UNION, only
+    /// default-graph triples are returned and the in-memory KG is empty after
+    /// restart, causing VSA grounding to find zero relations.
+    ///
     /// Note: confidence values are not currently stored in SPARQL, so restored
     /// triples will have default confidence of 1.0.
-    // TODO: Store confidence via reification or named graphs to preserve across restarts.
     pub fn all_triples(&self) -> GraphResult<Vec<Triple>> {
+        // The UNION includes default-graph triples ({ ?s ?p ?o }) and all
+        // named-graph triples (GRAPH ?g { ?s ?p ?o }).  Deduplication is not
+        // required because a triple is only ever inserted into one graph
+        // (either DefaultGraph or a specific compartment named graph).
         let results = SparqlEvaluator::new()
-            .parse_query("SELECT ?s ?p ?o WHERE { ?s ?p ?o }")
+            .parse_query(
+                "SELECT ?s ?p ?o WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } }",
+            )
             .map_err(|e| GraphError::Sparql {
                 message: format!("SPARQL parse failed: {e}"),
             })?
@@ -285,9 +296,11 @@ impl SparqlStore {
         }
     }
 
-    /// Get the number of triples in the store.
+    /// Get the number of triples in the store (all graphs).
     pub fn len(&self) -> GraphResult<usize> {
-        let results = self.query_select("SELECT (COUNT(*) AS ?count) WHERE { ?s ?p ?o }")?;
+        let results = self.query_select(
+            "SELECT (COUNT(*) AS ?count) WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } }",
+        )?;
         if let Some(row) = results.first()
             && let Some((_, val)) = row.first()
         {
