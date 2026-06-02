@@ -55,6 +55,8 @@ pub mod infer;
 pub mod library;
 #[cfg(feature = "mcp")]
 pub mod mcp;
+#[cfg(feature = "daemon")]
+pub mod upstream_client;
 pub mod message;
 pub mod nlu;
 pub mod partition;

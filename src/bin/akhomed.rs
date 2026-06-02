@@ -3930,11 +3930,13 @@ async fn main() {
             StreamableHttpService, session::local::LocalSessionManager,
         };
 
+        let upstreams = state.config.read().await.upstreams.clone();
         let mcp_state = Arc::new(akh_medu::mcp::McpState::new(
             paths.clone(),
             Arc::clone(&state.workspaces),
             Arc::clone(&state.agents),
             Arc::clone(&state.psyche_snapshots),
+            upstreams,
         ));
 
         let mcp_service = StreamableHttpService::new(

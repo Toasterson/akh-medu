@@ -1,0 +1,316 @@
+//! Lightweight synchronous HTTP-MCP client for calling upstream tool endpoints.
+//!
+//! Used by the `import_anima_project` and `link_seshat_doc` MCP tools to pull
+//! context from Anima (project management) and Seshat (document corpus) into the
+//! local knowledge graph.
+//!
+//! Implements the MCP Streamable HTTP transport (2025-03-26): sends an initialize
+//! request to establish a session, then calls the requested tool. All I/O uses
+//! `ureq` (blocking) and must be invoked from within `tokio::task::spawn_blocking`.
+//!
+//! # Example
+//!
+//! ```no_run
+//! use akh_medu::config::UpstreamEndpointConfig;
+//! use akh_medu::upstream_client::UpstreamMcpClient;
+//!
+//! let cfg = UpstreamEndpointConfig { url: "http://anima.local:4100".into(), auth_header: None };
+//! let client = UpstreamMcpClient::new(&cfg);
+//! let text = client.call_tool_text("list_work_items", serde_json::json!({"project_id": "abc"})).unwrap();
+//! ```
+
+use std::time::Duration;
+
+use miette::Diagnostic;
+use serde_json::Value;
+use thiserror::Error;
+
+use crate::config::UpstreamEndpointConfig;
+
+// ---------------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------------
+
+/// Errors from upstream MCP client operations.
+#[derive(Debug, Error, Diagnostic)]
+pub enum UpstreamError {
+    #[error("upstream request failed: {message}")]
+    #[diagnostic(
+        code(akh::upstream::request),
+        help("Check that the upstream service is running and the URL is correct.")
+    )]
+    Request { message: String },
+
+    #[error("upstream returned RPC error {code}: {message}")]
+    #[diagnostic(
+        code(akh::upstream::rpc_error),
+        help("The upstream MCP tool call was rejected. Check tool name and arguments.")
+    )]
+    RpcError { code: i64, message: String },
+
+    #[error("failed to parse upstream response: {message}")]
+    #[diagnostic(
+        code(akh::upstream::parse),
+        help("The upstream returned an unexpected response format.")
+    )]
+    Parse { message: String },
+
+    #[error("upstream not configured for \"{service}\"")]
+    #[diagnostic(
+        code(akh::upstream::not_configured),
+        help(
+            "Add [upstreams.{service}] with a url field (and optional auth_header) \
+             to akh-medu config.toml."
+        )
+    )]
+    NotConfigured { service: &'static str },
+}
+
+pub type UpstreamResult<T> = Result<T, UpstreamError>;
+
+// ---------------------------------------------------------------------------
+// Client
+// ---------------------------------------------------------------------------
+
+/// Synchronous MCP client for a single upstream endpoint.
+///
+/// Wraps `ureq` and implements the two-step MCP handshake:
+/// 1. `initialize` — establishes a session and extracts the `Mcp-Session-Id` header.
+/// 2. `tools/call` — invokes the requested tool with that session ID.
+///
+/// If initialization fails (e.g. the upstream does not require it), the client
+/// falls back to a direct tool call without a session ID.
+pub struct UpstreamMcpClient {
+    base_url: String,
+    auth_header: Option<String>,
+    agent: ureq::Agent,
+}
+
+impl UpstreamMcpClient {
+    /// Create a new client from an [`UpstreamEndpointConfig`].
+    pub fn new(config: &UpstreamEndpointConfig) -> Self {
+        let agent = ureq::AgentBuilder::new()
+            .timeout(Duration::from_secs(30))
+            .build();
+        Self {
+            base_url: config.url.trim_end_matches('/').to_string(),
+            auth_header: config.resolved_auth(),
+            agent,
+        }
+    }
+
+    /// Build a POST request to `{base_url}/mcp` with common MCP headers.
+    fn post_mcp(&self) -> ureq::Request {
+        let endpoint = format!("{}/mcp", self.base_url);
+        let mut req = self
+            .agent
+            .post(&endpoint)
+            .set("Content-Type", "application/json")
+            .set("Accept", "application/json, text/event-stream");
+        if let Some(ref auth) = self.auth_header {
+            req = req.set("Authorization", auth);
+        }
+        req
+    }
+
+    /// Send a JSON-RPC payload and return `(session_id_header, parsed_body)`.
+    fn send_rpc(
+        &self,
+        req: ureq::Request,
+        payload: Value,
+    ) -> UpstreamResult<(Option<String>, Value)> {
+        let resp = req.send_json(payload).map_err(|e| match e {
+            ureq::Error::Status(code, resp) => UpstreamError::Request {
+                message: format!(
+                    "HTTP {code}: {}",
+                    resp.into_string()
+                        .unwrap_or_default()
+                        .chars()
+                        .take(256)
+                        .collect::<String>()
+                ),
+            },
+            ureq::Error::Transport(t) => UpstreamError::Request {
+                message: format!("transport error: {t}"),
+            },
+        })?;
+
+        let session_id = resp.header("Mcp-Session-Id").map(str::to_owned);
+        let content_type = resp.header("Content-Type").unwrap_or("").to_owned();
+        let body = resp.into_string().map_err(|e| UpstreamError::Parse {
+            message: format!("reading response body: {e}"),
+        })?;
+
+        let json = if content_type.contains("text/event-stream") {
+            parse_sse_last_data(&body)?
+        } else {
+            serde_json::from_str(&body).map_err(|e| UpstreamError::Parse {
+                message: format!(
+                    "{e}: {}",
+                    body.chars().take(256).collect::<String>()
+                ),
+            })?
+        };
+
+        Ok((session_id, json))
+    }
+
+    /// Call a named tool on the upstream MCP endpoint.
+    ///
+    /// Returns the `content` array from the `CallToolResult`, or an empty vec if
+    /// the result contained no content items.
+    pub fn call_tool(&self, tool_name: &str, arguments: Value) -> UpstreamResult<Vec<Value>> {
+        // Step 1: initialize session.
+        let init_payload = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-03-26",
+                "capabilities": {},
+                "clientInfo": {
+                    "name": "akhomed-bridge",
+                    "version": env!("CARGO_PKG_VERSION")
+                }
+            }
+        });
+
+        let session_id = match self.send_rpc(self.post_mcp(), init_payload) {
+            Ok((sid, json)) => {
+                // Non-fatal RPC errors during init are ignored; proceed anyway.
+                if !json["error"].is_object() {
+                    sid
+                } else {
+                    tracing::debug!(
+                        error = %json["error"],
+                        "upstream init returned RPC error; proceeding without session"
+                    );
+                    None
+                }
+            }
+            Err(e) => {
+                // Network errors during init are non-fatal; attempt direct call.
+                tracing::debug!(
+                    error = %e,
+                    "upstream init request failed; attempting direct tool call"
+                );
+                None
+            }
+        };
+
+        // Step 2: call the tool.
+        let tool_payload = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": tool_name,
+                "arguments": arguments
+            }
+        });
+
+        let mut req = self.post_mcp();
+        if let Some(sid) = session_id.as_deref() {
+            req = req.set("Mcp-Session-Id", sid);
+        }
+
+        let (_, result_json) = self.send_rpc(req, tool_payload)?;
+        check_rpc_error(&result_json)?;
+
+        let content = result_json["result"]["content"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+
+        Ok(content)
+    }
+
+    /// Call a tool and return the concatenated text from all `text`-type content items.
+    pub fn call_tool_text(&self, tool_name: &str, arguments: Value) -> UpstreamResult<String> {
+        let content = self.call_tool(tool_name, arguments)?;
+        Ok(content
+            .iter()
+            .filter_map(|c| c["text"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n"))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+fn check_rpc_error(json: &Value) -> UpstreamResult<()> {
+    if json["error"].is_object() {
+        Err(UpstreamError::RpcError {
+            code: json["error"]["code"].as_i64().unwrap_or(-1),
+            message: json["error"]["message"]
+                .as_str()
+                .unwrap_or("unknown RPC error")
+                .to_string(),
+        })
+    } else {
+        Ok(())
+    }
+}
+
+/// Extract the last `data:` line from an SSE stream body and parse it as JSON.
+fn parse_sse_last_data(body: &str) -> UpstreamResult<Value> {
+    let last_data = body
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .filter(|d| *d != "[DONE]")
+        .last()
+        .ok_or_else(|| UpstreamError::Parse {
+            message: "no data events found in SSE stream".to_string(),
+        })?;
+
+    serde_json::from_str(last_data).map_err(|e| UpstreamError::Parse {
+        message: format!("SSE data JSON parse error: {e}"),
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_sse_last_data_extracts_last_event() {
+        let sse = "data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\ndata: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]}}\n";
+        let val = parse_sse_last_data(sse).unwrap();
+        assert_eq!(val["result"]["content"][0]["text"], "ok");
+    }
+
+    #[test]
+    fn parse_sse_no_data_returns_error() {
+        let sse = "event: done\n\n";
+        assert!(parse_sse_last_data(sse).is_err());
+    }
+
+    #[test]
+    fn parse_sse_skips_done_sentinel() {
+        let sse = "data: {\"ok\":true}\ndata: [DONE]\n";
+        let val = parse_sse_last_data(sse).unwrap();
+        assert_eq!(val["ok"], true);
+    }
+
+    #[test]
+    fn check_rpc_error_passes_success() {
+        let ok = serde_json::json!({"jsonrpc":"2.0","id":1,"result":{}});
+        assert!(check_rpc_error(&ok).is_ok());
+    }
+
+    #[test]
+    fn check_rpc_error_returns_err() {
+        let err = serde_json::json!({"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"Method not found"}});
+        let e = check_rpc_error(&err).unwrap_err();
+        match e {
+            UpstreamError::RpcError { code, .. } => assert_eq!(code, -32601),
+            other => panic!("unexpected: {other}"),
+        }
+    }
+}
