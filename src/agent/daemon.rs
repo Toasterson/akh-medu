@@ -79,6 +79,11 @@ pub struct DaemonConfig {
     /// Runs bridge encoder alignment training during idle periods.
     /// Only starts after sufficient training data has accumulated.
     pub bridge_training_interval: Duration,
+    /// OpenClaw journal sync interval (default: 24 hours).
+    ///
+    /// Fetches new daily memory journals from OpenClaw and persists them
+    /// as episodic memories. Only runs when `OPENCLAW_API_KEY` is set.
+    pub openclaw_sync_interval: Duration,
     /// Maximum OODA cycles (0 = unlimited).
     pub max_cycles: usize,
 }
@@ -99,7 +104,8 @@ impl Default for DaemonConfig {
             sleep_cycle_interval: Duration::from_secs(3600),
             trigger_evaluation_interval: Duration::from_secs(15),
             knowledge_extraction_interval: Duration::from_secs(2700), // 45 min
-            bridge_training_interval: Duration::from_secs(7200),      // 2 hours
+            bridge_training_interval: Duration::from_secs(7200), // 2 hours
+            openclaw_sync_interval: Duration::from_secs(86400), // 24 hours
             max_cycles: 0,
         }
     }
@@ -228,6 +234,7 @@ impl AgentDaemon {
         let mut trigger_tick = interval(self.config.trigger_evaluation_interval);
         let mut extraction_tick = interval(self.config.knowledge_extraction_interval);
         let mut bridge_training_tick = interval(self.config.bridge_training_interval);
+        let mut openclaw_sync_tick = interval(self.config.openclaw_sync_interval);
 
         tokio::task::block_in_place(|| {
             self.lock_agent().sink().emit(&AkhMessage::system(
@@ -310,6 +317,9 @@ impl AgentDaemon {
                     // internally; block_in_place covers only the brief mutex
                     // acquisition at the start.
                     tokio::task::block_in_place(|| self.run_bridge_training());
+                }
+                _ = openclaw_sync_tick.tick() => {
+                    self.run_openclaw_sync();
                 }
                 _ = self.wait_for_shutdown() => {
                     tokio::task::block_in_place(|| {
@@ -1020,6 +1030,60 @@ impl AgentDaemon {
         });
     }
 
+    fn run_openclaw_sync(&self) {
+        use super::memory_sync::{MemorySyncConfig, sync_openclaw_journals};
+        use super::openclaw::OpenClawConfig;
+
+        // Load config from env — if the key is absent, skip silently.
+        let Some(openclaw_cfg) = OpenClawConfig::from_env() else {
+            tracing::debug!("daemon: OPENCLAW_API_KEY not set, skipping journal sync");
+            return;
+        };
+
+        let (engine, predicates, cycle_count) = {
+            let agent = self.agent.lock().unwrap();
+            (
+                agent.engine.clone(),
+                agent.predicates.clone(),
+                agent.cycle_count,
+            )
+        };
+        // Agent lock released — HTTP I/O runs without blocking other handlers.
+
+        let sync_cfg = MemorySyncConfig::default();
+        match sync_openclaw_journals(
+            &engine,
+            &openclaw_cfg,
+            &sync_cfg,
+            &predicates,
+            cycle_count as u64,
+        ) {
+            Ok(result) => {
+                if result.journals_fetched > 0 {
+                    if let Ok(agent) = self.agent.lock() {
+                        agent.sink().emit(&AkhMessage::system(format!(
+                            "[daemon:openclaw] fetched {}, ingested {}, skipped {}",
+                            result.journals_fetched, result.ingested, result.skipped,
+                        )));
+                    }
+                }
+                tracing::info!(
+                    fetched = result.journals_fetched,
+                    ingested = result.ingested,
+                    skipped = result.skipped,
+                    "daemon: OpenClaw journal sync complete",
+                );
+                // Persist KG changes after sync.
+                if result.ingested > 0 {
+                    let _ = engine.persist();
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "daemon: OpenClaw journal sync failed");
+            }
+        }
+    }
+
     fn persist(&self) {
         let agent = self.lock_agent();
         if let Err(e) = agent.persist_session() {
@@ -1104,6 +1168,10 @@ mod tests {
         assert_eq!(
             config.knowledge_extraction_interval,
             Duration::from_secs(2700)
+        );
+        assert_eq!(
+            config.openclaw_sync_interval,
+            Duration::from_secs(86400)
         );
         assert_eq!(config.max_cycles, 0);
     }
