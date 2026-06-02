@@ -41,7 +41,19 @@ Today the pipeline is **LLM-as-symbolic-translator** (text ⇄ triples/symbols) 
 
 ---
 
-## Gap 1 — Gemma is not a supported driver (hardwired to Qwen2.5-1.5B)
+> **Update (after integrating the Gemma+Psyche cluster, PRs #180–186):** the integration
+> added Gemma *plumbing* but **not** native Candle Gemma loading. Specifically:
+> a structured psyche→system-prompt serializer (`src/compartment/prompt`), KG/VSA
+> context injection into prompts (`build_kg_context` / `KgContextCache`,
+> `generate_dialogue_with_kg`), an ELIZA-vs-Gemma engine selector + `GemmaBackend`
+> **trait** (`crates/anima-ai/src/gemma.rs`, no concrete impl), a per-agent model
+> manager that routes Gemma inference to an **external Ollama daemon**
+> (`src/agent/ollama.rs`, `ollama pull gemma4:e4b`), plus teacher-QA dataset generation
+> and a LoRA fine-tuning scaffold. So **Gemma is now reachable as a driver via Ollama
+> (HTTP), and the trait seam exists**, but the in-process Candle path is still Qwen-only.
+> Gaps 1 and 2 below are updated accordingly.
+
+## Gap 1 — Gemma is not a *native* (in-process Candle) driver; only an external Ollama path exists
 
 **Observed:** repo-wide there is **zero** `gemma`/`Gemma` support. The Candle backend type is hardwired: `src/nlu/candle_backend.rs:22 use candle_transformers::models::quantized_qwen2::ModelWeights;`. The model file is a hardcoded constant `qwen2.5-1.5b-instruct-q4_k_m.gguf` under `models/llm/` resolved relative to `data_dir` (`candle_backend.rs:74-76, :190`) with **no env override**. The chat template and EOS tokens are Qwen-specific (`<|im_start|>`/`<|im_end|>`, EOS 151643/151645, `candle_backend.rs:~531`). llama-cpp-2 path is likewise documented as Qwen (`llm_translator.rs:3`).
 
@@ -96,7 +108,7 @@ This is the **core** of the goal and the largest gap. The projection machinery e
 
 ## Recommended sequence
 
-1. **Gap 1** — land `LlmBackend` trait (Phase 39a) + Gemma 3 Candle backend (fork candle-transformers if needed) + configurable model path. *Unblocks everything.*
+1. **Gap 1** — a `GemmaBackend` trait + Ollama HTTP driver now exist (PRs #182/#185); the remaining work is a **concrete in-process Candle Gemma impl** behind that trait (fork candle-transformers if the quantized Gemma 3 variant isn't exposed) + a configurable model path, OR formally adopt the Ollama path as the Gemma driver. Reconcile with the `LlmBackend` trait from Phase 39a. *Unblocks everything.*
 2. **Gap 3** — wire `CandleFormatter` into `ask`/`chat` output (cheap win; gives Gemma-driven verbalization immediately).
 3. **Gap 2** — real hidden-state extraction (forked model) → persisted, inference-time `NeuralVsaBridge` with correct dims and a real training signal. *The headline "knowledge → VSA from Gemma calculation space" capability.*
 4. **Gap 4** — controlled-development gate (validation + quarantine compartment) for LLM-proposed knowledge.
