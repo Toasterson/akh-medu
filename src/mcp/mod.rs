@@ -3912,20 +3912,29 @@ impl AkhMcpServer {
                 e.into_inner()
             });
 
-            // Resolve query terms to symbol IDs
+            // Resolve query terms to symbol IDs. Generic words ("recent", "memory",
+            // "events") won't resolve — in that case fall back to temporal recall.
             let query_ids: Vec<crate::symbol::SymbolId> = query_terms
                 .iter()
                 .filter_map(|term| engine.resolve_symbol(term).ok())
                 .collect();
 
-            if query_ids.is_empty() {
-                return Ok("No query terms could be resolved to known symbols.".to_string());
-            }
-
-            let episodes = agent.recall(&query_ids, top_k).map_err(|e| format!("{e}"))?;
+            let (episodes, mode) = if query_ids.is_empty() {
+                // No terms resolved: do a pure recency scan across all episodes.
+                let eps = agent.recall_recent(top_k).map_err(|e| format!("{e}"))?;
+                (eps, "recent")
+            } else {
+                // Symbol-based recall (falls back to recency internally when empty).
+                let eps = agent.recall(&query_ids, top_k).map_err(|e| format!("{e}"))?;
+                (eps, "matched")
+            };
 
             if episodes.is_empty() {
-                return Ok("No matching episodes found.".to_string());
+                return Ok(
+                    "No episodic memories found. The agent may not have run any OODA cycles \
+                     yet, or consolidation has not occurred."
+                        .to_string(),
+                );
             }
 
             let lines: Vec<String> = episodes
@@ -3949,7 +3958,7 @@ impl AkhMcpServer {
                 .collect();
 
             Ok(format!(
-                "Episodes ({}):\n{}",
+                "Episodes [{mode}] ({}):\n{}",
                 episodes.len(),
                 lines.join("\n")
             ))

@@ -29,8 +29,8 @@ use super::resource::{self, EffortIndex, ImprovementHistory};
 use super::watch::{self, Watch, WatchFiring};
 use super::memory::{
     ConsolidationConfig, ConsolidationResult, EpisodicEntry, SessionSummary, WorkingMemory,
-    WorkingMemoryEntry, WorkingMemoryKind, consolidate, generate_session_summary, recall_episodes,
-    restore_session_summary,
+    WorkingMemoryEntry, WorkingMemoryKind, consolidate, generate_session_summary, index_cycle_episode,
+    recall_episodes, recall_recent_episodes, restore_session_summary,
 };
 use super::ooda::{self, DecisionImpasse, OodaCycleResult};
 use super::vsa_decide::DecideMode;
@@ -707,6 +707,35 @@ impl Agent {
 
         let result = ooda::run_ooda_cycle_with_mode(self, mode)?;
 
+        // Index the cycle immediately as a retrievable episode so agent_recall can
+        // surface it without waiting for the WM auto-consolidation threshold.
+        {
+            let goal_id = result.decision.goal_id;
+            let goal_label = self
+                .goals
+                .iter()
+                .find(|g| g.symbol_id == goal_id)
+                .map(|g| g.description.as_str())
+                .unwrap_or("unknown goal");
+            let progress = match &result.action_result.goal_progress {
+                ooda::GoalProgress::Completed => "completed",
+                ooda::GoalProgress::Advanced { .. } => "advanced",
+                ooda::GoalProgress::Failed { .. } => "failed",
+                ooda::GoalProgress::NoChange => "no_change",
+            };
+            if let Err(e) = index_cycle_episode(
+                &self.engine,
+                &self.predicates,
+                self.cycle_count,
+                goal_label,
+                Some(goal_id),
+                &result.decision.chosen_tool,
+                progress,
+            ) {
+                tracing::debug!(cycle = self.cycle_count, error = %e, "failed to index cycle episode");
+            }
+        }
+
         // Advance plan tracking based on the cycle result.
         let goal_id = result.decision.goal_id;
         let key = goal_id.get();
@@ -1119,7 +1148,10 @@ impl Agent {
                 break;
             }
 
-            let result = ooda::run_ooda_cycle(self)?;
+            // Use run_cycle (not ooda::run_ooda_cycle directly) so that episode
+            // indexing, plan tracking, metacognition, and other per-cycle housekeeping
+            // happen on every iteration — not just when the caller uses agent_run_cycle.
+            let result = self.run_cycle()?;
 
             // Track consecutive no-progress cycles.
             match result.action_result.goal_progress {
@@ -1238,6 +1270,14 @@ impl Agent {
     /// Recall episodic memories by query symbols.
     pub fn recall(&self, query: &[SymbolId], top_k: usize) -> AgentResult<Vec<EpisodicEntry>> {
         recall_episodes(&self.engine, query, &self.predicates, top_k)
+    }
+
+    /// Recall the most recent episodic memories without requiring resolved symbols.
+    ///
+    /// Scans all episodes indexed under `episodic_memory` and returns the `top_k`
+    /// most recent. Use this when query terms don't map to known symbols.
+    pub fn recall_recent(&self, top_k: usize) -> AgentResult<Vec<EpisodicEntry>> {
+        recall_recent_episodes(&self.engine, &self.predicates, top_k)
     }
 
     /// Get current goals.
