@@ -246,6 +246,7 @@ impl DaemonSection {
             knowledge_elicitation_interval: ov
                 .knowledge_elicitation_secs
                 .map_or(defaults.knowledge_elicitation_interval, Duration::from_secs),
+            kg_compaction_interval: defaults.kg_compaction_interval,
             max_cycles: self.max_cycles,
         }
     }

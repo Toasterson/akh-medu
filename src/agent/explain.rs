@@ -1161,6 +1161,16 @@ pub fn derivation_kind_prose(kind: &DerivationKind) -> String {
         } => {
             format!("imported from file \"{source_path}\" ({format})")
         }
+        DerivationKind::KgCompaction {
+            scaffolding_removed,
+            total_before,
+            knowledge_density,
+        } => {
+            format!(
+                "KG compaction: removed {scaffolding_removed}/{total_before} scaffolding triples, density {:.1}%",
+                knowledge_density * 100.0
+            )
+        }
     }
 }
 

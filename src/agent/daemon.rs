@@ -92,6 +92,13 @@ pub struct DaemonConfig {
     /// from already-fetched text.  Falls back gracefully when the model file
     /// is absent.
     pub knowledge_elicitation_interval: Duration,
+    /// KG compaction interval (default: 30 min).
+    ///
+    /// Removes episode/agent scaffolding triples that accumulate over time and
+    /// degrade KG query quality. Runs the [`compaction::run_kg_compaction`]
+    /// heuristic on a periodic timer so the graph stays clean without manual
+    /// intervention.
+    pub kg_compaction_interval: Duration,
     /// Maximum OODA cycles (0 = unlimited).
     pub max_cycles: usize,
 }
@@ -115,6 +122,7 @@ impl Default for DaemonConfig {
             bridge_training_interval: Duration::from_secs(7200), // 2 hours
             openclaw_sync_interval: Duration::from_secs(86400), // 24 hours
             knowledge_elicitation_interval: Duration::from_secs(1800), // 30 min
+            kg_compaction_interval: Duration::from_secs(1800), // 30 min
             max_cycles: 0,
         }
     }
@@ -245,6 +253,7 @@ impl AgentDaemon {
         let mut bridge_training_tick = interval(self.config.bridge_training_interval);
         let mut openclaw_sync_tick = interval(self.config.openclaw_sync_interval);
         let mut elicitation_tick = interval(self.config.knowledge_elicitation_interval);
+        let mut kg_compaction_tick = interval(self.config.kg_compaction_interval);
 
         tokio::task::block_in_place(|| {
             self.lock_agent().sink().emit(&AkhMessage::system(
@@ -333,6 +342,9 @@ impl AgentDaemon {
                 }
                 _ = elicitation_tick.tick() => {
                     self.run_knowledge_elicitation_task();
+                }
+                _ = kg_compaction_tick.tick() => {
+                    self.run_kg_compaction();
                 }
                 _ = self.wait_for_shutdown() => {
                     tokio::task::block_in_place(|| {
@@ -1093,6 +1105,52 @@ impl AgentDaemon {
             }
             Err(e) => {
                 tracing::warn!(error = %e, "daemon: OpenClaw journal sync failed");
+            }
+        }
+    }
+
+    /// Run one KG compaction pass: remove episode/agent scaffolding triples.
+    ///
+    /// Releases the agent lock before the scan (CPU-bound) to avoid blocking
+    /// HTTP handlers during the triple classification loop.
+    fn run_kg_compaction(&self) {
+        use super::compaction::{CompactionConfig, run_kg_compaction};
+
+        // Brief lock: clone the engine Arc, then release.
+        let engine = {
+            let agent = self.agent.lock().unwrap();
+            agent.engine.clone()
+        };
+
+        let config = CompactionConfig::default();
+        match run_kg_compaction(&engine, &config) {
+            Ok(metrics) => {
+                if metrics.scaffolding_removed > 0 {
+                    if let Ok(agent) = self.agent.lock() {
+                        agent.sink().emit(&AkhMessage::system(format!(
+                            "[daemon:compaction] removed {}/{} scaffolding triples, density {:.1}%",
+                            metrics.scaffolding_removed,
+                            metrics.scaffolding_found,
+                            metrics.knowledge_density * 100.0,
+                        )));
+                    }
+                }
+                tracing::info!(
+                    total_before = metrics.total_before,
+                    scaffolding_found = metrics.scaffolding_found,
+                    scaffolding_removed = metrics.scaffolding_removed,
+                    knowledge_density = metrics.knowledge_density,
+                    "daemon: KG compaction complete",
+                );
+                if let Some(ref status) = self.status
+                    && let Ok(mut st) = status.try_lock()
+                {
+                    st.knowledge_density = Some(metrics.knowledge_density);
+                    st.last_compaction_at = Some(now_secs());
+                }
+            }
+            Err(e) => {
+                tracing::debug!(error = %e, "daemon: KG compaction skipped");
             }
         }
     }

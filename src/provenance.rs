@@ -745,6 +745,21 @@ pub enum DerivationKind {
         source_path: String,
         format: String,
     },
+
+    // --- KG Compaction -------------------------------------------------------
+
+    /// Episodic scaffolding triples were removed from the KG (daemon compaction).
+    ///
+    /// Records how many `episode:N → agent:learned → *` and reverse child-of
+    /// links were purged, and the resulting knowledge density.
+    KgCompaction {
+        /// Number of scaffolding triples actually deleted this run.
+        scaffolding_removed: usize,
+        /// Total triples in the KG before this compaction run.
+        total_before: usize,
+        /// Knowledge density (knowledge triples / total triples) after compaction.
+        knowledge_density: f32,
+    },
 }
 
 impl DerivationKind {
@@ -851,6 +866,7 @@ impl DerivationKind {
             Self::KnowledgeElicitation { .. } => 97,
             Self::VsaRlUpdate { .. } => 98,
             Self::FileImport { .. } => 99,
+            Self::KgCompaction { .. } => 100,
         }
     }
 }

@@ -196,6 +196,15 @@ pub struct DaemonStatus {
     /// Total triples in knowledge graph.
     #[serde(default)]
     pub kg_triples: usize,
+    /// Knowledge density: knowledge-bearing triples / total triples [0.0, 1.0].
+    ///
+    /// Updated after each KG compaction pass. `None` until the first compaction
+    /// has run.
+    #[serde(default)]
+    pub knowledge_density: Option<f32>,
+    /// Unix timestamp of the last KG compaction run.
+    #[serde(default)]
+    pub last_compaction_at: Option<u64>,
 }
 
 // ---------------------------------------------------------------------------
