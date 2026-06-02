@@ -3296,7 +3296,7 @@ dependencies = [
  "akh-medu",
  "axum",
  "bincode",
- "miette",
+ "miette 7.6.0",
  "redb",
  "rmcp",
  "schemars 1.2.1",
