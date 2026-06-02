@@ -510,7 +510,13 @@ impl NluPipeline {
     }
 
     /// Generate a brief dialogue act response (greeting, farewell, etc.)
-    /// using the LLM with persona context. Returns `None` if LLM unavailable.
+    /// using the LLM with persona and optional KG context.
+    ///
+    /// `context` is the active conversation topic (e.g. "the Ennead").
+    /// `kg_context` is the pre-built KG context block from [`kg_context::build_kg_context`];
+    /// when present it is injected into the system prompt to ground the response.
+    ///
+    /// Returns `None` when no LLM backend is loaded.
     #[allow(unused_variables)] // params used only when nlu-llm feature is enabled
     pub fn generate_dialogue(
         &self,
@@ -518,6 +524,7 @@ impl NluPipeline {
         persona_name: &str,
         traits: &[String],
         context: Option<&str>,
+        kg_context: Option<&str>,
     ) -> Option<String> {
         self.generate_dialogue_with_kg(act, persona_name, traits, context, None)
     }

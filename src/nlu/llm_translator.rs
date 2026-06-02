@@ -526,6 +526,7 @@ pub fn build_dialogue_prompt(
     persona_name: &str,
     traits: &[String],
     context: Option<&str>,
+    kg_context: Option<&str>,
 ) -> String {
     build_dialogue_prompt_with_kg(act, persona_name, traits, context, None)
 }
@@ -626,10 +627,24 @@ mod tests {
 
     #[test]
     fn dialogue_prompt_contains_act() {
-        let prompt = build_dialogue_prompt("greeting", "Akh", &["warm".into()], None);
+        let prompt = build_dialogue_prompt("greeting", "Akh", &["warm".into()], None, None);
         assert!(prompt.contains("greeting"));
         assert!(prompt.contains("Akh"));
         assert!(prompt.contains("warm"));
+    }
+
+    #[test]
+    fn dialogue_prompt_includes_kg_context() {
+        let kg = "## Knowledge Graph Context\n- Ennead is-a collective\n";
+        let prompt = build_dialogue_prompt("greeting", "Akh", &[], None, Some(kg));
+        assert!(prompt.contains("Knowledge Graph Context"));
+        assert!(prompt.contains("Ennead is-a collective"));
+    }
+
+    #[test]
+    fn dialogue_prompt_no_kg_context_unchanged() {
+        let without = build_dialogue_prompt("farewell", "Akh", &[], None, None);
+        assert!(!without.contains("Knowledge Graph Context"));
     }
 
     // ── JSON → AbsTree parsing ─────────────────────────────────────────

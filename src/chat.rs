@@ -221,13 +221,13 @@ impl ChatProcessor {
         match tree {
             // ── Dialogue acts ───────────────────────────────────────
             AbsTree::Greeting { .. } => {
-                self.handle_dialogue_greeting(&mut msgs, agent, engine, &grammar);
+                self.handle_dialogue_greeting(&mut msgs, agent, engine, &grammar, raw_input);
             }
             AbsTree::Farewell { .. } => {
-                self.handle_dialogue_farewell(&mut msgs, agent, engine, &grammar);
+                self.handle_dialogue_farewell(&mut msgs, agent, engine, &grammar, raw_input);
             }
             AbsTree::Acknowledgment { .. } => {
-                self.handle_dialogue_ack(&mut msgs, agent, engine, &grammar);
+                self.handle_dialogue_ack(&mut msgs, agent, engine, &grammar, raw_input);
             }
             AbsTree::FollowUpRequest { .. } => {
                 self.handle_dialogue_follow_up(&mut msgs, agent, engine, &grammar);
@@ -307,6 +307,7 @@ impl ChatProcessor {
         agent: &mut Agent,
         engine: &Arc<Engine>,
         grammar: &str,
+        raw_input: &str,
     ) {
         let (name, traits) = Self::persona_name_and_traits(engine);
         let active_topic = Self::active_topic_label(agent, engine);
@@ -335,11 +336,13 @@ impl ChatProcessor {
         agent: &mut Agent,
         engine: &Arc<Engine>,
         grammar: &str,
+        raw_input: &str,
     ) {
         let (name, traits) = Self::persona_name_and_traits(engine);
+        let kg_ctx = self.kg_context_builder.build(raw_input, engine);
         let text = self
             .nlu_pipeline
-            .generate_dialogue("farewell", &name, &traits, None)
+            .generate_dialogue("farewell", &name, &traits, None, kg_ctx.as_deref())
             .unwrap_or_else(|| agent.dialogue_manager().handle_farewell(&name));
         msgs.push(AkhMessage::narrative(&text, grammar));
         agent.conversation_state_mut().record_agent_turn(&text);
@@ -351,11 +354,13 @@ impl ChatProcessor {
         agent: &mut Agent,
         engine: &Arc<Engine>,
         grammar: &str,
+        raw_input: &str,
     ) {
         let (name, traits) = Self::persona_name_and_traits(engine);
+        let kg_ctx = self.kg_context_builder.build(raw_input, engine);
         let text = self
             .nlu_pipeline
-            .generate_dialogue("acknowledgment", &name, &traits, None)
+            .generate_dialogue("acknowledgment", &name, &traits, None, kg_ctx.as_deref())
             .unwrap_or_else(|| agent.dialogue_manager().handle_ack(&traits));
         msgs.push(AkhMessage::narrative(&text, grammar));
         agent.conversation_state_mut().record_agent_turn(&text);
