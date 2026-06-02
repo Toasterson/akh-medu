@@ -634,6 +634,45 @@ pub struct AgentRecallParams {
     pub top_k: Option<usize>,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct AgentAddGoalParams {
+    #[schemars(description = "Target workspace (default: \"default\")")]
+    #[serde(default = "default_workspace")]
+    pub workspace: String,
+    #[schemars(description = "Goal description text")]
+    pub text: String,
+    #[schemars(description = "Priority 0–255 (default: 128)")]
+    pub priority: Option<u8>,
+    #[schemars(description = "Success criteria (default: \"Agent-determined completion\")")]
+    pub criteria: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct AgentDeleteGoalParams {
+    #[schemars(description = "Target workspace (default: \"default\")")]
+    #[serde(default = "default_workspace")]
+    pub workspace: String,
+    #[schemars(description = "Numeric goal ID as returned by agent_goals")]
+    pub id: u64,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct AgentUpdateGoalParams {
+    #[schemars(description = "Target workspace (default: \"default\")")]
+    #[serde(default = "default_workspace")]
+    pub workspace: String,
+    #[schemars(description = "Numeric goal ID as returned by agent_goals")]
+    pub id: u64,
+    #[schemars(description = "New priority 0–255")]
+    pub priority: Option<u8>,
+    #[schemars(
+        description = "New status label: active | pending | suspended | completed | failed:<reason> | proposed | dormant"
+    )]
+    pub status: Option<String>,
+    #[schemars(description = "New success criteria text")]
+    pub criteria: Option<String>,
+}
+
 // ── Phase 3: Knowledge Introspection Tools ──────────────────────────────
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -2361,7 +2400,7 @@ impl AkhMcpServer {
 
     #[tool(
         name = "agent_goals",
-        description = "List the agent's current goals with their status, priority, and success criteria."
+        description = "List the agent's current goals with their id, status, priority, and success criteria."
     )]
     async fn agent_goals(
         &self,
@@ -2381,8 +2420,9 @@ impl AkhMcpServer {
                 .iter()
                 .map(|g| {
                     format!(
-                        "- [{}] \"{}\" (priority={}, criteria=\"{}\")",
-                        format!("{:?}", g.status),
+                        "- id={} [{}] \"{}\" (priority={}, criteria=\"{}\")",
+                        g.symbol_id.get(),
+                        g.status,
                         g.description,
                         g.priority,
                         g.success_criteria
@@ -2391,6 +2431,99 @@ impl AkhMcpServer {
                 .collect();
 
             Ok(format!("Goals ({}):\n{}", goals.len(), lines.join("\n")))
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("task panicked: {e}"), None))?
+        .map_err(|e| McpError::internal_error(e, None))?;
+
+        Ok(CallToolResult::success(vec![Content::text(result)]))
+    }
+
+    #[tool(
+        name = "agent_add_goal",
+        description = "Append a single goal to the agent's goal list without replacing existing goals. Returns the new goal's numeric id."
+    )]
+    async fn agent_add_goal(
+        &self,
+        Parameters(params): Parameters<AgentAddGoalParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let agent = self.state.get_agent(&params.workspace).await?;
+        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            let mut agent = agent.lock().map_err(|e| format!("agent lock: {e}"))?;
+            let priority = params.priority.unwrap_or(128);
+            let criteria = params
+                .criteria
+                .unwrap_or_else(|| "Agent-determined completion".into());
+            let id = agent
+                .add_goal(&params.text, priority, &criteria)
+                .map_err(|e| format!("{e}"))?;
+            let _ = agent.persist_session();
+            Ok(format!(
+                "Goal added: id={} \"{}\" (priority={}, criteria=\"{}\")",
+                id.get(),
+                params.text,
+                priority,
+                criteria
+            ))
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("task panicked: {e}"), None))?
+        .map_err(|e| McpError::internal_error(e, None))?;
+
+        Ok(CallToolResult::success(vec![Content::text(result)]))
+    }
+
+    #[tool(
+        name = "agent_delete_goal",
+        description = "Permanently remove a goal by its numeric id. Use agent_goals to find the id."
+    )]
+    async fn agent_delete_goal(
+        &self,
+        Parameters(params): Parameters<AgentDeleteGoalParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let agent = self.state.get_agent(&params.workspace).await?;
+        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            let mut agent = agent.lock().map_err(|e| format!("agent lock: {e}"))?;
+            let goal_id = crate::symbol::SymbolId::new(params.id).ok_or_else(|| {
+                format!("invalid goal id: {} (must be non-zero)", params.id)
+            })?;
+            agent
+                .delete_goal(goal_id)
+                .map_err(|e| format!("{e}"))?;
+            let _ = agent.persist_session();
+            Ok(format!("Goal id={} deleted.", params.id))
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("task panicked: {e}"), None))?
+        .map_err(|e| McpError::internal_error(e, None))?;
+
+        Ok(CallToolResult::success(vec![Content::text(result)]))
+    }
+
+    #[tool(
+        name = "agent_update_goal",
+        description = "Update a goal's priority, status, and/or success criteria. Supply only the fields you want to change. Use agent_goals to find the id."
+    )]
+    async fn agent_update_goal(
+        &self,
+        Parameters(params): Parameters<AgentUpdateGoalParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let agent = self.state.get_agent(&params.workspace).await?;
+        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            let mut agent = agent.lock().map_err(|e| format!("agent lock: {e}"))?;
+            let goal_id = crate::symbol::SymbolId::new(params.id).ok_or_else(|| {
+                format!("invalid goal id: {} (must be non-zero)", params.id)
+            })?;
+            agent
+                .update_goal(
+                    goal_id,
+                    params.priority,
+                    params.status.as_deref(),
+                    params.criteria.as_deref(),
+                )
+                .map_err(|e| format!("{e}"))?;
+            let _ = agent.persist_session();
+            Ok(format!("Goal id={} updated.", params.id))
         })
         .await
         .map_err(|e| McpError::internal_error(format!("task panicked: {e}"), None))?

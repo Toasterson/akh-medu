@@ -123,6 +123,16 @@ impl TieredStore {
         }
     }
 
+    /// Delete a metadata entry from the durable tier.
+    ///
+    /// Returns `true` if an entry was found and removed, `false` otherwise.
+    pub fn remove_meta(&self, key: &[u8]) -> StoreResult<bool> {
+        match &self.durable {
+            Some(d) => d.remove(key),
+            None => Ok(false),
+        }
+    }
+
     /// Scan all keys with the given prefix from the durable tier.
     ///
     /// Returns `(key, value)` pairs. Returns an empty vec if no durable
