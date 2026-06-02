@@ -5,16 +5,33 @@ Goal: merge the newest open pulls, analyze + fix each gap locally, land on `main
 
 ## Summary
 
-- **50 open PRs** at start, all targeting `develop`, all reported `mergeable:false` by Forgejo
-  (stale signal — each branch's merge-base actually equalled current `develop` HEAD, so each
-  merged cleanly *in isolation*; the real work was **cross-PR conflict resolution**).
-- **48 branches integrated** (47 of the 50 open PRs + 1 sibling fix branch `019e39a4`
-  Ennead/Maat dedup that was the better variant for its slot).
-- **3 PRs deliberately skipped**, each documented below as an analyzed gap.
-- Result vs `develop`: **127 files changed, +26,278 / −420**, 101 commits (48 merge commits).
-- **Compile gate:** `cargo check --bin akhomed` with the full capability feature set
+- The repo had **~85 open PRs** (the API list is paged at 50). They were integrated in **two waves**.
+- **Wave 1 — the newest 50 open PRs:** 48 branches integrated (47 of the 50 + 1 sibling fix
+  branch `019e39a4` Ennead/Maat dedup). 3 skipped.
+- **Wave 2 — the remaining ~35 older open PRs:** 30 more integrated across the Gemma+Psyche,
+  MCP-tooling, contamination/memory/tecton-hygiene, OODA-tuning, and small/medium phase-scaffold
+  clusters; 2 skipped as superseded (#217, #159 — their fixes were already present); 5 deferred.
+- **Total: 78 PR branches integrated** into `goal/integrate-merge-main`.
+- All branches reported `mergeable:false` by Forgejo (stale — each merged against an older
+  `develop`; the real work was **cross-PR + against-already-merged conflict resolution**).
+- **Compile gate** (after both waves): `cargo check --bin akhomed` with the full feature set
   (`mcp,nlu-full,candle-backend,delegation,wiki,calendar,email,sparql-persist,oxifed,wasm-tools,training-data`)
-  passes (`Finished`, 0 errors).
+  passes (`Finished`, 0 errors). Wave-1 lib tests: **2167 passed, 0 failed**.
+
+### Wave 2 highlights (older open PRs)
+- **Gemma+Psyche (#180–186):** psyche→system-prompt serializer, KG/VSA context injection into
+  prompts, ELIZA-vs-Gemma engine selector + `GemmaBackend` trait, per-agent model manager routing
+  Gemma via an **external Ollama daemon** (`gemma4:e4b`), teacher-QA dataset generation, LoRA
+  fine-tuning scaffold. (No native Candle Gemma loading yet — see gap analysis.)
+- **MCP tooling (#191,198,199,203,204,218):** workspace param-deser fix, bounded daemon-run
+  lifecycle, `config_inspect`, `cross_workspace_query`, `import_export`, `cleanup_by_pattern`.
+- **Contamination/memory/tecton (#206,210,213,212,209,216,215,187,188,189,190):** Ma'at self-ref
+  guard, per-cycle episodic indexing + KG-backed recall, Ennead deity identities + seed pack,
+  apply-seed-packs-on-open, goal truncation/prune, workspace-isolation cleanup, journal ingest
+  CLI/MCP tool, VSA-similarity identity guard, KG compaction task, write-once Ennead role,
+  ingestion-capacity cap.
+- **OODA tuning (#162,163)** + **phase scaffolds (#113 Affective, #119 Delegation, #115 Semantic
+  Router, #114 Sensory Grounding).**
 
 ## Baseline fixes (so `develop` builds on stable Rust 1.94.1 with all features)
 
