@@ -1091,6 +1091,15 @@ pub fn derivation_kind_prose(kind: &DerivationKind) -> String {
                 "delegated to {target} (model: {model}, {wall_time_ms}ms): {task_description}"
             )
         }
+        DerivationKind::AffectiveAppraisal {
+            trigger_kind,
+            valence,
+            resulting_mood_valence,
+        } => {
+            format!(
+                "affective appraisal: {trigger_kind} (valence: {valence:+.2} → mood: {resulting_mood_valence:+.2})"
+            )
+        }
         DerivationKind::ArticleCreated {
             title,
             block_count,

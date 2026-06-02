@@ -66,7 +66,7 @@ impl Tool for MemoryRecallTool {
                 })?;
             (eps, "recent")
         } else {
-            let eps = memory::recall_episodes(engine, &query_ids, &self.predicates, top_k)
+            let eps = memory::recall_episodes(engine, &query_ids, &self.predicates, top_k, None)
                 .map_err(|e| AgentError::ToolExecution {
                     tool_name: "memory_recall".into(),
                     message: format!("{e}"),

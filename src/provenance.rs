@@ -635,6 +635,18 @@ pub enum DerivationKind {
         source_text: String,
     },
 
+    // --- Phase 23: Affective System ------------------------------------------
+
+    /// An affective appraisal was processed and mood state updated (Phase 23).
+    AffectiveAppraisal {
+        /// The appraisal trigger kind (e.g. "GoalCompleted", "GoalFailed").
+        trigger_kind: String,
+        /// Outcome valence of the appraisal (-1.0 to 1.0).
+        valence: f32,
+        /// Resulting mood valence after EMA update.
+        resulting_mood_valence: f32,
+    },
+
     // --- Phase 36: Delegation ------------------------------------------------
 
     /// A task was delegated to an external worker (Phase 36).
@@ -867,6 +879,7 @@ impl DerivationKind {
             Self::VsaRlUpdate { .. } => 98,
             Self::FileImport { .. } => 99,
             Self::KgCompaction { .. } => 100,
+            Self::AffectiveAppraisal { .. } => 101,
         }
     }
 }

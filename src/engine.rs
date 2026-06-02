@@ -2992,6 +2992,7 @@ impl Engine {
 
         // Always write a bincode snapshot of KG triples so restores work even
         // when `sparql-persist` is disabled (e.g., in tests or single-binary mode).
+        // Write under both keys consulted by the restore path on startup.
         if self.config.data_dir.is_some() {
             let triples = self.knowledge_graph.all_triples();
             let snapshot = bincode::serialize(&triples).map_err(|e| {
@@ -3000,6 +3001,7 @@ impl Engine {
                 }
             })?;
             self.store.put_meta(b"kg_triples_snapshot", &snapshot)?;
+            self.store.put_meta(b"kg:triples", &snapshot)?;
             tracing::debug!(triples = triples.len(), "KG bincode snapshot written");
         }
 

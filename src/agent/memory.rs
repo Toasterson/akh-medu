@@ -12,6 +12,7 @@ use crate::graph::Triple;
 use crate::provenance::{DerivationKind, ProvenanceRecord};
 use crate::symbol::SymbolId;
 
+use super::affect::{AffectiveState, emotional_salience, mood_congruence_bias};
 use super::agent::AgentPredicates;
 use super::error::{AgentError, AgentResult};
 use super::goal::Goal;
@@ -243,6 +244,8 @@ pub struct EpisodicEntry {
     pub relevance_score: f32,
     /// When this was consolidated (seconds since UNIX epoch).
     pub timestamp: u64,
+    /// Affective valence (mood) at consolidation time — used for mood-congruent retrieval (Phase 23).
+    pub affective_valence: f32,
 }
 
 // ---------------------------------------------------------------------------
@@ -262,6 +265,11 @@ pub struct ConsolidationConfig {
     pub utility_weight: f32,
     /// Trigger auto-consolidation when WM reaches this count (default: 50).
     pub auto_consolidate_at: usize,
+    /// Multiplier for emotional salience boost on consolidation scores (Phase 23, default: 0.2).
+    ///
+    /// When non-zero, emotionally significant moments (high |valence| × arousal) boost
+    /// the consolidation score, making those memories more likely to be persisted.
+    pub affective_salience_weight: f32,
 }
 
 impl Default for ConsolidationConfig {
@@ -272,6 +280,7 @@ impl Default for ConsolidationConfig {
             novelty_weight: 0.3,
             utility_weight: 0.3,
             auto_consolidate_at: 50,
+            affective_salience_weight: 0.2,
         }
     }
 }
@@ -327,12 +336,16 @@ pub fn actr_activation(entry: &WorkingMemoryEntry, current_cycle: u64) -> f32 {
 }
 
 /// Score a working memory entry for consolidation.
+///
+/// When `affect` is provided, emotionally significant moments receive a salience
+/// boost — high |valence| × arousal increases the consolidation priority (Phase 23).
 fn score_entry(
     entry: &WorkingMemoryEntry,
     goals: &[Goal],
     engine: &Engine,
     config: &ConsolidationConfig,
     current_cycle: u64,
+    affect: Option<&AffectiveState>,
 ) -> f32 {
     // Goal relevance: does this entry's symbols overlap with any active goal's symbols?
     let goal_relevance = {
@@ -376,15 +389,28 @@ fn score_entry(
     // Utility: ACT-R activation-based (replaces raw reference_count * 0.25).
     let utility = actr_activation(entry, current_cycle);
 
-    config.goal_relevance_weight * goal_relevance
+    let base_score = config.goal_relevance_weight * goal_relevance
         + config.novelty_weight * novelty
-        + config.utility_weight * utility
+        + config.utility_weight * utility;
+
+    // Affective salience boost (Phase 23): emotionally intense moments are more memorable.
+    if config.affective_salience_weight > 0.0
+        && let Some(state) = affect
+    {
+        let salience = emotional_salience(state); // 1.0–2.0
+        base_score * (1.0 + (salience - 1.0) * config.affective_salience_weight)
+    } else {
+        base_score
+    }
 }
 
 /// Run the deliberate consolidation process.
 ///
 /// Scores each working memory entry, persists qualifying ones as episodic
 /// memories in the knowledge graph, records provenance, and evicts processed entries.
+///
+/// When `affect` is `Some`, emotionally significant episodes receive a salience
+/// boost and the current mood valence is stored for future mood-congruent recall (Phase 23).
 pub fn consolidate(
     working_memory: &mut WorkingMemory,
     engine: &Engine,
@@ -392,6 +418,7 @@ pub fn consolidate(
     config: &ConsolidationConfig,
     predicates: &AgentPredicates,
     current_cycle: u64,
+    affect: Option<&AffectiveState>,
 ) -> AgentResult<ConsolidationResult> {
     let entries_scored = working_memory.len();
     let mut entries_to_persist = Vec::new();
@@ -411,7 +438,7 @@ pub fn consolidate(
             continue;
         }
 
-        let score = score_entry(entry, goals, engine, config, current_cycle);
+        let score = score_entry(entry, goals, engine, config, current_cycle, affect);
         if score >= config.min_relevance {
             entries_to_persist.push((entry.clone(), score));
         } else {
@@ -420,10 +447,11 @@ pub fn consolidate(
     }
 
     let mut episodes_created = Vec::new();
+    let affective_valence = affect.map(|s| s.valence).unwrap_or(0.0);
 
     // Persist qualifying entries as episodic memories.
     for (entry, score) in &entries_to_persist {
-        match persist_episode(engine, entry, *score, predicates) {
+        match persist_episode(engine, entry, *score, affective_valence, predicates) {
             Ok(episode_id) => {
                 episodes_created.push(episode_id);
                 entries_to_evict.push(entry.id);
@@ -458,6 +486,7 @@ fn persist_episode(
     engine: &Engine,
     entry: &WorkingMemoryEntry,
     relevance_score: f32,
+    affective_valence: f32,
     predicates: &AgentPredicates,
 ) -> AgentResult<SymbolId> {
     // Embed a truncated content excerpt in the episode entity's label so the
@@ -498,6 +527,15 @@ fn persist_episode(
         mem_type_sym,
     ));
 
+    // Store affective valence for mood-congruent retrieval (Phase 23).
+    let valence_label = format!("affect_valence:{:.3}", affective_valence);
+    let valence_sym = engine.resolve_or_create_entity(&valence_label)?;
+    let _ = engine.add_triple(&Triple::new(
+        episode_id,
+        predicates.has_affective_valence,
+        valence_sym,
+    ));
+
     // Store provenance. Use char_indices to find a safe UTF-8 truncation boundary;
     // byte-slicing at a fixed offset panics on multi-byte sequences.
     let reason = {
@@ -532,11 +570,15 @@ fn persist_episode(
 }
 
 /// Recall episodic memories from the KG by querying related symbols.
+///
+/// When `affect` is `Some`, mood-congruent retrieval is applied: memories with
+/// valence matching the current mood are ranked higher (Phase 23).
 pub fn recall_episodes(
     engine: &Engine,
     query_symbols: &[SymbolId],
     predicates: &AgentPredicates,
     top_k: usize,
+    affect: Option<&AffectiveState>,
 ) -> AgentResult<Vec<EpisodicEntry>> {
     let mut episodes: Vec<EpisodicEntry> = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -564,14 +606,28 @@ pub fn recall_episodes(
         }
     }
 
-    // Sort by timestamp (most recent first), then relevance.
-    episodes.sort_by(|a, b| {
-        b.timestamp.cmp(&a.timestamp).then(
-            b.relevance_score
-                .partial_cmp(&a.relevance_score)
-                .unwrap_or(std::cmp::Ordering::Equal),
-        )
-    });
+    // Sort with mood-congruent bias (Phase 23) or plain recency + relevance.
+    if let Some(mood) = affect {
+        episodes.sort_by(|a, b| {
+            let bias_a = mood_congruence_bias(mood, a.affective_valence);
+            let bias_b = mood_congruence_bias(mood, b.affective_valence);
+            let score_a = a.relevance_score * bias_a;
+            let score_b = b.relevance_score * bias_b;
+            // Primary: biased score; secondary: recency.
+            score_b
+                .partial_cmp(&score_a)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(b.timestamp.cmp(&a.timestamp))
+        });
+    } else {
+        episodes.sort_by(|a, b| {
+            b.timestamp.cmp(&a.timestamp).then(
+                b.relevance_score
+                    .partial_cmp(&a.relevance_score)
+                    .unwrap_or(std::cmp::Ordering::Equal),
+            )
+        });
+    }
     episodes.truncate(top_k);
 
     Ok(episodes)
@@ -711,6 +767,7 @@ fn reconstruct_episode(
     let mut summary = String::new();
     let mut learnings = Vec::new();
     let mut tags = Vec::new();
+    let mut affective_valence = 0.0f32;
 
     // New format: summary is embedded in the episode entity's own label as
     // "episode:{id}:{content}".  Extract the third colon-delimited segment.
@@ -736,6 +793,11 @@ fn reconstruct_episode(
             learnings.push(triple.object);
         } else if triple.predicate == predicates.has_tag {
             tags.push(triple.object);
+        } else if triple.predicate == predicates.has_affective_valence {
+            let label = engine.resolve_label(triple.object);
+            if let Some(val_str) = label.strip_prefix("affect_valence:") {
+                affective_valence = val_str.parse().unwrap_or(0.0);
+            }
         }
     }
 
@@ -753,6 +815,7 @@ fn reconstruct_episode(
         consolidation_reason: String::new(), // would need provenance lookup for full detail
         relevance_score: 0.0,                // would need provenance lookup
         timestamp,
+        affective_valence,
     })
 }
 

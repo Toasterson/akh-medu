@@ -9,6 +9,7 @@ use crate::graph::Triple;
 use crate::provenance::{DerivationKind, ProvenanceRecord};
 use crate::symbol::SymbolId;
 
+use super::affect::{AffectiveSystem, Appraisal, AppraisalTrigger};
 use super::agent::Agent;
 use super::error::{AgentError, AgentResult};
 use super::goal::{self, Goal, GoalStatus};
@@ -208,12 +209,19 @@ fn observe(agent: &mut Agent, cycle: u64) -> AgentResult<Observation> {
         .collect();
 
     // Recall relevant episodes if we have active goals.
+    // Apply mood-congruent retrieval bias from the current affective state (Phase 23).
     let mut recalled = Vec::new();
-    if !active_goals.is_empty()
-        && let Ok(episodes) =
-            super::memory::recall_episodes(&agent.engine, &active_goals, &agent.predicates, 3)
-    {
-        recalled = episodes;
+    if !active_goals.is_empty() {
+        let current_affect = *agent.affective_system.current_affect();
+        if let Ok(episodes) = super::memory::recall_episodes(
+            &agent.engine,
+            &active_goals,
+            &agent.predicates,
+            3,
+            Some(&current_affect),
+        ) {
+            recalled = episodes;
+        }
     }
 
     // JITIR query (Phase 13g): if the preference profile has recorded interactions,
@@ -469,6 +477,7 @@ fn decide(
             &agent.working_memory,
             agent.psyche.as_ref(),
             &agent.tool_registry,
+            Some(&agent.affective_system),
         ),
     };
 
@@ -599,6 +608,10 @@ struct ToolCandidate {
     archetype_bonus: f32,
     /// ACT-R utility scaling: computed_priority / 255.0 (Phase 11c).
     goal_value_factor: f32,
+    /// Somatic marker bias for the primary concept this tool operates on (Phase 23).
+    ///
+    /// Positive = learned approach signal; negative = learned avoidance. Clamped to [-0.3, +0.3].
+    somatic_marker_bias: f32,
     /// Why this tool was considered.
     reasoning: String,
 }
@@ -609,7 +622,8 @@ impl ToolCandidate {
             + self.novelty_bonus
             + self.episodic_bonus
             + self.pressure_bonus
-            + self.archetype_bonus)
+            + self.archetype_bonus
+            + self.somatic_marker_bias)
             .max(0.0);
         // ACT-R utility scaling: 0.5× at priority 0, 1.0× at priority 255.
         raw * (0.5 + 0.5 * self.goal_value_factor)
@@ -626,6 +640,7 @@ impl ToolCandidate {
             pressure_bonus: 0.0,
             archetype_bonus: 0.0,
             goal_value_factor: 1.0, // default: no scaling
+            somatic_marker_bias: 0.0,
             reasoning,
         }
     }
@@ -732,7 +747,10 @@ fn synthesize_triple(
 /// Scores all 5 tools based on: state-dependent base score, recency penalty
 /// (avoids repeating tools on the same goal), novelty bonus (explores
 /// untried tools), episodic bonus (replicates past successful strategies),
-/// and memory pressure bonus. Picks the highest-scored candidate.
+/// memory pressure bonus, archetype weights, and somatic marker bias (Phase 23).
+///
+/// When `affective` is provided, mood modulates exploration rate
+/// (`exploration_modulation()`) and somatic markers bias concept-specific tools.
 fn select_tool(
     goal: &Goal,
     observation: &Observation,
@@ -741,6 +759,7 @@ fn select_tool(
     working_memory: &WorkingMemory,
     psyche: Option<&crate::compartment::psyche::Psyche>,
     tool_registry: &super::tool::ToolRegistry,
+    affective: Option<&AffectiveSystem>,
 ) -> (String, ToolInput, String, Option<DecisionImpasse>) {
     let history = GoalToolHistory::from_working_memory(working_memory, goal.symbol_id);
     let episodic_tools = extract_episodic_tool_hints(&observation.recalled_episodes);
@@ -1396,6 +1415,32 @@ fn select_tool(
         candidate.goal_value_factor = gvf;
     }
 
+    // Apply affective modulations (Phase 23).
+    if let Some(affect) = affective {
+        // Mood-based exploration: positive mood → broader search (higher base scores);
+        // negative mood → cautious (lower base scores).
+        let exploration_mod = affect.exploration_modulation();
+        for candidate in &mut candidates {
+            candidate.base_score = (candidate.base_score * exploration_mod).clamp(0.0, 1.0);
+        }
+
+        // Somatic marker bias: learned concept-valence associations bias concept-specific tools.
+        for candidate in &mut candidates {
+            let concept_label = match candidate.name.as_str() {
+                "kg_query" => candidate.input.get("symbol").map(str::to_owned),
+                "kg_mutate" => candidate.input.get("subject").map(str::to_owned),
+                "similarity_search" => candidate.input.get("symbol").map(str::to_owned),
+                _ => None,
+            };
+            if let Some(label) = concept_label {
+                if let Ok(sym_id) = engine.lookup_symbol(&label) {
+                    let bias = affect.bias_for(sym_id);
+                    candidate.somatic_marker_bias = (bias * 0.3).clamp(-0.3, 0.3);
+                }
+            }
+        }
+    }
+
     // Pick the highest-scored candidate.
     candidates.sort_by(|a, b| {
         b.total_score()
@@ -1409,7 +1454,7 @@ fn select_tool(
     if let Some(best) = candidates.into_iter().next() {
         let score = best.total_score();
         let reasoning = format!(
-            "{} [score={:.2}: base={:.2} recency=-{:.2} novelty=+{:.2} episodic=+{:.2} pressure=+{:.2} archetype={:+.3} gvf={:.2}]",
+            "{} [score={:.2}: base={:.2} recency=-{:.2} novelty=+{:.2} episodic=+{:.2} pressure=+{:.2} archetype={:+.3} somatic={:+.3} gvf={:.2}]",
             best.reasoning,
             score,
             best.base_score,
@@ -1418,6 +1463,7 @@ fn select_tool(
             best.episodic_bonus,
             best.pressure_bonus,
             best.archetype_bonus,
+            best.somatic_marker_bias,
             best.goal_value_factor,
         );
         (best.name, best.input, reasoning, impasse)
@@ -1660,6 +1706,94 @@ fn act(agent: &mut Agent, decision: &Decision, cycle: u64) -> AgentResult<Action
                 cycle,
             )
         });
+
+    // Affective appraisal and somatic marker learning from this action's outcome (Phase 23).
+    {
+        let ts = cycle;
+        let appraisal = match &goal_progress {
+            GoalProgress::Completed => Appraisal {
+                trigger: AppraisalTrigger::GoalCompleted { goal_id: decision.goal_id },
+                relevance: 0.9,
+                novelty: 0.2,
+                valence: 0.8,
+                coping: 0.9,
+                timestamp: ts,
+            },
+            GoalProgress::Failed { .. } => Appraisal {
+                trigger: AppraisalTrigger::GoalFailed { goal_id: decision.goal_id },
+                relevance: 0.8,
+                novelty: 0.4,
+                valence: -0.7,
+                coping: 0.3,
+                timestamp: ts,
+            },
+            GoalProgress::Advanced { .. } => Appraisal {
+                trigger: AppraisalTrigger::PositiveFeedback,
+                relevance: 0.5,
+                novelty: 0.2,
+                valence: 0.3,
+                coping: 0.7,
+                timestamp: ts,
+            },
+            GoalProgress::NoChange if !tool_output.success => Appraisal {
+                trigger: AppraisalTrigger::NegativeFeedback,
+                relevance: 0.3,
+                novelty: 0.1,
+                valence: -0.2,
+                coping: 0.6,
+                timestamp: ts,
+            },
+            GoalProgress::NoChange => Appraisal {
+                trigger: AppraisalTrigger::Novelty { entity: decision.goal_id },
+                relevance: 0.2,
+                novelty: 0.3,
+                valence: 0.0,
+                coping: 0.8,
+                timestamp: ts,
+            },
+        };
+
+        // Record provenance for significant appraisals (not neutral no-change).
+        let appraisal_valence = appraisal.valence;
+        let trigger_kind = match &appraisal.trigger {
+            AppraisalTrigger::GoalCompleted { .. } => "GoalCompleted",
+            AppraisalTrigger::GoalFailed { .. } => "GoalFailed",
+            AppraisalTrigger::PositiveFeedback => "PositiveFeedback",
+            AppraisalTrigger::NegativeFeedback => "NegativeFeedback",
+            AppraisalTrigger::Novelty { .. } => "Novelty",
+            AppraisalTrigger::Contradiction { .. } => "Contradiction",
+            AppraisalTrigger::ResourcePressure { .. } => "ResourcePressure",
+            AppraisalTrigger::TemporalSignal { .. } => "TemporalSignal",
+        };
+        agent.affective_system.appraise(appraisal);
+        let resulting_mood = agent.affective_system.current_affect().valence;
+        if appraisal_valence.abs() > 0.15 {
+            let mut prov = ProvenanceRecord::new(
+                decision.goal_id,
+                DerivationKind::AffectiveAppraisal {
+                    trigger_kind: trigger_kind.to_owned(),
+                    valence: appraisal_valence,
+                    resulting_mood_valence: resulting_mood,
+                },
+            )
+            .with_confidence(appraisal_valence.abs());
+            let _ = agent.engine.store_provenance(&mut prov);
+        }
+
+        // Somatic marker learning: associate involved concepts with this outcome's valence.
+        let outcome_valence = match &goal_progress {
+            GoalProgress::Completed => 0.8f32,
+            GoalProgress::Advanced { .. } => 0.3,
+            GoalProgress::Failed { .. } => -0.7,
+            GoalProgress::NoChange if !tool_output.success => -0.2,
+            GoalProgress::NoChange => 0.0,
+        };
+        if outcome_valence.abs() > 0.1 {
+            for sym in &tool_output.symbols_involved {
+                agent.affective_system.record_outcome(*sym, outcome_valence);
+            }
+        }
+    }
 
     Ok(ActionResult {
         tool_output,
