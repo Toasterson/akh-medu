@@ -451,6 +451,47 @@ impl NluPipeline {
     // handles that. The LLM is only used for short dialogue acts (greetings,
     // farewells) where hallucination risk is low and persona flavor helps.
 
+    /// Generate natural language from VSA-structured text using the Candle backend.
+    ///
+    /// Intended for formatting VSA pipeline results and agent summaries as
+    /// readable prose.  Returns `None` if the Candle backend is not loaded.
+    ///
+    /// # Latency
+    /// The caller is responsible for measuring end-to-end latency from VSA
+    /// output production to the returned string.  Internal decoding latency is
+    /// logged at `DEBUG` level.
+    #[allow(unused_variables)]
+    pub fn generate_vsa_summary(&self, structured_text: &str, max_tokens: u32) -> Option<String> {
+        #[cfg(feature = "candle-backend")]
+        if let Some(ref backend_arc) = self.candle_backend {
+            match backend_arc.lock() {
+                Ok(mut backend) => {
+                    let prompt = build_vsa_nl_prompt(structured_text);
+                    match backend.generate(&prompt, max_tokens) {
+                        Ok(text) if !text.trim().is_empty() => {
+                            tracing::debug!(
+                                approx_words = text.split_whitespace().count(),
+                                "NluPipeline: VSA summary generated via Candle"
+                            );
+                            return Some(text);
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            tracing::debug!(
+                                error = %e,
+                                "NluPipeline: VSA summary generation failed"
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "NluPipeline: backend lock poisoned");
+                }
+            }
+        }
+        None
+    }
+
     /// Generate a brief dialogue act response (greeting, farewell, etc.)
     /// using the LLM with persona context. Returns `None` if LLM unavailable.
     #[allow(unused_variables)] // params used only when nlu-llm feature is enabled
@@ -535,5 +576,22 @@ impl Default for NluPipeline {
     fn default() -> Self {
         Self::new()
     }
+}
+
+// ---------------------------------------------------------------------------
+// Internal helpers
+// ---------------------------------------------------------------------------
+
+/// Build a Qwen2-style chat prompt for VSA → NL generation.
+fn build_vsa_nl_prompt(structured_text: &str) -> String {
+    format!(
+        "<|im_start|>system\n\
+         You are a concise assistant. Present knowledge graph findings clearly.\n\
+         <|im_end|>\n\
+         <|im_start|>user\n\
+         {structured_text}\n\
+         <|im_end|>\n\
+         <|im_start|>assistant\n"
+    )
 }
 
