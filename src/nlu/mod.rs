@@ -12,6 +12,7 @@
 //! 4. **VSA parse ranker** — ranks candidate parses using exemplar memory
 
 pub mod error;
+pub mod kg_context;
 pub mod parse_ranker;
 
 #[cfg(feature = "nlu-ml")]
@@ -310,6 +311,21 @@ impl NluPipeline {
     /// Returns a structured parse result if any tier succeeds, or `NluError::ParseFailed`
     /// if all tiers fail.
     pub fn parse(&mut self, input: &str, ctx: &ParseContext) -> NluResult<NluParseResult> {
+        self.parse_with_context(input, ctx, None)
+    }
+
+    /// Parse with an optional KG context block that is passed to LLM tiers.
+    ///
+    /// `kg_context` is forwarded to Tier 3 (LLM/Candle) prompt construction
+    /// so the model can ground entity references against known KG facts.
+    /// Tiers 1, 2, and 4 ignore the context (they are rule- or exemplar-based).
+    #[allow(unused_variables)] // kg_context used only when nlu-llm or candle-backend is enabled
+    pub fn parse_with_context(
+        &mut self,
+        input: &str,
+        ctx: &ParseContext,
+        kg_context: Option<&str>,
+    ) -> NluResult<NluParseResult> {
         // Tier 1: Rule parser (extended parse_prose)
         tracing::debug!(tier = 1, "attempting rule parser");
         let result = parser::parse_prose(input, ctx);
@@ -370,9 +386,10 @@ impl NluPipeline {
         if let Some(ref llm_arc) = self.llm_translator {
             let llm = std::sync::Arc::clone(llm_arc);
             let input_owned = input.to_string();
-            tracing::debug!(tier = 3, "attempting LLM translation");
+            let ctx_owned = kg_context.map(str::to_string);
+            tracing::debug!(tier = 3, has_kg_context = ctx_owned.is_some(), "attempting LLM translation");
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-                llm.translate(&input_owned)
+                llm.translate_with_context(&input_owned, ctx_owned.as_deref())
             }));
             match result {
                 Ok(Ok(translation)) => {
@@ -399,8 +416,8 @@ impl NluPipeline {
         // Preferred over llama-cpp-2 when both are loaded.
         #[cfg(feature = "candle-backend")]
         if let Some(candle_arc) = self.candle_backend.as_ref().map(std::sync::Arc::clone) {
-            tracing::debug!(tier = 3, backend = "candle", "attempting Candle translation");
-            let translation_result = candle_arc.lock().unwrap().translate(input);
+            tracing::debug!(tier = 3, backend = "candle", has_kg_context = kg_context.is_some(), "attempting Candle translation");
+            let translation_result = candle_arc.lock().unwrap().translate_with_context(input, kg_context);
             match translation_result {
                 Ok(translation) => {
                     tracing::info!(
@@ -502,10 +519,33 @@ impl NluPipeline {
         traits: &[String],
         context: Option<&str>,
     ) -> Option<String> {
+        self.generate_dialogue_with_kg(act, persona_name, traits, context, None)
+    }
+
+    /// Generate a dialogue act response with an optional KG context block.
+    ///
+    /// `kg_context` is injected into the system prompt so the model can ground
+    /// its response in actual knowledge-graph facts. The combined prompt is
+    /// designed to stay under 3 800 tokens (Psyche prompt + KG context).
+    #[allow(unused_variables)] // params used only when nlu-llm feature is enabled
+    pub fn generate_dialogue_with_kg(
+        &self,
+        act: &str,
+        persona_name: &str,
+        traits: &[String],
+        context: Option<&str>,
+        kg_context: Option<&str>,
+    ) -> Option<String> {
         #[cfg(feature = "nlu-llm")]
         if let Some(ref llm_arc) = self.llm_translator {
             let llm = std::sync::Arc::clone(llm_arc);
-            let prompt = llm_translator::build_dialogue_prompt(act, persona_name, traits, context);
+            let prompt = llm_translator::build_dialogue_prompt_with_kg(
+                act,
+                persona_name,
+                traits,
+                context,
+                kg_context,
+            );
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
                 llm.generate(&prompt, 64)
             }));
