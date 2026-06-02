@@ -1,0 +1,427 @@
+# Phase 41g benchmark dataset — prompt → plan → execute
+# Categories: code-add, code-edit, refactor, doc-write, debug
+# Each prompt carries acceptance predicates evaluated against pipeline output.
+
+# ---------------------------------------------------------------------------
+# code-add: add new constructs to a Rust codebase
+# ---------------------------------------------------------------------------
+
+[[prompts]]
+id = "code_add_001"
+category = "code-add"
+prompt = "Add a Rust struct Foo with a name: String field, derive Debug and Clone, with proper error handling using miette and unit tests."
+
+[[prompts.acceptance]]
+kind = "output_contains"
+pattern = "struct Foo"
+
+[[prompts.acceptance]]
+kind = "output_contains"
+pattern = "#[derive"
+
+[[prompts.acceptance]]
+kind = "plan_has_min_steps"
+min_steps = 2
+
+# ---
+
+[[prompts]]
+id = "code_add_002"
+category = "code-add"
+prompt = "Add a new enum Color with variants Red, Green, Blue to the codebase. Include Display impl and a unit test."
+
+[[prompts.acceptance]]
+kind = "output_contains"
+pattern = "enum Color"
+
+[[prompts.acceptance]]
+kind = "output_contains"
+pattern = "impl"
+
+# ---
+
+[[prompts]]
+id = "code_add_003"
+category = "code-add"
+prompt = "Add a function compute_checksum(data: &[u8]) -> u32 using a simple XOR fold. Include a doc comment and tests."
+
+[[prompts.acceptance]]
+kind = "output_contains"
+pattern = "fn compute_checksum"
+
+[[prompts.acceptance]]
+kind = "output_contains"
+pattern = "-> u32"
+
+[[prompts.acceptance]]
+kind = "plan_has_min_steps"
+min_steps = 2
+
+# ---
+
+[[prompts]]
+id = "code_add_004"
+category = "code-add"
+prompt = "Add a trait Describable with a single method describe(&self) -> String. Implement it for the type Foo."
+
+[[prompts.acceptance]]
+kind = "output_contains"
+pattern = "trait Describable"
+
+[[prompts.acceptance]]
+kind = "output_contains"
+pattern = "fn describe"
+
+# ---
+
+[[prompts]]
+id = "code_add_005"
+category = "code-add"
+prompt = "Add a Builder pattern for constructing Config objects with optional fields: timeout_ms: u64 and max_retries: u32."
+
+[[prompts.acceptance]]
+kind = "output_contains"
+pattern = "struct Config"
+
+[[prompts.acceptance]]
+kind = "output_contains"
+pattern = "Builder"
+
+[[prompts.acceptance]]
+kind = "plan_has_min_steps"
+min_steps = 3
+
+# ---
+
+[[prompts]]
+id = "code_add_006"
+category = "code-add"
+prompt = "Add a newtype wrapper Meters(f64) and Seconds(f64) with From impls and arithmetic operator overloads."
+
+[[prompts.acceptance]]
+kind = "output_contains"
+pattern = "struct Meters"
+
+[[prompts.acceptance]]
+kind = "output_contains"
+pattern = "impl From"
+
+# ---
+
+[[prompts]]
+id = "code_add_007"
+category = "code-add"
+prompt = "Add a generic Stack<T> with push, pop, peek, and is_empty methods backed by a Vec<T>."
+
+[[prompts.acceptance]]
+kind = "output_contains"
+pattern = "struct Stack"
+
+[[prompts.acceptance]]
+kind = "output_contains"
+pattern = "fn push"
+
+[[prompts.acceptance]]
+kind = "output_contains"
+pattern = "fn pop"
+
+# ---------------------------------------------------------------------------
+# code-edit: modify existing constructs
+# ---------------------------------------------------------------------------
+
+[[prompts]]
+id = "code_edit_001"
+category = "code-edit"
+prompt = "Change the error type in the function parse_config to use a miette Diagnostic error instead of a plain String."
+
+[[prompts.acceptance]]
+kind = "output_contains"
+pattern = "Diagnostic"
+
+[[prompts.acceptance]]
+kind = "output_contains"
+pattern = "miette"
+
+# ---
+
+[[prompts]]
+id = "code_edit_002"
+category = "code-edit"
+prompt = "Add the field updated_at: chrono::DateTime<Utc> to the existing Record struct and update all construction sites."
+
+[[prompts.acceptance]]
+kind = "output_contains"
+pattern = "updated_at"
+
+[[prompts.acceptance]]
+kind = "plan_has_min_steps"
+min_steps = 2
+
+# ---
+
+[[prompts]]
+id = "code_edit_003"
+category = "code-edit"
+prompt = "Replace the Vec<String> tags field in BlogPost with a HashSet<String> and update all usages."
+
+[[prompts.acceptance]]
+kind = "output_contains"
+pattern = "HashSet"
+
+[[prompts.acceptance]]
+kind = "output_contains"
+pattern = "tags"
+
+# ---
+
+[[prompts]]
+id = "code_edit_004"
+category = "code-edit"
+prompt = "Add serde Serialize and Deserialize derives to the ApiResponse struct and all its nested types."
+
+[[prompts.acceptance]]
+kind = "output_contains"
+pattern = "Serialize"
+
+[[prompts.acceptance]]
+kind = "output_contains"
+pattern = "Deserialize"
+
+# ---
+
+[[prompts]]
+id = "code_edit_005"
+category = "code-edit"
+prompt = "Make the Database struct implement Clone by adding a custom Clone impl that opens a new connection."
+
+[[prompts.acceptance]]
+kind = "output_contains"
+pattern = "impl Clone"
+
+[[prompts.acceptance]]
+kind = "output_contains"
+pattern = "Database"
+
+# ---------------------------------------------------------------------------
+# refactor: restructure without changing external behaviour
+# ---------------------------------------------------------------------------
+
+[[prompts]]
+id = "refactor_001"
+category = "refactor"
+prompt = "Extract the validation logic from the save() method into a separate validate(&self) -> Result<(), ValidationError> method."
+
+[[prompts.acceptance]]
+kind = "output_contains"
+pattern = "fn validate"
+
+[[prompts.acceptance]]
+kind = "output_contains"
+pattern = "ValidationError"
+
+# ---
+
+[[prompts]]
+id = "refactor_002"
+category = "refactor"
+prompt = "Replace the match statement on Option<String> with idiomatic combinator chains using map, and_then, and unwrap_or_else."
+
+[[prompts.acceptance]]
+kind = "output_contains"
+pattern = "map"
+
+[[prompts.acceptance]]
+kind = "output_contains"
+pattern = "unwrap_or"
+
+# ---
+
+[[prompts]]
+id = "refactor_003"
+category = "refactor"
+prompt = "Split the 300-line handler module into three modules: parsing, validation, and serialization, with a mod.rs re-export."
+
+[[prompts.acceptance]]
+kind = "output_contains"
+pattern = "mod parsing"
+
+[[prompts.acceptance]]
+kind = "output_contains"
+pattern = "mod validation"
+
+[[prompts.acceptance]]
+kind = "plan_has_min_steps"
+min_steps = 3
+
+# ---
+
+[[prompts]]
+id = "refactor_004"
+category = "refactor"
+prompt = "Convert the imperative for-loop accumulation in aggregate_scores to an iterator chain with fold."
+
+[[prompts.acceptance]]
+kind = "output_contains"
+pattern = "fold"
+
+[[prompts.acceptance]]
+kind = "output_contains"
+pattern = "iter()"
+
+# ---
+
+[[prompts]]
+id = "refactor_005"
+category = "refactor"
+prompt = "Replace the global mutable STATE: Mutex<Vec<Item>> with a proper StateManager struct encapsulating access."
+
+[[prompts.acceptance]]
+kind = "output_contains"
+pattern = "StateManager"
+
+[[prompts.acceptance]]
+kind = "output_contains"
+pattern = "Mutex"
+
+# ---------------------------------------------------------------------------
+# doc-write: generate or improve documentation
+# ---------------------------------------------------------------------------
+
+[[prompts]]
+id = "doc_write_001"
+category = "doc-write"
+prompt = "Write module-level rustdoc for the storage module explaining the three-tier hot/warm/cold architecture."
+
+[[prompts.acceptance]]
+kind = "output_contains"
+pattern = "//!"
+
+[[prompts.acceptance]]
+kind = "output_contains"
+pattern = "hot"
+
+# ---
+
+[[prompts]]
+id = "doc_write_002"
+category = "doc-write"
+prompt = "Add doc comments with examples to the public methods of the SymbolRegistry struct."
+
+[[prompts.acceptance]]
+kind = "output_contains"
+pattern = "///"
+
+[[prompts.acceptance]]
+kind = "output_contains"
+pattern = "# Examples"
+
+# ---
+
+[[prompts]]
+id = "doc_write_003"
+category = "doc-write"
+prompt = "Write a CHANGELOG entry for the v0.7.0 release covering new features: Phase 41 thinking engine and benchmark harness."
+
+[[prompts.acceptance]]
+kind = "output_contains"
+pattern = "v0.7.0"
+
+[[prompts.acceptance]]
+kind = "output_contains"
+pattern = "Phase 41"
+
+# ---
+
+[[prompts]]
+id = "doc_write_004"
+category = "doc-write"
+prompt = "Generate an ADR (Architecture Decision Record) for choosing redb over sled as the cold-tier storage backend."
+
+[[prompts.acceptance]]
+kind = "output_contains"
+pattern = "## Decision"
+
+[[prompts.acceptance]]
+kind = "output_contains"
+pattern = "redb"
+
+# ---------------------------------------------------------------------------
+# debug: diagnose and fix a described bug
+# ---------------------------------------------------------------------------
+
+[[prompts]]
+id = "debug_001"
+category = "debug"
+prompt = "The function parse_headers panics with index out of bounds when the input is an empty string. Fix it to return an error instead."
+
+[[prompts.acceptance]]
+kind = "output_contains"
+pattern = "is_empty"
+
+[[prompts.acceptance]]
+kind = "output_contains"
+pattern = "Err"
+
+# ---
+
+[[prompts]]
+id = "debug_002"
+category = "debug"
+prompt = "Cargo clippy reports: unused variable warning in process_batch. Fix the variable name or use it."
+
+[[prompts.acceptance]]
+kind = "output_contains"
+pattern = "_"
+
+[[prompts.acceptance]]
+kind = "plan_has_min_steps"
+min_steps = 1
+
+# ---
+
+[[prompts]]
+id = "debug_003"
+category = "debug"
+prompt = "The test test_roundtrip fails because serialization adds an extra newline. Locate and remove the spurious newline in the serializer."
+
+[[prompts.acceptance]]
+kind = "output_contains"
+pattern = "serialize"
+
+[[prompts.acceptance]]
+kind = "output_contains"
+pattern = "trim"
+
+# ---
+
+[[prompts]]
+id = "debug_004"
+category = "debug"
+prompt = "Fix the integer overflow in calculate_total: it wraps on large inputs. Use checked_add and return an error on overflow."
+
+[[prompts.acceptance]]
+kind = "output_contains"
+pattern = "checked_add"
+
+[[prompts.acceptance]]
+kind = "output_contains"
+pattern = "overflow"
+
+# ---
+
+[[prompts]]
+id = "debug_005"
+category = "debug"
+prompt = "The DashMap deadlock occurs when two threads both hold read locks and try to upgrade. Restructure to avoid the upgrade pattern."
+
+[[prompts.acceptance]]
+kind = "output_contains"
+pattern = "DashMap"
+
+[[prompts.acceptance]]
+kind = "output_contains"
+pattern = "deadlock"
+
+[[prompts.acceptance]]
+kind = "plan_has_min_steps"
+min_steps = 2
