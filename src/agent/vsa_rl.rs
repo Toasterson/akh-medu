@@ -118,7 +118,15 @@ pub fn encode_actual_outcome(
         }
     }
 
+    // The RL bookkeeping triple (goal --agent:rl_quality--> tool) is a runtime
+    // artifact that compute_and_apply writes itself; it must NOT be folded into
+    // the *actual outcome* representation it is measuring, or the tool's own
+    // vector contaminates the reward toward the random baseline on later cycles.
+    let rl_quality = engine.resolve_or_create_relation("agent:rl_quality").ok();
     for t in &engine.triples_from(goal_id) {
+        if rl_quality == Some(t.predicate) {
+            continue;
+        }
         if let Some(v) = im.get(t.object) {
             components.push(v);
         }
