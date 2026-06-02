@@ -141,6 +141,19 @@ pub enum GoalSource {
         watch_name: String,
         discrepancy: String,
     },
+    /// Auto-generated after consolidation via VSA competence gap detection.
+    ///
+    /// Created when a knowledge tier's coverage score falls below 0.70.
+    /// Goals with this source start as `Proposed` at priority 64 so humans
+    /// can review before promoting them.
+    VsaCompetenceGap {
+        /// Bloom-derived tier: "foundational", "intermediate", or "advanced".
+        tier: String,
+        /// Label of the entity or area with insufficient coverage.
+        area_name: String,
+        /// Coverage score that triggered this goal (< 0.70).
+        coverage_score: f32,
+    },
 }
 
 /// Justification for a goal's existence (Phase 11f: AGM belief revision).

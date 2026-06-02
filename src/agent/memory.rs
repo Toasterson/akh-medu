@@ -287,6 +287,8 @@ pub struct ConsolidationResult {
     pub entries_evicted: usize,
     /// SymbolIds of newly created episodes.
     pub episodes_created: Vec<SymbolId>,
+    /// Goals auto-generated from VSA competence gap detection.
+    pub vsa_gap_goals_created: usize,
 }
 
 /// ACT-R base-level activation for a working memory entry.
@@ -447,6 +449,7 @@ pub fn consolidate(
         entries_persisted,
         entries_evicted,
         episodes_created,
+        vsa_gap_goals_created: 0,
     })
 }
 

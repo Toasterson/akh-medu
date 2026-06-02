@@ -220,6 +220,9 @@ pub fn categorize_goal(goal: &Goal) -> String {
         Some(GoalSource::ImpasseDetected { .. }) => "impasse",
         Some(GoalSource::ReflectionInsight { .. }) => "reflection",
         Some(GoalSource::WorldChange { .. }) => "worldchange",
+        Some(GoalSource::VsaCompetenceGap { tier, .. }) => {
+            return format!("competence:{tier}");
+        }
         None => "user",
     };
 
