@@ -339,7 +339,7 @@ impl ChatProcessor {
         raw_input: &str,
     ) {
         let (name, traits) = Self::persona_name_and_traits(engine);
-        let kg_ctx = self.kg_context_builder.build(raw_input, engine);
+        let kg_ctx = build_kg_context(engine, raw_input, &mut self.kg_cache);
         let text = self
             .nlu_pipeline
             .generate_dialogue("farewell", &name, &traits, None, kg_ctx.as_deref())
@@ -357,7 +357,7 @@ impl ChatProcessor {
         raw_input: &str,
     ) {
         let (name, traits) = Self::persona_name_and_traits(engine);
-        let kg_ctx = self.kg_context_builder.build(raw_input, engine);
+        let kg_ctx = build_kg_context(engine, raw_input, &mut self.kg_cache);
         let text = self
             .nlu_pipeline
             .generate_dialogue("acknowledgment", &name, &traits, None, kg_ctx.as_deref())
