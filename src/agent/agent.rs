@@ -293,6 +293,7 @@ impl Agent {
         registry.register(Box::new(tools::TextIngestTool));
         registry.register(Box::new(tools::CodeIngestTool));
         registry.register(Box::new(tools::ContentIngestTool));
+        registry.register(Box::new(tools::JournalIngestTool));
 
         // Library search.
         registry.register(Box::new(tools::LibrarySearchTool));

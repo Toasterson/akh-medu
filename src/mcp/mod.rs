@@ -392,6 +392,26 @@ pub struct IngestTextParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct JournalIngestParams {
+    #[schemars(description = "Target workspace (default: \"default\")")]
+    #[serde(default = "default_workspace")]
+    pub workspace: String,
+    #[schemars(
+        description = "File glob pattern, e.g. '~/.openclaw/workspace/memory/*.md' or a single file path."
+    )]
+    pub path_glob: String,
+    #[schemars(
+        description = "Chunking strategy: 'per-day' (default, one episode per file), \
+            'per-heading' (one per ## section), 'per-session' (one per --- block)."
+    )]
+    pub strategy: Option<String>,
+    #[schemars(
+        description = "If true, run NLU triple extraction over each chunk and assert triples in the KG. Default: false."
+    )]
+    pub extract_triples: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct IngestUrlParams {
     #[schemars(description = "Target workspace (default: \"default\")")]
     #[serde(default = "default_workspace")]
@@ -1305,6 +1325,40 @@ impl AkhMcpServer {
                 .with_param("max_sentences", "100");
             let tool = TextIngestTool;
             let output = tool.execute(&engine, input).map_err(|e| format!("{e}"))?;
+            let _ = engine.persist();
+            Ok(output.result)
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("task panicked: {e}"), None))?
+        .map_err(|e| McpError::internal_error(e, None))?;
+
+        Ok(CallToolResult::success(vec![Content::text(result)]))
+    }
+
+    #[tool(
+        name = "journal_ingest",
+        description = "Ingest OpenClaw markdown journal files into episodic memory. \
+            Reads files matching path_glob and creates one episodic entry per chunk. \
+            Idempotent — safe to re-run daily. Strategies: per-day (default), \
+            per-heading (split on ## sections), per-session (split on --- blocks). \
+            After ingestion, agent_recall will return matching journal episodes."
+    )]
+    async fn journal_ingest(
+        &self,
+        Parameters(params): Parameters<JournalIngestParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let engine = self.state.get_engine(&params.workspace).await?;
+        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            use crate::agent::tool::{Tool, ToolInput};
+            use crate::agent::tools::JournalIngestTool;
+            let mut input = ToolInput::new().with_param("path_glob", &params.path_glob);
+            if let Some(s) = &params.strategy {
+                input = input.with_param("strategy", s);
+            }
+            if let Some(et) = params.extract_triples {
+                input = input.with_param("extract_triples", if et { "true" } else { "false" });
+            }
+            let output = JournalIngestTool.execute(&engine, input).map_err(|e| format!("{e}"))?;
             let _ = engine.persist();
             Ok(output.result)
         })
@@ -4502,7 +4556,8 @@ impl rmcp::handler::server::ServerHandler for AkhMcpServer {
                  independently, handle errors per-stage, and fill gaps (e.g. provide identity data \
                  when resolution fails).\n\n\
                  Agent introspection: `agent_run_cycle` (single OODA step), `agent_goals`, \
-                 `agent_recall` (episodic memory), `agent_psyche`.\n\n\
+                 `agent_recall` (episodic memory), `agent_psyche`, \
+                 `journal_ingest` (load OpenClaw markdown journals into episodic memory).\n\n\
                  Knowledge introspection: `triples_of`, `provenance_of`, `export_symbols`, \
                  `infer_analogy`, `remove_triple`.\n\n\
                  Event calculus (temporal reasoning): `record_event` (create events that initiate/terminate \
