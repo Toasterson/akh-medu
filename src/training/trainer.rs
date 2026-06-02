@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 use crate::engine::Engine;
 use crate::vsa::neural_bridge::{BridgeTrainer, NeuralVsaBridge};
-use crate::vsa::{Dimension, HyperVec};
+use crate::vsa::HyperVec;
 
 // ---------------------------------------------------------------------------
 // Configuration

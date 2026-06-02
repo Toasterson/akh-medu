@@ -294,7 +294,7 @@ pub fn encode_state_with_vsa(
     let mut components = Vec::new();
 
     // Goal progress component.
-    for (goal_id, progress) in &state.goal_states {
+    for (goal_id, _progress) in &state.goal_states {
         let goal_vec = crate::vsa::encode::encode_symbol(ops, *goal_id);
         if let Ok(bound) = ops.bind(&roles.goal_progress, &goal_vec) {
             components.push(bound);

@@ -19,7 +19,7 @@ use super::llm_translator::parse_abstree_json;
 use super::llm_translator::LlmTranslation;
 
 #[cfg(feature = "candle-backend")]
-use candle_core::{DType, Device, IndexOp, Tensor};
+use candle_core::{Device, IndexOp, Tensor};
 #[cfg(feature = "candle-backend")]
 use candle_transformers::models::quantized_qwen2::ModelWeights;
 

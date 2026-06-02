@@ -25,7 +25,7 @@ use crate::engine::Engine;
 use crate::symbol::SymbolId;
 
 use super::causal::CausalManager;
-use super::state_value::{AgentState, ValueFunction, encode_state};
+use super::state_value::{AgentState, ValueFunction};
 
 // ═══════════════════════════════════════════════════════════════════════
 // Configuration

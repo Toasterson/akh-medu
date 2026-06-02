@@ -332,7 +332,7 @@ impl ChatProcessor {
         agent: &mut Agent,
         engine: &Arc<Engine>,
         grammar: &str,
-        raw_input: &str,
+        _raw_input: &str,
     ) {
         let (name, traits) = Self::persona_name_and_traits(engine);
         let active_topic = Self::active_topic_label(agent, engine);
