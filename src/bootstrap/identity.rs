@@ -854,6 +854,7 @@ pub fn build_psyche(
             dominant_archetype: archetype_profile.primary.clone(),
         },
         awakened: false, // will be marked true by ritual_of_awakening
+        ocean: None,     // derived from archetypes by psyche_compiler when needed
     };
 
     // Validate: domain should match purpose.
