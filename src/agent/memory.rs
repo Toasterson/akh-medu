@@ -470,7 +470,9 @@ fn persist_episode(
         entry.content.as_str()
     };
     let episode_label = format!("episode:{}:{}", entry.id, excerpt);
-    let episode = engine.create_symbol(SymbolKind::Entity, &episode_label)?;
+    let episode_id = engine
+        .create_symbol(crate::symbol::SymbolKind::Entity, &episode_label)?
+        .id;
 
     // Link to learned symbols.
     for sym in &entry.symbols {
