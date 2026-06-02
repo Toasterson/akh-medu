@@ -498,17 +498,23 @@ fn persist_episode(
         mem_type_sym,
     ));
 
-    // Store provenance.
-    let reason = format!(
-        "Consolidated from WM entry {} ({}): {}",
-        entry.id,
-        kind_tag_label.trim_start_matches("tag:"),
-        if entry.content.len() > 60 {
-            format!("{}...", &entry.content[..60])
-        } else {
-            entry.content.clone()
-        }
-    );
+    // Store provenance. Use char_indices to find a safe UTF-8 truncation boundary;
+    // byte-slicing at a fixed offset panics on multi-byte sequences.
+    let reason = {
+        let end = entry
+            .content
+            .char_indices()
+            .nth(60)
+            .map(|(i, _)| i)
+            .unwrap_or(entry.content.len());
+        let truncated = &entry.content[..end];
+        let suffix = if end < entry.content.len() { "..." } else { "" };
+        format!(
+            "Consolidated from WM entry {} ({}): {truncated}{suffix}",
+            entry.id,
+            kind_tag_label.trim_start_matches("tag:"),
+        )
+    };
 
     let mut prov = ProvenanceRecord::new(
         episode_id,

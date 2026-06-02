@@ -149,6 +149,9 @@ pub struct WorkspaceConfig {
     /// Maximum expected symbols.
     #[serde(default = "default_max_symbols")]
     pub max_symbols: u64,
+    /// Maximum triples before ingestion is rejected with a capacity error.
+    #[serde(default = "default_max_triples")]
+    pub max_triples: u64,
     /// Seed pack IDs to apply on first initialization.
     #[serde(default = "default_seed_packs")]
     pub seed_packs: Vec<String>,
@@ -182,6 +185,13 @@ fn default_seed_packs() -> Vec<String> {
     ]
 }
 
+fn default_max_triples() -> u64 {
+    DEFAULT_MAX_TRIPLES
+}
+
+/// Default triple ceiling applied when no workspace config exists.
+pub const DEFAULT_MAX_TRIPLES: u64 = 500_000;
+
 impl Default for WorkspaceConfig {
     fn default() -> Self {
         Self {
@@ -191,6 +201,7 @@ impl Default for WorkspaceConfig {
             language: default_language(),
             max_memory_mb: default_max_memory_mb(),
             max_symbols: default_max_symbols(),
+            max_triples: default_max_triples(),
             seed_packs: vec![
                 "identity".into(),
                 "ontology".into(),
@@ -564,6 +575,31 @@ max_symbols = 1000000
         let loaded = WorkspaceConfig::load(&path).unwrap();
         assert_eq!(loaded.name, "test-ws");
         assert_eq!(loaded.dimension, 5000);
+        assert_eq!(loaded.max_triples, DEFAULT_MAX_TRIPLES);
+    }
+
+    #[test]
+    fn config_max_triples_persists() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("bounded.toml");
+
+        let cfg = WorkspaceConfig {
+            name: "bounded".into(),
+            max_triples: 10_000,
+            ..Default::default()
+        };
+        cfg.save(&path).unwrap();
+
+        let loaded = WorkspaceConfig::load(&path).unwrap();
+        assert_eq!(loaded.max_triples, 10_000);
+    }
+
+    #[test]
+    fn config_missing_max_triples_defaults() {
+        // TOML without max_triples should deserialise with the default value.
+        let toml = r#"name = "legacy""#;
+        let cfg: WorkspaceConfig = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.max_triples, DEFAULT_MAX_TRIPLES);
     }
 
     #[test]

@@ -244,11 +244,26 @@ impl McpState {
             ));
         }
 
-        let config = EngineConfig {
-            dimension: Dimension::DEFAULT,
-            data_dir: Some(ws_paths.kg_dir.clone()),
-            compartments_dir: Some(ws_paths.compartments_dir.clone()),
-            ..Default::default()
+        // Load per-workspace config to honour dimension, memory and symbol limits;
+        // fall back to defaults when no config file is present.
+        let config_path = self.paths.workspace_config_file(name);
+        let config = if config_path.exists() {
+            match crate::workspace::WorkspaceConfig::load(&config_path) {
+                Ok(ws_cfg) => ws_cfg.to_engine_config(&ws_paths),
+                Err(_) => EngineConfig {
+                    dimension: Dimension::DEFAULT,
+                    data_dir: Some(ws_paths.kg_dir.clone()),
+                    compartments_dir: Some(ws_paths.compartments_dir.clone()),
+                    ..Default::default()
+                },
+            }
+        } else {
+            EngineConfig {
+                dimension: Dimension::DEFAULT,
+                data_dir: Some(ws_paths.kg_dir.clone()),
+                compartments_dir: Some(ws_paths.compartments_dir.clone()),
+                ..Default::default()
+            }
         };
 
         // Run the expensive DB open on a blocking thread so Tokio isn't frozen.
@@ -315,6 +330,41 @@ impl McpState {
             .or_insert(snapshot);
 
         Ok(result)
+    }
+
+    /// Return an error if the workspace has reached its configured triple limit.
+    ///
+    /// Reads the workspace config (if present) to determine `max_triples`; falls
+    /// back to [`crate::workspace::DEFAULT_MAX_TRIPLES`]. Call this before any
+    /// operation that would add new triples to the knowledge graph.
+    pub async fn check_ingestion_capacity(
+        &self,
+        name: &str,
+        engine: &Engine,
+    ) -> Result<(), McpError> {
+        let config_path = self.paths.workspace_config_file(name);
+        let max_triples = if config_path.exists() {
+            crate::workspace::WorkspaceConfig::load(&config_path)
+                .ok()
+                .map(|c| c.max_triples)
+                .unwrap_or(crate::workspace::DEFAULT_MAX_TRIPLES)
+        } else {
+            crate::workspace::DEFAULT_MAX_TRIPLES
+        };
+        let current = engine.info().triple_count as u64;
+        if current >= max_triples {
+            Err(McpError::invalid_params(
+                format!(
+                    "workspace \"{name}\" has reached its ingestion limit: \
+                     {current} / {max_triples} triples. \
+                     Use archive_workspace to freeze it or remove_triple / \
+                     remove_batch to free space first."
+                ),
+                None,
+            ))
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -511,6 +561,12 @@ pub struct CreateWorkspaceParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct DeleteWorkspaceParams {
     #[schemars(description = "Name of the workspace to delete")]
+    pub name: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ArchiveWorkspaceParams {
+    #[schemars(description = "Name of the workspace to archive")]
     pub name: String,
 }
 
@@ -1677,6 +1733,7 @@ impl AkhMcpServer {
         Parameters(params): Parameters<AssertTripleParams>,
     ) -> Result<CallToolResult, McpError> {
         let engine = self.state.get_engine(&params.workspace).await?;
+        self.state.check_ingestion_capacity(&params.workspace, &engine).await?;
         let conf = params.confidence.unwrap_or(0.9) as f32;
 
         let s = engine
@@ -1710,6 +1767,7 @@ impl AkhMcpServer {
         Parameters(params): Parameters<AssertBatchParams>,
     ) -> Result<CallToolResult, McpError> {
         let engine = self.state.get_engine(&params.workspace).await?;
+        self.state.check_ingestion_capacity(&params.workspace, &engine).await?;
 
         let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
             // Use Engine::add_triples_batch for single-call batch assertion
@@ -1746,6 +1804,7 @@ impl AkhMcpServer {
         Parameters(params): Parameters<IngestTextParams>,
     ) -> Result<CallToolResult, McpError> {
         let engine = self.state.get_engine(&params.workspace).await?;
+        self.state.check_ingestion_capacity(&params.workspace, &engine).await?;
         let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
             use crate::agent::tool::{Tool, ToolInput};
             use crate::agent::tools::TextIngestTool;
@@ -1807,6 +1866,7 @@ impl AkhMcpServer {
         Parameters(params): Parameters<IngestUrlParams>,
     ) -> Result<CallToolResult, McpError> {
         let engine = self.state.get_engine(&params.workspace).await?;
+        self.state.check_ingestion_capacity(&params.workspace, &engine).await?;
         let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
             use crate::agent::tool::{Tool, ToolInput};
             use crate::agent::tools::ContentIngestTool;
@@ -2233,6 +2293,82 @@ impl AkhMcpServer {
     }
 
     #[tool(
+        name = "archive_workspace",
+        description = "Archive a workspace by suspending its daemon and renaming its data \
+                       directory to a timestamped archive name. Use this to freeze a \
+                       contaminated or over-capacity workspace without permanently deleting \
+                       it. The archive is kept on disk and can be restored by renaming it \
+                       back. Returns a snapshot of the triple and symbol counts at archive time."
+    )]
+    async fn archive_workspace(
+        &self,
+        Parameters(params): Parameters<ArchiveWorkspaceParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let name = params.name.as_str();
+
+        // Snapshot before evicting so the report is accurate.
+        let snapshot = if let Ok(engine) = self.state.get_engine(name).await {
+            let info = engine.info();
+            format!("{} triples, {} symbols", info.triple_count, info.symbol_count)
+        } else {
+            "stats unavailable".to_string()
+        };
+
+        // Pause daemon if one is registered for this workspace.
+        {
+            let pauses = self.state.daemon_pauses.read().await;
+            if let Some(h) = pauses.get(name) {
+                h.paused
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+
+        // Evict engine and agent from the in-memory cache so file handles are released.
+        {
+            let mut map = self.state.workspaces.write().await;
+            map.remove(name);
+        }
+        {
+            let mut agents = self.state.agents.write().await;
+            agents.remove(name);
+        }
+
+        let ws_paths = self.state.paths.workspace(name);
+        if !ws_paths.root.exists() {
+            return Err(McpError::invalid_params(
+                format!("workspace \"{name}\" not found"),
+                None,
+            ));
+        }
+
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let archive_name = format!("{name}-archived-{timestamp}");
+        let archive_paths = self.state.paths.workspace(&archive_name);
+
+        std::fs::rename(&ws_paths.root, &archive_paths.root).map_err(|e| {
+            McpError::internal_error(
+                format!("failed to archive workspace \"{name}\": {e}"),
+                None,
+            )
+        })?;
+
+        // Move config file if present.
+        let config_src = self.state.paths.workspace_config_file(name);
+        if config_src.exists() {
+            let config_dst = self.state.paths.workspace_config_file(&archive_name);
+            let _ = std::fs::rename(&config_src, &config_dst);
+        }
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Workspace \"{name}\" archived as \"{archive_name}\" — {snapshot}. \
+             Daemon suspended. Create a fresh workspace to resume operations."
+        ))]))
+    }
+
+    #[tool(
         name = "apply_seed",
         description = "Apply a seed pack to a workspace, populating it with foundational knowledge triples."
     )]
@@ -2305,6 +2441,10 @@ impl AkhMcpServer {
         // field is not updated unless we do it here explicitly.
         let agent = self.state.get_agent(&params.workspace).await?;
 
+        // Skip capacity check for status-only reads.
+        if !params.status {
+            self.state.check_ingestion_capacity(&params.workspace, &engine).await?;
+        }
         let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
             use crate::bootstrap::OrchestratorConfig;
 
@@ -2660,6 +2800,7 @@ impl AkhMcpServer {
         Parameters(params): Parameters<ExpandDomainParams>,
     ) -> Result<CallToolResult, McpError> {
         let engine = self.state.get_engine(&params.workspace).await?;
+        self.state.check_ingestion_capacity(&params.workspace, &engine).await?;
 
         let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
             use crate::bootstrap::expand::{DomainExpander, ExpansionConfig};
