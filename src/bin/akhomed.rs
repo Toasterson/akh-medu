@@ -60,6 +60,9 @@ struct ServerState {
     /// One shared Agent per workspace — daemon, HTTP handlers, and WS sessions
     /// all operate on the same instance. See ADR-027.
     agents: Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>,
+    /// Non-blocking psyche snapshots shared with McpState.  Populated at agent
+    /// creation time so monitoring reads never block on the agent mutex.
+    psyche_snapshots: mcp::PsycheSnapshotMap,
     /// Cached NLU pipeline per workspace — avoids reloading 1GB+ LLM model on
     /// every WS connection or MCP chat call.
     nlu_pipelines: RwLock<HashMap<String, Arc<Mutex<akh_medu::nlu::NluPipeline>>>>,
@@ -86,6 +89,7 @@ impl ServerState {
             workspaces: Arc::new(RwLock::new(HashMap::new())),
             daemons: RwLock::new(HashMap::new()),
             agents: Arc::new(RwLock::new(HashMap::new())),
+            psyche_snapshots: Arc::new(RwLock::new(HashMap::new())),
             nlu_pipelines: RwLock::new(HashMap::new()),
             audit_broadcast: audit_tx,
             daemon_pauses: RwLock::new(HashMap::new()),
@@ -178,11 +182,24 @@ impl ServerState {
         })?;
 
         tracing::info!(workspace = %name, "shared agent created");
+        // Extract the snapshot Arc before moving agent into Mutex so it can be
+        // registered without ever re-acquiring the agent lock.
+        let snapshot = agent.psyche_snapshot();
         let shared = Arc::new(Mutex::new(agent));
         let mut agents = self.agents.write().await;
         // Another request may have raced us — keep the first one.
         let entry = agents.entry(name.to_string()).or_insert(Arc::clone(&shared));
-        Ok(Arc::clone(entry))
+        let result = Arc::clone(entry);
+        drop(agents);
+
+        // Register snapshot (idempotent — or_insert keeps the race-winner's snapshot).
+        self.psyche_snapshots
+            .write()
+            .await
+            .entry(name.to_string())
+            .or_insert(snapshot);
+
+        Ok(result)
     }
 
     /// Get or lazily create a shared NLU pipeline for the given workspace.
@@ -3917,6 +3934,7 @@ async fn main() {
             paths.clone(),
             Arc::clone(&state.workspaces),
             Arc::clone(&state.agents),
+            Arc::clone(&state.psyche_snapshots),
         ));
 
         let mcp_service = StreamableHttpService::new(

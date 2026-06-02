@@ -34,6 +34,20 @@ fn default_workspace() -> String {
     "default".into()
 }
 
+/// Per-workspace psyche snapshot map.
+///
+/// Each value is an `Arc<RwLock<Option<Psyche>>>` extracted from the agent
+/// at creation time.  Shared between `ServerState` and `McpState` so that
+/// monitoring tools can read psyche state without holding the agent mutex.
+pub type PsycheSnapshotMap = Arc<
+    RwLock<
+        HashMap<
+            String,
+            Arc<std::sync::RwLock<Option<crate::compartment::psyche::Psyche>>>,
+        >,
+    >,
+>;
+
 /// Shared state needed by MCP tool handlers.
 ///
 /// Holds Arc-wrapped workspace and agent maps shared with `ServerState`,
@@ -49,6 +63,9 @@ pub struct McpState {
     /// Per-workspace gates that serialize Engine::new() so two concurrent
     /// MCP calls never collide on the redb file-lock open.
     pub loading_gates: RwLock<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// Non-blocking psyche snapshots — shared with `ServerState` so the snapshot
+    /// is populated at agent creation time and readable without the agent mutex.
+    pub psyche_snapshots: PsycheSnapshotMap,
 }
 
 /// Pause control for a single workspace daemon.
@@ -72,11 +89,13 @@ impl McpState {
         paths: AkhPaths,
         workspaces: Arc<RwLock<HashMap<String, Arc<Engine>>>>,
         agents: Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>,
+        psyche_snapshots: PsycheSnapshotMap,
     ) -> Self {
         Self {
             paths,
             workspaces,
             agents,
+            psyche_snapshots,
             nlu_pipelines: RwLock::new(HashMap::new()),
             daemon_pauses: RwLock::new(HashMap::new()),
             loading_gates: RwLock::new(HashMap::new()),
@@ -216,13 +235,26 @@ impl McpState {
         .map_err(|e| McpError::internal_error(format!("agent task panicked: {e}"), None))?
         .map_err(|e| McpError::internal_error(format!("failed to create agent: {e}"), None))?;
 
+        // Extract the snapshot Arc before moving agent into Mutex so it can be
+        // registered in psyche_snapshots without ever re-acquiring the agent lock.
+        let snapshot = agent.psyche_snapshot();
         let shared = Arc::new(Mutex::new(agent));
         let mut agents = self.agents.write().await;
         // Another request may have raced us — keep the first one.
         let entry = agents
             .entry(name.to_string())
             .or_insert(Arc::clone(&shared));
-        Ok(Arc::clone(entry))
+        let result = Arc::clone(entry);
+        drop(agents);
+
+        // Register snapshot (idempotent — or_insert keeps the race-winner's snapshot).
+        self.psyche_snapshots
+            .write()
+            .await
+            .entry(name.to_string())
+            .or_insert(snapshot);
+
+        Ok(result)
     }
 }
 
@@ -2440,12 +2472,29 @@ impl AkhMcpServer {
         &self,
         Parameters(params): Parameters<WorkspaceParam>,
     ) -> Result<CallToolResult, McpError> {
-        let agent = self.state.get_agent(&params.workspace).await?;
+        // Ensure the agent (and its snapshot) exists.
+        self.state.get_agent(&params.workspace).await?;
+
+        // Look up the snapshot that was registered when the agent was created.
+        // Reading from the snapshot never blocks on the agent mutex, so this
+        // remains responsive even while the OODA loop holds the agent lock.
+        let snapshot = self
+            .state
+            .psyche_snapshots
+            .read()
+            .await
+            .get(&params.workspace)
+            .map(Arc::clone)
+            .ok_or_else(|| {
+                McpError::internal_error("psyche snapshot not registered for workspace", None)
+            })?;
 
         let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
-            let agent = agent.lock().map_err(|e| format!("agent lock: {e}"))?;
+            let guard = snapshot
+                .read()
+                .map_err(|e| format!("psyche snapshot poisoned: {e}"))?;
 
-            match agent.psyche() {
+            match &*guard {
                 Some(psyche) => {
                     let mut lines = vec![
                         format!("Persona: {}", psyche.persona.name),
