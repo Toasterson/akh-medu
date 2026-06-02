@@ -69,7 +69,7 @@ impl CompartmentManager {
         let mut compartments = self
             .compartments
             .write()
-            .expect("compartments lock poisoned");
+            .unwrap_or_else(|e| e.into_inner());
 
         for entry in entries {
             let entry = entry.map_err(|e| CompartmentError::Io {
@@ -146,13 +146,13 @@ impl CompartmentManager {
                 }
             })?;
 
-            *self.psyche.write().expect("psyche lock poisoned") = Some(psyche);
+            *self.psyche.write().unwrap_or_else(|e| e.into_inner()) = Some(psyche);
         }
 
         let mut compartments = self
             .compartments
             .write()
-            .expect("compartments lock poisoned");
+            .unwrap_or_else(|e| e.into_inner());
         let compartment = compartments
             .get_mut(id)
             .ok_or_else(|| CompartmentError::NotFound { id: id.into() })?;
@@ -226,7 +226,7 @@ impl CompartmentManager {
         let mut compartments = self
             .compartments
             .write()
-            .expect("compartments lock poisoned");
+            .unwrap_or_else(|e| e.into_inner());
         let compartment = compartments
             .get_mut(id)
             .ok_or_else(|| CompartmentError::NotFound { id: id.into() })?;
@@ -244,7 +244,7 @@ impl CompartmentManager {
         }
 
         if id == "psyche" {
-            *self.psyche.write().expect("psyche lock poisoned") = None;
+            *self.psyche.write().unwrap_or_else(|e| e.into_inner()) = None;
         }
 
         compartment.state = CompartmentState::Dormant;
@@ -257,7 +257,7 @@ impl CompartmentManager {
         let mut compartments = self
             .compartments
             .write()
-            .expect("compartments lock poisoned");
+            .unwrap_or_else(|e| e.into_inner());
         let compartment = compartments
             .get_mut(id)
             .ok_or_else(|| CompartmentError::NotFound { id: id.into() })?;
@@ -274,7 +274,7 @@ impl CompartmentManager {
         let mut compartments = self
             .compartments
             .write()
-            .expect("compartments lock poisoned");
+            .unwrap_or_else(|e| e.into_inner());
         let compartment = compartments
             .get_mut(id)
             .ok_or_else(|| CompartmentError::NotFound { id: id.into() })?;
@@ -290,7 +290,7 @@ impl CompartmentManager {
         let compartments = self
             .compartments
             .read()
-            .expect("compartments lock poisoned");
+            .unwrap_or_else(|e| e.into_inner());
         compartments
             .values()
             .filter(|c| c.state == CompartmentState::Active)
@@ -303,7 +303,7 @@ impl CompartmentManager {
         let compartments = self
             .compartments
             .read()
-            .expect("compartments lock poisoned");
+            .unwrap_or_else(|e| e.into_inner());
         compartments.get(id).map(|c| c.manifest.clone())
     }
 
@@ -312,7 +312,7 @@ impl CompartmentManager {
         let compartments = self
             .compartments
             .read()
-            .expect("compartments lock poisoned");
+            .unwrap_or_else(|e| e.into_inner());
         compartments
             .values()
             .filter(|c| c.manifest.kind == kind)
@@ -322,7 +322,10 @@ impl CompartmentManager {
 
     /// Get the loaded psyche (if the psyche compartment has been loaded).
     pub fn psyche(&self) -> Option<Psyche> {
-        self.psyche.read().expect("psyche lock poisoned").clone()
+        self.psyche
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// Update the stored psyche (after evolution).
@@ -330,7 +333,7 @@ impl CompartmentManager {
     /// Returns `PsycheImmutable` if the existing psyche is awakened.
     /// Use [`force_set_psyche`] for admin override.
     pub fn set_psyche(&self, psyche: Psyche) -> CompartmentResult<()> {
-        let mut guard = self.psyche.write().expect("psyche lock poisoned");
+        let mut guard = self.psyche.write().unwrap_or_else(|e| e.into_inner());
         if let Some(ref existing) = *guard {
             if existing.is_awakened() {
                 return Err(CompartmentError::PsycheImmutable);
@@ -346,7 +349,7 @@ impl CompartmentManager {
         if let Err(e) = self.persist_psyche_to_disk(&psyche) {
             tracing::warn!(error = %e, "failed to persist psyche to disk");
         }
-        *self.psyche.write().expect("psyche lock poisoned") = Some(psyche);
+        *self.psyche.write().unwrap_or_else(|e| e.into_inner()) = Some(psyche);
     }
 
     /// Persist the psyche to `compartments/psyche/psyche.toml` on disk.
@@ -407,7 +410,7 @@ impl CompartmentManager {
         let compartments = self
             .compartments
             .read()
-            .expect("compartments lock poisoned");
+            .unwrap_or_else(|e| e.into_inner());
         compartments
             .iter()
             .filter(|(_, c)| c.state == CompartmentState::Dormant)
@@ -420,7 +423,7 @@ impl CompartmentManager {
         let compartments = self
             .compartments
             .read()
-            .expect("compartments lock poisoned");
+            .unwrap_or_else(|e| e.into_inner());
         compartments
             .values()
             .map(|c| (c.manifest.clone(), c.state, c.triple_count))

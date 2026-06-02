@@ -179,6 +179,23 @@ impl AgentDaemon {
         self
     }
 
+    /// Acquire the agent lock, recovering from poison rather than panicking.
+    ///
+    /// A poisoned mutex means a previous task panicked while holding the guard.
+    /// Recovering via `into_inner()` clears the poison flag so all subsequent
+    /// callers succeed normally. The agent data may be slightly inconsistent if
+    /// the prior panic left a write half-applied, but that is still preferable
+    /// to permanently blocking every future operation on this workspace.
+    ///
+    /// Locking discipline: each per-workspace `Arc<Mutex<Agent>>` is independent.
+    /// A panic (and subsequent poison) in workspace A cannot affect workspace B.
+    fn lock_agent(&self) -> std::sync::MutexGuard<'_, Agent> {
+        self.agent.lock().unwrap_or_else(|e| {
+            tracing::warn!("agent mutex was poisoned; recovering (a previous task may have panicked while holding the lock)");
+            e.into_inner()
+        })
+    }
+
     /// Run the main daemon loop.
     ///
     /// Schedules all background tasks as tokio intervals and selects on them.
@@ -213,7 +230,7 @@ impl AgentDaemon {
         let mut bridge_training_tick = interval(self.config.bridge_training_interval);
 
         tokio::task::block_in_place(|| {
-            self.agent.lock().unwrap().sink().emit(&AkhMessage::system(
+            self.lock_agent().sink().emit(&AkhMessage::system(
                 "daemon started — background learning active",
             ));
         });
@@ -258,7 +275,7 @@ impl AgentDaemon {
                     tokio::task::block_in_place(|| self.run_idle_cycle());
                     if self.config.max_cycles > 0 && self.total_cycles >= self.config.max_cycles {
                         tokio::task::block_in_place(|| {
-                            self.agent.lock().unwrap().sink().emit(&AkhMessage::system(
+                            self.lock_agent().sink().emit(&AkhMessage::system(
                                 format!(
                                     "daemon: max cycles ({}) reached, shutting down",
                                     self.config.max_cycles,
@@ -291,7 +308,7 @@ impl AgentDaemon {
                 }
                 _ = self.wait_for_shutdown() => {
                     tokio::task::block_in_place(|| {
-                        self.agent.lock().unwrap().sink().emit(&AkhMessage::system(
+                        self.lock_agent().sink().emit(&AkhMessage::system(
                             "daemon: received shutdown signal, persisting session...",
                         ));
                     });
@@ -345,7 +362,7 @@ impl AgentDaemon {
     // -----------------------------------------------------------------------
 
     fn run_equivalence_learning(&mut self) {
-        let engine = self.agent.lock().unwrap().engine.clone();
+        let engine = self.lock_agent().engine.clone();
         match engine.learn_equivalences() {
             Ok(count) => {
                 if count > 0 {
@@ -364,7 +381,7 @@ impl AgentDaemon {
     }
 
     fn run_reflection(&mut self) {
-        let mut agent = self.agent.lock().unwrap();
+        let mut agent = self.lock_agent();
         match agent.reflect() {
             Ok(result) => {
                 let adj_count = result.adjustments.len();
@@ -396,7 +413,7 @@ impl AgentDaemon {
     }
 
     fn run_consolidation_check(&mut self) {
-        let mut agent = self.agent.lock().unwrap();
+        let mut agent = self.lock_agent();
         let wm_len = agent.working_memory().len();
         let threshold = agent.config.consolidation.auto_consolidate_at;
         if wm_len < threshold {
@@ -423,7 +440,7 @@ impl AgentDaemon {
     }
 
     fn run_schema_discovery(&self) {
-        let engine = self.agent.lock().unwrap().engine.clone();
+        let engine = self.lock_agent().engine.clone();
         let config = crate::autonomous::schema::SchemaDiscoveryConfig::default();
         match engine.discover_schema(config) {
             Ok(result) => {
@@ -445,7 +462,7 @@ impl AgentDaemon {
     }
 
     fn run_rule_inference(&self) {
-        let engine = self.agent.lock().unwrap().engine.clone();
+        let engine = self.lock_agent().engine.clone();
         let config = crate::autonomous::rule_engine::RuleEngineConfig::default();
         match engine.run_rules(config) {
             Ok(result) => {
@@ -474,7 +491,7 @@ impl AgentDaemon {
         use super::goal;
 
         let (engine, goal_ids) = {
-            let agent = self.agent.lock().unwrap();
+            let agent = self.lock_agent();
             let active = goal::active_goals(agent.goals());
             if active.is_empty() {
                 return;
@@ -509,7 +526,7 @@ impl AgentDaemon {
         // the Agent, so holding the mutex during network I/O + ingestion would
         // needlessly block every HTTP handler for 30-120s.
         let (engine, curiosity_cfg) = {
-            let agent = self.agent.lock().unwrap();
+            let agent = self.lock_agent();
             (agent.engine.clone(), agent.curiosity_config.clone())
         };
         // Lock is released here — HTTP handlers can proceed.
@@ -561,7 +578,7 @@ impl AgentDaemon {
             watch_firings,
             curiosity_config,
         ) = {
-            let mut guard = self.agent.lock().unwrap();
+            let mut guard = self.lock_agent();
             // Explicit reborrow so the borrow checker can split field access.
             let agent: &mut Agent = &mut *guard;
 
@@ -636,7 +653,7 @@ impl AgentDaemon {
         }
 
         // Phase 3: Brief lock — apply results (push goals, store provenance).
-        let mut agent = self.agent.lock().unwrap();
+        let mut agent = self.lock_agent();
 
         for proposal in &gen_result.activated {
             match super::goal::create_goal(
@@ -712,7 +729,7 @@ impl AgentDaemon {
     }
 
     fn run_sleep_cycle(&mut self) {
-        let mut guard = self.agent.lock().unwrap();
+        let mut guard = self.lock_agent();
         // Explicit reborrow so the borrow checker can see partial field access.
         let agent: &mut Agent = &mut *guard;
         match super::sleep::run_sleep_cycle(
@@ -744,7 +761,7 @@ impl AgentDaemon {
     fn run_trigger_evaluation(&mut self) {
         use super::trigger::{self as trigger_mod, TriggerStore};
 
-        let mut guard = self.agent.lock().unwrap();
+        let mut guard = self.lock_agent();
         // Explicit reborrow for partial field access.
         let agent: &mut Agent = &mut *guard;
 
@@ -795,7 +812,7 @@ impl AgentDaemon {
             return;
         }
 
-        let mut agent = self.agent.lock().unwrap();
+        let mut agent = self.lock_agent();
         if goal::active_goals(agent.goals()).is_empty() {
             drop(agent);
             self.cycle_done.notify_one();
@@ -845,7 +862,7 @@ impl AgentDaemon {
 
         // Extract engine ref and drop agent lock.
         let engine = {
-            let agent = self.agent.lock().unwrap();
+            let agent = self.lock_agent();
             agent.engine.clone()
         };
 
@@ -946,7 +963,7 @@ impl AgentDaemon {
         use crate::vsa::neural_bridge::NeuralVsaBridge;
 
         let engine = {
-            let agent = self.agent.lock().unwrap();
+            let agent = self.lock_agent();
             agent.engine.clone()
         };
 
@@ -997,7 +1014,7 @@ impl AgentDaemon {
     }
 
     fn persist(&self) {
-        let agent = self.agent.lock().unwrap();
+        let agent = self.lock_agent();
         if let Err(e) = agent.persist_session() {
             tracing::warn!(error = %e, "daemon: session persist failed");
         } else {
