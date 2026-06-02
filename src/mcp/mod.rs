@@ -3566,6 +3566,28 @@ impl AkhMcpServer {
         Ok(CallToolResult::success(vec![Content::text(result)]))
     }
 
+    // ── Causal World Model Bootstrap (Phase 15a / WI 019e1ab7) ─────
+
+    #[tool(
+        name = "causal_world_model",
+        description = "Return the current causal world model for a workspace: a Markdown summary of every registered tool schema including its description, parameters, preconditions, effects, and observed success rate. Use this to inspect what the agent knows about its own capabilities before running OODA cycles or planning."
+    )]
+    async fn causal_world_model(
+        &self,
+        Parameters(params): Parameters<WorkspaceParam>,
+    ) -> Result<CallToolResult, McpError> {
+        let agent = self.state.get_agent(&params.workspace).await?;
+
+        let summary = tokio::task::spawn_blocking(move || -> String {
+            let agent = agent.lock().expect("agent lock poisoned");
+            agent.causal_manager().world_model_summary()
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("task panicked: {e}"), None))?;
+
+        Ok(CallToolResult::success(vec![Content::text(summary)]))
+    }
+
     // ── Evidence Theory (Phase 17) ─────────────────────────────────
 
     #[tool(
@@ -4136,7 +4158,9 @@ impl rmcp::handler::server::ServerHandler for AkhMcpServer {
                  `simulate_actions` (predict action sequence outcomes), `what_changed_since` (temporal diff), \
                  `fluent_history` (full lifecycle of a fluent).\n\n\
                  Counterfactual reasoning: `counterfactual` (Pearl Level 3: what if action Y instead \
-                 of X?), `prediction_accuracy` (causal model accuracy stats and refinement suggestions).\n\n\
+                 of X?), `prediction_accuracy` (causal model accuracy stats and refinement suggestions), \
+                 `causal_world_model` (full Markdown dump of all tool schemas — descriptions, parameters, \
+                 preconditions, effects, success rates).\n\n\
                  Planning: `mcts_plan` (multi-step MCTS planning using causal world model and TD values).\n\n\
                  Evidence theory: `add_evidence` (submit evidence for/against a claim from a source), \
                  `assess_evidence` (Dempster-Shafer belief interval assessment with conflict detection).\n\n\
