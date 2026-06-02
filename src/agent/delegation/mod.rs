@@ -4,9 +4,20 @@
 //! enforces cost budgets via [`CostGuard`], and tracks active delegations.
 //! Results flow back through an mpsc channel and are processed by the daemon
 //! event loop.
+//!
+//! ### Synchronous enqueue / asynchronous dispatch
+//!
+//! The OODA loop's `DelegateTool` calls [`DelegationManager::enqueue`], which
+//! is synchronous and simply pushes the task into a pending queue.  The daemon
+//! calls [`DelegationManager::drain_pending`] on each delegation tick, which
+//! pulls tasks from the queue and calls the async [`DelegationManager::dispatch`]
+//! for each one.  This decouples the synchronous tool context from the async
+//! subprocess machinery.
 
 #[cfg(feature = "daemon")]
 pub mod local_claude;
+pub mod peer;
+pub mod remote_trigger;
 
 mod error;
 mod types;
@@ -15,6 +26,7 @@ pub use error::{DelegationError, DelegationResult};
 pub use types::*;
 
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use dashmap::DashMap;
@@ -58,10 +70,19 @@ impl CostGuard {
     /// Check whether we can afford an estimated token count on the given model.
     pub fn can_afford(&self, estimated_tokens: u64, model: &str) -> bool {
         self.maybe_reset_daily();
+        // If daily budget is 0, only local (free) targets are allowed.
+        if self.daily_budget_cents == 0 {
+            return false;
+        }
         let cost = self.estimate_cost(estimated_tokens, model);
         let spent = self.spent_today_cents.load(Ordering::Relaxed);
         let remaining = self.daily_budget_cents.saturating_sub(spent);
         cost <= remaining && cost <= self.per_task_max_cents
+    }
+
+    /// Whether local-only mode is in effect (daily_budget_cents == 0).
+    pub fn is_local_only(&self) -> bool {
+        self.daily_budget_cents == 0
     }
 
     /// Record actual token spend after a delegation completes.
@@ -86,6 +107,11 @@ impl CostGuard {
         self.maybe_reset_daily();
         self.daily_budget_cents
             .saturating_sub(self.spent_today_cents.load(Ordering::Relaxed))
+    }
+
+    /// Daily budget in cents.
+    pub fn daily_budget_cents(&self) -> u64 {
+        self.daily_budget_cents
     }
 
     fn estimate_cost(&self, tokens: u64, model: &str) -> u64 {
@@ -138,11 +164,15 @@ pub struct DelegationManager {
     active: DashMap<u64, ActiveDelegation>,
     cost_guard: CostGuard,
     next_id: AtomicU64,
+    /// Tasks enqueued by synchronous tool calls, pending async dispatch.
+    pending_tasks: Arc<Mutex<Vec<DelegationTask>>>,
     /// Completed results waiting to be processed by the daemon loop.
     #[cfg(feature = "daemon")]
     result_tx: tokio::sync::mpsc::Sender<DelegationResult<DelegationOutcome>>,
     #[cfg(feature = "daemon")]
-    result_rx: std::sync::Mutex<tokio::sync::mpsc::Receiver<DelegationResult<DelegationOutcome>>>,
+    result_rx: Mutex<tokio::sync::mpsc::Receiver<DelegationResult<DelegationOutcome>>>,
+    /// Known peer registry.
+    peer_registry: peer::PeerRegistry,
 }
 
 impl DelegationManager {
@@ -152,13 +182,16 @@ impl DelegationManager {
         let (tx, rx) = tokio::sync::mpsc::channel(64);
         let cost_guard =
             CostGuard::new(config.daily_cost_budget_cents, config.per_task_max_cents);
+        let peer_registry = peer::PeerRegistry::new(&config.peers);
         Self {
             config,
             active: DashMap::new(),
             cost_guard,
             next_id: AtomicU64::new(1),
+            pending_tasks: Arc::new(Mutex::new(Vec::new())),
             result_tx: tx,
-            result_rx: std::sync::Mutex::new(rx),
+            result_rx: Mutex::new(rx),
+            peer_registry,
         }
     }
 
@@ -167,13 +200,65 @@ impl DelegationManager {
     pub fn new(config: DelegationConfig) -> Self {
         let cost_guard =
             CostGuard::new(config.daily_cost_budget_cents, config.per_task_max_cents);
+        let peer_registry = peer::PeerRegistry::new(&config.peers);
         Self {
             config,
             active: DashMap::new(),
             cost_guard,
             next_id: AtomicU64::new(1),
+            pending_tasks: Arc::new(Mutex::new(Vec::new())),
+            peer_registry,
         }
     }
+
+    // -----------------------------------------------------------------------
+    // Pending task queue (synchronous enqueue from OODA tool context)
+    // -----------------------------------------------------------------------
+
+    /// Enqueue a task for later async dispatch (called from synchronous tool context).
+    ///
+    /// Returns an error if delegation is disabled or at capacity.  The actual
+    /// subprocess spawning happens on the next daemon delegation tick.
+    pub fn enqueue(&self, task: DelegationTask) -> DelegationResult<()> {
+        if !self.config.enabled {
+            return Err(DelegationError::Disabled);
+        }
+        let pending = self.active.len()
+            + self
+                .pending_tasks
+                .lock()
+                .map(|q| q.len())
+                .unwrap_or(0);
+        if pending >= self.config.max_concurrent {
+            return Err(DelegationError::AtCapacity {
+                max: self.config.max_concurrent,
+                active: pending,
+            });
+        }
+        if let Ok(mut q) = self.pending_tasks.lock() {
+            q.push(task);
+        }
+        Ok(())
+    }
+
+    /// Clone the pending task queue Arc so the `DelegateTool` can push into it.
+    pub fn pending_queue(&self) -> Arc<Mutex<Vec<DelegationTask>>> {
+        Arc::clone(&self.pending_tasks)
+    }
+
+    /// Drain the pending queue and return tasks for async dispatch.
+    ///
+    /// Called by the daemon delegation tick under `#[cfg(feature = "daemon")]`.
+    pub fn drain_pending(&self) -> Vec<DelegationTask> {
+        self.pending_tasks
+            .lock()
+            .map(|mut q| std::mem::take(&mut *q))
+            .unwrap_or_default()
+    }
+
+    // -----------------------------------------------------------------------
+    // Core methods
+    // -----------------------------------------------------------------------
 
     /// Allocate the next delegation ID.
     pub fn next_id(&self) -> DelegationId {
@@ -226,6 +311,24 @@ impl DelegationManager {
         self.active.iter().map(|r| r.value().clone()).collect()
     }
 
+    /// Number of currently active delegations.
+    pub fn active_count(&self) -> usize {
+        self.active.len()
+    }
+
+    /// Number of tasks queued but not yet dispatched.
+    pub fn pending_count(&self) -> usize {
+        self.pending_tasks
+            .lock()
+            .map(|q| q.len())
+            .unwrap_or(0)
+    }
+
+    /// Whether we can accept another delegation (below max_concurrent).
+    pub fn has_capacity(&self) -> bool {
+        self.active.len() < self.config.max_concurrent
+    }
+
     /// Check for timed-out delegations and mark them accordingly.
     pub fn check_timeouts(&self) -> Vec<DelegationId> {
         let now = now_secs();
@@ -241,31 +344,63 @@ impl DelegationManager {
         timed_out
     }
 
-    /// Number of currently active (non-completed) delegations.
-    pub fn active_count(&self) -> usize {
-        self.active.len()
+    /// Access the peer registry.
+    pub fn peer_registry(&self) -> &peer::PeerRegistry {
+        &self.peer_registry
     }
 
-    /// Whether we can accept another delegation (below max_concurrent).
-    pub fn has_capacity(&self) -> bool {
-        self.active.len() < self.config.max_concurrent
+    /// Mutable access to the peer registry.
+    pub fn peer_registry_mut(&mut self) -> &mut peer::PeerRegistry {
+        &mut self.peer_registry
     }
 
-    /// Select the best target for a task based on config and capabilities.
+    // -----------------------------------------------------------------------
+    // Target selection
+    // -----------------------------------------------------------------------
+
+    /// Select the best target for a task based on config, capabilities, and
+    /// the sovereignty gradient (local → peer → remote).
     pub fn select_target(
         &self,
-        _required_capabilities: &[String],
+        required_capabilities: &[String],
         target_hint: Option<&str>,
     ) -> DelegationResult<DelegationTargetKind> {
-        // If the caller gave an explicit hint, honour it.
+        // Honour explicit hint first.
         if let Some(hint) = target_hint {
             return match hint {
-                "local" if self.config.local.enabled => {
-                    Ok(DelegationTargetKind::LocalClaude {
-                        model: self.config.local.model.clone(),
-                        allowed_tools: self.config.local.allowed_tools.clone(),
-                        working_dir: self.config.local.working_dir.clone(),
-                    })
+                "local" => {
+                    if self.config.local.enabled {
+                        Ok(DelegationTargetKind::LocalClaude {
+                            model: self.config.local.model.clone(),
+                            allowed_tools: self.config.local.allowed_tools.clone(),
+                            working_dir: self.config.local.working_dir.clone(),
+                        })
+                    } else {
+                        Err(DelegationError::NoTarget {
+                            required: vec!["local".to_string()],
+                        })
+                    }
+                }
+                "remote" => {
+                    if self.config.remote.enabled {
+                        Ok(DelegationTargetKind::RemoteTrigger {
+                            akhomed_public_url: self.config.remote.akhomed_public_url.clone(),
+                            model: self.config.remote.model.clone(),
+                        })
+                    } else {
+                        Err(DelegationError::NoTarget {
+                            required: vec!["remote".to_string()],
+                        })
+                    }
+                }
+                "peer" => {
+                    if let Some(endpoint) = self.peer_registry.best_peer(required_capabilities) {
+                        Ok(DelegationTargetKind::AkhMeduPeer { endpoint })
+                    } else {
+                        Err(DelegationError::NoTarget {
+                            required: vec!["peer".to_string()],
+                        })
+                    }
                 }
                 _ => Err(DelegationError::NoTarget {
                     required: vec![hint.to_string()],
@@ -273,7 +408,7 @@ impl DelegationManager {
             };
         }
 
-        // Default selection priority: local → (future: remote → peer)
+        // Sovereignty gradient: local → peer → remote.
         if self.config.local.enabled {
             return Ok(DelegationTargetKind::LocalClaude {
                 model: self.config.local.model.clone(),
@@ -282,16 +417,32 @@ impl DelegationManager {
             });
         }
 
+        if self.config.peers.enabled {
+            if let Some(endpoint) = self.peer_registry.best_peer(required_capabilities) {
+                return Ok(DelegationTargetKind::AkhMeduPeer { endpoint });
+            }
+        }
+
+        if self.config.remote.enabled && !self.cost_guard.is_local_only() {
+            return Ok(DelegationTargetKind::RemoteTrigger {
+                akhomed_public_url: self.config.remote.akhomed_public_url.clone(),
+                model: self.config.remote.model.clone(),
+            });
+        }
+
         Err(DelegationError::NoTarget {
             required: vec!["any".to_string()],
         })
     }
 
+    // -----------------------------------------------------------------------
+    // Dispatch
+    // -----------------------------------------------------------------------
+
     /// Dispatch a task to an appropriate target.
     ///
-    /// This is the primary entry point used by the OODA loop's delegate tool.
-    /// It checks capacity, selects a target, verifies the budget, creates the
-    /// active delegation record, and (for local targets) spawns the subprocess.
+    /// Checks capacity, selects a target, verifies the budget, creates the
+    /// active delegation record, and spawns the worker.
     #[cfg(feature = "daemon")]
     pub fn dispatch(
         &self,
@@ -308,42 +459,50 @@ impl DelegationManager {
             });
         }
 
-        let target = self.select_target(&task.required_capabilities, target_hint)?;
+        let hint = target_hint
+            .or(task.target_hint.as_deref());
+        let target = self.select_target(&task.required_capabilities, hint)?;
 
-        // Budget check — estimate ~4K tokens for a typical task
-        let estimated_tokens = 4_000u64;
         let model = match &target {
-            DelegationTargetKind::LocalClaude { model, .. } => model.as_str(),
+            DelegationTargetKind::LocalClaude { model, .. } => model.clone(),
+            DelegationTargetKind::RemoteTrigger { model, .. } => model.clone(),
+            DelegationTargetKind::AkhMeduPeer { .. } => String::new(), // peer is free
         };
-        if !self.cost_guard.can_afford(estimated_tokens, model) {
-            return Err(DelegationError::BudgetExceeded {
-                spent_cents: self.cost_guard.spent_today_cents(),
-                budget_cents: self.config.daily_cost_budget_cents,
-            });
+
+        // Budget check — local subprocess is free (Max plan), peers are free;
+        // only remote triggers incur API cost.
+        let is_paid = matches!(target, DelegationTargetKind::RemoteTrigger { .. });
+        if is_paid {
+            let estimated_tokens = 4_000u64;
+            if !self.cost_guard.can_afford(estimated_tokens, &model) {
+                return Err(DelegationError::BudgetExceeded {
+                    spent_cents: self.cost_guard.spent_today_cents(),
+                    budget_cents: self.config.daily_cost_budget_cents,
+                });
+            }
         }
 
         let id = self.next_id();
         let timeout_secs = match &target {
-            DelegationTargetKind::LocalClaude { .. } => {
-                self.config.local.timeout_seconds
-            }
+            DelegationTargetKind::LocalClaude { .. } => self.config.local.timeout_seconds,
+            DelegationTargetKind::RemoteTrigger { .. } => 300, // 5 min for remote
+            DelegationTargetKind::AkhMeduPeer { .. } => 60,
         };
 
         let delegation = ActiveDelegation {
-            id: id.clone(),
+            id,
             goal_id: task.goal_id,
             target: target.clone(),
             task_description: task.description.clone(),
             started_at: now_secs(),
             timeout_secs,
-            status: DelegationStatus::Pending,
+            status: DelegationStatus::Running,
         };
         self.track(delegation);
 
-        // Spawn the worker based on target kind.
-        match target {
+        match target.clone() {
             DelegationTargetKind::LocalClaude {
-                model,
+                model: m,
                 allowed_tools,
                 working_dir,
             } => {
@@ -353,12 +512,17 @@ impl DelegationManager {
                 );
                 let tx = self.result_sender();
                 let task_clone = task;
-                let id_clone = id.clone();
+                let id_clone = id;
+                let target_clone = target;
                 tokio::spawn(async move {
-                    let result =
-                        worker.execute(&task_clone, &model, &allowed_tools, working_dir.as_deref()).await;
+                    let result = worker
+                        .execute(&task_clone, &m, &allowed_tools, working_dir.as_deref())
+                        .await;
                     let outcome = match result {
-                        Ok(outcome) => outcome,
+                        Ok(mut outcome) => {
+                            outcome.target = Some(target_clone);
+                            outcome
+                        }
                         Err(e) => DelegationOutcome {
                             id: id_clone,
                             stdout: String::new(),
@@ -369,6 +533,72 @@ impl DelegationManager {
                             exit_code: None,
                             goal_id: task_clone.goal_id,
                             error: Some(e.to_string()),
+                            target: Some(target_clone),
+                        },
+                    };
+                    let _ = tx.send(Ok(outcome)).await;
+                });
+            }
+            DelegationTargetKind::RemoteTrigger {
+                akhomed_public_url,
+                model: m,
+            } => {
+                let worker = remote_trigger::RemoteTriggerWorker::new(
+                    akhomed_public_url,
+                    m.clone(),
+                    self.config.remote.max_cost_per_task_cents,
+                );
+                let tx = self.result_sender();
+                let task_clone = task;
+                let id_clone = id;
+                let target_clone = target;
+                tokio::spawn(async move {
+                    let result = worker.delegate_once(&task_clone, id_clone).await;
+                    let outcome = match result {
+                        Ok(mut outcome) => {
+                            outcome.target = Some(target_clone);
+                            outcome
+                        }
+                        Err(e) => DelegationOutcome {
+                            id: id_clone,
+                            stdout: String::new(),
+                            structured: None,
+                            wall_time: Duration::ZERO,
+                            tokens_consumed: None,
+                            cost_usd: None,
+                            exit_code: None,
+                            goal_id: task_clone.goal_id,
+                            error: Some(e.to_string()),
+                            target: Some(target_clone),
+                        },
+                    };
+                    let _ = tx.send(Ok(outcome)).await;
+                });
+            }
+            DelegationTargetKind::AkhMeduPeer { endpoint } => {
+                let tx = self.result_sender();
+                let task_clone = task;
+                let id_clone = id;
+                let target_clone = target;
+                tokio::spawn(async move {
+                    let result =
+                        peer::delegate_to_peer(&endpoint, &task_clone, id_clone).await;
+                    let outcome = match result {
+                        Ok(mut outcome) => {
+                            outcome.target = Some(target_clone);
+                            outcome
+                        }
+                        Err(e) => DelegationOutcome {
+                            id: id_clone,
+                            stdout: String::new(),
+                            structured: None,
+                            wall_time: Duration::ZERO,
+                            tokens_consumed: None,
+                            cost_usd: None,
+                            exit_code: None,
+                            goal_id: task_clone.goal_id,
+                            error: Some(e.to_string()),
+                            target: Some(target_clone),
                         },
                     };
                     let _ = tx.send(Ok(outcome)).await;
@@ -385,6 +615,7 @@ impl std::fmt::Debug for DelegationManager {
         f.debug_struct("DelegationManager")
             .field("config", &self.config)
             .field("active_count", &self.active.len())
+            .field("pending_count", &self.pending_count())
             .field("cost_guard", &self.cost_guard)
             .finish()
     }

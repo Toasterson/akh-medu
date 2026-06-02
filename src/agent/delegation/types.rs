@@ -6,7 +6,6 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::skills::LabelTriple;
-use crate::symbol::SymbolId;
 
 // ---------------------------------------------------------------------------
 // DelegationId
@@ -41,6 +40,10 @@ pub struct DelegationConfig {
     pub akhomed_url: String,
     /// Local Claude Code subprocess settings.
     pub local: LocalDelegationConfig,
+    /// Remote trigger settings (claude.ai API).
+    pub remote: RemoteDelegationConfig,
+    /// Peer akh-medu instance settings.
+    pub peers: PeerDelegationConfig,
 }
 
 impl Default for DelegationConfig {
@@ -52,6 +55,8 @@ impl Default for DelegationConfig {
             per_task_max_cents: 10,
             akhomed_url: "http://localhost:3001".into(),
             local: LocalDelegationConfig::default(),
+            remote: RemoteDelegationConfig::default(),
+            peers: PeerDelegationConfig::default(),
         }
     }
 }
@@ -90,6 +95,51 @@ impl Default for LocalDelegationConfig {
     }
 }
 
+/// Configuration for remote trigger delegation (claude.ai API).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoteDelegationConfig {
+    /// Whether remote delegation is enabled (requires API access and public URL).
+    pub enabled: bool,
+    /// Public URL of this akhomed instance (workers call back via MCP).
+    pub akhomed_public_url: String,
+    /// Model to use for remote triggers.
+    pub model: String,
+    /// Maximum cost per remote task in cents.
+    pub max_cost_per_task_cents: u64,
+}
+
+impl Default for RemoteDelegationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            akhomed_public_url: String::new(),
+            model: "sonnet".into(),
+            max_cost_per_task_cents: 10,
+        }
+    }
+}
+
+/// Configuration for peer akh-medu instance delegation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PeerDelegationConfig {
+    /// Whether peer delegation is enabled.
+    pub enabled: bool,
+    /// Explicit peer endpoint URLs (e.g. "http://research-akh.local:3001").
+    pub endpoints: Vec<String>,
+    /// Whether to attempt auto-discovery via mDNS (future feature).
+    pub auto_discover: bool,
+}
+
+impl Default for PeerDelegationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            endpoints: Vec::new(),
+            auto_discover: false,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Target kinds
 // ---------------------------------------------------------------------------
@@ -103,13 +153,25 @@ pub enum DelegationTargetKind {
         allowed_tools: Vec<String>,
         working_dir: Option<PathBuf>,
     },
-    // Future: RemoteTrigger, AkhMeduPeer, McpServer
+    /// Remote trigger via claude.ai API — survives restarts.
+    RemoteTrigger {
+        akhomed_public_url: String,
+        model: String,
+    },
+    /// Another akh-medu instance — for KG-level operations.
+    AkhMeduPeer {
+        endpoint: String,
+    },
 }
 
 impl std::fmt::Display for DelegationTargetKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::LocalClaude { model, .. } => write!(f, "local-claude:{model}"),
+            Self::RemoteTrigger { akhomed_public_url, model } => {
+                write!(f, "remote-trigger:{model}@{akhomed_public_url}")
+            }
+            Self::AkhMeduPeer { endpoint } => write!(f, "peer:{endpoint}"),
         }
     }
 }
@@ -127,10 +189,26 @@ pub struct DelegationTask {
     pub context_triples: Vec<LabelTriple>,
     /// What capabilities the target needs (for target selection).
     pub required_capabilities: Vec<String>,
-    /// The goal this task is working toward.
+    /// The goal this task is working toward (0 = no specific goal).
     pub goal_id: u64,
     /// Priority (inherited from the goal).
     pub priority: f32,
+    /// Optional explicit target hint ("local", "remote", "peer").
+    pub target_hint: Option<String>,
+}
+
+impl DelegationTask {
+    /// Create a minimal task with just a description.
+    pub fn new(description: impl Into<String>) -> Self {
+        Self {
+            description: description.into(),
+            context_triples: Vec::new(),
+            required_capabilities: Vec::new(),
+            goal_id: 0,
+            priority: 0.5,
+            target_hint: None,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -175,6 +253,8 @@ pub struct DelegationOutcome {
     pub exit_code: Option<i32>,
     pub goal_id: u64,
     pub error: Option<String>,
+    /// Which target processed this delegation.
+    pub target: Option<DelegationTargetKind>,
 }
 
 /// Structured output extracted from the worker's `akh-result` block.

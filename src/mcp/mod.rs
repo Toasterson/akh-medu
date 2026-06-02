@@ -1199,6 +1199,28 @@ pub struct ToolRegisterRemoteParams {
     pub access_agents: Option<String>,
 }
 
+// ── Phase 36: Delegation Parameter Structs ───────────────────────────────
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DelegateTaskParams {
+    #[schemars(description = "Target workspace (default: \"default\")")]
+    #[serde(default = "default_workspace")]
+    pub workspace: String,
+    #[schemars(description = "Description of the task to delegate to an external worker")]
+    pub task: String,
+    #[schemars(
+        description = "Target hint: 'local' (Claude Code subprocess), 'remote' (cloud trigger), 'peer' (another akh-medu)"
+    )]
+    pub target: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DelegationStatusParams {
+    #[schemars(description = "Target workspace (default: \"default\")")]
+    #[serde(default = "default_workspace")]
+    pub workspace: String,
+}
+
 // ── Config Inspect Parameter + Response Structs ──────────────────────────
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1329,6 +1351,15 @@ pub struct CleanupByPatternParams {
     #[schemars(description = "When true (default), preview what would be removed without committing. Set false to execute the removal.")]
     #[serde(default = "default_dry_run")]
     pub dry_run: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CancelDelegationParams {
+    #[schemars(description = "Target workspace (default: \"default\")")]
+    #[serde(default = "default_workspace")]
+    pub workspace: String,
+    #[schemars(description = "Delegation ID to cancel (numeric)")]
+    pub delegation_id: u64,
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────
@@ -5815,6 +5846,65 @@ impl AkhMcpServer {
         )]))
     }
 
+    // ── Phase 36: Delegation Management ────────────────────────────────
+
+    #[tool(
+        name = "delegation_status",
+        description = "List active and recently-completed delegations for a workspace. \
+                       Shows task descriptions, targets, status, and elapsed time."
+    )]
+    async fn delegation_status(
+        &self,
+        Parameters(params): Parameters<DelegationStatusParams>,
+    ) -> Result<CallToolResult, McpError> {
+        #[cfg(feature = "delegation")]
+        {
+            let agent = self.state.get_agent(&params.workspace).await?;
+            let lines = tokio::task::spawn_blocking(move || {
+                let agent = agent.lock().map_err(|e| format!("lock: {e}"))?;
+                let mgr = agent.delegation_manager();
+                let active = mgr.active_delegations();
+                let mut lines = vec![format!(
+                    "Delegation status — enabled: {}, active: {}, pending: {}, capacity: {}/{}",
+                    mgr.is_enabled(),
+                    mgr.active_count(),
+                    mgr.pending_count(),
+                    mgr.active_count(),
+                    mgr.config().max_concurrent,
+                )];
+                let cg = mgr.cost_guard();
+                lines.push(format!(
+                    "Budget: {} cents/day, spent today: {} cents, remaining: {} cents",
+                    cg.daily_budget_cents(),
+                    cg.spent_today_cents(),
+                    cg.remaining_cents(),
+                ));
+                if active.is_empty() {
+                    lines.push("No active delegations.".to_string());
+                } else {
+                    for del in &active {
+                        lines.push(format!(
+                            "  [{}] {} → {} ({:?})",
+                            del.id, del.task_description, del.target, del.status,
+                        ));
+                    }
+                }
+                Ok::<Vec<String>, String>(lines)
+            })
+            .await
+            .map_err(|e| McpError::internal_error(format!("task panicked: {e}"), None))?
+            .map_err(|e| McpError::internal_error(e, None))?;
+
+            return Ok(CallToolResult::success(vec![Content::text(lines.join("\n"))]));
+        }
+        #[cfg(not(feature = "delegation"))]
+        Ok(CallToolResult::success(vec![Content::text(
+            "Delegation feature is not enabled in this build. \
+             Rebuild with --features delegation to enable."
+                .to_string(),
+        )]))
+    }
+
     #[tool(
         name = "tool_register_remote",
         description = "Register a remote MCP tool in the knowledge graph for federation / peer discovery. \
@@ -6517,6 +6607,222 @@ impl AkhMcpServer {
         .map_err(|e| McpError::internal_error(e, None))?;
 
         Ok(CallToolResult::success(vec![Content::text(result)]))
+    }
+
+    #[tool(
+        name = "delegate_task",
+        description = "Manually delegate a task to an external Claude Code worker or peer agent. \
+                       The task runs asynchronously; use delegation_status to check progress."
+    )]
+    async fn delegate_task(
+        &self,
+        Parameters(params): Parameters<DelegateTaskParams>,
+    ) -> Result<CallToolResult, McpError> {
+        #[cfg(feature = "delegation")]
+        {
+            let agent = self.state.get_agent(&params.workspace).await?;
+            let task_desc = params.task.clone();
+            let target_hint = params.target.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                let agent = agent.lock().map_err(|e| format!("lock: {e}"))?;
+                let task = crate::agent::delegation::DelegationTask {
+                    description: task_desc.clone(),
+                    context_triples: Vec::new(),
+                    required_capabilities: Vec::new(),
+                    goal_id: 0,
+                    priority: 0.7,
+                    target_hint: target_hint.clone(),
+                };
+                agent
+                    .delegation_manager()
+                    .enqueue(task)
+                    .map(|_| format!(
+                        "Task queued for delegation: \"{task_desc}\" → target: {} \
+                         (will dispatch on next daemon tick ~10s)",
+                        target_hint.as_deref().unwrap_or("auto"),
+                    ))
+                    .map_err(|e| e.to_string())
+            })
+            .await
+            .map_err(|e| McpError::internal_error(format!("task panicked: {e}"), None))?
+            .map_err(|e| McpError::internal_error(e, None))?;
+
+            return Ok(CallToolResult::success(vec![Content::text(result)]));
+        }
+        #[cfg(not(feature = "delegation"))]
+        Ok(CallToolResult::success(vec![Content::text(
+            "Delegation feature is not enabled in this build.".to_string(),
+        )]))
+    }
+
+    #[tool(
+        name = "delegation_cost_report",
+        description = "Show today's delegation cost breakdown: budget, amount spent, \
+                       remaining allowance, and per-model pricing."
+    )]
+    async fn delegation_cost_report(
+        &self,
+        Parameters(params): Parameters<DelegationStatusParams>,
+    ) -> Result<CallToolResult, McpError> {
+        #[cfg(feature = "delegation")]
+        {
+            let agent = self.state.get_agent(&params.workspace).await?;
+            let report = tokio::task::spawn_blocking(move || {
+                let agent = agent.lock().map_err(|e| format!("lock: {e}"))?;
+                let mgr = agent.delegation_manager();
+                let cg = mgr.cost_guard();
+                let cfg = mgr.config();
+                let mut lines = vec!["=== Delegation Cost Report ===".to_string()];
+                lines.push(format!(
+                    "Daily budget: {} cents ({:.2} USD)",
+                    cg.daily_budget_cents(),
+                    cg.daily_budget_cents() as f64 / 100.0,
+                ));
+                lines.push(format!(
+                    "Spent today: {} cents ({:.4} USD)",
+                    cg.spent_today_cents(),
+                    cg.spent_today_cents() as f64 / 100.0,
+                ));
+                lines.push(format!(
+                    "Remaining: {} cents ({:.4} USD)",
+                    cg.remaining_cents(),
+                    cg.remaining_cents() as f64 / 100.0,
+                ));
+                lines.push(format!(
+                    "Per-task cap: {} cents ({:.2} USD)",
+                    cfg.per_task_max_cents,
+                    cfg.per_task_max_cents as f64 / 100.0,
+                ));
+                lines.push(String::new());
+                lines.push("Model pricing (cents per 1M input tokens):".to_string());
+                lines.push("  haiku: 25c  ($0.25/M)".to_string());
+                lines.push("  sonnet: 300c ($3.00/M)".to_string());
+                lines.push("  opus: 1500c  ($15.00/M)".to_string());
+                lines.push(String::new());
+                if cg.is_local_only() {
+                    lines.push(
+                        "Mode: LOCAL ONLY (daily_cost_budget_cents = 0, \
+                         no API costs incurred)"
+                            .to_string(),
+                    );
+                }
+                // Peer registry summary.
+                let peers = mgr.peer_registry().list();
+                if !peers.is_empty() {
+                    lines.push(String::new());
+                    lines.push(format!("Known peers: {}", peers.len()));
+                    for peer in &peers {
+                        lines.push(format!(
+                            "  {} — load: {:.0}%, success: {:.0}%, avg: {:.0}ms",
+                            peer.endpoint,
+                            peer.load * 100.0,
+                            peer.success_rate * 100.0,
+                            peer.avg_response_ms,
+                        ));
+                    }
+                }
+                Ok::<Vec<String>, String>(lines)
+            })
+            .await
+            .map_err(|e| McpError::internal_error(format!("task panicked: {e}"), None))?
+            .map_err(|e| McpError::internal_error(e, None))?;
+
+            return Ok(CallToolResult::success(vec![Content::text(report.join("\n"))]));
+        }
+        #[cfg(not(feature = "delegation"))]
+        Ok(CallToolResult::success(vec![Content::text(
+            "Delegation feature is not enabled in this build.".to_string(),
+        )]))
+    }
+
+    #[tool(
+        name = "list_peers",
+        description = "List known peer akh-medu instances, their capabilities, \
+                       current load, and historical performance metrics."
+    )]
+    async fn list_peers(
+        &self,
+        Parameters(params): Parameters<DelegationStatusParams>,
+    ) -> Result<CallToolResult, McpError> {
+        #[cfg(feature = "delegation")]
+        {
+            let agent = self.state.get_agent(&params.workspace).await?;
+            let output = tokio::task::spawn_blocking(move || -> Result<String, String> {
+                let agent = agent.lock().map_err(|e| format!("lock: {e}"))?;
+                let registry = agent.delegation_manager().peer_registry();
+                let peers = registry.list();
+                if peers.is_empty() {
+                    return Ok("No peers configured. Add endpoints to [delegation.peers] in akh.toml.".to_string());
+                }
+                let mut lines = vec![format!("Known peers ({}):", peers.len())];
+                for peer in &peers {
+                    lines.push(format!("  Endpoint: {}", peer.endpoint));
+                    lines.push(format!(
+                        "    Load: {:.0}%  Success: {:.0}%  Avg response: {:.0}ms  Tasks: {}",
+                        peer.load * 100.0,
+                        peer.success_rate * 100.0,
+                        peer.avg_response_ms,
+                        peer.tasks_completed,
+                    ));
+                    if !peer.capabilities.is_empty() {
+                        lines.push(format!("    Capabilities: {}", peer.capabilities.join(", ")));
+                    }
+                    if !peer.active_skills.is_empty() {
+                        lines.push(format!("    Active skills: {}", peer.active_skills.join(", ")));
+                    }
+                }
+                Ok(lines.join("\n"))
+            })
+            .await
+            .map_err(|e| McpError::internal_error(format!("task panicked: {e}"), None))?
+            .map_err(|e| McpError::internal_error(e, None))?;
+
+            return Ok(CallToolResult::success(vec![Content::text(output)]));
+        }
+        #[cfg(not(feature = "delegation"))]
+        Ok(CallToolResult::success(vec![Content::text(
+            "Delegation feature is not enabled in this build.".to_string(),
+        )]))
+    }
+
+    #[tool(
+        name = "cancel_delegation",
+        description = "Cancel an active delegation by ID. \
+                       The delegation is removed from tracking; the subprocess may \
+                       still be running (local processes are not killed)."
+    )]
+    async fn cancel_delegation(
+        &self,
+        Parameters(params): Parameters<CancelDelegationParams>,
+    ) -> Result<CallToolResult, McpError> {
+        #[cfg(feature = "delegation")]
+        {
+            let agent = self.state.get_agent(&params.workspace).await?;
+            let delegation_id = params.delegation_id;
+            let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+                let agent = agent.lock().map_err(|e| format!("lock: {e}"))?;
+                let id = crate::agent::delegation::DelegationId(delegation_id);
+                match agent.delegation_manager().complete(id) {
+                    Some(del) => Ok(format!(
+                        "Delegation {} cancelled: \"{}\" (was {:?})",
+                        delegation_id, del.task_description, del.status,
+                    )),
+                    None => Ok(format!(
+                        "Delegation {} not found (may have already completed).",
+                        delegation_id
+                    )),
+                }
+            })
+            .await
+            .map_err(|e| McpError::internal_error(format!("task panicked: {e}"), None))?
+            .map_err(|e| McpError::internal_error(e, None))?;
+
+            return Ok(CallToolResult::success(vec![Content::text(result)]));
+        }
+        #[cfg(not(feature = "delegation"))]
+        Ok(CallToolResult::success(vec![Content::text(
+            "Delegation feature is not enabled in this build.".to_string(),
+        )]))
     }
 }
 

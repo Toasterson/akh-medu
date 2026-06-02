@@ -90,6 +90,26 @@ pub enum DelegationError {
     )]
     ParseOutput,
 
+    #[error("peer {endpoint} is unreachable")]
+    #[diagnostic(
+        code(akh::delegation::peer_unreachable),
+        help(
+            "Check network connectivity to {endpoint}, or remove it from \
+             [delegation.peers] endpoints in akh.toml"
+        )
+    )]
+    PeerUnreachable { endpoint: String },
+
+    #[error("remote trigger API is not yet available")]
+    #[diagnostic(
+        code(akh::delegation::remote_unavailable),
+        help(
+            "The claude.ai remote trigger API is not yet publicly available. \
+             Use local delegation instead, or check for updates."
+        )
+    )]
+    RemoteTriggerUnavailable,
+
     #[error("I/O error during delegation: {0}")]
     #[diagnostic(
         code(akh::delegation::io),
