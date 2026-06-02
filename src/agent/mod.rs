@@ -52,6 +52,7 @@ pub mod operator_channel;
 pub mod oxifed;
 pub mod goal_generation;
 pub mod idle;
+pub mod journal_ingest;
 pub mod library_learn;
 pub mod mcts;
 pub mod memory;

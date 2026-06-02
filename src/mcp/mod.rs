@@ -859,6 +859,20 @@ pub struct AgentUpdateGoalParams {
     pub criteria: Option<String>,
 }
 
+// ── Journal Ingest Tool ─────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct IngestJournalParams {
+    #[schemars(description = "Target workspace (default: \"default\")")]
+    #[serde(default = "default_workspace")]
+    pub workspace: String,
+    #[schemars(
+        description = "Path to a directory of *.md journals or a single .md file. \
+                       Defaults to $AKH_JOURNAL_DIR or $XDG_DATA_HOME/akh-medu/journals/."
+    )]
+    pub path: Option<String>,
+}
+
 // ── Phase 3: Knowledge Introspection Tools ──────────────────────────────
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -3979,6 +3993,74 @@ impl AkhMcpServer {
     }
 
     #[tool(
+        name = "ingest_journal",
+        description = "Ingest OpenClaw daily memory journals (*.md files) into the episodic KG \
+                       store so they are searchable via agent_recall. Accepts an optional path to \
+                       a directory of markdown files or a single file; defaults to the configured \
+                       journal directory ($AKH_JOURNAL_DIR or $XDG_DATA_HOME/akh-medu/journals/). \
+                       Re-running is idempotent: already-ingested files are skipped."
+    )]
+    async fn ingest_journal(
+        &self,
+        Parameters(params): Parameters<IngestJournalParams>,
+    ) -> Result<CallToolResult, McpError> {
+        use crate::agent::agent::AgentPredicates;
+        use crate::agent::journal_ingest;
+
+        let engine = self.state.get_engine(&params.workspace).await?;
+        let paths = self.state.paths.clone();
+        let path_override = params.path.clone();
+
+        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            let predicates = AgentPredicates::init(&engine).map_err(|e| format!("{e}"))?;
+
+            let (files_scanned, files_ingested, files_skipped, episodes_created) =
+                if let Some(p) = path_override {
+                    let target = std::path::Path::new(&p);
+                    if target.is_file() {
+                        let n = journal_ingest::ingest_journal_file(&engine, target, &predicates)
+                            .map_err(|e| format!("{e}"))?;
+                        let _ = engine.persist();
+                        (1usize, if n > 0 { 1 } else { 0 }, if n == 0 { 1 } else { 0 }, n)
+                    } else {
+                        let stats =
+                            journal_ingest::ingest_journals_from_dir(&engine, target, &predicates)
+                                .map_err(|e| format!("{e}"))?;
+                        let _ = engine.persist();
+                        (
+                            stats.files_scanned,
+                            stats.files_ingested,
+                            stats.files_skipped,
+                            stats.episodes_created,
+                        )
+                    }
+                } else {
+                    let journal_dir = paths.memory_journals_dir();
+                    let stats =
+                        journal_ingest::ingest_journals_from_dir(&engine, &journal_dir, &predicates)
+                            .map_err(|e| format!("{e}"))?;
+                    let _ = engine.persist();
+                    (
+                        stats.files_scanned,
+                        stats.files_ingested,
+                        stats.files_skipped,
+                        stats.episodes_created,
+                    )
+                };
+
+            Ok(format!(
+                "Journal ingest: {files_scanned} file(s) scanned, {files_ingested} ingested, \
+                 {files_skipped} skipped, {episodes_created} episode(s) created."
+            ))
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("task panicked: {e}"), None))?
+        .map_err(|e| McpError::internal_error(e, None))?;
+
+        Ok(CallToolResult::success(vec![Content::text(result)]))
+    }
+
+    #[tool(
         name = "agent_psyche",
         description = "Read the agent's current psyche state: persona, archetypes, OCEAN profile, shadow patterns, and self-integration."
     )]
@@ -6330,7 +6412,7 @@ impl rmcp::handler::server::ServerHandler for AkhMcpServer {
                  Agent introspection: `agent_run_cycle` (single OODA step), `agent_goals`, \
                  `manage_goals` (cancel/suspend/resume/list/prioritize goal lifecycle), \
                  `agent_recall` (episodic memory), `agent_psyche`, \
-                 `journal_ingest` (load OpenClaw markdown journals into episodic memory).\n\n\
+                 `ingest_journal` (ingest OpenClaw memory/*.md journals into episodic store).\n\n\
                  Knowledge introspection: `triples_of`, `provenance_of`, `export_symbols`, \
                  `infer_analogy`, `remove_triple`.\n\n\
                  Event calculus (temporal reasoning): `record_event` (create events that initiate/terminate \
