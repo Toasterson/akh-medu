@@ -30,7 +30,9 @@ pub enum BootstrapError {
             "Include a domain or role description. Examples:\n\
              - \"expert in compilers\"\n\
              - \"You are a knowledge engineer\"\n\
-             - \"master of distributed systems based on Athena\""
+             - \"master of distributed systems based on Athena\"\n\
+             - \"Kubernetes runs on Talos\"\n\
+             - \"The home lab has networking\""
         )
     )]
     NoPurpose,
@@ -190,6 +192,17 @@ static RE_AS: LazyLock<Regex> =
 
 static RE_DOMAIN: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)(?:expert in|specialist in|master of|focused on) (\w[\w\s]*\w|\w+)").unwrap()
+});
+
+/// Matches the subject of a simple declarative sentence (SVO pattern).
+///
+/// Handles statements like "Kubernetes runs on Talos" or "The home lab has networking"
+/// where there is no explicit domain keyword phrase.
+static RE_DECLARATIVE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)^(?:the |an? )?(\w[\w\s]*?)\s+(?:is|are|was|were|runs?|has|have|had|uses?|manages?|provides?|supports?|handles?|serves?|deploys?|hosts?|contains?|includes?|depends?|belongs?|operates?|exists?)\b",
+    )
+    .unwrap()
 });
 
 // ── Static Entity Sets ──────────────────────────────────────────────────
@@ -366,6 +379,14 @@ fn extract_domain(input: &str) -> String {
         }
     }
 
+    // Fallback: extract subject from a simple declarative sentence.
+    if let Some(caps) = RE_DECLARATIVE.captures(input) {
+        let subject = caps[1].trim();
+        if !subject.is_empty() {
+            return subject.to_string();
+        }
+    }
+
     String::new()
 }
 
@@ -523,5 +544,45 @@ mod tests {
         let intent = parse_purpose("expert in AI and machine learning").unwrap();
         assert!(intent.identity.is_none());
         assert!(!intent.purpose.domain.is_empty());
+    }
+
+    #[test]
+    fn parse_declarative_svo_verb_runs() {
+        // "Kubernetes runs on Talos" — subject becomes domain
+        let intent = parse_purpose("Kubernetes runs on Talos").unwrap();
+        assert_eq!(intent.purpose.domain, "Kubernetes");
+        assert!(intent.identity.is_none());
+        // "Talos" should appear as a seed concept (capitalized non-initial word)
+        assert!(intent.purpose.seed_concepts.iter().any(|c| c == "Talos"));
+    }
+
+    #[test]
+    fn parse_declarative_the_prefix_verb_has() {
+        // "The home lab has networking" — strips "The", subject becomes domain
+        let intent = parse_purpose("The home lab has networking").unwrap();
+        assert_eq!(intent.purpose.domain, "home lab");
+        assert!(intent.identity.is_none());
+    }
+
+    #[test]
+    fn parse_declarative_is_statement() {
+        // Simple "X is Y" — common tech description pattern
+        let intent = parse_purpose("Talos is a Kubernetes OS").unwrap();
+        assert_eq!(intent.purpose.domain, "Talos");
+        assert!(intent.identity.is_none());
+    }
+
+    #[test]
+    fn parse_declarative_uses_verb() {
+        let intent = parse_purpose("The cluster uses Cilium for networking").unwrap();
+        assert_eq!(intent.purpose.domain, "cluster");
+        assert!(intent.identity.is_none());
+    }
+
+    #[test]
+    fn parse_declarative_provides_verb() {
+        let intent = parse_purpose("Vault provides secret management").unwrap();
+        assert_eq!(intent.purpose.domain, "Vault");
+        assert!(intent.identity.is_none());
     }
 }
