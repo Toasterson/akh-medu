@@ -8,6 +8,7 @@ use std::collections::HashSet;
 
 use std::sync::Arc;
 
+use akh_medu::agent::error::AgentError;
 use akh_medu::agent::goal::GoalStatus;
 use akh_medu::agent::memory::{WorkingMemory, WorkingMemoryEntry, WorkingMemoryKind};
 use akh_medu::agent::tool::{Tool, ToolInput, ToolOutput, ToolSignature};
@@ -1128,6 +1129,75 @@ fn agent_run_until_complete() {
         results.is_empty(),
         "no active goals, should return immediately"
     );
+}
+
+#[test]
+fn run_until_complete_respects_max_cycles() {
+    let engine = Arc::new(test_engine());
+
+    // max_cycles=0 means the cap is hit before any cycle runs, so an active goal
+    // guarantees MaxCyclesReached is returned regardless of goal content.
+    let config = AgentConfig {
+        max_cycles: 0,
+        ..Default::default()
+    };
+    let mut agent = Agent::new(engine, config).unwrap();
+    agent
+        .add_goal("Any goal that keeps the loop alive", 128, "impossible")
+        .unwrap();
+
+    let result = agent.run_until_complete();
+
+    assert!(
+        matches!(result, Err(AgentError::MaxCyclesReached { max_cycles: 0 })),
+        "expected MaxCyclesReached(0), got: {:?}",
+        result.err()
+    );
+
+    // No OODA cycles should have run — cycle_count stays at zero.
+    assert_eq!(
+        agent.cycle_count(),
+        0,
+        "no cycles should run when max_cycles=0"
+    );
+}
+
+#[test]
+fn run_until_complete_runs_exactly_max_cycles() {
+    let engine = Arc::new(test_engine());
+
+    // Set cap to 2. The agent will run exactly 2 cycles then stop.
+    let config = AgentConfig {
+        max_cycles: 2,
+        ..Default::default()
+    };
+    let mut agent = Agent::new(engine, config).unwrap();
+    agent
+        .add_goal("Long-running exploration goal", 128, "never satisfied")
+        .unwrap();
+
+    let before = agent.cycle_count();
+    let result = agent.run_until_complete();
+
+    // Either completed naturally in ≤2 cycles, or hit the cap.
+    match result {
+        Ok(results) => {
+            assert!(
+                results.len() <= 2,
+                "should run at most 2 cycles, ran {}",
+                results.len()
+            );
+        }
+        Err(AgentError::MaxCyclesReached { max_cycles }) => {
+            assert_eq!(max_cycles, 2);
+            assert_eq!(
+                agent.cycle_count() - before,
+                2,
+                "should have run exactly 2 cycles before cap"
+            );
+        }
+        Err(e) => panic!("unexpected error: {e}"),
+    }
 }
 
 #[test]
