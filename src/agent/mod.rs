@@ -44,6 +44,7 @@ pub mod error;
 pub mod evidence;
 pub mod game_theory;
 pub mod goal;
+pub mod hygiene;
 pub mod interlocutor;
 pub mod operator_channel;
 #[cfg(feature = "oxifed")]
@@ -139,6 +140,7 @@ pub use game_theory::{
     is_prisoners_dilemma, recommend_strategy, should_cooperate,
 };
 pub use goal::{Goal, GoalJustification, GoalSource, GoalStatus};
+pub use hygiene::{HygieneConfig, HygieneResult, run_hygiene_pass};
 pub use metacognition::{CompetenceModel, FailureIndex, GoalEvaluation, MetacognitionConfig, MetacognitiveControl};
 pub use goal_generation::{GoalGenerationConfig, GoalGenerationResult, GoalProposal};
 pub use idle::{IdleScheduler, IdleTaskResult};
