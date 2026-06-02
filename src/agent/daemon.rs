@@ -812,7 +812,9 @@ impl AgentDaemon {
             return;
         }
 
-        let mut agent = self.lock_agent();
+        // Borrow only the `agent` field (not all of `&self`) so the
+        // `self.total_cycles += 1` below does not conflict with the live guard.
+        let mut agent = self.agent.lock().unwrap_or_else(|e| e.into_inner());
         if goal::active_goals(agent.goals()).is_empty() {
             drop(agent);
             self.cycle_done.notify_one();

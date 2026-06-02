@@ -212,6 +212,10 @@ static RE_PURPOSE_IS: LazyLock<Regex> = LazyLock::new(|| {
 static RE_I_WILL: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
         r"(?i)i will (?:be |serve as |act as |function as )?(.+?)(?:\s+while\b|\s+when\b|\s+until\b|\s+during\b|[.,;!?]|$)",
+    )
+    .unwrap()
+});
+
 /// Matches the subject of a simple declarative sentence (SVO pattern).
 ///
 /// Handles statements like "Kubernetes runs on Talos" or "The home lab has networking"
@@ -409,6 +413,7 @@ fn extract_domain(input: &str) -> String {
     }
     if let Some(caps) = RE_I_WILL.captures(input) {
         return caps[1].trim().to_string();
+    }
     // Fallback: extract subject from a simple declarative sentence.
     if let Some(caps) = RE_DECLARATIVE.captures(input) {
         let subject = caps[1].trim();
@@ -655,6 +660,8 @@ mod tests {
         let err = parse_purpose("hello world").unwrap_err();
         assert!(matches!(err, BootstrapError::NoPurpose));
         assert!(format!("{err}").contains("no purpose"));
+    }
+
     #[test]
     fn parse_declarative_svo_verb_runs() {
         // "Kubernetes runs on Talos" — subject becomes domain
