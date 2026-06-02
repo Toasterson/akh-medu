@@ -1,10 +1,18 @@
-//! ELIZA dialogue system with VSA-enhanced fuzzy keyword matching.
+//! ELIZA dialogue system.
 //!
-//! This module provides a classic ELIZA-style pattern-matching dialogue engine
-//! extended with Vector Symbolic Architecture (VSA) hypervectors for fuzzy
-//! keyword matching.
+//! This module bundles two complementary pieces, both developed against
+//! `src/eliza/`:
 //!
-//! ## Usage
+//! * **VSA-enhanced pattern-matching engine** (PR #173) — a classic
+//!   ELIZA-style dialogue engine ([`engine::ElizaEngine`]) configured from TOML
+//!   [`script::Script`]s, extended with Vector Symbolic Architecture (VSA)
+//!   hypervectors for fuzzy keyword matching.
+//! * **Seshat script store + hot-reloader** (PR #179) — durable, federated
+//!   storage for ELIZA dialogue scripts via Seshat's document store
+//!   ([`seshat::SeshatScriptStore`]), with a TTL [`cache`] and a hot-reload
+//!   background thread ([`reloader`]).
+//!
+//! ## Usage — VSA engine
 //!
 //! ```no_run
 //! use akh_medu::eliza::{ElizaEngine, Script};
@@ -30,30 +38,68 @@
 //! println!("{}", engine.respond("I miss my mom"));
 //! ```
 //!
-//! ## Matching strategy
+//! ## Usage — Seshat store (Dev mode)
 //!
-//! Each rule carries a `keywords` list that serves as a synonym group.  At
-//! load time all keywords are encoded as bipolar hypervectors (10 000 dims).
+//! ```no_run
+//! use akh_medu::eliza::{ElizaMode, SeshatScriptStore};
+//! use akh_medu::eliza::reloader::ScriptReloader;
 //!
-//! For every user turn the engine:
+//! let store = SeshatScriptStore::new("http://seshat.lab.home:9090");
+//! // store.save("sage", "node { prop = val }").unwrap();
 //!
-//! 1. Tokenises the input into lowercase words.
-//! 2. For each rule (priority-descending):
-//!    a. **Exact path** — checks whether any input word is literally in the
-//!       keyword list.  This is the primary match path for synonym groups.
-//!    b. **VSA path** — encodes each input word as a hypervector and computes
-//!       Hamming similarity against each keyword's hypervector.  A word
-//!       matches if the similarity meets or exceeds `similarity_threshold`.
-//!       With the current hash-based token encoder this path fires for tokens
-//!       that are identical to a keyword.  When semantic vectors are loaded
-//!       (Phase 26/32) it will generalise to unseen synonyms automatically.
-//! 3. Returns the first matching rule's next round-robin response, or the
-//!    script's `default_response`.
+//! let _reloader = ScriptReloader::new(store.clone(), ElizaMode::Dev)
+//!     .with_local_dir("scripts/")
+//!     .on_change(Box::new(|name, content| {
+//!         println!("Script '{name}' changed ({} bytes)", content.len());
+//!     }))
+//!     .start();
+//! ```
 
+// PR #173 — VSA pattern-matching engine.
 pub mod engine;
-pub mod error;
 pub mod script;
+
+// Shared error type (union of both subsystems' variants).
+pub mod error;
+
+// PR #179 — Seshat-backed script store + hot-reloader.
+pub mod cache;
+pub mod reloader;
+pub mod seshat;
 
 pub use engine::ElizaEngine;
 pub use error::{ElizaError, ElizaResult};
 pub use script::Script;
+pub use seshat::{SaveResult, ScriptContent, ScriptInfo, SeshatScriptStore};
+
+/// Callback signature for script-change notifications.
+///
+/// Receives `(script_name, new_content)`.  Must be `Send + Sync + 'static`
+/// because it is called from the hot-reload background thread.
+pub type ScriptChangeCallback = Box<dyn Fn(&str, &str) + Send + Sync + 'static>;
+
+/// ELIZA operating mode — controls script source precedence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ElizaMode {
+    /// Local `.kdl` files take precedence over Seshat.
+    ///
+    /// Workflow: edit locally → instant hot-reload → `store.save()` to persist.
+    #[default]
+    Dev,
+
+    /// Seshat is the sole source of truth.
+    ///
+    /// All scripts are fetched from Seshat on startup; the local directory is
+    /// not monitored even if [`reloader::ScriptReloader::with_local_dir`] was
+    /// called.
+    Prod,
+}
+
+impl std::fmt::Display for ElizaMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Dev => write!(f, "dev"),
+            Self::Prod => write!(f, "prod"),
+        }
+    }
+}
