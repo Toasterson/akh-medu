@@ -14,6 +14,15 @@
 //! Reads lock the mutex only long enough to create a read transaction (MVCC
 //! snapshot), then release it so other reads can proceed concurrently.
 //! Writes hold the mutex for the full transaction lifetime.
+//!
+//! ## Calling from async contexts
+//!
+//! All write methods (`put`, `remove`, `put_batch`, `remove_batch`) acquire
+//! a `std::sync::Mutex`, which **blocks the calling thread**.  Callers from
+//! an async Tokio context must therefore be inside either
+//! `tokio::task::spawn_blocking` or `tokio::task::block_in_place`; calling
+//! them directly on an async task thread starves the Tokio runtime and can
+//! prevent MCP handlers from receiving new requests.
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -394,5 +403,43 @@ mod tests {
         store.put(b"other_key", b"data").unwrap();
         let results = store.scan_prefix(b"sym_meta:").unwrap();
         assert!(results.is_empty());
+    }
+
+    /// Verify that concurrent writes from multiple threads are serialized
+    /// correctly by the Arc<Mutex<Database>> wrapper. No data should be lost
+    /// and no "multiple active write transactions" error should occur.
+    #[test]
+    fn concurrent_writes_are_serialized() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let dir = TempDir::new().unwrap();
+        let store = Arc::new(DurableStore::open(dir.path()).unwrap());
+
+        let handles: Vec<_> = (0u8..8)
+            .map(|i| {
+                let s = Arc::clone(&store);
+                thread::spawn(move || {
+                    let key = [b'k', i];
+                    let val = [b'v', i];
+                    s.put(&key, &val).expect("concurrent put should not fail");
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().expect("thread panicked");
+        }
+
+        // All 8 keys must be present.
+        for i in 0u8..8 {
+            let key = [b'k', i];
+            let val = [b'v', i];
+            assert_eq!(
+                store.get(&key).unwrap(),
+                Some(val.to_vec()),
+                "key {i} missing after concurrent writes",
+            );
+        }
     }
 }
