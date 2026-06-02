@@ -1323,6 +1323,7 @@ fn select_tool(
 
                     // Build ToolInput from parameter schema (best-effort).
                     let mut input = ToolInput::new();
+                    let mut skip_candidate = false;
                     for param in &sig.parameters {
                         if param.required {
                             if param.name == "message" || param.name == "goal" {
@@ -1342,9 +1343,25 @@ fn select_tool(
                                         }
                                     })
                                     .unwrap_or_else(|| goal_label.clone());
+                                // Skip agent_spawn / agent_retire / agent_message
+                                // when the derived name would be invalid — these
+                                // tools require a valid workspace name and calling
+                                // them with a KG-fragment label (e.g. "status:active")
+                                // would waste an OODA cycle on a predictable error.
+                                if (sig.name == "agent_spawn"
+                                    || sig.name == "agent_retire"
+                                    || sig.name == "agent_message")
+                                    && crate::workspace::validate_workspace_name(&id).is_err()
+                                {
+                                    skip_candidate = true;
+                                    break;
+                                }
                                 input = input.with_param(&param.name, &id);
                             }
                         }
+                    }
+                    if skip_candidate {
+                        continue;
                     }
 
                     candidates.push(apply_modifiers(
