@@ -1139,6 +1139,16 @@ pub fn derivation_kind_prose(kind: &DerivationKind) -> String {
                  {pods} pod(s) → {triples_asserted} triple(s)"
             )
         }
+        DerivationKind::KnowledgeElicitation {
+            model_id,
+            pass,
+            self_consistency,
+            ..
+        } => {
+            format!(
+                "LLM-elicited triple (model: {model_id}, pass: {pass}, self-consistency: {self_consistency:.2})"
+            )
+        }
     }
 }
 

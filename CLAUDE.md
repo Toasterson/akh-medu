@@ -89,6 +89,7 @@ Plans live under `docs/ai/plans/`, ADRs under `docs/ai/decisions/`.
 - **17**: Dempster-Shafer Evidence Theory — [plan](docs/ai/plans/2026-02-22-phase17-evidence-theory.md), [ADR 035](docs/ai/decisions/035-evidence-theory.md)
 - **18a-18c**: Source Reliability + ACH + Credibility — [plan](docs/ai/plans/2026-02-22-phase18-source-reliability.md), [ADR 036](docs/ai/decisions/036-source-reliability.md)
 - **25a-25e**: People & Contacts — [phase](docs/ai/phases/phase-25-people-contacts.md), [ADR 028](docs/ai/decisions/028-people-contacts-architecture.md)
+- **32**: Knowledge Extraction (T5 Knowledge model for bootstrap elicitation, multi-pass, hallucination detection) — [plan](docs/ai/plans/2026-03-26-phase32-llm-knowledge-extraction.md), [ADR 042](docs/ai/decisions/042-llm-knowledge-extraction.md)
 
 ### Upcoming Phases
 
@@ -107,7 +108,6 @@ See individual plan docs for details. Phases are ordered by dependency, not prio
 - **29**: Capability Exposure (microtheories, skillpacks, psyche, argumentation, reasoning traces, hypotheses, causal explorer, evidence, source trust) — [plan](docs/ai/plans/2026-03-26-phase29-capability-exposure.md), [ADR 039](docs/ai/decisions/039-capability-exposure.md)
 - **30**: Procedural Skills (actions.json + plans.json, LLM-assisted authoring, rule refinement, quality metrics) — [plan](docs/ai/plans/2026-03-26-phase30-procedural-skills.md), [ADR 040](docs/ai/decisions/040-procedural-skills.md)
 - **31**: Skill Intelligence (auto-discovery, dependency graph, neural embeddings, skill-aware routing, dynamic synthesis, sharing protocol, cross-skill inference, curriculum) — [plan](docs/ai/plans/2026-03-26-phase31-skill-intelligence.md), [ADR 041](docs/ai/decisions/041-skill-intelligence.md)
-- **32**: Knowledge Extraction (T5 Knowledge model for bootstrap elicitation, multi-pass, hallucination detection) — [plan](docs/ai/plans/2026-03-26-phase32-llm-knowledge-extraction.md), [ADR 042](docs/ai/decisions/042-llm-knowledge-extraction.md)
 - **33**: Grounded Verbalization (grammar aggregation, T5/mT5 data-to-text NLG, NeuroLogic constrained decoding, T5 NLU replaces Qwen) — [plan](docs/ai/plans/2026-03-26-phase33-grounded-verbalization.md), [ADR 043](docs/ai/decisions/043-grounded-verbalization.md)
 - **34**: Communicative Intelligence (response strategy selection, psyche style transform, archetype framing, conversation trajectory, shadow integration) — [plan](docs/ai/plans/2026-03-26-phase34-communicative-intelligence.md), [ADR 044](docs/ai/decisions/044-communicative-intelligence.md)
 - **35**: T5 Training Infrastructure (offline training for NLU + NLG + Knowledge models, Wikidata + ConceptNet + WebNLG data, GGUF export) — [plan](docs/ai/plans/2026-03-27-phase35-t5-training-infrastructure.md), [ADR 045](docs/ai/decisions/045-t5-training-infrastructure.md)

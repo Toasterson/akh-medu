@@ -158,6 +158,11 @@ burn-training = ["candle-backend"]  # will add "burn" when sqlite3 conflict reso
 training-data = []
 wiki = ["dep:comrak", "dep:syntect", "dep:minijinja", "dep:tantivy", "dep:blake3"]
 sparql-persist = ["oxigraph/rocksdb"]
+# Phase 32: LLM knowledge elicitation via T5 Knowledge model (Phase 35 provides
+# the model weights; this gate enables the elicitation code path).
+# Requires candle-backend. Gracefully degrades to web-API-only without the
+# t5-knowledge-q6k.gguf model file.
+knowledge-bootstrap = ["candle-backend"]
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

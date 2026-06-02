@@ -347,6 +347,27 @@ impl DomainExpander {
             engine.item_memory().insert(proto_id, domain_prototype);
         }
 
+        // 8. Phase 32 — LLM elicitation for the accepted concept set.
+        //
+        // Runs taxonomy + relationships passes using the T5 Knowledge model when
+        // available (Phase 35).  Gracefully skips when the model file is absent
+        // or the `candle-backend` feature is disabled.
+        if let Some(ref data_dir) = engine.config().data_dir {
+            let elicited = crate::bootstrap::knowledge_elicit::elicit_for_expansion(
+                &purpose.domain,
+                &accepted_labels,
+                engine,
+                Some(data_dir.clone()),
+            );
+            if let Some(n) = elicited {
+                tracing::info!(
+                    domain = %purpose.domain,
+                    triples_added = n,
+                    "expand: Phase 32 LLM elicitation added triples"
+                );
+            }
+        }
+
         Ok(ExpansionResult {
             concept_count,
             relation_count,
