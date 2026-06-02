@@ -772,6 +772,20 @@ pub enum DerivationKind {
         /// Knowledge density (knowledge triples / total triples) after compaction.
         knowledge_density: f32,
     },
+
+    // --- Phase 24: Sensory Grounding -----------------------------------------
+
+    /// Knowledge grounded from direct sensory observation (Phase 24).
+    ///
+    /// The agent perceived this through image, audio, or structured sensor input.
+    Perceived {
+        /// Modality: "image", "audio", or "structured".
+        modality: String,
+        /// Extraction confidence in [0, 1].
+        confidence: f32,
+        /// Opaque source identifier (e.g. file path, device name, or URI).
+        source_id: String,
+    },
 }
 
 impl DerivationKind {
@@ -880,6 +894,7 @@ impl DerivationKind {
             Self::FileImport { .. } => 99,
             Self::KgCompaction { .. } => 100,
             Self::AffectiveAppraisal { .. } => 101,
+            Self::Perceived { .. } => 102,
         }
     }
 }

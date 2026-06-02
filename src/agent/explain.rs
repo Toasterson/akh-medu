@@ -1180,6 +1180,15 @@ pub fn derivation_kind_prose(kind: &DerivationKind) -> String {
                 knowledge_density * 100.0
             )
         }
+        DerivationKind::Perceived {
+            modality,
+            confidence,
+            source_id,
+        } => {
+            format!(
+                "perceived via {modality} (confidence: {confidence:.2}, source: {source_id})"
+            )
+        }
     }
 }
 

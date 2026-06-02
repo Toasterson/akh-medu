@@ -1764,6 +1764,7 @@ fn act(agent: &mut Agent, decision: &Decision, cycle: u64) -> AgentResult<Action
             AppraisalTrigger::Contradiction { .. } => "Contradiction",
             AppraisalTrigger::ResourcePressure { .. } => "ResourcePressure",
             AppraisalTrigger::TemporalSignal { .. } => "TemporalSignal",
+            AppraisalTrigger::PerceptualStimulus { .. } => "PerceptualStimulus",
         };
         agent.affective_system.appraise(appraisal);
         let resulting_mood = agent.affective_system.current_affect().valence;
