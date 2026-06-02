@@ -318,12 +318,14 @@ fn is_goal_worthy_label(label: &str) -> bool {
         return false;
     }
 
-    // Wikipedia/Wikidata meta-pages
+    // Wikipedia/Wikidata meta-pages and agent-internal artifacts.
     let lower = trimmed.to_lowercase();
     let junk_prefixes = [
         "user:", "wikipedia:", "category talk:", "talk:", "file:",
         "template:", "portal:", "module:", "draft:", "mediawiki:",
         "sym:", "para:", "episode:", "doc:",
+        // Agent-internal entity kinds (must match is_noise_entity in rule_engine.rs).
+        "tool:", "goal:", "criteria:", "expand:", "desc:", "rate:", "wm:",
     ];
     if junk_prefixes.iter().any(|p| lower.starts_with(p)) {
         return false;

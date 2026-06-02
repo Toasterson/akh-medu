@@ -189,7 +189,8 @@ pub fn run_continuous_learning(
     let mut curiosity_cfg = curiosity_config.clone();
     curiosity_cfg.max_targets = config.max_targets;
 
-    let report = compute_directed_curiosity(engine, &curiosity_cfg)
+    // No goal context in background learning — pass empty slice to scan all domain entities.
+    let report = compute_directed_curiosity(engine, &curiosity_cfg, &[])
         .map_err(|e| ContinuousLearningError::StageFailed {
             stage: "curiosity",
             reason: e.to_string(),
