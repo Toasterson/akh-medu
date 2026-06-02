@@ -27,10 +27,15 @@ pub enum BootstrapError {
     #[diagnostic(
         code(akh::bootstrap::no_purpose),
         help(
-            "Include a domain or role description. Examples:\n\
-             - \"expert in compilers\"\n\
-             - \"You are a knowledge engineer\"\n\
-             - \"master of distributed systems based on Athena\""
+            "Use one of these recognized phrasings:\n\
+             - \"expert in <domain>\"  or  \"master of <domain>\"\n\
+             - \"You are a <role>\"  or  \"act like <figure>\"\n\
+             - \"based on <figure>\"  or  \"inspired by <figure>\"\n\
+             - \"I want to learn <domain>\"\n\
+             - \"My purpose is to <goal>\"\n\
+             - \"I will be <role> [while/when ...]\"\n\
+             - declarative facts: \"Kubernetes runs on Talos\", \"The home lab has networking\"\n\
+             Example: \"I want to learn systems design so I can build reliable services.\""
         )
     )]
     NoPurpose,
@@ -192,11 +197,41 @@ static RE_DOMAIN: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)(?:expert in|specialist in|master of|focused on) (\w[\w\s]*\w|\w+)").unwrap()
 });
 
+// Natural-language intent patterns — lower priority than RE_DOMAIN.
+static RE_WANT_TO: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)i (?:want|need|would like) to (?:learn |become |study |understand |)?(.+?)(?:\s+so\b|\s+in order\b|\s+because\b|[.,;!?]|$)",
+    )
+    .unwrap()
+});
+
+static RE_PURPOSE_IS: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)(?:my|our|the|this) purpose is (?:to )?(.+?)(?:[.,;!?]|$)").unwrap()
+});
+
+static RE_I_WILL: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)i will (?:be |serve as |act as |function as )?(.+?)(?:\s+while\b|\s+when\b|\s+until\b|\s+during\b|[.,;!?]|$)",
+    )
+    .unwrap()
+});
+
+/// Matches the subject of a simple declarative sentence (SVO pattern).
+///
+/// Handles statements like "Kubernetes runs on Talos" or "The home lab has networking"
+/// where there is no explicit domain keyword phrase.
+static RE_DECLARATIVE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)^(?:the |an? )?(\w[\w\s]*?)\s+(?:is|are|was|were|runs?|has|have|had|uses?|manages?|provides?|supports?|handles?|serves?|deploys?|hosts?|contains?|includes?|depends?|belongs?|operates?|exists?)\b",
+    )
+    .unwrap()
+});
+
 // ── Static Entity Sets ──────────────────────────────────────────────────
 
 const DEITIES: &[&str] = &[
     "ptah", "ra", "thoth", "anubis", "osiris", "isis", "horus", "sekhmet",
-    "bastet", "sobek", "khnum", "atum", "maat", "hathor", "set",
+    "bastet", "sobek", "khnum", "atum", "maat", "ma'at", "hathor", "set",
     "athena", "apollo", "hermes", "hephaestus", "zeus", "hera", "ares",
     "artemis", "poseidon", "demeter", "dionysus", "prometheus",
     "odin", "thor", "loki", "freya", "frigg", "tyr", "baldr", "heimdall",
@@ -290,12 +325,15 @@ pub fn extract_competence(input: &str) -> DreyfusLevel {
         DreyfusLevel::Proficient
     } else if lower.contains("competent") || lower.contains("skilled") {
         DreyfusLevel::Competent
-    } else if lower.contains("beginner") || lower.contains("novice") || lower.contains("learning")
-    {
+    } else if lower.contains("beginner") || lower.contains("novice") || lower.contains("learn") {
         DreyfusLevel::Novice
     } else {
-        // Default: if a domain is mentioned, assume Competent; otherwise Novice.
-        if RE_DOMAIN.is_match(&lower) {
+        // Default: if any domain pattern matched, assume Competent; otherwise Novice.
+        if RE_DOMAIN.is_match(input)
+            || RE_WANT_TO.is_match(input)
+            || RE_PURPOSE_IS.is_match(input)
+            || RE_I_WILL.is_match(input)
+        {
             DreyfusLevel::Competent
         } else {
             DreyfusLevel::Novice
@@ -366,6 +404,24 @@ fn extract_domain(input: &str) -> String {
         }
     }
 
+    // Natural-language intent patterns (in priority order).
+    if let Some(caps) = RE_WANT_TO.captures(input) {
+        return caps[1].trim().to_string();
+    }
+    if let Some(caps) = RE_PURPOSE_IS.captures(input) {
+        return caps[1].trim().to_string();
+    }
+    if let Some(caps) = RE_I_WILL.captures(input) {
+        return caps[1].trim().to_string();
+    }
+    // Fallback: extract subject from a simple declarative sentence.
+    if let Some(caps) = RE_DECLARATIVE.captures(input) {
+        let subject = caps[1].trim();
+        if !subject.is_empty() {
+            return subject.to_string();
+        }
+    }
+
     String::new()
 }
 
@@ -389,12 +445,21 @@ fn extract_seed_concepts(input: &str) -> Vec<String> {
         }
     }
 
-    // Add domain keywords from RE_DOMAIN.
-    if let Some(caps) = RE_DOMAIN.captures(input) {
+    // Add domain keywords from RE_DOMAIN and natural-language intent patterns.
+    let domain_caps = RE_DOMAIN
+        .captures(input)
+        .or_else(|| RE_WANT_TO.captures(input))
+        .or_else(|| RE_PURPOSE_IS.captures(input))
+        .or_else(|| RE_I_WILL.captures(input));
+
+    if let Some(caps) = domain_caps {
         let domain = caps[1].trim();
         for word in domain.split_whitespace() {
             let clean = word.trim_matches(|c: char| !c.is_alphanumeric());
-            if clean.len() >= 2 && !concepts.iter().any(|c| c.eq_ignore_ascii_case(clean)) {
+            if clean.len() >= 3
+                && !is_stopword(clean)
+                && !concepts.iter().any(|c| c.eq_ignore_ascii_case(clean))
+            {
                 concepts.push(clean.to_string());
             }
         }
@@ -523,5 +588,117 @@ mod tests {
         let intent = parse_purpose("expert in AI and machine learning").unwrap();
         assert!(intent.identity.is_none());
         assert!(!intent.purpose.domain.is_empty());
+    }
+
+    // ── Natural-language pattern tests (acceptance criteria 1 + 3) ────────
+
+    #[test]
+    fn parse_natural_want_to_learn() {
+        let intent = parse_purpose(
+            "I want to learn architecture and systems design so I can build my home.",
+        )
+        .unwrap();
+        assert!(
+            intent.purpose.domain.to_lowercase().contains("architecture")
+                || intent.purpose.domain.to_lowercase().contains("systems"),
+            "unexpected domain: {}",
+            intent.purpose.domain
+        );
+        assert_eq!(intent.purpose.competence_level, DreyfusLevel::Novice);
+    }
+
+    #[test]
+    fn parse_natural_want_to_become() {
+        let intent = parse_purpose("I want to become a distributed systems engineer.").unwrap();
+        assert!(!intent.purpose.domain.is_empty(), "domain should not be empty");
+    }
+
+    #[test]
+    fn parse_natural_purpose_is() {
+        let intent =
+            parse_purpose("My purpose is to keep the constellation healthy.").unwrap();
+        assert!(
+            intent.purpose.domain.to_lowercase().contains("constellation")
+                || intent.purpose.domain.to_lowercase().contains("keep"),
+            "unexpected domain: {}",
+            intent.purpose.domain
+        );
+    }
+
+    #[test]
+    fn parse_natural_i_will_be() {
+        let intent =
+            parse_purpose("I will be Toasty's architect agent while he is in Japan.").unwrap();
+        assert!(
+            intent.purpose.domain.to_lowercase().contains("architect")
+                || intent.purpose.domain.to_lowercase().contains("agent"),
+            "unexpected domain: {}",
+            intent.purpose.domain
+        );
+    }
+
+    #[test]
+    fn parse_natural_i_will_serve_as() {
+        let intent = parse_purpose("I will serve as the memory keeper when needed.").unwrap();
+        assert!(!intent.purpose.domain.is_empty(), "domain should not be empty");
+    }
+
+    #[test]
+    fn parse_natural_i_need_to_learn() {
+        let intent = parse_purpose("I need to learn Rust and systems programming.").unwrap();
+        assert!(
+            intent.purpose.domain.to_lowercase().contains("rust")
+                || intent.purpose.domain.to_lowercase().contains("systems"),
+            "unexpected domain: {}",
+            intent.purpose.domain
+        );
+        assert_eq!(intent.purpose.competence_level, DreyfusLevel::Novice);
+    }
+
+    #[test]
+    fn no_purpose_error_lists_patterns() {
+        let err = parse_purpose("hello world").unwrap_err();
+        assert!(matches!(err, BootstrapError::NoPurpose));
+        assert!(format!("{err}").contains("no purpose"));
+    }
+
+    #[test]
+    fn parse_declarative_svo_verb_runs() {
+        // "Kubernetes runs on Talos" — subject becomes domain
+        let intent = parse_purpose("Kubernetes runs on Talos").unwrap();
+        assert_eq!(intent.purpose.domain, "Kubernetes");
+        assert!(intent.identity.is_none());
+        // "Talos" should appear as a seed concept (capitalized non-initial word)
+        assert!(intent.purpose.seed_concepts.iter().any(|c| c == "Talos"));
+    }
+
+    #[test]
+    fn parse_declarative_the_prefix_verb_has() {
+        // "The home lab has networking" — strips "The", subject becomes domain
+        let intent = parse_purpose("The home lab has networking").unwrap();
+        assert_eq!(intent.purpose.domain, "home lab");
+        assert!(intent.identity.is_none());
+    }
+
+    #[test]
+    fn parse_declarative_is_statement() {
+        // Simple "X is Y" — common tech description pattern
+        let intent = parse_purpose("Talos is a Kubernetes OS").unwrap();
+        assert_eq!(intent.purpose.domain, "Talos");
+        assert!(intent.identity.is_none());
+    }
+
+    #[test]
+    fn parse_declarative_uses_verb() {
+        let intent = parse_purpose("The cluster uses Cilium for networking").unwrap();
+        assert_eq!(intent.purpose.domain, "cluster");
+        assert!(intent.identity.is_none());
+    }
+
+    #[test]
+    fn parse_declarative_provides_verb() {
+        let intent = parse_purpose("Vault provides secret management").unwrap();
+        assert_eq!(intent.purpose.domain, "Vault");
+        assert!(intent.identity.is_none());
     }
 }

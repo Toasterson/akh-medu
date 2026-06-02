@@ -25,6 +25,10 @@ pub enum GoalStatus {
     Dormant,
     /// Reformulated: replaced by a simpler version (Phase 11f).
     Reformulated { replacement: SymbolId },
+    /// Auto-cancelled by the hygiene pass (stale or exceeded child depth).
+    Cancelled { reason: String },
+    /// Collapsed into a primary goal by the deduplication hygiene pass.
+    Duplicate { primary: SymbolId },
 }
 
 impl GoalStatus {
@@ -39,6 +43,8 @@ impl GoalStatus {
             Self::Proposed => "proposed".into(),
             Self::Dormant => "dormant".into(),
             Self::Reformulated { replacement } => format!("reformulated:{}", replacement.get()),
+            Self::Cancelled { reason } => format!("cancelled:{reason}"),
+            Self::Duplicate { primary } => format!("duplicate:{}", primary.get()),
         }
     }
 
@@ -53,6 +59,17 @@ impl GoalStatus {
                 && let Some(sym) = SymbolId::new(id)
             {
                 return Self::Reformulated { replacement: sym };
+            }
+            Self::Pending
+        } else if let Some(reason) = label.strip_prefix("cancelled:") {
+            Self::Cancelled {
+                reason: reason.into(),
+            }
+        } else if let Some(id_str) = label.strip_prefix("duplicate:") {
+            if let Ok(id) = id_str.parse::<u64>()
+                && let Some(sym) = SymbolId::new(id)
+            {
+                return Self::Duplicate { primary: sym };
             }
             Self::Pending
         } else {
@@ -79,9 +96,9 @@ impl std::fmt::Display for GoalStatus {
             Self::Suspended => write!(f, "suspended"),
             Self::Proposed => write!(f, "proposed"),
             Self::Dormant => write!(f, "dormant"),
-            Self::Reformulated { replacement } => {
-                write!(f, "reformulated → {replacement}")
-            }
+            Self::Reformulated { replacement } => write!(f, "reformulated → {replacement}"),
+            Self::Cancelled { reason } => write!(f, "cancelled: {reason}"),
+            Self::Duplicate { primary } => write!(f, "duplicate → {primary}"),
         }
     }
 }
@@ -123,6 +140,19 @@ pub enum GoalSource {
     WorldChange {
         watch_name: String,
         discrepancy: String,
+    },
+    /// Auto-generated after consolidation via VSA competence gap detection.
+    ///
+    /// Created when a knowledge tier's coverage score falls below 0.70.
+    /// Goals with this source start as `Proposed` at priority 64 so humans
+    /// can review before promoting them.
+    VsaCompetenceGap {
+        /// Bloom-derived tier: "foundational", "intermediate", or "advanced".
+        tier: String,
+        /// Label of the entity or area with insufficient coverage.
+        area_name: String,
+        /// Coverage score that triggered this goal (< 0.70).
+        coverage_score: f32,
     },
 }
 
@@ -222,12 +252,41 @@ impl Goal {
             all_goals
                 .iter()
                 .find(|g| g.symbol_id == *blocker_id)
-                .is_some_and(|g| !matches!(g.status, GoalStatus::Completed | GoalStatus::Failed { .. }))
+                .is_some_and(|g| !matches!(
+                    g.status,
+                    GoalStatus::Completed
+                        | GoalStatus::Failed { .. }
+                        | GoalStatus::Cancelled { .. }
+                        | GoalStatus::Duplicate { .. }
+                ))
         })
     }
 }
 
+/// Strip any internal `goal:` / `desc:` prefixes that a caller may have
+/// accidentally embedded in the description text. These prefixes belong on
+/// the KG label, not inside the human-readable description itself.
+///
+/// Examples:
+/// - `"goal: investigate Tecton"` → `"investigate Tecton"`
+/// - `"desc:my objective"` → `"my objective"`
+/// - `"investigate: Tecton"` → unchanged (single colon mid-sentence is fine)
+pub fn normalize_goal_description(description: &str) -> &str {
+    // Each prefix is tried in order; the first match wins.
+    for prefix in ["goal: ", "goal:", "desc: ", "desc:"] {
+        if let Some(rest) = description.strip_prefix(prefix) {
+            return rest.trim_start();
+        }
+    }
+    description.trim_start()
+}
+
 /// Create a goal and persist it in the knowledge graph.
+///
+/// A goal is stored as a **single** entity whose label is
+/// `goal:<full description>`. No separate `desc:` entity is created.
+/// The description is normalized to strip any accidental `goal:` / `desc:`
+/// leading prefixes before the label is formed.
 ///
 /// If a symbol with the same goal label already exists (e.g. from a previous
 /// persisted session), it is reused rather than causing a duplicate-label error.
@@ -238,7 +297,8 @@ pub fn create_goal(
     criteria: &str,
     predicates: &AgentPredicates,
 ) -> AgentResult<Goal> {
-    let label = format!("goal:{}", description.chars().take(40).collect::<String>());
+    let description = normalize_goal_description(description);
+    let label = format!("goal:{description}");
     let goal_id = engine.resolve_or_create_entity(&label)?;
 
     let now = std::time::SystemTime::now()
@@ -246,13 +306,26 @@ pub fn create_goal(
         .unwrap_or_default()
         .as_secs();
 
-    // Store description.
-    let desc_sym = engine.resolve_or_create_entity(&format!("desc:{description}"))?;
-    let _ = engine.add_triple(&Triple::new(goal_id, predicates.has_description, desc_sym));
+    // Remove any stale property triples from a previous generation cycle through
+    // the engine so SPARQL stays in sync (resolve_or_create_entity reuses the same
+    // goal_id for the same label, so old triples must be cleared first).
+    for pred in [predicates.has_description, predicates.has_status, predicates.has_priority] {
+        let old: Vec<_> = engine
+            .knowledge_graph()
+            .triples_from(goal_id)
+            .into_iter()
+            .filter(|t| t.predicate == pred)
+            .collect();
+        for o in old {
+            let _ = engine.remove_triple(o.subject, o.predicate, o.object);
+        }
+    }
 
     // Store status.
     let status_sym = engine.resolve_or_create_entity("status:active")?;
     let _ = engine.add_triple(&Triple::new(goal_id, predicates.has_status, status_sym));
+    let status_key = format!("goal_status:{}", goal_id.get());
+    let _ = engine.store().put_meta(status_key.as_bytes(), b"active");
 
     // Store priority.
     let priority_sym = engine.resolve_or_create_entity(&format!("priority:{priority}"))?;
@@ -319,6 +392,17 @@ pub fn update_goal_status(
     new_status: GoalStatus,
     predicates: &AgentPredicates,
 ) -> AgentResult<()> {
+    // Remove old status triples through the engine so the SPARQL store stays in sync.
+    let old_status_triples: Vec<_> = engine
+        .knowledge_graph()
+        .triples_from(goal.symbol_id)
+        .into_iter()
+        .filter(|t| t.predicate == predicates.has_status)
+        .collect();
+    for old in old_status_triples {
+        let _ = engine.remove_triple(old.subject, old.predicate, old.object);
+    }
+
     let status_label = format!("status:{}", new_status.as_label());
     let status_sym = engine.resolve_or_create_entity(&status_label)?;
     let _ = engine.add_triple(&Triple::new(
@@ -326,7 +410,95 @@ pub fn update_goal_status(
         predicates.has_status,
         status_sym,
     ));
+    let status_key = format!("goal_status:{}", goal.symbol_id.get());
+    let _ = engine.store().put_meta(status_key.as_bytes(), new_status.as_label().as_bytes());
     goal.status = new_status;
+    Ok(())
+}
+
+/// Remove all KG triples for a goal so it is not restored on the next session.
+///
+/// Removes subject-predicate-object entries for the goal's known predicates.
+/// The caller must remove the goal from the in-memory vec separately.
+pub fn delete_goal_from_kg(
+    engine: &Engine,
+    goal_id: SymbolId,
+    predicates: &AgentPredicates,
+) -> AgentResult<()> {
+    // Remove all outgoing triples through the engine so SPARQL stays in sync.
+    let subject_triples: Vec<_> = engine.knowledge_graph().triples_from(goal_id);
+    for t in subject_triples {
+        let _ = engine.remove_triple(t.subject, t.predicate, t.object);
+    }
+    // Remove back-references (parent→child, etc.) so hierarchical integrity is maintained.
+    for pred in [
+        predicates.parent_goal,
+        predicates.child_goal,
+        predicates.blocked_by,
+    ] {
+        let back_refs: Vec<_> = engine
+            .knowledge_graph()
+            .triples_to(goal_id)
+            .into_iter()
+            .filter(|t| t.predicate == pred)
+            .collect();
+        for t in back_refs {
+            let _ = engine.remove_triple(t.subject, t.predicate, t.object);
+        }
+    }
+    Ok(())
+}
+
+/// Update a goal's priority in the KG and in-memory struct.
+pub fn update_goal_priority(
+    engine: &Engine,
+    goal: &mut Goal,
+    priority: u8,
+    predicates: &AgentPredicates,
+) -> AgentResult<()> {
+    let old: Vec<_> = engine
+        .knowledge_graph()
+        .triples_from(goal.symbol_id)
+        .into_iter()
+        .filter(|t| t.predicate == predicates.has_priority)
+        .collect();
+    for t in old {
+        let _ = engine.remove_triple(t.subject, t.predicate, t.object);
+    }
+    let priority_sym = engine.resolve_or_create_entity(&format!("priority:{priority}"))?;
+    let _ = engine.add_triple(&Triple::new(
+        goal.symbol_id,
+        predicates.has_priority,
+        priority_sym,
+    ));
+    goal.priority = priority;
+    goal.priority_rationale = None; // clear argumentation override on manual update
+    Ok(())
+}
+
+/// Update a goal's success criteria in the KG and in-memory struct.
+pub fn update_goal_criteria(
+    engine: &Engine,
+    goal: &mut Goal,
+    criteria: &str,
+    predicates: &AgentPredicates,
+) -> AgentResult<()> {
+    let old: Vec<_> = engine
+        .knowledge_graph()
+        .triples_from(goal.symbol_id)
+        .into_iter()
+        .filter(|t| t.predicate == predicates.has_criteria)
+        .collect();
+    for t in old {
+        let _ = engine.remove_triple(t.subject, t.predicate, t.object);
+    }
+    let criteria_sym = engine.resolve_or_create_entity(&format!("criteria:{criteria}"))?;
+    let _ = engine.add_triple(&Triple::new(
+        goal.symbol_id,
+        predicates.has_criteria,
+        criteria_sym,
+    ));
+    goal.success_criteria = criteria.into();
     Ok(())
 }
 
@@ -373,7 +545,8 @@ pub fn restore_goals(engine: &Engine, predicates: &AgentPredicates) -> AgentResu
         }
 
         let triples = engine.triples_from(meta.id);
-        let mut description = description_raw.to_string();
+        // Normalize the label-derived description (strip stale goal:/desc: prefixes).
+        let mut description = normalize_goal_description(description_raw).to_string();
         let mut status = GoalStatus::Pending;
         // Track the SymbolId of the status object so we pick the most recent one
         // (highest SymbolId = most recently created, since IDs are monotonic).
@@ -387,7 +560,10 @@ pub fn restore_goals(engine: &Engine, predicates: &AgentPredicates) -> AgentResu
         for triple in &triples {
             let obj_label = engine.resolve_label(triple.object);
             if triple.predicate == predicates.has_description {
-                description = obj_label.trim_start_matches("desc:").to_string();
+                // Backward compat: old sessions stored the full description in a
+                // separate `desc:` entity; use that when available.
+                let raw = obj_label.trim_start_matches("desc:");
+                description = normalize_goal_description(raw).to_string();
             } else if triple.predicate == predicates.has_status {
                 // Only accept this status if it's more recent (higher SymbolId)
                 // than any previously seen status triple for this goal.
@@ -412,6 +588,17 @@ pub fn restore_goals(engine: &Engine, predicates: &AgentPredicates) -> AgentResu
             }
         }
 
+        // If the KG didn't supply a status (e.g. SPARQL persistence is disabled
+        // and the store was recreated), fall back to the directly-persisted key.
+        if status_sym_id.is_none() {
+            let key = format!("goal_status:{}", meta.id.get());
+            if let Ok(Some(bytes)) = engine.store().get_meta(key.as_bytes()) {
+                if let Ok(label) = std::str::from_utf8(&bytes) {
+                    status = GoalStatus::from_label(label);
+                }
+            }
+        }
+
         goals.push(Goal {
             symbol_id: meta.id,
             description,
@@ -433,6 +620,33 @@ pub fn restore_goals(engine: &Engine, predicates: &AgentPredicates) -> AgentResu
     }
 
     Ok(goals)
+}
+
+/// Persist the current goal list to the durable store as a serialized blob.
+///
+/// This is the primary goal-persistence mechanism for restarts without
+/// `sparql-persist`. The blob is stored under `agent:goals` in redb and
+/// takes priority over KG-triple restoration in `restore_goals_from_store`.
+pub fn persist_goals(goals: &[Goal], engine: &Engine) -> AgentResult<()> {
+    use super::error::AgentError;
+    let bytes = bincode::serialize(goals).map_err(|e| AgentError::ConsolidationFailed {
+        message: format!("failed to serialize goals: {e}"),
+    })?;
+    engine
+        .store()
+        .put_meta(b"agent:goals", &bytes)
+        .map_err(|e| AgentError::ConsolidationFailed {
+            message: format!("failed to write goals to store: {e}"),
+        })?;
+    Ok(())
+}
+
+/// Try to restore goals from the durable store blob written by `persist_goals`.
+///
+/// Returns `None` if no persisted blob exists (fresh engine or memory-only).
+pub fn restore_goals_from_store(engine: &Engine) -> Option<Vec<Goal>> {
+    let bytes = engine.store().get_meta(b"agent:goals").ok()??;
+    bincode::deserialize::<Vec<Goal>>(&bytes).ok()
 }
 
 /// Clear all goals from the in-memory goal list.
@@ -539,6 +753,12 @@ mod tests {
             GoalStatus::Suspended,
             GoalStatus::Proposed,
             GoalStatus::Dormant,
+            GoalStatus::Cancelled {
+                reason: "idle for 20 cycles".into(),
+            },
+            GoalStatus::Duplicate {
+                primary: SymbolId::new(7).unwrap(),
+            },
         ];
         for status in statuses {
             let label = status.as_label();
@@ -820,5 +1040,96 @@ mod tests {
         assert!(user.entrenchment() > decomp.entrenchment());
         assert!(decomp.entrenchment() > inferred.entrenchment());
         assert!(inferred.entrenchment() > default.entrenchment());
+    }
+
+    #[test]
+    fn normalize_goal_description_strips_prefixes() {
+        // Leading goal: prefix is stripped.
+        assert_eq!(
+            normalize_goal_description("goal:investigate Tecton"),
+            "investigate Tecton"
+        );
+        assert_eq!(
+            normalize_goal_description("goal: investigate Tecton"),
+            "investigate Tecton"
+        );
+        // Leading desc: prefix is stripped.
+        assert_eq!(
+            normalize_goal_description("desc:my objective"),
+            "my objective"
+        );
+        assert_eq!(
+            normalize_goal_description("desc: my objective"),
+            "my objective"
+        );
+        // A colon mid-sentence is NOT stripped.
+        assert_eq!(
+            normalize_goal_description("investigate: I am Tecton"),
+            "investigate: I am Tecton"
+        );
+        // Already clean descriptions pass through unchanged.
+        assert_eq!(
+            normalize_goal_description("find all dependencies"),
+            "find all dependencies"
+        );
+        // Empty-after-strip falls back to empty.
+        assert_eq!(normalize_goal_description("goal:"), "");
+        // Nested prefix: only the outermost is stripped.
+        assert_eq!(
+            normalize_goal_description("goal:desc:inner"),
+            "desc:inner"
+        );
+    }
+
+    fn test_engine() -> crate::engine::Engine {
+        use crate::engine::{Engine, EngineConfig};
+        use crate::vsa::Dimension;
+        Engine::new(EngineConfig {
+            dimension: Dimension(1000),
+            ..EngineConfig::default()
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn create_goal_label_uses_full_description() {
+        let engine = test_engine();
+        let preds = crate::agent::agent::AgentPredicates::init(&engine).unwrap();
+
+        let description = "investigate: I am Tecton, the AI agent who exists to reason";
+        let goal = create_goal(&engine, description, 128, "done", &preds).unwrap();
+
+        // The goal entity label must be goal:<full description> with no truncation.
+        let label = engine.resolve_label(goal.symbol_id);
+        assert_eq!(label, format!("goal:{description}"));
+
+        // The restored description must match exactly.
+        assert_eq!(goal.description, description);
+
+        // No separate desc: entity should exist for this goal.
+        let all: Vec<_> = engine
+            .all_symbols()
+            .into_iter()
+            .filter(|m| m.label.starts_with("desc:"))
+            .collect();
+        assert!(
+            all.is_empty(),
+            "no desc: entities should be created; found: {all:?}"
+        );
+    }
+
+    #[test]
+    fn create_goal_normalizes_prefixed_description() {
+        let engine = test_engine();
+        let preds = crate::agent::agent::AgentPredicates::init(&engine).unwrap();
+
+        // Caller accidentally passes a description already prefixed with goal:.
+        let raw = "goal: investigate who Tecton is";
+        let goal = create_goal(&engine, raw, 128, "done", &preds).unwrap();
+
+        // Label should not double-prefix.
+        let label = engine.resolve_label(goal.symbol_id);
+        assert_eq!(label, "goal:investigate who Tecton is");
+        assert_eq!(goal.description, "investigate who Tecton is");
     }
 }

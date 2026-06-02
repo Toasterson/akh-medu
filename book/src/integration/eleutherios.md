@@ -108,10 +108,10 @@ Eleutherios pipes chunked text through stdin and reads structured output from st
 
 ```bash
 # Auto-detect language per chunk
-cat chunks.jsonl | ./target/release/akh-medu preprocess --format jsonl > structured.jsonl
+cat chunks.jsonl | ./target/release/akh preprocess --format jsonl > structured.jsonl
 
 # Force a specific language
-cat russian_chunks.jsonl | ./target/release/akh-medu preprocess --format jsonl --language ru > structured.jsonl
+cat russian_chunks.jsonl | ./target/release/akh preprocess --format jsonl --language ru > structured.jsonl
 ```
 
 **Input format** (one JSON object per line):
@@ -164,7 +164,7 @@ For batch processing, use `--format json` with a JSON array on stdin:
 echo '[
   {"id": "1", "text": "Gravity is a fundamental force of nature."},
   {"id": "2", "text": "Гравитация является фундаментальной силой природы."}
-]' | ./target/release/akh-medu preprocess --format json
+]' | ./target/release/akh preprocess --format json
 ```
 
 Returns:
@@ -182,7 +182,7 @@ For network-accessible integration (e.g., Eleutherios calling akh-medu over HTTP
 
 ```bash
 # Start server on port 8200
-./target/release/akh-medu-server
+./target/release/akhomed
 ```
 
 **Endpoints summary:**
@@ -295,7 +295,7 @@ cargo build --release
 cargo build --release --features server
 
 # Start the pre-processing server
-./target/release/akh-medu-server &
+./target/release/akhomed &
 
 # Verify
 curl -s http://localhost:8200/health
@@ -357,7 +357,7 @@ run it through akh-medu for immediate structural extraction:
 docker cp aegis-api:/tmp/aegis_imports/${JOB_ID}_jsonl/combined_chunks.jsonl /tmp/chunks.jsonl
 
 # Pre-process through akh-medu (CLI)
-cat /tmp/chunks.jsonl | ./target/release/akh-medu preprocess --format jsonl > /tmp/structured.jsonl
+cat /tmp/chunks.jsonl | ./target/release/akh preprocess --format jsonl > /tmp/structured.jsonl
 
 # Or via HTTP (batched, for production)
 python3 -c "
@@ -468,7 +468,7 @@ for i, para in enumerate(paragraphs):
 cargo build --release
 
 # Run pre-processing with language auto-detection
-cat /tmp/chunks.jsonl | ./target/release/akh-medu preprocess --format jsonl > /tmp/structured.jsonl
+cat /tmp/chunks.jsonl | ./target/release/akh preprocess --format jsonl > /tmp/structured.jsonl
 
 # Inspect the output
 head -1 /tmp/structured.jsonl | python3 -m json.tool
@@ -518,7 +518,7 @@ head -1 /tmp/structured.jsonl | python3 -m json.tool
 mixed-script content, or unsupported language using English as fallback):
 
 ```bash
-cat /tmp/german_chunks.jsonl | ./target/release/akh-medu preprocess --format jsonl --language en > /tmp/structured.jsonl
+cat /tmp/german_chunks.jsonl | ./target/release/akh preprocess --format jsonl --language en > /tmp/structured.jsonl
 ```
 
 ### 3. Pre-Process via HTTP
@@ -526,7 +526,7 @@ cat /tmp/german_chunks.jsonl | ./target/release/akh-medu preprocess --format jso
 ```bash
 # Build and start the server
 cargo build --release --features server
-./target/release/akh-medu-server &
+./target/release/akhomed &
 
 # Wait for startup
 sleep 1
@@ -689,7 +689,7 @@ than forcing a single language:
 
 ```bash
 # Each chunk is detected independently — this is the default behavior
-cat mixed_corpus.jsonl | ./target/release/akh-medu preprocess --format jsonl > structured.jsonl
+cat mixed_corpus.jsonl | ./target/release/akh preprocess --format jsonl > structured.jsonl
 ```
 
 You can also split mixed-language documents at the sentence level before chunking:
@@ -832,19 +832,19 @@ Each learned equivalence records how it was discovered:
 
 ```bash
 # List all learned equivalences
-./target/release/akh-medu equivalences list
+./target/release/akh equivalences list
 
 # Show counts by source (kg-structural, vsa-similarity, co-occurrence, manual)
-./target/release/akh-medu equivalences stats
+./target/release/akh equivalences stats
 
 # Run all learning strategies on current engine state
-./target/release/akh-medu equivalences learn
+./target/release/akh equivalences learn
 
 # Export to JSON for manual curation
-./target/release/akh-medu equivalences export > /tmp/equivalences.json
+./target/release/akh equivalences export > /tmp/equivalences.json
 
 # Import curated equivalences
-./target/release/akh-medu equivalences import < /tmp/equivalences.json
+./target/release/akh equivalences import < /tmp/equivalences.json
 ```
 
 ### Managing Equivalences via HTTP
@@ -895,7 +895,7 @@ seed the equivalence table with domain-specific terms before processing:
 
 ```bash
 # Via CLI
-./target/release/akh-medu equivalences import < /tmp/domain-terms.json
+./target/release/akh equivalences import < /tmp/domain-terms.json
 
 # Via HTTP
 curl -X POST http://localhost:8200/equivalences/import \
@@ -907,7 +907,7 @@ curl -X POST http://localhost:8200/equivalences/import \
 
 ```bash
 echo '{"text": "Митохондрия является органоидом клетки."}' | \
-  ./target/release/akh-medu preprocess --format jsonl
+  ./target/release/akh preprocess --format jsonl
 # entities[0].canonical_name will be "mitochondria" instead of "митохондрия"
 ```
 
@@ -915,15 +915,15 @@ echo '{"text": "Митохондрия является органоидом к�
 
 ```bash
 # Process a batch, let learning discover new equivalences
-cat /tmp/corpus.jsonl | ./target/release/akh-medu preprocess --format jsonl > /dev/null
-./target/release/akh-medu equivalences learn
+cat /tmp/corpus.jsonl | ./target/release/akh preprocess --format jsonl > /dev/null
+./target/release/akh equivalences learn
 
 # Export for review
-./target/release/akh-medu equivalences export > /tmp/review.json
+./target/release/akh equivalences export > /tmp/review.json
 
 # Edit review.json manually (fix mistakes, add missing terms)
 # Then re-import
-./target/release/akh-medu equivalences import < /tmp/review.json
+./target/release/akh equivalences import < /tmp/review.json
 ```
 
 ---
@@ -1320,7 +1320,7 @@ You can also import equivalences at runtime instead of modifying the source:
 ```bash
 echo '[
   {"canonical": "Germany", "surface": "Deutschland", "source_language": "de", "confidence": 1.0, "source": "Manual"}
-]' | ./target/release/akh-medu equivalences import
+]' | ./target/release/akh equivalences import
 ```
 
 ### Step 5: Rebuild and Test
@@ -1334,11 +1334,11 @@ cargo build --release
 
 # Test with sample text (explicit language)
 echo '{"text":"Der Archetyp ist ein universelles Muster."}' \
-  | ./target/release/akh-medu preprocess --format jsonl --language de
+  | ./target/release/akh preprocess --format jsonl --language de
 
 # Test auto-detection (if Step 3 was implemented)
 echo '{"text":"Die Zelle enthält Mitochondrien und andere Organellen."}' \
-  | ./target/release/akh-medu preprocess --format jsonl
+  | ./target/release/akh preprocess --format jsonl
 ```
 
 ### Checklist for New Languages
@@ -1355,7 +1355,7 @@ echo '{"text":"Die Zelle enthält Mitochondrien und andere Organellen."}' \
 - [ ] (Optional) Add detection markers in `detect.rs` for `Language::Auto` support
 - [ ] (Optional) Add cross-lingual entries in `equivalences.rs`
 - [ ] Run `cargo test --lib` (must pass, zero warnings)
-- [ ] Test with sample text: `echo '{"text":"..."}' | akh-medu preprocess --format jsonl --language XX`
+- [ ] Test with sample text: `echo '{"text":"..."}' | akh preprocess --format jsonl --language XX`
 
 ---
 
@@ -1376,7 +1376,7 @@ echo '{"text":"Die Zelle enthält Mitochondrien und andere Organellen."}' \
 Initialize a new akh-medu data directory:
 
 ```bash
-./target/release/akh-medu --data-dir /tmp/akh-data init
+./target/release/akh --data-dir /tmp/akh-data init
 ```
 
 #### `preprocess`
@@ -1385,13 +1385,13 @@ Pre-process text chunks from stdin:
 
 ```bash
 # JSONL mode (streaming, one object per line)
-cat chunks.jsonl | ./target/release/akh-medu preprocess --format jsonl
+cat chunks.jsonl | ./target/release/akh preprocess --format jsonl
 
 # JSON mode (batch, array on stdin)
-cat chunks.json | ./target/release/akh-medu preprocess --format json
+cat chunks.json | ./target/release/akh preprocess --format json
 
 # With explicit language
-cat chunks.jsonl | ./target/release/akh-medu preprocess --format jsonl --language ru
+cat chunks.jsonl | ./target/release/akh preprocess --format jsonl --language ru
 ```
 
 | Option | Description | Default |
@@ -1406,16 +1406,16 @@ Ingest structured data into the knowledge graph:
 
 ```bash
 # JSON triples
-./target/release/akh-medu --data-dir /tmp/akh-data ingest --file /path/to/triples.json
+./target/release/akh --data-dir /tmp/akh-data ingest --file /path/to/triples.json
 
 # CSV (subject, predicate, object format)
-./target/release/akh-medu --data-dir /tmp/akh-data ingest --file /path/to/data.csv --format csv --csv-format spo
+./target/release/akh --data-dir /tmp/akh-data ingest --file /path/to/data.csv --format csv --csv-format spo
 
 # CSV (entity format: column headers are predicates)
-./target/release/akh-medu --data-dir /tmp/akh-data ingest --file /path/to/data.csv --format csv --csv-format entity
+./target/release/akh --data-dir /tmp/akh-data ingest --file /path/to/data.csv --format csv --csv-format entity
 
 # Plain text
-./target/release/akh-medu --data-dir /tmp/akh-data ingest --file /path/to/text.txt --format text --max-sentences 100
+./target/release/akh --data-dir /tmp/akh-data ingest --file /path/to/text.txt --format text --max-sentences 100
 ```
 
 #### `equivalences`
@@ -1423,11 +1423,11 @@ Ingest structured data into the knowledge graph:
 Manage cross-lingual entity equivalences:
 
 ```bash
-./target/release/akh-medu equivalences list      # Show all learned equivalences
-./target/release/akh-medu equivalences stats     # Counts by source
-./target/release/akh-medu equivalences learn     # Run learning strategies
-./target/release/akh-medu equivalences export    # Export to JSON (stdout)
-./target/release/akh-medu equivalences import    # Import from JSON (stdin)
+./target/release/akh equivalences list      # Show all learned equivalences
+./target/release/akh equivalences stats     # Counts by source
+./target/release/akh equivalences learn     # Run learning strategies
+./target/release/akh equivalences export    # Export to JSON (stdout)
+./target/release/akh equivalences import    # Import from JSON (stdin)
 ```
 
 #### `grammar`
@@ -1436,25 +1436,25 @@ Grammar system commands:
 
 ```bash
 # List available grammar archetypes
-./target/release/akh-medu grammar list
+./target/release/akh grammar list
 
 # Parse prose to abstract syntax
-./target/release/akh-medu grammar parse "Dogs are mammals"
+./target/release/akh grammar parse "Dogs are mammals"
 
 # Parse and ingest into knowledge graph
-./target/release/akh-medu --data-dir /tmp/akh-data grammar parse "Dogs are mammals" --ingest
+./target/release/akh --data-dir /tmp/akh-data grammar parse "Dogs are mammals" --ingest
 
 # Linearize a triple (generate prose from structured data)
-./target/release/akh-medu grammar linearize --subject Dog --predicate is-a --object mammal
+./target/release/akh grammar linearize --subject Dog --predicate is-a --object mammal
 
 # Compare a triple to knowledge graph
-./target/release/akh-medu --data-dir /tmp/akh-data grammar compare --subject Dog --predicate is-a --object mammal
+./target/release/akh --data-dir /tmp/akh-data grammar compare --subject Dog --predicate is-a --object mammal
 
 # Load a custom TOML grammar
-./target/release/akh-medu grammar load --file /path/to/grammar.toml
+./target/release/akh grammar load --file /path/to/grammar.toml
 
 # Render an entity's knowledge graph neighborhood
-./target/release/akh-medu --data-dir /tmp/akh-data grammar render --entity Dog
+./target/release/akh --data-dir /tmp/akh-data grammar render --entity Dog
 ```
 
 ---
@@ -1466,7 +1466,7 @@ Grammar system commands:
 **Build/Run:**
 ```bash
 cargo build --release --features server
-./target/release/akh-medu-server
+./target/release/akhomed
 ```
 
 **Environment:**

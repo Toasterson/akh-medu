@@ -1,0 +1,35 @@
+{{- if and .Values.akhomed.enabled .Values.akhomed.persistence.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "akh-medu.fullname" . }}-akhomed-data
+  labels:
+    {{- include "akh-medu.akhomed.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    {{- toYaml .Values.akhomed.persistence.accessModes | nindent 4 }}
+  {{- if .Values.akhomed.persistence.storageClass }}
+  storageClassName: {{ .Values.akhomed.persistence.storageClass | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.akhomed.persistence.size }}
+{{- end }}
+---
+{{- if and .Values.akhomed.enabled .Values.akhomed.models.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "akh-medu.fullname" . }}-akhomed-models
+  labels:
+    {{- include "akh-medu.akhomed.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    {{- toYaml .Values.akhomed.models.accessModes | nindent 4 }}
+  {{- if .Values.akhomed.models.storageClass }}
+  storageClassName: {{ .Values.akhomed.models.storageClass | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.akhomed.models.size }}
+{{- end }}

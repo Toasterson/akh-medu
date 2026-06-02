@@ -13,6 +13,8 @@ pub mod encode;
 pub mod grounding;
 pub mod item_memory;
 pub mod ops;
+pub mod neural_bridge;
+pub mod polar_quant;
 
 use serde::{Deserialize, Serialize};
 

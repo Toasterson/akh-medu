@@ -287,6 +287,8 @@ pub struct ConsolidationResult {
     pub entries_evicted: usize,
     /// SymbolIds of newly created episodes.
     pub episodes_created: Vec<SymbolId>,
+    /// Goals auto-generated from VSA competence gap detection.
+    pub vsa_gap_goals_created: usize,
 }
 
 /// ACT-R base-level activation for a working memory entry.
@@ -397,6 +399,18 @@ pub fn consolidate(
 
     // Score every entry.
     for entry in working_memory.entries() {
+        // Observation entries (OODA cycle-state snapshots) and Decision entries
+        // (which tool was chosen and why) are transient operational logs — they
+        // carry no semantic knowledge worth persisting to the KG.  Evict them
+        // immediately without ever scoring or consolidating.
+        if matches!(
+            entry.kind,
+            WorkingMemoryKind::Observation | WorkingMemoryKind::Decision
+        ) {
+            entries_to_evict.push(entry.id);
+            continue;
+        }
+
         let score = score_entry(entry, goals, engine, config, current_cycle);
         if score >= config.min_relevance {
             entries_to_persist.push((entry.clone(), score));
@@ -435,6 +449,7 @@ pub fn consolidate(
         entries_persisted,
         entries_evicted,
         episodes_created,
+        vsa_gap_goals_created: 0,
     })
 }
 
@@ -445,24 +460,17 @@ fn persist_episode(
     relevance_score: f32,
     predicates: &AgentPredicates,
 ) -> AgentResult<SymbolId> {
-    // Create the episode entity.
-    let episode_label = format!("episode:{}", entry.id);
-    let episode = engine.create_symbol(SymbolKind::Entity, &episode_label)?;
-
-    // Link the episode to its summary via has_summary predicate.
-    // We store the summary as the episode's own label (already done above),
-    // but also create a dedicated summary entity.
-    let summary_label = if entry.content.len() > 80 {
-        format!("summary:{}", &entry.content[..80])
+    // Embed a truncated content excerpt in the episode entity's label so the
+    // summary is recoverable without creating a separate KG entity.  Storing
+    // the summary as a distinct `summary:*` entity was the original source of
+    // workspace KG pollution (WI-019e1061).
+    let excerpt = if entry.content.len() > 80 {
+        &entry.content[..80]
     } else {
-        format!("summary:{}", entry.content)
+        entry.content.as_str()
     };
-    let summary_sym = engine.resolve_or_create_entity(&summary_label)?;
-    let _ = engine.add_triple(&Triple::new(
-        episode.id,
-        predicates.has_summary,
-        summary_sym,
-    ));
+    let episode_label = format!("episode:{}:{}", entry.id, excerpt);
+    let episode = engine.create_symbol(SymbolKind::Entity, &episode_label)?;
 
     // Link to learned symbols.
     for sym in &entry.symbols {
@@ -584,9 +592,26 @@ fn reconstruct_episode(
     let mut learnings = Vec::new();
     let mut tags = Vec::new();
 
+    // New format: summary is embedded in the episode entity's own label as
+    // "episode:{id}:{content}".  Extract the third colon-delimited segment.
+    let episode_label = engine.resolve_label(episode_id);
+    if let Some(content) = episode_label.splitn(3, ':').nth(2) {
+        if !content.is_empty() {
+            summary = content.to_string();
+        }
+    }
+
     for triple in &triples {
         if triple.predicate == predicates.has_summary {
-            summary = engine.resolve_label(triple.object);
+            // Backward compat: legacy episodes stored a separate `summary:*`
+            // entity.  Use it only when the label-embedded summary is absent.
+            if summary.is_empty() {
+                let raw = engine.resolve_label(triple.object);
+                summary = raw
+                    .strip_prefix("summary:")
+                    .unwrap_or(&raw)
+                    .to_string();
+            }
         } else if triple.predicate == predicates.learned {
             learnings.push(triple.object);
         } else if triple.predicate == predicates.has_tag {
@@ -1090,5 +1115,140 @@ mod tests {
         let entry = wm.get(id).unwrap();
         assert_eq!(entry.reference_count, 2);
         assert_eq!(entry.access_timestamps, vec![5, 8]);
+    }
+
+    // -- Runtime artifact prevention tests --
+
+    /// consolidate() must evict Observation and Decision entries without ever
+    /// persisting them to the KG (they are operational logs, not knowledge).
+    #[test]
+    fn consolidate_skips_observation_and_decision_entries() {
+        use super::super::goal::{Goal, GoalStatus};
+        use crate::engine::{Engine, EngineConfig};
+        use crate::symbol::SymbolId;
+
+        let engine = Engine::new(EngineConfig::default()).unwrap();
+        let predicates = super::super::agent::AgentPredicates::init(&engine).unwrap();
+
+        let mut wm = WorkingMemory::new(20);
+
+        // Observation entry — operational log, must NOT be consolidated.
+        wm.push(WorkingMemoryEntry {
+            id: 0,
+            content: "Cycle 1: 1 active goals, 0 WM entries, 0 recalled episodes".into(),
+            symbols: vec![],
+            kind: WorkingMemoryKind::Observation,
+            timestamp: 0,
+            relevance: 0.9,
+            source_cycle: 1,
+            reference_count: 5,
+            access_timestamps: vec![1, 2, 3, 4, 5],
+        })
+        .unwrap();
+
+        // Decision entry — operational log, must NOT be consolidated.
+        wm.push(WorkingMemoryEntry {
+            id: 0,
+            content: "Decide: tool=kg_query, goal=\"test goal\", reason=explore".into(),
+            symbols: vec![SymbolId::new(1).unwrap()],
+            kind: WorkingMemoryKind::Decision,
+            timestamp: 0,
+            relevance: 0.9,
+            source_cycle: 1,
+            reference_count: 5,
+            access_timestamps: vec![1, 2, 3, 4, 5],
+        })
+        .unwrap();
+
+        let goals: Vec<Goal> = vec![];
+        let config = ConsolidationConfig {
+            min_relevance: 0.0, // accept everything that passes the kind filter
+            ..ConsolidationConfig::default()
+        };
+
+        let result = consolidate(&mut wm, &engine, &goals, &config, &predicates, 5).unwrap();
+
+        // Both entries evicted, neither persisted as episodes.
+        assert_eq!(result.entries_persisted, 0);
+        assert_eq!(result.episodes_created.len(), 0);
+        assert_eq!(wm.len(), 0, "WM should be empty after eviction");
+
+        // No episode:* entities created in the KG.
+        let episode_entities: Vec<_> = engine
+            .all_symbols()
+            .into_iter()
+            .filter(|m| m.label.starts_with("episode:"))
+            .collect();
+        assert!(
+            episode_entities.is_empty(),
+            "no episode entities should be created for Observation/Decision entries"
+        );
+    }
+
+    /// consolidate() must NOT create any `summary:*` entities for ToolResult
+    /// or GoalUpdate entries — the content lives in the episode label itself.
+    #[test]
+    fn consolidate_no_summary_entities_for_tool_results() {
+        use super::super::goal::{Goal, GoalStatus};
+        use crate::engine::{Engine, EngineConfig};
+        use crate::symbol::SymbolId;
+
+        let engine = Engine::new(EngineConfig::default()).unwrap();
+        let predicates = super::super::agent::AgentPredicates::init(&engine).unwrap();
+
+        let mut wm = WorkingMemory::new(20);
+
+        // ToolResult entry with a real symbol — eligible for consolidation.
+        let sym = engine
+            .resolve_or_create_entity("some:concept")
+            .unwrap();
+        wm.push(WorkingMemoryEntry {
+            id: 0,
+            content: "Tool result (kg_query):\nfound concept".into(),
+            symbols: vec![sym],
+            kind: WorkingMemoryKind::ToolResult,
+            timestamp: 0,
+            relevance: 0.9,
+            source_cycle: 1,
+            reference_count: 3,
+            access_timestamps: vec![1, 2, 3],
+        })
+        .unwrap();
+
+        let goals: Vec<Goal> = vec![];
+        let config = ConsolidationConfig {
+            min_relevance: 0.0,
+            ..ConsolidationConfig::default()
+        };
+
+        let result = consolidate(&mut wm, &engine, &goals, &config, &predicates, 5).unwrap();
+
+        assert_eq!(result.entries_persisted, 1);
+        assert_eq!(result.episodes_created.len(), 1);
+
+        // Verify NO `summary:*` entities were created.
+        let summary_entities: Vec<_> = engine
+            .all_symbols()
+            .into_iter()
+            .filter(|m| m.label.starts_with("summary:"))
+            .collect();
+        assert!(
+            summary_entities.is_empty(),
+            "summary:* entities must not be created (got: {:?})",
+            summary_entities.iter().map(|m| &m.label).collect::<Vec<_>>()
+        );
+
+        // Episode entity label should embed the content excerpt.
+        let episode_id = result.episodes_created[0];
+        let episode_label = engine.resolve_label(episode_id);
+        assert!(
+            episode_label.starts_with("episode:"),
+            "episode label should start with 'episode:': {episode_label}"
+        );
+        // The label includes the content excerpt after the second colon.
+        assert!(
+            episode_label.contains("Tool result"),
+            "episode label should embed content excerpt: {episode_label}"
+        );
     }
 }

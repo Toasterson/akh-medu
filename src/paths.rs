@@ -169,6 +169,14 @@ impl AkhPaths {
         self.data_dir.join("seeds")
     }
 
+    /// Shared NLU model directory: `$XDG_DATA_HOME/akh-medu/models/`.
+    ///
+    /// Models are large and workspace-independent, so they're stored in a
+    /// shared location rather than per-workspace.
+    pub fn models_dir(&self) -> PathBuf {
+        self.data_dir.join("models")
+    }
+
     /// Path to the shared content library directory.
     pub fn library_dir(&self) -> PathBuf {
         self.data_dir.join("library")

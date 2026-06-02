@@ -5,7 +5,7 @@
 //! via redb with multiple indices for efficient lookup.
 
 use std::num::NonZeroU64;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use redb::{
@@ -497,6 +497,246 @@ pub enum DerivationKind {
         /// If the VSA parse ranker contributed, the exemplar similarity score.
         exemplar_similarity: Option<f32>,
     },
+
+    // --- Phase 25: People & Contacts -----------------------------------------
+
+    /// A contact was resolved or created via identity resolution (Phase 25a).
+    ContactResolved {
+        contact_id: String,
+        alias_count: u32,
+    },
+
+    /// Two contacts were merged into one (Phase 25a).
+    ContactMerged {
+        kept: String,
+        discarded: String,
+    },
+
+    /// A relationship was recorded between two contacts (Phase 25b).
+    RelationshipRecorded {
+        from: String,
+        to: String,
+        kind: String,
+    },
+
+    /// A communication style observation was recorded (Phase 25d).
+    StyleObserved {
+        contact_id: String,
+        formality: f32,
+        verbosity: f32,
+    },
+
+    /// A calendar attendee was linked to a contact (Phase 25e).
+    CalendarAttendeeLinked {
+        event_id: u64,
+        contact_id: String,
+    },
+
+    /// A triple was extracted from text by an LLM backend (autonomous extraction).
+    LlmTripleExtraction {
+        backend: String,
+        source_text_hash: u64,
+        model: String,
+    },
+
+    // --- Phase 15b: Event Calculus -------------------------------------------
+
+    /// A state projection was computed via event calculus (Phase 15b).
+    EventCalculusProjection {
+        fluent_count: u32,
+        event_count: u32,
+        interval_secs: u64,
+    },
+
+    // --- Phase 15c: Counterfactual Reasoning ----------------------------------
+
+    /// A counterfactual analysis was performed (Phase 15c).
+    CounterfactualReasoning {
+        actual_action: String,
+        hypothetical_action: String,
+        divergent_count: u32,
+    },
+
+    // --- Phase 16: Predictive Planning ----------------------------------------
+
+    /// An MCTS planning session was executed (Phase 16b).
+    MctsPlanning {
+        iterations: u32,
+        depth: u32,
+        expected_value: f32,
+    },
+
+    // --- Phase 17: Evidence Theory --------------------------------------------
+
+    /// Evidence was combined from multiple sources (Phase 17a).
+    EvidenceCombination {
+        source_count: u32,
+        conflict_degree: f32,
+        belief: f32,
+        plausibility: f32,
+    },
+
+    // --- Phase 18: Source Reliability ------------------------------------------
+
+    /// A source's reliability was assessed (Phase 18a).
+    SourceReliabilityAssessed {
+        source_id_raw: u64,
+        reliability: String,
+        credibility: String,
+    },
+
+    // --- Phase 19: Epistemic Logic --------------------------------------------
+
+    /// An epistemic assessment was made (Phase 19a).
+    EpistemicAssessment {
+        agent_id_raw: u64,
+        modality: String,
+        proposition_count: u32,
+    },
+
+    /// An epistemic update was applied (Phase 19b DEL).
+    EpistemicUpdate {
+        event_kind: String,
+        updated_agent_count: u32,
+    },
+
+    /// A theory-of-mind model was built (Phase 19c).
+    TheoryOfMind {
+        target_agent_raw: u64,
+        tom_level: u8,
+        prediction_count: u32,
+    },
+
+    // --- Phase 20: Active Inference -------------------------------------------
+
+    /// An active inference cycle was run (Phase 20a).
+    ActiveInferenceCycle {
+        surprise: f32,
+        pragmatic: f32,
+        epistemic: f32,
+        efe: f32,
+    },
+
+    // --- Phase 21: Game Theory ------------------------------------------------
+
+    /// A game-theoretic interaction model was built (Phase 21).
+    GameTheoreticModel {
+        game_type: String,
+        equilibria_count: u32,
+        recommended_strategy: String,
+    },
+
+    // --- Phase 36: Delegation ------------------------------------------------
+
+    /// A concept was identified via neural→VSA bridge probing (Phase 26d).
+    NeuralProbe {
+        layer: usize,
+        similarity: f32,
+        source_text: String,
+    },
+
+    // --- Phase 36: Delegation ------------------------------------------------
+
+    /// A task was delegated to an external worker (Phase 36).
+    Delegation {
+        target: String,
+        task_description: String,
+        model_used: Option<String>,
+        tokens_consumed: Option<u64>,
+        cost_usd: Option<f64>,
+        wall_time_ms: u64,
+    },
+
+    // --- Phase 22: Akhipedia ------------------------------------------------
+
+    /// A wiki article was created (Phase 22a).
+    ArticleCreated {
+        title: String,
+        author_raw: u64,
+        block_count: usize,
+    },
+
+    /// A wiki article was updated (Phase 22b).
+    ArticleUpdated {
+        title: String,
+        block_count: usize,
+    },
+
+    /// An article was cited by another (Phase 22b).
+    ArticleCited {
+        from_title: String,
+        to_title: String,
+    },
+
+    /// An article was published via ActivityPub federation (Phase 22e).
+    ArticleFederated {
+        title: String,
+        activity_type: String,
+    },
+
+    /// An opinion was expressed in a blog post (Phase 22f).
+    OpinionExpressed {
+        title: String,
+        stance: String,
+        confidence: f32,
+    },
+
+    /// A debate contribution was made (Phase 22f).
+    DebateContribution {
+        topic: String,
+        contribution_kind: String,
+    },
+
+    // --- Cluster topology ingestion ------------------------------------------
+
+    /// Kubernetes cluster topology was queried and asserted as triples.
+    ClusterTopologyIngested {
+        nodes: usize,
+        storage_classes: usize,
+        pods: usize,
+        triples_asserted: usize,
+    },
+
+    // --- Phase 32: LLM Knowledge Elicitation ---------------------------------
+
+    /// Structured knowledge generated by LLM elicitation (Phase 32).
+    ///
+    /// Records which model, elicitation pass, prompt fingerprint, and
+    /// self-consistency score produced this triple, plus optional neural bridge
+    /// coherence (Phase 26d) and whether a web source later corroborated it.
+    /// LLM-only triples (not web-corroborated) decay via temporal projection
+    /// at –0.05/month (Phase 9k).  If the source model is later found
+    /// unreliable, all triples sharing the same `model_id` can be bulk-retracted
+    /// via TMS (Phase 9c).
+    KnowledgeElicitation {
+        /// Identifier for the generative model (e.g. `"t5-knowledge-q6k"`).
+        model_id: String,
+        /// Elicitation pass that produced this triple
+        /// (one of `"taxonomy"`, `"properties"`, `"relationships"`,
+        ///  `"procedures"`, `"temporal"`).
+        pass: String,
+        /// FNV-64 hash of the prompt text for reproducibility.
+        prompt_hash: u64,
+        /// Fraction of self-consistency rounds in which this triple appeared
+        /// (0.0–1.0).
+        self_consistency: f32,
+        /// Optional neural bridge coherence score from Phase 26d.
+        /// `None` when the neural bridge is unavailable.
+        neural_coherence: Option<f32>,
+        /// Whether a web source (Wikidata / Wikipedia / ConceptNet) later
+        /// confirmed this triple.
+        web_corroborated: bool,
+    },
+
+    /// A VSA-native RL update adjusted the confidence of an action-quality triple.
+    ///
+    /// Records the tool that was used, the cosine-similarity reward, and the
+    /// OODA cycle in which the Act→Observe transition occurred.
+    VsaRlUpdate {
+        tool: SymbolId,
+        reward: f32,
+        cycle: u64,
+    },
 }
 
 impl DerivationKind {
@@ -575,6 +815,33 @@ impl DerivationKind {
             Self::BootstrapOrchestration { .. } => 69,
             Self::ContinuousLearning { .. } => 70,
             Self::NluParsed { .. } => 71,
+            Self::ContactResolved { .. } => 72,
+            Self::ContactMerged { .. } => 73,
+            Self::RelationshipRecorded { .. } => 74,
+            Self::StyleObserved { .. } => 75,
+            Self::CalendarAttendeeLinked { .. } => 76,
+            Self::LlmTripleExtraction { .. } => 77,
+            Self::EventCalculusProjection { .. } => 78,
+            Self::CounterfactualReasoning { .. } => 79,
+            Self::MctsPlanning { .. } => 80,
+            Self::EvidenceCombination { .. } => 81,
+            Self::SourceReliabilityAssessed { .. } => 82,
+            Self::EpistemicAssessment { .. } => 83,
+            Self::EpistemicUpdate { .. } => 84,
+            Self::TheoryOfMind { .. } => 85,
+            Self::ActiveInferenceCycle { .. } => 86,
+            Self::GameTheoreticModel { .. } => 87,
+            Self::NeuralProbe { .. } => 88,
+            Self::Delegation { .. } => 89,
+            Self::ArticleCreated { .. } => 90,
+            Self::ArticleUpdated { .. } => 91,
+            Self::ArticleCited { .. } => 92,
+            Self::ArticleFederated { .. } => 93,
+            Self::OpinionExpressed { .. } => 94,
+            Self::DebateContribution { .. } => 95,
+            Self::ClusterTopologyIngested { .. } => 96,
+            Self::KnowledgeElicitation { .. } => 97,
+            Self::VsaRlUpdate { .. } => 98,
         }
     }
 }
@@ -675,8 +942,11 @@ impl ProvenanceRecord {
 ///
 /// Stores provenance records with multiple indices for efficient querying
 /// by derived symbol, source symbol, and derivation kind.
+///
+/// The database is wrapped in `Arc<Mutex<Database>>` to serialize concurrent
+/// write attempts at the Rust level, preventing OS-level lock pile-up.
 pub struct ProvenanceLedger {
-    db: Arc<Database>,
+    db: Arc<Mutex<Database>>,
     next_id: AtomicU64,
 }
 
@@ -698,10 +968,11 @@ impl ProvenanceLedger {
     /// Open a provenance ledger on an existing database.
     ///
     /// Recovers the next ID counter by scanning the primary table.
-    pub fn open(db: Arc<Database>) -> ProvenanceResult<Self> {
+    pub fn open(db: Arc<Mutex<Database>>) -> ProvenanceResult<Self> {
         // Ensure tables exist by opening a write txn.
         {
-            let txn = db.begin_write().map_err(redb_err)?;
+            let db_lock = db.lock().expect("redb mutex poisoned");
+            let txn = db_lock.begin_write().map_err(redb_err)?;
             // Opening the tables creates them if absent.
             txn.open_table(PROVENANCE_TABLE).map_err(redb_err)?;
             txn.open_multimap_table(DERIVED_INDEX)
@@ -715,7 +986,9 @@ impl ProvenanceLedger {
 
         // Recover max ID from the primary table.
         let max_id = {
-            let txn = db.begin_read().map_err(redb_err)?;
+            let db_lock = db.lock().expect("redb mutex poisoned");
+            let txn = db_lock.begin_read().map_err(redb_err)?;
+            drop(db_lock); // release lock — read txn is independent
             let table = txn.open_table(PROVENANCE_TABLE).map_err(redb_err)?;
             let mut max = 0u64;
             let iter = table.iter().map_err(redb_err)?;
@@ -748,7 +1021,8 @@ impl ProvenanceLedger {
             })
         })?;
 
-        let txn = self.db.begin_write().map_err(redb_err)?;
+        let db_lock = self.db.lock().expect("redb mutex poisoned");
+        let txn = db_lock.begin_write().map_err(redb_err)?;
         {
             let mut table = txn.open_table(PROVENANCE_TABLE).map_err(redb_err)?;
             table
@@ -810,7 +1084,8 @@ impl ProvenanceLedger {
             encoded_batch.push((raw_id, encoded));
         }
 
-        let txn = self.db.begin_write().map_err(redb_err)?;
+        let db_lock = self.db.lock().expect("redb mutex poisoned");
+        let txn = db_lock.begin_write().map_err(redb_err)?;
         {
             let mut table = txn.open_table(PROVENANCE_TABLE).map_err(redb_err)?;
             for (raw_id, encoded) in &encoded_batch {
@@ -852,7 +1127,9 @@ impl ProvenanceLedger {
 
     /// Get a provenance record by its ID.
     pub fn get(&self, id: ProvenanceId) -> ProvenanceResult<ProvenanceRecord> {
-        let txn = self.db.begin_read().map_err(redb_err)?;
+        let db_lock = self.db.lock().expect("redb mutex poisoned");
+        let txn = db_lock.begin_read().map_err(redb_err)?;
+        drop(db_lock); // release lock — read txn is independent
         let table = txn.open_table(PROVENANCE_TABLE).map_err(redb_err)?;
         let guard = table
             .get(id.get())
@@ -885,7 +1162,9 @@ impl ProvenanceLedger {
 
     /// Total number of provenance records.
     pub fn len(&self) -> ProvenanceResult<usize> {
-        let txn = self.db.begin_read().map_err(redb_err)?;
+        let db_lock = self.db.lock().expect("redb mutex poisoned");
+        let txn = db_lock.begin_read().map_err(redb_err)?;
+        drop(db_lock); // release lock — read txn is independent
         let table = txn.open_table(PROVENANCE_TABLE).map_err(redb_err)?;
         Ok(table.len().map_err(redb_err)? as usize)
     }
@@ -905,7 +1184,9 @@ impl ProvenanceLedger {
         table_def: &MultimapTableDefinition<u64, u64>,
         key: u64,
     ) -> ProvenanceResult<Vec<ProvenanceRecord>> {
-        let txn = self.db.begin_read().map_err(redb_err)?;
+        let db_lock = self.db.lock().expect("redb mutex poisoned");
+        let txn = db_lock.begin_read().map_err(redb_err)?;
+        drop(db_lock); // release lock — read txn is independent
         let idx = txn
             .open_multimap_table(*table_def)
             .map_err(redb_err)?;
@@ -932,7 +1213,9 @@ impl ProvenanceLedger {
 
     /// Retrieve records given a u8-keyed multimap index (kind).
     fn records_from_kind_index(&self, tag: u8) -> ProvenanceResult<Vec<ProvenanceRecord>> {
-        let txn = self.db.begin_read().map_err(redb_err)?;
+        let db_lock = self.db.lock().expect("redb mutex poisoned");
+        let txn = db_lock.begin_read().map_err(redb_err)?;
+        drop(db_lock); // release lock — read txn is independent
         let idx = txn
             .open_multimap_table(KIND_INDEX)
             .map_err(redb_err)?;
@@ -962,12 +1245,12 @@ impl ProvenanceLedger {
 mod tests {
     use super::*;
 
-    fn test_db() -> Arc<Database> {
+    fn test_db() -> Arc<Mutex<Database>> {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("test.redb");
         // Leak the TempDir to keep the directory alive for the test.
         std::mem::forget(dir);
-        Arc::new(Database::create(path).unwrap())
+        Arc::new(Mutex::new(Database::create(path).unwrap()))
     }
 
     fn sym(id: u64) -> SymbolId {
@@ -1100,7 +1383,7 @@ mod tests {
     fn persistence_across_reopens() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("persist.redb");
-        let db = Arc::new(Database::create(&path).unwrap());
+        let db = Arc::new(Mutex::new(Database::create(&path).unwrap()));
 
         let stored_id = {
             let ledger = ProvenanceLedger::open(Arc::clone(&db)).unwrap();
@@ -1111,7 +1394,7 @@ mod tests {
 
         // Drop and reopen.
         drop(db);
-        let db2 = Arc::new(Database::create(&path).unwrap());
+        let db2 = Arc::new(Mutex::new(Database::create(&path).unwrap()));
         let ledger2 = ProvenanceLedger::open(db2).unwrap();
 
         let retrieved = ledger2.get(stored_id).unwrap();

@@ -11,9 +11,11 @@ pub mod competence;
 pub mod expand;
 pub mod identity;
 pub mod ingest;
+pub mod knowledge_elicit;
 pub mod orchestrator;
 pub mod prerequisite;
 pub mod purpose;
+pub mod recipe;
 pub mod resources;
 
 pub use competence::{
@@ -34,6 +36,16 @@ pub use prerequisite::{
 pub use purpose::{
     BootstrapError, BootstrapIntent, BootstrapResult, DreyfusLevel, EntityType, IdentityRef,
     PurposeModel,
+};
+pub use recipe::{
+    PrerequisiteEntry, PurposeRecipe, RecipeError, RecipeIdentity, RecipePurpose, RecipeResources,
+    RecipeResult, RecipeSeeds, RecipeValidation,
+};
+pub use knowledge_elicit::{
+    ElicitBatch, ElicitConfig, ElicitPass, ElicitValidator, ElicitedTriple, FlagReason,
+    KnowledgeElicitor, RejectionReason, ValidatedTriple, ValidationResult,
+    apply_web_corroboration, compute_confidence, elicit_for_concept, elicit_for_expansion,
+    ingest_validated,
 };
 pub use orchestrator::{
     BootstrapOrchestrator, BootstrapSession, BootstrapStage, Checkpoint, OrchestratorConfig,

@@ -16,13 +16,13 @@ Three packs are compiled into the binary:
 
 ```bash
 # List available seed packs
-akh-medu seed list
+akh seed list
 
 # Apply a specific pack
-akh-medu seed apply identity
+akh seed apply identity
 
 # Check which seeds are applied to the current workspace
-akh-medu seed status
+akh seed status
 ```
 
 Seeds are **idempotent**: applying the same seed twice has no effect. Applied seeds are tracked via the `akh:seed-applied` predicate in the knowledge graph.
@@ -85,7 +85,7 @@ Copy the seed directory to the seeds location:
 cp -r my-seed/ ~/.local/share/akh-medu/seeds/my-seed/
 ```
 
-The pack will appear in `akh-medu seed list` on next invocation.
+The pack will appear in `akh seed list` on next invocation.
 
 ## Auto-Seeding on Workspace Creation
 

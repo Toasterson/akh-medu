@@ -33,6 +33,7 @@ use super::memory::{
     restore_session_summary,
 };
 use super::ooda::{self, DecisionImpasse, OodaCycleResult};
+use super::vsa_decide::DecideMode;
 use super::plan::{self, Plan, PlanStatus};
 use super::priority_reasoning::Audience;
 use super::project::{
@@ -71,6 +72,14 @@ pub struct AgentConfig {
     pub sleep: super::sleep::SleepConfig,
     /// Directed curiosity settings (Phase 11j).
     pub curiosity: super::curiosity::DirectedCuriosityConfig,
+    /// Maximum consecutive OODA cycles with no goal progress before stopping early (default: 4).
+    ///
+    /// After this many back-to-back `NoChange` cycles the loop terminates without
+    /// error, yielding the best findings so far.  This prevents the agent from
+    /// spinning against a sparse knowledge graph.  Set to 0 to disable.
+    pub max_empty_cycles: usize,
+    /// Goal queue hygiene settings.
+    pub hygiene: super::hygiene::HygieneConfig,
 }
 
 impl Default for AgentConfig {
@@ -87,6 +96,8 @@ impl Default for AgentConfig {
             chunking: ChunkingConfig::default(),
             sleep: super::sleep::SleepConfig::default(),
             curiosity: super::curiosity::DirectedCuriosityConfig::default(),
+            max_empty_cycles: 4,
+            hygiene: super::hygiene::HygieneConfig::default(),
         }
     }
 }
@@ -160,6 +171,10 @@ pub struct Agent {
     pub(crate) sink: Arc<dyn crate::message::MessageSink>,
     /// Optional Jungian psyche (loaded from the psyche compartment).
     pub(crate) psyche: Option<crate::compartment::psyche::Psyche>,
+    /// Non-blocking read-only snapshot of the current psyche.
+    /// Shared via `Arc` so monitoring tools can read it without acquiring the
+    /// agent mutex.  Kept in sync after every psyche mutation.
+    pub(crate) psyche_snapshot: Arc<std::sync::RwLock<Option<crate::compartment::psyche::Psyche>>>,
     /// Motivational drive system for autonomous goal generation.
     pub(crate) drives: DriveSystem,
     /// Value ordering for argumentation-based priority reasoning (Phase 11c).
@@ -210,12 +225,40 @@ pub struct Agent {
     pub(crate) preference_manager: super::preference::PreferenceManager,
     /// Causal world model manager (Phase 15a).
     pub(crate) causal_manager: super::causal::CausalManager,
+    /// Event calculus engine — temporal fluent reasoning (Phase 15b).
+    pub(crate) ec_engine: super::event_calculus::EventCalculusEngine,
+    /// Prediction tracker — causal model refinement (Phase 15c).
+    pub(crate) prediction_tracker: super::counterfactual::PredictionTracker,
+    /// TD-learned value function for planning (Phase 16a).
+    pub(crate) value_function: super::state_value::ValueFunction,
+    /// Evidence manager — Dempster-Shafer belief intervals (Phase 17).
+    pub(crate) evidence_manager: super::evidence::EvidenceManager,
+    /// Source reliability manager — Admiralty ratings + Bayesian trust (Phase 18a).
+    pub(crate) reliability_manager: super::source_reliability::SourceReliabilityManager,
+    /// Epistemic state manager — what agents know/believe (Phase 19).
+    pub(crate) epistemic_manager: super::epistemic::EpistemicStateManager,
+    /// Active inference engine — prediction, surprise, free energy (Phase 20).
+    pub(crate) active_inference: super::active_inference::ActiveInferenceEngine,
+    /// Temporal experience — felt duration, boredom, urgency (Phase 15d).
+    pub(crate) temporal_experience: super::temporal_experience::TemporalExperience,
+    /// Affective system — mood, somatic markers, emotional salience (Phase 23).
+    pub(crate) affective_system: super::affect::AffectiveSystem,
+    /// Contact manager — unified people/identity resolution (Phase 25a).
+    pub(crate) contact_manager: super::contact::ContactManager,
+    /// Relationship graph — interpersonal relationships between contacts (Phase 25b).
+    pub(crate) relationship_graph: super::contact_rel::RelationshipGraph,
+    /// Per-person conversation memory index (Phase 25c).
+    pub(crate) person_memory: super::contact_memory::PersonMemoryIndex,
+    /// Communication style profile manager (Phase 25d).
+    pub(crate) style_manager: super::contact_style::StyleManager,
     /// Dialogue state manager backed by KG microtheories.
     pub(crate) dialogue_manager: super::dialogue::DialogueManager,
     /// Sleep/consolidation cycle state (Phase 11i).
     pub(crate) sleep_cycle: super::sleep::SleepCycle,
     /// Directed curiosity configuration (Phase 11j).
     pub(crate) curiosity_config: super::curiosity::DirectedCuriosityConfig,
+    /// Goal queue hygiene configuration.
+    pub(crate) hygiene_config: super::hygiene::HygieneConfig,
     /// Optional WASM tool runtime (only when `wasm-tools` feature is enabled).
     #[cfg(feature = "wasm-tools")]
     pub(crate) wasm_runtime: Option<super::wasm_runtime::WasmToolRuntime>,
@@ -251,6 +294,7 @@ impl Agent {
         registry.register(Box::new(tools::TextIngestTool));
         registry.register(Box::new(tools::CodeIngestTool));
         registry.register(Box::new(tools::ContentIngestTool));
+        registry.register(Box::new(tools::JournalIngestTool));
 
         // Library search.
         registry.register(Box::new(tools::LibrarySearchTool));
@@ -274,6 +318,9 @@ impl Agent {
 
         // Audit log.
         registry.register(Box::new(tools::AuditLogTool));
+
+        // Tool-graph query (peer/federation discovery).
+        registry.register(Box::new(tools::ToolQueryTool));
     }
 
     /// Attach the audit ledger to the tool registry if persistence is configured.
@@ -399,8 +446,10 @@ impl Agent {
 
         let working_memory = WorkingMemory::new(config.working_memory_capacity);
 
-        // Try to restore goals from KG.
-        let goals = goal::restore_goals(&engine, &predicates).unwrap_or_default();
+        // Try to restore goals: prefer durable-store blob (survives without
+        // sparql-persist), fall back to KG-triple reconstruction.
+        let goals = goal::restore_goals_from_store(&engine)
+            .unwrap_or_else(|| goal::restore_goals(&engine, &predicates).unwrap_or_default());
 
         // Load psyche from compartment manager if available.
         let psyche = engine.compartments().and_then(|cm| cm.psyche());
@@ -409,6 +458,7 @@ impl Agent {
         let chunking_config = config.chunking.clone();
         let sleep_cycle = super::sleep::SleepCycle::new(config.sleep.clone());
         let curiosity_config = config.curiosity.clone();
+        let hygiene_config = config.hygiene.clone();
 
         let mut htn_registry = MethodRegistry::new();
         decomposition::register_builtin_methods(&mut htn_registry);
@@ -424,6 +474,7 @@ impl Agent {
             plans: std::collections::HashMap::new(),
             last_reflection: None,
             sink: Arc::new(crate::message::StdoutSink),
+            psyche_snapshot: Arc::new(std::sync::RwLock::new(psyche.clone())),
             psyche,
             drives,
             audience: Audience::exploration(),
@@ -450,9 +501,23 @@ impl Agent {
             calendar_manager: super::calendar::CalendarManager::default(),
             preference_manager: super::preference::PreferenceManager::default(),
             causal_manager: super::causal::CausalManager::default(),
+            ec_engine: super::event_calculus::EventCalculusEngine::default(),
+            prediction_tracker: super::counterfactual::PredictionTracker::default(),
+            value_function: super::state_value::ValueFunction::default(),
+            evidence_manager: super::evidence::EvidenceManager::new(),
+            reliability_manager: super::source_reliability::SourceReliabilityManager::new(),
+            epistemic_manager: super::epistemic::EpistemicStateManager::new(),
+            active_inference: super::active_inference::ActiveInferenceEngine::default(),
+            temporal_experience: super::temporal_experience::TemporalExperience::default(),
+            affective_system: super::affect::AffectiveSystem::new(),
+            contact_manager: super::contact::ContactManager::default(),
+            relationship_graph: super::contact_rel::RelationshipGraph::default(),
+            person_memory: super::contact_memory::PersonMemoryIndex::new(100),
+            style_manager: super::contact_style::StyleManager::default(),
             dialogue_manager,
             sleep_cycle,
             curiosity_config,
+            hygiene_config,
             #[cfg(feature = "wasm-tools")]
             wasm_runtime: super::wasm_runtime::WasmToolRuntime::new().ok(),
         };
@@ -477,6 +542,48 @@ impl Agent {
             tracing::warn!("failed to init preference predicates: {e}");
         }
 
+        // Initialize contact manager (Phase 25a).
+        if let Err(e) = agent.contact_manager.ensure_init(&agent.engine) {
+            tracing::warn!("failed to init contact predicates: {e}");
+        }
+
+        // Initialize relationship graph (Phase 25b).
+        if let Err(e) = agent.relationship_graph.ensure_init(&agent.engine) {
+            tracing::warn!("failed to init relationship graph predicates: {e}");
+        }
+
+        // Initialize style manager (Phase 25d).
+        if let Err(e) = agent.style_manager.ensure_init(&agent.engine) {
+            tracing::warn!("failed to init style manager predicates: {e}");
+        }
+
+        // Register multi-valued agent predicates so temporal conflict detection
+        // doesn't flag natural one-to-many relations (e.g. episode learns many things).
+        // Global predicates (child-of, doc:*, ingest:*) are registered in Engine::new()
+        // and LibraryPredicates::init() / IngestionPredicates::init() respectively.
+        {
+            let mut mv = agent.engine.multi_valued_preds_mut();
+            mv.declare_multi_valued(agent.predicates.learned);
+            mv.declare_multi_valued(agent.predicates.has_tag);
+            mv.declare_multi_valued(agent.predicates.child_goal);
+            mv.declare_multi_valued(agent.predicates.has_criteria);
+            mv.declare_multi_valued(agent.predicates.blocked_by);
+            // tool:access is one-to-many: a tool may be granted to multiple agents.
+            if let Ok(access_pred) =
+                agent.engine.resolve_or_create_relation("tool:access")
+            {
+                mv.declare_multi_valued(access_pred);
+            }
+        }
+
+        // Register all built-in tool manifests as KG triples for peer discovery.
+        if let Ok(registrar) = super::tool_graph::ToolGraphRegistrar::init(&agent.engine) {
+            let count = registrar.register_all(&agent.tool_registry, "akhomed", &["agent:any"]);
+            tracing::debug!(count, "tool_graph: registered tool manifests in KG");
+        } else {
+            tracing::warn!("tool_graph: failed to initialise ToolGraphRegistrar");
+        }
+
         // Initialize causal manager (Phase 15a): try restoring persisted
         // schemas first so a fresh Agent picks up bootstrapped schemas.
         if let Ok(restored) = super::causal::CausalManager::restore(&agent.engine) {
@@ -488,6 +595,13 @@ impl Agent {
             tracing::warn!("failed to init causal predicates: {e}");
         }
 
+        // Initialize event calculus engine (Phase 15b): restore or create.
+        if let Ok(restored) = super::event_calculus::EventCalculusEngine::restore(&agent.engine) {
+            agent.ec_engine = restored;
+        } else if let Err(e) = agent.ec_engine.ensure_init(&agent.engine) {
+            tracing::warn!("failed to init event calculus predicates: {e}");
+        }
+
         // Restore KG dialogue state into ConversationState.
         if let Some(topic_id) = agent.dialogue_manager.query_active_topic(&agent.engine) {
             agent.conversation_state.active_topic = Some(topic_id);
@@ -495,6 +609,35 @@ impl Agent {
 
         // Load tools from active skills.
         agent.load_skill_tools();
+
+        // Bootstrap causal world model from the full tool registry (Phase 15a / WI 019e1ab7).
+        //
+        // Runs after load_skill_tools() so skill-contributed tools are included.
+        // Existing schemas (manually tuned or restored from disk) are preserved.
+        {
+            let signatures = agent.tool_registry.list();
+            if !signatures.is_empty() {
+                match agent
+                    .causal_manager
+                    .bootstrap_from_signatures(&signatures, &agent.engine)
+                {
+                    Ok(n) if n > 0 => {
+                        tracing::info!(
+                            new_schemas = n,
+                            total = agent.causal_manager.schemas.len(),
+                            "causal world model bootstrapped from tool registry",
+                        );
+                        if let Err(e) = agent.causal_manager.persist(&agent.engine) {
+                            tracing::warn!("failed to persist bootstrapped causal schemas: {e}");
+                        }
+                    }
+                    Ok(_) => {} // all schemas already present
+                    Err(e) => {
+                        tracing::warn!("failed to bootstrap causal schemas from tool registry: {e}");
+                    }
+                }
+            }
+        }
 
         Ok(agent)
     }
@@ -518,11 +661,20 @@ impl Agent {
         Ok(id)
     }
 
-    /// Run a single OODA cycle.
+    /// Run a single OODA cycle using the default (LLM-driven) decide mode.
     ///
     /// Also triggers plan-aware execution (advances plan steps), periodic
     /// reflection, auto-decomposition of stalled goals, and auto-consolidation.
     pub fn run_cycle(&mut self) -> AgentResult<OodaCycleResult> {
+        self.run_cycle_with_mode(DecideMode::default())
+    }
+
+    /// Run a single OODA cycle with the specified [`DecideMode`].
+    ///
+    /// Use [`DecideMode::VsaNative`] for the fast VSA-native path (100-1000×
+    /// faster than the LLM-driven path), or [`DecideMode::LlmDriven`] for the
+    /// heuristic-enhanced legacy path.
+    pub fn run_cycle_with_mode(&mut self, mode: DecideMode) -> AgentResult<OodaCycleResult> {
         if goal::active_goals(&self.goals).is_empty() {
             return Err(AgentError::NoGoals);
         }
@@ -550,7 +702,7 @@ impl Agent {
             }
         }
 
-        let result = ooda::run_ooda_cycle(self)?;
+        let result = ooda::run_ooda_cycle_with_mode(self, mode)?;
 
         // Advance plan tracking based on the cycle result.
         let goal_id = result.decision.goal_id;
@@ -712,6 +864,8 @@ impl Agent {
                     tracing::warn!("failed to apply structural adjustments: {e}");
                 }
             }
+            // Psyche may have evolved during reflect() — keep snapshot in sync.
+            self.sync_psyche_snapshot();
 
             // Argumentation-based reprioritization replaces raw ±30 adjustments.
             let stall_threshold = self.config.reflection.stagnation_threshold;
@@ -829,6 +983,29 @@ impl Agent {
             self.last_watch_firings = firings;
         }
 
+        // Periodic goal queue hygiene (dedup, staleness, depth cap).
+        let hyg_interval = self.hygiene_config.run_every_n_cycles;
+        if hyg_interval > 0 && self.cycle_count.is_multiple_of(hyg_interval) {
+            let hr = super::hygiene::run_hygiene_pass(
+                &mut self.goals,
+                &self.engine,
+                &self.predicates,
+                self.cycle_count,
+                self.session_start_cycle,
+                &self.hygiene_config,
+            );
+            if hr.cancelled_stale + hr.cancelled_deep + hr.deduplicated > 0 {
+                tracing::info!(
+                    stale = hr.cancelled_stale,
+                    deep = hr.cancelled_deep,
+                    dedup = hr.deduplicated,
+                    before = hr.total_before,
+                    after = hr.total_after,
+                    "goal hygiene pass complete"
+                );
+            }
+        }
+
         // Periodic autonomous goal generation.
         let gen_interval = self.config.goal_generation.generate_every_n_cycles;
         if gen_interval > 0
@@ -912,18 +1089,57 @@ impl Agent {
     }
 
     /// Run cycles until all goals are complete or max_cycles is reached.
+    ///
+    /// Early-exit: if `config.max_empty_cycles > 0` and that many consecutive
+    /// cycles all return `NoChange`, the loop stops without error so the caller
+    /// can synthesize the best available findings rather than spinning against
+    /// a sparse graph.
     pub fn run_until_complete(&mut self) -> AgentResult<Vec<OodaCycleResult>> {
         let mut results = Vec::new();
         let max = self.config.max_cycles;
+        let max_empty = self.config.max_empty_cycles;
+        let mut current_cycles: usize = 0;
+        let mut consecutive_empty: usize = 0;
 
-        for _ in 0..max {
+        loop {
+            // Enforce the cycle cap before doing any work.
+            if current_cycles >= max {
+                tracing::warn!(
+                    max_cycles = max,
+                    "run_until_complete: cycle limit reached with active goals remaining"
+                );
+                break;
+            }
+
             let active = goal::active_goals(&self.goals);
             if active.is_empty() {
                 break;
             }
 
             let result = ooda::run_ooda_cycle(self)?;
+
+            // Track consecutive no-progress cycles.
+            match result.action_result.goal_progress {
+                ooda::GoalProgress::NoChange => {
+                    consecutive_empty += 1;
+                }
+                _ => {
+                    consecutive_empty = 0;
+                }
+            }
+
             results.push(result);
+            current_cycles += 1;
+
+            // Early exit when the graph is yielding nothing new.
+            if max_empty > 0 && consecutive_empty >= max_empty {
+                tracing::debug!(
+                    consecutive_empty,
+                    "OODA early exit: {} consecutive no-progress cycles",
+                    consecutive_empty
+                );
+                break;
+            }
 
             // Auto-decompose stalled goals.
             self.decompose_stalled_goals();
@@ -937,8 +1153,8 @@ impl Agent {
             }
         }
 
-        // Check if we hit the limit with active goals remaining.
-        if !goal::active_goals(&self.goals).is_empty() && results.len() >= max {
+        // Return a typed error so callers can detect and surface the cap.
+        if !goal::active_goals(&self.goals).is_empty() && current_cycles >= max {
             return Err(AgentError::MaxCyclesReached { max_cycles: max });
         }
 
@@ -946,15 +1162,74 @@ impl Agent {
     }
 
     /// Trigger memory consolidation.
+    ///
+    /// After persisting episodic memories, runs VSA competence gap detection
+    /// and auto-generates up to 10 `Proposed` investigation goals at priority 64
+    /// for knowledge areas with coverage score < 0.70.  Duplicate goals (by VSA
+    /// similarity) are silently skipped.  Human operators can promote, demote, or
+    /// cancel auto-generated goals via normal goal management.
     pub fn consolidate(&mut self) -> AgentResult<ConsolidationResult> {
-        consolidate(
+        let mut result = consolidate(
             &mut self.working_memory,
             &self.engine,
             &self.goals,
             &self.config.consolidation,
             &self.predicates,
             self.cycle_count,
-        )
+        )?;
+
+        // Post-consolidation: VSA competence gap → investigation goals.
+        let gap_proposals = goal_generation::generate_competence_gap_goals(
+            &self.engine,
+            &self.goals,
+            &self.config.goal_generation,
+        );
+
+        let mut vsa_goals_created = 0usize;
+        for proposal in &gap_proposals {
+            if vsa_goals_created >= goal_generation::MAX_COMPETENCE_GAP_GOALS {
+                break;
+            }
+            match goal::create_goal(
+                &self.engine,
+                &proposal.description,
+                proposal.priority_suggestion,
+                &proposal.success_criteria,
+                &self.predicates,
+            ) {
+                Ok(mut g) => {
+                    g.source = Some(proposal.source.clone());
+                    g.justification = Some(goal::GoalJustification::DefaultAssumption {
+                        rationale: proposal.rationale.clone(),
+                    });
+                    // Auto-generated goals start as Proposed so humans can review.
+                    if let Err(e) = goal::update_goal_status(
+                        &self.engine,
+                        &mut g,
+                        GoalStatus::Proposed,
+                        &self.predicates,
+                    ) {
+                        tracing::debug!("failed to set Proposed status for gap goal: {e}");
+                    }
+                    self.goals.push(g);
+                    vsa_goals_created += 1;
+                }
+                Err(e) => {
+                    tracing::debug!("failed to create competence gap goal: {e}");
+                }
+            }
+        }
+
+        result.vsa_gap_goals_created = vsa_goals_created;
+
+        if vsa_goals_created > 0 {
+            tracing::debug!(
+                count = vsa_goals_created,
+                "consolidation: auto-generated VSA competence gap goals"
+            );
+        }
+
+        Ok(result)
     }
 
     /// Recall episodic memories by query symbols.
@@ -1012,6 +1287,30 @@ impl Agent {
         self.psyche.as_ref()
     }
 
+    /// Return a cloned handle to the non-blocking psyche snapshot.
+    ///
+    /// Callers can read the snapshot without holding the agent mutex,
+    /// enabling concurrent monitoring during long OODA cycles.
+    pub fn psyche_snapshot(
+        &self,
+    ) -> Arc<std::sync::RwLock<Option<crate::compartment::psyche::Psyche>>> {
+        Arc::clone(&self.psyche_snapshot)
+    }
+
+    /// Sync `psyche_snapshot` to match the current `self.psyche`.
+    ///
+    /// Called after every mutation of `self.psyche` so monitoring reads
+    /// always see a fresh copy without acquiring the agent mutex.
+    /// Uses `try_write` so the OODA loop is never stalled by active readers.
+    /// If the write lock is unavailable, the snapshot stays at the previous
+    /// state until the next mutation (readers see data that is at most one
+    /// cycle stale).
+    pub(crate) fn sync_psyche_snapshot(&self) {
+        if let Ok(mut g) = self.psyche_snapshot.try_write() {
+            *g = self.psyche.clone();
+        }
+    }
+
     /// Set or replace the agent's psyche.
     ///
     /// Returns `PsycheImmutable` if the existing psyche is awakened.
@@ -1026,12 +1325,14 @@ impl Agent {
             }
         }
         self.psyche = Some(psyche);
+        self.sync_psyche_snapshot();
         Ok(())
     }
 
     /// Unconditionally replace the agent's psyche (admin override).
     pub fn force_set_psyche(&mut self, psyche: crate::compartment::psyche::Psyche) {
         self.psyche = Some(psyche);
+        self.sync_psyche_snapshot();
     }
 
     // ── Channel registry (Phase 12a) ────────────────────────────────────
@@ -1174,6 +1475,56 @@ impl Agent {
         &mut self.causal_manager
     }
 
+    /// Get a reference to the event calculus engine.
+    pub fn ec_engine(&self) -> &super::event_calculus::EventCalculusEngine {
+        &self.ec_engine
+    }
+
+    /// Get a mutable reference to the event calculus engine.
+    pub fn ec_engine_mut(&mut self) -> &mut super::event_calculus::EventCalculusEngine {
+        &mut self.ec_engine
+    }
+
+    /// Get a reference to the prediction tracker.
+    pub fn prediction_tracker(&self) -> &super::counterfactual::PredictionTracker {
+        &self.prediction_tracker
+    }
+
+    /// Get a mutable reference to the prediction tracker.
+    pub fn prediction_tracker_mut(&mut self) -> &mut super::counterfactual::PredictionTracker {
+        &mut self.prediction_tracker
+    }
+
+    /// Get a reference to the value function.
+    pub fn value_function(&self) -> &super::state_value::ValueFunction {
+        &self.value_function
+    }
+
+    /// Get a mutable reference to the value function.
+    pub fn value_function_mut(&mut self) -> &mut super::state_value::ValueFunction {
+        &mut self.value_function
+    }
+
+    /// Get a reference to the evidence manager.
+    pub fn evidence_manager(&self) -> &super::evidence::EvidenceManager {
+        &self.evidence_manager
+    }
+
+    /// Get a mutable reference to the evidence manager.
+    pub fn evidence_manager_mut(&mut self) -> &mut super::evidence::EvidenceManager {
+        &mut self.evidence_manager
+    }
+
+    /// Get a reference to the source reliability manager.
+    pub fn reliability_manager(&self) -> &super::source_reliability::SourceReliabilityManager {
+        &self.reliability_manager
+    }
+
+    /// Get a mutable reference to the source reliability manager.
+    pub fn reliability_manager_mut(&mut self) -> &mut super::source_reliability::SourceReliabilityManager {
+        &mut self.reliability_manager
+    }
+
     /// Ensure an interlocutor is registered, auto-creating on first interaction.
     ///
     /// Returns a reference to their profile. If the interlocutor already exists,
@@ -1270,6 +1621,18 @@ impl Agent {
         goal::update_goal_status(&self.engine, goal, GoalStatus::Suspended, &self.predicates)
     }
 
+    /// Resume a previously suspended goal.
+    pub fn resume_goal(&mut self, goal_id: SymbolId) -> AgentResult<()> {
+        let goal = self
+            .goals
+            .iter_mut()
+            .find(|g| g.symbol_id == goal_id)
+            .ok_or(AgentError::GoalNotFound {
+                goal_id: goal_id.get(),
+            })?;
+        goal::update_goal_status(&self.engine, goal, GoalStatus::Active, &self.predicates)
+    }
+
     /// Mark a goal as failed with a reason.
     pub fn fail_goal(&mut self, goal_id: SymbolId, reason: &str) -> AgentResult<()> {
         let goal = self
@@ -1287,6 +1650,61 @@ impl Agent {
             },
             &self.predicates,
         )
+    }
+
+    /// Permanently remove a goal by its symbol ID.
+    ///
+    /// Removes all KG triples for the goal so it is not restored on the next session,
+    /// then drops it from the in-memory list.
+    pub fn delete_goal(&mut self, goal_id: SymbolId) -> AgentResult<()> {
+        let pos = self
+            .goals
+            .iter()
+            .position(|g| g.symbol_id == goal_id)
+            .ok_or(AgentError::GoalNotFound {
+                goal_id: goal_id.get(),
+            })?;
+        goal::delete_goal_from_kg(&self.engine, goal_id, &self.predicates)?;
+        self.goals.remove(pos);
+        Ok(())
+    }
+
+    /// Update mutable fields of a goal: priority, status, and/or success criteria.
+    ///
+    /// Only fields with `Some` values are changed. Status is parsed from a
+    /// string label using [`GoalStatus::from_label`].
+    pub fn update_goal(
+        &mut self,
+        goal_id: SymbolId,
+        priority: Option<u8>,
+        status: Option<&str>,
+        criteria: Option<&str>,
+    ) -> AgentResult<()> {
+        // Find index first to avoid borrow issues when calling goal::* helpers.
+        let idx = self
+            .goals
+            .iter()
+            .position(|g| g.symbol_id == goal_id)
+            .ok_or(AgentError::GoalNotFound {
+                goal_id: goal_id.get(),
+            })?;
+
+        if let Some(p) = priority {
+            goal::update_goal_priority(&self.engine, &mut self.goals[idx], p, &self.predicates)?;
+        }
+        if let Some(s) = status {
+            let new_status = GoalStatus::from_label(s);
+            goal::update_goal_status(
+                &self.engine,
+                &mut self.goals[idx],
+                new_status,
+                &self.predicates,
+            )?;
+        }
+        if let Some(c) = criteria {
+            goal::update_goal_criteria(&self.engine, &mut self.goals[idx], c, &self.predicates)?;
+        }
+        Ok(())
     }
 
     /// Auto-decompose any active goals that have stalled.
@@ -1719,9 +2137,11 @@ impl Agent {
         );
 
         // Phase 11j: Generate curiosity proposals alongside drive signals.
+        // Pass goal_symbols so curiosity is scoped to goal-reachable entities.
         let curiosity_proposals = super::curiosity::compute_directed_curiosity(
             &self.engine,
             &self.curiosity_config,
+            &goal_symbols,
         )
         .map(|report| report.proposals)
         .unwrap_or_default();
@@ -1730,7 +2150,6 @@ impl Agent {
         let gen_result = goal_generation::generate_goals(
             &self.engine,
             &self.goals,
-            &self.working_memory,
             &self.drives,
             &self.config.goal_generation,
             &self.predicates,
@@ -1938,12 +2357,16 @@ impl Agent {
     ///
     /// Returns the project's symbol ID. The project is added to the agenda
     /// with the given priority.
+    ///
+    /// `allowed_domains` sets the URL ingest allowlist for this project.
+    /// Pass `None` to allow all sources (legacy open behaviour).
     pub fn create_project(
         &mut self,
         name: &str,
         description: &str,
         scope_concepts: &[&str],
         priority: u8,
+        allowed_domains: Option<Vec<String>>,
     ) -> AgentResult<SymbolId> {
         let proj = project::create_project(
             &self.engine,
@@ -1952,6 +2375,7 @@ impl Agent {
             scope_concepts,
             &self.project_predicates,
             &self.predicates,
+            allowed_domains,
         )?;
         let id = proj.id;
         self.agenda.add_project(id, priority);
@@ -2248,6 +2672,114 @@ impl Agent {
                 })?;
         }
 
+        // Persist affective system (Phase 23).
+        if !self.affective_system.markers.markers.is_empty()
+            || !self.affective_system.mood.recent_appraisals.is_empty()
+        {
+            let _ = self.affective_system.persist(&self.engine);
+        }
+
+        // Persist active inference engine (Phase 20).
+        if self.active_inference.cycle_count > 0 {
+            let _ = self.active_inference.persist(&self.engine);
+        }
+
+        // Persist epistemic manager (Phase 19).
+        if self.epistemic_manager.agent_count() > 0 {
+            let _ = self.epistemic_manager.persist(&self.engine);
+        }
+
+        // Persist reliability manager (Phase 18a).
+        if !self.reliability_manager.sources.is_empty() {
+            let _ = self.reliability_manager.persist(&self.engine);
+        }
+
+        // Persist evidence manager (Phase 17).
+        if self.evidence_manager.claim_count() > 0 {
+            let _ = self.evidence_manager.persist(&self.engine);
+        }
+
+        // Persist value function (Phase 16a).
+        if self.value_function.update_count > 0 {
+            let _ = self.value_function.persist(&self.engine);
+        }
+
+        // Persist prediction tracker (Phase 15c).
+        if self.prediction_tracker.predictions_made > 0 {
+            let pt_bytes = bincode::serialize(&self.prediction_tracker).map_err(|e| {
+                AgentError::ConsolidationFailed {
+                    message: format!("failed to serialize prediction tracker: {e}"),
+                }
+            })?;
+            store
+                .put_meta(b"agent:prediction_tracker", &pt_bytes)
+                .map_err(|e| AgentError::ConsolidationFailed {
+                    message: format!("failed to persist prediction tracker: {e}"),
+                })?;
+        }
+
+        // Persist event calculus engine (Phase 15b).
+        if !self.ec_engine.events.is_empty() || !self.ec_engine.fluents.is_empty() {
+            let ec_bytes = bincode::serialize(&self.ec_engine).map_err(|e| {
+                AgentError::ConsolidationFailed {
+                    message: format!("failed to serialize ec engine: {e}"),
+                }
+            })?;
+            store
+                .put_meta(b"agent:ec_engine", &ec_bytes)
+                .map_err(|e| AgentError::ConsolidationFailed {
+                    message: format!("failed to persist ec engine: {e}"),
+                })?;
+        }
+
+        // Persist contact manager (Phase 25a).
+        let contact_bytes = bincode::serialize(&self.contact_manager).map_err(|e| {
+            AgentError::ConsolidationFailed {
+                message: format!("failed to serialize contact manager: {e}"),
+            }
+        })?;
+        store
+            .put_meta(b"agent:contact_manager", &contact_bytes)
+            .map_err(|e| AgentError::ConsolidationFailed {
+                message: format!("failed to persist contact manager: {e}"),
+            })?;
+
+        // Persist relationship graph (Phase 25b).
+        let rel_bytes = bincode::serialize(&self.relationship_graph).map_err(|e| {
+            AgentError::ConsolidationFailed {
+                message: format!("failed to serialize relationship graph: {e}"),
+            }
+        })?;
+        store
+            .put_meta(b"agent:relationship_graph", &rel_bytes)
+            .map_err(|e| AgentError::ConsolidationFailed {
+                message: format!("failed to persist relationship graph: {e}"),
+            })?;
+
+        // Persist person memory index (Phase 25c).
+        let person_mem_bytes = bincode::serialize(&self.person_memory).map_err(|e| {
+            AgentError::ConsolidationFailed {
+                message: format!("failed to serialize person memory index: {e}"),
+            }
+        })?;
+        store
+            .put_meta(b"agent:person_memory", &person_mem_bytes)
+            .map_err(|e| AgentError::ConsolidationFailed {
+                message: format!("failed to persist person memory index: {e}"),
+            })?;
+
+        // Persist style manager (Phase 25d).
+        let style_bytes = bincode::serialize(&self.style_manager).map_err(|e| {
+            AgentError::ConsolidationFailed {
+                message: format!("failed to serialize style manager: {e}"),
+            }
+        })?;
+        store
+            .put_meta(b"agent:style_manager", &style_bytes)
+            .map_err(|e| AgentError::ConsolidationFailed {
+                message: format!("failed to persist style manager: {e}"),
+            })?;
+
         // Persist sleep cycle state (Phase 11i).
         let sleep_bytes =
             bincode::serialize(&self.sleep_cycle).map_err(|e| AgentError::ConsolidationFailed {
@@ -2271,6 +2803,11 @@ impl Agent {
                 message: format!("failed to persist curiosity config: {e}"),
             })?;
 
+        // Persist goals to durable store (survives restart without sparql-persist).
+        // Writes the `agent:goals` TieredStore snapshot so goals survive across
+        // sessions even when the `sparql-persist` feature is not enabled.
+        goal::persist_goals(&self.goals, &self.engine)?;
+
         // Flush the engine's durable store.
         self.engine
             .persist()
@@ -2278,6 +2815,20 @@ impl Agent {
                 message: format!("engine persist failed: {e}"),
             })?;
 
+        Ok(())
+    }
+
+    /// Lightweight persist: saves goals and flushes the engine's durable store.
+    ///
+    /// Use this instead of calling `engine.persist()` directly when you want
+    /// goal state to survive a restart without a full `persist_session()`.
+    pub fn persist(&self) -> AgentResult<()> {
+        goal::persist_goals(&self.goals, &self.engine)?;
+        self.engine
+            .persist()
+            .map_err(|e| AgentError::ConsolidationFailed {
+                message: format!("engine persist failed: {e}"),
+            })?;
         Ok(())
     }
 
@@ -2317,8 +2868,13 @@ impl Agent {
             .and_then(|bytes| bincode::deserialize::<u64>(&bytes).ok())
             .unwrap_or(0);
 
-        // Restore goals from KG.
-        let goals = goal::restore_goals(&engine, &predicates).unwrap_or_default();
+        // Restore goals: prefer the durable-store TieredStore snapshot (always
+        // accurate, full struct) over KG-triple reconstruction (only accurate
+        // when SPARQL persistence is enabled — without it, all goals default to
+        // Pending status because KG triples are in-memory only and lost on restart).
+        let goals = goal::restore_goals_from_store(&engine)
+            .filter(|g| !g.is_empty())
+            .unwrap_or_else(|| goal::restore_goals(&engine, &predicates).unwrap_or_default());
 
         // Restore psyche: prefer persisted state, fall back to compartment manager.
         let psyche = store
@@ -2449,6 +3005,67 @@ impl Agent {
                 super::causal::CausalManager::new(&engine).unwrap_or_default()
             });
 
+        // Restore event calculus engine (Phase 15b).
+        let ec_engine = super::event_calculus::EventCalculusEngine::restore(&engine)
+            .unwrap_or_else(|_| {
+                super::event_calculus::EventCalculusEngine::new(&engine).unwrap_or_default()
+            });
+
+        // Restore affective system (Phase 23).
+        let affective_system = super::affect::AffectiveSystem::restore(&engine);
+
+        // Restore active inference engine (Phase 20).
+        let active_inference = super::active_inference::ActiveInferenceEngine::restore(&engine);
+
+        // Restore epistemic manager (Phase 19).
+        let epistemic_manager = super::epistemic::EpistemicStateManager::restore(&engine);
+
+        // Restore reliability manager (Phase 18a).
+        let reliability_manager = super::source_reliability::SourceReliabilityManager::restore(&engine);
+
+        // Restore evidence manager (Phase 17).
+        let evidence_manager = super::evidence::EvidenceManager::restore(&engine);
+
+        // Restore value function (Phase 16a).
+        let value_function = super::state_value::ValueFunction::restore(&engine);
+
+        // Restore prediction tracker (Phase 15c).
+        let prediction_tracker = engine
+            .store()
+            .get_meta(b"agent:prediction_tracker")
+            .ok()
+            .flatten()
+            .and_then(|bytes| bincode::deserialize(&bytes).ok())
+            .unwrap_or_default();
+
+        // Restore contact manager (Phase 25a).
+        let contact_manager = super::contact::ContactManager::restore(&engine)
+            .unwrap_or_else(|_| {
+                super::contact::ContactManager::new(&engine).unwrap_or_default()
+            });
+
+        // Restore relationship graph (Phase 25b).
+        let relationship_graph = super::contact_rel::RelationshipGraph::restore(&engine)
+            .unwrap_or_else(|_| {
+                super::contact_rel::RelationshipGraph::new(&engine).unwrap_or_default()
+            });
+
+        // Restore person memory index (Phase 25c).
+        let person_memory = store
+            .get_meta(b"agent:person_memory")
+            .ok()
+            .flatten()
+            .and_then(|bytes| {
+                bincode::deserialize::<super::contact_memory::PersonMemoryIndex>(&bytes).ok()
+            })
+            .unwrap_or_else(|| super::contact_memory::PersonMemoryIndex::new(100));
+
+        // Restore style manager (Phase 25d).
+        let style_manager = super::contact_style::StyleManager::restore(&engine)
+            .unwrap_or_else(|_| {
+                super::contact_style::StyleManager::new(&engine).unwrap_or_default()
+            });
+
         // Restore sleep cycle state (Phase 11i).
         let sleep_cycle = store
             .get_meta(b"agent:sleep_cycle")
@@ -2467,6 +3084,7 @@ impl Agent {
             })
             .unwrap_or_else(|| config.curiosity.clone());
 
+        let hygiene_config = config.hygiene.clone();
         let session_start_cycle = cycle_count;
         let chunking_config = config.chunking.clone();
 
@@ -2481,6 +3099,7 @@ impl Agent {
             plans: std::collections::HashMap::new(),
             last_reflection: None,
             sink: Arc::new(crate::message::StdoutSink),
+            psyche_snapshot: Arc::new(std::sync::RwLock::new(psyche.clone())),
             psyche,
             drives,
             audience,
@@ -2507,9 +3126,23 @@ impl Agent {
             calendar_manager,
             preference_manager,
             causal_manager,
+            ec_engine,
+            prediction_tracker,
+            value_function,
+            evidence_manager,
+            reliability_manager,
+            epistemic_manager,
+            active_inference,
+            temporal_experience: super::temporal_experience::TemporalExperience::default(),
+            affective_system,
+            contact_manager,
+            relationship_graph,
+            person_memory,
+            style_manager,
             dialogue_manager,
             sleep_cycle,
             curiosity_config,
+            hygiene_config,
             #[cfg(feature = "wasm-tools")]
             wasm_runtime: super::wasm_runtime::WasmToolRuntime::new().ok(),
         };
@@ -2519,6 +3152,18 @@ impl Agent {
             tracing::warn!("failed to init interlocutor predicates on resume: {e}");
         }
 
+        // Register multi-valued agent predicates (idempotent — safe even when
+        // the set was already restored from the durable store). Global predicates
+        // are handled by Engine::new() and subsystem Predicates::init() methods.
+        {
+            let mut mv = agent.engine.multi_valued_preds_mut();
+            mv.declare_multi_valued(agent.predicates.learned);
+            mv.declare_multi_valued(agent.predicates.has_tag);
+            mv.declare_multi_valued(agent.predicates.child_goal);
+            mv.declare_multi_valued(agent.predicates.has_criteria);
+            mv.declare_multi_valued(agent.predicates.blocked_by);
+        }
+
         // Restore KG dialogue state into ConversationState.
         if let Some(topic_id) = agent.dialogue_manager.query_active_topic(&agent.engine) {
             agent.conversation_state.active_topic = Some(topic_id);
@@ -2526,6 +3171,32 @@ impl Agent {
 
         // Load tools from active skills.
         agent.load_skill_tools();
+
+        // Bootstrap causal world model from the full tool registry (Phase 15a / WI 019e1ab7).
+        {
+            let signatures = agent.tool_registry.list();
+            if !signatures.is_empty() {
+                match agent
+                    .causal_manager
+                    .bootstrap_from_signatures(&signatures, &agent.engine)
+                {
+                    Ok(n) if n > 0 => {
+                        tracing::info!(
+                            new_schemas = n,
+                            total = agent.causal_manager.schemas.len(),
+                            "causal world model bootstrapped from tool registry (resume)",
+                        );
+                        if let Err(e) = agent.causal_manager.persist(&agent.engine) {
+                            tracing::warn!("failed to persist bootstrapped causal schemas: {e}");
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::warn!("failed to bootstrap causal schemas from tool registry: {e}");
+                    }
+                }
+            }
+        }
 
         Ok(agent)
     }

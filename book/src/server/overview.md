@@ -5,17 +5,21 @@ Multi-workspace server hosting N engine instances with REST and WebSocket APIs.
 ## Building
 
 ```bash
-cargo build --release --features server --bin akh-medu-server
+# Server with full NLU pipeline
+cargo build --release --features server,nlu-full --bin akhomed
+
+# Server without NLU (lighter build, no cmake/ONNX dependencies)
+cargo build --release --features server --bin akhomed
 ```
 
 ## Running
 
 ```bash
 # Default: 0.0.0.0:8200
-akh-medu-server
+akhomed
 
 # Custom bind/port via env vars
-AKH_SERVER_BIND=127.0.0.1 AKH_SERVER_PORT=9000 akh-medu-server
+AKH_SERVER_BIND=127.0.0.1 AKH_SERVER_PORT=9000 akhomed
 ```
 
 ### Environment Variables
@@ -24,6 +28,7 @@ AKH_SERVER_BIND=127.0.0.1 AKH_SERVER_PORT=9000 akh-medu-server
 |---|---|---|
 | `AKH_SERVER_BIND` | `0.0.0.0` | Bind address |
 | `AKH_SERVER_PORT` | `8200` | Listen port |
+| `AKH_AUTO_START` | (from config) | Comma-separated workspace names to auto-load |
 | `RUST_LOG` | `info` | Log level filter |
 | `XDG_DATA_HOME` | `~/.local/share` | XDG data directory |
 | `XDG_CONFIG_HOME` | `~/.config` | XDG config directory |
@@ -54,6 +59,28 @@ AKH_SERVER_BIND=127.0.0.1 AKH_SERVER_PORT=9000 akh-medu-server
         default.bin             # agent session state
 ```
 
+## Client-Only CLI
+
+When `akhomed` is running, you can build a thin client that delegates all
+operations to the server over HTTP:
+
+```bash
+cargo build --release --features client-only --bin akh
+```
+
+This produces a smaller `akh` binary (~25 MB vs ~42 MB) that requires a
+running `akhomed` instance. All CLI commands work identically; the client
+auto-discovers the server via the PID file at
+`~/.local/state/akh-medu/akhomed.pid`.
+
+```bash
+# These commands talk to akhomed transparently
+akh init
+akh seed apply ontology
+akh awaken bootstrap "You are a systems architect based on Ptah"
+akh chat
+```
+
 ## REST API
 
 ### Health
@@ -66,7 +93,7 @@ Response:
 ```json
 {
   "status": "ok",
-  "version": "0.1.0",
+  "version": "0.5.4",
   "workspaces_loaded": 2
 }
 ```
@@ -197,22 +224,81 @@ The server streams `AkhMessage` JSON objects back. Each message has a `type` fie
 {"type": "error", "code": "ws", "message": "workspace not found", "help": null}
 ```
 
-## Systemd Example
+## Deploying with systemd (Linux)
+
+Run `akhomed` as a systemd user service for automatic startup and restart.
+
+### Install the service
+
+```bash
+# Copy the reference unit file
+mkdir -p ~/.config/systemd/user
+cp contrib/systemd/akhomed.service ~/.config/systemd/user/
+
+# Reload, enable, and start
+systemctl --user daemon-reload
+systemctl --user enable --now akhomed
+
+# Verify
+systemctl --user status akhomed
+curl -s http://127.0.0.1:8200/health
+```
+
+### Reference unit file
 
 ```ini
 [Unit]
-Description=akh-medu Knowledge Server
-After=network.target
+Description=akh-medu daemon — neuro-symbolic reasoning server
+Documentation=https://akh-medu.dev
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/akh-medu-server
-Environment=AKH_SERVER_BIND=127.0.0.1
-Environment=AKH_SERVER_PORT=8200
-Environment=RUST_LOG=info,egg=warn
+ExecStart=%h/.local/bin/akhomed
 Restart=on-failure
 RestartSec=5
 
+Environment=RUST_LOG=info,egg=warn,hnsw_rs=warn
+Environment=AKH_SERVER_BIND=127.0.0.1
+Environment=AKH_SERVER_PORT=8200
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.local/share/akh-medu %h/.config/akh-medu %h/.cache/akh-medu
+PrivateTmp=true
+
 [Install]
-WantedBy=multi-user.target
+WantedBy=default.target
 ```
+
+### Common operations
+
+```bash
+# View logs
+journalctl --user -u akhomed -f
+
+# Restart after config changes
+systemctl --user restart akhomed
+
+# Stop the daemon
+systemctl --user stop akhomed
+
+# Disable auto-start
+systemctl --user disable akhomed
+```
+
+## Deploying with launchd (macOS)
+
+On macOS, use the built-in `akh service` command:
+
+```bash
+akh service install            # Creates ~/Library/LaunchAgents/dev.akh-medu.akhomed.plist
+akh service start              # launchctl load
+akh service stop               # launchctl unload
+akh service uninstall          # Removes the plist
+```
+
+This creates a launchd agent that starts `akhomed` on login and restarts it
+on failure. The service listens on `127.0.0.1:8200` by default.

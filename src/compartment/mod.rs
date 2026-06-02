@@ -11,17 +11,24 @@
 //! See [`microtheory`] module for details.
 
 pub mod cwa;
+pub mod eliza;
 pub mod error;
 pub mod manager;
 pub mod manifest;
 pub mod microtheory;
 pub mod psyche;
+pub mod psyche_compiler;
 
+pub use eliza::{DefaultResponses, Decomposition, ElizaRule, ElizaScript, ScriptMeta};
 pub use error::{CompartmentError, CompartmentResult};
 pub use manager::CompartmentManager;
-pub use manifest::{CompartmentKind, CompartmentManifest, CompartmentState};
+pub use manifest::{CompartmentKind, CompartmentManifest, CompartmentScope, CompartmentState};
 pub use microtheory::{
     ContextAncestryCache, ContextDomain, ContextPredicates, LiftCondition, LiftingRule,
     Microtheory,
 };
-pub use psyche::Psyche;
+pub use psyche::{OceanProfile, Psyche};
+pub use psyche_compiler::{
+    CompilerError, CompilerResult, ReflectionDepth, compile as compile_psyche_to_script,
+    compile_to_toml as compile_psyche_to_toml,
+};

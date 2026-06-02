@@ -8,7 +8,7 @@ knowledge, querying it, running inference, and using the agent.
 Start by creating a persistent workspace:
 
 ```bash
-akh-medu init
+akh init
 ```
 
 All subsequent commands use the default workspace automatically. To use a
@@ -20,16 +20,16 @@ Seed packs load foundational knowledge. Three packs are bundled:
 
 ```bash
 # See what's available
-akh-medu seed list
+akh seed list
 
 # Apply the ontology (fundamental relations like is-a, has-part, causes)
-akh-medu seed apply ontology
+akh seed apply ontology
 
 # Apply common-sense knowledge (animals, materials, spatial concepts)
-akh-medu seed apply common-sense
+akh seed apply common-sense
 
 # Check what's been applied
-akh-medu seed status
+akh seed status
 ```
 
 Seeds are idempotent -- applying the same seed twice has no effect.
@@ -42,10 +42,10 @@ The fastest way to add knowledge is natural language:
 
 ```bash
 # Parse a statement and ingest it into the KG
-akh-medu grammar parse "Dogs are mammals" --ingest
-akh-medu grammar parse "Cats are mammals" --ingest
-akh-medu grammar parse "Mammals have warm blood" --ingest
-akh-medu grammar parse "The heart is part of the circulatory system" --ingest
+akh grammar parse "Dogs are mammals" --ingest
+akh grammar parse "Cats are mammals" --ingest
+akh grammar parse "Mammals have warm blood" --ingest
+akh grammar parse "The heart is part of the circulatory system" --ingest
 ```
 
 ### From a JSON file
@@ -62,23 +62,23 @@ For bulk ingestion, prepare a JSON file:
 ```
 
 ```bash
-akh-medu ingest --file planets.json
+akh ingest --file planets.json
 ```
 
 ### From CSV
 
 ```bash
 # Subject-Predicate-Object CSV
-akh-medu ingest --file data.csv --format csv --csv-format spo
+akh ingest --file data.csv --format csv --csv-format spo
 
 # Entity CSV (column headers become predicates)
-akh-medu ingest --file entities.csv --format csv --csv-format entity
+akh ingest --file entities.csv --format csv --csv-format entity
 ```
 
 ### From plain text
 
 ```bash
-akh-medu ingest --file article.txt --format text --max-sentences 100
+akh ingest --file article.txt --format text --max-sentences 100
 ```
 
 ## 4. Query the Knowledge Graph
@@ -87,40 +87,40 @@ akh-medu ingest --file article.txt --format text --max-sentences 100
 
 ```bash
 # List all known symbols
-akh-medu symbols list
+akh symbols list
 
 # Show details for a specific symbol
-akh-medu symbols show Dog
+akh symbols show Dog
 ```
 
 ### SPARQL queries
 
 ```bash
 # Find all mammals
-akh-medu sparql "SELECT ?s WHERE { ?s <https://akh-medu.dev/sym/is-a> <https://akh-medu.dev/sym/mammal> }"
+akh sparql "SELECT ?s WHERE { ?s <https://akh-medu.dev/sym/is-a> <https://akh-medu.dev/sym/mammal> }"
 
 # Or from a file
-akh-medu sparql --file query.sparql
+akh sparql --file query.sparql
 ```
 
 ### Graph traversal
 
 ```bash
 # BFS from Dog, 2 hops deep
-akh-medu traverse --seeds Dog --max-depth 2
+akh traverse --seeds Dog --max-depth 2
 
 # Only follow is-a edges
-akh-medu traverse --seeds Dog --predicates is-a --max-depth 3
+akh traverse --seeds Dog --predicates is-a --max-depth 3
 
 # Output as JSON
-akh-medu traverse --seeds Dog --max-depth 2 --format json
+akh traverse --seeds Dog --max-depth 2 --format json
 ```
 
 ### Similarity search
 
 ```bash
 # Find symbols similar to Dog via VSA
-akh-medu search --symbol Dog --top-k 5
+akh search --symbol Dog --top-k 5
 ```
 
 ## 5. Run Inference
@@ -131,7 +131,7 @@ Discover related knowledge by spreading activation from seed symbols:
 
 ```bash
 # What's related to Dog and Cat?
-akh-medu query --seeds "Dog,Cat" --depth 2 --top-k 10
+akh query --seeds "Dog,Cat" --depth 2 --top-k 10
 ```
 
 ### Analogy
@@ -139,7 +139,7 @@ akh-medu query --seeds "Dog,Cat" --depth 2 --top-k 10
 Compute "A is to B as C is to ?":
 
 ```bash
-akh-medu analogy --a King --b Man --c Queen --top-k 5
+akh analogy --a King --b Man --c Queen --top-k 5
 ```
 
 ### Role-filler recovery
@@ -147,7 +147,7 @@ akh-medu analogy --a King --b Man --c Queen --top-k 5
 Find the object of a (subject, predicate) pair via VSA:
 
 ```bash
-akh-medu filler --subject Dog --predicate is-a --top-k 5
+akh filler --subject Dog --predicate is-a --top-k 5
 ```
 
 ### Forward-chaining rules
@@ -155,7 +155,7 @@ akh-medu filler --subject Dog --predicate is-a --top-k 5
 Run e-graph rewrite rules to derive new facts:
 
 ```bash
-akh-medu agent infer --max-iterations 10
+akh agent infer --max-iterations 10
 ```
 
 ## 6. Use the Agent
@@ -167,21 +167,21 @@ utility-based tool selection.
 
 ```bash
 # Run one OODA cycle with a goal
-akh-medu agent cycle --goal "Find what mammals eat"
+akh agent cycle --goal "Find what mammals eat"
 ```
 
 ### Multi-cycle run
 
 ```bash
 # Run until the goal is satisfied or 20 cycles pass
-akh-medu agent run --goals "Discover properties of planets" --max-cycles 20
+akh agent run --goals "Discover properties of planets" --max-cycles 20
 ```
 
 ### Interactive REPL
 
 ```bash
 # Start the agent REPL
-akh-medu agent repl
+akh agent repl
 ```
 
 In the REPL, type goals in natural language. Commands:
@@ -193,7 +193,7 @@ In the REPL, type goals in natural language. Commands:
 
 ```bash
 # Pick up where you left off
-akh-medu agent resume --max-cycles 50
+akh agent resume --max-cycles 50
 ```
 
 ## 7. Use the TUI
@@ -201,7 +201,7 @@ akh-medu agent resume --max-cycles 50
 The unified TUI provides an interactive chat interface:
 
 ```bash
-akh-medu chat
+akh chat
 ```
 
 TUI commands (prefix with `/`):
@@ -218,29 +218,29 @@ cycles automatically and synthesizes findings using the active grammar.
 
 ```bash
 # Export all symbols as JSON
-akh-medu export symbols
+akh export symbols
 
 # Export all triples
-akh-medu export triples
+akh export triples
 
 # Export provenance chain for a symbol
-akh-medu export provenance --symbol Dog
+akh export provenance --symbol Dog
 ```
 
 ## 9. Graph Analytics
 
 ```bash
 # Most connected symbols
-akh-medu analytics degree --top-k 10
+akh analytics degree --top-k 10
 
 # PageRank importance
-akh-medu analytics pagerank --top-k 10
+akh analytics pagerank --top-k 10
 
 # Strongly connected components
-akh-medu analytics components
+akh analytics components
 
 # Shortest path between two symbols
-akh-medu analytics path --from Dog --to Cat
+akh analytics path --from Dog --to Cat
 ```
 
 ## Using the Rust API

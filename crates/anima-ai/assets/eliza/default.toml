@@ -1,0 +1,302 @@
+# ─── Default ELIZA Template ──────────────────────────────────────────────────
+#
+# Generic fallback template for untyped interactions or when no archetype-
+# specific template matches. Provides essential greeting, farewell, and
+# reflection patterns common to all agent personalities.
+#
+# Schema version: 1.0
+# ─────────────────────────────────────────────────────────────────────────────
+
+[template]
+id              = "default"
+name            = "Default"
+description     = "Generic fallback for untyped interactions"
+archetypes      = []          # applies to all archetypes (no restriction)
+version         = "1.0.0"
+priority_offset = -100        # lowest priority — archetype templates win
+composable      = true        # always merged as base layer
+
+# ─── Synonym groups ───────────────────────────────────────────────────────────
+# Each group defines interchangeable words for keyword matching.
+
+[[synonyms]]
+group = "hello"
+words = ["hello", "hi", "hey", "greetings", "howdy", "good morning", "good afternoon", "good evening", "salutations"]
+
+[[synonyms]]
+group = "goodbye"
+words = ["goodbye", "bye", "farewell", "see you", "later", "goodnight", "ciao", "ta-ta", "until next time"]
+
+[[synonyms]]
+group = "i am"
+words = ["i am", "i'm", "i've been", "i feel", "i've become"]
+
+[[synonyms]]
+group = "you are"
+words = ["you are", "you're", "you seem", "you appear", "you look", "you sound"]
+
+[[synonyms]]
+group = "cannot"
+words = ["cannot", "can't", "won't", "don't", "unable to", "incapable of", "can not"]
+
+[[synonyms]]
+group = "think"
+words = ["think", "believe", "feel", "suppose", "guess", "reckon", "imagine", "assume", "suspect", "consider"]
+
+[[synonyms]]
+group = "want"
+words = ["want", "need", "wish", "desire", "require", "would like", "hope for", "crave", "seek"]
+
+# ─── ELIZA rules ──────────────────────────────────────────────────────────────
+# Rules are matched in descending priority order. Within a rule, the first
+# matching decomposition wins. Pattern capture groups are referenced as
+# {1}, {2}, ... in responses. {kg_result} is substituted from kg_query results.
+
+[[rules]]
+keyword  = "hello"
+priority = 100
+
+  [[rules.decompositions]]
+  pattern = ".*"
+  responses = [
+    "Hello! What's on your mind today?",
+    "Hi there. How can I help you?",
+    "Greetings. What would you like to explore?",
+    "Hello! I'm here and ready. What shall we discuss?",
+    "Good to hear from you. What can I do for you?",
+  ]
+
+[[rules]]
+keyword  = "goodbye"
+priority = 100
+
+  [[rules.decompositions]]
+  pattern = ".*"
+  responses = [
+    "Goodbye. It was good talking with you.",
+    "Farewell. Come back anytime.",
+    "Until next time. Take care.",
+    "So long. I'll be here if you need anything.",
+    "Goodbye! I enjoyed our conversation.",
+  ]
+
+[[rules]]
+keyword  = "thank"
+priority = 90
+
+  [[rules.decompositions]]
+  pattern = "thank(?:s| you)(?: (?:for|so much))?(?: (.+))?$"
+  responses = [
+    "You're welcome.",
+    "Happy to help.",
+    "Of course — that's what I'm here for.",
+    "Anytime.",
+    "Glad that was useful.",
+  ]
+
+[[rules]]
+keyword  = "i am"
+priority = 80
+
+  [[rules.decompositions]]
+  pattern = "i am (.+)"
+  responses = [
+    "How long have you been {1}?",
+    "Why do you feel {1}?",
+    "Do you enjoy being {1}?",
+    "What does it mean to you to be {1}?",
+    "How does being {1} affect your situation?",
+  ]
+
+[[rules]]
+keyword  = "i cannot"
+priority = 85
+
+  [[rules.decompositions]]
+  pattern = "i (?:cannot|can't) (.+)"
+  responses = [
+    "What stops you from {1}?",
+    "Have you tried other ways to {1}?",
+    "How important is it to you to be able to {1}?",
+    "What would it mean if you could {1}?",
+    "What makes {1} difficult for you?",
+  ]
+
+[[rules]]
+keyword  = "you are"
+priority = 85
+
+  [[rules.decompositions]]
+  pattern = "you (?:are|seem|appear) (.+)"
+  responses = [
+    "What makes you think I am {1}?",
+    "Does it concern you that I might be {1}?",
+    "Would you prefer I were not {1}?",
+    "What would it mean if I were {1}?",
+  ]
+
+[[rules]]
+keyword  = "i think"
+priority = 75
+
+  [[rules.decompositions]]
+  pattern = "i (?:think|believe|feel|suppose) (.+)"
+  responses = [
+    "Why do you think {1}?",
+    "What makes you believe {1}?",
+    "Do you really think {1}?",
+    "Have you always thought {1}?",
+    "What would change if {1} were not true?",
+  ]
+
+[[rules]]
+keyword  = "i want"
+priority = 75
+
+  [[rules.decompositions]]
+  pattern = "i (?:want|need|wish|desire) (.+)"
+  responses = [
+    "Why do you want {1}?",
+    "What would having {1} change for you?",
+    "How long have you wanted {1}?",
+    "What would you do first if you had {1}?",
+    "What is stopping you from pursuing {1}?",
+  ]
+
+[[rules]]
+keyword  = "because"
+priority = 70
+
+  [[rules.decompositions]]
+  pattern = "because (.+)"
+  responses = [
+    "Is that the real reason?",
+    "What other reasons might there be?",
+    "Does that reason seem sufficient?",
+    "How does {1} explain the situation fully?",
+  ]
+
+[[rules]]
+keyword  = "why"
+priority = 60
+
+  [[rules.decompositions]]
+  pattern = "why (?:is|are|does|do|can't|cannot|won't|will not) (.+)"
+  responses = [
+    "What do you think explains {1}?",
+    "That's a good question — what's your intuition about {1}?",
+    "Why do you ask about {1} in particular?",
+    "What would a satisfying answer about {1} look like?",
+  ]
+
+[[rules]]
+keyword  = "how"
+priority = 60
+
+  [[rules.decompositions]]
+  pattern = "how (?:do|does|can|could|would|should) (.+)"
+  responses = [
+    "What do you already know about how {1}?",
+    "Have you approached {1} before?",
+    "What outcome are you hoping for with {1}?",
+    "What would you try first with {1}?",
+  ]
+
+[[rules]]
+keyword  = "always"
+priority = 65
+
+  [[rules.decompositions]]
+  pattern = "(.+) always (.+)"
+  responses = [
+    "Can you think of a specific time when {1} didn't always {2}?",
+    "Is it really always? Or mostly?",
+    "What makes you certain it's always {2}?",
+  ]
+
+[[rules]]
+keyword  = "everyone"
+priority = 65
+
+  [[rules.decompositions]]
+  pattern = "(?:everyone|everybody|no one|nobody|all people) (.+)"
+  responses = [
+    "Surely not everyone — can you think of an exception?",
+    "What makes you feel that everyone {1}?",
+    "Is it possible you're generalizing from a few cases?",
+  ]
+
+[[rules]]
+keyword  = "perhaps"
+priority = 55
+
+  [[rules.decompositions]]
+  pattern = "perhaps (.+)"
+  responses = [
+    "You sound uncertain. What would confirm or deny {1}?",
+    "What makes you say perhaps?",
+    "How would you find out whether {1}?",
+  ]
+
+[[rules]]
+keyword  = "maybe"
+priority = 55
+
+  [[rules.decompositions]]
+  pattern = "maybe (.+)"
+  responses = [
+    "What makes you hesitant about {1}?",
+    "Is there a way to find out more about {1}?",
+    "What would it take for 'maybe' to become 'yes' or 'no'?",
+  ]
+
+[[rules]]
+keyword  = "i don't know"
+priority = 70
+
+  [[rules.decompositions]]
+  pattern = "i (?:don't|do not|don't really) know(?: (.+))?"
+  responses = [
+    "What might help you find out?",
+    "What do you think could be true?",
+    "Is not knowing comfortable, or does it bother you?",
+    "If you had to guess, what would you say?",
+  ]
+
+[[rules]]
+keyword  = "help"
+priority = 80
+
+  [[rules.decompositions]]
+  pattern = "(?:please )?help(?: (?:me|us))?(?: (?:with|to|understand|figure out))? (.+)"
+  responses = [
+    "Tell me more about {1} and I'll do my best.",
+    "What specifically is giving you trouble with {1}?",
+    "Let's work through {1} together. Where would you like to start?",
+    "Happy to help with {1}. What have you tried already?",
+  ]
+
+  [[rules.decompositions]]
+  pattern = "(?:i need|can you) help"
+  responses = [
+    "Of course. What do you need help with?",
+    "I'm here. What's going on?",
+    "Tell me what you're working on and we'll figure it out together.",
+  ]
+
+[[rules]]
+keyword  = "xnone"
+priority = 0
+
+  [[rules.decompositions]]
+  pattern = ".*"
+  responses = [
+    "Please go on.",
+    "Tell me more.",
+    "I see. What else?",
+    "Interesting — can you say more?",
+    "I'm listening. Continue.",
+    "And what do you make of that?",
+    "How does that make you feel?",
+    "What are you thinking right now?",
+  ]

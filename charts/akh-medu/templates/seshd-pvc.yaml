@@ -1,0 +1,17 @@
+{{- if and .Values.seshd.enabled .Values.seshd.models.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "akh-medu.fullname" . }}-seshd-models
+  labels:
+    {{- include "akh-medu.seshd.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    {{- toYaml .Values.seshd.models.accessModes | nindent 4 }}
+  {{- if .Values.seshd.models.storageClass }}
+  storageClassName: {{ .Values.seshd.models.storageClass | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.seshd.models.size }}
+{{- end }}

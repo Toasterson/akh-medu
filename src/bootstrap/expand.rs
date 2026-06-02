@@ -311,7 +311,8 @@ impl DomainExpander {
             if let Ok(vec) = encode_label(ops, &candidate.label) {
                 candidate.similarity = ops.similarity(&vec, &domain_prototype).unwrap_or(0.5);
             }
-            candidate.accepted = candidate.similarity >= self.config.similarity_threshold;
+            candidate.accepted = is_valid_expansion_label(&candidate.label)
+                && candidate.similarity >= self.config.similarity_threshold;
         }
 
         // 5. Cap at max_concepts.
@@ -344,6 +345,27 @@ impl DomainExpander {
         //    (e.g. resource discovery) can retrieve it for similarity scoring.
         if let Some(proto_id) = domain_proto_id {
             engine.item_memory().insert(proto_id, domain_prototype);
+        }
+
+        // 8. Phase 32 — LLM elicitation for the accepted concept set.
+        //
+        // Runs taxonomy + relationships passes using the T5 Knowledge model when
+        // available (Phase 35).  Gracefully skips when the model file is absent
+        // or the `candle-backend` feature is disabled.
+        if let Some(ref data_dir) = engine.config().data_dir {
+            let elicited = crate::bootstrap::knowledge_elicit::elicit_for_expansion(
+                &purpose.domain,
+                &accepted_labels,
+                engine,
+                Some(data_dir.clone()),
+            );
+            if let Some(n) = elicited {
+                tracing::info!(
+                    domain = %purpose.domain,
+                    triples_added = n,
+                    "expand: Phase 32 LLM elicitation added triples"
+                );
+            }
         }
 
         Ok(ExpansionResult {
@@ -854,10 +876,20 @@ pub fn parse_conceptnet_edges(
 
 // ── Utility Helpers ─────────────────────────────────────────────────────
 
-/// Normalize a label for deduplication: lowercase, trim, hyphens→spaces.
+/// Normalize a label for deduplication: lowercase, trim, hyphens→spaces,
+/// apostrophes stripped.
+///
+/// Strips U+0027 APOSTROPHE, U+2018/U+2019 curly quotes, and U+02BC
+/// MODIFIER LETTER APOSTROPHE so that "Ma'at" and "Maat" hash to the same
+/// key "maat" during candidate deduplication.
 pub fn normalize_label(label: &str) -> String {
-    let mut s = label.trim().to_lowercase();
-    // Replace both hyphens and underscores with spaces in a single pass.
+    // Strip apostrophe variants first (multi-byte), then lowercase and trim,
+    // then replace hyphens/underscores with spaces.
+    let stripped: String = label
+        .chars()
+        .filter(|&c| !matches!(c, '\u{0027}' | '\u{2018}' | '\u{2019}' | '\u{02BC}'))
+        .collect();
+    let mut s = stripped.trim().to_lowercase();
     // SAFETY: replacing ASCII bytes with ASCII bytes preserves UTF-8 validity.
     unsafe {
         for byte in s.as_bytes_mut() {
@@ -884,6 +916,48 @@ fn simple_url_encode(input: &str) -> String {
         }
     }
     encoded
+}
+
+/// Check whether a candidate concept label is valid for domain expansion.
+///
+/// Rejects garbage from external APIs: Unicode control/combining characters,
+/// Wikipedia meta-pages, Wikidata IDs that are pure QIDs, extremely short labels,
+/// and common ingestion artifacts.
+fn is_valid_expansion_label(label: &str) -> bool {
+    let trimmed = label.trim();
+
+    // Too short (single char or empty)
+    if trimmed.len() < 2 {
+        return false;
+    }
+
+    // Wikipedia/Wikidata meta-pages
+    let lower = trimmed.to_lowercase();
+    let junk_prefixes = [
+        "user:", "wikipedia:", "category talk:", "talk:", "file:",
+        "template:", "portal:", "module:", "draft:", "mediawiki:",
+    ];
+    if junk_prefixes.iter().any(|p| lower.starts_with(p)) {
+        return false;
+    }
+
+    // Common meta/list/index artifacts
+    let junk_patterns = [
+        "articles for creation", "categories for discussion",
+        "redirects to", "/sandbox", "/export/",
+    ];
+    if junk_patterns.iter().any(|p| lower.contains(p)) {
+        return false;
+    }
+
+    // Mostly non-alphanumeric (Unicode control chars, combining marks, RTL markers)
+    let alpha_count = trimmed.chars().filter(|c| c.is_alphanumeric() || c.is_ascii_whitespace()).count();
+    let total = trimmed.chars().count();
+    if total > 0 && (alpha_count as f64 / total as f64) < 0.5 {
+        return false;
+    }
+
+    true
 }
 
 /// Check if a Wikipedia category is a meta/maintenance category.
@@ -942,6 +1016,20 @@ mod tests {
         assert_eq!(normalize_label("type-system"), "type system");
         assert_eq!(normalize_label("hello_world"), "hello world");
         assert_eq!(normalize_label("UPPER-CASE_mixed"), "upper case mixed");
+    }
+
+    #[test]
+    fn normalize_label_strips_apostrophes() {
+        // ASCII apostrophe (U+0027)
+        assert_eq!(normalize_label("Ma'at"), "maat");
+        // Unicode RIGHT SINGLE QUOTATION MARK (U+2019)
+        assert_eq!(normalize_label("Ma\u{2019}at"), "maat");
+        // Unicode LEFT SINGLE QUOTATION MARK (U+2018)
+        assert_eq!(normalize_label("Ma\u{2018}at"), "maat");
+        // MODIFIER LETTER APOSTROPHE (U+02BC)
+        assert_eq!(normalize_label("Ma\u{02BC}at"), "maat");
+        // Plain Maat should produce the same key.
+        assert_eq!(normalize_label("Maat"), "maat");
     }
 
     // ── Deduplication ───────────────────────────────────────────────

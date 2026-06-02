@@ -10,6 +10,7 @@
 //! same `AgentDaemon`, so every background task added here automatically works
 //! in both deployment modes.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -67,6 +68,30 @@ pub struct DaemonConfig {
     /// Evaluates user-defined triggers against the current agent state and
     /// fires any whose conditions are met.
     pub trigger_evaluation_interval: Duration,
+    /// Knowledge extraction interval (default: 45 min).
+    ///
+    /// Runs LLM-backed triple extraction on recently-fetched content that
+    /// hasn't been processed yet. Uses the three-tier fallback: local LLM,
+    /// external API, regex.
+    pub knowledge_extraction_interval: Duration,
+    /// Neural bridge training interval (default: 2 hours).
+    ///
+    /// Runs bridge encoder alignment training during idle periods.
+    /// Only starts after sufficient training data has accumulated.
+    pub bridge_training_interval: Duration,
+    /// OpenClaw journal sync interval (default: 24 hours).
+    ///
+    /// Fetches new daily memory journals from OpenClaw and persists them
+    /// as episodic memories. Only runs when `OPENCLAW_API_KEY` is set.
+    pub openclaw_sync_interval: Duration,
+    /// LLM knowledge elicitation interval (default: 30 min).
+    ///
+    /// Phase 32: proactively generates structured triples about domains with
+    /// detected knowledge gaps using the T5 Knowledge model (Phase 35).
+    /// Distinct from `knowledge_extraction_interval` which extracts triples
+    /// from already-fetched text.  Falls back gracefully when the model file
+    /// is absent.
+    pub knowledge_elicitation_interval: Duration,
     /// Maximum OODA cycles (0 = unlimited).
     pub max_cycles: usize,
 }
@@ -86,6 +111,10 @@ impl Default for DaemonConfig {
             goal_generation_interval: Duration::from_secs(300),
             sleep_cycle_interval: Duration::from_secs(3600),
             trigger_evaluation_interval: Duration::from_secs(15),
+            knowledge_extraction_interval: Duration::from_secs(2700), // 45 min
+            bridge_training_interval: Duration::from_secs(7200), // 2 hours
+            openclaw_sync_interval: Duration::from_secs(86400), // 24 hours
+            knowledge_elicitation_interval: Duration::from_secs(1800), // 30 min
             max_cycles: 0,
         }
     }
@@ -105,6 +134,12 @@ pub struct AgentDaemon {
     agent: Arc<Mutex<Agent>>,
     config: DaemonConfig,
     total_cycles: usize,
+    /// When true, cycle/learning methods skip their work without acquiring
+    /// the agent lock — allowing external writers to acquire it uncontended.
+    paused: Arc<AtomicBool>,
+    /// Notified after each cycle completes. The suspend handler waits on
+    /// this to ensure the daemon has released the agent lock.
+    cycle_done: Arc<tokio::sync::Notify>,
     /// Optional external shutdown signal (replaces Ctrl+C when set).
     ///
     /// Used by `akhomed` to integrate daemon shutdown with the HTTP server's
@@ -121,9 +156,30 @@ impl AgentDaemon {
             agent,
             config,
             total_cycles: 0,
+            paused: Arc::new(AtomicBool::new(false)),
+            cycle_done: Arc::new(tokio::sync::Notify::new()),
             shutdown: None,
             status: None,
         }
+    }
+
+    /// Pause the daemon — prevents new cycle/learning work from acquiring
+    /// the agent lock. Returns handles the caller uses to resume.
+    pub fn pause_handle(&self) -> (Arc<AtomicBool>, Arc<tokio::sync::Notify>) {
+        (Arc::clone(&self.paused), Arc::clone(&self.cycle_done))
+    }
+
+    /// Replace the internal pause handles with externally-managed ones.
+    /// Caller creates the handles, registers them in McpState, and passes
+    /// clones here so the daemon respects external pause requests.
+    pub fn with_pause_handles(
+        mut self,
+        paused: Arc<AtomicBool>,
+        cycle_done: Arc<tokio::sync::Notify>,
+    ) -> Self {
+        self.paused = paused;
+        self.cycle_done = cycle_done;
+        self
     }
 
     /// Attach an external shutdown receiver (replaces Ctrl+C handling).
@@ -138,11 +194,38 @@ impl AgentDaemon {
         self
     }
 
+    /// Acquire the agent lock, recovering from poison rather than panicking.
+    ///
+    /// A poisoned mutex means a previous task panicked while holding the guard.
+    /// Recovering via `into_inner()` clears the poison flag so all subsequent
+    /// callers succeed normally. The agent data may be slightly inconsistent if
+    /// the prior panic left a write half-applied, but that is still preferable
+    /// to permanently blocking every future operation on this workspace.
+    ///
+    /// Locking discipline: each per-workspace `Arc<Mutex<Agent>>` is independent.
+    /// A panic (and subsequent poison) in workspace A cannot affect workspace B.
+    fn lock_agent(&self) -> std::sync::MutexGuard<'_, Agent> {
+        self.agent.lock().unwrap_or_else(|e| {
+            tracing::warn!("agent mutex was poisoned; recovering (a previous task may have panicked while holding the lock)");
+            e.into_inner()
+        })
+    }
+
     /// Run the main daemon loop.
     ///
     /// Schedules all background tasks as tokio intervals and selects on them.
     /// Shuts down cleanly on Ctrl+C (or external shutdown signal), persisting
     /// the session before exit.
+    ///
+    /// ## Concurrency note
+    ///
+    /// Every background method (`run_*`) is synchronous — it acquires
+    /// `std::sync::Mutex` guards and calls redb write transactions.  Calling
+    /// blocking code directly on a Tokio async thread starves the runtime,
+    /// preventing other async tasks (MCP handlers, HTTP requests) from making
+    /// progress.  We therefore wrap every such call in
+    /// `tokio::task::block_in_place`, which signals Tokio to migrate waiting
+    /// async tasks to other threads before this thread blocks.
     pub async fn run(&mut self) -> AgentResult<()> {
         use tokio::time::interval;
 
@@ -158,82 +241,124 @@ impl AgentDaemon {
         let mut goal_gen_tick = interval(self.config.goal_generation_interval);
         let mut sleep_tick = interval(self.config.sleep_cycle_interval);
         let mut trigger_tick = interval(self.config.trigger_evaluation_interval);
+        let mut extraction_tick = interval(self.config.knowledge_extraction_interval);
+        let mut bridge_training_tick = interval(self.config.bridge_training_interval);
+        let mut openclaw_sync_tick = interval(self.config.openclaw_sync_interval);
+        let mut elicitation_tick = interval(self.config.knowledge_elicitation_interval);
 
-        self.agent.lock().unwrap().sink().emit(&AkhMessage::system(
-            "daemon started — background learning active",
-        ));
+        tokio::task::block_in_place(|| {
+            self.lock_agent().sink().emit(&AkhMessage::system(
+                "daemon started — background learning active",
+            ));
+        });
 
-        // Startup burst: seed goals and kick off learning immediately so the
-        // akh doesn't sit idle waiting for the first timer fire.
-        self.run_goal_generation();
-        self.run_continuous_learning();
+        // Startup: ensure causal world model covers all registered tools.
+        // Runs before goal generation so the world model is available for the
+        // first OODA cycle.
+        self.bootstrap_causal_schemas();
+
+        // Startup burst: seed goals so the akh can start acting immediately.
+        // Continuous learning is deliberately NOT run at startup — it holds the
+        // agent mutex for 30-120s (network I/O + ingestion), blocking all HTTP
+        // handlers.  The interval timer will kick it off naturally.
+        tokio::task::block_in_place(|| self.run_goal_generation());
 
         loop {
+            // When paused, spin-sleep — prevents daemon from acquiring
+            // the agent lock while batch writes are in progress.
+            if self.paused.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                continue;
+            }
+
             tokio::select! {
                 _ = equivalence_tick.tick() => {
-                    self.run_equivalence_learning();
+                    tokio::task::block_in_place(|| self.run_equivalence_learning());
                 }
                 _ = reflection_tick.tick() => {
-                    self.run_reflection();
+                    tokio::task::block_in_place(|| self.run_reflection());
                 }
                 _ = consolidation_tick.tick() => {
-                    self.run_consolidation_check();
+                    tokio::task::block_in_place(|| self.run_consolidation_check());
                 }
                 _ = schema_tick.tick() => {
-                    self.run_schema_discovery();
+                    tokio::task::block_in_place(|| self.run_schema_discovery());
                 }
                 _ = rules_tick.tick() => {
-                    self.run_rule_inference();
+                    tokio::task::block_in_place(|| self.run_rule_inference());
                 }
                 _ = gaps_tick.tick() => {
-                    self.run_gap_analysis();
+                    tokio::task::block_in_place(|| self.run_gap_analysis());
                 }
                 _ = persist_tick.tick() => {
-                    self.persist();
+                    tokio::task::block_in_place(|| self.persist());
                 }
                 _ = idle_cycle_tick.tick() => {
-                    self.run_idle_cycle();
+                    tokio::task::block_in_place(|| self.run_idle_cycle());
                     if self.config.max_cycles > 0 && self.total_cycles >= self.config.max_cycles {
-                        self.agent.lock().unwrap().sink().emit(&AkhMessage::system(format!(
-                            "daemon: max cycles ({}) reached, shutting down",
-                            self.config.max_cycles,
-                        )));
+                        tokio::task::block_in_place(|| {
+                            self.lock_agent().sink().emit(&AkhMessage::system(
+                                format!(
+                                    "daemon: max cycles ({}) reached, shutting down",
+                                    self.config.max_cycles,
+                                ),
+                            ));
+                        });
                         break;
                     }
                 }
                 _ = continuous_learning_tick.tick() => {
-                    self.run_continuous_learning();
+                    tokio::task::block_in_place(|| self.run_continuous_learning());
                 }
                 _ = goal_gen_tick.tick() => {
-                    self.run_goal_generation();
+                    tokio::task::block_in_place(|| self.run_goal_generation());
                 }
                 _ = sleep_tick.tick() => {
-                    self.run_sleep_cycle();
+                    tokio::task::block_in_place(|| self.run_sleep_cycle());
                 }
                 _ = trigger_tick.tick() => {
-                    self.run_trigger_evaluation();
+                    tokio::task::block_in_place(|| self.run_trigger_evaluation());
+                }
+                _ = extraction_tick.tick() => {
+                    tokio::task::block_in_place(|| self.run_knowledge_extraction());
+                }
+                _ = bridge_training_tick.tick() => {
+                    // run_bridge_training dispatches heavy work to spawn_blocking
+                    // internally; block_in_place covers only the brief mutex
+                    // acquisition at the start.
+                    tokio::task::block_in_place(|| self.run_bridge_training());
+                }
+                _ = openclaw_sync_tick.tick() => {
+                    self.run_openclaw_sync();
+                }
+                _ = elicitation_tick.tick() => {
+                    self.run_knowledge_elicitation_task();
                 }
                 _ = self.wait_for_shutdown() => {
-                    self.agent.lock().unwrap().sink().emit(&AkhMessage::system(
-                        "daemon: received shutdown signal, persisting session...",
-                    ));
+                    tokio::task::block_in_place(|| {
+                        self.lock_agent().sink().emit(&AkhMessage::system(
+                            "daemon: received shutdown signal, persisting session...",
+                        ));
+                    });
                     break;
                 }
             }
         }
 
         // Final persist on shutdown.
-        self.persist();
+        tokio::task::block_in_place(|| self.persist());
         if let Some(ref status) = self.status
             && let Ok(mut st) = status.try_lock()
         {
             st.running = false;
         }
-        self.agent
-            .lock()
-            .unwrap()
-            .sink()
-            .emit(&AkhMessage::system("daemon stopped"));
+        tokio::task::block_in_place(|| {
+            self.agent
+                .lock()
+                .unwrap()
+                .sink()
+                .emit(&AkhMessage::system("daemon stopped"));
+        });
         Ok(())
     }
 
@@ -265,13 +390,15 @@ impl AgentDaemon {
     // -----------------------------------------------------------------------
 
     fn run_equivalence_learning(&mut self) {
-        let agent = self.agent.lock().unwrap();
-        match agent.engine().learn_equivalences() {
+        let engine = self.lock_agent().engine.clone();
+        match engine.learn_equivalences() {
             Ok(count) => {
                 if count > 0 {
-                    agent.sink().emit(&AkhMessage::system(format!(
-                        "[daemon:equivalence] {count} new equivalences discovered",
-                    )));
+                    if let Ok(agent) = self.agent.lock() {
+                        agent.sink().emit(&AkhMessage::system(format!(
+                            "[daemon:equivalence] {count} new equivalences discovered",
+                        )));
+                    }
                 }
                 tracing::info!(count, "daemon: equivalence learning complete");
             }
@@ -282,7 +409,7 @@ impl AgentDaemon {
     }
 
     fn run_reflection(&mut self) {
-        let mut agent = self.agent.lock().unwrap();
+        let mut agent = self.lock_agent();
         match agent.reflect() {
             Ok(result) => {
                 let adj_count = result.adjustments.len();
@@ -314,7 +441,7 @@ impl AgentDaemon {
     }
 
     fn run_consolidation_check(&mut self) {
-        let mut agent = self.agent.lock().unwrap();
+        let mut agent = self.lock_agent();
         let wm_len = agent.working_memory().len();
         let threshold = agent.config.consolidation.auto_consolidate_at;
         if wm_len < threshold {
@@ -341,16 +468,18 @@ impl AgentDaemon {
     }
 
     fn run_schema_discovery(&self) {
-        let agent = self.agent.lock().unwrap();
+        let engine = self.lock_agent().engine.clone();
         let config = crate::autonomous::schema::SchemaDiscoveryConfig::default();
-        match agent.engine().discover_schema(config) {
+        match engine.discover_schema(config) {
             Ok(result) => {
                 let types = result.types.len();
                 let hierarchies = result.relation_hierarchies.len();
                 if types > 0 || hierarchies > 0 {
-                    agent.sink().emit(&AkhMessage::system(format!(
-                        "[daemon:schema] discovered {types} types, {hierarchies} relation hierarchies",
-                    )));
+                    if let Ok(agent) = self.agent.lock() {
+                        agent.sink().emit(&AkhMessage::system(format!(
+                            "[daemon:schema] discovered {types} types, {hierarchies} relation hierarchies",
+                        )));
+                    }
                 }
                 tracing::info!(types, hierarchies, "daemon: schema discovery complete");
             }
@@ -361,16 +490,18 @@ impl AgentDaemon {
     }
 
     fn run_rule_inference(&self) {
-        let agent = self.agent.lock().unwrap();
+        let engine = self.lock_agent().engine.clone();
         let config = crate::autonomous::rule_engine::RuleEngineConfig::default();
-        match agent.engine().run_rules(config) {
+        match engine.run_rules(config) {
             Ok(result) => {
                 let derived_count = result.derived.len();
                 if derived_count > 0 {
-                    agent.sink().emit(&AkhMessage::system(format!(
-                        "[daemon:rules] {} new triples from {} iterations",
-                        derived_count, result.iterations,
-                    )));
+                    if let Ok(agent) = self.agent.lock() {
+                        agent.sink().emit(&AkhMessage::system(format!(
+                            "[daemon:rules] {} new triples from {} iterations",
+                            derived_count, result.iterations,
+                        )));
+                    }
                 }
                 tracing::info!(
                     triples = derived_count,
@@ -387,21 +518,26 @@ impl AgentDaemon {
     fn run_gap_analysis(&self) {
         use super::goal;
 
-        let agent = self.agent.lock().unwrap();
-        let active = goal::active_goals(agent.goals());
-        if active.is_empty() {
-            return;
-        }
+        let (engine, goal_ids) = {
+            let agent = self.lock_agent();
+            let active = goal::active_goals(agent.goals());
+            if active.is_empty() {
+                return;
+            }
+            let ids: Vec<_> = active.iter().map(|g| g.symbol_id).collect();
+            (agent.engine.clone(), ids)
+        };
 
-        let goal_ids: Vec<_> = active.iter().map(|g| g.symbol_id).collect();
         let config = crate::autonomous::gap::GapAnalysisConfig::default();
-        match agent.engine().analyze_gaps(&goal_ids, config) {
+        match engine.analyze_gaps(&goal_ids, config) {
             Ok(result) => {
                 let gaps = result.gaps.len();
                 if gaps > 0 {
-                    agent.sink().emit(&AkhMessage::system(format!(
-                        "[daemon:gaps] {gaps} knowledge gaps identified around active goals",
-                    )));
+                    if let Ok(agent) = self.agent.lock() {
+                        agent.sink().emit(&AkhMessage::system(format!(
+                            "[daemon:gaps] {gaps} knowledge gaps identified around active goals",
+                        )));
+                    }
                 }
                 tracing::info!(gaps, "daemon: gap analysis complete");
             }
@@ -412,23 +548,31 @@ impl AgentDaemon {
     }
 
     fn run_continuous_learning(&self) {
-        let agent = self.agent.lock().unwrap();
-        // Reborrow through the guard so partial field access works.
-        let agent_ref: &Agent = &agent;
+        // Extract what we need from the agent, then DROP the lock before the
+        // expensive learning pipeline runs.  `run_continuous_learning` only
+        // needs an `&Arc<Engine>` and a curiosity config — it does not mutate
+        // the Agent, so holding the mutex during network I/O + ingestion would
+        // needlessly block every HTTP handler for 30-120s.
+        let (engine, curiosity_cfg) = {
+            let agent = self.lock_agent();
+            (agent.engine.clone(), agent.curiosity_config.clone())
+        };
+        // Lock is released here — HTTP handlers can proceed.
+
         let config = super::continuous_learning::ContinuousLearningConfig::default();
-        match super::continuous_learning::run_continuous_learning(
-            &agent_ref.engine,
-            &agent_ref.curiosity_config,
-            &config,
-        ) {
+        match super::continuous_learning::run_continuous_learning(&engine, &curiosity_cfg, &config)
+        {
             Ok(result) => {
-                agent.sink().emit(&AkhMessage::system(format!(
-                    "[daemon:learning] {} targets, {} resources, {} ingested, Dreyfus: {}",
-                    result.targets_found,
-                    result.resources_discovered,
-                    result.concepts_ingested,
-                    result.dreyfus_level,
-                )));
+                // Re-acquire lock briefly just for the status message.
+                if let Ok(agent) = self.agent.lock() {
+                    agent.sink().emit(&AkhMessage::system(format!(
+                        "[daemon:learning] {} targets, {} resources, {} ingested, Dreyfus: {}",
+                        result.targets_found,
+                        result.resources_discovered,
+                        result.concepts_ingested,
+                        result.dreyfus_level,
+                    )));
+                }
                 tracing::info!(
                     targets = result.targets_found,
                     resources = result.resources_discovered,
@@ -449,33 +593,171 @@ impl AgentDaemon {
     }
 
     fn run_goal_generation(&mut self) {
-        let mut agent = self.agent.lock().unwrap();
-        match agent.generate_goals() {
-            Ok(result) => {
-                let activated = result.activated.len();
-                let dormant = result.dormant.len();
-                if activated > 0 || dormant > 0 {
-                    agent.sink().emit(&AkhMessage::system(format!(
-                        "[daemon:goals] {activated} activated, {dormant} dormant",
-                    )));
-                }
-                tracing::info!(activated, dormant, "daemon: goal generation complete");
-                // Read goal count while agent is locked, then update status.
-                let goal_count = super::goal::active_goals(agent.goals()).len();
-                drop(agent); // Release agent lock before status lock.
-                if let Some(ref status) = self.status
-                    && let Ok(mut st) = status.try_lock()
-                {
-                    st.last_goal_gen_at = Some(now_secs());
-                    st.active_goals = goal_count;
-                }
+        // Phase 1: Brief lock — snapshot inputs + update drives (needs &WorkingMemory).
+        let (
+            engine,
+            goals_snapshot,
+            drives_snapshot,
+            gen_config,
+            predicates,
+            cycle_count,
+            impasse,
+            reflection,
+            watch_firings,
+            curiosity_config,
+        ) = {
+            let mut guard = self.lock_agent();
+            // Explicit reborrow so the borrow checker can split field access.
+            let agent: &mut Agent = &mut *guard;
+
+            // Update drives while we hold the lock (needs &WorkingMemory which is !Clone).
+            let goal_symbols: Vec<crate::symbol::SymbolId> =
+                super::goal::active_goals(&agent.goals)
+                    .iter()
+                    .map(|g| g.symbol_id)
+                    .collect();
+            agent.drives.update_with_curiosity(
+                &agent.engine,
+                &agent.working_memory,
+                &goal_symbols,
+                agent.cycle_count,
+                Some(&agent.curiosity_config),
+            );
+
+            (
+                agent.engine.clone(),
+                agent.goals.clone(),
+                agent.drives.clone(),
+                agent.config.goal_generation.clone(),
+                agent.predicates.clone(),
+                agent.cycle_count,
+                agent.last_impasse.clone(),
+                agent.last_reflection.clone(),
+                agent.last_watch_firings.clone(),
+                agent.curiosity_config.clone(),
+            )
+        };
+        // Lock released — HTTP handlers can proceed.
+
+        // Phase 2: Expensive computation (no lock held).
+        let goal_symbols_snapshot: Vec<crate::symbol::SymbolId> = super::goal::active_goals(&goals_snapshot)
+            .iter()
+            .map(|g| g.symbol_id)
+            .collect();
+        let curiosity_proposals = super::curiosity::compute_directed_curiosity(
+            &engine,
+            &curiosity_config,
+            &goal_symbols_snapshot,
+        )
+        .map(|report| report.proposals)
+        .unwrap_or_default();
+
+        let gen_result = match super::goal_generation::generate_goals(
+            &engine,
+            &goals_snapshot,
+            &drives_snapshot,
+            &gen_config,
+            &predicates,
+            cycle_count,
+            impasse.as_ref(),
+            reflection.as_ref(),
+            &watch_firings,
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::debug!(error = %e, "daemon: goal generation skipped");
+                return;
             }
-            Err(e) => tracing::debug!(error = %e, "daemon: goal generation skipped"),
+        };
+
+        // Merge curiosity proposals.
+        let mut gen_result = gen_result;
+        for cp in curiosity_proposals {
+            if gen_result.activated.len() < gen_config.max_activations {
+                gen_result.activated.push(cp);
+            } else if gen_result.dormant.len() < gen_config.max_dormant {
+                gen_result.dormant.push(cp);
+            }
+        }
+
+        // Phase 3: Brief lock — apply results (push goals, store provenance).
+        let mut agent = self.lock_agent();
+
+        for proposal in &gen_result.activated {
+            match super::goal::create_goal(
+                &agent.engine,
+                &proposal.description,
+                proposal.priority_suggestion,
+                &proposal.success_criteria,
+                &agent.predicates,
+            ) {
+                Ok(mut g) => {
+                    g.source = Some(proposal.source.clone());
+                    let (drive_name, drive_strength) =
+                        super::goal_generation::provenance_from_source(&proposal.source);
+                    let mut prov = crate::provenance::ProvenanceRecord::new(
+                        g.symbol_id,
+                        crate::provenance::DerivationKind::AutonomousGoalGeneration {
+                            drive: drive_name,
+                            strength: drive_strength,
+                        },
+                    )
+                    .with_confidence(proposal.feasibility);
+                    if let Err(e) = agent.engine.store_provenance(&mut prov) {
+                        tracing::debug!("failed to store goal provenance: {e}");
+                    }
+                    agent.goals.push(g);
+                }
+                Err(e) => tracing::debug!("failed to create activated goal: {e}"),
+            }
+        }
+
+        for proposal in &gen_result.dormant {
+            match super::goal::create_goal(
+                &agent.engine,
+                &proposal.description,
+                proposal.priority_suggestion,
+                &proposal.success_criteria,
+                &agent.predicates,
+            ) {
+                Ok(mut g) => {
+                    g.source = Some(proposal.source.clone());
+                    let _ = super::goal::update_goal_status(
+                        &agent.engine,
+                        &mut g,
+                        super::goal::GoalStatus::Dormant,
+                        &agent.predicates,
+                    );
+                    agent.goals.push(g);
+                }
+                Err(e) => tracing::debug!("failed to create dormant goal: {e}"),
+            }
+        }
+
+        // Clear impasse after it's been consumed.
+        agent.last_impasse = None;
+
+        let activated = gen_result.activated.len();
+        let dormant = gen_result.dormant.len();
+        if activated > 0 || dormant > 0 {
+            agent.sink().emit(&AkhMessage::system(format!(
+                "[daemon:goals] {activated} activated, {dormant} dormant",
+            )));
+        }
+        tracing::info!(activated, dormant, "daemon: goal generation complete");
+
+        let goal_count = super::goal::active_goals(&agent.goals).len();
+        drop(agent); // Release agent lock before status lock.
+        if let Some(ref status) = self.status
+            && let Ok(mut st) = status.try_lock()
+        {
+            st.last_goal_gen_at = Some(now_secs());
+            st.active_goals = goal_count;
         }
     }
 
     fn run_sleep_cycle(&mut self) {
-        let mut guard = self.agent.lock().unwrap();
+        let mut guard = self.lock_agent();
         // Explicit reborrow so the borrow checker can see partial field access.
         let agent: &mut Agent = &mut *guard;
         match super::sleep::run_sleep_cycle(
@@ -507,7 +789,7 @@ impl AgentDaemon {
     fn run_trigger_evaluation(&mut self) {
         use super::trigger::{self as trigger_mod, TriggerStore};
 
-        let mut guard = self.agent.lock().unwrap();
+        let mut guard = self.lock_agent();
         // Explicit reborrow for partial field access.
         let agent: &mut Agent = &mut *guard;
 
@@ -552,8 +834,18 @@ impl AgentDaemon {
     fn run_idle_cycle(&mut self) {
         use super::goal;
 
-        let mut agent = self.agent.lock().unwrap();
+        // Respect pause — don't even try to acquire the agent lock.
+        if self.paused.load(Ordering::SeqCst) {
+            self.cycle_done.notify_one();
+            return;
+        }
+
+        // Borrow only the `agent` field (not all of `&self`) so the
+        // `self.total_cycles += 1` below does not conflict with the live guard.
+        let mut agent = self.agent.lock().unwrap_or_else(|e| e.into_inner());
         if goal::active_goals(agent.goals()).is_empty() {
+            drop(agent);
+            self.cycle_done.notify_one();
             return;
         }
 
@@ -581,10 +873,355 @@ impl AgentDaemon {
                 tracing::warn!(error = %e, "daemon: OODA cycle failed");
             }
         }
+        // Notify any waiter that we've released the agent lock.
+        self.cycle_done.notify_one();
+    }
+
+    /// Run autonomous knowledge extraction on recently-fetched content.
+    ///
+    /// The akh decides what to extract based on its own curiosity targets:
+    /// 1. Query gap analysis for ZPD-proximal concepts with knowledge gaps
+    /// 2. For each target, gather any text associated with it (doc:mentions triples)
+    /// 3. Run the TripleExtractor (local LLM → external API → regex fallback)
+    /// 4. Store extracted triples with LlmTripleExtraction provenance
+    ///
+    /// Drops the agent lock during extraction (expensive I/O) to avoid blocking
+    /// HTTP handlers.
+    fn run_knowledge_extraction(&self) {
+        use crate::extraction::{ExtractionConfig, TripleExtractor};
+
+        // Extract engine ref and drop agent lock.
+        let engine = {
+            let agent = self.lock_agent();
+            agent.engine.clone()
+        };
+
+        // Load extraction config (use defaults for now — config.toml integration
+        // reads from the file at daemon startup and passes through DaemonConfig).
+        let config = ExtractionConfig::default();
+        if !config.enabled {
+            return;
+        }
+
+        let extractor = TripleExtractor::new(config);
+
+        // Find recently-added content paragraphs that reference gap entities.
+        // Strategy: query for `doc:mentions` triples pointing to entities that
+        // have few outgoing relations (knowledge gaps).
+        let doc_mentions = engine.resolve_symbol("doc:mentions").ok();
+        let Some(mentions_pred) = doc_mentions else {
+            return; // No content has been ingested yet.
+        };
+
+        let mention_triples = engine
+            .knowledge_graph()
+            .triples_for_predicate(mentions_pred);
+
+        if mention_triples.is_empty() {
+            return;
+        }
+
+        // Collect paragraph entities that mention under-connected concepts.
+        let mut extraction_targets: Vec<(crate::symbol::SymbolId, String)> = Vec::new();
+        for (para_id, entity_id) in &mention_triples {
+            // Check if the mentioned entity has few outgoing relations (gap signal).
+            let outgoing = engine.triples_from(*entity_id);
+            if outgoing.len() < 3 {
+                let para_label = engine.resolve_label(*para_id);
+                // Only process paragraph-like entities (from content ingest).
+                if para_label.starts_with("para:") {
+                    extraction_targets.push((*para_id, para_label));
+                }
+            }
+        }
+
+        // Limit to avoid excessive extraction in a single cycle.
+        extraction_targets.truncate(10);
+
+        if extraction_targets.is_empty() {
+            return;
+        }
+
+        let mut total_extracted = 0usize;
+
+        for (para_id, para_label) in &extraction_targets {
+            // Get the paragraph text from the KG (stored as outgoing triples).
+            let para_triples = engine.triples_from(*para_id);
+            // Build text from the paragraph's doc:content triple if it exists,
+            // or reconstruct from mentioned entity labels.
+            let text: String = para_triples
+                .iter()
+                .filter(|t| {
+                    let pred = engine.resolve_label(t.predicate);
+                    pred == "doc:mentions"
+                })
+                .map(|t| engine.resolve_label(t.object))
+                .collect::<Vec<_>>()
+                .join(", ");
+
+            if text.len() < 20 {
+                continue; // Too short to extract from.
+            }
+
+            match extractor.extract_and_store(&text, &engine) {
+                Ok(count) => total_extracted += count,
+                Err(e) => {
+                    tracing::debug!(para = %para_label, error = %e, "extraction failed");
+                }
+            }
+        }
+
+        if total_extracted > 0 {
+            let _ = engine.persist();
+            if let Ok(agent) = self.agent.lock() {
+                agent.sink().emit(&AkhMessage::system(format!(
+                    "[daemon:extraction] {total_extracted} triples extracted from {} paragraphs",
+                    extraction_targets.len(),
+                )));
+            }
+            tracing::info!(
+                triples = total_extracted,
+                paragraphs = extraction_targets.len(),
+                "daemon: knowledge extraction complete"
+            );
+        }
+    }
+
+    fn run_bridge_training(&self) {
+        use crate::training::{BridgeTrainingSession, TrainerConfig};
+        use crate::vsa::Dimension;
+        use crate::vsa::neural_bridge::NeuralVsaBridge;
+
+        let engine = {
+            let agent = self.lock_agent();
+            agent.engine.clone()
+        };
+
+        // Check if we have enough grounded symbols to train.
+        let symbol_count = engine.item_memory().all_symbols().len();
+        if symbol_count < 50 {
+            tracing::debug!(
+                symbols = symbol_count,
+                "daemon: bridge training skipped — insufficient grounded symbols (need ≥50)"
+            );
+            return;
+        }
+
+        // Training is CPU-bound — run in spawn_blocking to avoid starving
+        // the tokio event loop (which handles HTTP/WS/MCP requests).
+        let agent_ref = self.agent.clone();
+        tokio::task::spawn_blocking(move || {
+            let hidden_dim = 128;
+            let mut bridge = NeuralVsaBridge::new(hidden_dim, Dimension::DEFAULT);
+
+            let config = TrainerConfig {
+                max_steps: 100,
+                ..Default::default()
+            };
+            let session = BridgeTrainingSession::new(config);
+            let result = session.train_from_grounded_symbols(&mut bridge, &engine);
+
+            if result.improved {
+                if let Ok(agent) = agent_ref.lock() {
+                    agent.sink().emit(&AkhMessage::system(format!(
+                        "[daemon:bridge-training] {} steps, match rate {:.1}% → {:.1}% ({} symbols)",
+                        result.steps,
+                        result.initial_match_rate * 100.0,
+                        result.final_match_rate * 100.0,
+                        result.pairs_used,
+                    )));
+                }
+            }
+            tracing::info!(
+                steps = result.steps,
+                pairs = result.pairs_used,
+                initial = result.initial_match_rate,
+                final_rate = result.final_match_rate,
+                improved = result.improved,
+                "daemon: bridge training complete"
+            );
+        });
+    }
+
+    fn run_openclaw_sync(&self) {
+        use super::memory_sync::{MemorySyncConfig, sync_openclaw_journals};
+        use super::openclaw::OpenClawConfig;
+
+        // Load config from env — if the key is absent, skip silently.
+        let Some(openclaw_cfg) = OpenClawConfig::from_env() else {
+            tracing::debug!("daemon: OPENCLAW_API_KEY not set, skipping journal sync");
+            return;
+        };
+
+        let (engine, predicates, cycle_count) = {
+            let agent = self.agent.lock().unwrap();
+            (
+                agent.engine.clone(),
+                agent.predicates.clone(),
+                agent.cycle_count,
+            )
+        };
+        // Agent lock released — HTTP I/O runs without blocking other handlers.
+
+        let sync_cfg = MemorySyncConfig::default();
+        match sync_openclaw_journals(
+            &engine,
+            &openclaw_cfg,
+            &sync_cfg,
+            &predicates,
+            cycle_count as u64,
+        ) {
+            Ok(result) => {
+                if result.journals_fetched > 0 {
+                    if let Ok(agent) = self.agent.lock() {
+                        agent.sink().emit(&AkhMessage::system(format!(
+                            "[daemon:openclaw] fetched {}, ingested {}, skipped {}",
+                            result.journals_fetched, result.ingested, result.skipped,
+                        )));
+                    }
+                }
+                tracing::info!(
+                    fetched = result.journals_fetched,
+                    ingested = result.ingested,
+                    skipped = result.skipped,
+                    "daemon: OpenClaw journal sync complete",
+                );
+                // Persist KG changes after sync.
+                if result.ingested > 0 {
+                    let _ = engine.persist();
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "daemon: OpenClaw journal sync failed");
+            }
+        }
+    }
+
+    /// Phase 32 — proactive LLM knowledge elicitation for gap domains.
+    ///
+    /// Identifies domains with low triple density from recent gap analysis,
+    /// then runs the KnowledgeElicitor (taxonomy + relationships pass) on each.
+    /// Falls back silently when the `candle-backend` feature is disabled or the
+    /// model file is absent — bootstrap continues via web-API-only mode.
+    fn run_knowledge_elicitation_task(&self) {
+        use crate::bootstrap::knowledge_elicit::{
+            ElicitConfig, ElicitPass, ElicitValidator, KnowledgeElicitor, ingest_validated,
+        };
+
+        // Extract engine + data_dir without holding the agent lock.
+        let (engine, data_dir) = {
+            let agent = self.agent.lock().unwrap();
+            let dir = agent.engine.config().data_dir.clone();
+            (agent.engine.clone(), dir)
+        };
+
+        // Locate domains with few outgoing concept triples as elicitation targets.
+        // Strategy: look for symbols whose label contains no `:` prefix (plain
+        // concept labels) and that have fewer than 5 outgoing relations.
+        let expand_pred = engine.resolve_symbol("expand:subclass_of").ok();
+        let is_a_pred = engine.resolve_symbol("is-a").ok();
+
+        if expand_pred.is_none() && is_a_pred.is_none() {
+            // No domain ontology present yet — nothing to elicit for.
+            return;
+        }
+
+        // Collect candidate domain labels by sampling concept symbols with low
+        // outgoing degree.  Limit to 3 domains per cycle to avoid rate pressure.
+        let mut domain_concepts: Vec<(String, Vec<String>)> = Vec::new();
+
+        let all_symbols = engine.item_memory().all_symbols();
+        let mut candidates: Vec<(String, usize)> = all_symbols
+            .iter()
+            .filter_map(|sym| {
+                let label = engine.resolve_label(*sym);
+                // Skip relation / namespace symbols.
+                if label.contains(':') || label.len() < 3 {
+                    return None;
+                }
+                let degree = engine.triples_from(*sym).len();
+                // Elicitation targets: concepts with 1–8 outgoing relations
+                // (seeded but sparse).
+                if degree >= 1 && degree <= 8 {
+                    Some((label, degree))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Sort by ascending degree (sparsest first).
+        candidates.sort_by_key(|(_, d)| *d);
+        candidates.truncate(30);
+
+        // Group into domain buckets by shared prefix heuristic or just take the
+        // top-N concepts as seeds for a single "general" elicitation.
+        if !candidates.is_empty() {
+            let seeds: Vec<String> = candidates
+                .iter()
+                .take(10)
+                .map(|(label, _)| label.clone())
+                .collect();
+            // Use the most common 2-grams as a domain hint, or "general knowledge"
+            // as fallback.
+            let domain = guess_domain(&seeds).unwrap_or_else(|| "general knowledge".to_string());
+            domain_concepts.push((domain, seeds));
+        }
+
+        if domain_concepts.is_empty() {
+            return;
+        }
+
+        let config = ElicitConfig::default();
+        let mut elicitor = KnowledgeElicitor::new(config, data_dir);
+
+        if !elicitor.is_available() {
+            tracing::debug!("daemon:elicitation: backend unavailable, skipping");
+            return;
+        }
+
+        let mut total_inserted = 0usize;
+        let validator = ElicitValidator::new(None);
+
+        for (domain, seeds) in &domain_concepts {
+            let batch = elicitor.elicit(
+                domain,
+                seeds,
+                &[ElicitPass::Taxonomy, ElicitPass::Relationships],
+            );
+
+            if batch.triples.is_empty() {
+                continue;
+            }
+
+            let validated = validator.validate(&batch.triples, batch.total_rounds, &engine);
+            let inserted = ingest_validated(&validated, &engine, &batch, ElicitPass::Taxonomy);
+            total_inserted += inserted;
+
+            tracing::info!(
+                domain,
+                elicited = batch.triples.len(),
+                accepted = validated.accepted.len(),
+                rejected = validated.rejected.len(),
+                inserted,
+                "daemon:elicitation: domain pass complete"
+            );
+        }
+
+        if total_inserted > 0 {
+            let _ = engine.persist();
+            if let Ok(agent) = self.agent.lock() {
+                agent.sink().emit(&AkhMessage::system(format!(
+                    "[daemon:elicitation] {} triples generated across {} domain(s)",
+                    total_inserted,
+                    domain_concepts.len(),
+                )));
+            }
+        }
     }
 
     fn persist(&self) {
-        let agent = self.agent.lock().unwrap();
+        let agent = self.lock_agent();
         if let Err(e) = agent.persist_session() {
             tracing::warn!(error = %e, "daemon: session persist failed");
         } else {
@@ -597,6 +1234,81 @@ impl AgentDaemon {
             }
         }
     }
+
+    /// Ensure the causal world model has schemas for all registered tools.
+    ///
+    /// Called once at daemon startup so that any tools added after the agent
+    /// was last persisted (e.g. new skills installed between runs) are
+    /// immediately reflected in the world model.  Existing schemas are not
+    /// overwritten, so learned success rates are preserved.
+    fn bootstrap_causal_schemas(&mut self) {
+        let mut agent = self.agent.lock().unwrap();
+        let signatures = agent.tool_registry.list();
+        if signatures.is_empty() {
+            return;
+        }
+        // Clone the `Arc<Engine>` so the read borrow of `engine` does not
+        // conflict with the `&mut` borrow of `causal_manager` below.
+        let engine = agent.engine.clone();
+        match agent
+            .causal_manager
+            .bootstrap_from_signatures(&signatures, &engine)
+        {
+            Ok(0) => {
+                tracing::debug!(
+                    total = agent.causal_manager.schemas.len(),
+                    "daemon: causal world model already up-to-date",
+                );
+            }
+            Ok(n) => {
+                agent.sink().emit(&AkhMessage::system(format!(
+                    "[daemon:causal] bootstrapped {n} new action schema(s) from tool registry \
+                     ({} total)",
+                    agent.causal_manager.schemas.len(),
+                )));
+                tracing::info!(
+                    new_schemas = n,
+                    total = agent.causal_manager.schemas.len(),
+                    "daemon: causal world model bootstrapped",
+                );
+                if let Err(e) = agent.causal_manager.persist(&engine) {
+                    tracing::warn!("daemon: failed to persist causal schemas: {e}");
+                }
+            }
+            Err(e) => {
+                tracing::warn!("daemon: failed to bootstrap causal schemas: {e}");
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Module-level helpers
+// ---------------------------------------------------------------------------
+
+/// Heuristically guess a domain label from a set of seed concept labels.
+///
+/// Uses the longest common word among all seeds, falling back to `None`.
+fn guess_domain(seeds: &[String]) -> Option<String> {
+    if seeds.is_empty() {
+        return None;
+    }
+    // Collect all words from all seed labels.
+    let all_words: Vec<&str> = seeds
+        .iter()
+        .flat_map(|s| s.split_whitespace())
+        .collect();
+    // Find the word that appears in the most seeds.
+    let mut freq: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for w in &all_words {
+        if w.len() >= 4 {
+            *freq.entry(w).or_insert(0) += 1;
+        }
+    }
+    freq.into_iter()
+        .max_by_key(|(_, count)| *count)
+        .filter(|(_, count)| *count >= 2)
+        .map(|(word, _)| word.to_string())
 }
 
 #[cfg(test)]
@@ -614,10 +1326,25 @@ mod tests {
         assert_eq!(config.gap_analysis_interval, Duration::from_secs(900));
         assert_eq!(config.persist_interval, Duration::from_secs(60));
         assert_eq!(config.idle_cycle_interval, Duration::from_secs(30));
-        assert_eq!(config.continuous_learning_interval, Duration::from_secs(7200));
+        assert_eq!(
+            config.continuous_learning_interval,
+            Duration::from_secs(7200)
+        );
         assert_eq!(config.goal_generation_interval, Duration::from_secs(300));
         assert_eq!(config.sleep_cycle_interval, Duration::from_secs(3600));
         assert_eq!(config.trigger_evaluation_interval, Duration::from_secs(15));
+        assert_eq!(
+            config.knowledge_extraction_interval,
+            Duration::from_secs(2700)
+        );
+        assert_eq!(
+            config.openclaw_sync_interval,
+            Duration::from_secs(86400)
+        );
+        assert_eq!(
+            config.knowledge_elicitation_interval,
+            Duration::from_secs(1800)
+        );
         assert_eq!(config.max_cycles, 0);
     }
 }

@@ -291,12 +291,12 @@ impl MicroMlLayer {
     /// Expected model directory layout under `data_dir`:
     ///
     /// ```text
-    /// models/ner/
+    /// ner/
     /// ├── model.onnx
     /// ├── tokenizer.json
     /// └── config.json   # { "id2label": { "0": "O", "1": "B-PER", ... } }
     /// ```
-    const NER_SUBDIR: &'static str = "models/ner";
+    const NER_SUBDIR: &'static str = "ner";
 
     /// Load the NER model from `model_dir`.
     ///

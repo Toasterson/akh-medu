@@ -81,6 +81,15 @@ pub struct Project {
     pub cycles_consumed: u32,
     /// Cycle at which this project was created.
     pub created_at: u64,
+    /// Domains allowed for URL-based document ingestion.
+    ///
+    /// `None` is the legacy default: all URL sources are permitted.
+    /// `Some([])` blocks all URL ingest for this project.
+    /// `Some(["example.com", ...])` restricts to explicitly listed domains.
+    ///
+    /// Passed to `IngestConfig::allowed_domains` by any ingest caller that
+    /// has access to the active project.
+    pub allowed_domains: Option<Vec<String>>,
 }
 
 impl Project {
@@ -126,6 +135,11 @@ pub struct ProjectPredicates {
     pub project_description: SymbolId,
     /// `agent:project_status` — links a project to its status entity.
     pub project_status: SymbolId,
+    /// `agent:allowed_domain` — links a project to one permitted ingest domain.
+    ///
+    /// One triple per allowed domain; the object is a plain entity whose label
+    /// is the domain string (e.g. `"github.com"`).
+    pub allowed_domain: SymbolId,
 }
 
 impl ProjectPredicates {
@@ -136,6 +150,7 @@ impl ProjectPredicates {
             project_scope: engine.resolve_or_create_relation("agent:project_scope")?,
             project_description: engine.resolve_or_create_relation("agent:project_description")?,
             project_status: engine.resolve_or_create_relation("agent:project_status")?,
+            allowed_domain: engine.resolve_or_create_relation("agent:allowed_domain")?,
         })
     }
 }
@@ -227,8 +242,13 @@ pub enum ProjectAssignment {
 
 /// Create a new project backed by a `Task` microtheory in the KG.
 ///
-/// Stores description, status, and scope triples. Optionally computes a
-/// scope vector from the given concept labels.
+/// Stores description, status, scope, and allowed-domain triples.
+/// Optionally computes a scope vector from the given concept labels.
+///
+/// `allowed_domains` drives the URL ingest allowlist:
+/// - `None`  → all URL sources permitted (legacy / open).
+/// - `Some([])` → all URL sources blocked.
+/// - `Some([d, ...])` → only listed domains are permitted.
 pub fn create_project(
     engine: &Engine,
     name: &str,
@@ -236,6 +256,7 @@ pub fn create_project(
     scope_concepts: &[&str],
     predicates: &ProjectPredicates,
     agent_predicates: &AgentPredicates,
+    allowed_domains: Option<Vec<String>>,
 ) -> AgentResult<Project> {
     // Create the project entity.
     let label = format!("project:{name}");
@@ -281,6 +302,19 @@ pub fn create_project(
         desc_entity,
     ))?;
 
+    // Persist each allowed domain as a separate `agent:allowed_domain` triple.
+    // The object label is the domain string itself (e.g. "github.com").
+    if let Some(ref domains) = allowed_domains {
+        for domain in domains {
+            let domain_entity = engine.resolve_or_create_entity(domain)?;
+            engine.add_triple(&Triple::new(
+                project_sym.id,
+                predicates.allowed_domain,
+                domain_entity,
+            ))?;
+        }
+    }
+
     // Record provenance.
     let mut prov = ProvenanceRecord::new(
         project_sym.id,
@@ -300,6 +334,7 @@ pub fn create_project(
         cycle_budget: None,
         cycles_consumed: 0,
         created_at: project_sym.created_at,
+        allowed_domains,
     })
 }
 
@@ -352,6 +387,20 @@ pub fn restore_projects(
 
         let scope_vector = compute_scope_vector(engine, &scope_ids);
 
+        // Reconstruct allowed-domain list from `agent:allowed_domain` triples.
+        // If no such triples exist, default to `None` (legacy open behaviour).
+        let domain_triples: Vec<String> = triples
+            .iter()
+            .filter(|t| t.predicate == predicates.allowed_domain)
+            .map(|t| engine.resolve_label(t.object))
+            .collect();
+
+        let allowed_domains = if domain_triples.is_empty() {
+            None
+        } else {
+            Some(domain_triples)
+        };
+
         projects.push(Project {
             id: sym.id,
             name,
@@ -361,6 +410,7 @@ pub fn restore_projects(
             cycle_budget: None,
             cycles_consumed: 0,
             created_at: sym.created_at,
+            allowed_domains,
         });
     }
 
@@ -575,6 +625,7 @@ mod tests {
                 cycle_budget: None,
                 cycles_consumed: 0,
                 created_at: 0,
+                allowed_domains: None,
             },
             Project {
                 id: sym(2),
@@ -585,6 +636,7 @@ mod tests {
                 cycle_budget: None,
                 cycles_consumed: 0,
                 created_at: 0,
+                allowed_domains: None,
             },
         ];
 
@@ -616,6 +668,7 @@ mod tests {
             cycle_budget: None,
             cycles_consumed: 0,
             created_at: 0,
+            allowed_domains: None,
         };
 
         let goals = vec![
@@ -672,6 +725,7 @@ mod tests {
             cycle_budget: None,
             cycles_consumed: 0,
             created_at: 0,
+            allowed_domains: None,
         };
 
         assert_eq!(project_progress(&project, &[]), 0.0);
@@ -689,6 +743,7 @@ mod tests {
             preds.project_scope,
             preds.project_description,
             preds.project_status,
+            preds.allowed_domain,
         ];
         for (i, a) in ids.iter().enumerate() {
             for (j, b) in ids.iter().enumerate() {
@@ -712,6 +767,7 @@ mod tests {
             &["rust", "testing"],
             &preds,
             &agent_preds,
+            None,
         )
         .unwrap();
 
@@ -739,6 +795,7 @@ mod tests {
             &[],
             &preds,
             &agent_preds,
+            None,
         )
         .unwrap();
 
@@ -783,6 +840,7 @@ mod tests {
             cycle_budget: None,
             cycles_consumed: 0,
             created_at: 0,
+            allowed_domains: None,
         };
 
         // Create a goal with a symbol that is related to "rust".
@@ -861,5 +919,62 @@ mod tests {
         // Empty input returns None.
         let empty = compute_scope_vector(&engine, &[]);
         assert!(empty.is_none());
+    }
+
+    // -- Allowed domains --
+
+    #[test]
+    fn allowed_domains_persisted_and_restored() {
+        let engine = test_engine();
+        let preds = ProjectPredicates::init(&engine).unwrap();
+        let agent_preds = AgentPredicates::init(&engine).unwrap();
+
+        let domains = Some(vec!["github.com".to_string(), "docs.rust-lang.org".to_string()]);
+        let project = create_project(
+            &engine,
+            "arch-project",
+            "Digital architect project",
+            &[],
+            &preds,
+            &agent_preds,
+            domains.clone(),
+        )
+        .unwrap();
+
+        assert_eq!(project.allowed_domains, domains);
+
+        let restored = restore_projects(&engine, &preds, &agent_preds).unwrap();
+        assert_eq!(restored.len(), 1);
+        let restored_domains = restored[0].allowed_domains.as_ref().unwrap();
+        // Order may differ; sort before comparison.
+        let mut got = restored_domains.clone();
+        got.sort();
+        let mut want: Vec<String> = domains.unwrap();
+        want.sort();
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn none_allowed_domains_stays_none() {
+        let engine = test_engine();
+        let preds = ProjectPredicates::init(&engine).unwrap();
+        let agent_preds = AgentPredicates::init(&engine).unwrap();
+
+        let project = create_project(
+            &engine,
+            "open-project",
+            "No domain restrictions",
+            &[],
+            &preds,
+            &agent_preds,
+            None,
+        )
+        .unwrap();
+
+        assert!(project.allowed_domains.is_none());
+
+        let restored = restore_projects(&engine, &preds, &agent_preds).unwrap();
+        assert_eq!(restored.len(), 1);
+        assert!(restored[0].allowed_domains.is_none());
     }
 }

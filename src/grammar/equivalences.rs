@@ -464,6 +464,12 @@ pub static EQUIVALENCES: &[Equivalence] = &[
         canonical: "mammal",
         aliases: &["млекопитающее", "ثديي", "mammifère", "mamífero"],
     },
+    // Egyptian goddess of truth, justice, and cosmic order.
+    // Canonicalize the apostrophe-bearing form; "Maat" (ASCII-only) is a common alias.
+    Equivalence {
+        canonical: "Ma'at",
+        aliases: &["Maat", "ma'at", "maat", "Ma\u{2019}at", "Ma\u{02BC}at"],
+    },
     Equivalence {
         canonical: "military",
         aliases: &["военный", "عسكري", "militaire", "militar"],
@@ -588,5 +594,16 @@ mod tests {
     fn lookup_common_term() {
         assert_eq!(lookup_equivalence("млекопитающее"), Some("mammal"));
         assert_eq!(lookup_equivalence("mammifère"), Some("mammal"));
+    }
+
+    #[test]
+    fn lookup_maat_variants() {
+        // Canonical form resolves to itself.
+        assert_eq!(lookup_equivalence("Ma'at"), Some("Ma'at"));
+        // ASCII-only alias resolves to canonical.
+        assert_eq!(lookup_equivalence("Maat"), Some("Ma'at"));
+        // Lowercase aliases resolve correctly.
+        assert_eq!(lookup_equivalence("maat"), Some("Ma'at"));
+        assert_eq!(lookup_equivalence("ma'at"), Some("Ma'at"));
     }
 }

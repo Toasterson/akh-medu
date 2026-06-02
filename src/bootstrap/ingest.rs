@@ -99,6 +99,13 @@ pub struct IngestionConfig {
     pub grounding_rounds: usize,
     /// Override catalog directory (default: XDG data dir).
     pub catalog_dir: Option<PathBuf>,
+    /// Phase 32: optional domain hint for LLM elicitation.
+    ///
+    /// When set and the `candle-backend` feature is enabled, the ingestor
+    /// runs `KnowledgeElicitor::elicit(Properties + Relationships)` for each
+    /// curriculum concept after web-source ingestion.  Falls back gracefully
+    /// when the model file is absent.
+    pub elicit_domain: Option<String>,
 }
 
 impl Default for IngestionConfig {
@@ -112,6 +119,7 @@ impl Default for IngestionConfig {
             url_timeout_secs: 15,
             grounding_rounds: 2,
             catalog_dir: None,
+            elicit_domain: None,
         }
     }
 }
@@ -129,14 +137,22 @@ struct IngestionPredicates {
 
 impl IngestionPredicates {
     fn init(engine: &Engine) -> IngestionResult<Self> {
-        Ok(Self {
+        let preds = Self {
             ingested_from: engine.resolve_or_create_relation("ingest:ingested_from")?,
             extraction_method: engine.resolve_or_create_relation("ingest:extraction_method")?,
             cross_validation_count: engine
                 .resolve_or_create_relation("ingest:cross_validation_count")?,
             curriculum_tier: engine.resolve_or_create_relation("ingest:curriculum_tier")?,
             ingestion_status: engine.resolve_or_create_relation("ingest:ingestion_status")?,
-        })
+        };
+
+        // A concept can be ingested from multiple resources and extracted
+        // by multiple methods — register these as multi-valued.
+        let mut mv = engine.multi_valued_preds_mut();
+        mv.declare_multi_valued(preds.ingested_from);
+        mv.declare_multi_valued(preds.extraction_method);
+
+        Ok(preds)
     }
 }
 
@@ -434,6 +450,22 @@ impl CurriculumIngestor {
                     if self.ground_concept(engine, entry.concept) {
                         result.symbols_grounded += 1;
                     }
+
+                    // Phase 32 — LLM elicitation for this concept.
+                    //
+                    // Runs after web-source ingestion so that the LLM pass
+                    // complements (not duplicates) what web sources provided.
+                    // Falls back silently when the model file is absent.
+                    if let Some(ref domain) = self.config.elicit_domain.clone()
+                        && let Some(ref data_dir) = engine.config().data_dir
+                    {
+                        let _ = crate::bootstrap::knowledge_elicit::elicit_for_concept(
+                            &entry.label,
+                            domain,
+                            engine,
+                            Some(data_dir.clone()),
+                        );
+                    }
                 }
             }
 
@@ -517,7 +549,7 @@ impl CurriculumIngestor {
                 ..Default::default()
             };
 
-            match ingest_url(engine, catalog, &resource.url, url_config, None) {
+            match ingest_url(engine, catalog, &resource.url, url_config, None, self.config.url_timeout_secs) {
                 Ok(ingest_result) => {
                     outcome.triples_added += ingest_result.triple_count;
                     outcome.concepts_extracted += ingest_result.concept_count;
@@ -532,11 +564,11 @@ impl CurriculumIngestor {
                         tier,
                     );
                 }
-                Err(_) => {
+                Err(e) => {
                     // URL ingestion is best-effort — log and continue.
                     eprintln!(
-                        "  Warning: URL ingestion failed for '{}' ({})",
-                        resource.title, resource.url
+                        "  Warning: URL ingestion failed for '{}' ({}): {}",
+                        resource.title, resource.url, e
                     );
                 }
             }

@@ -73,6 +73,68 @@ pub struct AkhomedConfig {
     /// Daemon-related settings.
     #[serde(default)]
     pub daemon: DaemonSection,
+
+    /// Autonomous triple extraction settings.
+    #[serde(default)]
+    pub extraction: crate::extraction::ExtractionConfig,
+
+    /// Upstream MCP service endpoints (anima, seshat).
+    #[serde(default)]
+    pub upstreams: UpstreamsSection,
+}
+
+// ---------------------------------------------------------------------------
+// Upstream config
+// ---------------------------------------------------------------------------
+
+/// Cross-MCP upstream service configuration.
+///
+/// Example TOML:
+/// ```toml
+/// [upstreams.anima]
+/// url = "http://anima.local:4100"
+/// auth_header = "env:ANIMA_API_KEY"
+///
+/// [upstreams.seshat]
+/// url = "http://seshat.local:4200"
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UpstreamsSection {
+    /// Anima project-management MCP endpoint.
+    #[serde(default)]
+    pub anima: Option<UpstreamEndpointConfig>,
+    /// Seshat document-corpus MCP endpoint.
+    #[serde(default)]
+    pub seshat: Option<UpstreamEndpointConfig>,
+}
+
+/// Configuration for a single upstream MCP endpoint.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpstreamEndpointConfig {
+    /// Base URL of the upstream service (e.g. `http://localhost:4100`).
+    /// The MCP endpoint is expected at `{url}/mcp`.
+    pub url: String,
+
+    /// Optional HTTP Authorization header value.
+    ///
+    /// Supports two forms:
+    /// - `"Bearer <token>"` — used verbatim.
+    /// - `"env:VAR_NAME"` — reads the token from the named environment variable at call time.
+    #[serde(default)]
+    pub auth_header: Option<String>,
+}
+
+impl UpstreamEndpointConfig {
+    /// Resolve the auth header, expanding `env:VAR` references.
+    pub fn resolved_auth(&self) -> Option<String> {
+        self.auth_header.as_ref().map(|h| {
+            if let Some(var) = h.strip_prefix("env:") {
+                std::env::var(var).unwrap_or_else(|_| h.clone())
+            } else {
+                h.clone()
+            }
+        })
+    }
 }
 
 /// Daemon configuration section.
@@ -124,6 +186,9 @@ pub struct IntervalOverrides {
     pub goal_generation_secs: Option<u64>,
     pub sleep_cycle_secs: Option<u64>,
     pub trigger_evaluation_secs: Option<u64>,
+    pub knowledge_extraction_secs: Option<u64>,
+    /// Phase 32: LLM knowledge elicitation interval (default: 30 min).
+    pub knowledge_elicitation_secs: Option<u64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -173,6 +238,14 @@ impl DaemonSection {
             trigger_evaluation_interval: ov
                 .trigger_evaluation_secs
                 .map_or(defaults.trigger_evaluation_interval, Duration::from_secs),
+            knowledge_extraction_interval: ov
+                .knowledge_extraction_secs
+                .map_or(defaults.knowledge_extraction_interval, Duration::from_secs),
+            bridge_training_interval: defaults.bridge_training_interval,
+            openclaw_sync_interval: defaults.openclaw_sync_interval,
+            knowledge_elicitation_interval: ov
+                .knowledge_elicitation_secs
+                .map_or(defaults.knowledge_elicitation_interval, Duration::from_secs),
             max_cycles: self.max_cycles,
         }
     }
@@ -278,6 +351,52 @@ auto_start = []
     fn load_nonexistent_returns_defaults() {
         let config = AkhomedConfig::load(Path::new("/tmp/akh-does-not-exist.toml")).unwrap();
         assert_eq!(config.daemon.auto_start, vec!["default".to_string()]);
+    }
+
+    #[test]
+    fn upstreams_section_parses() {
+        let toml_str = r#"
+[upstreams.anima]
+url = "http://anima.local:4100"
+auth_header = "env:ANIMA_TOKEN"
+
+[upstreams.seshat]
+url = "http://seshat.local:4200"
+"#;
+        let config: AkhomedConfig = toml::from_str(toml_str).unwrap();
+        let anima = config.upstreams.anima.as_ref().unwrap();
+        assert_eq!(anima.url, "http://anima.local:4100");
+        assert_eq!(anima.auth_header.as_deref(), Some("env:ANIMA_TOKEN"));
+        let seshat = config.upstreams.seshat.as_ref().unwrap();
+        assert_eq!(seshat.url, "http://seshat.local:4200");
+        assert!(seshat.auth_header.is_none());
+    }
+
+    #[test]
+    fn upstreams_section_defaults_to_empty() {
+        let config = AkhomedConfig::default();
+        assert!(config.upstreams.anima.is_none());
+        assert!(config.upstreams.seshat.is_none());
+    }
+
+    #[test]
+    fn upstream_env_auth_expansion() {
+        unsafe { std::env::set_var("_AKH_TEST_TOKEN", "secret-token") };
+        let endpoint = UpstreamEndpointConfig {
+            url: "http://example.com".into(),
+            auth_header: Some("env:_AKH_TEST_TOKEN".into()),
+        };
+        assert_eq!(endpoint.resolved_auth().as_deref(), Some("secret-token"));
+        unsafe { std::env::remove_var("_AKH_TEST_TOKEN") };
+    }
+
+    #[test]
+    fn upstream_literal_auth_passthrough() {
+        let endpoint = UpstreamEndpointConfig {
+            url: "http://example.com".into(),
+            auth_header: Some("Bearer tok123".into()),
+        };
+        assert_eq!(endpoint.resolved_auth().as_deref(), Some("Bearer tok123"));
     }
 
     #[test]

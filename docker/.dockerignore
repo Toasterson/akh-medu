@@ -1,0 +1,14 @@
+target/
+.git/
+*.md
+docs/
+tests/
+benches/
+book/
+fonts/
+charts/
+docker/
+.github/
+.vscode/
+*.txt
+*.swp

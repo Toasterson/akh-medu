@@ -202,6 +202,7 @@ pub struct Lexicon {
     conditional_triggers: Vec<String>,
     /// Temporal words (e.g., "now", "tomorrow", "сейчас").
     temporal_words: Vec<String>,
+
 }
 
 /// Non-declarative commands recognized by the lexer.
@@ -364,9 +365,10 @@ impl Lexicon {
             "function".into(),
         ];
         let meta_phrases = vec![
-            "what can you".into(), "what do you".into(), "who are you".into(),
+            "what can you".into(), "what do you do".into(), "who are you".into(),
             "describe yourself".into(), "tell me about yourself".into(),
             "introduce yourself".into(), "what are you".into(),
+            "what are your".into(),
             "your capabilities".into(), "your abilities".into(),
             "your purpose".into(),
         ];
@@ -1295,10 +1297,14 @@ impl Lexicon {
         self.meta_capability_words.contains(&lower)
     }
 
-    /// Whether a string contains a meta-question phrase (e.g., "what can you do").
+    /// Whether a string starts with a meta-question phrase (e.g., "what can you do").
+    ///
+    /// Uses `starts_with` to avoid false positives like "what do you know about X"
+    /// matching the `"what do you do"` meta phrase.
     pub fn has_meta_phrase(&self, text: &str) -> bool {
         let lower = text.to_lowercase();
-        self.meta_phrases.iter().any(|p| lower.contains(p.as_str()))
+        let trimmed = lower.trim();
+        self.meta_phrases.iter().any(|p| trimmed.starts_with(p.as_str()))
     }
 
     // ── NLU category accessors ─────────────────────────────────────
@@ -1478,6 +1484,19 @@ impl Lexicon {
             .iter()
             .map(|w| w.to_string())
             .collect();
+
+        // Handle "do you know about X" / "do you think about X" patterns:
+        // strip the pronoun + verb + preposition prefix, keep only the real subject.
+        // "you know about the rust library miette" → "the rust library miette"
+        if content.len() >= 3 {
+            let w0 = content[0].to_lowercase();
+            let w2 = content[2].to_lowercase();
+            if (w0 == "you" || w0 == "i" || self.is_singular_anaphora(&w0))
+                && (w2 == "about" || w2 == "of")
+            {
+                content = content[3..].to_vec();
+            }
+        }
 
         // Strip trailing auxiliary if more than one content word remains.
         let mut trailing_stripped = false;
@@ -2055,4 +2074,5 @@ mod tests {
             other => panic!("expected Fuzzy, got {other:?}"),
         }
     }
+
 }

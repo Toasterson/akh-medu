@@ -15,6 +15,7 @@ use super::goal::{self, Goal, GoalStatus};
 use super::memory::{EpisodicEntry, WorkingMemory, WorkingMemoryEntry, WorkingMemoryKind};
 use super::tool::{ToolInput, ToolOutput};
 use super::tool_semantics::{encode_criteria, encode_goal_semantics};
+use super::vsa_decide::{DecideMode, VsaDecideConfig, vsa_native_decide};
 
 // ---------------------------------------------------------------------------
 // OODA cycle types
@@ -33,6 +34,9 @@ pub struct OodaCycleResult {
     pub decision: Decision,
     /// Result of the chosen action.
     pub action_result: ActionResult,
+    /// Number of contaminated is-a/child-of triples purged after this cycle.
+    /// Non-zero signals that inference or seed loading regenerated contaminants.
+    pub contaminants_purged: usize,
 }
 
 /// State gathered during the Observe phase.
@@ -70,6 +74,9 @@ pub struct Decision {
     pub reasoning: String,
     /// Which goal this serves.
     pub goal_id: SymbolId,
+    /// Predicted outcome hypervector, encoded from success criteria for the RL signal.
+    /// Compared against the actual outcome in the Act phase to compute a reward.
+    pub predicted_outcome_vec: Option<crate::vsa::HyperVec>,
 }
 
 /// Result of executing the chosen action.
@@ -83,6 +90,9 @@ pub struct ActionResult {
     pub new_wm_entries: Vec<u64>,
     /// Discrepancy between expected and actual effects (Phase 11e).
     pub discrepancy: Option<super::watch::Discrepancy>,
+    /// VSA RL signal for this Act→Observe transition.
+    /// `None` when predicted outcome encoding was unavailable or tool was vetoed.
+    pub rl_signal: Option<super::vsa_rl::RlSignal>,
 }
 
 /// How a goal progressed as a result of the action.
@@ -126,8 +136,19 @@ pub enum ImpasseKind {
 // OODA cycle implementation
 // ---------------------------------------------------------------------------
 
-/// Run one full OODA cycle on the agent.
+/// Run one full OODA cycle on the agent using the default (LLM-driven) decide mode.
 pub fn run_ooda_cycle(agent: &mut Agent) -> AgentResult<OodaCycleResult> {
+    run_ooda_cycle_with_mode(agent, DecideMode::default())
+}
+
+/// Run one full OODA cycle with the specified decide mode.
+///
+/// - [`DecideMode::LlmDriven`]: heuristic-enhanced VSA scoring (legacy default).
+/// - [`DecideMode::VsaNative`]: pure VSA similarity ranking with UCB1-MCTS fallback.
+pub fn run_ooda_cycle_with_mode(
+    agent: &mut Agent,
+    mode: DecideMode,
+) -> AgentResult<OodaCycleResult> {
     agent.cycle_count += 1;
     let cycle = agent.cycle_count;
 
@@ -138,10 +159,30 @@ pub fn run_ooda_cycle(agent: &mut Agent) -> AgentResult<OodaCycleResult> {
     let orientation = orient(agent, &observation)?;
 
     // ── Decide ──────────────────────────────────────────────────────────
-    let decision = decide(agent, &observation, &orientation, cycle)?;
+    let decision = decide(agent, &observation, &orientation, cycle, mode)?;
 
     // ── Act ─────────────────────────────────────────────────────────────
     let action_result = act(agent, &decision, cycle)?;
+
+    // ── Post-cycle contaminant guard ─────────────────────────────────────
+    // Purge any is-a/child-of triples that were (re-)generated during this
+    // cycle, e.g. via forward-chaining on stale topology or a seed pack that
+    // asserts infrastructure labels as type-hierarchy parents of agent nodes.
+    // Contaminants (CI runners, ForgejoActions, Stor01 …) re-emerge across
+    // cleanup sessions because infer_rules fires every cycle; this guard
+    // removes them unconditionally so they cannot accumulate.
+    let contaminants_purged = agent
+        .engine
+        .purge_contaminated_inferences()
+        .unwrap_or(0);
+    if contaminants_purged > 0 {
+        tracing::warn!(
+            cycle,
+            contaminants_purged,
+            "Post-cycle guard removed contaminated is-a/child-of triple(s); \
+             check inference rules and seed packs for topology leaks"
+        );
+    }
 
     Ok(OodaCycleResult {
         cycle_number: cycle,
@@ -149,6 +190,7 @@ pub fn run_ooda_cycle(agent: &mut Agent) -> AgentResult<OodaCycleResult> {
         orientation,
         decision,
         action_result,
+        contaminants_purged,
     })
 }
 
@@ -236,11 +278,24 @@ fn orient(agent: &mut Agent, observation: &Observation) -> AgentResult<Orientati
     let mut inferences = Vec::new();
 
     // For each active goal, gather adjacent KG triples.
+    // Only run inference on Entity-kind symbols — skip episodes, summaries,
+    // criteria artifacts, and working-memory noise to prevent garbage amplification.
     for goal_id in &observation.active_goals {
         let from = agent.engine.triples_from(*goal_id);
         let to = agent.engine.triples_to(*goal_id);
         relevant_knowledge.extend(from);
         relevant_knowledge.extend(to);
+
+        // Guard: only seed inference from real Entity symbols.
+        let is_entity = agent
+            .engine
+            .get_symbol_meta(*goal_id)
+            .map(|m| matches!(m.kind, crate::symbol::SymbolKind::Entity))
+            .unwrap_or(false);
+
+        if !is_entity {
+            continue;
+        }
 
         // Try inference from goal symbol.
         let query = crate::infer::InferenceQuery {
@@ -302,6 +357,7 @@ fn decide(
     observation: &Observation,
     orientation: &Orientation,
     cycle: u64,
+    mode: DecideMode,
 ) -> AgentResult<Decision> {
     // Get the top-priority active goal, scoped to the active project when available.
     let active = goal::active_goals(&agent.goals);
@@ -381,19 +437,52 @@ fn decide(
         agent.working_memory.increment_reference(*entry_id, cycle);
     }
 
-    // Rule-based strategy to select tool + build input.
-    let (tool_name, tool_input, reasoning, impasse) = select_tool(
-        top_goal,
-        observation,
-        orientation,
-        &agent.engine,
-        &agent.working_memory,
-        agent.psyche.as_ref(),
-        &agent.tool_registry,
-    );
+    // Select tool + build input via the chosen decide mode.
+    let (tool_name, tool_input, reasoning, impasse) = match mode {
+        DecideMode::VsaNative => {
+            let config = VsaDecideConfig::default();
+            let outcome = vsa_native_decide(
+                top_goal,
+                observation,
+                orientation,
+                &agent.engine,
+                &agent.working_memory,
+                agent.psyche.as_ref(),
+                &agent.tool_registry,
+                &config,
+            );
+            tracing::debug!(
+                mode = "vsa_native",
+                tool = %outcome.tool_name,
+                similarity = outcome.diagnostics.best_similarity,
+                used_mcts = outcome.diagnostics.used_mcts,
+                tools_scored = outcome.diagnostics.tools_scored,
+                "VSA-native decide",
+            );
+            (outcome.tool_name, outcome.tool_input, outcome.reasoning, outcome.impasse)
+        }
+        DecideMode::LlmDriven => select_tool(
+            top_goal,
+            observation,
+            orientation,
+            &agent.engine,
+            &agent.working_memory,
+            agent.psyche.as_ref(),
+            &agent.tool_registry,
+        ),
+    };
 
     // Store impasse on agent for goal generation to pick up.
     agent.last_impasse = impasse;
+
+    // Encode the predicted outcome hypervector from goal success criteria.
+    // This is captured now (before the tool runs) so it represents the agent's
+    // expectation and can be compared against the actual outcome in Act.
+    let predicted_outcome_vec = {
+        let ops = agent.engine.ops();
+        let im = agent.engine.item_memory();
+        super::vsa_rl::encode_predicted_outcome(top_goal, &agent.engine, ops, im).ok()
+    };
 
     // Record decision in WM.
     let dec_content =
@@ -426,6 +515,7 @@ fn decide(
         tool_input,
         reasoning,
         goal_id,
+        predicted_outcome_vec,
     })
 }
 
@@ -1341,6 +1431,7 @@ fn act(agent: &mut Agent, decision: &Decision, cycle: u64) -> AgentResult<Action
                 if let Some(ref mut p) = agent.psyche {
                     p.record_shadow_encounter();
                 }
+                agent.sync_psyche_snapshot();
 
                 let veto_output = ToolOutput {
                     result: format!(
@@ -1376,6 +1467,7 @@ fn act(agent: &mut Agent, decision: &Decision, cycle: u64) -> AgentResult<Action
                     },
                     new_wm_entries: wm_id.into_iter().collect(),
                     discrepancy: None,
+                    rl_signal: None,
                 });
             }
 
@@ -1474,11 +1566,29 @@ fn act(agent: &mut Agent, decision: &Decision, cycle: u64) -> AgentResult<Action
         }
     }
 
+    // VSA RL signal: compare predicted outcome (Decide) against actual (Act).
+    // Adjusts the (goal, agent:rl_quality, tool) triple confidence via EMA.
+    let rl_signal = decision
+        .predicted_outcome_vec
+        .as_ref()
+        .and_then(|predicted| {
+            super::vsa_rl::compute_and_apply(
+                &agent.engine,
+                decision.goal_id,
+                &decision.chosen_tool,
+                predicted,
+                &tool_output,
+                &super::vsa_rl::VsaRlConfig::default(),
+                cycle,
+            )
+        });
+
     Ok(ActionResult {
         tool_output,
         goal_progress,
         new_wm_entries: wm_id.into_iter().collect(),
         discrepancy: None,
+        rl_signal,
     })
 }
 
@@ -1897,14 +2007,10 @@ fn evaluate_goal_progress(
                 "VSA interference: tool={tool_interference:.3}, KG={kg_interference:.3} (threshold={completion_threshold:.2})",
             ),
         }
-    } else if !tool_output.symbols_involved.is_empty() {
-        GoalProgress::Advanced {
-            detail: format!(
-                "Tool produced {} symbols, weak interference: {best_interference:.3}.",
-                tool_output.symbols_involved.len()
-            ),
-        }
     } else {
+        // Below advancement threshold: treat as no-progress regardless of symbol count.
+        // Without this, any tool output with symbols resets the consecutive-empty counter
+        // and prevents the early-exit from firing on sparse graphs.
         GoalProgress::NoChange
     }
 }
@@ -1977,14 +2083,9 @@ fn evaluate_goal_progress_keyword_fallback(
                 kg_ratio * 100.0,
             ),
         }
-    } else if !tool_output.symbols_involved.is_empty() {
-        GoalProgress::Advanced {
-            detail: format!(
-                "Tool produced {} symbols, no criteria keywords matched yet.",
-                tool_output.symbols_involved.len()
-            ),
-        }
     } else {
+        // No keywords matched: treat as no-progress so the consecutive-empty
+        // early-exit fires correctly on sparse graphs.
         GoalProgress::NoChange
     }
 }

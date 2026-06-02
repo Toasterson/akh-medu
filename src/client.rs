@@ -88,7 +88,7 @@ pub fn discover_server(paths: &AkhPaths) -> Option<ServerInfo> {
 
     // Health-check the server.
     let url = format!("{}/health", info.base_url());
-    match ureq::get(&url).timeout(std::time::Duration::from_secs(2)).call() {
+    match ureq::get(&url).timeout(std::time::Duration::from_secs(10)).call() {
         Ok(resp) if resp.status() == 200 => Some(info),
         Ok(resp) => {
             tracing::warn!(
@@ -871,7 +871,7 @@ impl AkhClient {
             let result = if req.source.starts_with("http://")
                 || req.source.starts_with("https://")
             {
-                crate::library::ingest_url(engine, &mut catalog, &req.source, ingest_config, None)
+                crate::library::ingest_url(engine, &mut catalog, &req.source, ingest_config, None, 30)
                     .map_err(|e| ClientError::Engine(crate::error::AkhError::Library(e)))?
             } else {
                 let path = std::path::PathBuf::from(&req.source);

@@ -6,6 +6,15 @@ try to express options on how to handle issues for calling functions
 
 ## Documentation Maintenance
 
+**Anima is the primary store for plans and decisions** (project `019d9844-ce74-7993-a9f0-c953b8f04a4e`, "Akh-Medu"). Every plan and ADR also lives in Seshat's corpus so AI agents can search across them. The `docs/ai/plans/` and `docs/ai/decisions/` directories in this repo are **backups** — they exist for offline access and as the canonical paste source when ingesting into Anima/Seshat. Code that references a plan or ADR should cite both: the Anima work-item ID *and* the local file path.
+
+Authoring flow for new plans / ADRs:
+1. Open or pick the relevant Anima work item (or create one).
+2. Write the plan / ADR markdown.
+3. Save it under `docs/ai/plans/<YYYY-MM-DD>-phase-name.md` or `docs/ai/decisions/<NNN>-name.md`.
+4. Push to Seshat via `seshat_ingest` (or eventually `anima_import` once that MCP tool lands — Anima WI `019dc4e5-df5a`) so the corpus stays in sync.
+5. Update the Anima work item's description to reference the file path; promote `current_phase` to `triaged` or `agent-ready` as appropriate.
+
 - Keep `docs/ai/architecture.md` updated when making structural changes (new modules, protocol changes, phase transitions). Bump the "last updated" date.
 - Create a new timestamped plan in `docs/ai/plans/` before starting a new phase or significant feature.
 - Create a new timestamped ADR in `docs/ai/decisions/` when making meaningful technology or design choices. Number sequentially from the last ADR.
@@ -62,36 +71,45 @@ try to express options on how to handle issues for calling functions
 
 ## Agent Roadmap
 
-Phases 1-7 are complete (engine + agent scaffold). The phases below evolve it into a real autonomous agent.
-Detailed completion checklists for each phase live under `docs/ai/phases/`.
+Phases 1-23 + 14i + 15d + 22a + 25a-25e are complete. Detailed completion checklists live under `docs/ai/phases/`.
+Plans live under `docs/ai/plans/`, ADRs under `docs/ai/decisions/`.
 
 ### Completed Phases
 
-| Phase | Description | Details |
-|-------|-------------|---------|
-| 8a-8f | Agent Autonomy (wiring, goals, decisions, persistence, tools, planning) | [phase-8](docs/ai/phases/phase-8-agent-autonomy.md) |
-| 9 | Cyc-Inspired HOL Enhancements (microtheories, TMS, defeasibility, argumentation) | [plan](docs/ai/plans/2026-02-17-phase9-cyc-inspired.md), [gap analysis](docs/ai/decisions/001-cyc-paper-analysis.md) |
-| 10 | Generative Functions (Rust code generation, pattern learning) | [plan](docs/ai/plans/2026-02-17-phase10-code-generation.md), [research](docs/ai/decisions/002-code-generation-research.md) |
-| 11 | Autonomous Task System (drives, HTN, argumentation, metacognition) + 11i-11j lifeform extensions | [plan](docs/ai/plans/2026-02-17-phase11-autonomous-tasks.md), [research](docs/ai/decisions/003-autonomous-tasks-research.md) |
-| 12a-12g | Interaction (channels, grounded dialogue, constraints, social KG, oxifed, explanations, multi-agent) | [phase-12](docs/ai/phases/phase-12-interaction.md), [plan](docs/ai/plans/2026-02-17-phase12-interaction.md) |
-| 13a-13g | Personal Assistant (email, spam, triage, extraction, PIM, calendar, preferences) | [phase-13](docs/ai/phases/phase-13-personal-assistant.md), [plan](docs/ai/plans/2026-02-17-phase13-personal-assistant.md) |
-| 14a-14h | Identity, domain expansion, prerequisite discovery, ZPD classification, resource discovery, curriculum ingestion, competence assessment, bootstrap orchestrator | [phase-14](docs/ai/phases/phase-14-identity.md), [plan](docs/ai/plans/2026-02-17-phase14-bootstrapping.md), [NLU plan](docs/ai/plans/2026-02-24-phase14-nlu-extension.md) |
-| 15a | Causal World Model (schemas, preconditions, effects, VSA encoding) | [phase-15](docs/ai/phases/phase-15-causal.md), [plan](docs/ai/plans/2026-02-22-phase15-causal-world-model.md) |
+- **1-7**: Engine + agent scaffold
+- **8a-8f**: Agent Autonomy — [phase](docs/ai/phases/phase-8-agent-autonomy.md), [plan](docs/ai/plans/2026-02-17-phase8-agent-autonomy.md)
+- **9**: Cyc-Inspired HOL — [plan](docs/ai/plans/2026-02-17-phase9-cyc-inspired.md), [ADR 001](docs/ai/decisions/001-cyc-paper-analysis.md)
+- **10**: Generative Functions — [plan](docs/ai/plans/2026-02-17-phase10-code-generation.md), [ADR 002](docs/ai/decisions/002-code-generation-research.md)
+- **11 + 11i-11j**: Autonomous Tasks + lifeform extensions — [plan](docs/ai/plans/2026-02-17-phase11-autonomous-tasks.md), [ADR 003](docs/ai/decisions/003-autonomous-tasks-research.md)
+- **12a-12g**: Interaction — [phase](docs/ai/phases/phase-12-interaction.md), [plan](docs/ai/plans/2026-02-17-phase12-interaction.md)
+- **13a-13g**: Personal Assistant — [phase](docs/ai/phases/phase-13-personal-assistant.md), [plan](docs/ai/plans/2026-02-17-phase13-personal-assistant.md)
+- **14a-14m**: Identity, bootstrapping, NLU (all 4 tiers) — [phase](docs/ai/phases/phase-14-identity.md), [bootstrap plan](docs/ai/plans/2026-02-17-phase14-bootstrapping.md), [NLU plan](docs/ai/plans/2026-02-24-phase14-nlu-extension.md), [ADR 022](docs/ai/decisions/022-nlu-architecture.md)
+- **15a-15c**: Causal World Model + Event Calculus + Counterfactuals — [phase](docs/ai/phases/phase-15-causal.md), [plan](docs/ai/plans/2026-02-22-phase15-causal-world-model.md), [ADR 032](docs/ai/decisions/032-event-calculus-engine.md), [ADR 033](docs/ai/decisions/033-counterfactual-reasoning.md)
+- **16a-16c**: MCTS Planning + TD Values + Plan Monitoring — [plan](docs/ai/plans/2026-02-22-phase16-predictive-planning.md), [ADR 034](docs/ai/decisions/034-mcts-planning.md)
+- **17**: Dempster-Shafer Evidence Theory — [plan](docs/ai/plans/2026-02-22-phase17-evidence-theory.md), [ADR 035](docs/ai/decisions/035-evidence-theory.md)
+- **18a-18c**: Source Reliability + ACH + Credibility — [plan](docs/ai/plans/2026-02-22-phase18-source-reliability.md), [ADR 036](docs/ai/decisions/036-source-reliability.md)
+- **25a-25e**: People & Contacts — [phase](docs/ai/phases/phase-25-people-contacts.md), [ADR 028](docs/ai/decisions/028-people-contacts-architecture.md)
+- **32**: Knowledge Extraction (T5 Knowledge model for bootstrap elicitation, multi-pass, hallucination detection) — [plan](docs/ai/plans/2026-03-26-phase32-llm-knowledge-extraction.md), [ADR 042](docs/ai/decisions/042-llm-knowledge-extraction.md)
 
 ### Upcoming Phases
 
-| Phase | Description | Plan | Research |
-|-------|-------------|------|----------|
-| 14i | Community recipe sharing | [plan](docs/ai/plans/2026-02-17-phase14-bootstrapping.md) | [research](docs/ai/decisions/005-bootstrapping-research.md) |
-| 14j-14m | NLU Extension (rule parser, micro-ML NER, small LLM translator, VSA parse ranker) | [plan](docs/ai/plans/2026-02-24-phase14-nlu-extension.md) | [ADR](docs/ai/decisions/022-nlu-architecture.md) |
-| Release Alpha | Kubernetes-deployed autonomous agent (Docker, Helm, Prometheus, continuous learning) | [plan](docs/ai/plans/2026-02-23-release-alpha.md) | — |
-| 15b-15d | Event calculus, counterfactual reasoning, prediction tracking, temporal experience | [plan](docs/ai/plans/2026-02-22-phase15-causal-world-model.md) | [research](docs/ai/decisions/020-predictive-planning-epistemic-research.md) |
-| 16 | Predictive Multi-Step Planning (MCTS + TD Learning) | [plan](docs/ai/plans/2026-02-22-phase16-predictive-planning.md) | [research](docs/ai/decisions/020-predictive-planning-epistemic-research.md) |
-| 17 | Dempster-Shafer Evidence Theory & Belief Intervals | [plan](docs/ai/plans/2026-02-22-phase17-evidence-theory.md) | [research](docs/ai/decisions/020-predictive-planning-epistemic-research.md) |
-| 18 | Source Reliability, ACH & Credibility Assessment | [plan](docs/ai/plans/2026-02-22-phase18-source-reliability.md) | [research](docs/ai/decisions/020-predictive-planning-epistemic-research.md) |
-| 19 | Epistemic Logic & Theory of Mind | [plan](docs/ai/plans/2026-02-22-phase19-epistemic-reasoning.md) | [research](docs/ai/decisions/020-predictive-planning-epistemic-research.md) |
-| 20 | Active Inference OODA Enhancement + Proprioception | [plan](docs/ai/plans/2026-02-22-phase20-active-inference.md) | [research](docs/ai/decisions/020-predictive-planning-epistemic-research.md) |
-| 21 | Game-Theoretic Social Reasoning | [plan](docs/ai/plans/2026-02-22-phase21-game-theoretic-reasoning.md) | [research](docs/ai/decisions/020-predictive-planning-epistemic-research.md) |
-| 22 | Akhipedia: Internal Knowledge Wiki | [plan](docs/ai/plans/2026-02-23-phase22-akhipedia.md) | [ADR](docs/ai/decisions/021-akhipedia-architecture.md) |
-| 23 | Affective System (emotional valence, mood modulation, felt urgency) | [plan](docs/ai/plans/2026-02-24-phase23-affective-system.md) | — |
-| 24 | Sensory Grounding (image processing, audio, embodied perception) | [plan](docs/ai/plans/2026-02-24-phase24-sensory-grounding.md) | — |
+See individual plan docs for details. Phases are ordered by dependency, not priority.
+
+- **Release Alpha**: K8s deployment — [plan](docs/ai/plans/2026-02-23-release-alpha.md)
+- **19**: Epistemic Logic & Theory of Mind — [plan](docs/ai/plans/2026-02-22-phase19-epistemic-reasoning.md)
+- **20**: Active Inference — [plan](docs/ai/plans/2026-02-22-phase20-active-inference.md)
+- **21**: Game-Theoretic Social Reasoning — [plan](docs/ai/plans/2026-02-22-phase21-game-theory.md)
+- **22**: Akhipedia — [plan](docs/ai/plans/2026-02-23-phase22-akhipedia.md), [ADR 021](docs/ai/decisions/021-akhipedia-architecture.md)
+- **23**: Affective System — [plan](docs/ai/plans/2026-02-24-phase23-affective-system.md)
+- **24**: Sensory Grounding — [plan](docs/ai/plans/2026-02-24-phase24-sensory-grounding.md)
+- **26**: LLM-VSA Deep Integration (Candle migration, Neural→VSA bridge, PolarQuant, NEON SIMD) — [plan](docs/ai/plans/2026-03-26-phase26-llm-vsa-deep-integration.md), [ADR 037](docs/ai/decisions/037-llm-vsa-deep-integration.md)
+- **27**: Live KG→LLM Training (Burn framework, LoRA fine-tuning, depends on Phase 26) — preliminary plan in Phase 26 doc
+- **28**: `n akh` Semantic Router (dynamic model routing, LinUCB bandit, cost-aware) — [plan](docs/ai/plans/2026-03-26-phase28-semantic-router.md), [ADR 038](docs/ai/decisions/038-semantic-router.md)
+- **29**: Capability Exposure (microtheories, skillpacks, psyche, argumentation, reasoning traces, hypotheses, causal explorer, evidence, source trust) — [plan](docs/ai/plans/2026-03-26-phase29-capability-exposure.md), [ADR 039](docs/ai/decisions/039-capability-exposure.md)
+- **30**: Procedural Skills (actions.json + plans.json, LLM-assisted authoring, rule refinement, quality metrics) — [plan](docs/ai/plans/2026-03-26-phase30-procedural-skills.md), [ADR 040](docs/ai/decisions/040-procedural-skills.md)
+- **31**: Skill Intelligence (auto-discovery, dependency graph, neural embeddings, skill-aware routing, dynamic synthesis, sharing protocol, cross-skill inference, curriculum) — [plan](docs/ai/plans/2026-03-26-phase31-skill-intelligence.md), [ADR 041](docs/ai/decisions/041-skill-intelligence.md)
+- **33**: Grounded Verbalization (grammar aggregation, T5/mT5 data-to-text NLG, NeuroLogic constrained decoding, T5 NLU replaces Qwen) — [plan](docs/ai/plans/2026-03-26-phase33-grounded-verbalization.md), [ADR 043](docs/ai/decisions/043-grounded-verbalization.md)
+- **34**: Communicative Intelligence (response strategy selection, psyche style transform, archetype framing, conversation trajectory, shadow integration) — [plan](docs/ai/plans/2026-03-26-phase34-communicative-intelligence.md), [ADR 044](docs/ai/decisions/044-communicative-intelligence.md)
+- **35**: T5 Training Infrastructure (offline training for NLU + NLG + Knowledge models, Wikidata + ConceptNet + WebNLG data, GGUF export) — [plan](docs/ai/plans/2026-03-27-phase35-t5-training-infrastructure.md), [ADR 045](docs/ai/decisions/045-t5-training-infrastructure.md)
+- **36**: Delegation & External Scheduling (DelegationManager, local Claude Code subprocess, remote triggers, peer coordination, cost control, bidirectional MCP bridge) — [plan](docs/ai/plans/2026-03-28-phase36-delegation-external-scheduling.md), [ADR 046](docs/ai/decisions/046-delegation-external-scheduling.md)
+- **37**: Seshat's Archive (shared corpus library, pgvector RAG, MCP service, wish→microtheory synthesis, Candle/T5 LLM, multi-akh sharing) — [plan](docs/ai/plans/2026-04-09-phase37-seshat-archive.md), [ADR 047](docs/ai/decisions/047-seshat-archive.md)

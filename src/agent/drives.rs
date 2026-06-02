@@ -165,7 +165,7 @@ impl DriveSystem {
         // Curiosity: directed (Phase 11j) if config provided, else KG stagnation.
         let info = engine.info();
         let curiosity_strength = if let Some(config) = curiosity_config {
-            match super::curiosity::compute_directed_curiosity(engine, config) {
+            match super::curiosity::compute_directed_curiosity(engine, config, goal_symbols) {
                 Ok(report) => {
                     // Use directed curiosity's strongest_drive, but also incorporate
                     // KG stagnation as a fallback signal.

@@ -1,13 +1,15 @@
-//! LLM Translator — NLU Tier 3.
+//! LLM Translator — dual boundary translator.
 //!
-//! Uses a small local LLM (Qwen2.5-1.5B-Instruct via `llama-cpp-2`) to
-//! translate natural language into structured [`AbsTree`] JSON.
+//! Uses a small local LLM (Qwen2.5-1.5B-Instruct via `llama-cpp-2`) for:
 //!
-//! The LLM output is constrained via a GBNF grammar so it can only produce
-//! valid AbsTree JSON matching serde's externally-tagged enum representation.
+//! 1. **Input boundary** (NLU Tier 3): natural language → [`AbsTree`] JSON
+//! 2. **Output boundary**: symbolic facts + persona context → natural prose
+//!
+//! The LLM is a boundary translator — not a reasoning engine. All state
+//! management and reasoning stays in VSA/KG space.
 //!
 //! Graceful degradation: if the model file is absent, `try_load()` returns
-//! `None` and the pipeline silently skips this tier.
+//! `None` and both translation directions are skipped.
 
 use std::path::{Path, PathBuf};
 
@@ -17,7 +19,7 @@ use super::error::{NluError, NluResult};
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
-/// The result of an LLM translation.
+/// The result of an LLM translation (input boundary).
 #[derive(Debug, Clone)]
 pub struct LlmTranslation {
     /// The raw JSON string produced by the LLM.
@@ -28,14 +30,23 @@ pub struct LlmTranslation {
     pub tokens_generated: u32,
 }
 
+/// Stop condition for the generation loop.
+enum StopCondition {
+    /// Stop when a top-level JSON object closes (brace depth tracking).
+    JsonObject,
+    /// Stop on EOS or double-newline (for free-form text generation).
+    Text,
+}
+
 // ── GBNF grammar ───────────────────────────────────────────────────────────
 
 /// The GBNF grammar constraining LLM output to valid AbsTree JSON.
+/// Kept for reference and future use if llama.cpp fixes abort behavior.
 pub const ABSTREE_GBNF: &str = include_str!("abstree.gbnf");
 
 // ── LlmTranslator ─────────────────────────────────────────────────────────
 
-/// The LLM-based translator for natural language → AbsTree.
+/// Dual boundary translator: NL ↔ Symbols via local LLM.
 pub struct LlmTranslator {
     /// The loaded LLM model.
     #[cfg(feature = "nlu-llm")]
@@ -118,20 +129,89 @@ impl LlmTranslator {
         Self::load(&model_path).ok()
     }
 
-    /// Translate natural language input into an AbsTree.
+    // ── Input boundary: NL → AbsTree ─────────────────────────────────
+
+    /// Translate natural language input into an AbsTree (input boundary).
     ///
-    /// Generates constrained JSON via GBNF grammar, then deserializes.
+    /// Uses greedy sampling with brace-depth tracking to extract a JSON object.
     #[cfg(feature = "nlu-llm")]
     pub fn translate(&self, input: &str) -> NluResult<LlmTranslation> {
+        let prompt = build_prompt(input);
+        let (raw, n_generated) = self.run_generation(&prompt, self.max_tokens, StopCondition::JsonObject)?;
+
+        // Extract the JSON object (trim anything before first '{' or after last '}')
+        let raw = raw.trim();
+        let json = if let Some(start) = raw.find('{') {
+            if let Some(end) = raw.rfind('}') {
+                &raw[start..=end]
+            } else {
+                raw
+            }
+        } else {
+            raw
+        };
+
+        tracing::debug!(json_len = json.len(), raw = %json, "attempting AbsTree JSON parse");
+
+        let tree = parse_abstree_json(json)?;
+
+        Ok(LlmTranslation {
+            json: json.to_string(),
+            tree,
+            tokens_generated: n_generated,
+        })
+    }
+
+    /// Non-feature-gated stub.
+    #[cfg(not(feature = "nlu-llm"))]
+    pub fn translate(&self, _input: &str) -> NluResult<LlmTranslation> {
+        Err(NluError::LlmGenerationFailed {
+            reason: "nlu-llm feature not enabled".to_string(),
+        })
+    }
+
+    // ── Output boundary: Symbols → NL ────────────────────────────────
+
+    /// Generate natural language from a prompt (output boundary).
+    ///
+    /// Stops on EOS or double-newline. Returns the generated text.
+    #[cfg(feature = "nlu-llm")]
+    pub fn generate(&self, prompt: &str, max_tokens: u32) -> NluResult<String> {
+        let (raw, n_generated) = self.run_generation(prompt, max_tokens, StopCondition::Text)?;
+        let text = Self::clean_generated_text(&raw);
+        tracing::debug!(tokens = n_generated, len = text.len(), "LLM text generation complete");
+        Ok(text)
+    }
+
+    /// Non-feature-gated stub.
+    #[cfg(not(feature = "nlu-llm"))]
+    pub fn generate(&self, _prompt: &str, _max_tokens: u32) -> NluResult<String> {
+        Err(NluError::LlmGenerationFailed {
+            reason: "nlu-llm feature not enabled".to_string(),
+        })
+    }
+
+    // ── Shared generation core ───────────────────────────────────────
+
+    /// Run the LLM generation loop with the given prompt and stop condition.
+    ///
+    /// Returns `(generated_text, tokens_generated)`.
+    #[cfg(feature = "nlu-llm")]
+    fn run_generation(
+        &self,
+        prompt: &str,
+        max_tokens: u32,
+        stop: StopCondition,
+    ) -> NluResult<(String, u32)> {
         use llama_cpp_2::context::params::LlamaContextParams;
         use llama_cpp_2::llama_batch::LlamaBatch;
         use llama_cpp_2::model::AddBos;
-        use llama_cpp_2::token::LlamaToken;
+        use llama_cpp_2::sampling::LlamaSampler;
 
-        let prompt = build_prompt(input);
-
-        // Create context for generation
-        let ctx_params = LlamaContextParams::default();
+        let ctx_params = LlamaContextParams::default()
+            .with_n_ctx(std::num::NonZeroU32::new(2048))
+            .with_n_batch(2048)
+            .with_n_ubatch(512);
         let mut ctx = self
             .model
             .new_context(&self.backend, ctx_params)
@@ -139,16 +219,27 @@ impl LlmTranslator {
                 reason: format!("Context creation: {e}"),
             })?;
 
-        // Tokenize the prompt
+        let mut sampler = LlamaSampler::chain_simple([LlamaSampler::greedy()]);
+
         let tokens = self
             .model
-            .str_to_token(&prompt, AddBos::Always)
+            .str_to_token(prompt, AddBos::Always)
             .map_err(|e| NluError::LlmGenerationFailed {
                 reason: format!("Tokenization: {e}"),
             })?;
 
-        // Feed prompt tokens
-        let mut batch = LlamaBatch::new(tokens.len().max(512), 1);
+        tracing::debug!(prompt_tokens = tokens.len(), "LLM prompt tokenized");
+
+        if tokens.len() > 1800 {
+            return Err(NluError::LlmGenerationFailed {
+                reason: format!(
+                    "Prompt too long ({} tokens, max 1800).",
+                    tokens.len()
+                ),
+            });
+        }
+
+        let mut batch = LlamaBatch::new(tokens.len().max(2048), 1);
         for (i, &token) in tokens.iter().enumerate() {
             let is_last = i == tokens.len() - 1;
             batch
@@ -163,36 +254,84 @@ impl LlmTranslator {
                 reason: format!("Decode: {e}"),
             })?;
 
-        // Generate tokens with sampling
+        // Generation loop with stop-condition dispatch
         let mut output_tokens = Vec::new();
         let mut n_generated = 0u32;
+        let mut decoder = encoding_rs::UTF_8.new_decoder();
 
-        // Simple greedy sampling loop
-        while n_generated < self.max_tokens {
-            let logits = ctx.get_logits_ith((batch.n_tokens() - 1) as i32);
+        // State for JsonObject stop condition
+        let mut brace_depth: i32 = 0;
+        let mut saw_open_brace = false;
 
-            // Greedy: pick highest logit
-            let mut best_token = LlamaToken(0);
-            let mut best_logit = f32::NEG_INFINITY;
-            for (i, &logit) in logits.iter().enumerate() {
-                if logit > best_logit {
-                    best_logit = logit;
-                    best_token = LlamaToken(i as i32);
-                }
-            }
+        // State for Text stop condition
+        let mut consecutive_newlines = 0u32;
+        let mut consecutive_hashes = 0u32;
+        let mut generated_text = String::new();
 
-            // Check for EOS
-            if best_token == self.model.token_eos() {
+        while n_generated < max_tokens {
+            let token = sampler.sample(&ctx, (batch.n_tokens() - 1) as i32);
+
+            if token == self.model.token_eos() {
                 break;
             }
 
-            output_tokens.push(best_token);
+            sampler.accept(token);
+            output_tokens.push(token);
             n_generated += 1;
 
-            // Feed the new token for next iteration
+            // Check stop condition
+            if let Ok(piece) = self.model.token_to_piece(token, &mut decoder, false, None) {
+                match stop {
+                    StopCondition::JsonObject => {
+                        for ch in piece.chars() {
+                            if ch == '{' {
+                                brace_depth += 1;
+                                saw_open_brace = true;
+                            } else if ch == '}' {
+                                brace_depth -= 1;
+                            }
+                        }
+                        if saw_open_brace && brace_depth <= 0 {
+                            break;
+                        }
+                    }
+                    StopCondition::Text => {
+                        generated_text.push_str(&piece);
+                        // Stop on <|im_end|> (Qwen chat template end-of-turn)
+                        if generated_text.contains("<|im_end|>") {
+                            break;
+                        }
+                        for ch in piece.chars() {
+                            if ch == '\n' {
+                                consecutive_newlines += 1;
+                            } else {
+                                consecutive_newlines = 0;
+                            }
+                            if ch == '#' {
+                                consecutive_hashes += 1;
+                            } else if !ch.is_whitespace() {
+                                consecutive_hashes = 0;
+                            }
+                        }
+                        // Stop on double-newline, hashtag spam, or repetition
+                        if consecutive_newlines >= 2
+                            || consecutive_hashes >= 2
+                            || Self::detect_repetition(&generated_text)
+                        {
+                            break;
+                        }
+                    }
+                }
+            }
+
             batch.clear();
             batch
-                .add(best_token, (tokens.len() + n_generated as usize - 1) as i32, &[0], true)
+                .add(
+                    token,
+                    (tokens.len() + n_generated as usize - 1) as i32,
+                    &[0],
+                    true,
+                )
                 .map_err(|_| NluError::LlmGenerationFailed {
                     reason: "Batch add failed".to_string(),
                 })?;
@@ -203,37 +342,88 @@ impl LlmTranslator {
                 })?;
         }
 
-        // Detokenize output
-        let mut decoder = encoding_rs::UTF_8.new_decoder();
-        let json: String = output_tokens
+        tracing::debug!(tokens_generated = n_generated, "LLM generation complete");
+
+        let mut detok_decoder = encoding_rs::UTF_8.new_decoder();
+        let text: String = output_tokens
             .iter()
-            .filter_map(|t| self.model.token_to_piece(*t, &mut decoder, false, None).ok())
+            .filter_map(|t| {
+                self.model
+                    .token_to_piece(*t, &mut detok_decoder, false, None)
+                    .ok()
+            })
             .collect();
 
-        let tree = parse_abstree_json(&json)?;
-
-        Ok(LlmTranslation {
-            json,
-            tree,
-            tokens_generated: n_generated,
-        })
-    }
-
-    /// Non-feature-gated stub.
-    #[cfg(not(feature = "nlu-llm"))]
-    pub fn translate(&self, _input: &str) -> NluResult<LlmTranslation> {
-        Err(NluError::LlmGenerationFailed {
-            reason: "nlu-llm feature not enabled".to_string(),
-        })
+        Ok((text, n_generated))
     }
 
     /// Access the max_tokens setting.
     pub fn max_tokens(&self) -> u32 {
         self.max_tokens
     }
+
+    /// Clean up generated text: strip chat template tokens, hashtags, numbered prefixes, and trailing noise.
+    fn clean_generated_text(raw: &str) -> String {
+        // Strip Qwen chat template tokens
+        let mut text = raw
+            .replace("<|im_end|>", "")
+            .replace("<|im_start|>", "")
+            .trim()
+            .to_string();
+
+        // Strip everything from the first '#' onward (hashtag spam)
+        if let Some(hash_pos) = text.find('#') {
+            text.truncate(hash_pos);
+            text = text.trim_end().to_string();
+        }
+
+        // Strip numbered list prefixes: "1. " "2. " etc.
+        let lines: Vec<&str> = text.lines().collect();
+        if lines.len() > 1 && lines.iter().all(|l| {
+            let t = l.trim();
+            t.is_empty() || (t.len() > 2 && t.as_bytes()[0].is_ascii_digit() && t.as_bytes()[1] == b'.')
+        }) {
+            // All lines are numbered — strip the numbering and join
+            text = lines
+                .iter()
+                .filter_map(|l| {
+                    let t = l.trim();
+                    if t.len() > 3 && t.as_bytes()[0].is_ascii_digit() && t.as_bytes()[1] == b'.' {
+                        Some(t[2..].trim())
+                    } else if t.is_empty() {
+                        None
+                    } else {
+                        Some(t)
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+        }
+
+        // Trim trailing incomplete sentences (no period at end)
+        if !text.is_empty() && !text.ends_with('.') && !text.ends_with('!') && !text.ends_with('?') {
+            if let Some(last_period) = text.rfind(|c: char| c == '.' || c == '!' || c == '?') {
+                text.truncate(last_period + 1);
+            }
+        }
+
+        text.trim().to_string()
+    }
+
+    /// Detect degenerate repetition in generated text.
+    ///
+    /// Returns `true` if the last 40 chars appear earlier in the text,
+    /// indicating the model is stuck in a loop.
+    fn detect_repetition(text: &str) -> bool {
+        if text.len() < 80 {
+            return false;
+        }
+        let tail = &text[text.len() - 40..];
+        text[..text.len() - 40].contains(tail)
+    }
 }
 
-// ── Prompt construction ────────────────────────────────────────────────────
+// ── Input boundary prompt ──────────────────────────────────────────────────
 
 /// Build the system + few-shot prompt for NL → AbsTree translation.
 pub fn build_prompt(input: &str) -> String {
@@ -279,6 +469,42 @@ Input: "{input}"
 Output: "#
     )
 }
+
+// ── Output boundary prompt — dialogue acts only ───────────────────────────
+//
+// The LLM is NOT used for knowledge responses (the narrative grammar handles
+// that). Only short dialogue acts (greeting, farewell) use LLM generation.
+
+/// Build a short prompt for dialogue acts (greeting, farewell, etc.).
+///
+/// Uses Qwen2.5-Instruct chat template format.
+pub fn build_dialogue_prompt(
+    act: &str,
+    persona_name: &str,
+    traits: &[String],
+    context: Option<&str>,
+) -> String {
+    let traits_str = if traits.is_empty() {
+        "knowledgeable".to_string()
+    } else {
+        traits.join(", ")
+    };
+
+    let context_line = context
+        .map(|c| format!(" We were discussing {c}."))
+        .unwrap_or_default();
+
+    format!(
+        "<|im_start|>system\n\
+         You are {persona_name}, a knowledge engine that is {traits_str}.\n\
+         Respond with exactly one sentence. No hashtags. Always introduce yourself as {persona_name}.<|im_end|>\n\
+         <|im_start|>user\n\
+         Generate a {act} response.{context_line}<|im_end|>\n\
+         <|im_start|>assistant\n"
+    )
+}
+
+// ── JSON parsing ───────────────────────────────────────────────────────────
 
 /// Parse a JSON string into an AbsTree.
 ///
@@ -332,6 +558,14 @@ mod tests {
         assert!(prompt.contains("Quantified"));
         assert!(prompt.contains("Conditional"));
         assert!(prompt.contains("Modal"));
+    }
+
+    #[test]
+    fn dialogue_prompt_contains_act() {
+        let prompt = build_dialogue_prompt("greeting", "Akh", &["warm".into()], None);
+        assert!(prompt.contains("greeting"));
+        assert!(prompt.contains("Akh"));
+        assert!(prompt.contains("warm"));
     }
 
     // ── JSON → AbsTree parsing ─────────────────────────────────────────
@@ -560,7 +794,6 @@ mod tests {
 
     #[test]
     fn parse_rejects_valid_json_wrong_shape() {
-        // Valid JSON but not an AbsTree variant
         let err = parse_abstree_json(r#"{"NotAVariant": 42}"#).unwrap_err();
         assert!(matches!(err, NluError::LlmGenerationFailed { .. }));
     }

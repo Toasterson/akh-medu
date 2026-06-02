@@ -77,7 +77,7 @@ pub struct AgentRunRequest {
 }
 
 fn default_max_cycles() -> usize {
-    10
+    50
 }
 
 /// Response for `POST /workspaces/{ws}/agent/run`.
@@ -447,6 +447,22 @@ pub struct CompartmentInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompartmentListResponse {
     pub compartments: Vec<CompartmentInfo>,
+}
+
+/// Response for compartment lifecycle actions (load, unload, activate, deactivate).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompartmentActionResponse {
+    pub id: String,
+    /// What action was performed: "discovered", "loaded", "unloaded", "activated", "deactivated".
+    pub action: String,
+    pub success: bool,
+}
+
+/// Response for `POST /workspaces/{ws}/compartments/discover`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompartmentDiscoverResponse {
+    pub discovered: usize,
+    pub total: usize,
 }
 
 // ── Awaken ────────────────────────────────────────────────────────────────

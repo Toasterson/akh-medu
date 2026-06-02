@@ -1,0 +1,29 @@
+{
+  "description": "Akh-medu knowledge graph session hooks for context loading and consolidation",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/session-context.sh",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/session-stop.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

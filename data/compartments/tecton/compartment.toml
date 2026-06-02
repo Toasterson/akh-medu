@@ -1,0 +1,6 @@
+id = "tecton"
+name = "Tecton Workspace"
+kind = "Workspace"
+description = "Root compartment for the Tecton Ennead workspace — scopes all Tecton-owned knowledge, agents, and projects."
+scope = "Private"
+tags = ["workspace", "ennead", "architect", "multi-agent"]

@@ -18,7 +18,6 @@ use super::agent::AgentPredicates;
 use super::drives::{DriveKind, DriveSystem};
 use super::error::AgentResult;
 use super::goal::{self, Goal, GoalSource, GoalStatus};
-use super::memory::WorkingMemory;
 use super::ooda::DecisionImpasse;
 use super::reflect::ReflectionResult;
 use super::watch::{WatchAction, WatchFiring};
@@ -109,7 +108,6 @@ pub struct GoalGenerationResult {
 pub fn generate_goals(
     engine: &Engine,
     goals: &[Goal],
-    _working_memory: &WorkingMemory,
     drives: &DriveSystem,
     config: &GoalGenerationConfig,
     _predicates: &AgentPredicates,
@@ -254,6 +252,11 @@ fn proposals_from_gaps(engine: &Engine, goal_symbols: &[SymbolId]) -> Vec<GoalPr
         .gaps
         .into_iter()
         .filter(|gap| gap.severity > 0.3) // Only significant gaps.
+        .filter(|gap| {
+            // Quality gate: reject junk entities before creating goals.
+            let label = engine.resolve_label(gap.entity);
+            is_goal_worthy_label(&label)
+        })
         .take(5) // Don't flood with gap proposals.
         .map(|gap| {
             let entity_label = engine.resolve_label(gap.entity);
@@ -295,6 +298,56 @@ fn proposals_from_gaps(engine: &Engine, goal_symbols: &[SymbolId]) -> Vec<GoalPr
             }
         })
         .collect()
+}
+
+/// Check whether an entity label is worth creating a goal for.
+///
+/// Rejects junk labels from ingestion noise: Unicode control characters,
+/// Wikipedia/Wikidata meta-pages, numeric-only labels, extremely short or
+/// long labels, and common ingestion artifacts.
+fn is_goal_worthy_label(label: &str) -> bool {
+    let trimmed = label.trim();
+
+    // Too short or too long
+    if trimmed.len() < 3 || trimmed.len() > 120 {
+        return false;
+    }
+
+    // Pure numeric or Wikidata ID (wd:Q12345)
+    if trimmed.starts_with("wd:") || trimmed.chars().all(|c| c.is_ascii_digit()) {
+        return false;
+    }
+
+    // Wikipedia/Wikidata meta-pages and agent-internal artifacts.
+    let lower = trimmed.to_lowercase();
+    let junk_prefixes = [
+        "user:", "wikipedia:", "category talk:", "talk:", "file:",
+        "template:", "portal:", "module:", "draft:", "mediawiki:",
+        "sym:", "para:", "episode:", "doc:",
+        // Agent-internal entity kinds (must match is_noise_entity in rule_engine.rs).
+        "tool:", "goal:", "criteria:", "expand:", "desc:", "rate:", "wm:",
+    ];
+    if junk_prefixes.iter().any(|p| lower.starts_with(p)) {
+        return false;
+    }
+
+    // Common ingestion artifacts
+    let junk_patterns = [
+        "list of", "index of", "timeline of", "articles for creation",
+        "categories for discussion", "redirects to", "sandbox",
+    ];
+    if junk_patterns.iter().any(|p| lower.contains(p)) {
+        return false;
+    }
+
+    // Mostly non-alphanumeric (Unicode junk, combining marks, control chars)
+    let alpha_count = trimmed.chars().filter(|c| c.is_alphanumeric()).count();
+    let total = trimmed.chars().count();
+    if total > 0 && (alpha_count as f64 / total as f64) < 0.5 {
+        return false;
+    }
+
+    true
 }
 
 /// Contradiction provenance → goal proposals.
@@ -652,7 +705,169 @@ pub fn provenance_from_source(source: &GoalSource) -> (String, f32) {
         GoalSource::ImpasseDetected { .. } => ("impasse".to_string(), 0.6),
         GoalSource::ReflectionInsight { .. } => ("reflection".to_string(), 0.5),
         GoalSource::WorldChange { .. } => ("world_change".to_string(), 0.7),
+        GoalSource::VsaCompetenceGap { coverage_score, .. } => {
+            ("vsa_competence_gap".to_string(), 1.0 - coverage_score)
+        }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Post-consolidation VSA competence gap detection
+// ---------------------------------------------------------------------------
+
+/// Maximum goals generated per consolidation cycle (acceptance criterion).
+pub const MAX_COMPETENCE_GAP_GOALS: usize = 10;
+
+/// Competence score threshold below which a gap triggers an investigation goal.
+pub const COMPETENCE_GAP_THRESHOLD: f32 = 0.7;
+
+/// Priority assigned to auto-generated competence gap goals.
+pub const COMPETENCE_GAP_PRIORITY: u8 = 64;
+
+/// Generate investigation goals from VSA competence gap detection.
+///
+/// Called after `consolidate()`. Uses gap analysis to identify under-connected
+/// knowledge areas and proposes "Learn more about X" goals at priority 64 with
+/// `GoalStatus::Proposed`. Goals are deduplicated against all existing goals.
+///
+/// Returns at most [`MAX_COMPETENCE_GAP_GOALS`] proposals.
+pub fn generate_competence_gap_goals(
+    engine: &Engine,
+    existing_goals: &[Goal],
+    config: &GoalGenerationConfig,
+) -> Vec<GoalProposal> {
+    proposals_from_competence_gaps(engine, existing_goals, config)
+}
+
+/// VSA competence gap detection → investigation goal proposals.
+///
+/// 1. Derives scope symbols from active goals (falls back to sampled entities).
+/// 2. Runs gap analysis; returns empty if overall coverage ≥ 0.70.
+/// 3. Maps each gap to a Bloom tier and creates a deduplicated proposal.
+fn proposals_from_competence_gaps(
+    engine: &Engine,
+    existing_goals: &[Goal],
+    config: &GoalGenerationConfig,
+) -> Vec<GoalProposal> {
+    const FALLBACK_ENTITY_LIMIT: usize = 50;
+
+    // Scope: active goal symbols, or a sample of KG entities when no goals exist.
+    let scope_symbols: Vec<SymbolId> = {
+        let active: Vec<SymbolId> = existing_goals
+            .iter()
+            .filter(|g| matches!(g.status, GoalStatus::Active))
+            .map(|g| g.symbol_id)
+            .collect();
+
+        if active.is_empty() {
+            // Fall back to a sample of entity symbols, skipping agent meta-symbols.
+            engine
+                .all_symbols()
+                .into_iter()
+                .filter(|m| {
+                    let l = &m.label;
+                    !l.starts_with("goal:")
+                        && !l.starts_with("status:")
+                        && !l.starts_with("priority:")
+                        && !l.starts_with("criteria:")
+                        && !l.starts_with("desc:")
+                        && !l.starts_with("episode:")
+                        && !l.starts_with("tag:")
+                        && !l.starts_with("summary:")
+                        && !l.starts_with("agent:")
+                })
+                .take(FALLBACK_ENTITY_LIMIT)
+                .map(|m| m.id)
+                .collect()
+        } else {
+            active
+        }
+    };
+
+    if scope_symbols.is_empty() {
+        return Vec::new();
+    }
+
+    let gap_config = crate::autonomous::gap::GapAnalysisConfig {
+        max_gaps: MAX_COMPETENCE_GAP_GOALS * 3,
+        ..Default::default()
+    };
+
+    let result = match engine.analyze_gaps(&scope_symbols, gap_config) {
+        Ok(r) => r,
+        Err(_) => return Vec::new(),
+    };
+
+    // Short-circuit: if overall coverage is already good, no goals needed.
+    if result.coverage_score >= COMPETENCE_GAP_THRESHOLD {
+        return Vec::new();
+    }
+
+    let existing_descs: Vec<&str> =
+        existing_goals.iter().map(|g| g.description.as_str()).collect();
+
+    let mut proposals: Vec<GoalProposal> = Vec::new();
+
+    for gap in result.gaps.into_iter() {
+        if proposals.len() >= MAX_COMPETENCE_GAP_GOALS {
+            break;
+        }
+
+        let entity_label = engine.resolve_label(gap.entity);
+
+        // Skip low-quality entity labels.
+        if !is_goal_worthy_label(&entity_label) {
+            continue;
+        }
+
+        // Map gap kind to Bloom tier.
+        let tier = match &gap.kind {
+            GapKind::DeadEnd { .. } => "foundational",
+            GapKind::MissingPredicate { .. } => "intermediate",
+            GapKind::IncompleteType { .. } => "advanced",
+        };
+
+        // coverage_score for this gap: inverse of severity.
+        let coverage_score = 1.0 - gap.severity;
+        if coverage_score >= COMPETENCE_GAP_THRESHOLD {
+            continue;
+        }
+
+        let description = format!("Learn more about {entity_label}");
+
+        // Deduplicate against existing goals.
+        if is_duplicate(&description, &existing_descs, engine, config) {
+            continue;
+        }
+
+        // Deduplicate against already-queued proposals.
+        let queued_descs: Vec<&str> =
+            proposals.iter().map(|p: &GoalProposal| p.description.as_str()).collect();
+        if is_duplicate(&description, &queued_descs, engine, config) {
+            continue;
+        }
+
+        proposals.push(GoalProposal {
+            description,
+            rationale: format!(
+                "VSA competence score {coverage_score:.2} for {tier} concept \
+                 '{entity_label}' is below the 0.70 threshold"
+            ),
+            source: GoalSource::VsaCompetenceGap {
+                tier: tier.to_string(),
+                area_name: entity_label.clone(),
+                coverage_score,
+            },
+            priority_suggestion: COMPETENCE_GAP_PRIORITY,
+            success_criteria: format!(
+                "Knowledge coverage for '{entity_label}' reaches competence score >= 0.70"
+            ),
+            conflicts_with: Vec::new(),
+            feasibility: 1.0,
+        });
+    }
+
+    proposals
 }
 
 // ---------------------------------------------------------------------------

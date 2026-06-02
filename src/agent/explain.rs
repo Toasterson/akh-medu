@@ -951,6 +951,210 @@ pub fn derivation_kind_prose(kind: &DerivationKind) -> String {
                 .unwrap_or_default();
             format!("NLU parsed (tier {source_tier}, confidence: {confidence:.2}{sim})")
         }
+        DerivationKind::ContactResolved {
+            contact_id,
+            alias_count,
+        } => {
+            format!("contact resolved: \"{contact_id}\" ({alias_count} aliases)")
+        }
+        DerivationKind::ContactMerged { kept, discarded } => {
+            format!("contacts merged: kept \"{kept}\", discarded \"{discarded}\"")
+        }
+        DerivationKind::RelationshipRecorded { from, to, kind } => {
+            format!("relationship recorded: {from} --{kind}--> {to}")
+        }
+        DerivationKind::StyleObserved {
+            contact_id,
+            formality,
+            verbosity,
+        } => {
+            format!(
+                "style observed for \"{contact_id}\": formality={formality:.2}, verbosity={verbosity:.2}"
+            )
+        }
+        DerivationKind::CalendarAttendeeLinked {
+            event_id,
+            contact_id,
+        } => {
+            format!("calendar attendee linked: event {event_id} ↔ contact \"{contact_id}\"")
+        }
+        DerivationKind::LlmTripleExtraction {
+            backend,
+            model,
+            ..
+        } => {
+            format!("LLM-extracted triple (backend: {backend}, model: {model})")
+        }
+        DerivationKind::EventCalculusProjection {
+            fluent_count,
+            event_count,
+            interval_secs,
+        } => {
+            format!(
+                "event calculus projection: {fluent_count} fluents, {event_count} events, {interval_secs}s interval"
+            )
+        }
+        DerivationKind::CounterfactualReasoning {
+            actual_action,
+            hypothetical_action,
+            divergent_count,
+        } => {
+            format!(
+                "counterfactual: \"{actual_action}\" vs \"{hypothetical_action}\" — {divergent_count} divergent fluent(s)"
+            )
+        }
+        DerivationKind::MctsPlanning {
+            iterations,
+            depth,
+            expected_value,
+        } => {
+            format!(
+                "MCTS planning: {iterations} iterations, depth {depth}, expected value {expected_value:.2}"
+            )
+        }
+        DerivationKind::EvidenceCombination {
+            source_count,
+            conflict_degree,
+            belief,
+            plausibility,
+        } => {
+            format!(
+                "evidence combined: {source_count} sources, conflict={conflict_degree:.2}, Bel={belief:.2}, Pl={plausibility:.2}"
+            )
+        }
+        DerivationKind::SourceReliabilityAssessed {
+            reliability,
+            credibility,
+            ..
+        } => {
+            format!("source reliability: {reliability}{credibility}")
+        }
+        DerivationKind::EpistemicAssessment {
+            modality,
+            proposition_count,
+            ..
+        } => {
+            format!("epistemic assessment: {modality} ({proposition_count} propositions)")
+        }
+        DerivationKind::EpistemicUpdate {
+            event_kind,
+            updated_agent_count,
+        } => {
+            format!("epistemic update: {event_kind} ({updated_agent_count} agents)")
+        }
+        DerivationKind::TheoryOfMind {
+            tom_level,
+            prediction_count,
+            ..
+        } => {
+            format!("theory of mind: level {tom_level}, {prediction_count} predictions")
+        }
+        DerivationKind::ActiveInferenceCycle {
+            surprise,
+            pragmatic,
+            epistemic,
+            efe,
+        } => {
+            format!(
+                "active inference: surprise={surprise:.2}, pragmatic={pragmatic:.2}, epistemic={epistemic:.2}, EFE={efe:.2}"
+            )
+        }
+        DerivationKind::GameTheoreticModel {
+            game_type,
+            equilibria_count,
+            recommended_strategy,
+        } => {
+            format!(
+                "game theory: {game_type}, {equilibria_count} equilibria, strategy: {recommended_strategy}"
+            )
+        }
+        DerivationKind::NeuralProbe {
+            layer,
+            similarity,
+            source_text,
+        } => {
+            format!(
+                "neural probe at layer {layer} (similarity: {similarity:.3}): \"{source_text}\""
+            )
+        }
+        DerivationKind::Delegation {
+            target,
+            task_description,
+            model_used,
+            wall_time_ms,
+            ..
+        } => {
+            let model = model_used
+                .as_deref()
+                .unwrap_or("unknown");
+            format!(
+                "delegated to {target} (model: {model}, {wall_time_ms}ms): {task_description}"
+            )
+        }
+        DerivationKind::ArticleCreated {
+            title,
+            block_count,
+            ..
+        } => {
+            format!("wiki article created: \"{title}\" ({block_count} blocks)")
+        }
+        DerivationKind::ArticleUpdated { title, block_count } => {
+            format!("wiki article updated: \"{title}\" ({block_count} blocks)")
+        }
+        DerivationKind::ArticleCited {
+            from_title,
+            to_title,
+        } => {
+            format!("wiki citation recorded: \"{from_title}\" → \"{to_title}\"")
+        }
+        DerivationKind::ArticleFederated {
+            title,
+            activity_type,
+        } => {
+            format!("wiki article federated: \"{title}\" ({activity_type})")
+        }
+        DerivationKind::OpinionExpressed {
+            title,
+            stance,
+            confidence,
+        } => {
+            format!(
+                "opinion expressed in \"{title}\": {stance} (confidence: {confidence:.2})"
+            )
+        }
+        DerivationKind::DebateContribution {
+            topic,
+            contribution_kind,
+        } => {
+            format!("debate contribution on \"{topic}\": {contribution_kind}")
+        }
+        DerivationKind::ClusterTopologyIngested {
+            nodes,
+            storage_classes,
+            pods,
+            triples_asserted,
+        } => {
+            format!(
+                "K8s cluster topology ingested: {nodes} node(s), {storage_classes} storage class(es), \
+                 {pods} pod(s) → {triples_asserted} triple(s)"
+            )
+        }
+        DerivationKind::KnowledgeElicitation {
+            model_id,
+            pass,
+            self_consistency,
+            ..
+        } => {
+            format!(
+                "LLM-elicited triple (model: {model_id}, pass: {pass}, self-consistency: {self_consistency:.2})"
+            )
+        }
+        DerivationKind::VsaRlUpdate { tool, reward, cycle } => {
+            format!(
+                "VSA RL update at cycle {cycle}: tool sym:{} received reward {reward:.3}",
+                tool.get()
+            )
+        }
     }
 }
 

@@ -66,7 +66,7 @@ When a plan step fails:
 
 ```bash
 # Generate and display a plan for the current goal
-akh-medu agent plan
+akh agent plan
 
 # In the REPL
 > p
@@ -120,7 +120,7 @@ ReflectionConfig {
 
 ```bash
 # Trigger reflection manually
-akh-medu agent reflect
+akh agent reflect
 
 # In the REPL
 > r

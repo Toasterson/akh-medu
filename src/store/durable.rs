@@ -2,9 +2,30 @@
 //!
 //! Used for metadata, provenance records, and any data that must survive
 //! crashes. Provides full transactional guarantees.
+//!
+//! ## Concurrency
+//!
+//! The underlying redb `Database` is wrapped in `Arc<Mutex<Database>>` to
+//! serialize write access at the Rust Mutex level. This prevents thread
+//! pile-up on redb's internal file lock, which on macOS can exhaust kernel
+//! resources and cause SIGKILL when many concurrent MCP calls hit the same
+//! database.
+//!
+//! Reads lock the mutex only long enough to create a read transaction (MVCC
+//! snapshot), then release it so other reads can proceed concurrently.
+//! Writes hold the mutex for the full transaction lifetime.
+//!
+//! ## Calling from async contexts
+//!
+//! All write methods (`put`, `remove`, `put_batch`, `remove_batch`) acquire
+//! a `std::sync::Mutex`, which **blocks the calling thread**.  Callers from
+//! an async Tokio context must therefore be inside either
+//! `tokio::task::spawn_blocking` or `tokio::task::block_in_place`; calling
+//! them directly on an async task thread starves the Tokio runtime and can
+//! prevent MCP handlers from receiving new requests.
 
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use redb::{Database, TableDefinition};
 
@@ -17,8 +38,11 @@ const META_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("meta");
 /// ACID-durable store using redb.
 ///
 /// All writes go through transactions. Reads use MVCC snapshots.
+///
+/// The database is wrapped in `Arc<Mutex<Database>>` to serialize concurrent
+/// write attempts at the Rust level, avoiding OS-level lock contention.
 pub struct DurableStore {
-    db: Arc<Database>,
+    db: Arc<Mutex<Database>>,
 }
 
 impl DurableStore {
@@ -29,12 +53,15 @@ impl DurableStore {
         let db = Database::create(&db_path).map_err(|e| StoreError::Redb {
             message: format!("failed to open redb at {}: {e}", db_path.display()),
         })?;
-        Ok(Self { db: Arc::new(db) })
+        Ok(Self {
+            db: Arc::new(Mutex::new(db)),
+        })
     }
 
     /// Store a key-value pair with full ACID guarantees.
     pub fn put(&self, key: &[u8], value: &[u8]) -> StoreResult<()> {
-        let txn = self.db.begin_write().map_err(|e| StoreError::Redb {
+        let db = self.db.lock().expect("redb mutex poisoned");
+        let txn = db.begin_write().map_err(|e| StoreError::Redb {
             message: format!("begin_write failed: {e}"),
         })?;
         {
@@ -51,14 +78,26 @@ impl DurableStore {
         Ok(())
     }
 
-    /// Read a value by key. Returns `Ok(None)` if the key doesn't exist.
+    /// Read a value by key. Returns `Ok(None)` if the key doesn't exist
+    /// or if the table hasn't been created yet (fresh database).
+    ///
+    /// Locks the mutex only long enough to begin the read transaction;
+    /// the MVCC snapshot is then used without holding the lock.
     pub fn get(&self, key: &[u8]) -> StoreResult<Option<Vec<u8>>> {
-        let txn = self.db.begin_read().map_err(|e| StoreError::Redb {
+        let db = self.db.lock().expect("redb mutex poisoned");
+        let txn = db.begin_read().map_err(|e| StoreError::Redb {
             message: format!("begin_read failed: {e}"),
         })?;
-        let table = txn.open_table(META_TABLE).map_err(|e| StoreError::Redb {
-            message: format!("open_table failed: {e}"),
-        })?;
+        drop(db); // release lock — read txn is independent
+        let table = match txn.open_table(META_TABLE) {
+            Ok(t) => t,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
+            Err(e) => {
+                return Err(StoreError::Redb {
+                    message: format!("open_table failed: {e}"),
+                });
+            }
+        };
         let result = table.get(key).map_err(|e| StoreError::Redb {
             message: format!("get failed: {e}"),
         })?;
@@ -67,13 +106,20 @@ impl DurableStore {
 
     /// Delete a key. Returns whether the key existed.
     pub fn remove(&self, key: &[u8]) -> StoreResult<bool> {
-        let txn = self.db.begin_write().map_err(|e| StoreError::Redb {
+        let db = self.db.lock().expect("redb mutex poisoned");
+        let txn = db.begin_write().map_err(|e| StoreError::Redb {
             message: format!("begin_write failed: {e}"),
         })?;
         let existed = {
-            let mut table = txn.open_table(META_TABLE).map_err(|e| StoreError::Redb {
-                message: format!("open_table failed: {e}"),
-            })?;
+            let mut table = match txn.open_table(META_TABLE) {
+                Ok(t) => t,
+                Err(redb::TableError::TableDoesNotExist(_)) => return Ok(false),
+                Err(e) => {
+                    return Err(StoreError::Redb {
+                        message: format!("open_table failed: {e}"),
+                    });
+                }
+            };
             let result = table.remove(key).map_err(|e| StoreError::Redb {
                 message: format!("remove failed: {e}"),
             })?;
@@ -87,7 +133,8 @@ impl DurableStore {
 
     /// Store multiple key-value pairs in a single transaction.
     pub fn put_batch(&self, entries: &[(&[u8], &[u8])]) -> StoreResult<()> {
-        let txn = self.db.begin_write().map_err(|e| StoreError::Redb {
+        let db = self.db.lock().expect("redb mutex poisoned");
+        let txn = db.begin_write().map_err(|e| StoreError::Redb {
             message: format!("begin_write failed: {e}"),
         })?;
         {
@@ -106,6 +153,42 @@ impl DurableStore {
         Ok(())
     }
 
+    /// Remove multiple keys in a single transaction.
+    ///
+    /// Returns the number of keys that were actually removed (existed and
+    /// were deleted). Keys that don't exist are silently skipped.
+    pub fn remove_batch(&self, keys: &[&[u8]]) -> StoreResult<usize> {
+        let db = self.db.lock().expect("redb mutex poisoned");
+        let txn = db.begin_write().map_err(|e| StoreError::Redb {
+            message: format!("begin_write failed: {e}"),
+        })?;
+        let count = {
+            let mut table = match txn.open_table(META_TABLE) {
+                Ok(t) => t,
+                Err(redb::TableError::TableDoesNotExist(_)) => return Ok(0),
+                Err(e) => {
+                    return Err(StoreError::Redb {
+                        message: format!("open_table failed: {e}"),
+                    });
+                }
+            };
+            let mut removed = 0usize;
+            for key in keys {
+                let result = table.remove(*key).map_err(|e| StoreError::Redb {
+                    message: format!("remove failed: {e}"),
+                })?;
+                if result.is_some() {
+                    removed += 1;
+                }
+            }
+            removed
+        };
+        txn.commit().map_err(|e| StoreError::Redb {
+            message: format!("commit failed: {e}"),
+        })?;
+        Ok(count)
+    }
+
     /// Check if a key exists.
     pub fn contains(&self, key: &[u8]) -> StoreResult<bool> {
         self.get(key).map(|v| v.is_some())
@@ -116,16 +199,22 @@ impl DurableStore {
     /// Uses redb range queries with prefix bounds to efficiently iterate
     /// only the matching key space.
     pub fn scan_prefix(&self, prefix: &[u8]) -> StoreResult<Vec<(Vec<u8>, Vec<u8>)>> {
-        let txn = self.db.begin_read().map_err(|e| StoreError::Redb {
+        let db = self.db.lock().expect("redb mutex poisoned");
+        let txn = db.begin_read().map_err(|e| StoreError::Redb {
             message: format!("begin_read failed: {e}"),
         })?;
-        let table = txn.open_table(META_TABLE).map_err(|e| StoreError::Redb {
-            message: format!("open_table failed: {e}"),
-        })?;
+        drop(db); // release lock — read txn is independent
+        let table = match txn.open_table(META_TABLE) {
+            Ok(t) => t,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
+            Err(e) => {
+                return Err(StoreError::Redb {
+                    message: format!("open_table failed: {e}"),
+                });
+            }
+        };
 
         // Compute the exclusive upper bound by incrementing the last byte.
-        // If the last byte is 0xFF, try the second-to-last, etc.
-        // If all bytes are 0xFF, we use an unbounded range (scan to end).
         let end_bound = increment_prefix(prefix);
 
         let mut results = Vec::new();
@@ -150,7 +239,6 @@ impl DurableStore {
                 message: format!("range iteration failed: {e}"),
             })?;
             let key_bytes = k.value().to_vec();
-            // Double-check prefix match (for the unbounded case).
             if !key_bytes.starts_with(prefix) {
                 break;
             }
@@ -160,15 +248,11 @@ impl DurableStore {
         Ok(results)
     }
 
-    /// Get a reference to the underlying database (for custom table operations).
-    pub fn database(&self) -> &Database {
-        &self.db
-    }
-
-    /// Get a shared handle to the underlying database.
+    /// Get a shared handle to the database mutex.
     ///
-    /// Used by the provenance ledger to open its own tables on the same DB.
-    pub fn database_arc(&self) -> Arc<Database> {
+    /// Used by provenance ledger, audit ledger, and other subsystems
+    /// that write to their own tables on the same database.
+    pub fn database_arc(&self) -> Arc<Mutex<Database>> {
         Arc::clone(&self.db)
     }
 }
@@ -263,6 +347,55 @@ mod tests {
     }
 
     #[test]
+    fn remove_batch_basic() {
+        let dir = TempDir::new().unwrap();
+        let store = DurableStore::open(dir.path()).unwrap();
+
+        store.put(b"k1", b"v1").unwrap();
+        store.put(b"k2", b"v2").unwrap();
+        store.put(b"k3", b"v3").unwrap();
+        store.put(b"k4", b"v4").unwrap();
+
+        let removed = store.remove_batch(&[b"k1", b"k3"]).unwrap();
+        assert_eq!(removed, 2);
+        assert_eq!(store.get(b"k1").unwrap(), None);
+        assert_eq!(store.get(b"k2").unwrap(), Some(b"v2".to_vec()));
+        assert_eq!(store.get(b"k3").unwrap(), None);
+        assert_eq!(store.get(b"k4").unwrap(), Some(b"v4".to_vec()));
+    }
+
+    #[test]
+    fn remove_batch_partial_nonexistent() {
+        let dir = TempDir::new().unwrap();
+        let store = DurableStore::open(dir.path()).unwrap();
+
+        store.put(b"exists", b"data").unwrap();
+
+        let removed = store.remove_batch(&[b"exists", b"nope"]).unwrap();
+        assert_eq!(removed, 1);
+        assert_eq!(store.get(b"exists").unwrap(), None);
+    }
+
+    #[test]
+    fn remove_batch_empty() {
+        let dir = TempDir::new().unwrap();
+        let store = DurableStore::open(dir.path()).unwrap();
+
+        store.put(b"key", b"val").unwrap();
+        let removed = store.remove_batch(&[]).unwrap();
+        assert_eq!(removed, 0);
+        assert_eq!(store.get(b"key").unwrap(), Some(b"val".to_vec()));
+    }
+
+    #[test]
+    fn remove_batch_all_nonexistent() {
+        let dir = TempDir::new().unwrap();
+        let store = DurableStore::open(dir.path()).unwrap();
+        let removed = store.remove_batch(&[b"ghost1", b"ghost2"]).unwrap();
+        assert_eq!(removed, 0);
+    }
+
+    #[test]
     fn scan_prefix_empty_result() {
         let dir = TempDir::new().unwrap();
         let store = DurableStore::open(dir.path()).unwrap();
@@ -270,5 +403,43 @@ mod tests {
         store.put(b"other_key", b"data").unwrap();
         let results = store.scan_prefix(b"sym_meta:").unwrap();
         assert!(results.is_empty());
+    }
+
+    /// Verify that concurrent writes from multiple threads are serialized
+    /// correctly by the Arc<Mutex<Database>> wrapper. No data should be lost
+    /// and no "multiple active write transactions" error should occur.
+    #[test]
+    fn concurrent_writes_are_serialized() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let dir = TempDir::new().unwrap();
+        let store = Arc::new(DurableStore::open(dir.path()).unwrap());
+
+        let handles: Vec<_> = (0u8..8)
+            .map(|i| {
+                let s = Arc::clone(&store);
+                thread::spawn(move || {
+                    let key = [b'k', i];
+                    let val = [b'v', i];
+                    s.put(&key, &val).expect("concurrent put should not fail");
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().expect("thread panicked");
+        }
+
+        // All 8 keys must be present.
+        for i in 0u8..8 {
+            let key = [b'k', i];
+            let val = [b'v', i];
+            assert_eq!(
+                store.get(&key).unwrap(),
+                Some(val.to_vec()),
+                "key {i} missing after concurrent writes",
+            );
+        }
     }
 }

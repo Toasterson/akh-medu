@@ -1,0 +1,231 @@
+# ── Global ─────────────────────────────────────────────────────────────────
+global:
+  imageRegistry: ""
+  # Allow non-Bitnami pgvector image (required for pgvector/pgvector).
+  security:
+    allowInsecureImages: true
+
+# CPU architectures for which akhomed and seshd images have been built.
+# Pods are pinned to nodes matching one of these via required nodeAffinity
+# on `kubernetes.io/arch`. Add "arm64" here only after publishing arm64 images.
+supportedArchitectures:
+  - amd64
+
+# ── akhomed (akh-medu daemon) ──────────────────────────────────────────────
+akhomed:
+  enabled: true
+  replicaCount: 1
+
+  image:
+    repository: code.aopc.cloud/toasterson/akhomed
+    tag: ""  # defaults to .Chart.AppVersion
+    pullPolicy: IfNotPresent
+
+  service:
+    type: ClusterIP
+    port: 8200
+
+  ingress:
+    enabled: false
+    className: ""
+    annotations: {}
+    hosts:
+      - host: akh-medu.local
+        paths:
+          - path: /
+            pathType: Prefix
+    tls: []
+
+  # Environment variables passed to akhomed.
+  env:
+    AKH_SERVER_BIND: "0.0.0.0"
+    AKH_SERVER_PORT: "8200"
+    AKH_AUTO_START: "default"
+    RUST_LOG: "info"
+
+  # Persistent volume for engine data (KG, HNSW, redb).
+  persistence:
+    enabled: true
+    storageClass: ""
+    size: 30Gi
+    accessModes:
+      - ReadWriteOnce
+
+  # NLU models volume (ONNX NER model, LLM GGUF, Candle models).
+  models:
+    enabled: true
+    storageClass: ""
+    size: 5Gi
+    accessModes:
+      - ReadWriteOnce
+
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: "2"
+      memory: 4Gi
+
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+  # Readiness/liveness probes hit the akhomed status endpoint.
+  probes:
+    liveness:
+      httpGet:
+        path: /status
+        port: http
+      initialDelaySeconds: 10
+      periodSeconds: 30
+    readiness:
+      httpGet:
+        path: /status
+        port: http
+      initialDelaySeconds: 5
+      periodSeconds: 10
+
+# ── seshd (Seshat's Archive) ──────────────────────────────────────────────
+seshd:
+  enabled: true
+  replicaCount: 1
+
+  image:
+    repository: code.aopc.cloud/toasterson/seshd
+    tag: ""  # defaults to .Chart.AppVersion
+    pullPolicy: IfNotPresent
+
+  service:
+    type: ClusterIP
+    port: 9090
+
+  ingress:
+    enabled: false
+    className: ""
+    annotations: {}
+    hosts:
+      - host: seshat.local
+        paths:
+          - path: /
+            pathType: Prefix
+    tls: []
+
+  env:
+    RUST_LOG: "seshat=info"
+
+  # Seshat config (rendered as ConfigMap → mounted at /config/seshat.toml).
+  config:
+    database:
+      # When empty AND postgresql.enabled=true, the URL is auto-constructed
+      # from the subchart. Set this to use an external PostgreSQL instance.
+      url: ""
+      maxConnections: 10
+    embedding:
+      model: "all-MiniLM-L6-v2"
+      batchSize: 32
+      pollIntervalSecs: 30
+    server:
+      bind: "0.0.0.0:9090"
+      transport: "streamable-http"
+    synthesis:
+      enabled: false
+      backend: "candle"
+      modelPath: ""
+      maxTriples: 30
+
+  # Models volume for embedding ONNX + synthesis GGUF models.
+  models:
+    enabled: true
+    storageClass: ""
+    size: 2Gi
+    accessModes:
+      - ReadWriteOnce
+
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 2Gi
+
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+  probes:
+    # rmcp's streamable-http transport returns 406 to a plain GET /mcp
+    # (it needs `accept: text/event-stream`), so a plain httpGet probe
+    # on /mcp fails. Use tcpSocket to just verify the listener is open.
+    # Once seshd grows a proper /healthz endpoint, this can flip back
+    # to httpGet. NOTE: kube probe schema forbids multiple handler
+    # types on the same probe, so an HR that overrides with `httpGet`
+    # must either null out `tcpSocket` or (better) the chart template
+    # needs a handler-exclusive render. Keeping the default aligned
+    # with the production HR avoids the deep-merge foot-gun.
+    liveness:
+      tcpSocket:
+        port: http
+      initialDelaySeconds: 15
+      periodSeconds: 30
+    readiness:
+      tcpSocket:
+        port: http
+      initialDelaySeconds: 10
+      periodSeconds: 10
+
+# ── External PostgreSQL ───────────────────────────────────────────────────
+# Use this when postgresql.enabled=false to point at an existing instance.
+externalPostgresql:
+  host: ""
+  port: 5432
+  database: seshat
+  username: seshat
+  # Password: set via --set or reference an existing secret.
+  password: ""
+  # If set, the password is read from this secret instead.
+  existingSecret: ""
+  existingSecretKey: "password"
+
+# ── PostgreSQL (Bitnami subchart) ─────────────────────────────────────────
+# Set enabled=false and configure externalPostgresql above to use
+# an existing PostgreSQL installation.
+postgresql:
+  enabled: true
+  auth:
+    database: seshat
+    username: seshat
+    # Set via --set or external secret.
+    password: ""
+    existingSecret: ""
+  primary:
+    # Enable pgvector extension.
+    initdb:
+      scripts:
+        enable-pgvector.sql: |
+          CREATE EXTENSION IF NOT EXISTS vector;
+    persistence:
+      enabled: true
+      size: 10Gi
+    resources:
+      requests:
+        cpu: 250m
+        memory: 256Mi
+      limits:
+        cpu: "1"
+        memory: 1Gi
+    # Pin PostgreSQL to the same architectures as akhomed/seshd
+    # (pgvector/pgvector is multi-arch so this just mirrors our policy).
+    nodeAffinityPreset:
+      type: "hard"
+      key: "kubernetes.io/arch"
+      values:
+        - amd64
+  image:
+    registry: docker.io
+    repository: pgvector/pgvector
+    tag: "pg16"
+
+# ── Image pull secrets ────────────────────────────────────────────────────
+imagePullSecrets: []

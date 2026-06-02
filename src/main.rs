@@ -2,7 +2,9 @@
 
 use std::path::PathBuf;
 #[cfg(not(feature = "client-only"))]
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+#[cfg(feature = "daemon")]
+use std::sync::Mutex;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use miette::{IntoDiagnostic, Result};
@@ -217,6 +219,121 @@ enum Commands {
         #[command(subcommand)]
         action: ServiceAction,
     },
+
+    /// Download and configure NLU models and ONNX Runtime.
+    Setup {
+        #[command(subcommand)]
+        action: SetupAction,
+    },
+
+    /// Akhipedia: the agent's internal knowledge wiki (Phase 22).
+    Wiki {
+        #[command(subcommand)]
+        action: WikiAction,
+    },
+
+    /// Sync OpenClaw daily memory journals into Tecton episodic memory.
+    MemorySync {
+        #[command(subcommand)]
+        action: MemorySyncAction,
+    },
+
+    /// Kubernetes cluster topology ingestion and query.
+    Cluster {
+        #[command(subcommand)]
+        action: ClusterAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum SetupAction {
+    /// Download NLU models (NER ~130MB, LLM ~1.1GB).
+    Models {
+        /// Only download the NER model (skip LLM).
+        #[arg(long)]
+        ner_only: bool,
+        /// Only download the LLM model (skip NER).
+        #[arg(long)]
+        llm_only: bool,
+    },
+    /// Download and install ONNX Runtime for the current platform.
+    OnnxRuntime {
+        /// Target version (default: 1.23.2).
+        #[arg(long)]
+        version: Option<String>,
+    },
+    /// Check the current NLU setup status.
+    Check,
+}
+
+#[derive(Subcommand)]
+enum WikiAction {
+    /// List all wiki articles.
+    List,
+    /// Read a wiki article by title.
+    Read {
+        /// Article title.
+        #[arg(long)]
+        title: String,
+    },
+    /// Search wiki articles by keyword.
+    Search {
+        /// Search query.
+        query: String,
+    },
+    /// Render the wiki to static HTML (requires --features wiki).
+    Render {
+        /// Output directory for the static site.
+        #[arg(long, default_value = "site")]
+        output: PathBuf,
+        /// Site title.
+        #[arg(long, default_value = "Akhipedia")]
+        site_title: String,
+    },
+    /// Blog subcommands (opinion posts).
+    Blog {
+        #[command(subcommand)]
+        action: WikiBlogAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum WikiBlogAction {
+    /// List blog posts (articles with opinion blocks), newest-first.
+    List,
+    /// Show a debate thread rooted at a topic article.
+    Debate {
+        /// Root topic article title.
+        #[arg(long)]
+        topic: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum MemorySyncAction {
+    /// Run an immediate OpenClaw journal sync into episodic memory.
+    ///
+    /// Reads OPENCLAW_API_KEY and OPENCLAW_ENDPOINT from the environment.
+    /// Journals already imported are skipped (idempotent).
+    Sync {
+        /// Maximum number of journal entries to ingest in this run.
+        #[arg(long, default_value = "30")]
+        max: usize,
+    },
+    /// Show OpenClaw sync status: last sync time and imported journal count.
+    Status,
+}
+
+#[derive(Subcommand)]
+enum ClusterAction {
+    /// Query the live Kubernetes cluster and assert topology triples.
+    Ingest {
+        /// Print triples without writing to the knowledge graph.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Show cluster-topology triples already in the knowledge graph.
+    Show,
 }
 
 #[derive(Subcommand)]
@@ -785,22 +902,24 @@ fn main() -> Result<()> {
     let language = Language::from_code(&cli.language).unwrap_or(Language::Auto);
 
     // Resolve data directory: explicit --data-dir wins, otherwise XDG workspace.
-    let (data_dir, xdg_paths) = if let Some(ref explicit) = cli.data_dir {
-        (Some(explicit.clone()), None)
+    let (data_dir, compartments_dir, xdg_paths) = if let Some(ref explicit) = cli.data_dir {
+        (Some(explicit.clone()), None, None)
     } else {
         match akh_medu::paths::AkhPaths::resolve() {
             Ok(paths) => {
                 let ws = paths.workspace(&cli.workspace);
                 let dir = ws.kg_dir.clone();
-                (Some(dir), Some(paths))
+                let comp_dir = ws.compartments_dir.clone();
+                (Some(dir), Some(comp_dir), Some(paths))
             }
-            Err(_) => (None, None),
+            Err(_) => (None, None, None),
         }
     };
 
     let config = EngineConfig {
         dimension: Dimension(cli.dimension),
         data_dir: data_dir.clone(),
+        compartments_dir: compartments_dir.clone(),
         language,
         ..Default::default()
     };
@@ -876,6 +995,7 @@ fn main() -> Result<()> {
                         let engine_config = EngineConfig {
                             dimension: Dimension(cli.dimension),
                             data_dir: Some(ws_paths.kg_dir.clone()),
+                            compartments_dir: Some(ws_paths.compartments_dir.clone()),
                             language,
                             ..Default::default()
                         };
@@ -912,6 +1032,7 @@ fn main() -> Result<()> {
                     let engine_config = EngineConfig {
                         dimension: Dimension(cli.dimension),
                         data_dir: Some(ws_paths.kg_dir.clone()),
+                        compartments_dir: Some(ws_paths.compartments_dir.clone()),
                         language,
                         ..Default::default()
                     };
@@ -2472,6 +2593,7 @@ fn main() -> Result<()> {
                                 &knowledge,
                                 &purpose,
                                 &engine,
+                                false,
                             ) {
                                 Ok(ritual) => {
                                     println!("\nRitual of Awakening complete!");
@@ -3633,6 +3755,58 @@ fn main() -> Result<()> {
         Commands::Service { action } => {
             dispatch_service(action)?;
         }
+
+        // ── Setup (models & runtime) ────────────────────────────────────
+        Commands::Setup { action } => {
+            dispatch_setup(action)?;
+        }
+
+        // ── Wiki (Akhipedia) ─────────────────────────────────────────────
+        Commands::Wiki { action } => {
+            let engine = Engine::new(config).into_diagnostic()?;
+            dispatch_wiki(action, &engine)?;
+        }
+
+        // ── Memory Sync (OpenClaw journals → episodic memory) ────────────
+        Commands::MemorySync { action } => {
+            let engine = Engine::new(config).into_diagnostic()?;
+            let agent_cfg = AgentConfig::default();
+            let agent = Agent::new(Arc::new(engine), agent_cfg).into_diagnostic()?;
+            dispatch_memory_sync(action, agent.predicates(), agent.engine())?;
+        }
+
+        // ── Cluster topology ─────────────────────────────────────────────
+        Commands::Cluster { action } => {
+            let engine = Engine::new(config).into_diagnostic()?;
+            match action {
+                ClusterAction::Ingest { dry_run } => {
+                    let report =
+                        akh_medu::cluster::ingest_topology(&engine, dry_run)
+                            .into_diagnostic()?;
+                    if dry_run {
+                        println!("\n[dry-run] Would assert {} triple(s).", report.triples_asserted);
+                    } else {
+                        println!(
+                            "Cluster topology ingested: {} node(s), {} storage class(es), \
+                             {} pod(s) → {} triple(s) asserted.",
+                            report.nodes_processed,
+                            report.storage_classes_processed,
+                            report.pods_processed,
+                            report.triples_asserted,
+                        );
+                    }
+                    if !report.errors.is_empty() {
+                        eprintln!("Warnings ({}):", report.errors.len());
+                        for e in &report.errors {
+                            eprintln!("  - {e}");
+                        }
+                    }
+                }
+                ClusterAction::Show => {
+                    akh_medu::cluster::show_topology(&engine);
+                }
+            }
+        }
     }
 
     Ok(())
@@ -3692,6 +3866,172 @@ fn dispatch_service(action: ServiceAction) -> Result<()> {
     Ok(())
 }
 
+/// Dispatch `akh setup` subcommands. Works without an Engine.
+fn dispatch_setup(action: SetupAction) -> Result<()> {
+    use akh_medu::setup;
+
+    let paths = akh_medu::paths::AkhPaths::resolve().into_diagnostic()?;
+
+    match action {
+        SetupAction::Models { ner_only, llm_only } => {
+            if !llm_only {
+                eprintln!("=== Downloading NER models (Tier 2) ===");
+                setup::download_ner_models(&paths).into_diagnostic()?;
+            }
+            if !ner_only {
+                eprintln!("=== Downloading LLM model (Tier 3) ===");
+                setup::download_llm_model(&paths).into_diagnostic()?;
+            }
+            eprintln!("\nDone. Models installed to: {}", paths.models_dir().display());
+        }
+        SetupAction::OnnxRuntime { version } => {
+            let v = version.as_deref().unwrap_or(setup::default_ort_version());
+            eprintln!("=== Installing ONNX Runtime v{v} ===");
+            setup::install_onnx_runtime(v).into_diagnostic()?;
+        }
+        SetupAction::Check => {
+            setup::check_setup(&paths).into_diagnostic()?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Dispatch `akh wiki` subcommands (requires local engine access).
+#[cfg(not(feature = "client-only"))]
+fn dispatch_wiki(action: WikiAction, engine: &akh_medu::engine::Engine) -> Result<()> {
+    use akh_medu::wiki::{ArticleStore, blog};
+
+    match action {
+        WikiAction::List => {
+            let store = ArticleStore::restore(engine);
+            let mut titles = store.list_titles();
+            titles.sort_unstable();
+            if titles.is_empty() {
+                println!("No wiki articles yet. Use `akh wiki write` or the agent write tools.");
+            } else {
+                println!("{} article(s):", titles.len());
+                for t in &titles {
+                    println!("  • {t}");
+                }
+            }
+        }
+
+        WikiAction::Read { title } => {
+            let store = ArticleStore::restore(engine);
+            match store.get_by_title(&title) {
+                None => {
+                    eprintln!("Article not found: \"{title}\"");
+                    std::process::exit(1);
+                }
+                Some(article) => {
+                    println!("# {}", article.header.title);
+                    println!(
+                        "Author: #{} | Created: {} | Blocks: {}",
+                        article.header.author.get(),
+                        article.header.created,
+                        article.header.blocks.len(),
+                    );
+                    if !article.header.cites.is_empty() {
+                        println!("Cites: {} article(s)", article.header.cites.len());
+                    }
+                    println!();
+                    println!("{}", article.body);
+                }
+            }
+        }
+
+        WikiAction::Search { query } => {
+            let store = ArticleStore::restore(engine);
+            let lower = query.to_lowercase();
+            let mut hits: Vec<_> = store
+                .articles
+                .values()
+                .filter(|a| {
+                    a.header.title.to_lowercase().contains(&lower)
+                        || a.body.to_lowercase().contains(&lower)
+                })
+                .collect();
+            hits.sort_by(|a, b| a.header.title.cmp(&b.header.title));
+            if hits.is_empty() {
+                println!("No articles found matching \"{query}\".");
+            } else {
+                println!("Found {} article(s):", hits.len());
+                for h in &hits {
+                    println!("  • {}", h.header.title);
+                }
+            }
+        }
+
+        WikiAction::Render { output, site_title } => {
+            #[cfg(feature = "wiki")]
+            {
+                use akh_medu::wiki::{RenderConfig, WikiRenderer};
+                let store = ArticleStore::restore(engine);
+                let config = RenderConfig {
+                    output_dir: output.clone(),
+                    site_title,
+                    base_url: "/".into(),
+                };
+                let renderer = WikiRenderer::new(config);
+                let n = renderer
+                    .render_site(&store)
+                    .map_err(|e| miette::miette!("{e}"))?;
+                println!(
+                    "Rendered {n} article(s) to {}",
+                    output.display()
+                );
+            }
+            #[cfg(not(feature = "wiki"))]
+            {
+                let _ = (output, site_title);
+                eprintln!(
+                    "Rendering requires the `wiki` feature. Rebuild with: cargo build --features wiki"
+                );
+                std::process::exit(1);
+            }
+        }
+
+        WikiAction::Blog { action } => match action {
+            WikiBlogAction::List => {
+                let store = ArticleStore::restore(engine);
+                let posts = blog::list_blog_posts(&store);
+                if posts.is_empty() {
+                    println!("No blog posts yet (articles need Opinion blocks).");
+                } else {
+                    println!("{} blog post(s):", posts.len());
+                    for p in &posts {
+                        let stance = p
+                            .primary_stance
+                            .as_ref()
+                            .map(|s| format!(" [{}]", s.position))
+                            .unwrap_or_default();
+                        println!("  • {}{}", p.title, stance);
+                    }
+                }
+            }
+            WikiBlogAction::Debate { topic } => {
+                let store = ArticleStore::restore(engine);
+                match blog::build_debate_thread(&store, &topic) {
+                    Err(e) => {
+                        eprintln!("Error: {e}");
+                        std::process::exit(1);
+                    }
+                    Ok(thread) => {
+                        println!("Debate thread: \"{}\"", thread.topic);
+                        println!("{} contribution(s):", thread.len());
+                        for (i, c) in thread.contributions.iter().enumerate() {
+                            println!("  {}. {c}", i + 1);
+                        }
+                    }
+                }
+            }
+        },
+    }
+
+    Ok(())
+}
+
 /// Pretty-print daemon status with all monitoring fields.
 fn print_daemon_status(status: &akh_medu::client::DaemonStatus) {
     println!("Daemon status:");
@@ -3714,6 +4054,83 @@ fn print_daemon_status(status: &akh_medu::client::DaemonStatus) {
     if let Some(ts) = status.last_goal_gen_at {
         println!("  Last goal gen:  {}", format_timestamp(ts));
     }
+}
+
+/// Dispatch `akh memory-sync` subcommands (requires local engine access).
+#[cfg(not(feature = "client-only"))]
+fn dispatch_memory_sync(
+    action: MemorySyncAction,
+    predicates: &akh_medu::agent::AgentPredicates,
+    engine: &akh_medu::engine::Engine,
+) -> Result<()> {
+    use akh_medu::agent::memory_sync;
+
+    match action {
+        MemorySyncAction::Sync { max } => {
+            let Some(openclaw_cfg) = akh_medu::agent::OpenClawConfig::from_env() else {
+                eprintln!(
+                    "error: OPENCLAW_API_KEY is not set.\n\
+                     Export your OpenClaw bearer token before running sync:\n\
+                     \n  export OPENCLAW_API_KEY=<your-key>\n"
+                );
+                std::process::exit(1);
+            };
+
+            let sync_cfg = akh_medu::agent::MemorySyncConfig {
+                max_per_run: max,
+                ..Default::default()
+            };
+
+            println!("Syncing OpenClaw journals into episodic memory (max {max} entries)...");
+
+            let result = memory_sync::sync_openclaw_journals(
+                engine,
+                &openclaw_cfg,
+                &sync_cfg,
+                predicates,
+                0,
+            )
+            .into_diagnostic()?;
+
+            println!("Done.");
+            println!("  Journals fetched : {}", result.journals_fetched);
+            println!("  Ingested         : {}", result.ingested);
+            println!("  Skipped (cached) : {}", result.skipped);
+
+            if result.ingested > 0 {
+                engine.persist().into_diagnostic()?;
+                println!("  KG persisted.");
+            }
+        }
+
+        MemorySyncAction::Status => {
+            let last_sync = memory_sync::last_sync_timestamp(engine);
+            let count = memory_sync::imported_journal_count(engine);
+
+            println!("OpenClaw Memory Sync Status");
+            println!("===========================");
+            println!(
+                "  Last sync:        {}",
+                last_sync
+                    .map(format_timestamp)
+                    .unwrap_or_else(|| "never".into())
+            );
+            println!("  Journals on file: {count}");
+
+            let key_set = std::env::var("OPENCLAW_API_KEY")
+                .map(|k| !k.is_empty())
+                .unwrap_or(false);
+            println!(
+                "  API key:          {}",
+                if key_set { "configured" } else { "not set (OPENCLAW_API_KEY)" }
+            );
+            let endpoint = std::env::var("OPENCLAW_ENDPOINT")
+                .unwrap_or_else(|_| "https://api.openclaw.dev (default)".into());
+            println!("  Endpoint:         {endpoint}");
+        }
+    }
+
+    Ok(())
 }
 
 /// Format a unix timestamp as a human-readable relative or absolute string.
@@ -3750,9 +4167,12 @@ fn run_client_only(cli: Cli) -> Result<()> {
     use akh_medu::api_types;
     use std::path::Path;
 
-    // Service commands work without a running server.
+    // Service and Setup commands work without a running server.
     if let Commands::Service { action } = cli.command {
         return dispatch_service(action);
+    }
+    if let Commands::Setup { action } = cli.command {
+        return dispatch_setup(action);
     }
 
     let xdg_paths = akh_medu::paths::AkhPaths::resolve().ok();
@@ -4964,6 +5384,23 @@ fn run_client_only(cli: Cli) -> Result<()> {
         // ── Service (launchd) ────────────────────────────────────────────
         Commands::Service { action } => {
             dispatch_service(action)?;
+        }
+
+        // ── Setup (handled by early return, unreachable) ────────────────
+        Commands::Setup { .. } => unreachable!("handled by early return"),
+
+        // ── Wiki (Akhipedia) — not yet available via remote client ───────
+        Commands::Wiki { .. } => {
+            eprintln!("Wiki commands require local engine access. Run without --server flag.");
+            std::process::exit(1);
+        }
+
+        // ── Memory Sync — requires local engine access ───────────────────
+        Commands::MemorySync { .. } => {
+            eprintln!(
+                "memory-sync commands require local engine access. Run without --server flag."
+            );
+            std::process::exit(1);
         }
     }
 

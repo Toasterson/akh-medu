@@ -165,6 +165,10 @@ pub enum AgentError {
 
     #[error(transparent)]
     #[diagnostic(transparent)]
+    Contact(#[from] super::contact::ContactError),
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
     Bootstrap(#[from] crate::bootstrap::purpose::BootstrapError),
 
     #[error(transparent)]
@@ -194,6 +198,10 @@ pub enum AgentError {
     #[error(transparent)]
     #[diagnostic(transparent)]
     Orchestrator(#[from] crate::bootstrap::orchestrator::OrchestratorError),
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Delegation(#[from] super::delegation::DelegationError),
 
     #[error("{0}")]
     #[diagnostic(

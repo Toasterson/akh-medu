@@ -1,0 +1,9 @@
+{
+  "name": "akh-medu",
+  "description": "Neuro-symbolic knowledge graph as persistent reasoning backend. Provides structured memory, SPARQL queries, and autonomous investigation across sessions.",
+  "version": "0.1.0",
+  "author": {
+    "name": "toasty"
+  },
+  "license": "AGPL-3.0"
+}

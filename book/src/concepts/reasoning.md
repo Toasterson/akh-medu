@@ -62,11 +62,11 @@ Skills can contribute additional rules that are loaded dynamically.
 
 ```bash
 # Simplify an expression
-akh-medu reason --expr "unbind(bind(Dog, is-a), is-a)"
+akh reason --expr "unbind(bind(Dog, is-a), is-a)"
 # Output: Dog
 
 # Verbose mode shows the e-graph state
-akh-medu reason --expr "unbind(bind(Dog, is-a), is-a)" --verbose
+akh reason --expr "unbind(bind(Dog, is-a), is-a)" --verbose
 ```
 
 ### Rust API
@@ -97,7 +97,7 @@ inference:
 3. New triples are extracted and committed to the knowledge graph.
 
 ```bash
-akh-medu agent infer --max-iterations 10 --min-confidence 0.5
+akh agent infer --max-iterations 10 --min-confidence 0.5
 ```
 
 ## E-Graph Verification

@@ -8,7 +8,7 @@
 //! truncate operations exist.**
 
 use std::num::NonZeroU64;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use miette::Diagnostic;
@@ -240,7 +240,7 @@ pub type AuditResult<T> = std::result::Result<T, AuditError>;
 ///
 /// **No delete, update, or truncate operations exist.**
 pub struct AuditLedger {
-    db: Arc<Database>,
+    db: Arc<Mutex<Database>>,
     next_id: AtomicU64,
     #[cfg(feature = "daemon")]
     broadcast: std::sync::Mutex<Option<tokio::sync::broadcast::Sender<AuditEntry>>>,
@@ -265,10 +265,11 @@ impl AuditLedger {
     /// Open an audit ledger on an existing database.
     ///
     /// Recovers the next ID counter by scanning the primary table.
-    pub fn open(db: Arc<Database>) -> AuditResult<Self> {
+    pub fn open(db: Arc<Mutex<Database>>) -> AuditResult<Self> {
         // Ensure tables exist by opening a write txn.
         {
-            let txn = db.begin_write().map_err(redb_err)?;
+            let db_lock = db.lock().expect("redb mutex poisoned");
+            let txn = db_lock.begin_write().map_err(redb_err)?;
             txn.open_table(AUDIT_TABLE).map_err(redb_err)?;
             txn.open_multimap_table(AUDIT_KIND_INDEX)
                 .map_err(redb_err)?;
@@ -277,7 +278,9 @@ impl AuditLedger {
 
         // Recover max ID from the primary table.
         let max_id = {
-            let txn = db.begin_read().map_err(redb_err)?;
+            let db_lock = db.lock().expect("redb mutex poisoned");
+            let txn = db_lock.begin_read().map_err(redb_err)?;
+            drop(db_lock); // release lock — read txn is independent
             let table = txn.open_table(AUDIT_TABLE).map_err(redb_err)?;
             let mut max = 0u64;
             let iter = table.iter().map_err(redb_err)?;
@@ -315,7 +318,8 @@ impl AuditLedger {
             })
         })?;
 
-        let txn = self.db.begin_write().map_err(redb_err)?;
+        let db_lock = self.db.lock().expect("redb mutex poisoned");
+        let txn = db_lock.begin_write().map_err(redb_err)?;
         {
             let mut table = txn.open_table(AUDIT_TABLE).map_err(redb_err)?;
             table
@@ -353,7 +357,9 @@ impl AuditLedger {
 
     /// Get a single entry by ID.
     pub fn get(&self, id: AuditId) -> AuditResult<AuditEntry> {
-        let txn = self.db.begin_read().map_err(redb_err)?;
+        let db_lock = self.db.lock().expect("redb mutex poisoned");
+        let txn = db_lock.begin_read().map_err(redb_err)?;
+        drop(db_lock); // release lock — read txn is independent
         let table = txn.open_table(AUDIT_TABLE).map_err(redb_err)?;
         let guard = table
             .get(id.get())
@@ -364,7 +370,9 @@ impl AuditLedger {
 
     /// Paginated range scan over all entries.
     pub fn list_page(&self, offset: u64, limit: usize) -> AuditResult<AuditPage> {
-        let txn = self.db.begin_read().map_err(redb_err)?;
+        let db_lock = self.db.lock().expect("redb mutex poisoned");
+        let txn = db_lock.begin_read().map_err(redb_err)?;
+        drop(db_lock); // release lock — read txn is independent
         let table = txn.open_table(AUDIT_TABLE).map_err(redb_err)?;
         let total = table.len().map_err(redb_err)? as usize;
 
@@ -394,7 +402,9 @@ impl AuditLedger {
 
     /// Paginated filtered query by kind tag.
     pub fn list_by_kind(&self, kind_tag: u8, offset: u64, limit: usize) -> AuditResult<AuditPage> {
-        let txn = self.db.begin_read().map_err(redb_err)?;
+        let db_lock = self.db.lock().expect("redb mutex poisoned");
+        let txn = db_lock.begin_read().map_err(redb_err)?;
+        drop(db_lock); // release lock — read txn is independent
         let idx = txn
             .open_multimap_table(AUDIT_KIND_INDEX)
             .map_err(redb_err)?;
@@ -436,7 +446,9 @@ impl AuditLedger {
 
     /// Get entries after a given ID (for streaming catch-up).
     pub fn since(&self, after_id: u64, limit: usize) -> AuditResult<Vec<AuditEntry>> {
-        let txn = self.db.begin_read().map_err(redb_err)?;
+        let db_lock = self.db.lock().expect("redb mutex poisoned");
+        let txn = db_lock.begin_read().map_err(redb_err)?;
+        drop(db_lock); // release lock — read txn is independent
         let table = txn.open_table(AUDIT_TABLE).map_err(redb_err)?;
 
         let mut entries = Vec::with_capacity(limit);
@@ -455,7 +467,9 @@ impl AuditLedger {
 
     /// Total number of audit entries.
     pub fn len(&self) -> AuditResult<usize> {
-        let txn = self.db.begin_read().map_err(redb_err)?;
+        let db_lock = self.db.lock().expect("redb mutex poisoned");
+        let txn = db_lock.begin_read().map_err(redb_err)?;
+        drop(db_lock); // release lock — read txn is independent
         let table = txn.open_table(AUDIT_TABLE).map_err(redb_err)?;
         Ok(table.len().map_err(redb_err)? as usize)
     }
@@ -498,11 +512,11 @@ fn deserialize_entry(bytes: &[u8]) -> AuditResult<AuditEntry> {
 mod tests {
     use super::*;
 
-    fn test_db() -> Arc<Database> {
+    fn test_db() -> Arc<Mutex<Database>> {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("test.redb");
         std::mem::forget(dir);
-        Arc::new(Database::create(path).unwrap())
+        Arc::new(Mutex::new(Database::create(path).unwrap()))
     }
 
     #[test]
@@ -655,7 +669,7 @@ mod tests {
     fn persistence_across_reopens() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("persist.redb");
-        let db = Arc::new(Database::create(&path).unwrap());
+        let db = Arc::new(Mutex::new(Database::create(&path).unwrap()));
 
         let stored_id = {
             let ledger = AuditLedger::open(Arc::clone(&db)).unwrap();
@@ -674,7 +688,7 @@ mod tests {
 
         // Drop and reopen.
         drop(db);
-        let db2 = Arc::new(Database::create(&path).unwrap());
+        let db2 = Arc::new(Mutex::new(Database::create(&path).unwrap()));
         let ledger2 = AuditLedger::open(db2).unwrap();
 
         let retrieved = ledger2.get(stored_id).unwrap();

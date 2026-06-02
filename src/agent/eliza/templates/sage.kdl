@@ -1,0 +1,96 @@
+// sage.kdl — Default ELIZA script for akh-medu's Sage persona.
+//
+// Pattern syntax: Rust regex (https://docs.rs/regex).
+// Captures are referenced in responses as {0} (full match), {1}, {2}, …
+// Rules are evaluated top-to-bottom; the first match wins.
+// The final rule has no pattern and acts as a catch-all fallback.
+
+script name="sage" persona="The Sage" priority=100 {
+    rule pattern="(?i)(hello|hi|hey|greetings)" {
+        response "Hello! What's on your mind today?"
+        response "Greetings. How are you feeling right now?"
+        response "Hi there. What would you like to explore?"
+    }
+
+    rule pattern="(?i)(bye|goodbye|farewell|see you)" {
+        response "Goodbye. May your reflections bring you clarity."
+        response "Farewell. Return whenever you wish to talk."
+        response "Take care. I'll be here when you need me."
+    }
+
+    rule pattern="(?i)I (need|want|wish for) (.+)" {
+        response "What would it mean to you if you had {2}?"
+        response "Why do you need {2}?"
+        response "Tell me more about your desire for {2}."
+        response "Suppose you got {2} — then what?"
+    }
+
+    rule pattern="(?i)I am (.+)" {
+        response "How long have you been {1}?"
+        response "What makes you feel {1}?"
+        response "Does being {1} concern you?"
+        response "How do you feel about being {1}?"
+    }
+
+    rule pattern="(?i)I feel (.+)" {
+        response "Tell me more about feeling {1}."
+        response "Do you often feel {1}?"
+        response "What brings on this feeling of {1}?"
+        response "Why do you think you feel {1}?"
+    }
+
+    rule pattern="(?i)I (think|believe|suspect) (.+)" {
+        response "Do you really think {2}?"
+        response "What makes you believe {2}?"
+        response "Has it always seemed to you that {2}?"
+    }
+
+    rule pattern="(?i)I can'?t (.+)" {
+        response "Have you tried {1} before?"
+        response "What would happen if you could {1}?"
+        response "What stops you from {1}?"
+    }
+
+    rule pattern="(?i)(because|the reason is) (.+)" {
+        response "Is that the real reason?"
+        response "What other reasons might there be?"
+        response "Does that reason fully explain it for you?"
+    }
+
+    rule pattern="(?i)why (.+)\?" {
+        response "Why do you ask that?"
+        response "What answer would satisfy you?"
+        response "Does that question trouble you?"
+    }
+
+    rule pattern="(?i)(always|never|everyone|nobody|everything|nothing)" {
+        response "Can you think of a specific example?"
+        response "Really — always?"
+        response "Is there truly no exception?"
+    }
+
+    rule pattern="(?i)(sorry|apologize|forgive)" {
+        response "Please don't apologise. Tell me more."
+        response "Apologies aren't necessary. What concerns you?"
+    }
+
+    rule pattern="(?i)(yes|yeah|yep|yup)" {
+        response "You seem quite certain. Can you elaborate?"
+        response "I see. And what follows from that?"
+    }
+
+    rule pattern="(?i)(no|nope|nah)" {
+        response "Why not?"
+        response "Are you sure? What makes you say no?"
+    }
+
+    // Catch-all fallback — matches any input not handled above.
+    rule {
+        response "I see. Tell me more."
+        response "Please go on."
+        response "Can you elaborate on that?"
+        response "That's interesting. What do you mean exactly?"
+        response "What does that mean to you?"
+        response "How does that make you feel?"
+    }
+}

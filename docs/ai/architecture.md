@@ -1,6 +1,6 @@
 # Akh-medu Architecture
 
-> Last updated: 2026-03-01 (macOS launchd service management, enhanced daemon monitoring)
+> Last updated: 2026-04-14 (Kubernetes deployment: Helm chart + Docker images, ADR 048)
 
 ## Overview
 
@@ -13,16 +13,17 @@ Akh-medu is a neuro-symbolic AI engine that runs entirely on CPU with no LLM dep
 - **Code Generation** — KG-to-Rust pipeline: code_gen tool, RustCodeGrammar, compiler feedback loop, parameterized templates, VSA code pattern encoding, pattern mining from examples, library learning cycle
 - **Multilingual Grammar** — GF-inspired abstract/concrete syntax split for 5 languages
 - **Four-Tier NLU** — rule parser → micro-ML NER → small LLM translator → VSA parse ranker (planned, Phase 14j-14m)
-- **Content Library** — document ingestion (PDF, EPUB, HTML) with chunking and semantic enrichment
+- **Content Library** — document ingestion (PDF, EPUB, HTML) with chunking and semantic enrichment (deprecated in favor of Seshat's Archive)
+- **Seshat's Archive** (Phase 37) — shared corpus library backed by pgvector/PostgreSQL, dedicated MCP service (`crates/seshat/`), RAG retrieval + LLM microtheory synthesis (Candle/T5), multi-akh sharing
 - **Tiered Storage** — hot (DashMap) → warm (mmap) → cold (redb) for scalability
 
 ## Module Map
 
 ```
 src/
-├── agent/              49 modules — OODA loop, tools (code_gen, code_ingest, compile_feedback, pattern_mine), memory, goals, drives, goal_generation, HTN decomposition, priority reasoning (argumentation), projects (microtheory-backed), planning, psyche, library learning, watch (GDA expectation monitoring), metacognition (Nelson-Narens monitoring/control, ZPD, AGM belief revision), resource awareness (VOC, CBR effort estimation), chunking (procedural learning), channel abstraction (CommChannel trait, ChannelRegistry, OperatorChannel), conversation (grounded dialogue, ConversationState, GroundedResponse), dialogue (KG-backed DialogueManager, DialoguePredicates, per-channel microtheory state), constraint_check (pre-communication constraint pipeline), interlocutor (social KG, InterlocutorRegistry, theory-of-mind microtheories, VSA interest vectors), oxifed (ActivityPub federation via AMQP bridge, feature-gated), explain (provenance-to-prose pipeline, DerivationNode trees, 5 query types), multi_agent (capability tokens, AgentProtocolMessage, TokenRegistry, trust bootstrap), pim (GTD + Eisenhower + PARA task overlay, petgraph dependency DAG, VSA priority encoding), causal (action schemas with preconditions/effects, pattern matching with variable binding, state transitions, outcome verification, VSA causal encoding)
+├── agent/              49 modules — OODA loop, tools (code_gen, code_ingest, compile_feedback, pattern_mine), memory, goals, drives, goal_generation, HTN decomposition, priority reasoning (argumentation), projects (microtheory-backed), planning, psyche, library learning, watch (GDA expectation monitoring), metacognition (Nelson-Narens monitoring/control, ZPD, AGM belief revision), resource awareness (VOC, CBR effort estimation), chunking (procedural learning), channel abstraction (CommChannel trait, ChannelRegistry, OperatorChannel), conversation (grounded dialogue, ConversationState, GroundedResponse), dialogue (KG-backed DialogueManager, DialoguePredicates, per-channel microtheory state), constraint_check (pre-communication constraint pipeline), interlocutor (social KG, InterlocutorRegistry, theory-of-mind microtheories, VSA interest vectors), oxifed (ActivityPub federation via AMQP bridge, feature-gated), explain (provenance-to-prose pipeline, DerivationNode trees, 5 query types), multi_agent (capability tokens, AgentProtocolMessage, TokenRegistry, trust bootstrap), pim (GTD + Eisenhower + PARA task overlay, petgraph dependency DAG, VSA priority encoding), causal (action schemas with preconditions/effects, pattern matching with variable binding, state transitions, outcome verification, VSA causal encoding), event_calculus (Phase 15b: temporal fluent reasoning, Event Calculus axioms, state projection, action sequence simulation, fluent history tracking), counterfactual (Phase 15c: Pearl Level 3 counterfactual reasoning, prediction tracking, causal model refinement), state_value (Phase 16a: TD-learned value function, compact state encoding, multi-factor rewards), mcts (Phase 16b: Monte Carlo Tree Search planner, UCT selection, R-MCTS reflection warm-start), plan_monitor (Phase 16c: plan execution monitoring, deviation detection, TD reward cycle, MCTS→Plan conversion), evidence (Phase 17: Dempster-Shafer mass functions, belief intervals, Dempster's rule combination, conflict detection, evidence fusion pipeline)
 ├── email/              9 modules — email channel (feature-gated): EmailConnector trait (JMAP/IMAP/Mock), MIME parsing (mail-parser), JWZ threading (RFC 5256), email composition (lettre), EmailChannel implementing CommChannel, EmailPredicates (14 well-known relations), OnlineHD spam classifier (VSA + Bayesian + deterministic rules), email triage & priority (sender reputation, four-feature importance scoring, VSA prototypes, HEY-style screening), structured extraction (regex + grammar hybrid, multi-language temporal/action NER, compartment-scoped KG persistence)
-├── bootstrap/           2 modules — purpose/identity parser (Phase 14a), identity resolution + Ritual of Awakening (Phase 14b)
+├── bootstrap/          10 modules — purpose/identity parser, Ritual of Awakening, domain expansion, curriculum ingestion, prerequisite analysis, ZPD competence assessment, resource discovery, bootstrap orchestrator, recipe, knowledge elicitation (Phase 32: KnowledgeElicitor + ElicitValidator, multi-pass T5 elicitation with self-consistency voting and 6-layer validation)
 ├── autonomous/          6 modules — background learning, confidence fusion, grounding
 ├── argumentation/       1 module  — pro/con argumentation (Phase 9e): meta-rules, verdicts, evidence chains
 ├── compartment/         5 modules — knowledge isolation, Jungian psyche, microtheories (Phase 9a, per-repo code scoping), CWA/circumscription (Phase 9m)
@@ -30,7 +31,8 @@ src/
 ├── grammar/            22 modules — GF-inspired parsing/generation, entity resolution, Rust code gen (Phase 10a), templates (Phase 10e)
 ├── graph/               9 modules — KG (petgraph), SPARQL (oxigraph), analytics, predicate hierarchy (Phase 9b), defeasible reasoning (Phase 9d), arity constraints (Phase 9j), contradiction detection (Phase 9l), argumentation truth (Phase 9i), NARTs (Phase 9o)
 ├── infer/               3 modules — spreading activation (with Phase 9 hierarchy + temporal context), backward chaining, superposition
-├── library/            12 modules — document parsing, chunking, three-phase concept extraction (regex + standalone + NLU)
+├── library/            12 modules — document parsing, chunking, three-phase concept extraction (regex + standalone + NLU); seshat/ submodule for MCP client to Seshat service
+crates/seshat/          — Seshat's Archive service: pgvector schema (SeaORM), MCP server (rmcp), ONNX embedding worker, optional Candle LLM synthesis, seshat-ingest CLI
 ├── reason/              3 modules — e-graph language (AkhLang), rewrite rules, second-order quantification (Phase 9n), anti-unification (Phase 10h)
 ├── simd/                5 modules — runtime SIMD kernel dispatch (AVX2 / generic)
 ├── skills/              1 module  — skillpack lifecycle (Cold/Warm/Hot)
@@ -48,8 +50,14 @@ src/
 ├── tms.rs                         — truth maintenance system (Phase 9c): support sets, retraction cascades
 ├── symbol.rs                      — SymbolId (NonZeroU64), SymbolKind, allocator
 ├── pipeline.rs                    — composable stage pipelines
+├── mcp/                 1 module  — MCP server (feature-gated): AkhMcpServer with 36 tools for Claude Code integration (ADR-029). Phase 1: granular bootstrap (resolve_identity, ritual_of_awakening, expand_domain, analyze_prerequisites, assess_competence, remove_triple). Phase 2: agent introspection (agent_run_cycle, agent_goals, agent_recall, agent_psyche). Phase 3: knowledge introspection (triples_of, provenance_of, export_symbols, infer_analogy).
 ├── service.rs                     — macOS launchd service management (plist generation, install/uninstall/start/stop/status)
 └── main.rs                        — CLI (clap) with 50+ subcommands
+
+data/web/                          — embedded web UI (htmx + Alpine.js SPA)
+├── index.html                     — single-page app: workspace select, awakening ceremony, chat + audit log
+├── style.css                      — dark theme, message type styling, stage timeline animations
+└── vendor/                        — bundled JS (htmx 2.x, Alpine.js 3.x) — no CDN dependency
 ```
 
 ## Core Data Model
@@ -396,6 +404,16 @@ Phase 13a–13i: Personal assistant (9 sub-phases):
 - [x] Feature: `calendar = ["icalendar", "chrono"]` — core module compiles without feature, only iCal import/CalDAV sync are feature-gated
 - [x] 32 new unit tests (13 Allen relations + boundary cases, inverse symmetry, is_overlapping, label roundtrip, event duration/overlaps, manager CRUD, conflict detection, range queries, today/week, persist/restore, iCal import + dedup)
 
+### Phase 25 — People & Contacts ✓
+
+5 sub-phases building unified people-awareness:
+- **25a — Contact Entity & Identity Resolution**: `ContactManager` with alias-based O(1) identity resolution, merge support, 13 KG predicates. `ContactError` (4 variants). Provenance: ContactResolved (72), ContactMerged (73).
+- **25b — Relationship Graph**: `RelationshipGraph` with 10 `RelationshipKind` variants, strength reinforcement + exponential decay, VSA-based social circle detection. Provenance: RelationshipRecorded (74).
+- **25c — Per-Person Conversation Memory**: `PersonMemoryIndex` mapping contacts to episodic memories and discussed topics. Recall by person, by person+topic, shared context between contacts.
+- **25d — Communication Style Profiles**: `StyleManager` with rule-based formality/verbosity heuristics (no LLM), EMA tracking (alpha=0.3), VSA prototype similarity search. Provenance: StyleObserved (75).
+- **25e — Calendar-Contact Integration**: `ContactCalendar` stateless utility — attendee management, co-attendance, meeting frequency, availability heatmap. Provenance: CalendarAttendeeLinked (76).
+- 33 unit tests across all sub-phases.
+
 Phase 14a–14i: Purpose-driven bootstrapping with identity (9 sub-phases):
 - **Identity**: 14a purpose + identity parser (NL → PurposeModel + IdentityRef, character reference extraction), 14b identity resolution (Wikidata + DBpedia + Wikipedia cascade → 12 Jungian archetypes → OCEAN → Psyche construction, Ritual of Awakening: self-naming via cultural morphemes)
 - **Domain**: 14c domain expansion (Wikidata + Wikipedia + ConceptNet, VSA boundary detection), 14d prerequisite discovery + ZPD classification (Vygotsky zones, curriculum generation)
@@ -412,6 +430,7 @@ Phase 14a–14i: Purpose-driven bootstrapping with identity (9 sub-phases):
 |--------|---------|----------|
 | `akh` | CLI client | default (full) or `client-only` (thin HTTP client) |
 | `akhomed` | Background server/daemon | `server`, `daemon` |
+| `seshd` | Seshat's Archive MCP service | `embedding` (crate: `seshat`) |
 
 ### Daemon Mode (Primary)
 
@@ -447,3 +466,114 @@ Logs: `~/Library/Logs/akh-medu/akhomed.{stdout,stderr}.log`
 Scripts:
 - `scripts/smoke-test.sh` — HTTP endpoint verification (~20 endpoints)
 - `scripts/stability-monitor.sh` — CSV logging (RSS, KG size, cycles) for overnight monitoring
+
+### Kubernetes Deployment (ADR-048)
+
+Docker images (`docker/akhomed.Dockerfile`, `docker/seshd.Dockerfile`) produce multi-arch (`amd64`/`arm64`) containers with ONNX Runtime pre-installed. Helm chart at `charts/akh-medu/`:
+
+```
+charts/akh-medu/
+├── Chart.yaml              # Bitnami PostgreSQL subchart dependency
+├── values.yaml
+└── templates/
+    ├── akhomed-deployment.yaml   # Recreate strategy (single-writer KG)
+    ├── akhomed-service.yaml
+    ├── akhomed-pvc.yaml          # 30Gi data + 5Gi models
+    ├── seshd-deployment.yaml     # With migrate init container
+    ├── seshd-service.yaml
+    ├── seshd-configmap.yaml      # seshat.toml (DB URL from subchart secret)
+    ├── seshd-pvc.yaml            # 1Gi models
+    └── *-ingress.yaml            # Optional per service
+```
+
+PostgreSQL uses `pgvector/pgvector:pg16` image with `CREATE EXTENSION vector` in initdb.
+
+## Planned: LLM-VSA Deep Integration (Phase 26, ADR-037)
+
+Direction for bidirectional neural↔symbolic bridge:
+
+```
+Current:  Text ──NLU──▶ AbsTree ──▶ VSA/KG (deterministic encoding, LLM is opaque)
+Target:   Text ──LLM──▶ Hidden states ──Neural encoder──▶ HyperVec ──▶ KG grounding
+                              │                                          │
+                              └────── Symbolic manipulation ◀────────────┘
+```
+
+Sub-phases:
+- **26a**: ARM NEON SIMD kernels (2-4x speedup on M2)
+- **26b**: Candle backend (pure Rust, hidden state access, Metal on M2)
+- **26c**: PolarQuant KV cache compression (~5x, enables 7B models on M2)
+- **26d**: Neural→VSA bridge (linear projection + binarization, self-supervised)
+- **26e**: Pipeline integration (neural concept extraction as NLU enrichment)
+- **26f**: Benchmarking
+
+See [plan](plans/2026-03-26-phase26-llm-vsa-deep-integration.md) and [ADR 037](decisions/037-llm-vsa-deep-integration.md).
+
+## Planned: Dual-Framework ML Stack (Phases 26-27)
+
+- **Phase 26** (Candle): Inference + hidden state access + small encoder training
+- **Phase 27** (Burn): LoRA fine-tuning, background training loops, hot-swap weights
+- Both use safetensors format for weight exchange
+
+## Planned: `n akh` Semantic Router (Phase 28, ADR-038)
+
+Dynamic routing across all inference layers:
+
+```
+Query ──▶ n akh (VSA features + LinUCB bandit)
+              │
+              ├──▶ Rule parser      (free, <1ms)
+              ├──▶ ONNX NER         (free, ~5ms)
+              ├──▶ Candle LLM       (free, ~200ms)
+              ├──▶ VSA direct       (free, <1ms, skip LLM)
+              ├──▶ Cloud API        ($$$, ~1-3s)
+              └──▶ Burn-trained     (free, ~200ms, Phase 27)
+```
+
+Self-optimizing: as Phase 27 training improves local models, bandit shifts
+traffic from cloud → local automatically.
+
+See [plan](plans/2026-03-26-phase28-semantic-router.md) and [ADR 038](decisions/038-semantic-router.md).
+
+## Planned: Capability Exposure (Phase 29, ADR-039)
+
+Expose hidden internal capabilities as user-facing operations (MCP + CLI + NLU + dashboard):
+
+- **29a**: Microtheory management (create, browse, compose, query)
+- **29b**: Skillpack lifecycle (activate, deactivate, share)
+- **29c**: Psyche & Shadow dynamics (profile, shadow journal, archetype tuning)
+- **29d**: Argumentation & debate ("argue for X", structured pro/con)
+- **29e**: Transparent reasoning ("why do you think X?", derivation trees)
+- **29f**: Hypothesis explorer (superposition visualization)
+- **29g**: Causal explorer ("what caused X?", counterfactual timelines)
+- **29h**: Evidence & belief dashboard (Dempster-Shafer intervals, conflict alerts)
+- **29i**: Source trust dashboard (reliability scores, trust history)
+
+See [plan](plans/2026-03-26-phase29-capability-exposure.md) and [ADR 039](decisions/039-capability-exposure.md).
+
+## Planned: Procedural Skills (Phase 30, ADR-040)
+
+Extend skills from "what is" (facts) to "how to do" (procedures):
+
+- **30a**: Extended format — `actions.json` (causal schemas) + `plans.json` (HTN templates)
+- **30b**: Activation wiring — skills register actions/plans with CausalManager + HTN + MCTS
+- **30c**: LLM-assisted authoring — natural language → structured skill (3-tier user model)
+- **30d**: Rule refinement loop — failure analysis → LLM suggests fixes → user approves
+- **30e**: Quality metrics — success rates, failure modes, rule coverage, staleness
+
+See [plan](plans/2026-03-26-phase30-procedural-skills.md) and [ADR 040](decisions/040-procedural-skills.md).
+
+## Planned: Skill Intelligence (Phase 31, ADR-041)
+
+Self-organizing skill ecosystem:
+
+- **31a**: Dependency graph — `depends`, `conflicts`, `provides`/`requires` capability tags
+- **31b**: Neural skill embeddings — per-skill prototype HyperVec for domain matching
+- **31c**: Skill-aware routing — `n akh` lazy-loads skills on demand
+- **31d**: Discovery from reasoning — agent detects latent skills during consolidation
+- **31e**: Dynamic synthesis — agent creates skills to fill knowledge gaps
+- **31f**: Sharing protocol — `.akhskill` archive export/import
+- **31g**: Cross-skill inference — bridge rules for multi-domain reasoning
+- **31h**: Curriculum — learning progressions for bootstrap
+
+See [plan](plans/2026-03-26-phase31-skill-intelligence.md) and [ADR 041](decisions/041-skill-intelligence.md).

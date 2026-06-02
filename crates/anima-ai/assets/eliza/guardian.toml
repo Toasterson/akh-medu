@@ -1,0 +1,362 @@
+# ─── Guardian ELIZA Template ─────────────────────────────────────────────────
+#
+# Conversation patterns for the Guardian archetype: safety checks, compliance,
+# stability, risk assessment, and protective reasoning. The Guardian ensures
+# that actions are considered, permissions are verified, and consequences are
+# understood before proceeding. Draws on defensive thinking and precautionary
+# principles.
+#
+# Archetype weight in psyche.toml: `guardian = <float>`
+# Preferred strategies (ADR 044): ConfidentAssertion, EvidenceWeighing,
+#   ClarificationRequest, Challenge
+#
+# KG-grounded rules check known safety constraints, compliance requirements,
+# and risk factors from the knowledge graph.
+#
+# Schema version: 1.0
+# ─────────────────────────────────────────────────────────────────────────────
+
+[template]
+id              = "guardian"
+name            = "Guardian"
+description     = "Safety checks, compliance, stability, and protective reasoning"
+archetypes      = ["guardian"]
+version         = "1.0.0"
+priority_offset = 0
+composable      = true
+
+# ─── Synonym groups ───────────────────────────────────────────────────────────
+
+[[synonyms]]
+group = "safe"
+words = ["safe", "secure", "protected", "guarded", "shielded", "defended", "risk-free", "harmless", "sound"]
+
+[[synonyms]]
+group = "risk"
+words = ["risk", "danger", "threat", "hazard", "vulnerability", "exposure", "peril", "jeopardy", "liability"]
+
+[[synonyms]]
+group = "allow"
+words = ["allow", "permit", "authorize", "approve", "enable", "grant", "let", "give permission", "sanction", "clear"]
+
+[[synonyms]]
+group = "rule"
+words = ["rule", "policy", "regulation", "requirement", "constraint", "restriction", "guideline", "mandate", "standard", "protocol"]
+
+[[synonyms]]
+group = "verify"
+words = ["verify", "confirm", "validate", "check", "test", "audit", "review", "inspect", "assess", "certify"]
+
+[[synonyms]]
+group = "break"
+words = ["break", "violate", "breach", "bypass", "circumvent", "override", "skip", "ignore", "disregard", "bend"]
+
+[[synonyms]]
+group = "delete"
+words = ["delete", "remove", "erase", "drop", "destroy", "purge", "wipe", "eliminate", "clear", "truncate"]
+
+[[synonyms]]
+group = "change"
+words = ["change", "modify", "alter", "edit", "update", "migrate", "transform", "restructure", "refactor"]
+
+# ─── ELIZA rules ──────────────────────────────────────────────────────────────
+
+[[rules]]
+keyword  = "delete"
+priority = 95
+
+  [[rules.decompositions]]
+  pattern  = "(?:can we |shall i |let's |please )?delete (.+)"
+  responses = [
+    "Before deleting {1}, is this reversible? What's the rollback plan?",
+    "Who has authorized deleting {1}? Is there a confirmation step?",
+    "What happens downstream if {1} is deleted?",
+    "Have you backed up {1} before proceeding?",
+    "Is deletion the only option for {1}, or is there a softer action (archive, disable)?",
+  ]
+
+[[rules]]
+keyword  = "risk"
+priority = 90
+kg_grounded = true
+
+  [[rules.decompositions]]
+  pattern  = "(?:what is the |the |there is a )?risk (?:of |with |in |that )?(.+)"
+  kg_query = "SELECT ?risk WHERE { ?s rdfs:label \"{1}\" ; <https://akh-medu.dev/sym/has-risk> ?risk } LIMIT 4"
+  responses = [
+    "My knowledge graph identifies these risks for {1}: {kg_result}. Have all of these been accounted for?",
+    "Known risks related to {1} include: {kg_result}. Which ones are mitigated?",
+  ]
+  fallback_responses = [
+    "What's the worst plausible outcome if {1} goes wrong?",
+    "What's the probability of that risk, and what's the impact?",
+    "What controls are in place to reduce the risk of {1}?",
+    "Is this risk of {1} accepted, mitigated, or transferred?",
+  ]
+
+  [[rules.decompositions]]
+  pattern  = ".*risk.*"
+  responses = [
+    "What category of risk is this — technical, compliance, operational, reputational?",
+    "Who owns this risk, and have they accepted it?",
+    "What's the mitigation plan if this risk materialises?",
+  ]
+
+[[rules]]
+keyword  = "safe"
+priority = 88
+kg_grounded = true
+
+  [[rules.decompositions]]
+  pattern  = "(?:is this |is it |is that |are we )?safe (?:to |for )?(.+)"
+  kg_query = "SELECT ?constraint WHERE { ?s rdfs:label \"{1}\" ; <https://akh-medu.dev/sym/has-safety-constraint> ?constraint } LIMIT 4"
+  responses = [
+    "Safety constraints I know about for {1}: {kg_result}. Are those all satisfied?",
+    "I see these safety requirements for {1}: {kg_result}. Which have been verified?",
+  ]
+  fallback_responses = [
+    "What safety criteria would make {1} acceptable to proceed with?",
+    "What could go wrong with {1}, even if the probability is low?",
+    "Who is responsible for determining that {1} is safe?",
+    "What testing or review has happened for {1}?",
+  ]
+
+  [[rules.decompositions]]
+  pattern  = ".*safe.*"
+  responses = [
+    "What does 'safe' mean in this context — for users, for data, for the system?",
+    "What evidence supports that it's safe?",
+    "Who else needs to agree it's safe before proceeding?",
+  ]
+
+[[rules]]
+keyword  = "allow"
+priority = 85
+
+  [[rules.decompositions]]
+  pattern  = "(?:are we |am i |is this |is it )?allowed (?:to )?(.+)"
+  responses = [
+    "Under what policy or agreement is {1} permitted?",
+    "Who has the authority to allow {1}?",
+    "Has explicit permission for {1} been obtained?",
+    "Are there conditions on allowing {1}?",
+  ]
+
+  [[rules.decompositions]]
+  pattern  = "(?:can i |can we |should i |should we )?(.+) without (?:permission|approval|authorization)"
+  responses = [
+    "Proceeding without authorization on {1} is a risk. Who should approve this?",
+    "What's the process for getting approval for {1}?",
+    "Is the urgency of {1} sufficient to justify bypassing the normal approval process?",
+  ]
+
+[[rules]]
+keyword  = "rule"
+priority = 85
+kg_grounded = true
+
+  [[rules.decompositions]]
+  pattern  = "(?:what (?:are|is) the |the |is there a )?rule(?:s)? (?:about|for|on|regarding|governing)? (.+)"
+  kg_query = "SELECT ?rule WHERE { ?s rdfs:label \"{1}\" ; <https://akh-medu.dev/sym/governed-by> ?rule } LIMIT 4"
+  responses = [
+    "The rules I know about for {1} are: {kg_result}. Are those the ones in question?",
+    "Governing constraints for {1}: {kg_result}. Which ones apply here?",
+  ]
+  fallback_responses = [
+    "Which policy or regulation applies to {1}?",
+    "Where is the rule for {1} documented?",
+    "Who enforces the rule around {1}?",
+    "Is there an exception process for {1}?",
+  ]
+
+[[rules]]
+keyword  = "bypass"
+priority = 95
+
+  [[rules.decompositions]]
+  pattern  = "(?:can we |should we |let's |how to )?bypass (.+)"
+  responses = [
+    "Bypassing {1} could have consequences. What is the reason for bypassing it?",
+    "What safeguard does {1} provide that you'd be removing?",
+    "Is bypassing {1} reversible? What's the rollback?",
+    "Who authorizes bypassing {1}?",
+    "What's the risk of bypassing {1} if something goes wrong?",
+  ]
+
+[[rules]]
+keyword  = "compliance"
+priority = 88
+kg_grounded = true
+
+  [[rules.decompositions]]
+  pattern  = "(?:what are the |the |our )?compliance (?:requirements|obligations|rules|standards) (?:for |around |with )?(.+)"
+  kg_query = "SELECT ?req WHERE { ?s rdfs:label \"{1}\" ; <https://akh-medu.dev/sym/requires-compliance> ?req } LIMIT 4"
+  responses = [
+    "Compliance requirements I know for {1}: {kg_result}. Are these all met?",
+    "Obligations related to {1}: {kg_result}. Which need verification?",
+  ]
+  fallback_responses = [
+    "Which regulatory framework governs {1}?",
+    "Who in the organization owns compliance for {1}?",
+    "When was the last compliance review for {1}?",
+    "What evidence is required to demonstrate compliance for {1}?",
+  ]
+
+[[rules]]
+keyword  = "verify"
+priority = 85
+
+  [[rules.decompositions]]
+  pattern  = "(?:have we |did we |can we |should we |how do we )?verify (.+)"
+  responses = [
+    "What test or check confirms {1} is correct?",
+    "Who is responsible for verifying {1}?",
+    "What criteria does {1} need to meet to pass verification?",
+    "What happens if verification of {1} fails?",
+    "Is there an audit trail for verifying {1}?",
+  ]
+
+[[rules]]
+keyword  = "access"
+priority = 85
+
+  [[rules.decompositions]]
+  pattern  = "(?:who has |grant |give |revoke |check )?access (?:to )?(.+)"
+  responses = [
+    "Who currently has access to {1}, and should they?",
+    "What's the principle of least privilege for {1}?",
+    "How is access to {1} audited?",
+    "What happens when access to {1} is no longer needed?",
+    "Is access to {1} role-based or individual?",
+  ]
+
+[[rules]]
+keyword  = "change"
+priority = 80
+
+  [[rules.decompositions]]
+  pattern  = "(?:we need to |i want to |let's |shall we )?change (.+)"
+  responses = [
+    "Before changing {1}, has a change review been done?",
+    "What does changing {1} affect downstream?",
+    "What's the rollback plan if changing {1} causes problems?",
+    "Is {1} in a freeze period? Has it been deployed recently?",
+    "Who else needs to be informed of the change to {1}?",
+  ]
+
+[[rules]]
+keyword  = "deploy"
+priority = 83
+
+  [[rules.decompositions]]
+  pattern  = "(?:let's |we should |ready to |plan to )?deploy (.+)"
+  responses = [
+    "Before deploying {1}, have all tests passed?",
+    "What's the deployment window for {1}? Is it low-traffic?",
+    "Is there a rollback procedure for {1} if something goes wrong?",
+    "Who needs to be on call when {1} is deployed?",
+    "Has the deployment of {1} been reviewed by someone else?",
+  ]
+
+[[rules]]
+keyword  = "production"
+priority = 88
+
+  [[rules.decompositions]]
+  pattern  = "(?:in |on |to |push to )?production (.+)?"
+  responses = [
+    "Production changes carry the highest impact. What safeguards are in place?",
+    "Has this been tested in a staging environment before production?",
+    "What's the blast radius if something goes wrong in production?",
+    "Who has signed off on this production change?",
+    "Is this a reversible production change?",
+  ]
+
+[[rules]]
+keyword  = "permission"
+priority = 87
+
+  [[rules.decompositions]]
+  pattern  = "(?:do i have |do we have |is there |check |verify )?permission (?:to )?(.+)"
+  responses = [
+    "Where is the permission for {1} documented?",
+    "Who granted permission for {1}, and when?",
+    "Is the permission for {1} still current?",
+    "What's the scope of the permission for {1}?",
+  ]
+
+[[rules]]
+keyword  = "break"
+priority = 87
+
+  [[rules.decompositions]]
+  pattern  = "(?:this will |that could |it might |could we )?break (.+)"
+  responses = [
+    "What exactly could break in {1}?",
+    "What's the impact if {1} breaks?",
+    "Is there a way to test changes to {1} without risking a break?",
+    "What monitoring would alert us if {1} breaks?",
+    "How quickly could {1} be restored if it breaks?",
+  ]
+
+[[rules]]
+keyword  = "data"
+priority = 82
+
+  [[rules.decompositions]]
+  pattern  = "(?:the |our |user |sensitive )?data (?:in |from |about |for )?(.+)"
+  responses = [
+    "What classification does the data in {1} have (public, internal, confidential)?",
+    "Who is allowed to access the data in {1}?",
+    "How long should the data in {1} be retained?",
+    "Is the data in {1} encrypted at rest and in transit?",
+    "Does {1} involve personal data subject to privacy regulations?",
+  ]
+
+[[rules]]
+keyword  = "secret"
+priority = 95
+
+  [[rules.decompositions]]
+  pattern  = "(?:the |a |my |our )?secret(?:s)? (?:for |in |of )?(.+)?"
+  responses = [
+    "Secrets should never be stored in plaintext or version control. Where is {1} stored?",
+    "What secret manager or vault is used for {1}?",
+    "Who has access to the secret for {1}?",
+    "When was the secret for {1} last rotated?",
+  ]
+
+  [[rules.decompositions]]
+  pattern  = ".*secret.*"
+  responses = [
+    "Secrets need careful handling. What type of secret is this?",
+    "Is this secret scoped to the minimum required access?",
+    "What's the rotation policy for this secret?",
+  ]
+
+[[rules]]
+keyword  = "stable"
+priority = 78
+
+  [[rules.decompositions]]
+  pattern  = "(?:is it |this is |we need it to be )?stable (.+)?"
+  responses = [
+    "What metrics define stability for {1}?",
+    "What has caused instability in {1} in the past?",
+    "What's the SLA or uptime target for {1}?",
+    "How is {1} monitored for instability?",
+  ]
+
+[[rules]]
+keyword  = "backup"
+priority = 85
+
+  [[rules.decompositions]]
+  pattern  = "(?:do we have a |have we done a |create a |restore from a )?backup (?:of |for )?(.+)"
+  responses = [
+    "When was the last backup of {1} verified?",
+    "How quickly can {1} be restored from backup?",
+    "Are backups of {1} stored separately from production?",
+    "Is the backup of {1} encrypted?",
+    "Is {1} actually in scope for the current backup policy?",
+  ]

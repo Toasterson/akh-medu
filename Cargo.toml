@@ -1,6 +1,10 @@
+[workspace]
+members = [".", "crates/seshat", "crates/heka"]
+resolver = "3"
+
 [package]
 name = "akh-medu"
-version = "0.5.4"
+version = "0.6.0"
 edition = "2024"
 description = "Neuro-symbolic AI engine: VSA + knowledge graphs + symbolic reasoning"
 license = "GPL-3.0-only"
@@ -40,7 +44,7 @@ rayon = "1"
 hnsw_rs = "0.3"
 anndists = "0.1"
 petgraph = "0.7"
-oxigraph = "0.5"
+oxigraph = { version = "0.5", default-features = false }
 
 # Code analysis
 syn = { version = "2", features = ["full", "visit"] }
@@ -97,19 +101,50 @@ native-tls = { version = "0.2", optional = true }
 lettre = { version = "0.11", optional = true, default-features = false, features = ["builder", "smtp-transport", "rustls-tls"] }
 regex = "1"
 
+# ELIZA hot-reload (feature-gated)
+notify = { version = "6", optional = true }
+knuffel = { version = "3", optional = true }
+
+# Archive extraction (for ONNX Runtime setup)
+flate2 = "1"
+tar = "0.4"
+
 # NLU Tier 2: Micro-ML NER (feature-gated)
-ort = { version = "2.0.0-rc.11", optional = true, default-features = false, features = ["std", "download-binaries", "copy-dylibs", "tls-native"] }
+ort = { version = "=2.0.0-rc.11", optional = true, default-features = false, features = ["std", "load-dynamic"] }
 tokenizers = { version = "0.22", optional = true, default-features = false, features = ["progressbar", "fancy-regex"] }
 
 # NLU Tier 3: Small LLM translator (feature-gated)
 llama-cpp-2 = { version = "0.1", optional = true, features = ["sampler"] }
 encoding_rs = { version = "0.8", optional = true }
 
+# NLU Candle backend: GGUF inference with hidden state access (feature-gated)
+candle-core = { version = "0.10", optional = true }
+candle-nn = { version = "0.10", optional = true }
+candle-transformers = { version = "0.10", optional = true }
+safetensors = { version = "0.7", optional = true }
+
+# Training: Burn framework for LoRA fine-tuning (future, feature-gated)
+# NOTE: Burn 0.21-pre.3's burn-dataset pulls rusqlite→libsqlite3-sys 0.35
+# which conflicts with seshat's sea-orm→sqlx→libsqlite3-sys 0.26.
+# Deferred until Burn reaches stable release with decoupled dataset crate.
+# burn = { version = "0.21", optional = true, default-features = false, features = ["train", "ndarray", "std"] }
+
+# MCP server (feature-gated)
+rmcp = { version = "0.17", features = ["server", "transport-streamable-http-server"], optional = true }
+
 # Calendar (feature-gated)
 icalendar = { version = "0.16", optional = true, features = ["parser"] }
 chrono = { version = "0.4", optional = true, features = ["serde"] }
 
+# Akhipedia wiki (feature-gated)
+comrak = { version = "0.31", optional = true, default-features = false, features = ["syntect"] }
+syntect = { version = "5", optional = true }
+minijinja = { version = "2", optional = true }
+tantivy = { version = "0.22", optional = true }
+blake3 = { version = "1", optional = true }
+
 [features]
+default = ["nlu-candle"]
 client-only = [ "daemon" ]  # Strips local engine from akh binary; requires running akhomed server
 daemon = ["tokio", "tokio-tungstenite", "futures-util"]
 server = ["daemon", "axum", "tower-http"]
@@ -120,6 +155,20 @@ wasm-tools = ["wasmtime"]
 nlu-ml = ["ort", "tokenizers"]
 nlu-llm = ["llama-cpp-2", "encoding_rs"]
 nlu-full = ["nlu-ml", "nlu-llm"]
+mcp = ["server", "rmcp"]
+delegation = ["daemon"]
+candle-backend = ["candle-core", "candle-nn", "candle-transformers", "safetensors", "tokenizers"]
+nlu-candle = ["candle-backend"]
+burn-training = ["candle-backend"]  # will add "burn" when sqlite3 conflict resolved
+training-data = []
+wiki = ["dep:comrak", "dep:syntect", "dep:minijinja", "dep:tantivy", "dep:blake3"]
+sparql-persist = ["oxigraph/rocksdb"]
+# Phase 32: LLM knowledge elicitation via T5 Knowledge model (Phase 35 provides
+# the model weights; this gate enables the elicitation code path).
+# Requires candle-backend. Gracefully degrades to web-API-only without the
+# t5-knowledge-q6k.gguf model file.
+knowledge-bootstrap = ["candle-backend"]
+eliza = ["daemon", "dep:notify", "dep:knuffel"]
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
@@ -136,4 +185,20 @@ required-features = ["server"]
 
 [[bench]]
 name = "vsa_ops"
+harness = false
+
+[[bench]]
+name = "phase26"
+harness = false
+
+[[bench]]
+name = "phase41g"
+harness = false
+
+[[bench]]
+name = "vsa_rl_cycles"
+harness = false
+
+[[bench]]
+name = "vsa_decide"
 harness = false

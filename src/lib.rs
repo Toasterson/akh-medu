@@ -31,6 +31,8 @@
 
 pub mod agent;
 pub mod api_types;
+pub mod bench_phase41g;
+pub mod cluster;
 pub mod argumentation;
 pub mod audit;
 pub mod bootstrap;
@@ -43,7 +45,9 @@ pub mod compartment;
 #[cfg(feature = "daemon")]
 pub mod config;
 pub mod dispatch;
+pub mod eliza;
 pub mod engine;
+pub mod extraction;
 pub mod error;
 pub mod export;
 pub mod glyph;
@@ -51,6 +55,10 @@ pub mod grammar;
 pub mod graph;
 pub mod infer;
 pub mod library;
+#[cfg(feature = "mcp")]
+pub mod mcp;
+#[cfg(feature = "daemon")]
+pub mod upstream_client;
 pub mod message;
 pub mod nlu;
 pub mod partition;
@@ -58,10 +66,12 @@ pub mod paths;
 pub mod pipeline;
 pub mod provenance;
 pub mod reason;
+pub mod reasoning;
 pub mod registry;
 pub mod rule_macro;
 pub mod seeds;
 pub mod service;
+pub mod setup;
 pub mod skolem;
 pub mod simd;
 pub mod skills;
@@ -69,6 +79,8 @@ pub mod store;
 pub mod symbol;
 pub mod temporal;
 pub mod tms;
+pub mod training;
 pub mod tui;
 pub mod vsa;
+pub mod wiki;
 pub mod workspace;

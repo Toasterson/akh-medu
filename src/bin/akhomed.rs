@@ -7,6 +7,12 @@
 //!
 //! See `docs/ai/decisions/023-client-only-mode.md` for the full endpoint inventory.
 
+// ── Embedded web UI assets ────────────────────────────────────────────────
+const INDEX_HTML: &str = include_str!("../../data/web/index.html");
+const STYLE_CSS: &str = include_str!("../../data/web/style.css");
+const HTMX_JS: &[u8] = include_bytes!("../../data/web/vendor/htmx.min.js");
+const ALPINE_JS: &[u8] = include_bytes!("../../data/web/vendor/alpine.min.js");
+
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -24,6 +30,7 @@ use tower_http::cors::CorsLayer;
 use akh_medu::agent::trigger::{Trigger, TriggerStore};
 use akh_medu::agent::{Agent, AgentConfig};
 use akh_medu::client::DaemonStatus;
+use akh_medu::mcp::{self, DaemonPauseHandle};
 use akh_medu::config::AkhomedConfig;
 use akh_medu::engine::{Engine, EngineConfig};
 use akh_medu::grammar::concrete::ParseContext;
@@ -48,13 +55,22 @@ use akh_medu::workspace::WorkspaceManager;
 struct ServerState {
     paths: AkhPaths,
     config: RwLock<AkhomedConfig>,
-    workspaces: RwLock<HashMap<String, Arc<Engine>>>,
+    workspaces: Arc<RwLock<HashMap<String, Arc<Engine>>>>,
     daemons: RwLock<HashMap<String, WorkspaceDaemon>>,
     /// One shared Agent per workspace — daemon, HTTP handlers, and WS sessions
     /// all operate on the same instance. See ADR-027.
-    agents: RwLock<HashMap<String, Arc<Mutex<Agent>>>>,
+    agents: Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>,
+    /// Non-blocking psyche snapshots shared with McpState.  Populated at agent
+    /// creation time so monitoring reads never block on the agent mutex.
+    psyche_snapshots: mcp::PsycheSnapshotMap,
+    /// Cached NLU pipeline per workspace — avoids reloading 1GB+ LLM model on
+    /// every WS connection or MCP chat call.
+    nlu_pipelines: RwLock<HashMap<String, Arc<Mutex<akh_medu::nlu::NluPipeline>>>>,
     /// Broadcast channel for audit entries — WS clients subscribe to this.
     audit_broadcast: tokio::sync::broadcast::Sender<akh_medu::audit::AuditEntry>,
+    /// Shared registry of per-workspace pause handles. Daemons write their
+    /// handles here; McpState reads them for suspend/resume via MCP.
+    daemon_pauses: RwLock<HashMap<String, mcp::DaemonPauseHandle>>,
 }
 
 /// Background daemon state for a workspace.
@@ -70,10 +86,13 @@ impl ServerState {
         Self {
             paths,
             config: RwLock::new(config),
-            workspaces: RwLock::new(HashMap::new()),
+            workspaces: Arc::new(RwLock::new(HashMap::new())),
             daemons: RwLock::new(HashMap::new()),
-            agents: RwLock::new(HashMap::new()),
+            agents: Arc::new(RwLock::new(HashMap::new())),
+            psyche_snapshots: Arc::new(RwLock::new(HashMap::new())),
+            nlu_pipelines: RwLock::new(HashMap::new()),
             audit_broadcast: audit_tx,
+            daemon_pauses: RwLock::new(HashMap::new()),
         }
     }
 
@@ -99,6 +118,7 @@ impl ServerState {
         let config = EngineConfig {
             dimension: Dimension::DEFAULT,
             data_dir: Some(ws_paths.kg_dir.clone()),
+            compartments_dir: Some(ws_paths.compartments_dir.clone()),
             ..Default::default()
         };
 
@@ -162,11 +182,68 @@ impl ServerState {
         })?;
 
         tracing::info!(workspace = %name, "shared agent created");
+        // Extract the snapshot Arc before moving agent into Mutex so it can be
+        // registered without ever re-acquiring the agent lock.
+        let snapshot = agent.psyche_snapshot();
         let shared = Arc::new(Mutex::new(agent));
         let mut agents = self.agents.write().await;
         // Another request may have raced us — keep the first one.
         let entry = agents.entry(name.to_string()).or_insert(Arc::clone(&shared));
-        Ok(Arc::clone(entry))
+        let result = Arc::clone(entry);
+        drop(agents);
+
+        // Register snapshot (idempotent — or_insert keeps the race-winner's snapshot).
+        self.psyche_snapshots
+            .write()
+            .await
+            .entry(name.to_string())
+            .or_insert(snapshot);
+
+        Ok(result)
+    }
+
+    /// Get or lazily create a shared NLU pipeline for the given workspace.
+    /// This avoids reloading the 1GB+ LLM model on every WS/MCP session.
+    async fn get_nlu_pipeline(
+        &self,
+        name: &str,
+        engine: &Engine,
+    ) -> Arc<Mutex<akh_medu::nlu::NluPipeline>> {
+        // Fast path: already cached.
+        {
+            let pipelines = self.nlu_pipelines.read().await;
+            if let Some(pipeline) = pipelines.get(name) {
+                return Arc::clone(pipeline);
+            }
+        }
+
+        // Slow path: create pipeline (loads models from disk).
+        let data_dir = engine.config().data_dir.clone();
+        let ranker_bytes = engine
+            .store()
+            .get_meta(b"nlu_ranker_state")
+            .ok()
+            .flatten();
+
+        let pipeline = tokio::task::spawn_blocking(move || {
+            let data_dir_ref = data_dir.as_deref();
+            ranker_bytes
+                .and_then(|bytes| akh_medu::nlu::parse_ranker::ParseRanker::from_bytes(&bytes))
+                .map(|ranker| {
+                    akh_medu::nlu::NluPipeline::with_ranker_and_models(ranker, data_dir_ref)
+                })
+                .unwrap_or_else(|| akh_medu::nlu::NluPipeline::new_with_models(data_dir_ref))
+        })
+        .await
+        .unwrap_or_else(|_| akh_medu::nlu::NluPipeline::new());
+
+        tracing::info!(workspace = %name, "shared NLU pipeline created");
+        let shared = Arc::new(Mutex::new(pipeline));
+        let mut pipelines = self.nlu_pipelines.write().await;
+        let entry = pipelines
+            .entry(name.to_string())
+            .or_insert(Arc::clone(&shared));
+        Arc::clone(entry)
     }
 }
 
@@ -221,6 +298,39 @@ async fn health(State(state): State<Arc<ServerState>>) -> Json<HealthResponse> {
         version: env!("CARGO_PKG_VERSION").to_string(),
         workspaces_loaded: map.len(),
     })
+}
+
+// ── Web UI handlers ─────────────────────────────────────────────────────
+
+async fn homepage_handler() -> axum::response::Html<&'static str> {
+    axum::response::Html(INDEX_HTML)
+}
+
+async fn style_handler() -> impl IntoResponse {
+    (
+        [(axum::http::header::CONTENT_TYPE, "text/css; charset=utf-8")],
+        STYLE_CSS,
+    )
+}
+
+async fn htmx_handler() -> impl IntoResponse {
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "application/javascript; charset=utf-8",
+        )],
+        HTMX_JS,
+    )
+}
+
+async fn alpine_handler() -> impl IntoResponse {
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "application/javascript; charset=utf-8",
+        )],
+        ALPINE_JS,
+    )
 }
 
 // ── Config handlers ──────────────────────────────────────────────────────
@@ -354,7 +464,8 @@ async fn apply_seed(
     Path((ws_name, pack_name)): Path<(String, String)>,
 ) -> Result<Json<SeedAppliedResponse>, (StatusCode, String)> {
     let engine = state.get_engine(&ws_name).await?;
-    let registry = SeedRegistry::bundled();
+    let seeds_dir = state.paths.seeds_dir();
+    let registry = SeedRegistry::discover(&seeds_dir);
     match registry.apply(&pack_name, &engine) {
         Ok(report) => Ok(Json(SeedAppliedResponse {
             pack: pack_name,
@@ -1099,6 +1210,7 @@ async fn library_add_handler(
             &req.source,
             ingest_config,
             Some(&mut nlu_pipeline),
+            30,
         )
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?
     } else {
@@ -1254,6 +1366,11 @@ async fn start_daemon_handler(
     let daemon_status = Arc::clone(&status);
     let daemon_ws_name = ws_name.clone();
 
+    // Register pause handle so MCP can suspend/resume this daemon.
+    let pause_handle = mcp::DaemonPauseHandle::new();
+    state.daemon_pauses.write().await.insert(ws_name.clone(), pause_handle.clone());
+
+    let task_handle = pause_handle.clone();
     let handle = tokio::task::spawn(async move {
         run_daemon_task(
             shared_agent,
@@ -1261,6 +1378,7 @@ async fn start_daemon_handler(
             shutdown_rx,
             daemon_config,
             daemon_ws_name,
+            task_handle,
         )
         .await;
     });
@@ -1334,12 +1452,14 @@ async fn run_daemon_task(
     shutdown_rx: tokio::sync::watch::Receiver<bool>,
     daemon_config: akh_medu::agent::DaemonConfig,
     ws_name: String,
+    pause_handle: mcp::DaemonPauseHandle,
 ) {
     use akh_medu::agent::AgentDaemon;
 
     let mut daemon = AgentDaemon::new(shared_agent, daemon_config)
         .with_shutdown(shutdown_rx)
-        .with_status(Arc::clone(&status));
+        .with_status(Arc::clone(&status))
+        .with_pause_handles(pause_handle.paused, pause_handle.cycle_done);
 
     if let Err(e) = daemon.run().await {
         tracing::error!(error = %e, ws = %ws_name, "daemon task failed");
@@ -1406,14 +1526,24 @@ async fn ws_handler(
 ) -> impl IntoResponse {
     let engine_result = state.get_engine(&ws_name).await;
     let agent_result = state.get_agent(&ws_name).await;
+    // Get cached NLU pipeline (loads models once, shares via Arc).
+    let nlu_result = match &engine_result {
+        Ok(engine) => Some(state.get_nlu_pipeline(&ws_name, engine).await),
+        Err(_) => None,
+    };
     let audit_rx = state.audit_broadcast.subscribe();
     ws.on_upgrade(move |socket| async move {
-        match (engine_result, agent_result) {
-            (Ok(engine), Ok(shared_agent)) => {
-                handle_ws_session(socket, shared_agent, engine, ws_name, audit_rx).await;
+        match (engine_result, agent_result, nlu_result) {
+            (Ok(engine), Ok(shared_agent), Some(nlu_pipeline)) => {
+                handle_ws_session(socket, shared_agent, engine, nlu_pipeline, ws_name, audit_rx)
+                    .await;
             }
-            (Err((_, msg)), _) | (_, Err((_, msg))) => {
+            (Err((_, msg)), _, _) | (_, Err((_, msg)), _) => {
                 let err = AkhMessage::error("ws", msg);
+                let _ = send_message(&err, &mut None::<&mut WebSocket>).await;
+            }
+            _ => {
+                let err = AkhMessage::error("ws", "failed to initialize NLU pipeline");
                 let _ = send_message(&err, &mut None::<&mut WebSocket>).await;
             }
         }
@@ -1424,20 +1554,14 @@ async fn handle_ws_session(
     mut socket: WebSocket,
     shared_agent: Arc<Mutex<Agent>>,
     engine: Arc<Engine>,
+    nlu_pipeline: Arc<Mutex<akh_medu::nlu::NluPipeline>>,
     ws_name: String,
     mut audit_rx: tokio::sync::broadcast::Receiver<akh_medu::audit::AuditEntry>,
 ) {
-    // ChatProcessor is session-local (owns NLU pipeline state).
-    let data_dir = engine.config().data_dir.as_deref();
-    let nlu_pipeline = engine
-        .store()
-        .get_meta(b"nlu_ranker_state")
-        .ok()
-        .flatten()
-        .and_then(|bytes| akh_medu::nlu::parse_ranker::ParseRanker::from_bytes(&bytes))
-        .map(|ranker| akh_medu::nlu::NluPipeline::with_ranker_and_models(ranker, data_dir))
-        .unwrap_or_else(|| akh_medu::nlu::NluPipeline::new_with_models(data_dir));
-    let mut chat_processor = akh_medu::chat::ChatProcessor::new(&engine, nlu_pipeline);
+    // Clone the shared pipeline — models are Arc-shared (cheap), ranker is
+    // cloned by value for per-session learning.
+    let session_pipeline = nlu_pipeline.lock().unwrap().clone();
+    let mut chat_processor = akh_medu::chat::ChatProcessor::new(&engine, session_pipeline);
 
     let welcome = AkhMessage::system(format!(
         "Connected to workspace \"{ws_name}\". {} symbols, {} triples.",
@@ -1765,6 +1889,107 @@ async fn compartments_handler(
     };
     Ok(Json(akh_medu::api_types::CompartmentListResponse {
         compartments,
+    }))
+}
+
+async fn compartment_discover_handler(
+    State(state): State<Arc<ServerState>>,
+    Path(ws_name): Path<String>,
+) -> Result<Json<akh_medu::api_types::CompartmentDiscoverResponse>, (StatusCode, String)> {
+    let engine = state.get_engine(&ws_name).await?;
+    let mgr = engine.compartments().ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            "compartment manager not available (no data dir)".to_string(),
+        )
+    })?;
+    let discovered = mgr
+        .discover()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?;
+    let total = mgr.all_compartments().len();
+    Ok(Json(akh_medu::api_types::CompartmentDiscoverResponse {
+        discovered,
+        total,
+    }))
+}
+
+async fn compartment_load_handler(
+    State(state): State<Arc<ServerState>>,
+    Path((ws_name, comp_id)): Path<(String, String)>,
+) -> Result<Json<akh_medu::api_types::CompartmentActionResponse>, (StatusCode, String)> {
+    let engine = state.get_engine(&ws_name).await?;
+    let mgr = engine.compartments().ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            "compartment manager not available".to_string(),
+        )
+    })?;
+    mgr.load(&comp_id, &engine)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("{e}")))?;
+    Ok(Json(akh_medu::api_types::CompartmentActionResponse {
+        id: comp_id,
+        action: "loaded".to_string(),
+        success: true,
+    }))
+}
+
+async fn compartment_unload_handler(
+    State(state): State<Arc<ServerState>>,
+    Path((ws_name, comp_id)): Path<(String, String)>,
+) -> Result<Json<akh_medu::api_types::CompartmentActionResponse>, (StatusCode, String)> {
+    let engine = state.get_engine(&ws_name).await?;
+    let mgr = engine.compartments().ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            "compartment manager not available".to_string(),
+        )
+    })?;
+    mgr.unload(&comp_id, &engine)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("{e}")))?;
+    Ok(Json(akh_medu::api_types::CompartmentActionResponse {
+        id: comp_id,
+        action: "unloaded".to_string(),
+        success: true,
+    }))
+}
+
+async fn compartment_activate_handler(
+    State(state): State<Arc<ServerState>>,
+    Path((ws_name, comp_id)): Path<(String, String)>,
+) -> Result<Json<akh_medu::api_types::CompartmentActionResponse>, (StatusCode, String)> {
+    let engine = state.get_engine(&ws_name).await?;
+    let mgr = engine.compartments().ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            "compartment manager not available".to_string(),
+        )
+    })?;
+    mgr.activate(&comp_id)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("{e}")))?;
+    Ok(Json(akh_medu::api_types::CompartmentActionResponse {
+        id: comp_id,
+        action: "activated".to_string(),
+        success: true,
+    }))
+}
+
+async fn compartment_deactivate_handler(
+    State(state): State<Arc<ServerState>>,
+    Path((ws_name, comp_id)): Path<(String, String)>,
+) -> Result<Json<akh_medu::api_types::CompartmentActionResponse>, (StatusCode, String)> {
+    let engine = state.get_engine(&ws_name).await?;
+    let mgr = engine.compartments().ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            "compartment manager not available".to_string(),
+        )
+    })?;
+    mgr.deactivate(&comp_id)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("{e}")))?;
+    Ok(Json(akh_medu::api_types::CompartmentActionResponse {
+        id: comp_id,
+        action: "deactivated".to_string(),
+        success: true,
     }))
 }
 
@@ -2740,7 +2965,7 @@ async fn awaken_resolve_handler(
             description: knowledge.description.clone(),
         };
         let ritual = akh_medu::bootstrap::identity::ritual_of_awakening(
-            &knowledge, &purpose, &engine,
+            &knowledge, &purpose, &engine, false,
         )
         .ok();
 
@@ -3178,10 +3403,67 @@ async fn main() {
     };
 
     // AKH_AUTO_START env var overrides config if set.
-    let auto_start: Vec<String> = match std::env::var("AKH_AUTO_START") {
-        Ok(val) if val.is_empty() => Vec::new(),
-        Ok(val) => val.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect(),
-        Err(_) => config.daemon.auto_start.clone(),
+    // "default" is treated as "no auto-start" (daemons are paused by default).
+    let env_auto_start: Option<Vec<String>> = match std::env::var("AKH_AUTO_START") {
+        Ok(val) => {
+            let trimmed = val.trim();
+            if trimmed.is_empty() || trimmed == "default" {
+                Some(Vec::new())
+            } else {
+                Some(
+                    trimmed
+                        .split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty() && s != "default")
+                        .collect(),
+                )
+            }
+        }
+        Err(_) => None,
+    };
+
+    // CLI --auto-start <workspace> adds to the auto-start list.
+    // This is opt-in: workspaces are NOT auto-started unless explicitly listed.
+    let mut cli_auto_start = Vec::new();
+    {
+        let mut args = std::env::args().skip(1);
+        while let Some(arg) = args.next() {
+            if arg == "--auto-start" {
+                if let Some(ws) = args.next() {
+                    if !ws.is_empty() && ws != "default" {
+                        cli_auto_start.push(ws);
+                    }
+                }
+            }
+        }
+    }
+
+    // Merge: env var takes precedence if set; otherwise use config + CLI.
+    let auto_start: Vec<String> = if let Some(env_list) = env_auto_start {
+        // Env var overrides everything. Merge with CLI for dedup.
+        let mut merged = env_list;
+        for w in cli_auto_start {
+            if !merged.contains(&w) {
+                merged.push(w);
+            }
+        }
+        merged
+    } else {
+        // Config provides defaults (filtered to remove "default" sentinel),
+        // CLI --auto-start appends.
+        let mut merged: Vec<String> = config
+            .daemon
+            .auto_start
+            .iter()
+            .filter(|s| s.as_str() != "default")
+            .cloned()
+            .collect();
+        for w in cli_auto_start {
+            if !merged.contains(&w) {
+                merged.push(w);
+            }
+        }
+        merged
     };
 
     let state = Arc::new(ServerState::new(paths.clone(), config));
@@ -3223,6 +3505,9 @@ async fn main() {
                     let daemon_status = Arc::clone(&status);
                     let daemon_ws = ws_name.clone();
                     let dc = daemon_config.clone();
+                    let pause_handle = mcp::DaemonPauseHandle::new();
+                    state.daemon_pauses.write().await.insert(ws_name.clone(), pause_handle.clone());
+                    let task_handle = pause_handle.clone();
                     let handle = tokio::task::spawn(async move {
                         run_daemon_task(
                             shared_agent,
@@ -3230,6 +3515,7 @@ async fn main() {
                             shutdown_rx,
                             dc,
                             daemon_ws,
+                            task_handle,
                         )
                         .await;
                     });
@@ -3255,6 +3541,11 @@ async fn main() {
     }
 
     let app = Router::new()
+        // Web UI.
+        .route("/", get(homepage_handler))
+        .route("/assets/style.css", get(style_handler))
+        .route("/assets/htmx.min.js", get(htmx_handler))
+        .route("/assets/alpine.min.js", get(alpine_handler))
         // Health.
         .route("/health", get(health))
         // Global config.
@@ -3607,10 +3898,56 @@ async fn main() {
             "/workspaces/{ws_name}/compartments",
             get(compartments_handler),
         )
+        .route(
+            "/workspaces/{ws_name}/compartments/discover",
+            post(compartment_discover_handler),
+        )
+        .route(
+            "/workspaces/{ws_name}/compartments/{comp_id}/load",
+            post(compartment_load_handler),
+        )
+        .route(
+            "/workspaces/{ws_name}/compartments/{comp_id}/unload",
+            post(compartment_unload_handler),
+        )
+        .route(
+            "/workspaces/{ws_name}/compartments/{comp_id}/activate",
+            post(compartment_activate_handler),
+        )
+        .route(
+            "/workspaces/{ws_name}/compartments/{comp_id}/deactivate",
+            post(compartment_deactivate_handler),
+        )
         // WebSocket.
         .route("/ws/{ws_name}", get(ws_handler))
         .layer(CorsLayer::permissive())
         .with_state(Arc::clone(&state));
+
+    // ── MCP server (feature-gated) ──────────────────────────────────
+    #[cfg(feature = "mcp")]
+    let app = {
+        use rmcp::transport::streamable_http_server::{
+            StreamableHttpService, session::local::LocalSessionManager,
+        };
+
+        let upstreams = state.config.read().await.upstreams.clone();
+        let mcp_state = Arc::new(akh_medu::mcp::McpState::new(
+            paths.clone(),
+            Arc::clone(&state.workspaces),
+            Arc::clone(&state.agents),
+            Arc::clone(&state.psyche_snapshots),
+            upstreams,
+        ));
+
+        let mcp_service = StreamableHttpService::new(
+            move || Ok(akh_medu::mcp::AkhMcpServer::new(Arc::clone(&mcp_state))),
+            LocalSessionManager::default().into(),
+            Default::default(),
+        );
+
+        tracing::info!("MCP server mounted at /mcp");
+        app.nest_service("/mcp", mcp_service)
+    };
 
     tracing::info!("akhomed listening on {addr}");
 
@@ -3642,18 +3979,31 @@ async fn main() {
 
             // Signal all workspace daemons to stop, then join with timeout.
             let mut daemons = state_for_shutdown.daemons.write().await;
-            for (name, daemon) in daemons.drain() {
+            let mut aborted = false;
+            for (name, mut daemon) in daemons.drain() {
                 tracing::info!(workspace = %name, "stopping workspace daemon");
                 let _ = daemon.shutdown_tx.send(true);
-                match tokio::time::timeout(Duration::from_secs(5), daemon.handle).await {
+                match tokio::time::timeout(Duration::from_secs(5), &mut daemon.handle).await {
                     Ok(Ok(())) => tracing::info!(workspace = %name, "daemon stopped cleanly"),
                     Ok(Err(e)) => tracing::warn!(workspace = %name, error = %e, "daemon task panicked"),
-                    Err(_) => tracing::warn!(workspace = %name, "daemon did not stop within 5s, abandoning"),
+                    Err(_) => {
+                        tracing::warn!(workspace = %name, "daemon did not stop within 5s, aborting");
+                        daemon.handle.abort();
+                        aborted = true;
+                    }
                 }
             }
             drop(daemons);
 
             akh_medu::client::remove_pid_file(&paths_for_shutdown);
+
+            // abort() only cancels at .await points. Daemon tasks run sync CPU
+            // work that never yields, so abort alone won't stop them. Force exit
+            // after a short grace period to avoid leaving the process hanging.
+            if aborted {
+                tracing::info!("force-exiting after abort (daemon tasks run sync CPU work)");
+                std::process::exit(0);
+            }
         })
         .await
         .expect("server error");

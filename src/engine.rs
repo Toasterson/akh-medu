@@ -49,6 +49,10 @@ pub struct EngineConfig {
     pub encoding: Encoding,
     /// Data directory for persistence. `None` for memory-only mode.
     pub data_dir: Option<PathBuf>,
+    /// Explicit compartments directory. When `None`, defaults to
+    /// `{data_dir}/compartments`. Set this when `data_dir` points to a
+    /// subdirectory (e.g. `kg/`) and compartments live at the workspace root.
+    pub compartments_dir: Option<PathBuf>,
     /// Maximum memory budget in MB for skillpacks.
     pub max_memory_mb: usize,
     /// Maximum expected symbols (capacity hint for item memory).
@@ -63,6 +67,7 @@ impl Default for EngineConfig {
             dimension: Dimension::DEFAULT,
             encoding: Encoding::Bipolar,
             data_dir: None,
+            compartments_dir: None,
             max_memory_mb: 1024,
             max_symbols: 1_000_000,
             language: Language::Auto,
@@ -105,6 +110,11 @@ pub struct Phase9Config {
     pub hierarchy_in_inference: bool,
     /// Expand rule macros on matching triple insertions.
     pub macro_expansion_on_insert: bool,
+    /// Reject triples where subject == object (self-referential).
+    ///
+    /// Defaults to `true`. Set to `false` only when inserting intentionally
+    /// reflexive triples (e.g., from second-order reflexivity inference).
+    pub reject_self_referential: bool,
 }
 
 impl Default for Phase9Config {
@@ -118,6 +128,7 @@ impl Default for Phase9Config {
             temporal_decay_enabled: true,
             hierarchy_in_inference: true,
             macro_expansion_on_insert: true,
+            reject_self_referential: true,
         }
     }
 }
@@ -147,6 +158,7 @@ pub struct Engine {
     temporal_registry: RwLock<crate::temporal::TemporalRegistry>,
     constraint_registry: RwLock<crate::graph::arity::ConstraintRegistry>,
     functional_predicates: RwLock<crate::graph::contradiction::FunctionalPredicates>,
+    multi_valued_predicates: RwLock<crate::graph::contradiction::MultiValuedPredicates>,
     disjointness_constraints: RwLock<crate::graph::contradiction::DisjointnessConstraints>,
     skolem_registry: RwLock<crate::skolem::SkolemRegistry>,
     nart_registry: RwLock<crate::graph::nart::NartRegistry>,
@@ -240,15 +252,38 @@ impl Engine {
 
         let store = Arc::new(store);
 
-        // Restore knowledge graph from persistent SPARQL store.
-        if let Some(ref sparql) = sparql {
-            let restored = sparql.all_triples().unwrap_or_else(|e| {
-                tracing::warn!(error = %e, "KG restore from SPARQL skipped");
-                vec![]
-            });
-            if !restored.is_empty() {
-                let count = knowledge_graph.bulk_load(&restored).unwrap_or(0);
-                tracing::info!(triples = count, "knowledge graph restored from SPARQL");
+        // Restore knowledge graph.
+        //
+        // Primary path: SPARQL store (persistent when `sparql-persist` is enabled).
+        // Fallback path: bincode snapshot in the TieredStore metadata, written by
+        // `Engine::persist()`.  This allows triple persistence in environments
+        // without RocksDB (e.g., test mode, single-binary deployments).
+        let sparql_triples = sparql
+            .as_ref()
+            .map(|s| {
+                s.all_triples().unwrap_or_else(|e| {
+                    tracing::warn!(error = %e, "KG restore from SPARQL skipped");
+                    vec![]
+                })
+            })
+            .unwrap_or_default();
+
+        if !sparql_triples.is_empty() {
+            let count = knowledge_graph.bulk_load(&sparql_triples).unwrap_or(0);
+            tracing::info!(triples = count, "knowledge graph restored from SPARQL");
+        } else {
+            // SPARQL is unavailable or empty — try the bincode fallback.
+            let fallback = store
+                .get_meta(b"kg_triples_snapshot")
+                .ok()
+                .flatten()
+                .and_then(|bytes| {
+                    bincode::deserialize::<Vec<crate::graph::Triple>>(&bytes).ok()
+                })
+                .unwrap_or_default();
+            if !fallback.is_empty() {
+                let count = knowledge_graph.bulk_load(&fallback).unwrap_or(0);
+                tracing::info!(triples = count, "knowledge graph restored from bincode snapshot");
             }
         }
 
@@ -275,9 +310,18 @@ impl Engine {
         // Restore learned equivalences from persistent storage.
         let entity_resolver = RwLock::new(EntityResolver::load_from_store(&store));
 
-        // Initialize compartment manager if data_dir has a compartments/ subdir.
-        let compartment_manager = config.data_dir.as_ref().map(|dir| {
-            let compartments_dir = dir.join("compartments");
+        // Initialize compartment manager. Use explicit compartments_dir if set,
+        // otherwise default to {data_dir}/compartments.
+        let compartment_manager = config
+            .compartments_dir
+            .as_ref()
+            .or(config.data_dir.as_ref())
+            .map(|dir| {
+            let compartments_dir = if config.compartments_dir.is_some() {
+                dir.clone()
+            } else {
+                dir.join("compartments")
+            };
             let mgr = crate::compartment::CompartmentManager::new(compartments_dir);
             if let Err(e) = mgr.discover() {
                 tracing::debug!(error = %e, "compartment discovery skipped");
@@ -306,6 +350,7 @@ impl Engine {
             temporal_registry: RwLock::new(crate::temporal::TemporalRegistry::new()),
             constraint_registry: RwLock::new(crate::graph::arity::ConstraintRegistry::new()),
             functional_predicates: RwLock::new(crate::graph::contradiction::FunctionalPredicates::new()),
+            multi_valued_predicates: RwLock::new(crate::graph::contradiction::MultiValuedPredicates::new()),
             disjointness_constraints: RwLock::new(crate::graph::contradiction::DisjointnessConstraints::new()),
             skolem_registry: RwLock::new(crate::skolem::SkolemRegistry::new()),
             nart_registry: RwLock::new(crate::graph::nart::NartRegistry::new()),
@@ -315,6 +360,11 @@ impl Engine {
 
         // Restore Phase 9 registries from persistent storage if available.
         engine.restore_phase9();
+
+        // Register well-known global multi-valued predicates (taxonomy relations
+        // that naturally have many objects per subject). This must happen after
+        // restore_phase9() so it merges with any previously persisted set.
+        engine.register_builtin_multi_valued();
 
         // Auto-load all discovered compartments (psyche, domain, etc.) so their
         // triples and psyche config are available immediately.
@@ -425,6 +475,16 @@ impl Engine {
     /// 2. **Insert**: KG + hypervector creation + SPARQL sync
     /// 3. **Post-insert**: Hierarchy invalidation, Skolem auto-grounding, rule macro expansion
     pub fn add_triple(&self, triple: &Triple) -> AkhResult<()> {
+        // --- Self-referential guard ---
+        if self.phase9_config.reject_self_referential && triple.subject == triple.object {
+            return Err(EngineError::SelfReferentialTriple {
+                subject_label: self.resolve_label(triple.subject),
+                predicate_label: self.resolve_label(triple.predicate),
+                subject_id: triple.subject.get(),
+            }
+            .into());
+        }
+
         // --- Phase 9 pre-insert: constraint check ---
         if self.phase9_config.enforce_constraints {
             let registry = self.constraint_registry.read().unwrap();
@@ -464,8 +524,9 @@ impl Engine {
             let func = self.functional_predicates.read().unwrap();
             let disj = self.disjointness_constraints.read().unwrap();
             let temp = self.temporal_registry.read().unwrap();
+            let mv = self.multi_valued_predicates.read().unwrap();
             let contradictions = crate::graph::contradiction::check_contradictions(
-                self, triple, &func, &disj, Some(&temp),
+                self, triple, &func, &disj, Some(&temp), Some(&mv),
             );
 
             if !contradictions.is_empty() {
@@ -588,6 +649,66 @@ impl Engine {
                     symbol_id: symbol.get(),
                 })?;
         self.search_similar(&vec, top_k)
+    }
+
+    /// Re-encode a symbol's hypervector using its relational neighborhood.
+    ///
+    /// Uses existing ItemMemory vectors for neighbors and predicates so that
+    /// the grounded result captures actual KG structure. Blends the symbol's
+    /// current vector with its neighborhood bundle via probabilistic bit
+    /// selection for reproducible convergence.
+    ///
+    /// Returns the number of neighbor edges used for grounding (0 = no change).
+    pub fn ground_symbol(&self, symbol: SymbolId) -> AkhResult<usize> {
+        let outgoing = self.triples_from(symbol).len();
+        let incoming = self.triples_to(symbol).len();
+        let n_edges = outgoing + incoming;
+
+        if n_edges == 0 {
+            return Ok(0);
+        }
+
+        let config = crate::vsa::grounding::GroundingConfig::default();
+        let grounded = crate::vsa::grounding::ground_symbol(
+            symbol,
+            self,
+            &self.ops,
+            &self.item_memory,
+            &config,
+        )?;
+        self.item_memory.insert(symbol, grounded);
+        Ok(n_edges)
+    }
+
+    /// Re-encode all symbols using iterative neighborhood aggregation.
+    ///
+    /// Delegates to `vsa::grounding::ground_all` which re-uses existing
+    /// ItemMemory vectors rather than creating fresh random seeds per call,
+    /// correctly propagating KG structure into hypervector space.
+    ///
+    /// Returns `(grounded_count, total_relations_used)`.
+    pub fn ground_all_symbols(&self) -> AkhResult<(usize, usize)> {
+        let config = crate::vsa::grounding::GroundingConfig::default();
+        let result =
+            crate::vsa::grounding::ground_all(self, &self.ops, &self.item_memory, &config)?;
+
+        let total_rels = self.knowledge_graph.triple_count();
+
+        if total_rels == 0 {
+            tracing::warn!(
+                symbols = result.symbols_updated,
+                "ground_all_symbols: KG has 0 triples — grounding produced no relational structure"
+            );
+        }
+
+        // Rebuild the HNSW index after re-grounding to remove stale entries.
+        // Without this, similarity_search returns uniform 1.0 because old
+        // random vectors remain alongside the newly grounded ones.
+        if result.symbols_updated > 0 {
+            self.item_memory.rebuild_hnsw();
+        }
+
+        Ok((result.symbols_updated, total_rels))
     }
 
     // -----------------------------------------------------------------------
@@ -1256,6 +1377,140 @@ impl Engine {
         Ok(engine.run(self)?)
     }
 
+    /// Remove semantically invalid `is-a` and `child-of` triples from the KG.
+    ///
+    /// These arise when the inference engine transitively closes across
+    /// mismatched domains — for example, agent identity nodes (Ptah, Khnum,
+    /// Horus, …) gaining spurious `is-a` links to CI runners, ForgejoActions,
+    /// storage nodes, tool-name identifiers, UUIDs, or raw noise artefacts.
+    ///
+    /// The predicate-specific semantic guard applied here mirrors the runtime
+    /// guard in the forward-chaining rule engine, so this serves as retroactive
+    /// cleanup for contamination that accumulated before the guard was in place.
+    ///
+    /// Returns the number of triples removed.
+    pub fn purge_contaminated_inferences(&self) -> AkhResult<usize> {
+        use crate::autonomous::rule_engine::{
+            is_invalid_type_hierarchy_participant, is_noise_entity,
+        };
+
+        let is_a_id = self.lookup_symbol("is-a").ok();
+        let child_of_id = self.lookup_symbol("child-of").ok();
+        if is_a_id.is_none() && child_of_id.is_none() {
+            return Ok(0);
+        }
+
+        let candidates: Vec<Triple> = self
+            .all_triples()
+            .into_iter()
+            .filter(|t| Some(t.predicate) == is_a_id || Some(t.predicate) == child_of_id)
+            .collect();
+
+        let mut removed = 0usize;
+        for triple in candidates {
+            let pred_label = self.resolve_label(triple.predicate);
+            let subj_label = self.resolve_label(triple.subject);
+            let obj_label = self.resolve_label(triple.object);
+
+            let contaminated = is_noise_entity(&subj_label)
+                || is_noise_entity(&obj_label)
+                || is_invalid_type_hierarchy_participant(&pred_label, &subj_label)
+                || is_invalid_type_hierarchy_participant(&pred_label, &obj_label);
+
+            if contaminated {
+                self.knowledge_graph
+                    .remove_triple(triple.subject, triple.predicate, triple.object);
+                if let Some(ref sparql) = self.sparql {
+                    let _ = sparql.remove_triple(triple.subject, triple.predicate, triple.object);
+                }
+                removed += 1;
+            }
+        }
+
+        Ok(removed)
+    }
+
+    /// Remove all agent runtime artifact entities from the knowledge graph.
+    ///
+    /// Runtime artifacts are entities whose labels start with `"summary:"` —
+    /// opaque string dumps written by the old memory consolidation path.  They
+    /// inflate triple counts, bloat the VSA similarity space, and carry no
+    /// durable semantic value.
+    ///
+    /// This method acts as a one-time GC sweep for databases that accumulated
+    /// artifacts before the consolidation guard (WI-019e1061) was introduced.
+    /// New runs no longer produce `summary:*` entities, so this is safe to call
+    /// at engine startup and as a background maintenance task.
+    ///
+    /// Returns the number of triples removed.
+    pub fn purge_runtime_artifacts(&self) -> AkhResult<usize> {
+        let artifact_ids: Vec<SymbolId> = self
+            .all_symbols()
+            .into_iter()
+            .filter(|m| m.label.starts_with("summary:"))
+            .map(|m| m.id)
+            .collect();
+
+        if artifact_ids.is_empty() {
+            return Ok(0);
+        }
+
+        let artifact_set: std::collections::HashSet<SymbolId> =
+            artifact_ids.iter().copied().collect();
+
+        let to_remove: Vec<Triple> = self
+            .all_triples()
+            .into_iter()
+            .filter(|t| {
+                artifact_set.contains(&t.subject) || artifact_set.contains(&t.object)
+            })
+            .collect();
+
+        let removed = to_remove.len();
+        for triple in to_remove {
+            self.knowledge_graph
+                .remove_triple(triple.subject, triple.predicate, triple.object);
+            if let Some(ref sparql) = self.sparql {
+                let _ = sparql.remove_triple(triple.subject, triple.predicate, triple.object);
+            }
+        }
+
+        tracing::info!(
+            artifact_symbols = artifact_ids.len(),
+            triples_removed = removed,
+            "purged runtime artifact entities from knowledge graph"
+        );
+
+        Ok(removed)
+    }
+
+    /// Remove all self-referential triples (where subject == object) from the KG and SPARQL store.
+    ///
+    /// Self-referential triples are rejected by `add_triple` when
+    /// `Phase9Config::reject_self_referential` is `true`.  This method
+    /// retroactively purges any that slipped in before the guard was active.
+    ///
+    /// Returns the number of triples removed.
+    pub fn purge_self_referential_triples(&self) -> AkhResult<usize> {
+        let candidates: Vec<Triple> = self
+            .all_triples()
+            .into_iter()
+            .filter(|t| t.subject == t.object)
+            .collect();
+
+        let mut removed = 0usize;
+        for triple in candidates {
+            self.knowledge_graph
+                .remove_triple(triple.subject, triple.predicate, triple.object);
+            if let Some(ref sparql) = self.sparql {
+                let _ = sparql.remove_triple(triple.subject, triple.predicate, triple.object);
+            }
+            removed += 1;
+        }
+
+        Ok(removed)
+    }
+
     /// Analyze knowledge gaps around the given goal symbols.
     pub fn analyze_gaps(
         &self,
@@ -1831,6 +2086,310 @@ impl Engine {
             .remove_triples_in_compartment(compartment_id)
     }
 
+    /// Adjust the confidence of an existing triple by `delta`, clamped to `[min_conf, max_conf]`.
+    ///
+    /// Unlike `add_triple` (which always promotes to the maximum confidence seen),
+    /// this method can both increase and decrease confidence — required for RL updates
+    /// where unsuccessful actions must reduce the learned action-quality score.
+    ///
+    /// Returns `true` if the triple was found and updated, `false` if it does not exist.
+    /// Use `add_triple` first to insert new triples; this method only updates existing ones.
+    pub fn update_triple_confidence(
+        &self,
+        subject: SymbolId,
+        predicate: SymbolId,
+        object: SymbolId,
+        delta: f32,
+        min_conf: f32,
+        max_conf: f32,
+    ) -> bool {
+        self.knowledge_graph
+            .update_triple_confidence(subject, predicate, object, delta, min_conf, max_conf)
+    }
+
+    /// Add multiple triples in a single operation.
+    ///
+    /// Resolves all symbols upfront and inserts each triple into the KG.
+    /// Contradiction detection and constraint checking run per-triple
+    /// (consistent with `add_triple`), but all symbol resolution happens
+    /// before any insertions.
+    ///
+    /// Returns a summary: (asserted_count, Vec of error strings for failures).
+    pub fn add_triples_batch(
+        &self,
+        entries: &[(impl AsRef<str>, impl AsRef<str>, impl AsRef<str>)],
+        default_confidence: f32,
+    ) -> (usize, Vec<String>) {
+        // Phase 1: resolve all symbols upfront
+        struct Resolved<'a> {
+            s: SymbolId,
+            p: SymbolId,
+            o: SymbolId,
+            conf: f32,
+            label_s: &'a str,
+            label_p: &'a str,
+            label_o: &'a str,
+        }
+        let mut resolved = Vec::with_capacity(entries.len());
+        let mut errors = Vec::new();
+
+        for (s_ref, p_ref, o_ref) in entries {
+            let (sl, pl, ol) = (s_ref.as_ref(), p_ref.as_ref(), o_ref.as_ref());
+            let s = match self.resolve_or_create_entity(sl) {
+                Ok(id) => id,
+                Err(e) => { errors.push(format!("{sl} {pl} {ol}: {e}")); continue; }
+            };
+            let p = match self.resolve_or_create_relation(pl) {
+                Ok(id) => id,
+                Err(e) => { errors.push(format!("{sl} {pl} {ol}: {e}")); continue; }
+            };
+            let o = match self.resolve_or_create_entity(ol) {
+                Ok(id) => id,
+                Err(e) => { errors.push(format!("{sl} {pl} {ol}: {e}")); continue; }
+            };
+            resolved.push(Resolved { s, p, o, conf: default_confidence, label_s: sl, label_p: pl, label_o: ol });
+        }
+
+        // Phase 2: insert each resolved triple
+        let mut asserted = 0usize;
+        for r in &resolved {
+            let triple = crate::graph::Triple::new(r.s, r.p, r.o).with_confidence(r.conf);
+            match self.add_triple(&triple) {
+                Ok(()) => asserted += 1,
+                Err(e) => errors.push(format!("{} {} {}: {e}", r.label_s, r.label_p, r.label_o)),
+            }
+        }
+
+        (asserted, errors)
+    }
+
+    /// Remove multiple triples from the knowledge graph.
+    ///
+    /// All resolutions happen upfront; each triple is removed from the KG
+    /// and SPARQL store. TMS cascade (if enabled) fires once per symbol
+    /// at the end rather than after each individual triple.
+    ///
+    /// Returns the number of triples actually removed.
+    pub fn remove_triples_batch(
+        &self,
+        triples: &[(impl AsRef<str>, impl AsRef<str>, impl AsRef<str>)],
+    ) -> AkhResult<usize> {
+        // Phase 1: resolve all symbols
+        struct Resolved {
+            s: SymbolId,
+            p: SymbolId,
+            o: SymbolId,
+        }
+        let mut resolved = Vec::with_capacity(triples.len());
+        for (s_ref, p_ref, o_ref) in triples {
+            let s = self.resolve_symbol(s_ref.as_ref())?;
+            let p = self.resolve_symbol(p_ref.as_ref())?;
+            let o = self.resolve_symbol(o_ref.as_ref())?;
+            resolved.push(Resolved { s, p, o });
+        }
+
+        // Phase 2: remove all from the KG + SPARQL
+        let mut removed = 0usize;
+        for r in &resolved {
+            if self.knowledge_graph.remove_triple(r.s, r.p, r.o) {
+                if let Some(ref sparql) = self.sparql {
+                    let _ = sparql.remove_triple(r.s, r.p, r.o);
+                }
+                removed += 1;
+            }
+        }
+
+        // Phase 3: TMS cascade (if enabled) — collect unique symbols from removed triples
+        if self.phase9_config.tms_enabled && removed > 0 {
+            let mut tms = self.tms.write().unwrap();
+            let mut tms_retracted = Vec::new();
+            for r in &resolved {
+                let result = tms.retract(r.o);
+                for &rs in &result.retracted {
+                    if rs != r.o && !tms_retracted.contains(&rs) {
+                        tms_retracted.push(rs);
+                    }
+                }
+            }
+            // Remove cascaded triples from KG
+            for &sym in &tms_retracted {
+                let triples_from: Vec<_> = self.knowledge_graph.triples_from(sym);
+                for t in &triples_from {
+                    self.knowledge_graph.remove_triple(t.subject, t.predicate, t.object);
+                }
+                let triples_to: Vec<_> = self.knowledge_graph.triples_to(sym);
+                for t in &triples_to {
+                    self.knowledge_graph.remove_triple(t.subject, t.predicate, t.object);
+                }
+            }
+        }
+
+        Ok(removed)
+    }
+
+    /// Delete all triples whose resolved labels match the given regex patterns.
+    ///
+    /// At least one of `subject_pattern`, `predicate_pattern`, or `object_pattern`
+    /// must be `Some`. A triple is selected when **all** provided patterns match
+    /// their respective field labels (vacuous truth for omitted patterns).
+    ///
+    /// Removes from the in-memory KG and (if present) the SPARQL store in batches
+    /// of `chunk_size` to bound per-transaction write pressure.  After each chunk
+    /// `persist()` is called so that partial progress survives if the caller is
+    /// interrupted. Returns the total number of triples removed.
+    pub fn purge_by_pattern(
+        &self,
+        subject_pattern: Option<&str>,
+        predicate_pattern: Option<&str>,
+        object_pattern: Option<&str>,
+        chunk_size: usize,
+    ) -> AkhResult<usize> {
+        use regex::Regex;
+
+        if subject_pattern.is_none() && predicate_pattern.is_none() && object_pattern.is_none() {
+            return Err(EngineError::InvalidPattern {
+                message: "at least one of subject_pattern, predicate_pattern, \
+                          object_pattern must be provided"
+                    .into(),
+            }
+            .into());
+        }
+
+        let s_re = subject_pattern
+            .map(Regex::new)
+            .transpose()
+            .map_err(|e| EngineError::InvalidPattern {
+                message: format!("subject pattern: {e}"),
+            })?;
+        let p_re = predicate_pattern
+            .map(Regex::new)
+            .transpose()
+            .map_err(|e| EngineError::InvalidPattern {
+                message: format!("predicate pattern: {e}"),
+            })?;
+        let o_re = object_pattern
+            .map(Regex::new)
+            .transpose()
+            .map_err(|e| EngineError::InvalidPattern {
+                message: format!("object pattern: {e}"),
+            })?;
+
+        let chunk_sz = chunk_size.clamp(1, 500);
+
+        // Collect matching (s, p, o) SymbolId triples without holding graph lock.
+        let candidates: Vec<(SymbolId, SymbolId, SymbolId)> = self
+            .knowledge_graph
+            .all_triples()
+            .into_iter()
+            .filter(|t| {
+                s_re.as_ref()
+                    .map_or(true, |re| re.is_match(&self.registry.resolve_label(t.subject)))
+                    && p_re.as_ref().map_or(true, |re| {
+                        re.is_match(&self.registry.resolve_label(t.predicate))
+                    })
+                    && o_re.as_ref().map_or(true, |re| {
+                        re.is_match(&self.registry.resolve_label(t.object))
+                    })
+            })
+            .map(|t| (t.subject, t.predicate, t.object))
+            .collect();
+
+        let mut removed = 0usize;
+
+        for chunk in candidates.chunks(chunk_sz) {
+            for &(s, p, o) in chunk {
+                if self.knowledge_graph.remove_triple(s, p, o) {
+                    if let Some(ref sparql) = self.sparql {
+                        let _ = sparql.remove_triple(s, p, o);
+                    }
+                    removed += 1;
+                }
+            }
+            // Persist metadata after each chunk to bound redb write-transaction size.
+            let _ = self.persist();
+        }
+
+        Ok(removed)
+    }
+
+    /// Execute a basic SPARQL DELETE query and remove matching triples from
+    /// the KG (and SPARQL store if present).
+    ///
+    /// Supported forms:
+    /// - `DELETE WHERE { ?s ?p ?o ... }`
+    /// - `DELETE { ?s ?p ?o } WHERE { ... }`
+    ///
+    /// The WHERE clause is re-executed as a `SELECT ?s ?p ?o` against the
+    /// SPARQL store; matched triples are then removed from both stores.
+    /// Returns the number of triples removed.
+    pub fn sparql_delete(&self, query: &str) -> AkhResult<usize> {
+        use crate::graph::sparql::SparqlStore;
+
+        let sparql_store = self.sparql.as_ref().ok_or(EngineError::InvalidConfig {
+            message: "SPARQL DELETE requires persistence (--data-dir)".into(),
+        })?;
+
+        let select_query = Self::sparql_delete_to_select(query).ok_or_else(|| {
+            EngineError::SparqlDeleteParse {
+                message: format!("unrecognised query: {query}"),
+            }
+        })?;
+
+        let rows = sparql_store
+            .query_select(&select_query)
+            .map_err(|e| EngineError::SparqlDeleteParse {
+                message: format!("SELECT failed: {e}"),
+            })?;
+
+        let candidates: Vec<(SymbolId, SymbolId, SymbolId)> = rows
+            .iter()
+            .filter_map(|row| {
+                let find = |var: &str| {
+                    row.iter()
+                        .find(|(k, _)| k.as_str() == var)
+                        .map(|(_, v)| v.trim_matches(|c: char| c == '<' || c == '>').to_string())
+                };
+                let s_iri = find("s")?;
+                let p_iri = find("p")?;
+                let o_iri = find("o")?;
+                let s_id = SparqlStore::iri_to_symbol(&s_iri)?;
+                let p_id = SparqlStore::iri_to_symbol(&p_iri)?;
+                let o_id = SparqlStore::iri_to_symbol(&o_iri)?;
+                Some((s_id, p_id, o_id))
+            })
+            .collect();
+
+        let mut removed = 0usize;
+        for &(s, p, o) in &candidates {
+            if self.knowledge_graph.remove_triple(s, p, o) {
+                let _ = sparql_store.remove_triple(s, p, o);
+                removed += 1;
+            }
+        }
+
+        Ok(removed)
+    }
+
+    /// Convert a `DELETE WHERE { ... }` or `DELETE { ?s ?p ?o } WHERE { ... }`
+    /// query into an equivalent `SELECT ?s ?p ?o WHERE { ... }` query.
+    fn sparql_delete_to_select(query: &str) -> Option<String> {
+        let trimmed = query.trim();
+        let upper = trimmed.to_uppercase();
+
+        // Find WHERE keyword position; must come after DELETE.
+        let delete_pos = upper.find("DELETE")?;
+        let where_search_start = delete_pos + "DELETE".len();
+        let where_pos = upper[where_search_start..].find("WHERE").map(|p| where_search_start + p)?;
+
+        // Extract WHERE body from the original (case-preserving) string.
+        let after_where = trimmed[where_pos + "WHERE".len()..].trim_start();
+        if after_where.starts_with('{') {
+            return Some(format!("SELECT ?s ?p ?o WHERE {after_where}"));
+        }
+
+        None
+    }
+
     // -----------------------------------------------------------------------
     // Predicate Hierarchy (Phase 9b)
     // -----------------------------------------------------------------------
@@ -2110,6 +2669,36 @@ impl Engine {
         self.disjointness_constraints.write().unwrap()
     }
 
+    /// Get a read lock on the multi-valued predicates set.
+    pub fn multi_valued_preds(&self) -> std::sync::RwLockReadGuard<'_, crate::graph::contradiction::MultiValuedPredicates> {
+        self.multi_valued_predicates.read().unwrap()
+    }
+
+    /// Get a write lock on the multi-valued predicates set.
+    pub fn multi_valued_preds_mut(&self) -> std::sync::RwLockWriteGuard<'_, crate::graph::contradiction::MultiValuedPredicates> {
+        self.multi_valued_predicates.write().unwrap()
+    }
+
+    /// Register well-known global multi-valued predicates (taxonomy relations).
+    ///
+    /// Called once during `Engine::new()` after `restore_phase9()`. Only registers
+    /// predicates that already exist in the symbol table (from a prior session or
+    /// seed loading) — avoids creating symbols in a fresh engine where tests
+    /// expect an empty symbol space. Subsystem `Predicates::init()` methods
+    /// register their own multi-valued predicates when they resolve/create them.
+    fn register_builtin_multi_valued(&self) {
+        let labels = [
+            "child-of", "part-of", "similar-to", "has-a", "parent-of",
+            "is-a",
+        ];
+        let mut mv = self.multi_valued_predicates.write().unwrap();
+        for label in labels {
+            if let Some(sym) = self.registry.lookup(label) {
+                mv.declare_multi_valued(sym);
+            }
+        }
+    }
+
     /// Check a triple for contradictions using the engine's stored registries.
     pub fn check_contradictions(
         &self,
@@ -2118,12 +2707,14 @@ impl Engine {
         let func = self.functional_predicates.read().unwrap();
         let disj = self.disjointness_constraints.read().unwrap();
         let temp = self.temporal_registry.read().unwrap();
+        let mv = self.multi_valued_predicates.read().unwrap();
         crate::graph::contradiction::check_contradictions(
             self,
             incoming,
             &func,
             &disj,
             Some(&temp),
+            Some(&mv),
         )
     }
 
@@ -2350,9 +2941,22 @@ impl Engine {
             .unwrap()
             .persist_to_store(&self.store)?;
 
-        // Sync knowledge graph to SPARQL store.
+        // Sync knowledge graph to SPARQL store (primary persistence path).
         if let Some(ref sparql) = self.sparql {
             sparql.sync_from(&self.knowledge_graph)?;
+        }
+
+        // Always write a bincode snapshot of KG triples so restores work even
+        // when `sparql-persist` is disabled (e.g., in tests or single-binary mode).
+        if self.config.data_dir.is_some() {
+            let triples = self.knowledge_graph.all_triples();
+            let snapshot = bincode::serialize(&triples).map_err(|e| {
+                crate::error::StoreError::Serialization {
+                    message: format!("failed to serialize KG snapshot: {e}"),
+                }
+            })?;
+            self.store.put_meta(b"kg_triples_snapshot", &snapshot)?;
+            tracing::debug!(triples = triples.len(), "KG bincode snapshot written");
         }
 
         // Persist Phase 9 registries.
@@ -2376,6 +2980,7 @@ impl Engine {
         self.store.put_meta(b"phase9:temporal", &enc(&*self.temporal_registry.read().unwrap())?)?;
         self.store.put_meta(b"phase9:constraints", &enc(&*self.constraint_registry.read().unwrap())?)?;
         self.store.put_meta(b"phase9:functional", &enc(&*self.functional_predicates.read().unwrap())?)?;
+        self.store.put_meta(b"phase9:multi_valued", &enc(&*self.multi_valued_predicates.read().unwrap())?)?;
         self.store.put_meta(b"phase9:disjointness", &enc(&*self.disjointness_constraints.read().unwrap())?)?;
         self.store.put_meta(b"phase9:skolem", &enc(&*self.skolem_registry.read().unwrap())?)?;
         self.store.put_meta(b"phase9:nart", &enc(&*self.nart_registry.read().unwrap())?)?;
@@ -2410,6 +3015,11 @@ impl Engine {
             && let Ok(fp) = bincode::deserialize(&bytes)
         {
             *self.functional_predicates.write().unwrap() = fp;
+        }
+        if let Some(bytes) = load(b"phase9:multi_valued")
+            && let Ok(mv) = bincode::deserialize(&bytes)
+        {
+            *self.multi_valued_predicates.write().unwrap() = mv;
         }
         if let Some(bytes) = load(b"phase9:disjointness")
             && let Ok(dc) = bincode::deserialize(&bytes)
@@ -2690,5 +3300,69 @@ mod tests {
         assert!(names.contains(&"formal"));
         assert!(names.contains(&"terse"));
         assert!(names.contains(&"narrative"));
+    }
+
+    #[test]
+    fn purge_by_pattern_object_match() {
+        let engine = Engine::new(EngineConfig {
+            dimension: Dimension::TEST,
+            ..Default::default()
+        })
+        .unwrap();
+
+        let sun = engine.create_symbol(SymbolKind::Entity, "Sun").unwrap();
+        let moon = engine.create_symbol(SymbolKind::Entity, "Moon").unwrap();
+        let is_a = engine.create_symbol(SymbolKind::Relation, "is-a").unwrap();
+        let star = engine.create_symbol(SymbolKind::Entity, "Star").unwrap();
+        let planet = engine.create_symbol(SymbolKind::Entity, "Planet").unwrap();
+
+        engine.add_triple(&Triple::new(sun.id, is_a.id, star.id)).unwrap();
+        engine.add_triple(&Triple::new(moon.id, is_a.id, planet.id)).unwrap();
+        assert_eq!(engine.all_triples().len(), 2);
+
+        // Purge only triples whose object label starts with "Star".
+        let removed = engine
+            .purge_by_pattern(None, None, Some("^Star$"), 10)
+            .unwrap();
+        assert_eq!(removed, 1);
+        assert_eq!(engine.all_triples().len(), 1);
+        // The moon triple should survive.
+        assert!(engine.has_triple(moon.id, is_a.id, planet.id));
+    }
+
+    #[test]
+    fn purge_by_pattern_requires_at_least_one_pattern() {
+        let engine = Engine::new(EngineConfig {
+            dimension: Dimension::TEST,
+            ..Default::default()
+        })
+        .unwrap();
+
+        let result = engine.purge_by_pattern(None, None, None, 10);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn sparql_delete_to_select_delete_where() {
+        let q = "DELETE WHERE { ?s ?p ?o }";
+        let sel = Engine::sparql_delete_to_select(q).unwrap();
+        assert!(sel.starts_with("SELECT ?s ?p ?o WHERE"));
+        assert!(sel.contains("{ ?s ?p ?o }"));
+    }
+
+    #[test]
+    fn sparql_delete_to_select_delete_where_filter() {
+        let q = "delete where { ?s ?p ?o . FILTER(regex(str(?o), \"^sim\")) }";
+        let sel = Engine::sparql_delete_to_select(q).unwrap();
+        assert!(sel.starts_with("SELECT ?s ?p ?o WHERE"));
+        assert!(sel.contains("FILTER"));
+    }
+
+    #[test]
+    fn sparql_delete_to_select_delete_graph_where() {
+        let q = "DELETE { ?s ?p ?o } WHERE { ?s ?p ?o . FILTER(?p = <urn:x>) }";
+        let sel = Engine::sparql_delete_to_select(q).unwrap();
+        assert!(sel.starts_with("SELECT ?s ?p ?o WHERE"));
+        assert!(sel.contains("FILTER"));
     }
 }

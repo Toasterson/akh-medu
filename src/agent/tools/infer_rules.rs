@@ -28,6 +28,25 @@ impl Tool for InferRulesTool {
                     description: "Minimum confidence for derived triples (default: 0.1).".into(),
                     required: false,
                 },
+                ToolParam {
+                    name: "cleanup".into(),
+                    description: "Remove contaminated is-a/child-of triples before inference \
+                                  (true/false, default: false). Use to retroactively purge \
+                                  cross-domain type-hierarchy pollution from prior inference \
+                                  bugs (e.g. agent identities linked to CI runners or storage \
+                                  nodes)."
+                        .into(),
+                    required: false,
+                },
+                ToolParam {
+                    name: "purge_self_referential".into(),
+                    description: "Remove self-referential triples (A → p → A) before inference \
+                                  (true/false, default: false). Use to retroactively purge \
+                                  invalid self-links that were inserted before the guard was \
+                                  active."
+                        .into(),
+                    required: false,
+                },
             ],
         }
     }
@@ -41,6 +60,38 @@ impl Tool for InferRulesTool {
             .get("min_confidence")
             .and_then(|s| s.parse::<f32>().ok())
             .unwrap_or(0.1);
+        let run_cleanup = input
+            .get("cleanup")
+            .map(|s| matches!(s, "true" | "1" | "yes"))
+            .unwrap_or(false);
+        let purge_self_ref = input
+            .get("purge_self_referential")
+            .map(|s| matches!(s, "true" | "1" | "yes"))
+            .unwrap_or(false);
+
+        let mut lines = Vec::new();
+
+        if run_cleanup {
+            let purged = engine.purge_contaminated_inferences()?;
+            if purged > 0 {
+                lines.push(format!(
+                    "Cleanup: removed {purged} contaminated is-a/child-of triple(s)."
+                ));
+            } else {
+                lines.push("Cleanup: no contaminated triples found.".into());
+            }
+        }
+
+        if purge_self_ref {
+            let purged = engine.purge_self_referential_triples()?;
+            if purged > 0 {
+                lines.push(format!(
+                    "Purge: removed {purged} self-referential triple(s)."
+                ));
+            } else {
+                lines.push("Purge: no self-referential triples found.".into());
+            }
+        }
 
         let config = RuleEngineConfig {
             max_iterations,
@@ -50,7 +101,6 @@ impl Tool for InferRulesTool {
 
         let result = engine.run_rules(config)?;
 
-        let mut lines = Vec::new();
         lines.push(format!(
             "Derived {} new triple(s) in {} iteration(s){}",
             result.derived.len(),
@@ -89,6 +139,16 @@ impl Tool for InferRulesTool {
                 ToolParamSchema::optional(
                     "min_confidence",
                     "Minimum confidence for derived triples (default: 0.1).",
+                ),
+                ToolParamSchema::optional(
+                    "cleanup",
+                    "Remove contaminated is-a/child-of triples before inference \
+                     (true/false, default: false).",
+                ),
+                ToolParamSchema::optional(
+                    "purge_self_referential",
+                    "Remove self-referential triples (A → p → A) before inference \
+                     (true/false, default: false).",
                 ),
             ],
             danger: DangerInfo {

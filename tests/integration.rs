@@ -8,6 +8,7 @@ use std::collections::HashSet;
 
 use std::sync::Arc;
 
+use akh_medu::agent::error::AgentError;
 use akh_medu::agent::goal::GoalStatus;
 use akh_medu::agent::memory::{WorkingMemory, WorkingMemoryEntry, WorkingMemoryKind};
 use akh_medu::agent::tool::{Tool, ToolInput, ToolOutput, ToolSignature};
@@ -897,13 +898,13 @@ fn goal_status_transitions() {
 fn tool_registry_crud() {
     let mut agent = test_agent();
 
-    // Should have 26 built-in tools:
-    //   5 core + 4 external + 2 autonomous + 4 ingest + 1 library + 1 doc
+    // Should have 27 built-in tools:
+    //   5 core + 4 external + 2 autonomous + 5 ingest + 1 library + 1 doc
     //   + 3 code (code_gen, compile_feedback, pattern_mine)
     //   + 4 agent (agent_list, agent_spawn, agent_message, agent_retire)
     //   + 1 trigger (trigger_manage) + 1 audit_log
     let tools = agent.list_tools();
-    assert_eq!(tools.len(), 26);
+    assert_eq!(tools.len(), 27);
 
     let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
     // Core tools.
@@ -925,6 +926,7 @@ fn tool_registry_crud() {
     assert!(names.contains(&"text_ingest"));
     assert!(names.contains(&"code_ingest"));
     assert!(names.contains(&"content_ingest"));
+    assert!(names.contains(&"journal_ingest"));
     // Library search.
     assert!(names.contains(&"library_search"));
     // Documentation tools.
@@ -975,7 +977,7 @@ fn tool_registry_crud() {
     }
 
     agent.register_tool(Box::new(CustomTool));
-    assert_eq!(agent.list_tools().len(), 27);
+    assert_eq!(agent.list_tools().len(), 28);
 }
 
 #[test]
@@ -1131,6 +1133,75 @@ fn agent_run_until_complete() {
 }
 
 #[test]
+fn run_until_complete_respects_max_cycles() {
+    let engine = Arc::new(test_engine());
+
+    // max_cycles=0 means the cap is hit before any cycle runs, so an active goal
+    // guarantees MaxCyclesReached is returned regardless of goal content.
+    let config = AgentConfig {
+        max_cycles: 0,
+        ..Default::default()
+    };
+    let mut agent = Agent::new(engine, config).unwrap();
+    agent
+        .add_goal("Any goal that keeps the loop alive", 128, "impossible")
+        .unwrap();
+
+    let result = agent.run_until_complete();
+
+    assert!(
+        matches!(result, Err(AgentError::MaxCyclesReached { max_cycles: 0 })),
+        "expected MaxCyclesReached(0), got: {:?}",
+        result.err()
+    );
+
+    // No OODA cycles should have run — cycle_count stays at zero.
+    assert_eq!(
+        agent.cycle_count(),
+        0,
+        "no cycles should run when max_cycles=0"
+    );
+}
+
+#[test]
+fn run_until_complete_runs_exactly_max_cycles() {
+    let engine = Arc::new(test_engine());
+
+    // Set cap to 2. The agent will run exactly 2 cycles then stop.
+    let config = AgentConfig {
+        max_cycles: 2,
+        ..Default::default()
+    };
+    let mut agent = Agent::new(engine, config).unwrap();
+    agent
+        .add_goal("Long-running exploration goal", 128, "never satisfied")
+        .unwrap();
+
+    let before = agent.cycle_count();
+    let result = agent.run_until_complete();
+
+    // Either completed naturally in ≤2 cycles, or hit the cap.
+    match result {
+        Ok(results) => {
+            assert!(
+                results.len() <= 2,
+                "should run at most 2 cycles, ran {}",
+                results.len()
+            );
+        }
+        Err(AgentError::MaxCyclesReached { max_cycles }) => {
+            assert_eq!(max_cycles, 2);
+            assert_eq!(
+                agent.cycle_count() - before,
+                2,
+                "should have run exactly 2 cycles before cap"
+            );
+        }
+        Err(e) => panic!("unexpected error: {e}"),
+    }
+}
+
+#[test]
 fn episodic_recall_by_tag() {
     let dir = tempfile::TempDir::new().unwrap();
     let engine = persistent_engine(dir.path());
@@ -1263,6 +1334,8 @@ fn reference_count_incremented_during_decide() {
     );
 }
 
+// Requires file-backed SPARQL persistence to survive engine restarts.
+#[cfg_attr(not(feature = "sparql-persist"), ignore)]
 #[test]
 fn goal_status_restore_deterministic() {
     let dir = tempfile::TempDir::new().unwrap();
@@ -1275,7 +1348,10 @@ fn goal_status_restore_deterministic() {
 
         // Transition: Active -> Completed (adds a second has_status triple).
         agent.complete_goal(goal_id).unwrap();
-        engine.persist().unwrap();
+        // Use agent.persist() so goal status is saved to the durable store
+        // (engine.persist() alone only syncs to SPARQL, which is in-memory
+        // without the sparql-persist feature).
+        agent.persist().unwrap();
     }
 
     // Reopen and verify the restored goal picks the LATEST status (Completed).
@@ -3046,4 +3122,114 @@ fn core_features_work_standalone() {
         .execute(&engine, input)
         .unwrap();
     assert!(output.success);
+}
+
+#[test]
+fn self_referential_triple_is_rejected() {
+    let engine = test_engine();
+    let entity = engine.create_symbol(SymbolKind::Entity, "Box").unwrap();
+    let part_of = engine
+        .create_symbol(SymbolKind::Relation, "part-of")
+        .unwrap();
+    let result = engine.add_triple(&Triple::new(entity.id, part_of.id, entity.id));
+    assert!(result.is_err(), "self-referential triple must be rejected");
+    let msg = format!("{}", result.unwrap_err());
+    assert!(
+        msg.contains("self-referential"),
+        "error message should mention self-referential, got: {msg}"
+    );
+}
+
+#[test]
+fn self_referential_triple_rejected_for_any_predicate() {
+    let engine = test_engine();
+    let thing = engine.create_symbol(SymbolKind::Entity, "Thing").unwrap();
+    for label in ["is-a", "has-a", "located-in", "orbits"] {
+        let pred = engine.create_symbol(SymbolKind::Relation, label).unwrap();
+        let result = engine.add_triple(&Triple::new(thing.id, pred.id, thing.id));
+        assert!(
+            result.is_err(),
+            "self-referential triple with predicate '{label}' must be rejected"
+        );
+    }
+}
+
+#[test]
+fn self_referential_check_can_be_disabled() {
+    use akh_medu::engine::Phase9Config;
+    let engine = test_engine();
+    let mut cfg = engine.phase9_config().clone();
+    cfg.reject_self_referential = false;
+
+    let mut engine = Engine::new(EngineConfig {
+        dimension: Dimension::TEST,
+        ..Default::default()
+    })
+    .unwrap();
+    engine.set_phase9_config(cfg);
+
+    let thing = engine.create_symbol(SymbolKind::Entity, "Thing").unwrap();
+    let equal = engine.create_symbol(SymbolKind::Relation, "equal").unwrap();
+    engine
+        .add_triple(&Triple::new(thing.id, equal.id, thing.id))
+        .expect("self-referential insert should succeed when check is disabled");
+}
+
+#[test]
+fn non_self_referential_triples_are_unaffected() {
+    let engine = test_engine();
+    let a = engine.create_symbol(SymbolKind::Entity, "A").unwrap();
+    let b = engine.create_symbol(SymbolKind::Entity, "B").unwrap();
+    let rel = engine
+        .create_symbol(SymbolKind::Relation, "related-to")
+        .unwrap();
+    engine
+        .add_triple(&Triple::new(a.id, rel.id, b.id))
+        .expect("normal triple must still be accepted");
+}
+
+#[test]
+fn purge_self_referential_triples_removes_existing() {
+    use akh_medu::engine::Phase9Config;
+
+    // Build an engine with the guard disabled so we can insert a self-referential triple.
+    let mut engine = Engine::new(EngineConfig {
+        dimension: Dimension::TEST,
+        ..Default::default()
+    })
+    .unwrap();
+    let mut cfg = engine.phase9_config().clone();
+    cfg.reject_self_referential = false;
+    engine.set_phase9_config(cfg.clone());
+
+    let thing = engine.create_symbol(SymbolKind::Entity, "Thing").unwrap();
+    let rel = engine.create_symbol(SymbolKind::Relation, "part-of").unwrap();
+
+    engine
+        .add_triple(&Triple::new(thing.id, rel.id, thing.id))
+        .expect("self-referential insert should succeed with guard disabled");
+
+    // Verify it's present.
+    let before = engine.all_triples();
+    assert!(
+        before
+            .iter()
+            .any(|t| t.subject == thing.id && t.object == thing.id),
+        "self-referential triple should be in KG before purge"
+    );
+
+    // Re-enable the guard and purge existing violators.
+    cfg.reject_self_referential = true;
+    engine.set_phase9_config(cfg);
+
+    let purged = engine.purge_self_referential_triples().unwrap();
+    assert_eq!(purged, 1, "exactly one self-referential triple should be purged");
+
+    let after = engine.all_triples();
+    assert!(
+        !after
+            .iter()
+            .any(|t| t.subject == t.object),
+        "no self-referential triples should remain after purge"
+    );
 }

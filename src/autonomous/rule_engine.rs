@@ -14,6 +14,125 @@ use super::error::AutonomousResult;
 use super::rules::{InferenceRule, RuleSet, RuleTerm, TriplePattern};
 
 // ---------------------------------------------------------------------------
+// Noise entity filter
+// ---------------------------------------------------------------------------
+
+/// Returns `true` if an entity name matches known noise/artifact patterns from
+/// agent learning and scaffolding. Entities matching these patterns should be
+/// excluded from rule inference to prevent nonsense transitive closures (e.g.
+/// `Tecton → is-a → Stor01` through intermediate tool-output entities).
+pub fn is_noise_entity(name: &str) -> bool {
+    // Agent learning artifacts
+    name.starts_with("episode:")
+    // Agent goal records
+    || name.starts_with("goal:")
+    // Agent criteria patterns
+    || name.starts_with("criteria:")
+    // Agent scaffolding markers
+    || name.starts_with("expand:")
+    || name.starts_with("desc:")
+    // Numeric rate/certainty markers like "rate:0.8000"
+    || name.starts_with("rate:")
+    // Bare numeric strings like "0.9910"
+    || is_numeric_string(name)
+}
+
+/// Returns `true` if the string is purely numeric (digits and at most one decimal point).
+fn is_numeric_string(s: &str) -> bool {
+    if s.is_empty() {
+        return false;
+    }
+    let mut dot_count = 0;
+    for ch in s.chars() {
+        if ch == '.' {
+            dot_count += 1;
+            if dot_count > 1 {
+                return false;
+            }
+        } else if !ch.is_ascii_digit() {
+            return false;
+        }
+    }
+    true
+}
+
+// ---------------------------------------------------------------------------
+// Semantic type-compatibility guard
+// ---------------------------------------------------------------------------
+
+/// Returns `true` if the label looks like a snake_case tool or function name
+/// (e.g. `infer_rules`, `kg_query`, `code_ingest`).  These identifiers are
+/// internal artefacts and must not appear as nodes in a type hierarchy.
+fn is_snake_case_tool_name(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 64
+        && s.contains('_')
+        && !s.contains('-')
+        && !s.contains(' ')
+        && s.chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+}
+
+/// Returns `true` if the label matches known CI/CD or storage infrastructure
+/// entity patterns.  Such labels must not become type-hierarchy parents of
+/// agent identity entities (e.g. `Ptah is-a ForgejoActions` is semantically
+/// invalid).
+fn is_infrastructure_entity(s: &str) -> bool {
+    let lower = s.to_ascii_lowercase();
+    // Forgejo CI/CD platform (ForgejoActions, Forgejo, forgejo-runner, …)
+    lower.contains("forgejo")
+    // Generic CI runner labels
+    || lower == "ci runner"
+    || lower == "ci-runner"
+    || lower.starts_with("ci runner ")
+    || lower.starts_with("ci-runner")
+    // Numbered CI runner instances like "runner-01", "runner_prod" (not standalone "runner")
+    || lower.starts_with("runner-")
+    || lower.starts_with("runner_")
+    // Storage node labels: "Storage", "Storage-01", "Stor01", "StorageNode"
+    || lower == "storage"
+    || lower.starts_with("storage ")
+    || lower.starts_with("storage-")
+    || lower.starts_with("storage_")
+    || lower.starts_with("storagenode")
+    // Numbered storage nodes like "Stor01", "Stor-1" (prefix + digit or dash)
+    || (lower.starts_with("stor")
+        && lower.len() > 4
+        && lower[4..].starts_with(|c: char| c.is_ascii_digit() || c == '-'))
+}
+
+/// Returns `true` if the label is a standard UUID (8-4-4-4-12 hex groups).
+fn is_uuid(s: &str) -> bool {
+    let parts: Vec<&str> = s.split('-').collect();
+    if parts.len() != 5 {
+        return false;
+    }
+    let expected = [8usize, 4, 4, 4, 12];
+    parts
+        .iter()
+        .zip(expected.iter())
+        .all(|(part, &len)| part.len() == len && part.chars().all(|c| c.is_ascii_hexdigit()))
+}
+
+/// Returns `true` when `entity_label` must not participate in a type-hierarchy
+/// assertion (`is-a` or `child-of` predicate).
+///
+/// Blocks cross-domain contamination: agent identity nodes must not gain
+/// spurious `is-a` / `child-of` links to CI runners, storage nodes, tool-name
+/// stubs, UUIDs, or other operational artefacts that have no place in the
+/// concept taxonomy.  Apply this to **both** the subject and the object of
+/// any candidate derived triple.
+pub fn is_invalid_type_hierarchy_participant(pred_label: &str, entity_label: &str) -> bool {
+    if !matches!(pred_label, "is-a" | "child-of") {
+        return false;
+    }
+    is_noise_entity(entity_label)
+        || is_snake_case_tool_name(entity_label)
+        || is_infrastructure_entity(entity_label)
+        || is_uuid(entity_label)
+}
+
+// ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
 
@@ -122,6 +241,19 @@ impl RuleEngine {
                         if let Some(triple) =
                             self.instantiate_pattern(consequent, bindings, engine)?
                         {
+                            // Semantic type-compatibility guard: reject derivations
+                            // that would link type-hierarchy predicates to infrastructure
+                            // entities, tool-name stubs, UUIDs, or other non-taxonomic
+                            // artefacts (fixes KG contamination from the P2 infer_rules bug).
+                            let pred_label = engine.resolve_label(triple.predicate);
+                            let subj_label = engine.resolve_label(triple.subject);
+                            let obj_label = engine.resolve_label(triple.object);
+                            if is_invalid_type_hierarchy_participant(&pred_label, &subj_label)
+                                || is_invalid_type_hierarchy_participant(&pred_label, &obj_label)
+                            {
+                                continue;
+                            }
+
                             let key = (
                                 triple.subject.get(),
                                 triple.predicate.get(),
@@ -285,6 +417,14 @@ impl RuleEngine {
         };
 
         for triple in &candidate_triples {
+            // Skip triples involving noise/artifact entities (agent scaffolding,
+            // numeric noise, etc.) to prevent nonsensical transitive closures.
+            let subj_label = engine.resolve_label(triple.subject);
+            let obj_label = engine.resolve_label(triple.object);
+            if is_noise_entity(&subj_label) || is_noise_entity(&obj_label) {
+                continue;
+            }
+
             let mut new_bindings = HashMap::new();
             let matched =
                 self.match_term(
@@ -605,5 +745,209 @@ mod tests {
         let result = re.run(&engine).unwrap();
 
         assert!(result.derived.len() <= 2);
+    }
+
+    #[test]
+    fn noise_entities_do_not_participate_in_inference() {
+        let engine = test_engine();
+        // Chain: A -> goal:X -> B. The goal:X entity should be skipped by
+        // the noise filter, so transitive closure should NOT derive A is-a B.
+        engine
+            .ingest_label_triples(&[
+                ("A".into(), "is-a".into(), "goal:xyz".into(), 1.0),
+                ("goal:xyz".into(), "is-a".into(), "B".into(), 1.0),
+            ])
+            .unwrap();
+
+        let re = RuleEngine::new(RuleEngineConfig::default()).with_rules(RuleSet::builtin());
+        let result = re.run(&engine).unwrap();
+
+        // A is-a B should NOT be derived because the intermediate entity
+        // "goal:xyz" is a noise entity.
+        let a = engine.lookup_symbol("A").unwrap();
+        let b = engine.lookup_symbol("B").unwrap();
+        let isa = engine.lookup_symbol("is-a").unwrap();
+        assert!(!engine.has_triple(a, isa, b));
+
+        // is-a-transitive should have produced zero derivations.
+        let transitive_derived = result
+            .rule_stats
+            .get("is-a-transitive")
+            .copied()
+            .unwrap_or(0);
+        assert_eq!(transitive_derived, 0);
+    }
+
+    #[test]
+    fn noise_entity_detection_patterns() {
+        // These should all be recognized as noise.
+        assert!(is_noise_entity("episode:42"));
+        assert!(is_noise_entity("goal:learn_rust"));
+        assert!(is_noise_entity("criteria:quality_score"));
+        assert!(is_noise_entity("expand:some_concept"));
+        assert!(is_noise_entity("desc:a_description"));
+        assert!(is_noise_entity("rate:0.8000"));
+        assert!(is_noise_entity("0.9910"));
+
+        // These should NOT be recognized as noise.
+        assert!(!is_noise_entity("Tecton"));
+        assert!(!is_noise_entity("MacMini"));
+        assert!(!is_noise_entity("Stor01"));
+        assert!(!is_noise_entity("is-a"));
+        assert!(!is_noise_entity("part-of"));
+    }
+
+    #[test]
+    fn infrastructure_entity_detection() {
+        // CI/CD and storage patterns that must be detected.
+        assert!(is_infrastructure_entity("ForgejoActions"));
+        assert!(is_infrastructure_entity("forgejo-runner"));
+        assert!(is_infrastructure_entity("CI runner"));
+        assert!(is_infrastructure_entity("CI-runner"));
+        assert!(is_infrastructure_entity("runner-01"));
+        assert!(is_infrastructure_entity("runner_prod"));
+        assert!(is_infrastructure_entity("Storage"));
+        assert!(is_infrastructure_entity("StorageNode"));
+        assert!(is_infrastructure_entity("Stor01"));
+        assert!(is_infrastructure_entity("Stor-1"));
+
+        // Legitimate entity labels that must NOT be blocked.
+        assert!(!is_infrastructure_entity("Ptah"));
+        assert!(!is_infrastructure_entity("Khnum"));
+        assert!(!is_infrastructure_entity("System"));
+        assert!(!is_infrastructure_entity("Service"));
+        assert!(!is_infrastructure_entity("Process"));
+        assert!(!is_infrastructure_entity("runner")); // standalone too broad — not blocked
+        assert!(!is_infrastructure_entity("Marathon runner"));
+    }
+
+    #[test]
+    fn snake_case_tool_name_detection() {
+        assert!(is_snake_case_tool_name("infer_rules"));
+        assert!(is_snake_case_tool_name("kg_query"));
+        assert!(is_snake_case_tool_name("code_ingest"));
+        assert!(is_snake_case_tool_name("memory_recall"));
+
+        // Predicates with hyphens must not be flagged.
+        assert!(!is_snake_case_tool_name("is-a"));
+        assert!(!is_snake_case_tool_name("child-of"));
+        assert!(!is_snake_case_tool_name("part-of"));
+        // Uppercase entity names must not be flagged.
+        assert!(!is_snake_case_tool_name("Ptah"));
+        assert!(!is_snake_case_tool_name("System"));
+        // Labels with spaces must not be flagged.
+        assert!(!is_snake_case_tool_name("CI runner"));
+    }
+
+    #[test]
+    fn uuid_detection() {
+        assert!(is_uuid("550e8400-e29b-41d4-a716-446655440000"));
+        assert!(!is_uuid("Ptah"));
+        assert!(!is_uuid("episode:42"));
+        assert!(!is_uuid("550e8400-e29b-41d4-a716")); // too short
+    }
+
+    #[test]
+    fn invalid_type_hierarchy_participant_guard() {
+        // is-a with infrastructure objects must be blocked.
+        assert!(is_invalid_type_hierarchy_participant(
+            "is-a",
+            "ForgejoActions"
+        ));
+        assert!(is_invalid_type_hierarchy_participant("is-a", "CI runner"));
+        assert!(is_invalid_type_hierarchy_participant("is-a", "Stor01"));
+        assert!(is_invalid_type_hierarchy_participant("is-a", "runner-01"));
+        assert!(is_invalid_type_hierarchy_participant("is-a", "infer_rules"));
+        assert!(is_invalid_type_hierarchy_participant("is-a", "goal:xyz"));
+        assert!(is_invalid_type_hierarchy_participant(
+            "is-a",
+            "550e8400-e29b-41d4-a716-446655440000"
+        ));
+
+        // child-of with the same patterns must be blocked.
+        assert!(is_invalid_type_hierarchy_participant(
+            "child-of",
+            "episode:42"
+        ));
+        assert!(is_invalid_type_hierarchy_participant(
+            "child-of", "kg_query"
+        ));
+        assert!(is_invalid_type_hierarchy_participant(
+            "child-of",
+            "ForgejoActions"
+        ));
+
+        // Valid type-hierarchy participants must NOT be blocked.
+        assert!(!is_invalid_type_hierarchy_participant("is-a", "Ptah"));
+        assert!(!is_invalid_type_hierarchy_participant("is-a", "System"));
+        assert!(!is_invalid_type_hierarchy_participant("is-a", "Concept"));
+        assert!(!is_invalid_type_hierarchy_participant("child-of", "Khnum"));
+
+        // Non-taxonomic predicates must always pass (guard is a no-op).
+        assert!(!is_invalid_type_hierarchy_participant(
+            "part-of",
+            "ForgejoActions"
+        ));
+        assert!(!is_invalid_type_hierarchy_participant(
+            "similar-to",
+            "runner"
+        ));
+    }
+
+    #[test]
+    fn infrastructure_object_blocked_from_is_a_derivation() {
+        let engine = test_engine();
+        // Ptah is-a ForgejoActions should not be derived even if a
+        // chain X is-a ForgejoActions, Ptah is-a X exists.
+        engine
+            .ingest_label_triples(&[
+                ("Ptah".into(), "is-a".into(), "AgentSystem".into(), 1.0),
+                (
+                    "AgentSystem".into(),
+                    "is-a".into(),
+                    "ForgejoActions".into(),
+                    1.0,
+                ),
+            ])
+            .unwrap();
+
+        let re = RuleEngine::new(RuleEngineConfig::default()).with_rules(RuleSet::builtin());
+        let result = re.run(&engine).unwrap();
+
+        let ptah = engine.lookup_symbol("Ptah").unwrap();
+        let forgejo = engine.lookup_symbol("ForgejoActions").unwrap();
+        let isa = engine.lookup_symbol("is-a").unwrap();
+
+        // Ptah is-a ForgejoActions must NOT be derived.
+        assert!(!engine.has_triple(ptah, isa, forgejo));
+        // The rule produced zero valid derivations.
+        let count = result
+            .rule_stats
+            .get("is-a-transitive")
+            .copied()
+            .unwrap_or(0);
+        assert_eq!(
+            count, 0,
+            "is-a-transitive should derive nothing through infrastructure"
+        );
+    }
+
+    #[test]
+    fn tool_name_blocked_from_child_of_derivation() {
+        let engine = test_engine();
+        // "Ptah parent-of infer_rules" → would produce "infer_rules child-of Ptah"
+        // but infer_rules is a tool name and must be blocked.
+        engine
+            .ingest_label_triples(&[("Ptah".into(), "parent-of".into(), "infer_rules".into(), 1.0)])
+            .unwrap();
+
+        let re = RuleEngine::new(RuleEngineConfig::default()).with_rules(RuleSet::builtin());
+        re.run(&engine).unwrap();
+
+        let infer_rules_sym = engine.lookup_symbol("infer_rules").unwrap();
+        let ptah = engine.lookup_symbol("Ptah").unwrap();
+        let child_of = engine.lookup_symbol("child-of").unwrap();
+
+        assert!(!engine.has_triple(infer_rules_sym, child_of, ptah));
     }
 }

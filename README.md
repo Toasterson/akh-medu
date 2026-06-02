@@ -74,4 +74,4 @@ For integration into proprietary applications, contact the author.
 
 To make it possible to milk as much money as possible from proprietary vendors
 back into FLOSS work, every contributor must agree that we will sell very
-expensive proprietary licenses.
+expensive proprietary licenses..

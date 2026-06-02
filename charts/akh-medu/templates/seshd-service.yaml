@@ -1,0 +1,17 @@
+{{- if .Values.seshd.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "akh-medu.fullname" . }}-seshd
+  labels:
+    {{- include "akh-medu.seshd.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.seshd.service.type }}
+  ports:
+    - port: {{ .Values.seshd.service.port }}
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "akh-medu.seshd.selectorLabels" . | nindent 4 }}
+{{- end }}

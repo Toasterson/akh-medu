@@ -1,0 +1,102 @@
+{{- if .Values.seshd.enabled }}
+{{- $dbSecretName := include "akh-medu.db.secretName" . -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "akh-medu.fullname" . }}-seshd
+  labels:
+    {{- include "akh-medu.seshd.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.seshd.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "akh-medu.seshd.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/seshd-configmap.yaml") . | sha256sum }}
+      labels:
+        {{- include "akh-medu.seshd.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+      initContainers:
+        # Run migrations before starting the service.
+        - name: migrate
+          image: {{ include "akh-medu.seshd.image" . }}
+          imagePullPolicy: {{ .Values.seshd.image.pullPolicy }}
+          command: ["seshd", "migrate", "/config/seshat.toml"]
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $dbSecretName }}
+                  key: DATABASE_URL
+          volumeMounts:
+            - name: config
+              mountPath: /config
+      containers:
+        - name: seshd
+          image: {{ include "akh-medu.seshd.image" . }}
+          imagePullPolicy: {{ .Values.seshd.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 9090
+              protocol: TCP
+          env:
+            {{- range $key, $val := .Values.seshd.env }}
+            - name: {{ $key }}
+              value: {{ $val | quote }}
+            {{- end }}
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $dbSecretName }}
+                  key: DATABASE_URL
+          volumeMounts:
+            - name: config
+              mountPath: /config
+            {{- if .Values.seshd.models.enabled }}
+            - name: models
+              mountPath: /models
+            {{- end }}
+          {{- with .Values.seshd.probes.liveness }}
+          livenessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.seshd.probes.readiness }}
+          readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.seshd.resources | nindent 12 }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "akh-medu.fullname" . }}-seshd-config
+        {{- if .Values.seshd.models.enabled }}
+        - name: models
+          persistentVolumeClaim:
+            claimName: {{ include "akh-medu.fullname" . }}-seshd-models
+        {{- end }}
+      {{- with .Values.seshd.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.seshd.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      affinity:
+        {{- include "akh-medu.archAffinity" . | nindent 8 }}
+        {{- with .Values.seshd.affinity }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+{{- end }}

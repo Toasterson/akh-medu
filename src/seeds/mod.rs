@@ -11,6 +11,7 @@ use miette::Diagnostic;
 use serde::Deserialize;
 use thiserror::Error;
 
+use crate::autonomous::rule_engine::is_invalid_type_hierarchy_participant;
 use crate::engine::Engine;
 use crate::graph::Triple;
 
@@ -100,6 +101,9 @@ pub struct SeedReport {
     pub triples_applied: usize,
     pub triples_skipped: usize,
     pub already_applied: bool,
+    /// Triples that were silently dropped because they would have introduced
+    /// contaminated is-a/child-of links (e.g. agent identity → CI runner).
+    pub contaminants_rejected: usize,
 }
 
 // ── TOML deserialization helpers ─────────────────────────────────────────
@@ -126,6 +130,9 @@ struct SeedMeta {
 const IDENTITY_TOML: &str = include_str!("../../data/seeds/identity/seed.toml");
 const ONTOLOGY_TOML: &str = include_str!("../../data/seeds/ontology/seed.toml");
 const COMMON_SENSE_TOML: &str = include_str!("../../data/seeds/common-sense/seed.toml");
+const COMPUTING_TOML: &str = include_str!("../../data/seeds/computing/seed.toml");
+const ARCHITECTURE_TOML: &str = include_str!("../../data/seeds/architecture/seed.toml");
+const TECTON_TOML: &str = include_str!("../../data/seeds/tecton/seed.toml");
 
 fn parse_seed_toml(toml_str: &str, source: SeedSource) -> SeedResult<SeedPack> {
     let parsed: SeedToml = toml::from_str(toml_str).map_err(|e| SeedError::Parse {
@@ -148,6 +155,9 @@ fn bundled_packs() -> Vec<SeedPack> {
         (IDENTITY_TOML, "identity"),
         (ONTOLOGY_TOML, "ontology"),
         (COMMON_SENSE_TOML, "common-sense"),
+        (COMPUTING_TOML, "computing"),
+        (ARCHITECTURE_TOML, "architecture"),
+        (TECTON_TOML, "tecton"),
     ]
     .iter()
     .filter_map(
@@ -265,7 +275,8 @@ fn is_seed_applied(engine: &Engine, seed_id: &str) -> bool {
         triples.iter().any(|t| {
             let pred_label = engine.resolve_label(t.predicate);
             let obj_label = engine.resolve_label(t.object);
-            pred_label == SEED_APPLIED_PREDICATE && obj_label == seed_id
+            pred_label == SEED_APPLIED_PREDICATE
+                && obj_label.eq_ignore_ascii_case(seed_id)
         })
     } else {
         false
@@ -314,13 +325,33 @@ fn apply_seed_pack(pack: &SeedPack, engine: &Engine) -> SeedResult<SeedReport> {
             triples_applied: 0,
             triples_skipped: pack.triples.len(),
             already_applied: true,
+            contaminants_rejected: 0,
         });
     }
 
     let mut applied = 0;
     let mut skipped = 0;
+    let mut contaminants_rejected = 0;
 
     for st in &pack.triples {
+        // Contamination guard: reject is-a/child-of triples whose subject or
+        // object is a known-bad label (CI runners, storage nodes, tool stubs,
+        // UUIDs, noise artefacts). These have been manually purged repeatedly
+        // and must not be re-seeded by any pack that inadvertently captured
+        // stale topology from an earlier contaminant session.
+        if is_invalid_type_hierarchy_participant(&st.predicate, &st.subject)
+            || is_invalid_type_hierarchy_participant(&st.predicate, &st.object)
+        {
+            tracing::warn!(
+                pack_id = %pack.id,
+                subject = %st.subject,
+                predicate = %st.predicate,
+                object = %st.object,
+                "Seed pack: rejected contaminated type-hierarchy triple"
+            );
+            contaminants_rejected += 1;
+            continue;
+        }
         // If the subject is being declared as a relation, create it as Relation kind.
         let subj = if st.predicate == "is-a" && st.object == "relation" {
             engine.resolve_or_create_relation(&st.subject)
@@ -377,6 +408,7 @@ fn apply_seed_pack(pack: &SeedPack, engine: &Engine) -> SeedResult<SeedReport> {
         triples_applied: applied,
         triples_skipped: skipped,
         already_applied: false,
+        contaminants_rejected,
     })
 }
 
@@ -389,10 +421,13 @@ mod tests {
     #[test]
     fn bundled_packs_parse() {
         let packs = bundled_packs();
-        assert_eq!(packs.len(), 3);
+        assert_eq!(packs.len(), 6);
         assert!(packs.iter().any(|p| p.id == "identity"));
         assert!(packs.iter().any(|p| p.id == "ontology"));
         assert!(packs.iter().any(|p| p.id == "common-sense"));
+        assert!(packs.iter().any(|p| p.id == "computing"));
+        assert!(packs.iter().any(|p| p.id == "architecture"));
+        assert!(packs.iter().any(|p| p.id == "tecton"));
     }
 
     #[test]
@@ -400,6 +435,63 @@ mod tests {
         let reg = SeedRegistry::bundled();
         let list = reg.list();
         assert!(list.len() >= 3);
+    }
+
+    #[test]
+    fn seed_pack_rejects_contaminated_isa_triples() {
+        let engine = Engine::new(EngineConfig {
+            dimension: Dimension::TEST,
+            ..Default::default()
+        })
+        .unwrap();
+
+        // Build a pack with one legitimate triple and two contaminated ones.
+        let pack = SeedPack {
+            id: "test-contamination".into(),
+            name: "Test".into(),
+            version: "1.0.0".into(),
+            description: "Contamination guard test".into(),
+            triples: vec![
+                SeedTriple {
+                    subject: "Tecton".into(),
+                    predicate: "is-a".into(),
+                    object: "agent identity".into(),
+                    confidence: 1.0,
+                },
+                SeedTriple {
+                    subject: "Tecton".into(),
+                    predicate: "is-a".into(),
+                    object: "ForgejoActions".into(),
+                    confidence: 0.9,
+                },
+                SeedTriple {
+                    subject: "Tecton".into(),
+                    predicate: "is-a".into(),
+                    object: "Stor01".into(),
+                    confidence: 0.9,
+                },
+            ],
+            source: SeedSource::Bundled,
+            partition: None,
+        };
+
+        let report = apply_seed_pack(&pack, &engine).unwrap();
+        assert_eq!(report.triples_applied, 1, "only the clean triple should be applied");
+        assert_eq!(report.contaminants_rejected, 2, "ForgejoActions and Stor01 must be rejected");
+
+        // The clean triple must be in the KG.
+        let tecton = engine.resolve_symbol("Tecton").unwrap();
+        let isa = engine.lookup_symbol("is-a").unwrap();
+        let agent_id = engine.resolve_symbol("agent identity").unwrap();
+        assert!(engine.has_triple(tecton, isa, agent_id));
+
+        // The contaminated objects must NOT be in the KG as type-hierarchy nodes.
+        let forgejo = engine.resolve_symbol("ForgejoActions").ok();
+        let stor01 = engine.resolve_symbol("Stor01").ok();
+        if let (Some(f), Some(s)) = (forgejo, stor01) {
+            assert!(!engine.has_triple(tecton, isa, f));
+            assert!(!engine.has_triple(tecton, isa, s));
+        }
     }
 
     #[test]
@@ -435,12 +527,75 @@ mod tests {
         let reg = SeedRegistry::bundled();
         let ids: Vec<String> = reg.list().iter().map(|p| p.id.clone()).collect();
         let reports = reg.apply_all(&ids, &engine).unwrap();
-        assert_eq!(reports.len(), 3);
+        assert_eq!(reports.len(), 6);
 
         let total: usize = reports.iter().map(|r| r.triples_applied).sum();
         assert!(
-            total > 30,
-            "Expected 30+ triples from all seeds, got {total}"
+            total > 100,
+            "Expected 100+ triples from all seeds, got {total}"
         );
+    }
+
+    #[test]
+    fn apply_tecton_seed() {
+        let engine = Engine::new(EngineConfig {
+            dimension: Dimension::TEST,
+            ..Default::default()
+        })
+        .unwrap();
+
+        let reg = SeedRegistry::bundled();
+        let report = reg.apply("tecton", &engine).unwrap();
+        assert!(!report.already_applied);
+        assert!(report.triples_applied > 0, "Expected Tecton triples to be applied");
+
+        // Tecton symbol must exist.
+        assert!(engine.resolve_symbol("Tecton").is_ok());
+
+        // Verify the full self-model triple coverage.
+        let tecton_id = engine.resolve_symbol("Tecton").unwrap();
+        let triples = engine.triples_from(tecton_id);
+        let pred_obj_pairs: Vec<(String, String)> = triples
+            .iter()
+            .map(|t| {
+                (
+                    engine.resolve_label(t.predicate),
+                    engine.resolve_label(t.object),
+                )
+            })
+            .collect();
+
+        let has = |pred: &str, obj: &str| {
+            pred_obj_pairs
+                .iter()
+                .any(|(p, o)| p == pred && o == obj)
+        };
+
+        assert!(has("is-a", "DigitalArchitect"), "Tecton --is-a--> DigitalArchitect");
+        assert!(has("inspired-by", "Ptah"), "Tecton --inspired-by--> Ptah");
+        assert!(has("has-role", "Creator"), "Tecton --has-role--> Creator");
+        assert!(has("has-role", "Architect"), "Tecton --has-role--> Architect");
+        assert!(has("operates-on", "cluster"), "Tecton --operates-on--> cluster");
+        assert!(has("runs-on", "MacMini"), "Tecton --runs-on--> MacMini");
+        assert!(has("runs-on", "Hephaistos"), "Tecton --runs-on--> Hephaistos");
+        assert!(has("created-by", "Toasty"), "Tecton --created-by--> Toasty");
+        assert!(has("part-of", "Ennead"), "Tecton --part-of--> Ennead");
+
+        // Verify related entities have type context for "who is X?" queries.
+        let toasty_id = engine.resolve_symbol("Toasty").unwrap();
+        let toasty_triples = engine.triples_from(toasty_id);
+        assert!(
+            toasty_triples.iter().any(|t| engine.resolve_label(t.predicate) == "is-a"
+                && engine.resolve_label(t.object) == "person"),
+            "Toasty --is-a--> person"
+        );
+
+        // Verify the seed-applied tracking triple was recorded.
+        assert!(engine.resolve_symbol("akh-medu").is_ok(), "akh-medu entity must exist after seed application");
+        assert!(is_seed_applied_public(&engine, "tecton"), "is_seed_applied must be true after first apply");
+
+        // Idempotency.
+        let report2 = reg.apply("tecton", &engine).unwrap();
+        assert!(report2.already_applied);
     }
 }

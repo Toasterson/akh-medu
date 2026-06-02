@@ -75,6 +75,10 @@ pub enum AkhError {
 
     #[error(transparent)]
     #[diagnostic(transparent)]
+    Eliza(#[from] crate::eliza::error::ElizaError),
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
     Compartment(#[from] crate::compartment::CompartmentError),
 
     #[error(transparent)]
@@ -140,6 +144,10 @@ pub enum AkhError {
     #[error(transparent)]
     #[diagnostic(transparent)]
     Nlu(#[from] crate::nlu::error::NluError),
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Wiki(#[from] crate::wiki::WikiError),
 }
 
 // ---------------------------------------------------------------------------
@@ -701,6 +709,42 @@ pub enum EngineError {
         )
     )]
     ContradictionRejected { message: String },
+
+    #[error("invalid regex pattern: {message}")]
+    #[diagnostic(
+        code(akh::engine::invalid_pattern),
+        help("Ensure the pattern is a valid Rust regex. {message}")
+    )]
+    InvalidPattern { message: String },
+
+    #[error("SPARQL DELETE parse error: {message}")]
+    #[diagnostic(
+        code(akh::engine::sparql_delete_parse),
+        help(
+            "Expected DELETE WHERE {{ ?s ?p ?o ... }} or \
+             DELETE {{ ?s ?p ?o }} WHERE {{ ... }}. {message}"
+        )
+    )]
+    SparqlDeleteParse { message: String },
+
+    #[error(
+        "self-referential triple rejected: {subject_label} -{predicate_label}-> {subject_label} \
+         (sym:{subject_id})"
+    )]
+    #[diagnostic(
+        code(akh::engine::self_referential_triple),
+        help(
+            "A triple where the subject and object are the same entity (A → p → A) is not \
+             permitted. For intentionally reflexive relations (e.g., equality, identity), \
+             use the second-order reasoning system's reflexivity rule, or disable this \
+             check via Phase9Config::reject_self_referential."
+        )
+    )]
+    SelfReferentialTriple {
+        subject_label: String,
+        predicate_label: String,
+        subject_id: u64,
+    },
 }
 
 /// Convenience alias for functions returning akh-medu results.

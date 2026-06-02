@@ -9,26 +9,43 @@
 //! - **Consolidation** (deliberate reasoning about what to remember)
 
 #[allow(clippy::module_inception)]
+pub mod active_inference;
+pub mod affect;
 pub mod agent;
+pub mod ach;
 pub mod calendar;
 pub mod causal;
 pub mod channel;
+pub mod counterfactual;
+pub mod event_calculus;
 pub mod channel_message;
 pub mod chat;
+pub mod contact;
+pub mod contact_calendar;
+pub mod contact_memory;
+pub mod contact_rel;
+pub mod contact_style;
 pub mod constraint_check;
 pub mod conversation;
+pub mod credibility;
 pub mod chunking;
 pub mod dialogue;
 pub mod cli_tool;
 pub mod continuous_learning;
 pub mod curiosity;
 pub mod explain;
+pub mod delegation;
+pub mod eliza;
 #[cfg(feature = "daemon")]
 pub mod daemon;
 pub mod decomposition;
 pub mod drives;
+pub mod epistemic;
 pub mod error;
+pub mod evidence;
+pub mod game_theory;
 pub mod goal;
+pub mod hygiene;
 pub mod interlocutor;
 pub mod operator_channel;
 #[cfg(feature = "oxifed")]
@@ -36,13 +53,18 @@ pub mod oxifed;
 pub mod goal_generation;
 pub mod idle;
 pub mod library_learn;
+pub mod mcts;
 pub mod memory;
+pub mod memory_sync;
 pub mod metacognition;
 pub mod multi_agent;
 pub mod nlp;
 pub mod ooda;
+pub mod openclaw;
+pub mod output;
 pub mod pim;
 pub mod plan;
+pub mod plan_monitor;
 pub mod preference;
 pub mod priority_reasoning;
 pub mod project;
@@ -50,13 +72,19 @@ pub mod reflect;
 pub mod resource;
 pub mod semantic_enrichment;
 pub mod sleep;
+pub mod source_reliability;
+pub mod state_value;
 pub mod synthesize;
 pub mod synthesize_abs;
+pub mod temporal_experience;
 pub mod tool;
+pub mod tool_graph;
 pub mod tool_manifest;
 pub mod tool_semantics;
 pub mod tools;
+pub mod vsa_decide;
 pub mod trigger;
+pub mod vsa_rl;
 pub mod watch;
 #[cfg(feature = "wasm-tools")]
 pub mod wasm_runtime;
@@ -73,6 +101,10 @@ pub use constraint_check::{
     ConstraintWarning, EmissionDecision, SensitivityLevel, emission_decision,
 };
 pub use conversation::{ConversationState, ConversationTurn, GroundedResponse, GroundedTriple, ResponseDetail, Speaker};
+pub use credibility::{
+    CredibilityAnalysis, CredibilityAnalyzer, CredibilityRecommendation, CredibilitySignals,
+    DeceptionIndicators, detect_manipulation_markers,
+};
 pub use interlocutor::{InterlocutorPredicates, InterlocutorProfile, InterlocutorRegistry, InterlocutorError, InterlocutorResult, interest_overlap};
 pub use multi_agent::{
     AgentProtocolMessage, CapabilityScope, CapabilityToken, InterlocutorKind, MultiAgentError,
@@ -86,15 +118,35 @@ pub use decomposition::{
     DecompositionMethod, DecompositionOutput, DecompositionStrategy, DependencyEdge, MethodRegistry,
     TaskNode, TaskNodeKind, TaskTree,
 };
+pub use eliza::{ElizaEngine, Keyword as ElizaKeyword, Rule as ElizaRule, Script as ElizaScript, ScriptError as ElizaScriptError};
 pub use drives::{DriveKind, DriveSystem};
+pub use epistemic::{
+    CommunicationStrategy, EpistemicError, EpistemicEvent, EpistemicModality,
+    EpistemicProfile, EpistemicProposition, EpistemicResult, EpistemicStateManager,
+    EpistemicUpdateResult, InformationAdvantage, PropositionRef, StrategicAssessment,
+    ToMEngine, ToMLevel, ToMModel,
+};
 pub use error::{AgentError, AgentResult};
+pub use evidence::{
+    BeliefInterval, ClaimAssessment, ClaimVerdict, ConflictAlert, ConflictRecommendation,
+    EvidenceError, EvidenceFusionConfig, EvidenceItem, EvidenceManager, EvidenceResult,
+    MassFunction,
+};
 pub use explain::{
     DerivationNode, ExplainError, ExplainResult, ExplanationQuery, build_derivation_tree,
     derivation_kind_prose, execute_query, explain_changes, explain_confidence, explain_entity,
     explain_known, render_derivation_prose, render_derivation_tree,
 };
 pub use operator_channel::{InboundHandle, OperatorChannel};
+pub use game_theory::{
+    CheapTalkAnalysis, Coalition, GameType, InteractionGame, LevelKModel, PayoffFactors,
+    PlanImpact, PredictedResponse, SignalType, SignalingAnalysis, SignalingResponse,
+    SocialDynamics, SocialEnvironment, SocialOutcome, Strategy,
+    analyze_cheap_talk, analyze_signal, classify_game, detect_dynamics, find_nash_equilibria,
+    is_prisoners_dilemma, recommend_strategy, should_cooperate,
+};
 pub use goal::{Goal, GoalJustification, GoalSource, GoalStatus};
+pub use hygiene::{HygieneConfig, HygieneResult, run_hygiene_pass};
 pub use metacognition::{CompetenceModel, FailureIndex, GoalEvaluation, MetacognitionConfig, MetacognitiveControl};
 pub use goal_generation::{GoalGenerationConfig, GoalGenerationResult, GoalProposal};
 pub use idle::{IdleScheduler, IdleTaskResult};
@@ -111,13 +163,42 @@ pub use ooda::{
     ActionResult, Decision, DecisionImpasse, GoalProgress, ImpasseKind, Observation,
     OodaCycleResult, Orientation,
 };
+pub use affect::{
+    AffectiveState, AffectiveSystem, Appraisal, AppraisalTrigger, MoodState,
+    SomaticMarker, SomaticMarkerRegistry, emotional_salience, mood_congruence_bias,
+};
+pub use active_inference::{
+    ActiveInferenceConfig, ActiveInferenceEngine, FreeEnergy, GenerativeModel,
+    Policy, PolicySelectionResult, PrecisionWeights, PredictionError,
+};
+pub use ach::{AchAnalysis, AchEvidence, AchHypothesis, ConsistencyRating};
 pub use calendar::{
     AllenRelation, CalendarError, CalendarEvent, CalendarManager, CalendarPredicates,
     CalendarResult, CalendarRoleVectors,
 };
+pub use contact::{
+    Contact, ContactError, ContactManager, ContactPredicates, ContactResult,
+};
+pub use contact_rel::{
+    Relationship, RelationshipGraph, RelationshipKind, RelationshipPredicates, SocialCircle,
+};
+pub use contact_calendar::{CalendarContactPredicates, ContactCalendar};
+pub use contact_memory::PersonMemoryIndex;
+pub use contact_style::{
+    CommunicationStyle, StyleManager, StyleObservation, StylePredicates, score_formality,
+    score_verbosity,
+};
 pub use causal::{
     ActionSchema, CausalEffect, CausalError, CausalManager, CausalPattern, CausalPredicates,
     CausalRelation, CausalResult, CausalRoleVectors, EffectKind, PatternElement, StateTransition,
+};
+pub use counterfactual::{
+    CfResult, CounterfactualError, CounterfactualQuery, CounterfactualResult,
+    PredictionRecord, PredictionTracker, counterfactual_query,
+};
+pub use event_calculus::{
+    Event, EventCalculusEngine, EventCalculusError, EventCalculusPredicates,
+    EventCalculusResult, Fluent, FluentHistoryEntry, SimulationResult, StateProjection,
 };
 pub use pim::{
     DependencyEdge as PimDependencyEdge, EisenhowerQuadrant, EnergyLevel, GtdReviewResult,
@@ -125,6 +206,7 @@ pub use pim::{
     PimResult, Recurrence,
 };
 pub use plan::{Plan, PlanStatus, PlanStep, StepStatus};
+pub use plan_monitor::{DeviationSeverity, PlanMonitor, plan_from_mcts, post_action_update};
 pub use preference::{
     FeedbackSignal, JitirResult, PreferenceError, PreferenceManager, PreferencePredicates,
     PreferenceResult, PreferenceReview, PreferenceRoleVectors, ProactivityLevel, Suggestion,
@@ -137,12 +219,27 @@ pub use continuous_learning::{ContinuousLearningConfig, ContinuousLearningRunRes
 pub use curiosity::{CuriosityReport, CuriosityTarget, DirectedCuriosityConfig};
 pub use resource::{EffortCase, EffortEstimate, EffortIndex, ImprovementHistory, ResourceReport};
 pub use semantic_enrichment::{EnrichmentResult, SemanticPredicates};
+pub use mcts::{MctsConfig, MctsNode, MctsPlanner, MctsReflection, MctsResult, prune_tree};
 pub use sleep::{ConsolidationPhase, SleepConfig, SleepCycle, SleepMetrics};
+pub use source_reliability::{
+    AdmiraltyRating, BetaDistribution, InformationCredibility, ReliabilityError,
+    ReliabilityResult, SourceReliability, SourceReliabilityManager, TrustDimension, TrustModel,
+};
+pub use state_value::{
+    AgentState, Reward, StateRoleVectors, ValueFunction, encode_state, encode_state_with_vsa,
+};
+pub use output::{CandleFormatError, CandleFormatResult, CandleFormatter, FormatOutput, FormatSource};
+pub use vsa_rl::{RlSignal, VsaRlConfig};
 pub use synthesize::NarrativeSummary;
+pub use temporal_experience::TemporalExperience;
 pub use tool::{Tool, ToolInput, ToolOutput, ToolRegistry, ToolSignature};
+pub use tool_graph::{ToolGraphPredicates, ToolGraphRegistrar};
+pub use vsa_decide::{DecideMode, VsaDecideConfig, VsaDecideDiagnostics};
 pub use tool_manifest::{Capability, DangerInfo, DangerLevel, ToolManifest, ToolSource};
 pub use trigger::{Trigger, TriggerAction, TriggerCondition, TriggerStore};
 pub use watch::{
     Discrepancy, Expectation, TriplePattern, Watch, WatchAction, WatchCondition, WatchFiring,
     WorldSnapshot,
 };
+pub use memory_sync::{MemorySyncConfig, MemorySyncResult};
+pub use openclaw::{OpenClawConfig, OpenClawError};

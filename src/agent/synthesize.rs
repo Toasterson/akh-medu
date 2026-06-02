@@ -92,6 +92,14 @@ pub fn is_metadata_label(label: &str) -> bool {
         || label.starts_with("causal:")
         || label.starts_with("project:")
         || label.starts_with("watch:")
+        // Bootstrap/expansion infrastructure — internal bookkeeping.
+        || label.starts_with("expand:")
+        || label.starts_with("ingest:")
+        || label.starts_with("xval:")
+        || label.starts_with("wd:")
+        || label.starts_with("resource:")
+        || label.starts_with("prereq:")
+        || label.starts_with("assess:")
 }
 
 /// Whether a line references agent metadata labels (even embedded in a sentence).

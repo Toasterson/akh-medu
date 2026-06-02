@@ -40,7 +40,7 @@ pub enum NluError {
     #[error("NLU model not found: {path}")]
     #[diagnostic(
         code(akh::nlu::model_not_found),
-        help("Download with `akh init --with-models`")
+        help("Download with `akh setup models`")
     )]
     ModelNotFound { path: std::path::PathBuf },
 
@@ -59,6 +59,14 @@ pub enum NluError {
         help("The LLM could not produce valid output")
     )]
     LlmGenerationFailed { reason: String },
+
+    /// GBNF grammar initialization failed (malformed grammar file).
+    #[error("GBNF grammar initialization failed: {reason}")]
+    #[diagnostic(
+        code(akh::nlu::grammar_init),
+        help("The GBNF grammar file may be malformed. Check abstree.gbnf syntax.")
+    )]
+    GrammarInitFailed { reason: String },
 
     /// Wrapped grammar error.
     #[error(transparent)]

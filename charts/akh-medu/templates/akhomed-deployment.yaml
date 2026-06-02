@@ -1,0 +1,85 @@
+{{- if .Values.akhomed.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "akh-medu.fullname" . }}-akhomed
+  labels:
+    {{- include "akh-medu.akhomed.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.akhomed.replicaCount }}
+  strategy:
+    type: Recreate  # Single writer to KG data volume.
+  selector:
+    matchLabels:
+      {{- include "akh-medu.akhomed.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "akh-medu.akhomed.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        fsGroup: 1000
+      containers:
+        - name: akhomed
+          image: {{ include "akh-medu.akhomed.image" . }}
+          imagePullPolicy: {{ .Values.akhomed.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.akhomed.env.AKH_SERVER_PORT | default 8200 }}
+              protocol: TCP
+          env:
+            {{- range $key, $val := .Values.akhomed.env }}
+            - name: {{ $key }}
+              value: {{ $val | quote }}
+            {{- end }}
+            - name: AKH_HOME
+              value: /data
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            {{- if .Values.akhomed.models.enabled }}
+            - name: models
+              mountPath: /data/models
+            {{- end }}
+          {{- with .Values.akhomed.probes.liveness }}
+          livenessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.akhomed.probes.readiness }}
+          readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.akhomed.resources | nindent 12 }}
+      volumes:
+        - name: data
+          {{- if .Values.akhomed.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "akh-medu.fullname" . }}-akhomed-data
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        {{- if .Values.akhomed.models.enabled }}
+        - name: models
+          persistentVolumeClaim:
+            claimName: {{ include "akh-medu.fullname" . }}-akhomed-models
+        {{- end }}
+      {{- with .Values.akhomed.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.akhomed.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      affinity:
+        {{- include "akh-medu.archAffinity" . | nindent 8 }}
+        {{- with .Values.akhomed.affinity }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+{{- end }}

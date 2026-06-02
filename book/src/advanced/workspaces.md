@@ -63,16 +63,16 @@ shared_partitions = []                  # mounted shared partitions
 
 ```bash
 # List all workspaces
-akh-medu workspace list
+akh workspace list
 
 # Create a new workspace
-akh-medu workspace create my-project
+akh workspace create my-project
 
 # Show workspace info
-akh-medu workspace info default
+akh workspace info default
 
 # Delete a workspace (removes all data)
-akh-medu workspace delete my-project
+akh workspace delete my-project
 ```
 
 ### Using a Specific Workspace
@@ -81,13 +81,13 @@ Pass `-w` or `--workspace` to any command:
 
 ```bash
 # Initialize a named workspace
-akh-medu -w my-project init
+akh -w my-project init
 
 # Query in a specific workspace
-akh-medu -w my-project query --seeds "Dog" --depth 2
+akh -w my-project query --seeds "Dog" --depth 2
 
 # Run agent in a workspace
-akh-medu -w my-project agent run --goals "..." --max-cycles 10
+akh -w my-project agent run --goals "..." --max-cycles 10
 ```
 
 ### REST API

@@ -69,7 +69,7 @@ impl CompartmentManager {
         let mut compartments = self
             .compartments
             .write()
-            .expect("compartments lock poisoned");
+            .unwrap_or_else(|e| e.into_inner());
 
         for entry in entries {
             let entry = entry.map_err(|e| CompartmentError::Io {
@@ -117,9 +117,12 @@ impl CompartmentManager {
     /// Load a compartment's triples into the knowledge graph.
     ///
     /// For the "psyche" core compartment, also deserializes the `Psyche` struct
-    /// from `psyche.toml` in the compartment directory.
+    /// from `psyche.toml` in the compartment directory and translates its fields
+    /// (archetypes, shadow patterns, persona traits, individuation level) into
+    /// KG triples so the reasoning pipeline can inspect identity state at runtime.
     pub fn load(&self, id: &str, engine: &crate::engine::Engine) -> CompartmentResult<()> {
         let compartment_dir = self.compartments_dir.join(id);
+        let mut psyche_triple_count = 0usize;
 
         // Load psyche if this is the psyche compartment.
         if id == "psyche" {
@@ -134,13 +137,22 @@ impl CompartmentManager {
             } else {
                 Psyche::default()
             };
-            *self.psyche.write().expect("psyche lock poisoned") = Some(psyche);
+
+            // Translate persona metadata into KG triples before storing the psyche.
+            psyche_triple_count = psyche.inject_into_kg(engine, id).map_err(|e| {
+                CompartmentError::InvalidManifest {
+                    path: compartment_dir.display().to_string(),
+                    message: format!("failed to inject psyche triples into KG: {e}"),
+                }
+            })?;
+
+            *self.psyche.write().unwrap_or_else(|e| e.into_inner()) = Some(psyche);
         }
 
         let mut compartments = self
             .compartments
             .write()
-            .expect("compartments lock poisoned");
+            .unwrap_or_else(|e| e.into_inner());
         let compartment = compartments
             .get_mut(id)
             .ok_or_else(|| CompartmentError::NotFound { id: id.into() })?;
@@ -149,8 +161,8 @@ impl CompartmentManager {
             return Err(CompartmentError::AlreadyLoaded { id: id.into() });
         }
 
-        // Load triples if specified.
-        let mut triple_count = 0;
+        // Load triples if specified; start the count from any psyche-injected triples.
+        let mut triple_count = psyche_triple_count;
         if let Some(ref triples_file) = compartment.manifest.triples_file {
             let triples_path = compartment_dir.join(triples_file);
             if triples_path.exists() {
@@ -214,7 +226,7 @@ impl CompartmentManager {
         let mut compartments = self
             .compartments
             .write()
-            .expect("compartments lock poisoned");
+            .unwrap_or_else(|e| e.into_inner());
         let compartment = compartments
             .get_mut(id)
             .ok_or_else(|| CompartmentError::NotFound { id: id.into() })?;
@@ -223,13 +235,16 @@ impl CompartmentManager {
             return Ok(());
         }
 
+        // Remove all KG triples tagged with this compartment (includes psyche-injected triples).
+        engine.remove_triples_in_compartment(id);
+
         // Remove triples from the named graph in SPARQL store.
         if let Some(sparql) = engine.sparql() {
             let _ = sparql.remove_graph(id);
         }
 
         if id == "psyche" {
-            *self.psyche.write().expect("psyche lock poisoned") = None;
+            *self.psyche.write().unwrap_or_else(|e| e.into_inner()) = None;
         }
 
         compartment.state = CompartmentState::Dormant;
@@ -242,7 +257,7 @@ impl CompartmentManager {
         let mut compartments = self
             .compartments
             .write()
-            .expect("compartments lock poisoned");
+            .unwrap_or_else(|e| e.into_inner());
         let compartment = compartments
             .get_mut(id)
             .ok_or_else(|| CompartmentError::NotFound { id: id.into() })?;
@@ -259,7 +274,7 @@ impl CompartmentManager {
         let mut compartments = self
             .compartments
             .write()
-            .expect("compartments lock poisoned");
+            .unwrap_or_else(|e| e.into_inner());
         let compartment = compartments
             .get_mut(id)
             .ok_or_else(|| CompartmentError::NotFound { id: id.into() })?;
@@ -275,7 +290,7 @@ impl CompartmentManager {
         let compartments = self
             .compartments
             .read()
-            .expect("compartments lock poisoned");
+            .unwrap_or_else(|e| e.into_inner());
         compartments
             .values()
             .filter(|c| c.state == CompartmentState::Active)
@@ -288,7 +303,7 @@ impl CompartmentManager {
         let compartments = self
             .compartments
             .read()
-            .expect("compartments lock poisoned");
+            .unwrap_or_else(|e| e.into_inner());
         compartments.get(id).map(|c| c.manifest.clone())
     }
 
@@ -297,7 +312,7 @@ impl CompartmentManager {
         let compartments = self
             .compartments
             .read()
-            .expect("compartments lock poisoned");
+            .unwrap_or_else(|e| e.into_inner());
         compartments
             .values()
             .filter(|c| c.manifest.kind == kind)
@@ -307,7 +322,10 @@ impl CompartmentManager {
 
     /// Get the loaded psyche (if the psyche compartment has been loaded).
     pub fn psyche(&self) -> Option<Psyche> {
-        self.psyche.read().expect("psyche lock poisoned").clone()
+        self.psyche
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// Update the stored psyche (after evolution).
@@ -315,7 +333,7 @@ impl CompartmentManager {
     /// Returns `PsycheImmutable` if the existing psyche is awakened.
     /// Use [`force_set_psyche`] for admin override.
     pub fn set_psyche(&self, psyche: Psyche) -> CompartmentResult<()> {
-        let mut guard = self.psyche.write().expect("psyche lock poisoned");
+        let mut guard = self.psyche.write().unwrap_or_else(|e| e.into_inner());
         if let Some(ref existing) = *guard {
             if existing.is_awakened() {
                 return Err(CompartmentError::PsycheImmutable);
@@ -331,7 +349,7 @@ impl CompartmentManager {
         if let Err(e) = self.persist_psyche_to_disk(&psyche) {
             tracing::warn!(error = %e, "failed to persist psyche to disk");
         }
-        *self.psyche.write().expect("psyche lock poisoned") = Some(psyche);
+        *self.psyche.write().unwrap_or_else(|e| e.into_inner()) = Some(psyche);
     }
 
     /// Persist the psyche to `compartments/psyche/psyche.toml` on disk.
@@ -358,6 +376,8 @@ impl CompartmentManager {
                 rules_file: None,
                 grammar_ref: None,
                 tags: vec!["identity".into(), "core".into()],
+                parent: None,
+                scope: super::manifest::CompartmentScope::Public,
             };
             let toml_str = toml::to_string_pretty(&manifest).map_err(|e| {
                 CompartmentError::InvalidManifest {
@@ -392,7 +412,7 @@ impl CompartmentManager {
         let compartments = self
             .compartments
             .read()
-            .expect("compartments lock poisoned");
+            .unwrap_or_else(|e| e.into_inner());
         compartments
             .iter()
             .filter(|(_, c)| c.state == CompartmentState::Dormant)
@@ -405,7 +425,7 @@ impl CompartmentManager {
         let compartments = self
             .compartments
             .read()
-            .expect("compartments lock poisoned");
+            .unwrap_or_else(|e| e.into_inner());
         compartments
             .values()
             .map(|c| (c.manifest.clone(), c.state, c.triple_count))
@@ -415,5 +435,179 @@ impl CompartmentManager {
     /// Get the compartments directory path.
     pub fn compartments_dir(&self) -> &std::path::Path {
         &self.compartments_dir
+    }
+
+    /// List all compartments whose `parent` matches the given id.
+    pub fn compartments_by_parent(&self, parent_id: &str) -> Vec<CompartmentManifest> {
+        let compartments = self
+            .compartments
+            .read()
+            .expect("compartments lock poisoned");
+        compartments
+            .values()
+            .filter(|c| c.manifest.parent.as_deref() == Some(parent_id))
+            .map(|c| c.manifest.clone())
+            .collect()
+    }
+
+    /// Create a new compartment on disk and register it as Dormant.
+    ///
+    /// Writes `compartment.toml` into `<compartments_dir>/<id>/` and calls
+    /// `discover()` to register it. Returns `AlreadyExists` if the directory
+    /// already contains a manifest.
+    pub fn create_compartment(&self, manifest: CompartmentManifest) -> CompartmentResult<()> {
+        let dir = self.compartments_dir.join(&manifest.id);
+        let manifest_path = dir.join("compartment.toml");
+
+        if manifest_path.exists() {
+            return Err(super::error::CompartmentError::AlreadyExists {
+                id: manifest.id.clone(),
+            });
+        }
+
+        std::fs::create_dir_all(&dir).map_err(|e| super::error::CompartmentError::Io {
+            id: manifest.id.clone(),
+            source: e,
+        })?;
+
+        let toml_str = toml::to_string_pretty(&manifest).map_err(|e| {
+            super::error::CompartmentError::InvalidManifest {
+                path: manifest_path.display().to_string(),
+                message: e.to_string(),
+            }
+        })?;
+
+        std::fs::write(&manifest_path, toml_str).map_err(|e| {
+            super::error::CompartmentError::Io {
+                id: manifest.id.clone(),
+                source: e,
+            }
+        })?;
+
+        // Register the new compartment without re-scanning the whole directory.
+        let id = manifest.id.clone();
+        let graph_name = format!("{COMPARTMENT_NS}{}", &id);
+        self.compartments
+            .write()
+            .expect("compartments lock poisoned")
+            .entry(id)
+            .or_insert_with(|| LoadedCompartment {
+                manifest,
+                state: CompartmentState::Dormant,
+                triple_count: 0,
+                graph_name,
+            });
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::compartment::manifest::{CompartmentKind, CompartmentScope};
+
+    fn tmp_manager() -> (tempfile::TempDir, CompartmentManager) {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mgr = CompartmentManager::new(tmp.path().to_path_buf());
+        (tmp, mgr)
+    }
+
+    fn workspace_manifest(id: &str) -> CompartmentManifest {
+        CompartmentManifest {
+            id: id.into(),
+            name: format!("{id} Workspace"),
+            kind: CompartmentKind::Workspace,
+            description: "test workspace compartment".into(),
+            triples_file: None,
+            rules_file: None,
+            grammar_ref: None,
+            tags: vec!["test".into()],
+            parent: None,
+            scope: CompartmentScope::Private,
+        }
+    }
+
+    fn child_manifest(id: &str, parent: &str) -> CompartmentManifest {
+        CompartmentManifest {
+            id: id.into(),
+            name: format!("{id} child"),
+            kind: CompartmentKind::Project,
+            description: "child compartment".into(),
+            triples_file: None,
+            rules_file: None,
+            grammar_ref: None,
+            tags: vec![],
+            parent: Some(parent.into()),
+            scope: CompartmentScope::Protected,
+        }
+    }
+
+    #[test]
+    fn create_compartment_writes_toml_and_registers() {
+        let (_tmp, mgr) = tmp_manager();
+        let m = workspace_manifest("tecton");
+        mgr.create_compartment(m).unwrap();
+
+        // Should appear as Dormant.
+        let all = mgr.all_compartments();
+        assert_eq!(all.len(), 1);
+        let (manifest, state, _tc) = &all[0];
+        assert_eq!(manifest.id, "tecton");
+        assert_eq!(manifest.kind, CompartmentKind::Workspace);
+        assert_eq!(manifest.scope, CompartmentScope::Private);
+        assert_eq!(*state, CompartmentState::Dormant);
+    }
+
+    #[test]
+    fn create_compartment_duplicate_returns_error() {
+        let (_tmp, mgr) = tmp_manager();
+        mgr.create_compartment(workspace_manifest("alpha")).unwrap();
+        let err = mgr.create_compartment(workspace_manifest("alpha")).unwrap_err();
+        assert!(matches!(err, super::CompartmentError::AlreadyExists { .. }));
+    }
+
+    #[test]
+    fn compartments_by_parent_filters_correctly() {
+        let (_tmp, mgr) = tmp_manager();
+        mgr.create_compartment(workspace_manifest("root")).unwrap();
+        mgr.create_compartment(child_manifest("child-a", "root")).unwrap();
+        mgr.create_compartment(child_manifest("child-b", "root")).unwrap();
+        mgr.create_compartment(workspace_manifest("other")).unwrap();
+
+        let children = mgr.compartments_by_parent("root");
+        assert_eq!(children.len(), 2);
+        let ids: Vec<&str> = children.iter().map(|m| m.id.as_str()).collect();
+        assert!(ids.contains(&"child-a"));
+        assert!(ids.contains(&"child-b"));
+
+        let others = mgr.compartments_by_parent("other");
+        assert!(others.is_empty());
+    }
+
+    #[test]
+    fn discover_loads_workspace_kind_from_toml() {
+        let (tmp, mgr) = tmp_manager();
+        // Write a compartment.toml with Workspace kind.
+        let dir = tmp.path().join("tecton");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("compartment.toml"),
+            r#"id = "tecton"
+name = "Tecton"
+kind = "Workspace"
+scope = "Private"
+description = "workspace"
+tags = []
+"#,
+        )
+        .unwrap();
+
+        let count = mgr.discover().unwrap();
+        assert_eq!(count, 1);
+
+        let m = mgr.get("tecton").unwrap();
+        assert_eq!(m.kind, CompartmentKind::Workspace);
+        assert_eq!(m.scope, CompartmentScope::Private);
     }
 }

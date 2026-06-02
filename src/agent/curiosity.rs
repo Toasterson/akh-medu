@@ -7,6 +7,8 @@
 //! Uses a Gaussian-like curve peaking at a configurable fill ratio (~0.7) to
 //! model the "curiosity sweet spot" from Loewenstein's information gap theory.
 
+use std::collections::HashSet;
+
 use serde::{Deserialize, Serialize};
 
 use crate::bootstrap::prerequisite::ZpdZone;
@@ -127,50 +129,124 @@ pub fn classify_zpd_zone(fill_ratio: f32, config: &DirectedCuriosityConfig) -> Z
     }
 }
 
+/// Check whether an entity label is a valid curiosity exploration target.
+///
+/// Rejects agent-internal artifacts (episodes, tools, goals, etc.) and
+/// structurally noisy labels that have no domain significance.
+fn is_curiosity_target_worthy(label: &str) -> bool {
+    let trimmed = label.trim();
+    if trimmed.len() < 3 || trimmed.len() > 120 {
+        return false;
+    }
+    // Purely numeric or decimal strings (rate values, counts).
+    if trimmed.chars().all(|c| c.is_ascii_digit() || c == '.') {
+        return false;
+    }
+    let lower = trimmed.to_lowercase();
+    // Agent-internal artifact prefixes — not domain concepts.
+    const INTERNAL_PREFIXES: &[&str] = &[
+        "episode:", "tool:", "goal:", "criteria:", "expand:", "desc:",
+        "rate:", "sym:", "para:", "doc:", "wm:",
+    ];
+    if INTERNAL_PREFIXES.iter().any(|p| lower.starts_with(p)) {
+        return false;
+    }
+    // Mostly non-alphanumeric (Unicode junk, combining marks).
+    let alpha_count = trimmed.chars().filter(|c| c.is_alphanumeric()).count();
+    let total = trimmed.chars().count();
+    total == 0 || (alpha_count as f64 / total as f64) >= 0.5
+}
+
+/// BFS from goal seeds — returns SymbolIds of all entities reachable within `depth` hops.
+///
+/// Restricting curiosity exploration to goal-reachable entities ensures the agent
+/// investigates concepts connected to its current objectives rather than
+/// domain-irrelevant entities that happen to have low connectivity.
+fn collect_goal_reachable(engine: &Engine, seeds: &[SymbolId], depth: usize) -> HashSet<SymbolId> {
+    let mut visited: HashSet<SymbolId> = seeds.iter().copied().collect();
+    let mut frontier: Vec<SymbolId> = seeds.to_vec();
+
+    for _ in 0..depth {
+        let mut next = Vec::new();
+        for &id in &frontier {
+            for triple in engine.triples_from(id) {
+                if visited.insert(triple.object) {
+                    next.push(triple.object);
+                }
+            }
+            for triple in engine.triples_to(id) {
+                if visited.insert(triple.subject) {
+                    next.push(triple.subject);
+                }
+            }
+        }
+        if next.is_empty() {
+            break;
+        }
+        frontier = next;
+    }
+    visited
+}
+
 /// Discover curiosity targets by analyzing entity completeness.
 ///
-/// For each entity symbol:
+/// When `goal_symbols` is non-empty, candidates are restricted to entities
+/// reachable from those goals (depth 2). This prevents the agent from targeting
+/// domain-irrelevant entities unconnected to its current objectives.
+///
+/// Agent-internal artifacts (`episode:`, `tool:`, `goal:`, etc.) are always excluded.
+///
+/// For each candidate entity:
 /// 1. Count its outgoing relations.
-/// 2. Compare to the average outgoing relation count across all entities (schema average).
+/// 2. Compare to the average outgoing relation count across candidates (peer average).
 /// 3. Compute fill_ratio = actual / expected.
 /// 4. Compute gap_score via the Gaussian curve.
 /// 5. Sort by gap_score descending, take top `max_targets`.
 pub fn discover_curiosity_targets(
     engine: &Engine,
     config: &DirectedCuriosityConfig,
+    goal_symbols: &[SymbolId],
 ) -> AgentResult<Vec<CuriosityTarget>> {
     let symbols = engine.all_symbols();
-    let entities: Vec<_> = symbols
+
+    // Collect entity IDs, filtering out agent-internal artifacts.
+    let mut entity_ids: Vec<SymbolId> = symbols
         .iter()
         .filter(|s| s.kind == SymbolKind::Entity)
+        .filter(|s| is_curiosity_target_worthy(&engine.resolve_label(s.id)))
+        .map(|s| s.id)
         .collect();
 
-    if entities.is_empty() {
+    if entity_ids.is_empty() {
         return Ok(Vec::new());
     }
 
-    // Compute the average outgoing relation count across all entities.
-    let total_outgoing: usize = entities
-        .iter()
-        .map(|e| engine.triples_from(e.id).len())
-        .sum();
-    let avg_relations = if entities.is_empty() {
-        1
-    } else {
-        (total_outgoing / entities.len()).max(1)
-    };
+    // When active goals exist, restrict to entities reachable from them.
+    // This prevents targeting of domain-irrelevant entities.
+    if !goal_symbols.is_empty() {
+        let reachable = collect_goal_reachable(engine, goal_symbols, 2);
+        entity_ids.retain(|id| reachable.contains(id));
+    }
 
-    let mut targets: Vec<CuriosityTarget> = entities
+    if entity_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Compute the average outgoing relation count across candidates.
+    let total_outgoing: usize = entity_ids.iter().map(|&id| engine.triples_from(id).len()).sum();
+    let avg_relations = (total_outgoing / entity_ids.len()).max(1);
+
+    let mut targets: Vec<CuriosityTarget> = entity_ids
         .iter()
-        .map(|e| {
-            let filled = engine.triples_from(e.id).len();
+        .map(|&id| {
+            let filled = engine.triples_from(id).len();
             let expected = avg_relations;
             let fill_ratio = (filled as f32 / expected as f32).clamp(0.0, 2.0);
             let gap_score = compute_gap_score(fill_ratio, config);
             let zpd_zone = classify_zpd_zone(fill_ratio, config);
 
             CuriosityTarget {
-                concept: e.id,
+                concept: id,
                 gap_score,
                 expected_relations: expected,
                 filled_relations: filled,
@@ -194,7 +270,10 @@ pub fn discover_curiosity_targets(
 
 /// Generate goal proposals from curiosity targets.
 ///
-/// Only proximal-zone targets produce proposals.
+/// Only proximal-zone targets produce proposals. Agent-internal entities are
+/// filtered a second time here as a defence-in-depth measure.
+///
+/// Descriptions are substantive domain phrases, not internal system metrics.
 pub fn generate_curiosity_proposals(
     targets: &[CuriosityTarget],
     engine: &Engine,
@@ -202,12 +281,15 @@ pub fn generate_curiosity_proposals(
     let proposals: Vec<GoalProposal> = targets
         .iter()
         .filter(|t| t.zpd_zone == ZpdZone::Proximal)
-        .map(|t| {
+        .filter_map(|t| {
             let label = engine.resolve_label(t.concept);
-            GoalProposal {
+            // Defence-in-depth: skip any internal entity that slipped through.
+            if !is_curiosity_target_worthy(&label) {
+                return None;
+            }
+            Some(GoalProposal {
                 description: format!(
-                    "Learn more about '{}': {} of {} expected relations filled",
-                    label, t.filled_relations, t.expected_relations
+                    "Deepen understanding of '{label}' by discovering its missing connections"
                 ),
                 rationale: format!(
                     "Information gap score {:.2} (fill ratio {:.2}) in proximal zone",
@@ -219,12 +301,11 @@ pub fn generate_curiosity_proposals(
                 },
                 priority_suggestion: (t.gap_score * 128.0) as u8,
                 success_criteria: format!(
-                    "'{}' has at least {} outgoing relations",
-                    label, t.expected_relations
+                    "'{label}' is well-characterised with key relationships identified"
                 ),
                 conflicts_with: Vec::new(),
                 feasibility: 0.8,
-            }
+            })
         })
         .collect();
 
@@ -233,12 +314,16 @@ pub fn generate_curiosity_proposals(
 
 /// Run the full directed curiosity pipeline.
 ///
+/// `goal_symbols` scopes exploration to entities reachable from active goals.
+/// Pass an empty slice for background contexts where no goal scope is available.
+///
 /// Returns a `CuriosityReport` with targets, overall drive strength, and proposals.
 pub fn compute_directed_curiosity(
     engine: &Engine,
     config: &DirectedCuriosityConfig,
+    goal_symbols: &[SymbolId],
 ) -> AgentResult<CuriosityReport> {
-    let targets = discover_curiosity_targets(engine, config)?;
+    let targets = discover_curiosity_targets(engine, config, goal_symbols)?;
 
     let proposals = generate_curiosity_proposals(&targets, engine)?;
 
@@ -356,7 +441,8 @@ mod tests {
         let engine = test_engine();
         let config = DirectedCuriosityConfig::default();
 
-        let targets = discover_curiosity_targets(&engine, &config).unwrap();
+        // Pass empty goal_symbols — falls back to scanning all entities (empty KG → no targets).
+        let targets = discover_curiosity_targets(&engine, &config, &[]).unwrap();
         assert!(targets.is_empty());
     }
 
@@ -387,7 +473,8 @@ mod tests {
             ..DirectedCuriosityConfig::default()
         };
 
-        let targets = discover_curiosity_targets(&engine, &config).unwrap();
+        // Pass empty goal_symbols — scans all entities (no goal-scope restriction).
+        let targets = discover_curiosity_targets(&engine, &config, &[]).unwrap();
         assert!(!targets.is_empty());
 
         // All targets should have valid fields.
@@ -395,6 +482,58 @@ mod tests {
             assert!(t.gap_score >= 0.0 && t.gap_score <= 1.0);
             assert!(t.fill_ratio >= 0.0);
         }
+    }
+
+    #[test]
+    fn discover_targets_excludes_internal_entities() {
+        let engine = test_engine();
+
+        let _episode = engine.resolve_or_create_entity("episode:42").unwrap();
+        let _tool = engine.resolve_or_create_entity("tool:WebSearch").unwrap();
+        let _goal = engine.resolve_or_create_entity("goal:learn_rust").unwrap();
+        let domain = engine.resolve_or_create_entity("ConceptualFramework").unwrap();
+
+        let rel = engine.resolve_or_create_relation("test:rel").unwrap();
+        let obj = engine.resolve_or_create_entity("obj").unwrap();
+        engine.add_triple(&crate::graph::Triple::new(domain, rel, obj)).unwrap();
+
+        let config = DirectedCuriosityConfig::default();
+        let targets = discover_curiosity_targets(&engine, &config, &[]).unwrap();
+
+        // Internal entities must not appear as targets.
+        for t in &targets {
+            let label = engine.resolve_label(t.concept);
+            assert!(
+                !label.starts_with("episode:") && !label.starts_with("tool:") && !label.starts_with("goal:"),
+                "internal entity '{label}' appeared as a curiosity target"
+            );
+        }
+    }
+
+    #[test]
+    fn discover_targets_goal_scope_restricts_to_reachable() {
+        let engine = test_engine();
+
+        // Build two disconnected clusters.
+        let goal_root = engine.resolve_or_create_entity("GoalRoot").unwrap();
+        let connected = engine.resolve_or_create_entity("ConnectedConcept").unwrap();
+        let unrelated = engine.resolve_or_create_entity("UnrelatedConcept").unwrap();
+
+        let rel = engine.resolve_or_create_relation("related").unwrap();
+        let obj = engine.resolve_or_create_entity("shared_obj").unwrap();
+        engine.add_triple(&crate::graph::Triple::new(goal_root, rel, connected)).unwrap();
+        engine.add_triple(&crate::graph::Triple::new(connected, rel, obj)).unwrap();
+        // unrelated has no connection to goal_root
+
+        let config = DirectedCuriosityConfig::default();
+        let targets = discover_curiosity_targets(&engine, &config, &[goal_root]).unwrap();
+
+        let target_ids: Vec<_> = targets.iter().map(|t| t.concept).collect();
+        // UnrelatedConcept must not appear when goal scope is set.
+        assert!(
+            !target_ids.contains(&unrelated),
+            "domain-irrelevant entity appeared when goal scope was active"
+        );
     }
 
     #[test]
@@ -438,11 +577,43 @@ mod tests {
         let engine = test_engine();
         let config = DirectedCuriosityConfig::default();
 
-        let report = compute_directed_curiosity(&engine, &config).unwrap();
+        let report = compute_directed_curiosity(&engine, &config, &[]).unwrap();
         // Empty KG → no targets, zero drive.
         assert!(report.targets.is_empty());
         assert!(report.strongest_drive < f32::EPSILON);
         assert!(report.proposals.is_empty());
+    }
+
+    #[test]
+    fn proposals_description_is_substantive() {
+        let engine = test_engine();
+
+        let concept = engine.resolve_or_create_entity("HomeCluster").unwrap();
+        let rel = engine.resolve_or_create_relation("related").unwrap();
+        let obj = engine.resolve_or_create_entity("obj").unwrap();
+        engine.add_triple(&crate::graph::Triple::new(concept, rel, obj)).unwrap();
+
+        let config = DirectedCuriosityConfig {
+            proximal_low: 0.0,
+            proximal_high: 2.0,
+            ..DirectedCuriosityConfig::default()
+        };
+        let targets = discover_curiosity_targets(&engine, &config, &[]).unwrap();
+        let proposals = generate_curiosity_proposals(&targets, &engine).unwrap();
+
+        for p in &proposals {
+            // Descriptions must not contain internal relation-count metrics.
+            assert!(
+                !p.description.contains("expected relations filled"),
+                "description embeds internal metrics: {}",
+                p.description
+            );
+            assert!(
+                !p.description.contains("of ") || !p.description.contains(" filled"),
+                "description embeds fill ratio: {}",
+                p.description
+            );
+        }
     }
 
     #[test]
