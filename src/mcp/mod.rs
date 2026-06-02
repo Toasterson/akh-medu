@@ -62,6 +62,10 @@ fn deserialize_workspace<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::E
         .map(|opt| opt.filter(|s| !s.is_empty()).unwrap_or_else(default_workspace))
 }
 
+fn default_dry_run() -> bool {
+    true
+}
+
 /// Shared state needed by MCP tool handlers.
 ///
 /// Holds Arc-wrapped workspace and agent maps shared with `ServerState`,
@@ -1232,6 +1236,24 @@ pub struct ImportTriplesParams {
         description = "If true, simulate the import and report conflicts without modifying the workspace"
     )]
     #[serde(default)]
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CleanupByPatternParams {
+    #[schemars(description = "Target workspace (default: \"default\")")]
+    #[serde(default = "default_workspace")]
+    pub workspace: String,
+    #[schemars(description = "Prefix match on subject label (e.g. \"episode:\" matches all episode entities)")]
+    pub subject_pattern: Option<String>,
+    #[schemars(description = "Exact predicate label to match (e.g. \"child-of\", \"agent:learned\")")]
+    pub predicate: Option<String>,
+    #[schemars(description = "Prefix match on object label")]
+    pub object_pattern: Option<String>,
+    #[schemars(description = "Only include triples with confidence strictly below this value (e.g. 0.5)")]
+    pub confidence_below: Option<f64>,
+    #[schemars(description = "When true (default), preview what would be removed without committing. Set false to execute the removal.")]
+    #[serde(default = "default_dry_run")]
     pub dry_run: bool,
 }
 
@@ -6128,6 +6150,134 @@ impl AkhMcpServer {
 
         Ok(CallToolResult::success(vec![Content::text(result)]))
     }
+
+    #[tool(
+        name = "cleanup_by_pattern",
+        description = "Bulk-remove knowledge-graph triples matching subject/predicate/object patterns \
+                       with an optional confidence threshold. At least one filter must be supplied. \
+                       Use dry_run=true (the default) to preview the count and a sample of what would \
+                       be removed before committing. dry_run=false executes the deletion and returns \
+                       removed, cascade_retracted, and affected_entities counts."
+    )]
+    async fn cleanup_by_pattern(
+        &self,
+        Parameters(params): Parameters<CleanupByPatternParams>,
+    ) -> Result<CallToolResult, McpError> {
+        if params.subject_pattern.is_none()
+            && params.predicate.is_none()
+            && params.object_pattern.is_none()
+            && params.confidence_below.is_none()
+        {
+            return Err(McpError::invalid_params(
+                "at least one filter is required (subject_pattern, predicate, object_pattern, or confidence_below)",
+                None,
+            ));
+        }
+
+        let engine = self.state.get_engine(&params.workspace).await?;
+
+        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            let all = engine.all_triples();
+            let conf_threshold = params.confidence_below.map(|c| c as f32);
+
+            let matched: Vec<_> = all.iter().filter(|t| {
+                if let Some(ref sp) = params.subject_pattern {
+                    if !engine.resolve_label(t.subject).starts_with(sp.as_str()) {
+                        return false;
+                    }
+                }
+                if let Some(ref pred) = params.predicate {
+                    if engine.resolve_label(t.predicate) != *pred {
+                        return false;
+                    }
+                }
+                if let Some(ref op) = params.object_pattern {
+                    if !engine.resolve_label(t.object).starts_with(op.as_str()) {
+                        return false;
+                    }
+                }
+                if let Some(threshold) = conf_threshold {
+                    if t.confidence >= threshold {
+                        return false;
+                    }
+                }
+                true
+            }).collect();
+
+            let would_remove = matched.len();
+
+            if params.dry_run {
+                let mut pred_breakdown: HashMap<String, usize> = HashMap::new();
+                for t in &matched {
+                    *pred_breakdown.entry(engine.resolve_label(t.predicate)).or_insert(0) += 1;
+                }
+
+                let samples: Vec<String> = matched.iter().take(10).map(|t| {
+                    format!(
+                        "{} → {} → {} (conf={:.2})",
+                        engine.resolve_label(t.subject),
+                        engine.resolve_label(t.predicate),
+                        engine.resolve_label(t.object),
+                        t.confidence,
+                    )
+                }).collect();
+
+                let out = serde_json::json!({
+                    "would_remove": would_remove,
+                    "samples": samples,
+                    "predicate_breakdown": pred_breakdown,
+                });
+                return serde_json::to_string_pretty(&out).map_err(|e| format!("json: {e}"));
+            }
+
+            if would_remove == 0 {
+                let out = serde_json::json!({
+                    "removed": 0,
+                    "cascade_retracted": 0,
+                    "affected_entities": 0,
+                });
+                return serde_json::to_string_pretty(&out).map_err(|e| format!("json: {e}"));
+            }
+
+            // Collect unique entity IDs and build the removal list using numeric IDs
+            // so that resolve_symbol's u64-first parse handles the round-trip correctly.
+            let mut entity_ids = std::collections::HashSet::new();
+            let triples_to_remove: Vec<(String, String, String)> = matched.iter().map(|t| {
+                entity_ids.insert(t.subject.get());
+                entity_ids.insert(t.object.get());
+                (
+                    t.subject.get().to_string(),
+                    t.predicate.get().to_string(),
+                    t.object.get().to_string(),
+                )
+            }).collect();
+            let affected_entities = entity_ids.len();
+
+            // Record pre-removal count to derive cascade_retracted afterward.
+            let before_count = all.len();
+
+            let removed = engine
+                .remove_triples_batch(&triples_to_remove)
+                .map_err(|e| format!("{e}"))?;
+
+            let after_count = engine.all_triples().len();
+            let cascade_retracted = (before_count - after_count).saturating_sub(removed);
+
+            let _ = engine.persist();
+
+            let out = serde_json::json!({
+                "removed": removed,
+                "cascade_retracted": cascade_retracted,
+                "affected_entities": affected_entities,
+            });
+            serde_json::to_string_pretty(&out).map_err(|e| format!("json: {e}"))
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("task panicked: {e}"), None))?
+        .map_err(|e| McpError::internal_error(e, None))?;
+
+        Ok(CallToolResult::success(vec![Content::text(result)]))
+    }
 }
 
 // ── ServerHandler impl ──────────────────────────────────────────────────
@@ -6181,7 +6331,9 @@ impl rmcp::handler::server::ServerHandler for AkhMcpServer {
                  `verify_source_claim` (update trust when claim verified true/false).\n\n\
                  Analytics: `triple_stats` (full workspace diagnostics — predicate distribution, \
                  confidence bands, top-connected entities, orphan count in one call), \
-                 `predicate_filter` (list all entity pairs for a specific predicate).\n\n\
+                 `predicate_filter` (list all entity pairs for a specific predicate), \
+                 `cleanup_by_pattern` (bulk-remove triples by subject/predicate/object prefix and \
+                 confidence threshold; use dry_run=true to preview before committing).\n\n\
                  Cross-MCP context bridge: `import_anima_project` (pull Anima project + work items \
                  into the graph as typed triples — requires [upstreams.anima] in config.toml), \
                  `link_seshat_doc` (register a Seshat document as a reference source — \
