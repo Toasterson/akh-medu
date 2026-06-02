@@ -17,7 +17,7 @@ use super::error::{NluError, NluResult};
 use super::llm_translator::{build_prompt, parse_abstree_json, LlmTranslation};
 
 #[cfg(feature = "candle-backend")]
-use candle_core::{DType, Device, Tensor};
+use candle_core::{DType, Device, IndexOp, Tensor};
 #[cfg(feature = "candle-backend")]
 use candle_transformers::models::quantized_qwen2::ModelWeights;
 
