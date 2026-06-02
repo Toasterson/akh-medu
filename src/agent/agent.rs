@@ -450,8 +450,51 @@ impl Agent {
 
         // Try to restore goals: prefer durable-store blob (survives without
         // sparql-persist), fall back to KG-triple reconstruction.
-        let goals = goal::restore_goals_from_store(&engine)
+        let mut goals = goal::restore_goals_from_store(&engine)
             .unwrap_or_else(|| goal::restore_goals(&engine, &predicates).unwrap_or_default());
+
+        // Startup cap: prune excess non-terminal goals carried over from a previous
+        // session.  Autonomous investigation goals can accumulate to 72+ in a degraded
+        // session; capping here prevents them from blocking the OODA loop on restart.
+        // We keep at most max_open_goals * 2 non-terminal goals, preferring goals with
+        // higher priority (sorted descending).  Excess goals are marked Failed with an
+        // "excess from previous session" reason so they remain auditable.
+        {
+            let max_restore = config.goal_generation.max_open_goals.saturating_mul(2);
+            let non_terminal_ids: Vec<SymbolId> = {
+                let mut nt: Vec<&Goal> = goals
+                    .iter()
+                    .filter(|g| {
+                        !matches!(
+                            g.status,
+                            GoalStatus::Completed
+                                | GoalStatus::Failed { .. }
+                                | GoalStatus::Reformulated { .. }
+                        )
+                    })
+                    .collect();
+                // Prefer higher-priority and user-requested goals; discard the rest.
+                nt.sort_by(|a, b| {
+                    let ea = a.justification.as_ref().map(|j| j.entrenchment()).unwrap_or(0);
+                    let eb = b.justification.as_ref().map(|j| j.entrenchment()).unwrap_or(0);
+                    eb.cmp(&ea).then(b.computed_priority().cmp(&a.computed_priority()))
+                });
+                nt.iter().skip(max_restore).map(|g| g.symbol_id).collect()
+            };
+            for goal_id in non_terminal_ids {
+                if let Some(g) = goals.iter_mut().find(|g| g.symbol_id == goal_id) {
+                    tracing::debug!(goal = %goal_id, "startup cap: pruning excess open goal from previous session");
+                    let _ = goal::update_goal_status(
+                        &engine,
+                        g,
+                        GoalStatus::Failed {
+                            reason: "pruned: excess open goals from previous session".to_string(),
+                        },
+                        &predicates,
+                    );
+                }
+            }
+        }
 
         // Load psyche from compartment manager if available.
         let psyche = engine.compartments().and_then(|cm| cm.psyche());
@@ -1046,6 +1089,9 @@ impl Agent {
         {
             tracing::debug!("autonomous goal generation failed: {e}");
         }
+
+        // Prune autonomous goals that have been stuck for too long.
+        self.prune_abandoned_goals();
 
         // Auto-decompose stalled goals.
         self.decompose_stalled_goals();
@@ -1807,6 +1853,85 @@ impl Agent {
         Ok(())
     }
 
+    /// Mark long-stalled autonomous goals as `Failed` (abandoned).
+    ///
+    /// Goals whose `justification` entrenchment is < 2 (i.e. not `UserRequested`
+    /// or `DecomposedFrom`) are considered autonomous investigations. If such a
+    /// goal has been Active for at least `abandon_after_cycles` cycles without
+    /// any progress (or has had `cycles_worked > 0` and no recent progress), it
+    /// is failed with an "abandoned" reason so the slot can be reused.
+    fn prune_abandoned_goals(&mut self) {
+        let threshold = self.config.goal_generation.abandon_after_cycles;
+        let cycle = self.cycle_count;
+
+        // 1. Active goals with no recent progress.
+        let active_to_abandon: Vec<SymbolId> = self
+            .goals
+            .iter()
+            .filter(|g| matches!(g.status, GoalStatus::Active))
+            // Exempt user-requested and decomposed-from goals (entrenchment >= 2).
+            .filter(|g| {
+                g.justification
+                    .as_ref()
+                    .map(|j| j.entrenchment())
+                    .unwrap_or(0)
+                    < 2
+            })
+            // Only abandon after meaningful work has been done (cycles_worked > 0)
+            // and no progress for the configured threshold.
+            .filter(|g| {
+                g.cycles_worked > 0
+                    && cycle.saturating_sub(g.last_progress_cycle) >= threshold
+            })
+            .map(|g| g.symbol_id)
+            .collect();
+
+        // 2. Pending/Dormant goals that have never been worked on for too long.
+        //    These accumulate from goal generation cycles that produce goals which
+        //    never get selected by the OODA loop (e.g., excess goals restored from a
+        //    previous session, or low-priority dormant goals).
+        //    Prune them after 3× the normal threshold, giving them a generous window.
+        let pending_threshold = threshold.saturating_mul(3);
+        let pending_to_abandon: Vec<SymbolId> = self
+            .goals
+            .iter()
+            .filter(|g| matches!(g.status, GoalStatus::Pending | GoalStatus::Dormant))
+            .filter(|g| {
+                g.justification
+                    .as_ref()
+                    .map(|j| j.entrenchment())
+                    .unwrap_or(0)
+                    < 2
+            })
+            // Only prune if the agent has run long enough (cycle >= pending_threshold)
+            // AND the goal has never been worked on.
+            .filter(|g| g.cycles_worked == 0 && cycle >= pending_threshold)
+            .map(|g| g.symbol_id)
+            .collect();
+
+        for goal_id in active_to_abandon.into_iter().chain(pending_to_abandon) {
+            if let Some(g) = self.goals.iter_mut().find(|g| g.symbol_id == goal_id) {
+                let reason = if matches!(g.status, GoalStatus::Active) {
+                    format!("abandoned: no progress for {threshold} cycles")
+                } else {
+                    format!("abandoned: pending/dormant with no work for {pending_threshold} cycles")
+                };
+                tracing::debug!(
+                    goal = %goal_id,
+                    status = ?g.status,
+                    cycles_worked = g.cycles_worked,
+                    "Pruning abandoned investigation goal"
+                );
+                let _ = goal::update_goal_status(
+                    &self.engine,
+                    g,
+                    GoalStatus::Failed { reason },
+                    &self.predicates,
+                );
+            }
+        }
+    }
+
     /// Auto-decompose any active goals that have stalled.
     ///
     /// A goal is stalled if it has been worked on for `DEFAULT_STALL_THRESHOLD`
@@ -2270,8 +2395,34 @@ impl Agent {
             }
         }
 
-        // Activate generated goals by creating them in the goals list.
+        // Count currently open (non-terminal) goals to enforce the hard cap.
+        let max_open = self.config.goal_generation.max_open_goals;
+
+        // Activate generated goals by creating them in the goals list,
+        // respecting the max-open-goals cap.
         for proposal in &gen_result.activated {
+            let current_open = self
+                .goals
+                .iter()
+                .filter(|g| {
+                    matches!(
+                        g.status,
+                        GoalStatus::Active
+                            | GoalStatus::Pending
+                            | GoalStatus::Proposed
+                            | GoalStatus::Dormant
+                            | GoalStatus::Suspended
+                    )
+                })
+                .count();
+            if current_open >= max_open {
+                tracing::debug!(
+                    max_open,
+                    "max_open_goals reached — skipping remaining activations"
+                );
+                break;
+            }
+
             let mut g = goal::create_goal(
                 &self.engine,
                 &proposal.description,
@@ -2299,8 +2450,27 @@ impl Agent {
             self.goals.push(g);
         }
 
-        // Store dormant proposals as goals with Dormant status.
+        // Store dormant proposals as goals with Dormant status,
+        // also respecting the max-open-goals cap.
         for proposal in &gen_result.dormant {
+            let current_open = self
+                .goals
+                .iter()
+                .filter(|g| {
+                    matches!(
+                        g.status,
+                        GoalStatus::Active
+                            | GoalStatus::Pending
+                            | GoalStatus::Proposed
+                            | GoalStatus::Dormant
+                            | GoalStatus::Suspended
+                    )
+                })
+                .count();
+            if current_open >= max_open {
+                break;
+            }
+
             let mut g = goal::create_goal(
                 &self.engine,
                 &proposal.description,
@@ -2318,15 +2488,31 @@ impl Agent {
             self.goals.push(g);
         }
 
-        // Log generation result to WM.
+        // Log generation result to WM (include open-goal count for observability).
+        let current_open = self
+            .goals
+            .iter()
+            .filter(|g| {
+                matches!(
+                    g.status,
+                    GoalStatus::Active
+                        | GoalStatus::Pending
+                        | GoalStatus::Proposed
+                        | GoalStatus::Dormant
+                        | GoalStatus::Suspended
+                )
+            })
+            .count();
         if let Err(e) = self.working_memory.push(WorkingMemoryEntry {
             id: 0,
             content: format!(
-                "Goal generation: {} activated, {} dormant, {} deduplicated, {} infeasible. Drives: curiosity={:.2} coherence={:.2} completeness={:.2} efficiency={:.2}",
+                "Goal generation: {} activated, {} dormant, {} deduplicated, {} infeasible (open={}/{} cap). Drives: curiosity={:.2} coherence={:.2} completeness={:.2} efficiency={:.2}",
                 gen_result.activated.len(),
                 gen_result.dormant.len(),
                 gen_result.deduplicated,
                 gen_result.infeasible,
+                current_open,
+                max_open,
                 gen_result.drive_strengths[0],
                 gen_result.drive_strengths[1],
                 gen_result.drive_strengths[2],

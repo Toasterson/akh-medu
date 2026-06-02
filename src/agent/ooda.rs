@@ -703,14 +703,21 @@ fn synthesize_triple(
         .flat_map(|t| [t.subject, t.object])
         .collect();
 
+    // Only use inference symbols that are not metadata and not already connected.
     let novel_inference = orientation
         .inferences
         .iter()
-        .find(|(sym, _)| !connected.contains(sym) && *sym != goal.symbol_id)?;
+        .find(|(sym, _)| {
+            !connected.contains(sym)
+                && *sym != goal.symbol_id
+                && !is_metadata_label(&engine.resolve_label(*sym))
+        })?;
 
+    // Prefer non-metadata predicates so the synthesized triple is meaningful.
     let predicate = orientation
         .relevant_knowledge
-        .first()
+        .iter()
+        .find(|t| !is_metadata_label(&engine.resolve_label(t.predicate)))
         .map(|t| t.predicate)?;
 
     let subject = engine.resolve_label(goal.symbol_id);
@@ -826,25 +833,79 @@ fn select_tool(
         candidates.push(kg_candidate);
     }
 
-    // ── kg_mutate: only when we can synthesize a new triple ──
-    if has_knowledge && has_inferences
-        && let Some((subj, pred, obj)) = synthesize_triple(goal, orientation, engine)
+    // ── kg_mutate: synthesize triple from inferences, or record progress finding ──
+    //
+    // Primary path: use the orientation's inference symbols to propose a novel edge.
+    // Fallback path: after several cycles of searching, record the most relevant found
+    // symbol as a "investigated:X" triple so the agent can write findings back even
+    // when no new inference is available.
     {
-        candidates.push(apply_modifiers(
-            ToolCandidate::new(
-                "kg_mutate",
-                ToolInput::new()
-                    .with_param("subject", &subj)
-                    .with_param("predicate", &pred)
-                    .with_param("object", &obj)
-                    .with_param("confidence", "0.7"),
-                0.7,
-                format!("Synthesizing new triple: {subj} -> {pred} -> {obj}."),
-            ),
-            &history,
-            &episodic_tools,
-            pressure,
-        ));
+        let synthesized = if has_knowledge && has_inferences {
+            synthesize_triple(goal, orientation, engine)
+        } else {
+            None
+        };
+
+        if let Some((subj, pred, obj)) = synthesized {
+            candidates.push(apply_modifiers(
+                ToolCandidate::new(
+                    "kg_mutate",
+                    ToolInput::new()
+                        .with_param("subject", &subj)
+                        .with_param("predicate", &pred)
+                        .with_param("object", &obj)
+                        .with_param("confidence", "0.7"),
+                    0.7,
+                    format!("Synthesizing new triple: {subj} -> {pred} -> {obj}."),
+                ),
+                &history,
+                &episodic_tools,
+                pressure,
+            ));
+        } else if has_knowledge && goal.cycles_worked >= 1 {
+            // Record-findings fallback: write the most relevant non-metadata symbol
+            // found as an `investigated` relation so searches produce persistent output.
+            // Filter out agent-internal metadata symbols (status:, priority:, desc:, etc.)
+            // to avoid creating garbage triples like "goal:X investigated status:active".
+            let best_sym = orientation
+                .relevant_knowledge
+                .iter()
+                .flat_map(|t| [t.object, t.subject])
+                .find(|&s| {
+                    s != goal.symbol_id
+                        && !is_metadata_label(&engine.resolve_label(s))
+                })
+                .or_else(|| {
+                    // Fallback to inferences if no clean knowledge triple available.
+                    orientation
+                        .inferences
+                        .iter()
+                        .map(|(sym, _)| *sym)
+                        .find(|&s| {
+                            s != goal.symbol_id
+                                && !is_metadata_label(&engine.resolve_label(s))
+                        })
+                });
+            if let Some(best) = best_sym {
+                let subj = engine.resolve_label(goal.symbol_id);
+                let obj = engine.resolve_label(best);
+                candidates.push(apply_modifiers(
+                    ToolCandidate::new(
+                        "kg_mutate",
+                        ToolInput::new()
+                            .with_param("subject", &subj)
+                            .with_param("predicate", "investigated")
+                            .with_param("object", &obj)
+                            .with_param("confidence", "0.6"),
+                        0.55,
+                        format!("Recording investigation finding: {subj} investigated {obj}."),
+                    ),
+                    &history,
+                    &episodic_tools,
+                    pressure,
+                ));
+            }
+        }
     }
 
     // ── memory_recall: only when episodes exist ──
