@@ -99,7 +99,7 @@ pub struct WorkspaceConfig {
     #[serde(default = "default_max_symbols")]
     pub max_symbols: u64,
     /// Seed pack IDs to apply on first initialization.
-    #[serde(default)]
+    #[serde(default = "default_seed_packs")]
     pub seed_packs: Vec<String>,
     /// Shared partition names to mount.
     #[serde(default)]
@@ -121,6 +121,15 @@ fn default_max_memory_mb() -> usize {
 fn default_max_symbols() -> u64 {
     1_000_000
 }
+fn default_seed_packs() -> Vec<String> {
+    vec![
+        "identity".into(),
+        "ontology".into(),
+        "common-sense".into(),
+        "computing".into(),
+        "architecture".into(),
+    ]
+}
 
 impl Default for WorkspaceConfig {
     fn default() -> Self {
@@ -131,7 +140,13 @@ impl Default for WorkspaceConfig {
             language: default_language(),
             max_memory_mb: default_max_memory_mb(),
             max_symbols: default_max_symbols(),
-            seed_packs: vec!["identity".into(), "ontology".into(), "common-sense".into(), "computing".into(), "tecton".into()],
+            seed_packs: vec![
+                "identity".into(),
+                "ontology".into(),
+                "common-sense".into(),
+                "computing".into(),
+                "architecture".into(),
+            ],
             shared_partitions: Vec::new(),
         }
     }
@@ -316,8 +331,36 @@ mod tests {
     fn default_config_has_seed_packs() {
         let cfg = WorkspaceConfig::default();
         assert_eq!(cfg.name, "default");
-        assert!(!cfg.seed_packs.is_empty());
-        assert!(cfg.seed_packs.contains(&"identity".to_string()));
+        assert_eq!(cfg.seed_packs.len(), 5);
+        for pack in &["identity", "ontology", "common-sense", "computing", "architecture"] {
+            assert!(
+                cfg.seed_packs.contains(&pack.to_string()),
+                "default seed_packs missing: {pack}"
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_config_without_seed_packs_gets_defaults() {
+        // A workspace config saved before seed_packs existed (field absent from TOML)
+        // must deserialize with the full default seed list so Tecton and other
+        // pre-existing workspaces pick up seeds on next engine open.
+        let toml = r#"
+name = "tecton"
+dimension = 10000
+encoding = "bipolar"
+language = "auto"
+max_memory_mb = 1024
+max_symbols = 1000000
+"#;
+        let cfg: WorkspaceConfig = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.seed_packs.len(), 5, "missing seed_packs field must default to 5 packs");
+        for pack in &["identity", "ontology", "common-sense", "computing", "architecture"] {
+            assert!(
+                cfg.seed_packs.contains(&pack.to_string()),
+                "default seed_packs missing: {pack}"
+            );
+        }
     }
 
     #[test]
