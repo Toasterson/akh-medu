@@ -26,7 +26,12 @@ pub struct RustCodeGrammar;
 
 impl RustCodeGrammar {
     /// Linearize a single node with the given indent level.
-    fn linearize_node(&self, tree: &AbsTree, _ctx: &LinContext, indent: usize) -> GrammarResult<String> {
+    fn linearize_node(
+        &self,
+        tree: &AbsTree,
+        _ctx: &LinContext,
+        indent: usize,
+    ) -> GrammarResult<String> {
         let prefix = "    ".repeat(indent);
         match tree {
             AbsTree::CodeModule {
@@ -101,9 +106,7 @@ impl RustCodeGrammar {
                 }),
             },
 
-            AbsTree::DataFlow { steps } => {
-                Ok(self.linearize_data_flow(steps, &prefix))
-            }
+            AbsTree::DataFlow { steps } => Ok(self.linearize_data_flow(steps, &prefix)),
 
             AbsTree::CodeFact { kind, name, detail } => {
                 Ok(format!("{prefix}// {kind}: {name} — {detail}\n"))
@@ -153,8 +156,7 @@ impl RustCodeGrammar {
                 Ok(out)
             }
 
-            AbsTree::WithConfidence { inner, .. }
-            | AbsTree::WithProvenance { inner, .. } => {
+            AbsTree::WithConfidence { inner, .. } | AbsTree::WithProvenance { inner, .. } => {
                 self.linearize_node(inner, _ctx, indent)
             }
 
@@ -239,10 +241,7 @@ impl RustCodeGrammar {
         }
 
         if !derives.is_empty() {
-            out.push_str(&format!(
-                "{prefix}#[derive({})]\n",
-                derives.join(", ")
-            ));
+            out.push_str(&format!("{prefix}#[derive({})]\n", derives.join(", ")));
         }
 
         if fields.is_empty() {
@@ -281,10 +280,7 @@ impl RustCodeGrammar {
         }
 
         if !derives.is_empty() {
-            out.push_str(&format!(
-                "{prefix}#[derive({})]\n",
-                derives.join(", ")
-            ));
+            out.push_str(&format!("{prefix}#[derive({})]\n", derives.join(", ")));
         }
 
         out.push_str(&format!("{prefix}pub enum {name} {{\n"));
@@ -567,9 +563,10 @@ fn item_to_abstree(item: &syn::Item) -> Option<AbsTree> {
         }
         syn::Item::Impl(i) => {
             let target = quote::quote!(#i.self_ty).to_string();
-            let trait_name = i.trait_.as_ref().map(|(_, path, _)| {
-                quote::quote!(#path).to_string()
-            });
+            let trait_name = i
+                .trait_
+                .as_ref()
+                .map(|(_, path, _)| quote::quote!(#path).to_string());
             let methods: Vec<String> = i
                 .items
                 .iter()
@@ -596,9 +593,7 @@ fn item_to_abstree(item: &syn::Item) -> Option<AbsTree> {
             let children = m
                 .content
                 .as_ref()
-                .map(|(_, items)| {
-                    items.iter().filter_map(item_to_abstree).collect()
-                })
+                .map(|(_, items)| items.iter().filter_map(item_to_abstree).collect())
                 .unwrap_or_default();
             let doc = extract_doc_attrs(&m.attrs);
             Some(AbsTree::CodeModule {
@@ -720,11 +715,7 @@ mod tests {
             kind: "enum".to_string(),
             name: "Color".to_string(),
             doc_summary: None,
-            params_or_fields: vec![
-                "Red".to_string(),
-                "Green".to_string(),
-                "Blue".to_string(),
-            ],
+            params_or_fields: vec!["Red".to_string(), "Green".to_string(), "Blue".to_string()],
             return_type: None,
             traits: vec!["Debug".to_string()],
             importance: None,

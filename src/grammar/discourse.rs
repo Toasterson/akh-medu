@@ -302,11 +302,12 @@ fn resolve_pronoun_chain(
     engine: &Engine,
 ) -> DiscourseResult<(String, SymbolId, bool)> {
     // Try direct resolution first.
-    let subject_id = engine
-        .resolve_symbol(subject)
-        .map_err(|_| DiscourseError::SubjectNotFound {
-            subject: subject.to_string(),
-        })?;
+    let subject_id =
+        engine
+            .resolve_symbol(subject)
+            .map_err(|_| DiscourseError::SubjectNotFound {
+                subject: subject.to_string(),
+            })?;
 
     // Look for a `refers-to` chain from this subject.
     let refers_to_id = engine.resolve_symbol(REFERS_TO).ok();
@@ -400,10 +401,7 @@ pub fn build_discourse_response(
         let obj_label = registry.resolve_label(triple.object);
 
         // Filter: skip infrastructure triples.
-        if INFRASTRUCTURE_PREDICATES
-            .iter()
-            .any(|p| pred_label == *p)
-        {
+        if INFRASTRUCTURE_PREDICATES.iter().any(|p| pred_label == *p) {
             continue;
         }
 
@@ -421,9 +419,12 @@ pub fn build_discourse_response(
         }
 
         // Filter: skip triples with unresolved sym:N labels.
-        if subj_label.starts_with("sym:") || subj_label.starts_with("Sym:")
-            || pred_label.starts_with("sym:") || pred_label.starts_with("Sym:")
-            || obj_label.starts_with("sym:") || obj_label.starts_with("Sym:")
+        if subj_label.starts_with("sym:")
+            || subj_label.starts_with("Sym:")
+            || pred_label.starts_with("sym:")
+            || pred_label.starts_with("Sym:")
+            || obj_label.starts_with("sym:")
+            || obj_label.starts_with("Sym:")
         {
             continue;
         }
@@ -478,8 +479,7 @@ fn score_triple_for_focus(predicate_label: &str, focus: &QueryFocus) -> i32 {
         QueryFocus::Identity => {
             if IDENTITY_PREDICATES.contains(&predicate_label) {
                 10
-            } else if DEPRIORITIZED_PREDICATES.contains(&predicate_label)
-            {
+            } else if DEPRIORITIZED_PREDICATES.contains(&predicate_label) {
                 -5
             } else {
                 0
@@ -507,8 +507,7 @@ fn score_triple_for_focus(predicate_label: &str, focus: &QueryFocus) -> i32 {
                 10
             } else if IDENTITY_PREDICATES.contains(&predicate_label) {
                 3
-            } else if DEPRIORITIZED_PREDICATES.contains(&predicate_label)
-            {
+            } else if DEPRIORITIZED_PREDICATES.contains(&predicate_label) {
                 -5
             } else {
                 0
@@ -624,10 +623,16 @@ mod tests {
 
     #[test]
     fn response_detail_from_label_case_insensitive() {
-        assert_eq!(ResponseDetail::from_label("concise"), ResponseDetail::Concise);
+        assert_eq!(
+            ResponseDetail::from_label("concise"),
+            ResponseDetail::Concise
+        );
         assert_eq!(ResponseDetail::from_label("NORMAL"), ResponseDetail::Normal);
         assert_eq!(ResponseDetail::from_label("Full"), ResponseDetail::Full);
-        assert_eq!(ResponseDetail::from_label("unknown"), ResponseDetail::Normal);
+        assert_eq!(
+            ResponseDetail::from_label("unknown"),
+            ResponseDetail::Normal
+        );
     }
 
     #[test]
@@ -640,7 +645,10 @@ mod tests {
     #[test]
     fn categorize_identity_predicates() {
         assert_eq!(categorize_predicate("is-a"), PredicateCategory::Identity);
-        assert_eq!(categorize_predicate("has-name"), PredicateCategory::Identity);
+        assert_eq!(
+            categorize_predicate("has-name"),
+            PredicateCategory::Identity
+        );
     }
 
     #[test]
@@ -720,7 +728,9 @@ mod tests {
         let self_sym = engine.create_symbol(SymbolKind::Entity, "self").unwrap();
         let is_a = engine.create_symbol(SymbolKind::Relation, "is-a").unwrap();
         let akh = engine.create_symbol(SymbolKind::Entity, "Akh").unwrap();
-        let has_state = engine.create_symbol(SymbolKind::Relation, "has-state").unwrap();
+        let has_state = engine
+            .create_symbol(SymbolKind::Relation, "has-state")
+            .unwrap();
         let active = engine.create_symbol(SymbolKind::Entity, "active").unwrap();
 
         let good = Triple::new(self_sym.id, is_a.id, akh.id);
@@ -742,9 +752,7 @@ mod tests {
         let detail_pred = engine
             .create_symbol(SymbolKind::Relation, "discourse:response-detail")
             .unwrap();
-        let concise_val = engine
-            .create_symbol(SymbolKind::Entity, "concise")
-            .unwrap();
+        let concise_val = engine.create_symbol(SymbolKind::Entity, "concise").unwrap();
 
         // Assert the detail triple into the KG.
         let detail_triple = Triple::new(self_sym.id, detail_pred.id, concise_val.id);
@@ -781,7 +789,9 @@ mod tests {
             .create_symbol(SymbolKind::Relation, "has-capability")
             .unwrap();
         let akh = engine.create_symbol(SymbolKind::Entity, "Akh").unwrap();
-        let reason = engine.create_symbol(SymbolKind::Entity, "reasoning").unwrap();
+        let reason = engine
+            .create_symbol(SymbolKind::Entity, "reasoning")
+            .unwrap();
 
         // Supply capability first, identity second — grouping should reorder.
         let triples = vec![
@@ -880,7 +890,15 @@ mod tests {
         );
 
         // "it" is not in the KG as a symbol, but should resolve via conversation.
-        let ctx = resolve_discourse("it", Some(QuestionWord::What), "what about it?", &engine, false, Some(&conv), Some(&lex));
+        let ctx = resolve_discourse(
+            "it",
+            Some(QuestionWord::What),
+            "what about it?",
+            &engine,
+            false,
+            Some(&conv),
+            Some(&lex),
+        );
         assert!(ctx.is_ok());
         let ctx = ctx.unwrap();
         assert_eq!(ctx.resolved_subject, "dog");
@@ -891,7 +909,15 @@ mod tests {
     fn resolve_discourse_without_conversation_fails() {
         let engine = test_engine();
         // "it" is not in the KG, and no conversation context provided.
-        let ctx = resolve_discourse("it", Some(QuestionWord::What), "what is it?", &engine, false, None, None);
+        let ctx = resolve_discourse(
+            "it",
+            Some(QuestionWord::What),
+            "what is it?",
+            &engine,
+            false,
+            None,
+            None,
+        );
         assert!(ctx.is_err());
     }
 

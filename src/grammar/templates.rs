@@ -109,7 +109,9 @@ enum TemplateGenerator {
     NewConstructor,
     /// Dynamically discovered template from library learning (Phase 10h).
     /// Stores a generalized fingerprint string and uses format-string fill.
-    Learned { pattern: String },
+    Learned {
+        pattern: String,
+    },
 }
 
 impl CodeTemplate {
@@ -204,8 +206,11 @@ impl TemplateRegistry {
         self.templates
             .values()
             .filter(|t| {
-                let haystack = format!("{} {} {}", t.name, t.description, t.category).to_lowercase();
-                keywords.iter().any(|kw| haystack.contains(&kw.to_lowercase()))
+                let haystack =
+                    format!("{} {} {}", t.name, t.description, t.category).to_lowercase();
+                keywords
+                    .iter()
+                    .any(|kw| haystack.contains(&kw.to_lowercase()))
             })
             .collect()
     }
@@ -493,10 +498,7 @@ fn generate_builder(params: &HashMap<String, String>) -> GrammarResult<String> {
 fn generate_from_impl(params: &HashMap<String, String>) -> GrammarResult<String> {
     let source = params.get("source").unwrap();
     let target = params.get("target").unwrap();
-    let body = params
-        .get("body")
-        .map(|s| s.as_str())
-        .unwrap_or("todo!()");
+    let body = params.get("body").map(|s| s.as_str()).unwrap_or("todo!()");
 
     Ok(format!(
         "impl From<{source}> for {target} {{\n    fn from(value: {source}) -> Self {{\n        {body}\n    }}\n}}\n"
@@ -632,7 +634,12 @@ impl CodeTemplate {
                     abs.occurrences, abs.compression
                 ),
                 vec![
-                    TemplateParam::optional("fn_name", ParamKind::Text, "learned_fn", "Function name"),
+                    TemplateParam::optional(
+                        "fn_name",
+                        ParamKind::Text,
+                        "learned_fn",
+                        "Function name",
+                    ),
                     TemplateParam::optional("type_name", ParamKind::TypeName, "T", "Return type"),
                 ],
             ),
@@ -642,9 +649,12 @@ impl CodeTemplate {
                     "Learned struct pattern ({} occurrences, compression {:.1})",
                     abs.occurrences, abs.compression
                 ),
-                vec![
-                    TemplateParam::optional("type_name", ParamKind::TypeName, "LearnedStruct", "Struct name"),
-                ],
+                vec![TemplateParam::optional(
+                    "type_name",
+                    ParamKind::TypeName,
+                    "LearnedStruct",
+                    "Struct name",
+                )],
             ),
             GeneralizedAst::Enum { .. } => (
                 "learned-enum",
@@ -652,9 +662,12 @@ impl CodeTemplate {
                     "Learned enum pattern ({} occurrences, compression {:.1})",
                     abs.occurrences, abs.compression
                 ),
-                vec![
-                    TemplateParam::optional("type_name", ParamKind::TypeName, "LearnedEnum", "Enum name"),
-                ],
+                vec![TemplateParam::optional(
+                    "type_name",
+                    ParamKind::TypeName,
+                    "LearnedEnum",
+                    "Enum name",
+                )],
             ),
             GeneralizedAst::Impl { .. } => (
                 "learned-impl",
@@ -663,8 +676,18 @@ impl CodeTemplate {
                     abs.occurrences, abs.compression
                 ),
                 vec![
-                    TemplateParam::optional("type_name", ParamKind::TypeName, "LearnedType", "Type name"),
-                    TemplateParam::optional("trait_name", ParamKind::TraitName, "Trait", "Trait name"),
+                    TemplateParam::optional(
+                        "type_name",
+                        ParamKind::TypeName,
+                        "LearnedType",
+                        "Type name",
+                    ),
+                    TemplateParam::optional(
+                        "trait_name",
+                        ParamKind::TraitName,
+                        "Trait",
+                        "Trait name",
+                    ),
                 ],
             ),
             // Expression-level or Var/Concrete — not suitable for templates
@@ -788,7 +811,8 @@ mod tests {
         params.insert("name".into(), "MyError".into());
         params.insert(
             "variants".into(),
-            "NotFound(item not found, my::not_found, check the ID), InvalidInput(invalid input)".into(),
+            "NotFound(item not found, my::not_found, check the ID), InvalidInput(invalid input)"
+                .into(),
         );
         params.insert("result_alias".into(), "MyResult".into());
 
@@ -810,7 +834,10 @@ mod tests {
 
         let mut params = HashMap::new();
         params.insert("name".into(), "ParseError".into());
-        params.insert("variants".into(), "UnexpectedToken(unexpected token), Eof".into());
+        params.insert(
+            "variants".into(),
+            "UnexpectedToken(unexpected token), Eof".into(),
+        );
 
         let code = template.instantiate(&params).unwrap();
         assert!(code.contains("pub enum ParseError {"));
@@ -826,11 +853,16 @@ mod tests {
         let mut params = HashMap::new();
         params.insert("type_name".into(), "Config".into());
         params.insert("trait_name".into(), "Display".into());
-        params.insert("methods".into(), "fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result".into());
+        params.insert(
+            "methods".into(),
+            "fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result".into(),
+        );
 
         let code = template.instantiate(&params).unwrap();
         assert!(code.contains("impl Display for Config {"));
-        assert!(code.contains("fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {"));
+        assert!(
+            code.contains("fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {")
+        );
         assert!(code.contains("todo!()"));
     }
 
@@ -841,7 +873,10 @@ mod tests {
 
         let mut params = HashMap::new();
         params.insert("type_name".into(), "Config".into());
-        params.insert("fields".into(), "name: String, value: u64, debug: bool".into());
+        params.insert(
+            "fields".into(),
+            "name: String, value: u64, debug: bool".into(),
+        );
 
         let code = template.instantiate(&params).unwrap();
         assert!(code.contains("pub struct ConfigBuilder {"));

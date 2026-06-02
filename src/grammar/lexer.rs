@@ -164,7 +164,6 @@ pub struct Lexicon {
     capability_modals: Vec<String>,
 
     // ── Conversational token categories ──────────────────────────────
-
     /// Greeting words (e.g., "hello", "привет", "مرحبا").
     greeting_words: Vec<String>,
     /// Multi-word greeting phrases (e.g., "good morning", "bonjour").
@@ -189,7 +188,6 @@ pub struct Lexicon {
     meta_phrases: Vec<String>,
 
     // ── NLU extension categories (Phase 14j) ────────────────────────
-
     /// Negation words (e.g., "not", "never", "не").
     negation_words: Vec<String>,
     /// Quantifier words (e.g., "all", "every", "все").
@@ -202,7 +200,6 @@ pub struct Lexicon {
     conditional_triggers: Vec<String>,
     /// Temporal words (e.g., "now", "tomorrow", "сейчас").
     temporal_words: Vec<String>,
-
 }
 
 /// Non-declarative commands recognized by the lexer.
@@ -312,103 +309,206 @@ impl Lexicon {
         ];
 
         let auxiliary_verbs = vec![
-            "is".into(), "are".into(), "was".into(), "were".into(),
-            "do".into(), "does".into(), "did".into(),
-            "can".into(), "could".into(),
-            "will".into(), "would".into(),
-            "shall".into(), "should".into(),
-            "may".into(), "might".into(), "must".into(),
+            "is".into(),
+            "are".into(),
+            "was".into(),
+            "were".into(),
+            "do".into(),
+            "does".into(),
+            "did".into(),
+            "can".into(),
+            "could".into(),
+            "will".into(),
+            "would".into(),
+            "shall".into(),
+            "should".into(),
+            "may".into(),
+            "might".into(),
+            "must".into(),
             "about".into(),
         ];
         let trailing_auxiliaries = vec!["do".into(), "does".into()];
         let capability_modals = vec!["can".into(), "could".into()];
 
         let greeting_words = vec![
-            "hello".into(), "hi".into(), "hey".into(), "howdy".into(),
-            "yo".into(), "greetings".into(), "hiya".into(), "sup".into(),
+            "hello".into(),
+            "hi".into(),
+            "hey".into(),
+            "howdy".into(),
+            "yo".into(),
+            "greetings".into(),
+            "hiya".into(),
+            "sup".into(),
         ];
         let greeting_phrases = vec![
-            "good morning".into(), "good afternoon".into(),
-            "good evening".into(), "good day".into(),
+            "good morning".into(),
+            "good afternoon".into(),
+            "good evening".into(),
+            "good day".into(),
         ];
         let followup_cues = vec![
-            "more".into(), "elaborate".into(), "continue".into(),
-            "expand".into(), "detail".into(), "details".into(),
-            "further".into(), "deeper".into(),
+            "more".into(),
+            "elaborate".into(),
+            "continue".into(),
+            "expand".into(),
+            "detail".into(),
+            "details".into(),
+            "further".into(),
+            "deeper".into(),
         ];
         let followup_phrases = vec![
-            "tell me more".into(), "go on".into(), "keep going".into(),
-            "what else".into(), "more about".into(), "expand on".into(),
-            "elaborate on".into(), "more details".into(), "and then".into(),
-            "what about it".into(), "say more".into(),
+            "tell me more".into(),
+            "go on".into(),
+            "keep going".into(),
+            "what else".into(),
+            "more about".into(),
+            "expand on".into(),
+            "elaborate on".into(),
+            "more details".into(),
+            "and then".into(),
+            "what about it".into(),
+            "say more".into(),
         ];
         let ack_words = vec![
-            "thanks".into(), "thank".into(), "ok".into(), "okay".into(),
-            "understood".into(), "interesting".into(), "cool".into(),
-            "nice".into(), "great".into(), "sure".into(), "alright".into(),
-            "right".into(), "noted".into(), "appreciate".into(),
-            "acknowledged".into(), "cheers".into(), "sweet".into(),
-            "perfect".into(), "wonderful".into(), "excellent".into(),
-            "fantastic".into(), "brilliant".into(),
+            "thanks".into(),
+            "thank".into(),
+            "ok".into(),
+            "okay".into(),
+            "understood".into(),
+            "interesting".into(),
+            "cool".into(),
+            "nice".into(),
+            "great".into(),
+            "sure".into(),
+            "alright".into(),
+            "right".into(),
+            "noted".into(),
+            "appreciate".into(),
+            "acknowledged".into(),
+            "cheers".into(),
+            "sweet".into(),
+            "perfect".into(),
+            "wonderful".into(),
+            "excellent".into(),
+            "fantastic".into(),
+            "brilliant".into(),
         ];
         let ack_phrases = vec![
-            "got it".into(), "thank you".into(), "makes sense".into(),
-            "i see".into(), "fair enough".into(), "no worries".into(),
-            "sounds good".into(), "good to know".into(),
+            "got it".into(),
+            "thank you".into(),
+            "makes sense".into(),
+            "i see".into(),
+            "fair enough".into(),
+            "no worries".into(),
+            "sounds good".into(),
+            "good to know".into(),
         ];
-        let meta_self_words = vec![
-            "yourself".into(), "you".into(), "your".into(),
-        ];
+        let meta_self_words = vec!["yourself".into(), "you".into(), "your".into()];
         let meta_capability_words = vec![
-            "capabilities".into(), "capability".into(), "abilities".into(),
-            "ability".into(), "skills".into(), "purpose".into(),
+            "capabilities".into(),
+            "capability".into(),
+            "abilities".into(),
+            "ability".into(),
+            "skills".into(),
+            "purpose".into(),
             "function".into(),
         ];
         let meta_phrases = vec![
-            "what can you".into(), "what do you do".into(), "who are you".into(),
-            "describe yourself".into(), "tell me about yourself".into(),
-            "introduce yourself".into(), "what are you".into(),
+            "what can you".into(),
+            "what do you do".into(),
+            "who are you".into(),
+            "describe yourself".into(),
+            "tell me about yourself".into(),
+            "introduce yourself".into(),
+            "what are you".into(),
             "what are your".into(),
-            "your capabilities".into(), "your abilities".into(),
+            "your capabilities".into(),
+            "your abilities".into(),
             "your purpose".into(),
         ];
-        let singular_anaphora = vec![
-            "it".into(), "that".into(), "this".into(),
-        ];
-        let plural_anaphora = vec![
-            "them".into(), "they".into(), "those".into(), "these".into(),
-        ];
+        let singular_anaphora = vec!["it".into(), "that".into(), "this".into()];
+        let plural_anaphora = vec!["them".into(), "they".into(), "those".into(), "these".into()];
 
         let negation_words = vec![
-            "not".into(), "no".into(), "never".into(), "neither".into(), "nor".into(),
-            "cannot".into(), "can't".into(), "don't".into(), "doesn't".into(),
-            "isn't".into(), "aren't".into(), "won't".into(),
+            "not".into(),
+            "no".into(),
+            "never".into(),
+            "neither".into(),
+            "nor".into(),
+            "cannot".into(),
+            "can't".into(),
+            "don't".into(),
+            "doesn't".into(),
+            "isn't".into(),
+            "aren't".into(),
+            "won't".into(),
         ];
         let quantifier_words = vec![
-            "all".into(), "every".into(), "each".into(), "some".into(), "any".into(),
-            "most".into(), "none".into(), "few".into(), "many".into(), "several".into(),
+            "all".into(),
+            "every".into(),
+            "each".into(),
+            "some".into(),
+            "any".into(),
+            "most".into(),
+            "none".into(),
+            "few".into(),
+            "many".into(),
+            "several".into(),
             "both".into(),
         ];
         let comparative_words = vec![
-            "more".into(), "less".into(), "bigger".into(), "smaller".into(),
-            "greater".into(), "fewer".into(), "better".into(), "worse".into(),
-            "higher".into(), "lower".into(), "faster".into(), "slower".into(),
-            "larger".into(), "taller".into(), "shorter".into(),
+            "more".into(),
+            "less".into(),
+            "bigger".into(),
+            "smaller".into(),
+            "greater".into(),
+            "fewer".into(),
+            "better".into(),
+            "worse".into(),
+            "higher".into(),
+            "lower".into(),
+            "faster".into(),
+            "slower".into(),
+            "larger".into(),
+            "taller".into(),
+            "shorter".into(),
         ];
         let modal_verbs = vec![
-            "want".into(), "wants".into(), "can".into(), "could".into(),
-            "should".into(), "must".into(), "may".into(), "might".into(),
-            "need".into(), "needs".into(),
+            "want".into(),
+            "wants".into(),
+            "can".into(),
+            "could".into(),
+            "should".into(),
+            "must".into(),
+            "may".into(),
+            "might".into(),
+            "need".into(),
+            "needs".into(),
         ];
         let conditional_triggers = vec![
-            "if".into(), "when".into(), "whenever".into(), "unless".into(),
-            "provided".into(), "assuming".into(),
+            "if".into(),
+            "when".into(),
+            "whenever".into(),
+            "unless".into(),
+            "provided".into(),
+            "assuming".into(),
         ];
         let temporal_words = vec![
-            "now".into(), "today".into(), "tomorrow".into(), "yesterday".into(),
-            "soon".into(), "later".into(), "before".into(), "after".into(),
-            "next".into(), "last".into(), "during".into(), "since".into(),
-            "until".into(), "recently".into(), "already".into(),
+            "now".into(),
+            "today".into(),
+            "tomorrow".into(),
+            "yesterday".into(),
+            "soon".into(),
+            "later".into(),
+            "before".into(),
+            "after".into(),
+            "next".into(),
+            "last".into(),
+            "during".into(),
+            "since".into(),
+            "until".into(),
+            "recently".into(),
+            "already".into(),
         ];
 
         Self {
@@ -507,57 +607,91 @@ impl Lexicon {
             ("status".into(), CommandKind::ShowStatus),
         ];
 
-        let auxiliary_verbs = vec![
-            "это".into(), "является".into(), "может".into(), "ли".into(),
-        ];
+        let auxiliary_verbs = vec!["это".into(), "является".into(), "может".into(), "ли".into()];
         let trailing_auxiliaries = vec!["делать".into()];
         let capability_modals = vec!["может".into()];
 
         let greeting_words = vec![
-            "привет".into(), "здравствуйте".into(), "здравствуй".into(),
-            "приветствую".into(), "салют".into(),
+            "привет".into(),
+            "здравствуйте".into(),
+            "здравствуй".into(),
+            "приветствую".into(),
+            "салют".into(),
         ];
         let greeting_phrases = vec![
-            "доброе утро".into(), "добрый день".into(), "добрый вечер".into(),
+            "доброе утро".into(),
+            "добрый день".into(),
+            "добрый вечер".into(),
         ];
         let followup_cues = vec![
-            "ещё".into(), "еще".into(), "подробнее".into(), "продолжай".into(),
-            "дальше".into(), "детальнее".into(), "глубже".into(),
+            "ещё".into(),
+            "еще".into(),
+            "подробнее".into(),
+            "продолжай".into(),
+            "дальше".into(),
+            "детальнее".into(),
+            "глубже".into(),
         ];
         let followup_phrases = vec![
-            "расскажи больше".into(), "расскажи подробнее".into(),
-            "продолжай дальше".into(), "что ещё".into(), "что еще".into(),
+            "расскажи больше".into(),
+            "расскажи подробнее".into(),
+            "продолжай дальше".into(),
+            "что ещё".into(),
+            "что еще".into(),
         ];
         let ack_words = vec![
-            "спасибо".into(), "благодарю".into(), "понятно".into(),
-            "ясно".into(), "хорошо".into(), "ладно".into(), "ок".into(),
-            "интересно".into(), "отлично".into(), "замечательно".into(),
+            "спасибо".into(),
+            "благодарю".into(),
+            "понятно".into(),
+            "ясно".into(),
+            "хорошо".into(),
+            "ладно".into(),
+            "ок".into(),
+            "интересно".into(),
+            "отлично".into(),
+            "замечательно".into(),
             "прекрасно".into(),
         ];
         let ack_phrases = vec![
-            "всё понятно".into(), "все понятно".into(),
-            "имеет смысл".into(), "я понимаю".into(),
+            "всё понятно".into(),
+            "все понятно".into(),
+            "имеет смысл".into(),
+            "я понимаю".into(),
         ];
         let meta_self_words = vec![
-            "себя".into(), "ты".into(), "вы".into(), "тебя".into(),
-            "твои".into(), "ваши".into(),
+            "себя".into(),
+            "ты".into(),
+            "вы".into(),
+            "тебя".into(),
+            "твои".into(),
+            "ваши".into(),
         ];
         let meta_capability_words = vec![
-            "способности".into(), "возможности".into(), "навыки".into(),
-            "умения".into(), "назначение".into(), "функции".into(),
+            "способности".into(),
+            "возможности".into(),
+            "навыки".into(),
+            "умения".into(),
+            "назначение".into(),
+            "функции".into(),
         ];
         let meta_phrases = vec![
-            "что ты умеешь".into(), "что ты можешь".into(),
-            "кто ты".into(), "расскажи о себе".into(),
-            "опиши себя".into(), "представься".into(),
-            "твои возможности".into(), "ваши возможности".into(),
+            "что ты умеешь".into(),
+            "что ты можешь".into(),
+            "кто ты".into(),
+            "расскажи о себе".into(),
+            "опиши себя".into(),
+            "представься".into(),
+            "твои возможности".into(),
+            "ваши возможности".into(),
         ];
         let singular_anaphora = vec![
-            "это".into(), "оно".into(), "то".into(), "этот".into(), "эта".into(),
+            "это".into(),
+            "оно".into(),
+            "то".into(),
+            "этот".into(),
+            "эта".into(),
         ];
-        let plural_anaphora = vec![
-            "они".into(), "их".into(), "те".into(), "эти".into(),
-        ];
+        let plural_anaphora = vec!["они".into(), "их".into(), "те".into(), "эти".into()];
 
         Self {
             void_words,
@@ -581,30 +715,65 @@ impl Lexicon {
             meta_capability_words,
             meta_phrases,
             negation_words: vec![
-                "не".into(), "нет".into(), "никогда".into(), "ни".into(),
-                "нельзя".into(), "невозможно".into(),
+                "не".into(),
+                "нет".into(),
+                "никогда".into(),
+                "ни".into(),
+                "нельзя".into(),
+                "невозможно".into(),
             ],
             quantifier_words: vec![
-                "все".into(), "всё".into(), "каждый".into(), "каждая".into(),
-                "каждое".into(), "некоторые".into(), "любой".into(),
-                "большинство".into(), "никакой".into(), "много".into(),
-                "несколько".into(), "оба".into(),
+                "все".into(),
+                "всё".into(),
+                "каждый".into(),
+                "каждая".into(),
+                "каждое".into(),
+                "некоторые".into(),
+                "любой".into(),
+                "большинство".into(),
+                "никакой".into(),
+                "много".into(),
+                "несколько".into(),
+                "оба".into(),
             ],
             comparative_words: vec![
-                "больше".into(), "меньше".into(), "лучше".into(), "хуже".into(),
-                "выше".into(), "ниже".into(), "быстрее".into(), "медленнее".into(),
+                "больше".into(),
+                "меньше".into(),
+                "лучше".into(),
+                "хуже".into(),
+                "выше".into(),
+                "ниже".into(),
+                "быстрее".into(),
+                "медленнее".into(),
             ],
             modal_verbs: vec![
-                "хочу".into(), "хочет".into(), "могу".into(), "может".into(),
-                "должен".into(), "должна".into(), "нужно".into(),
+                "хочу".into(),
+                "хочет".into(),
+                "могу".into(),
+                "может".into(),
+                "должен".into(),
+                "должна".into(),
+                "нужно".into(),
             ],
             conditional_triggers: vec![
-                "если".into(), "когда".into(), "пока".into(), "если бы".into(),
+                "если".into(),
+                "когда".into(),
+                "пока".into(),
+                "если бы".into(),
             ],
             temporal_words: vec![
-                "сейчас".into(), "сегодня".into(), "завтра".into(), "вчера".into(),
-                "скоро".into(), "потом".into(), "позже".into(), "раньше".into(),
-                "после".into(), "до".into(), "недавно".into(), "уже".into(),
+                "сейчас".into(),
+                "сегодня".into(),
+                "завтра".into(),
+                "вчера".into(),
+                "скоро".into(),
+                "потом".into(),
+                "позже".into(),
+                "раньше".into(),
+                "после".into(),
+                "до".into(),
+                "недавно".into(),
+                "уже".into(),
             ],
         }
     }
@@ -667,54 +836,69 @@ impl Lexicon {
             ("status".into(), CommandKind::ShowStatus),
         ];
 
-        let auxiliary_verbs = vec![
-            "هل".into(), "هو".into(), "هي".into(), "يمكن".into(),
-        ];
+        let auxiliary_verbs = vec!["هل".into(), "هو".into(), "هي".into(), "يمكن".into()];
         let trailing_auxiliaries = vec!["تفعل".into(), "يفعل".into()];
         let capability_modals = vec!["يمكن".into(), "يستطيع".into()];
 
         let greeting_words = vec![
-            "مرحبا".into(), "أهلا".into(), "سلام".into(),
-            "مرحبًا".into(), "أهلاً".into(),
+            "مرحبا".into(),
+            "أهلا".into(),
+            "سلام".into(),
+            "مرحبًا".into(),
+            "أهلاً".into(),
         ];
         let greeting_phrases = vec![
-            "صباح الخير".into(), "مساء الخير".into(),
+            "صباح الخير".into(),
+            "مساء الخير".into(),
             "السلام عليكم".into(),
         ];
         let followup_cues = vec![
-            "المزيد".into(), "أكثر".into(), "تفصيل".into(),
-            "استمر".into(), "أكمل".into(),
+            "المزيد".into(),
+            "أكثر".into(),
+            "تفصيل".into(),
+            "استمر".into(),
+            "أكمل".into(),
         ];
         let followup_phrases = vec![
-            "أخبرني المزيد".into(), "تابع".into(),
-            "ماذا أيضا".into(), "ماذا أيضاً".into(),
+            "أخبرني المزيد".into(),
+            "تابع".into(),
+            "ماذا أيضا".into(),
+            "ماذا أيضاً".into(),
         ];
         let ack_words = vec![
-            "شكرا".into(), "شكراً".into(), "حسنا".into(), "حسناً".into(),
-            "فهمت".into(), "تمام".into(), "جيد".into(), "ممتاز".into(),
-            "رائع".into(), "مفهوم".into(),
+            "شكرا".into(),
+            "شكراً".into(),
+            "حسنا".into(),
+            "حسناً".into(),
+            "فهمت".into(),
+            "تمام".into(),
+            "جيد".into(),
+            "ممتاز".into(),
+            "رائع".into(),
+            "مفهوم".into(),
         ];
         let ack_phrases = vec![
-            "شكرا لك".into(), "شكراً لك".into(), "فهمت ذلك".into(),
+            "شكرا لك".into(),
+            "شكراً لك".into(),
+            "فهمت ذلك".into(),
             "أنا أفهم".into(),
         ];
-        let meta_self_words = vec![
-            "نفسك".into(), "أنت".into(), "أنتِ".into(),
-        ];
+        let meta_self_words = vec!["نفسك".into(), "أنت".into(), "أنتِ".into()];
         let meta_capability_words = vec![
-            "قدرات".into(), "قدراتك".into(), "مهارات".into(),
-            "إمكانيات".into(), "وظيفة".into(),
+            "قدرات".into(),
+            "قدراتك".into(),
+            "مهارات".into(),
+            "إمكانيات".into(),
+            "وظيفة".into(),
         ];
         let meta_phrases = vec![
-            "ماذا تستطيع".into(), "من أنت".into(),
-            "عرف عن نفسك".into(), "ما هي قدراتك".into(),
+            "ماذا تستطيع".into(),
+            "من أنت".into(),
+            "عرف عن نفسك".into(),
+            "ما هي قدراتك".into(),
         ];
-        let singular_anaphora = vec![
-            "هذا".into(), "هذه".into(), "ذلك".into(), "تلك".into(),
-        ];
-        let plural_anaphora = vec![
-            "هم".into(), "هن".into(), "هؤلاء".into(), "أولئك".into(),
-        ];
+        let singular_anaphora = vec!["هذا".into(), "هذه".into(), "ذلك".into(), "تلك".into()];
+        let plural_anaphora = vec!["هم".into(), "هن".into(), "هؤلاء".into(), "أولئك".into()];
 
         Self {
             void_words,
@@ -738,35 +922,83 @@ impl Lexicon {
             meta_capability_words,
             meta_phrases,
             negation_words: vec![
-                "لا".into(), "ليس".into(), "ليست".into(), "لم".into(),
-                "لن".into(), "ما".into(), "غير".into(), "بدون".into(),
-                "أبدا".into(), "أبداً".into(), "مش".into(),
+                "لا".into(),
+                "ليس".into(),
+                "ليست".into(),
+                "لم".into(),
+                "لن".into(),
+                "ما".into(),
+                "غير".into(),
+                "بدون".into(),
+                "أبدا".into(),
+                "أبداً".into(),
+                "مش".into(),
             ],
             quantifier_words: vec![
-                "كل".into(), "جميع".into(), "بعض".into(), "أي".into(),
-                "معظم".into(), "لا".into(), "عدة".into(), "كثير".into(),
-                "قليل".into(), "كلا".into(),
+                "كل".into(),
+                "جميع".into(),
+                "بعض".into(),
+                "أي".into(),
+                "معظم".into(),
+                "لا".into(),
+                "عدة".into(),
+                "كثير".into(),
+                "قليل".into(),
+                "كلا".into(),
             ],
             comparative_words: vec![
-                "أكثر".into(), "أقل".into(), "أكبر".into(), "أصغر".into(),
-                "أفضل".into(), "أسوأ".into(), "أعلى".into(), "أدنى".into(),
+                "أكثر".into(),
+                "أقل".into(),
+                "أكبر".into(),
+                "أصغر".into(),
+                "أفضل".into(),
+                "أسوأ".into(),
+                "أعلى".into(),
+                "أدنى".into(),
             ],
             modal_verbs: vec![
-                "أريد".into(), "أريدُ".into(), "يريد".into(), "تريد".into(),
-                "يستطيع".into(), "تستطيع".into(), "أستطيع".into(),
-                "يجب".into(), "ينبغي".into(), "يمكن".into(),
-                "يحتاج".into(), "تحتاج".into(), "أحتاج".into(),
+                "أريد".into(),
+                "أريدُ".into(),
+                "يريد".into(),
+                "تريد".into(),
+                "يستطيع".into(),
+                "تستطيع".into(),
+                "أستطيع".into(),
+                "يجب".into(),
+                "ينبغي".into(),
+                "يمكن".into(),
+                "يحتاج".into(),
+                "تحتاج".into(),
+                "أحتاج".into(),
             ],
             conditional_triggers: vec![
-                "إذا".into(), "لو".into(), "إن".into(), "عندما".into(),
-                "متى".into(), "ما لم".into(), "بشرط".into(),
+                "إذا".into(),
+                "لو".into(),
+                "إن".into(),
+                "عندما".into(),
+                "متى".into(),
+                "ما لم".into(),
+                "بشرط".into(),
             ],
             temporal_words: vec![
-                "الآن".into(), "اليوم".into(), "غدا".into(), "غداً".into(),
-                "أمس".into(), "قريبا".into(), "قريباً".into(),
-                "لاحقا".into(), "لاحقاً".into(), "قبل".into(), "بعد".into(),
-                "خلال".into(), "منذ".into(), "حتى".into(), "مؤخرا".into(),
-                "مؤخراً".into(), "فعلا".into(), "فعلاً".into(),
+                "الآن".into(),
+                "اليوم".into(),
+                "غدا".into(),
+                "غداً".into(),
+                "أمس".into(),
+                "قريبا".into(),
+                "قريباً".into(),
+                "لاحقا".into(),
+                "لاحقاً".into(),
+                "قبل".into(),
+                "بعد".into(),
+                "خلال".into(),
+                "منذ".into(),
+                "حتى".into(),
+                "مؤخرا".into(),
+                "مؤخراً".into(),
+                "فعلا".into(),
+                "فعلاً".into(),
             ],
         }
     }
@@ -855,65 +1087,113 @@ impl Lexicon {
         ];
 
         let auxiliary_verbs = vec![
-            "est".into(), "sont".into(),
-            "peut".into(), "peux".into(), "pouvez".into(),
+            "est".into(),
+            "sont".into(),
+            "peut".into(),
+            "peux".into(),
+            "pouvez".into(),
             "fait".into(),
         ];
         let trailing_auxiliaries = vec!["faire".into()];
         let capability_modals = vec!["peut".into(), "peux".into(), "pouvez".into()];
 
         let greeting_words = vec![
-            "bonjour".into(), "salut".into(), "coucou".into(),
+            "bonjour".into(),
+            "salut".into(),
+            "coucou".into(),
             "bonsoir".into(),
         ];
         let greeting_phrases = vec![
-            "bon matin".into(), "bonne journée".into(),
-            "bonne journee".into(), "bonne soirée".into(),
+            "bon matin".into(),
+            "bonne journée".into(),
+            "bonne journee".into(),
+            "bonne soirée".into(),
             "bonne soiree".into(),
         ];
         let followup_cues = vec![
-            "plus".into(), "davantage".into(), "détails".into(),
-            "details".into(), "continue".into(), "approfondir".into(),
+            "plus".into(),
+            "davantage".into(),
+            "détails".into(),
+            "details".into(),
+            "continue".into(),
+            "approfondir".into(),
         ];
         let followup_phrases = vec![
-            "dis-moi plus".into(), "continue".into(),
-            "dis m'en plus".into(), "quoi d'autre".into(),
-            "plus de détails".into(), "plus de details".into(),
+            "dis-moi plus".into(),
+            "continue".into(),
+            "dis m'en plus".into(),
+            "quoi d'autre".into(),
+            "plus de détails".into(),
+            "plus de details".into(),
         ];
         let ack_words = vec![
-            "merci".into(), "ok".into(), "compris".into(),
-            "intéressant".into(), "interessant".into(), "bien".into(),
-            "super".into(), "génial".into(), "genial".into(),
-            "parfait".into(), "excellent".into(), "entendu".into(),
+            "merci".into(),
+            "ok".into(),
+            "compris".into(),
+            "intéressant".into(),
+            "interessant".into(),
+            "bien".into(),
+            "super".into(),
+            "génial".into(),
+            "genial".into(),
+            "parfait".into(),
+            "excellent".into(),
+            "entendu".into(),
         ];
         let ack_phrases = vec![
-            "c'est compris".into(), "j'ai compris".into(),
-            "je comprends".into(), "ça a du sens".into(),
-            "ca a du sens".into(), "c'est bon".into(),
+            "c'est compris".into(),
+            "j'ai compris".into(),
+            "je comprends".into(),
+            "ça a du sens".into(),
+            "ca a du sens".into(),
+            "c'est bon".into(),
         ];
         let meta_self_words = vec![
-            "toi".into(), "toi-même".into(), "toi-meme".into(),
-            "tu".into(), "vous".into(), "tes".into(), "vos".into(),
+            "toi".into(),
+            "toi-même".into(),
+            "toi-meme".into(),
+            "tu".into(),
+            "vous".into(),
+            "tes".into(),
+            "vos".into(),
         ];
         let meta_capability_words = vec![
-            "capacités".into(), "capacites".into(), "compétences".into(),
-            "competences".into(), "fonctions".into(), "rôle".into(),
+            "capacités".into(),
+            "capacites".into(),
+            "compétences".into(),
+            "competences".into(),
+            "fonctions".into(),
+            "rôle".into(),
             "role".into(),
         ];
         let meta_phrases = vec![
-            "que peux-tu faire".into(), "que peux tu faire".into(),
-            "qui es-tu".into(), "qui es tu".into(),
-            "décris-toi".into(), "decris-toi".into(),
-            "présente-toi".into(), "presente-toi".into(),
-            "tes capacités".into(), "tes capacites".into(),
+            "que peux-tu faire".into(),
+            "que peux tu faire".into(),
+            "qui es-tu".into(),
+            "qui es tu".into(),
+            "décris-toi".into(),
+            "decris-toi".into(),
+            "présente-toi".into(),
+            "presente-toi".into(),
+            "tes capacités".into(),
+            "tes capacites".into(),
         ];
         let singular_anaphora = vec![
-            "ça".into(), "ca".into(), "cela".into(), "ceci".into(),
-            "il".into(), "elle".into(), "ce".into(),
+            "ça".into(),
+            "ca".into(),
+            "cela".into(),
+            "ceci".into(),
+            "il".into(),
+            "elle".into(),
+            "ce".into(),
         ];
         let plural_anaphora = vec![
-            "eux".into(), "elles".into(), "les".into(), "ceux".into(),
-            "celles".into(), "ces".into(),
+            "eux".into(),
+            "elles".into(),
+            "les".into(),
+            "ceux".into(),
+            "celles".into(),
+            "ces".into(),
         ];
 
         Self {
@@ -938,40 +1218,93 @@ impl Lexicon {
             meta_capability_words,
             meta_phrases,
             negation_words: vec![
-                "ne".into(), "pas".into(), "non".into(), "jamais".into(),
-                "ni".into(), "aucun".into(), "aucune".into(), "rien".into(),
-                "personne".into(), "plus".into(),
+                "ne".into(),
+                "pas".into(),
+                "non".into(),
+                "jamais".into(),
+                "ni".into(),
+                "aucun".into(),
+                "aucune".into(),
+                "rien".into(),
+                "personne".into(),
+                "plus".into(),
             ],
             quantifier_words: vec![
-                "tout".into(), "toute".into(), "tous".into(), "toutes".into(),
-                "chaque".into(), "quelque".into(), "quelques".into(),
-                "aucun".into(), "aucune".into(), "la plupart".into(),
-                "plusieurs".into(), "beaucoup".into(), "peu".into(),
+                "tout".into(),
+                "toute".into(),
+                "tous".into(),
+                "toutes".into(),
+                "chaque".into(),
+                "quelque".into(),
+                "quelques".into(),
+                "aucun".into(),
+                "aucune".into(),
+                "la plupart".into(),
+                "plusieurs".into(),
+                "beaucoup".into(),
+                "peu".into(),
             ],
             comparative_words: vec![
-                "plus".into(), "moins".into(), "meilleur".into(), "meilleure".into(),
-                "pire".into(), "mieux".into(), "supérieur".into(), "superieur".into(),
-                "inférieur".into(), "inferieur".into(),
+                "plus".into(),
+                "moins".into(),
+                "meilleur".into(),
+                "meilleure".into(),
+                "pire".into(),
+                "mieux".into(),
+                "supérieur".into(),
+                "superieur".into(),
+                "inférieur".into(),
+                "inferieur".into(),
             ],
             modal_verbs: vec![
-                "vouloir".into(), "veux".into(), "veut".into(), "voulons".into(),
-                "pouvoir".into(), "peux".into(), "peut".into(), "pouvons".into(),
-                "devoir".into(), "dois".into(), "doit".into(), "devons".into(),
-                "falloir".into(), "faut".into(),
+                "vouloir".into(),
+                "veux".into(),
+                "veut".into(),
+                "voulons".into(),
+                "pouvoir".into(),
+                "peux".into(),
+                "peut".into(),
+                "pouvons".into(),
+                "devoir".into(),
+                "dois".into(),
+                "doit".into(),
+                "devons".into(),
+                "falloir".into(),
+                "faut".into(),
             ],
             conditional_triggers: vec![
-                "si".into(), "quand".into(), "lorsque".into(),
-                "à moins que".into(), "a moins que".into(),
-                "pourvu que".into(), "en supposant que".into(),
+                "si".into(),
+                "quand".into(),
+                "lorsque".into(),
+                "à moins que".into(),
+                "a moins que".into(),
+                "pourvu que".into(),
+                "en supposant que".into(),
             ],
             temporal_words: vec![
-                "maintenant".into(), "aujourd'hui".into(), "demain".into(),
-                "hier".into(), "bientôt".into(), "bientot".into(),
-                "plus tard".into(), "avant".into(), "après".into(), "apres".into(),
-                "prochain".into(), "prochaine".into(), "dernier".into(), "dernière".into(),
-                "derniere".into(), "pendant".into(), "depuis".into(), "jusqu'à".into(),
-                "jusqua".into(), "récemment".into(), "recemment".into(),
-                "déjà".into(), "deja".into(),
+                "maintenant".into(),
+                "aujourd'hui".into(),
+                "demain".into(),
+                "hier".into(),
+                "bientôt".into(),
+                "bientot".into(),
+                "plus tard".into(),
+                "avant".into(),
+                "après".into(),
+                "apres".into(),
+                "prochain".into(),
+                "prochaine".into(),
+                "dernier".into(),
+                "dernière".into(),
+                "derniere".into(),
+                "pendant".into(),
+                "depuis".into(),
+                "jusqu'à".into(),
+                "jusqua".into(),
+                "récemment".into(),
+                "recemment".into(),
+                "déjà".into(),
+                "deja".into(),
             ],
         }
     }
@@ -1059,63 +1392,111 @@ impl Lexicon {
         ];
 
         let auxiliary_verbs = vec![
-            "es".into(), "son".into(),
-            "puede".into(), "puedes".into(),
-            "hace".into(), "hacen".into(),
+            "es".into(),
+            "son".into(),
+            "puede".into(),
+            "puedes".into(),
+            "hace".into(),
+            "hacen".into(),
         ];
         let trailing_auxiliaries = vec!["hacer".into()];
         let capability_modals = vec!["puede".into(), "puedes".into(), "pueden".into()];
 
-        let greeting_words = vec![
-            "hola".into(), "buenas".into(), "saludos".into(),
-        ];
+        let greeting_words = vec!["hola".into(), "buenas".into(), "saludos".into()];
         let greeting_phrases = vec![
-            "buenos días".into(), "buenos dias".into(),
-            "buenas tardes".into(), "buenas noches".into(),
-            "buen día".into(), "buen dia".into(),
+            "buenos días".into(),
+            "buenos dias".into(),
+            "buenas tardes".into(),
+            "buenas noches".into(),
+            "buen día".into(),
+            "buen dia".into(),
         ];
         let followup_cues = vec![
-            "más".into(), "mas".into(), "detalle".into(), "detalles".into(),
-            "continua".into(), "continúa".into(), "profundiza".into(),
+            "más".into(),
+            "mas".into(),
+            "detalle".into(),
+            "detalles".into(),
+            "continua".into(),
+            "continúa".into(),
+            "profundiza".into(),
         ];
         let followup_phrases = vec![
-            "dime más".into(), "dime mas".into(), "cuéntame más".into(),
-            "cuentame mas".into(), "sigue adelante".into(),
-            "qué más".into(), "que mas".into(),
-            "más detalles".into(), "mas detalles".into(),
+            "dime más".into(),
+            "dime mas".into(),
+            "cuéntame más".into(),
+            "cuentame mas".into(),
+            "sigue adelante".into(),
+            "qué más".into(),
+            "que mas".into(),
+            "más detalles".into(),
+            "mas detalles".into(),
         ];
         let ack_words = vec![
-            "gracias".into(), "ok".into(), "vale".into(), "entendido".into(),
-            "interesante".into(), "genial".into(), "bien".into(),
-            "perfecto".into(), "excelente".into(), "estupendo".into(),
-            "claro".into(), "bueno".into(),
+            "gracias".into(),
+            "ok".into(),
+            "vale".into(),
+            "entendido".into(),
+            "interesante".into(),
+            "genial".into(),
+            "bien".into(),
+            "perfecto".into(),
+            "excelente".into(),
+            "estupendo".into(),
+            "claro".into(),
+            "bueno".into(),
         ];
         let ack_phrases = vec![
-            "lo entiendo".into(), "ya veo".into(), "tiene sentido".into(),
-            "muchas gracias".into(), "está bien".into(), "esta bien".into(),
+            "lo entiendo".into(),
+            "ya veo".into(),
+            "tiene sentido".into(),
+            "muchas gracias".into(),
+            "está bien".into(),
+            "esta bien".into(),
         ];
         let meta_self_words = vec![
-            "tú".into(), "tu".into(), "usted".into(), "ti".into(),
-            "tus".into(), "sus".into(),
+            "tú".into(),
+            "tu".into(),
+            "usted".into(),
+            "ti".into(),
+            "tus".into(),
+            "sus".into(),
         ];
         let meta_capability_words = vec![
-            "capacidades".into(), "habilidades".into(),
-            "funciones".into(), "propósito".into(), "proposito".into(),
+            "capacidades".into(),
+            "habilidades".into(),
+            "funciones".into(),
+            "propósito".into(),
+            "proposito".into(),
         ];
         let meta_phrases = vec![
-            "qué puedes hacer".into(), "que puedes hacer".into(),
-            "quién eres".into(), "quien eres".into(),
-            "descríbete".into(), "describete".into(),
-            "preséntate".into(), "presentate".into(),
-            "tus capacidades".into(), "tus habilidades".into(),
+            "qué puedes hacer".into(),
+            "que puedes hacer".into(),
+            "quién eres".into(),
+            "quien eres".into(),
+            "descríbete".into(),
+            "describete".into(),
+            "preséntate".into(),
+            "presentate".into(),
+            "tus capacidades".into(),
+            "tus habilidades".into(),
         ];
         let singular_anaphora = vec![
-            "eso".into(), "esto".into(), "ello".into(), "ese".into(),
-            "esta".into(), "este".into(), "aquel".into(), "aquella".into(),
+            "eso".into(),
+            "esto".into(),
+            "ello".into(),
+            "ese".into(),
+            "esta".into(),
+            "este".into(),
+            "aquel".into(),
+            "aquella".into(),
         ];
         let plural_anaphora = vec![
-            "ellos".into(), "ellas".into(), "esos".into(), "estos".into(),
-            "aquellos".into(), "aquellas".into(),
+            "ellos".into(),
+            "ellas".into(),
+            "esos".into(),
+            "estos".into(),
+            "aquellos".into(),
+            "aquellas".into(),
         ];
 
         Self {
@@ -1140,41 +1521,101 @@ impl Lexicon {
             meta_capability_words,
             meta_phrases,
             negation_words: vec![
-                "no".into(), "ni".into(), "nunca".into(), "jamás".into(),
-                "jamas".into(), "tampoco".into(), "ningún".into(), "ningun".into(),
-                "ninguna".into(), "nada".into(), "nadie".into(),
+                "no".into(),
+                "ni".into(),
+                "nunca".into(),
+                "jamás".into(),
+                "jamas".into(),
+                "tampoco".into(),
+                "ningún".into(),
+                "ningun".into(),
+                "ninguna".into(),
+                "nada".into(),
+                "nadie".into(),
             ],
             quantifier_words: vec![
-                "todo".into(), "toda".into(), "todos".into(), "todas".into(),
-                "cada".into(), "algún".into(), "algun".into(), "alguna".into(),
-                "algunos".into(), "algunas".into(), "ningún".into(), "ningun".into(),
-                "ninguna".into(), "la mayoría".into(), "la mayoria".into(),
-                "varios".into(), "varias".into(), "muchos".into(), "muchas".into(),
-                "pocos".into(), "pocas".into(),
+                "todo".into(),
+                "toda".into(),
+                "todos".into(),
+                "todas".into(),
+                "cada".into(),
+                "algún".into(),
+                "algun".into(),
+                "alguna".into(),
+                "algunos".into(),
+                "algunas".into(),
+                "ningún".into(),
+                "ningun".into(),
+                "ninguna".into(),
+                "la mayoría".into(),
+                "la mayoria".into(),
+                "varios".into(),
+                "varias".into(),
+                "muchos".into(),
+                "muchas".into(),
+                "pocos".into(),
+                "pocas".into(),
             ],
             comparative_words: vec![
-                "más".into(), "mas".into(), "menos".into(), "mejor".into(),
-                "peor".into(), "mayor".into(), "menor".into(), "superior".into(),
+                "más".into(),
+                "mas".into(),
+                "menos".into(),
+                "mejor".into(),
+                "peor".into(),
+                "mayor".into(),
+                "menor".into(),
+                "superior".into(),
                 "inferior".into(),
             ],
             modal_verbs: vec![
-                "querer".into(), "quiero".into(), "quiere".into(), "queremos".into(),
-                "poder".into(), "puedo".into(), "puede".into(), "podemos".into(),
-                "deber".into(), "debo".into(), "debe".into(), "debemos".into(),
-                "necesitar".into(), "necesito".into(), "necesita".into(),
+                "querer".into(),
+                "quiero".into(),
+                "quiere".into(),
+                "queremos".into(),
+                "poder".into(),
+                "puedo".into(),
+                "puede".into(),
+                "podemos".into(),
+                "deber".into(),
+                "debo".into(),
+                "debe".into(),
+                "debemos".into(),
+                "necesitar".into(),
+                "necesito".into(),
+                "necesita".into(),
             ],
             conditional_triggers: vec![
-                "si".into(), "cuando".into(), "siempre que".into(),
-                "a menos que".into(), "con tal de que".into(),
+                "si".into(),
+                "cuando".into(),
+                "siempre que".into(),
+                "a menos que".into(),
+                "con tal de que".into(),
                 "suponiendo que".into(),
             ],
             temporal_words: vec![
-                "ahora".into(), "hoy".into(), "mañana".into(), "manana".into(),
-                "ayer".into(), "pronto".into(), "luego".into(), "después".into(),
-                "despues".into(), "antes".into(), "próximo".into(), "proximo".into(),
-                "próxima".into(), "proxima".into(), "último".into(), "ultimo".into(),
-                "última".into(), "ultima".into(), "durante".into(), "desde".into(),
-                "hasta".into(), "recientemente".into(), "ya".into(),
+                "ahora".into(),
+                "hoy".into(),
+                "mañana".into(),
+                "manana".into(),
+                "ayer".into(),
+                "pronto".into(),
+                "luego".into(),
+                "después".into(),
+                "despues".into(),
+                "antes".into(),
+                "próximo".into(),
+                "proximo".into(),
+                "próxima".into(),
+                "proxima".into(),
+                "último".into(),
+                "ultimo".into(),
+                "última".into(),
+                "ultima".into(),
+                "durante".into(),
+                "desde".into(),
+                "hasta".into(),
+                "recientemente".into(),
+                "ya".into(),
             ],
         }
     }
@@ -1258,7 +1699,9 @@ impl Lexicon {
     /// Whether a string contains a greeting phrase (e.g., "good morning").
     pub fn has_greeting_phrase(&self, text: &str) -> bool {
         let lower = text.to_lowercase();
-        self.greeting_phrases.iter().any(|p| lower.contains(p.as_str()))
+        self.greeting_phrases
+            .iter()
+            .any(|p| lower.contains(p.as_str()))
     }
 
     /// Whether a word is a follow-up cue (e.g., "more", "elaborate").
@@ -1270,7 +1713,9 @@ impl Lexicon {
     /// Whether a string contains a follow-up phrase (e.g., "tell me more").
     pub fn has_followup_phrase(&self, text: &str) -> bool {
         let lower = text.to_lowercase();
-        self.followup_phrases.iter().any(|p| lower.contains(p.as_str()))
+        self.followup_phrases
+            .iter()
+            .any(|p| lower.contains(p.as_str()))
     }
 
     /// Whether a word is an acknowledgment word (e.g., "thanks", "ok").
@@ -1304,7 +1749,9 @@ impl Lexicon {
     pub fn has_meta_phrase(&self, text: &str) -> bool {
         let lower = text.to_lowercase();
         let trimmed = lower.trim();
-        self.meta_phrases.iter().any(|p| trimmed.starts_with(p.as_str()))
+        self.meta_phrases
+            .iter()
+            .any(|p| trimmed.starts_with(p.as_str()))
     }
 
     // ── NLU category accessors ─────────────────────────────────────
@@ -1354,22 +1801,43 @@ impl Lexicon {
         }
         // Universal quantifiers — matches across all 5 languages
         let universals = [
-            "all", "every", "each", "both",
-            "все", "каждый", "каждая", "каждое",
-            "كل", "جميع", "كلا",
-            "tout", "toute", "tous", "toutes", "chaque",
-            "todo", "toda", "todos", "todas", "cada",
+            "all",
+            "every",
+            "each",
+            "both",
+            "все",
+            "каждый",
+            "каждая",
+            "каждое",
+            "كل",
+            "جميع",
+            "كلا",
+            "tout",
+            "toute",
+            "tous",
+            "toutes",
+            "chaque",
+            "todo",
+            "toda",
+            "todos",
+            "todas",
+            "cada",
         ];
         if universals.contains(&lower.as_str()) {
             return Some(Quantifier::Universal);
         }
         // None quantifiers
         let nones = [
-            "no", "none",
-            "ни один", "никакой",
+            "no",
+            "none",
+            "ни один",
+            "никакой",
             "لا",
-            "aucun", "aucune",
-            "ningún", "ningun", "ninguna",
+            "aucun",
+            "aucune",
+            "ningún",
+            "ningun",
+            "ninguna",
         ];
         if nones.contains(&lower.as_str()) {
             return Some(Quantifier::None);
@@ -1380,7 +1848,8 @@ impl Lexicon {
             "большинство",
             "معظم",
             "la plupart",
-            "la mayoría", "la mayoria",
+            "la mayoría",
+            "la mayoria",
         ];
         if mosts.contains(&lower.as_str()) {
             return Some(Quantifier::Most);
@@ -1397,21 +1866,44 @@ impl Lexicon {
             return None;
         }
         let wants = [
-            "want", "wants",
-            "хочу", "хочет", "хотеть",
-            "أريد", "أريدُ", "يريد", "تريد",
-            "vouloir", "veux", "veut", "voulons",
-            "querer", "quiero", "quiere", "queremos",
+            "want",
+            "wants",
+            "хочу",
+            "хочет",
+            "хотеть",
+            "أريد",
+            "أريدُ",
+            "يريد",
+            "تريد",
+            "vouloir",
+            "veux",
+            "veut",
+            "voulons",
+            "querer",
+            "quiero",
+            "quiere",
+            "queremos",
         ];
         if wants.contains(&lower.as_str()) {
             return Some(Modality::Want);
         }
         let cans = [
-            "can", "could",
-            "могу", "может", "мочь",
-            "يستطيع", "تستطيع", "أستطيع",
-            "pouvoir", "peux", "peut", "pouvons",
-            "poder", "puedo", "puede", "podemos",
+            "can",
+            "could",
+            "могу",
+            "может",
+            "мочь",
+            "يستطيع",
+            "تستطيع",
+            "أستطيع",
+            "pouvoir",
+            "peux",
+            "peut",
+            "pouvons",
+            "poder",
+            "puedo",
+            "puede",
+            "podemos",
         ];
         if cans.contains(&lower.as_str()) {
             return Some(Modality::Can);
@@ -1420,18 +1912,25 @@ impl Lexicon {
             "should",
             "следует",
             "ينبغي",
-            "devoir", "devrait",
-            "debería", "deberia",
+            "devoir",
+            "devrait",
+            "debería",
+            "deberia",
         ];
         if shoulds.contains(&lower.as_str()) {
             return Some(Modality::Should);
         }
         let musts = [
             "must",
-            "должен", "должна", "должно",
+            "должен",
+            "должна",
+            "должно",
             "يجب",
-            "dois", "doit", "faut",
-            "debo", "debe",
+            "dois",
+            "doit",
+            "faut",
+            "debo",
+            "debe",
         ];
         if musts.contains(&lower.as_str()) {
             return Some(Modality::Must);
@@ -1480,10 +1979,7 @@ impl Lexicon {
         }
 
         // Remaining words are content.
-        let mut content: Vec<String> = words[pos..]
-            .iter()
-            .map(|w| w.to_string())
-            .collect();
+        let mut content: Vec<String> = words[pos..].iter().map(|w| w.to_string()).collect();
 
         // Handle "do you know about X" / "do you think about X" patterns:
         // strip the pronoun + verb + preposition prefix, keep only the real subject.
@@ -2074,5 +2570,4 @@ mod tests {
             other => panic!("expected Fuzzy, got {other:?}"),
         }
     }
-
 }
