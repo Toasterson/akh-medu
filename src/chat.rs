@@ -38,6 +38,10 @@ pub struct ChatProcessorConfig {
     pub grammar: String,
     /// Maximum OODA cycles when escalating to a goal in chat context.
     pub max_escalation_cycles: usize,
+    /// When `false`, the processor operates in pure-read mode: no goals are created
+    /// and no OODA cycles run. Unresolved input synthesises from existing knowledge
+    /// instead of escalating to a new goal. Defaults to `true` for TUI/WS sessions.
+    pub create_goal: bool,
 }
 
 impl Default for ChatProcessorConfig {
@@ -45,6 +49,7 @@ impl Default for ChatProcessorConfig {
         Self {
             grammar: "narrative".to_string(),
             max_escalation_cycles: 10,
+            create_goal: true,
         }
     }
 }
@@ -185,6 +190,14 @@ impl ChatProcessor {
         &self.nlu_pipeline
     }
 
+    /// Enable or disable goal creation (pure-read mode).
+    ///
+    /// When `false`, unresolved input synthesises from existing knowledge instead
+    /// of escalating to a new goal. TUI and WebSocket sessions leave this `true`.
+    pub fn set_create_goal(&mut self, create_goal: bool) {
+        self.config.create_goal = create_goal;
+    }
+
     // ── AbsTree dispatch ────────────────────────────────────────────
 
     /// Dispatch on an NLU-parsed AbsTree variant.
@@ -216,10 +229,18 @@ impl ChatProcessor {
                 self.handle_dialogue_meta_query(&mut msgs, agent, engine, &grammar);
             }
             AbsTree::GoalRequest { description } => {
-                let desc = description.label()
-                    .map(String::from)
-                    .unwrap_or_else(|| description.collect_labels().join(" "));
-                self.handle_set_goal(&mut msgs, agent, engine, &desc, &grammar);
+                if self.config.create_goal {
+                    let desc = description.label()
+                        .map(String::from)
+                        .unwrap_or_else(|| description.collect_labels().join(" "));
+                    self.handle_set_goal(&mut msgs, agent, engine, &desc, &grammar);
+                } else {
+                    msgs.push(AkhMessage::system(
+                        "Goal creation is disabled in read-only mode. \
+                         Pass create_goal=true to enable investigation."
+                            .to_string(),
+                    ));
+                }
             }
             AbsTree::StructuralCommand { command, args } => {
                 self.handle_structural_command(&mut msgs, agent, engine, command, args);
@@ -468,7 +489,15 @@ impl ChatProcessor {
 
         match intent {
             UserIntent::SetGoal { description } => {
-                self.handle_set_goal(&mut msgs, agent, engine, &description, &grammar);
+                if self.config.create_goal {
+                    self.handle_set_goal(&mut msgs, agent, engine, &description, &grammar);
+                } else {
+                    msgs.push(AkhMessage::system(
+                        "Goal creation is disabled in read-only mode. \
+                         Pass create_goal=true to enable investigation."
+                            .to_string(),
+                    ));
+                }
             }
             UserIntent::Query {
                 subject,
@@ -1120,6 +1149,10 @@ impl ChatProcessor {
     ///
     /// Tool results and goal metadata are routed to audit log — only the
     /// persona-framed investigation message and final narrative appear in chat.
+    ///
+    /// When `create_goal` is `false` (pure-read mode), no goal is created and no
+    /// OODA cycles run. The method synthesises from existing working memory instead,
+    /// returning an "I don't know" response when the KG has nothing relevant.
     fn escalate_to_goal(
         &mut self,
         msgs: &mut Vec<AkhMessage>,
@@ -1128,6 +1161,20 @@ impl ChatProcessor {
         description: &str,
         _display_prefix: &str,
     ) {
+        if !self.config.create_goal {
+            // Pure-read mode: synthesise from whatever is already in working memory
+            // without creating a goal or running any OODA cycles.
+            let entries = agent.working_memory().entries().to_vec();
+            let summary = crate::agent::synthesize::synthesize_with_grammar(
+                description,
+                &entries,
+                agent.engine(),
+                grammar,
+            );
+            self.push_summary(msgs, &summary, grammar);
+            return;
+        }
+
         // Investigation framing — always use template. The LLM hallucinates
         // answers instead of acknowledgments, so we don't use it here.
         let framing = format!("Let me look into {description} for you.");

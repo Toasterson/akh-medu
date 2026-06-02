@@ -306,9 +306,17 @@ pub struct AskParams {
     pub workspace: String,
     #[schemars(description = "Natural-language question to investigate")]
     pub question: String,
-    #[schemars(description = "Maximum OODA cycles to run (default: scales with graph size, 5–50)")]
+    #[schemars(description = "Maximum OODA cycles to run when create_goal=true (default: scales with graph size, 5–50)")]
     #[serde(default, deserialize_with = "deserialize_opt_u32_or_str")]
     pub max_cycles: Option<u32>,
+    #[schemars(
+        description = "When true, creates an investigation goal and runs OODA cycles to find the \
+                       answer. When false (default), answers from existing knowledge only — no \
+                       agent state is modified. Use search, triples_of, or agent_recall for \
+                       targeted read-only lookups."
+    )]
+    #[serde(default)]
+    pub create_goal: bool,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -448,6 +456,13 @@ pub struct ChatParams {
         description = "User message to process through the full NLU pipeline (dialogue acts, facts, queries, goals)"
     )]
     pub message: String,
+    #[schemars(
+        description = "When true, unresolved input creates an investigation goal and runs OODA \
+                       cycles (old default behaviour). When false (default), chat is read-only: \
+                       no goals are created and no agent cycles run — safe for passive Q&A."
+    )]
+    #[serde(default)]
+    pub create_goal: bool,
 }
 
 // ── Batch Operations ────────────────────────────────────────────────────
@@ -982,15 +997,34 @@ impl AkhMcpServer {
 
     #[tool(
         name = "ask",
-        description = "Ask the knowledge agent a natural-language question. The agent runs OODA cycles to find the answer and returns a narrative summary of findings."
+        description = "Ask the knowledge agent a natural-language question. By default \
+                       (create_goal=false) this is read-only: it synthesises an answer from \
+                       existing working memory without modifying agent state — safe for passive \
+                       Q&A. Set create_goal=true to have the agent investigate: it will create \
+                       a goal, run OODA cycles, and return a narrative summary of findings."
     )]
     async fn ask(
         &self,
         Parameters(params): Parameters<AskParams>,
     ) -> Result<CallToolResult, McpError> {
         let agent = self.state.get_agent(&params.workspace).await?;
+        let create_goal = params.create_goal;
         let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
             let mut agent = agent.lock().map_err(|e| format!("agent lock: {e}"))?;
+            if !create_goal {
+                // Pure-read path: synthesise from existing working memory only.
+                // No goals are created, no OODA cycles run, agent state is unchanged.
+                let summary = agent.synthesize_findings(&params.question);
+                return Ok(if summary.overview.is_empty() {
+                    "I don't have enough information to answer that. \
+                     Use ask(create_goal=true) to investigate, or add knowledge with \
+                     assert_triple / text_ingest."
+                        .to_string()
+                } else {
+                    summary.overview
+                });
+            }
+
             // Dynamic budget: scale with graph density so sparse workspaces still
             // get enough cycles, while the early-exit on consecutive no-progress
             // cycles prevents wasteful spinning.  Caller-supplied value wins.
@@ -3640,7 +3674,11 @@ impl AkhMcpServer {
 
     #[tool(
         name = "chat",
-        description = "Send a message through the full NLU pipeline — handles dialogue acts, fact assertions, queries, and goal escalation, just like typing in the TUI."
+        description = "Send a message through the full NLU pipeline — handles dialogue acts, \
+                       fact assertions, and queries. By default (create_goal=false) this is \
+                       read-only: no goals are created and no agent cycles run, making it safe \
+                       for passive Q&A. Set create_goal=true to restore the old behaviour where \
+                       unresolved input spawns an investigation goal and runs OODA cycles."
     )]
     async fn chat(
         &self,
@@ -3650,6 +3688,7 @@ impl AkhMcpServer {
         let agent = self.state.get_agent(&params.workspace).await?;
         let nlu_cached = self.state.get_nlu_pipeline(&params.workspace, &engine).await;
         let message = params.message;
+        let create_goal = params.create_goal;
 
         let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
             // Clone the shared pipeline — models are Arc-shared (cheap),
@@ -3658,14 +3697,18 @@ impl AkhMcpServer {
 
             let mut chat_processor =
                 crate::chat::ChatProcessor::new(&engine, session_pipeline);
+            chat_processor.set_create_goal(create_goal);
 
             let mut agent = agent.lock().map_err(|e| format!("agent lock: {e}"))?;
             let responses = chat_processor.process_input(&message, &mut agent, &engine);
 
-            // Persist NLU ranker state and engine.
+            // Always persist NLU ranker state (read-only learning is fine).
             chat_processor.persist_nlu_state(&engine);
             let _ = engine.persist();
-            let _ = agent.persist_session();
+            // Only persist agent session when state may have changed.
+            if create_goal {
+                let _ = agent.persist_session();
+            }
 
             let text = format_messages(&responses);
             if text.is_empty() {
