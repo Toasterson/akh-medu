@@ -2735,6 +2735,8 @@ impl Agent {
             })?;
 
         // Persist goals to durable store (survives restart without sparql-persist).
+        // Writes the `agent:goals` TieredStore snapshot so goals survive across
+        // sessions even when the `sparql-persist` feature is not enabled.
         goal::persist_goals(&self.goals, &self.engine)?;
 
         // Flush the engine's durable store.
@@ -2797,8 +2799,12 @@ impl Agent {
             .and_then(|bytes| bincode::deserialize::<u64>(&bytes).ok())
             .unwrap_or(0);
 
-        // Restore goals: prefer durable-store blob, fall back to KG-triple reconstruction.
+        // Restore goals: prefer the durable-store TieredStore snapshot (always
+        // accurate, full struct) over KG-triple reconstruction (only accurate
+        // when SPARQL persistence is enabled — without it, all goals default to
+        // Pending status because KG triples are in-memory only and lost on restart).
         let goals = goal::restore_goals_from_store(&engine)
+            .filter(|g| !g.is_empty())
             .unwrap_or_else(|| goal::restore_goals(&engine, &predicates).unwrap_or_default());
 
         // Restore psyche: prefer persisted state, fall back to compartment manager.
