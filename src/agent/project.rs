@@ -625,6 +625,7 @@ mod tests {
                 cycle_budget: None,
                 cycles_consumed: 0,
                 created_at: 0,
+                allowed_domains: None,
             },
             Project {
                 id: sym(2),
@@ -635,6 +636,7 @@ mod tests {
                 cycle_budget: None,
                 cycles_consumed: 0,
                 created_at: 0,
+                allowed_domains: None,
             },
         ];
 
@@ -666,6 +668,7 @@ mod tests {
             cycle_budget: None,
             cycles_consumed: 0,
             created_at: 0,
+            allowed_domains: None,
         };
 
         let goals = vec![
@@ -722,6 +725,7 @@ mod tests {
             cycle_budget: None,
             cycles_consumed: 0,
             created_at: 0,
+            allowed_domains: None,
         };
 
         assert_eq!(project_progress(&project, &[]), 0.0);
@@ -836,6 +840,7 @@ mod tests {
             cycle_budget: None,
             cycles_consumed: 0,
             created_at: 0,
+            allowed_domains: None,
         };
 
         // Create a goal with a symbol that is related to "rust".
