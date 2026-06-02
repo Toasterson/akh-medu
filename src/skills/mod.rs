@@ -11,9 +11,15 @@
 //! - `procedures.md` — natural language source of truth (for LLM re-generation)
 
 pub mod author;
+pub mod bridge;
+pub mod curriculum;
+pub mod discover;
+pub mod graph;
 pub mod manager;
 pub mod quality;
 pub mod refine;
+pub mod share;
+pub mod synthesis;
 
 use std::collections::HashMap;
 
@@ -43,6 +49,9 @@ impl std::fmt::Display for SkillState {
 }
 
 /// Metadata describing a skillpack.
+///
+/// Extended in Phase 31 with dependency tracking (31a), curriculum support (31h),
+/// and remote sharing (31f).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SkillManifest {
     /// Unique skillpack identifier.
@@ -87,6 +96,30 @@ pub struct SkillManifest {
     /// for LLM-assisted re-generation (Phase 30c).
     #[serde(default)]
     pub procedures_file: Option<String>,
+
+    // ── Phase 31a: Dependency graph ────────────────────────────────────────
+    /// Skill IDs that must be active before this skill can be activated.
+    #[serde(default)]
+    pub depends: Vec<String>,
+    /// Skill IDs that cannot be co-active with this skill.
+    #[serde(default)]
+    pub conflicts: Vec<String>,
+    /// Capability tags this skill provides (for loose-coupling via `requires`).
+    #[serde(default)]
+    pub provides: Vec<String>,
+    /// Capability tags this skill needs; resolved to provider skill IDs at activation.
+    #[serde(default)]
+    pub requires: Vec<String>,
+
+    // ── Phase 31f: Sharing / remote URL ───────────────────────────────────
+    /// Optional canonical remote URL for this skill archive (e.g., from a registry).
+    #[serde(default)]
+    pub remote_url: Option<String>,
+
+    // ── Phase 31h: Curriculum ──────────────────────────────────────────────
+    /// Path to the curriculum JSON file relative to the skill directory.
+    #[serde(default)]
+    pub curriculum_file: Option<String>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -207,6 +240,8 @@ pub struct LoadedSkill {
     pub actions: Vec<SkillAction>,
     /// Loaded plan templates (populated when Hot; empty otherwise).
     pub plans: Vec<SkillPlan>,
+    /// Timestamp of the most recent access (Phase 31c idle-deactivation tracking).
+    pub last_used_at: Option<std::time::Instant>,
 }
 
 /// Summary info for listing skills.
@@ -232,6 +267,12 @@ pub struct SkillInfo {
     pub action_count: usize,
     /// Number of plan templates loaded.
     pub plan_count: usize,
+    /// Capabilities provided by this skill.
+    #[serde(default)]
+    pub provides: Vec<String>,
+    /// Capabilities required by this skill.
+    #[serde(default)]
+    pub requires: Vec<String>,
 }
 
 /// Result of activating a skillpack.
