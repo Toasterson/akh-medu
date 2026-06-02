@@ -183,6 +183,10 @@ name = "akhomed"
 path = "src/bin/akhomed.rs"
 required-features = ["server"]
 
+[[bin]]
+name = "generate_qa_dataset"
+path = "src/bin/generate_qa_dataset.rs"
+
 [[bench]]
 name = "vsa_ops"
 harness = false
