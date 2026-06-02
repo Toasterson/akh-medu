@@ -3120,3 +3120,113 @@ fn core_features_work_standalone() {
         .unwrap();
     assert!(output.success);
 }
+
+#[test]
+fn self_referential_triple_is_rejected() {
+    let engine = test_engine();
+    let entity = engine.create_symbol(SymbolKind::Entity, "Box").unwrap();
+    let part_of = engine
+        .create_symbol(SymbolKind::Relation, "part-of")
+        .unwrap();
+    let result = engine.add_triple(&Triple::new(entity.id, part_of.id, entity.id));
+    assert!(result.is_err(), "self-referential triple must be rejected");
+    let msg = format!("{}", result.unwrap_err());
+    assert!(
+        msg.contains("self-referential"),
+        "error message should mention self-referential, got: {msg}"
+    );
+}
+
+#[test]
+fn self_referential_triple_rejected_for_any_predicate() {
+    let engine = test_engine();
+    let thing = engine.create_symbol(SymbolKind::Entity, "Thing").unwrap();
+    for label in ["is-a", "has-a", "located-in", "orbits"] {
+        let pred = engine.create_symbol(SymbolKind::Relation, label).unwrap();
+        let result = engine.add_triple(&Triple::new(thing.id, pred.id, thing.id));
+        assert!(
+            result.is_err(),
+            "self-referential triple with predicate '{label}' must be rejected"
+        );
+    }
+}
+
+#[test]
+fn self_referential_check_can_be_disabled() {
+    use akh_medu::engine::Phase9Config;
+    let engine = test_engine();
+    let mut cfg = engine.phase9_config().clone();
+    cfg.reject_self_referential = false;
+
+    let mut engine = Engine::new(EngineConfig {
+        dimension: Dimension::TEST,
+        ..Default::default()
+    })
+    .unwrap();
+    engine.set_phase9_config(cfg);
+
+    let thing = engine.create_symbol(SymbolKind::Entity, "Thing").unwrap();
+    let equal = engine.create_symbol(SymbolKind::Relation, "equal").unwrap();
+    engine
+        .add_triple(&Triple::new(thing.id, equal.id, thing.id))
+        .expect("self-referential insert should succeed when check is disabled");
+}
+
+#[test]
+fn non_self_referential_triples_are_unaffected() {
+    let engine = test_engine();
+    let a = engine.create_symbol(SymbolKind::Entity, "A").unwrap();
+    let b = engine.create_symbol(SymbolKind::Entity, "B").unwrap();
+    let rel = engine
+        .create_symbol(SymbolKind::Relation, "related-to")
+        .unwrap();
+    engine
+        .add_triple(&Triple::new(a.id, rel.id, b.id))
+        .expect("normal triple must still be accepted");
+}
+
+#[test]
+fn purge_self_referential_triples_removes_existing() {
+    use akh_medu::engine::Phase9Config;
+
+    // Build an engine with the guard disabled so we can insert a self-referential triple.
+    let mut engine = Engine::new(EngineConfig {
+        dimension: Dimension::TEST,
+        ..Default::default()
+    })
+    .unwrap();
+    let mut cfg = engine.phase9_config().clone();
+    cfg.reject_self_referential = false;
+    engine.set_phase9_config(cfg.clone());
+
+    let thing = engine.create_symbol(SymbolKind::Entity, "Thing").unwrap();
+    let rel = engine.create_symbol(SymbolKind::Relation, "part-of").unwrap();
+
+    engine
+        .add_triple(&Triple::new(thing.id, rel.id, thing.id))
+        .expect("self-referential insert should succeed with guard disabled");
+
+    // Verify it's present.
+    let before = engine.all_triples();
+    assert!(
+        before
+            .iter()
+            .any(|t| t.subject == thing.id && t.object == thing.id),
+        "self-referential triple should be in KG before purge"
+    );
+
+    // Re-enable the guard and purge existing violators.
+    cfg.reject_self_referential = true;
+    engine.set_phase9_config(cfg);
+
+    let purged = engine.purge_self_referential_triples().unwrap();
+    assert_eq!(purged, 1, "exactly one self-referential triple should be purged");
+
+    let after = engine.all_triples();
+    assert!(
+        !after
+            .iter()
+            .any(|t| t.subject == t.object),
+        "no self-referential triples should remain after purge"
+    );
+}

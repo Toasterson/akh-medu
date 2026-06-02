@@ -722,6 +722,25 @@ pub enum EngineError {
         )
     )]
     SparqlDeleteParse { message: String },
+
+    #[error(
+        "self-referential triple rejected: {subject_label} -{predicate_label}-> {subject_label} \
+         (sym:{subject_id})"
+    )]
+    #[diagnostic(
+        code(akh::engine::self_referential_triple),
+        help(
+            "A triple where the subject and object are the same entity (A → p → A) is not \
+             permitted. For intentionally reflexive relations (e.g., equality, identity), \
+             use the second-order reasoning system's reflexivity rule, or disable this \
+             check via Phase9Config::reject_self_referential."
+        )
+    )]
+    SelfReferentialTriple {
+        subject_label: String,
+        predicate_label: String,
+        subject_id: u64,
+    },
 }
 
 /// Convenience alias for functions returning akh-medu results.
