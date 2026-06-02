@@ -82,6 +82,7 @@ pub mod tool_manifest;
 pub mod tool_semantics;
 pub mod tools;
 pub mod trigger;
+pub mod vsa_rl;
 pub mod watch;
 #[cfg(feature = "wasm-tools")]
 pub mod wasm_runtime;
@@ -225,6 +226,7 @@ pub use state_value::{
     AgentState, Reward, StateRoleVectors, ValueFunction, encode_state, encode_state_with_vsa,
 };
 pub use output::{CandleFormatError, CandleFormatResult, CandleFormatter, FormatOutput, FormatSource};
+pub use vsa_rl::{RlSignal, VsaRlConfig};
 pub use synthesize::NarrativeSummary;
 pub use temporal_experience::TemporalExperience;
 pub use tool::{Tool, ToolInput, ToolOutput, ToolRegistry, ToolSignature};

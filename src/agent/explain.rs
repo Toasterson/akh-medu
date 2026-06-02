@@ -1149,6 +1149,12 @@ pub fn derivation_kind_prose(kind: &DerivationKind) -> String {
                 "LLM-elicited triple (model: {model_id}, pass: {pass}, self-consistency: {self_consistency:.2})"
             )
         }
+        DerivationKind::VsaRlUpdate { tool, reward, cycle } => {
+            format!(
+                "VSA RL update at cycle {cycle}: tool sym:{} received reward {reward:.3}",
+                tool.get()
+            )
+        }
     }
 }
 

@@ -189,3 +189,7 @@ harness = false
 [[bench]]
 name = "phase41g"
 harness = false
+
+[[bench]]
+name = "vsa_rl_cycles"
+harness = false
