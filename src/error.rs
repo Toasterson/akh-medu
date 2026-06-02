@@ -75,6 +75,10 @@ pub enum AkhError {
 
     #[error(transparent)]
     #[diagnostic(transparent)]
+    Eliza(#[from] crate::eliza::error::ElizaError),
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
     Compartment(#[from] crate::compartment::CompartmentError),
 
     #[error(transparent)]
