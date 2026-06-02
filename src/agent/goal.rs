@@ -484,6 +484,33 @@ pub fn restore_goals(engine: &Engine, predicates: &AgentPredicates) -> AgentResu
     Ok(goals)
 }
 
+/// Persist the current goal list to the durable store as a serialized blob.
+///
+/// This is the primary goal-persistence mechanism for restarts without
+/// `sparql-persist`. The blob is stored under `agent:goals` in redb and
+/// takes priority over KG-triple restoration in `restore_goals_from_store`.
+pub fn persist_goals(goals: &[Goal], engine: &Engine) -> AgentResult<()> {
+    use super::error::AgentError;
+    let bytes = bincode::serialize(goals).map_err(|e| AgentError::ConsolidationFailed {
+        message: format!("failed to serialize goals: {e}"),
+    })?;
+    engine
+        .store()
+        .put_meta(b"agent:goals", &bytes)
+        .map_err(|e| AgentError::ConsolidationFailed {
+            message: format!("failed to write goals to store: {e}"),
+        })?;
+    Ok(())
+}
+
+/// Try to restore goals from the durable store blob written by `persist_goals`.
+///
+/// Returns `None` if no persisted blob exists (fresh engine or memory-only).
+pub fn restore_goals_from_store(engine: &Engine) -> Option<Vec<Goal>> {
+    let bytes = engine.store().get_meta(b"agent:goals").ok()??;
+    bincode::deserialize::<Vec<Goal>>(&bytes).ok()
+}
+
 /// Clear all goals from the in-memory goal list.
 ///
 /// Note: The KG does not currently support triple removal, so goal symbols

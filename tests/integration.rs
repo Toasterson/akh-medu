@@ -1345,7 +1345,10 @@ fn goal_status_restore_deterministic() {
 
         // Transition: Active -> Completed (adds a second has_status triple).
         agent.complete_goal(goal_id).unwrap();
-        engine.persist().unwrap();
+        // Use agent.persist() so goal status is saved to the durable store
+        // (engine.persist() alone only syncs to SPARQL, which is in-memory
+        // without the sparql-persist feature).
+        agent.persist().unwrap();
     }
 
     // Reopen and verify the restored goal picks the LATEST status (Completed).
