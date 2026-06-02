@@ -737,6 +737,14 @@ pub enum DerivationKind {
         reward: f32,
         cycle: u64,
     },
+
+    // --- Import/Export (MCP import_export tools) ------------------------------
+
+    /// Triples were imported from a file (MCP import_triples tool).
+    FileImport {
+        source_path: String,
+        format: String,
+    },
 }
 
 impl DerivationKind {
@@ -842,6 +850,7 @@ impl DerivationKind {
             Self::ClusterTopologyIngested { .. } => 96,
             Self::KnowledgeElicitation { .. } => 97,
             Self::VsaRlUpdate { .. } => 98,
+            Self::FileImport { .. } => 99,
         }
     }
 }

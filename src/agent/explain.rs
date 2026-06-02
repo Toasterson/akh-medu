@@ -1155,6 +1155,12 @@ pub fn derivation_kind_prose(kind: &DerivationKind) -> String {
                 tool.get()
             )
         }
+        DerivationKind::FileImport {
+            source_path,
+            format,
+        } => {
+            format!("imported from file \"{source_path}\" ({format})")
+        }
     }
 }
 

@@ -287,6 +287,20 @@ impl Engine {
             }
         }
 
+        // Fallback: restore KG triples from redb if SPARQL didn't provide any
+        // (e.g. sparql-persist feature is disabled or this is the first run after
+        //  upgrading to redb-backed triple persistence).
+        if knowledge_graph.triple_count() == 0 {
+            if let Ok(Some(bytes)) = store.get_meta(b"kg:triples") {
+                if let Ok(triples) = bincode::deserialize::<Vec<crate::graph::Triple>>(&bytes) {
+                    if !triples.is_empty() {
+                        let count = knowledge_graph.bulk_load(&triples).unwrap_or(0);
+                        tracing::info!(triples = count, "knowledge graph restored from redb fallback");
+                    }
+                }
+            }
+        }
+
         // Restore registry and allocator from persistent storage if available.
         let registry = SymbolRegistry::restore(&store).unwrap_or_else(|e| {
             tracing::debug!(error = %e, "registry restore skipped, starting fresh");
