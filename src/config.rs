@@ -182,6 +182,7 @@ impl DaemonSection {
                 .knowledge_extraction_secs
                 .map_or(defaults.knowledge_extraction_interval, Duration::from_secs),
             bridge_training_interval: defaults.bridge_training_interval,
+            openclaw_sync_interval: defaults.openclaw_sync_interval,
             max_cycles: self.max_cycles,
         }
     }

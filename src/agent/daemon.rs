@@ -1111,9 +1111,12 @@ impl AgentDaemon {
         if signatures.is_empty() {
             return;
         }
+        // Clone the `Arc<Engine>` so the read borrow of `engine` does not
+        // conflict with the `&mut` borrow of `causal_manager` below.
+        let engine = agent.engine.clone();
         match agent
             .causal_manager
-            .bootstrap_from_signatures(&signatures, &agent.engine)
+            .bootstrap_from_signatures(&signatures, &engine)
         {
             Ok(0) => {
                 tracing::debug!(
@@ -1132,7 +1135,7 @@ impl AgentDaemon {
                     total = agent.causal_manager.schemas.len(),
                     "daemon: causal world model bootstrapped",
                 );
-                if let Err(e) = agent.causal_manager.persist(&agent.engine) {
+                if let Err(e) = agent.causal_manager.persist(&engine) {
                     tracing::warn!("daemon: failed to persist causal schemas: {e}");
                 }
             }
