@@ -569,6 +569,40 @@ pub fn build_dialogue_prompt_with_kg(
     )
 }
 
+/// Build a prompt for open-ended generation (creative writing, hypotheticals, etc.).
+///
+/// Injects KG facts into the system context when available to ground the response
+/// in known facts and reduce hallucination.
+pub fn build_open_ended_prompt(
+    query: &str,
+    persona_name: &str,
+    traits: &[String],
+    kg_context: Option<&str>,
+) -> String {
+    let traits_str = if traits.is_empty() {
+        "knowledgeable and thoughtful".to_string()
+    } else {
+        traits.join(", ")
+    };
+
+    let context_block = match kg_context {
+        Some(ctx) if !ctx.trim().is_empty() => format!(
+            "\n\nHere are relevant facts from my knowledge graph:\n{ctx}\n\nUse these facts where relevant but feel free to be creative."
+        ),
+        _ => String::new(),
+    };
+
+    format!(
+        "<|im_start|>system\n\
+         You are {persona_name}, a knowledge engine that is {traits_str}.\
+         {context_block}\n\
+         Respond helpfully and concisely. No hashtags. No numbered lists unless asked.<|im_end|>\n\
+         <|im_start|>user\n\
+         {query}<|im_end|>\n\
+         <|im_start|>assistant\n"
+    )
+}
+
 // ── JSON parsing ───────────────────────────────────────────────────────────
 
 /// Parse a JSON string into an AbsTree.

@@ -30,6 +30,14 @@ pub mod script;
 pub use engine::ElizaEngine;
 pub use script::{Keyword, Rule, Script, ScriptError, ScriptResult};
 
+// ── Routing classifier (PR #176) — reconciled into the canonical dir ──────────
+// PR #176 originally landed this as `src/agent/eliza.rs`, colliding with this
+// directory. Its classifier (KG-grounded vs LLM-fallback routing) is lifted here
+// as `routing`, with its type exposed as `ElizaRouter` to avoid clashing with the
+// pattern-matching `ElizaEngine` above.
+pub mod routing;
+pub use routing::{ElizaRouter, ElizaRouting, FallbackReason};
+
 // ── KDL hot-reload engine (PR #178) — feature-gated ───────────────────────────
 // `eliza` pulls in the `knuffel` KDL parser and `notify` filesystem watcher and
 // requires `daemon` (see Cargo.toml). The hot-reload watcher lives in its own

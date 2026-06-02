@@ -6,12 +6,14 @@
 //! through `ChatProcessor::process_input()`, which implements:
 //!
 //! 1. Structural command fast-path (help, status, goals, etc.)
-//! 2. NLU pipeline parse → AbsTree dispatch (dialogue acts, facts, queries)
-//! 3. Escalation to autonomous goal when all else fails
+//! 2. ELIZA routing — classify before NLU; creative queries → LLM, factual → KG
+//! 3. NLU pipeline parse → AbsTree dispatch (dialogue acts, facts, queries)
+//! 4. Escalation to autonomous goal when all else fails
 
 use std::sync::Arc;
 
 use crate::agent::Agent;
+use crate::agent::eliza::{ElizaRouter, ElizaRouting, FallbackReason};
 use crate::agent::nlp::QuestionWord;
 #[allow(deprecated)]
 use crate::agent::{classify_intent, UserIntent};
@@ -64,12 +66,17 @@ impl Default for ChatProcessorConfig {
 /// then dispatched by variant: dialogue acts go to the DialogueManager,
 /// assertable structures are ingested as facts, queries are grounded, and
 /// unrecognized input is escalated to an autonomous goal.
+///
+/// ELIZA routing is applied before NLU: creative/open-ended queries go to
+/// the LLM with KG-fact context, factual queries go to the KG pipeline.
 pub struct ChatProcessor {
     nlu_pipeline: NluPipeline,
     config: ChatProcessorConfig,
     lexicon: Lexicon,
     /// Session-scoped KG context cache for LLM prompt injection.
     kg_cache: KgContextCache,
+    /// ELIZA routing classifier (KG vs LLM decision).
+    eliza: ElizaRouter,
 }
 
 impl ChatProcessor {
@@ -103,6 +110,7 @@ impl ChatProcessor {
             },
             lexicon,
             kg_cache: KgContextCache::new(),
+            eliza: ElizaRouter::new(),
         }
     }
 
@@ -133,6 +141,18 @@ impl ChatProcessor {
             #[allow(deprecated)]
             let intent = classify_intent(trimmed);
             return self.dispatch_structural(intent, trimmed, agent, engine);
+        }
+
+        // ── ELIZA routing — classify before NLU ─────────────────────
+        // Creative/open-ended queries bypass the KG path and go to the LLM
+        // with KG-fact context injected. Factual queries continue to the NLU
+        // pipeline which will ground them against the knowledge graph.
+        let eliza_routing = self.eliza.classify(trimmed);
+        if let ElizaRouting::LlmFallback { reason } = &eliza_routing {
+            if matches!(reason, FallbackReason::Creative) {
+                return self.handle_creative_llm_fallback(trimmed, agent, engine);
+            }
+            // LowConfidence: let NLU try — it may still parse well enough.
         }
 
         // ── NLU pipeline (all other input) ──────────────────────────
@@ -190,6 +210,11 @@ impl ChatProcessor {
     pub fn persist_nlu_state(&self, engine: &Engine) {
         let ranker_bytes = self.nlu_pipeline.ranker().to_bytes();
         let _ = engine.store().put_meta(b"nlu_ranker_state", &ranker_bytes);
+    }
+
+    /// Access the ELIZA routing classifier.
+    pub fn eliza(&self) -> &ElizaRouter {
+        &self.eliza
     }
 
     /// Access the NLU pipeline (e.g. for model loading status checks).
@@ -1138,6 +1163,105 @@ impl ChatProcessor {
                 "No psyche loaded. Run `akh awaken resolve <name>` to awaken.".to_string(),
             ));
         }
+    }
+
+    // ── ELIZA LLM fallback ──────────────────────────────────────────
+
+    /// Handle a creative or open-ended query via LLM with KG-fact context.
+    ///
+    /// Flow:
+    /// 1. Extract noun-like tokens from the input and query the KG for each.
+    /// 2. Summarize any found triples as short text context.
+    /// 3. Call the LLM with persona + KG context + the original query.
+    /// 4. If LLM unavailable, fall through to OODA goal escalation.
+    fn handle_creative_llm_fallback(
+        &mut self,
+        original_input: &str,
+        agent: &mut Agent,
+        engine: &Arc<Engine>,
+    ) -> Vec<AkhMessage> {
+        let grammar = self.config.grammar.clone();
+        let mut msgs = Vec::new();
+
+        // Collect KG facts for any nouns in the input.
+        let kg_context = self.collect_kg_context_for_input(original_input, engine);
+        let kg_context_str = kg_context.join("; ");
+        let kg_context_opt = if kg_context_str.is_empty() {
+            None
+        } else {
+            Some(kg_context_str.as_str())
+        };
+
+        let (name, traits) = Self::persona_name_and_traits(engine);
+
+        tracing::info!(
+            query = original_input,
+            kg_facts = kg_context.len(),
+            "ELIZA: routing creative query to LLM fallback"
+        );
+
+        // Try LLM generation with persona + KG context.
+        if let Some(text) = self
+            .nlu_pipeline
+            .generate_open_ended(original_input, &name, &traits, kg_context_opt)
+        {
+            if !text.trim().is_empty() {
+                agent.conversation_state_mut().record_agent_turn(&text);
+                msgs.push(AkhMessage::narrative(&text, &grammar));
+                return msgs;
+            }
+        }
+
+        // LLM unavailable or returned empty — fall back to OODA goal escalation.
+        tracing::debug!("LLM fallback returned nothing; escalating to goal");
+        self.escalate_to_goal(
+            &mut msgs,
+            agent,
+            &grammar,
+            original_input,
+            &format!("Exploring \"{original_input}\"."),
+        );
+        msgs
+    }
+
+    /// Extract KG facts for noun-like tokens in `input`.
+    ///
+    /// Filters stop words and tries each token against the KG. Returns a vec
+    /// of short fact strings like "Osiris is-a deity (confidence: 0.95)".
+    fn collect_kg_context_for_input(&self, input: &str, engine: &Arc<Engine>) -> Vec<String> {
+        let mut facts = Vec::new();
+        let stop_words = [
+            "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
+            "to", "of", "for", "in", "on", "at", "by", "with", "from", "into",
+            "and", "or", "but", "if", "then", "that", "this", "it", "me", "you",
+            "we", "they", "he", "she", "what", "which", "who", "write", "about",
+            "tell", "please", "create", "make", "compose", "imagine", "poem",
+            "story", "essay", "blog", "joke",
+        ];
+
+        let seen_tokens: std::collections::HashSet<String> = input
+            .split_whitespace()
+            .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase())
+            .filter(|w| !w.is_empty() && !stop_words.contains(&w.as_str()))
+            .collect();
+
+        for token in &seen_tokens {
+            if let Ok(sym_id) = engine.resolve_symbol(token) {
+                let triples = engine.triples_from(sym_id);
+                for triple in triples.iter().take(3) {
+                    let subj_label = engine.resolve_label(triple.subject);
+                    let pred_label = engine.resolve_label(triple.predicate);
+                    let obj_label = engine.resolve_label(triple.object);
+                    facts.push(format!(
+                        "{subj_label} {pred_label} {obj_label} (confidence: {:.2})",
+                        triple.confidence
+                    ));
+                }
+            }
+        }
+
+        facts.truncate(10); // Cap context size to avoid prompt overflow.
+        facts
     }
 
     // ── Shared helpers ──────────────────────────────────────────────
