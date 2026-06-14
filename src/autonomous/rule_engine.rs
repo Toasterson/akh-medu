@@ -21,6 +21,9 @@ use super::rules::{InferenceRule, RuleSet, RuleTerm, TriplePattern};
 /// agent learning and scaffolding. Entities matching these patterns should be
 /// excluded from rule inference to prevent nonsense transitive closures (e.g.
 /// `Tecton → is-a → Stor01` through intermediate tool-output entities).
+///
+/// Also used by the extraction pipeline to reject scaffolding entities before
+/// they are persisted to the knowledge graph (episode bleed prevention).
 pub fn is_noise_entity(name: &str) -> bool {
     // Agent learning artifacts
     name.starts_with("episode:")
@@ -33,8 +36,18 @@ pub fn is_noise_entity(name: &str) -> bool {
     || name.starts_with("desc:")
     // Numeric rate/certainty markers like "rate:0.8000"
     || name.starts_with("rate:")
-    // Bare numeric strings like "0.9910"
+    // Tool invocation names like "tool:similarity_search", "tool:memory_recall"
+    || name.starts_with("tool:")
+    // Status literals like "status:dormant", "status:active"
+    || name.starts_with("status:")
+    // Priority literals like "priority:69", "priority:200"
+    || name.starts_with("priority:")
+    // Bare numeric strings like "0.9910" or "69"
     || is_numeric_string(name)
+    // File paths and document names (SOUL.md, memory/, src/agent/foo.rs)
+    || is_file_path(name)
+    // UUID-like identifiers used for episodes, work items, etc.
+    || is_uuid_like(name)
 }
 
 /// Returns `true` if the string is purely numeric (digits and at most one decimal point).
@@ -54,6 +67,48 @@ fn is_numeric_string(s: &str) -> bool {
         }
     }
     true
+}
+
+/// Returns `true` if the string looks like a file path or document name.
+///
+/// Matches:
+/// - Directory-like strings ending with `/` (e.g. `memory/`)
+/// - Strings ending with a known file extension (e.g. `SOUL.md`, `src/agent/foo.rs`)
+fn is_file_path(s: &str) -> bool {
+    if s.ends_with('/') {
+        return true;
+    }
+    const FILE_EXTS: &[&str] = &[
+        ".md", ".rs", ".toml", ".json", ".py", ".ts", ".js", ".yaml", ".yml", ".txt", ".sh",
+        ".html", ".xml",
+    ];
+    if FILE_EXTS.iter().any(|ext| s.ends_with(ext)) {
+        // Accept if it has a path separator or has no spaces (bare filename)
+        return s.contains('/') || !s.contains(' ');
+    }
+    false
+}
+
+/// Returns `true` if the string looks like a UUID (8-4-4-4-12 lowercase hex).
+///
+/// Matches both hyphenated (`019e4909-cf4b-70e1-a703-287c3fdea3ef`) and
+/// compact (`019e4909cf4b70e1a703287c3fdea3ef`) forms of 128-bit identifiers.
+fn is_uuid_like(s: &str) -> bool {
+    // Hyphenated UUID: exactly 36 chars
+    if s.len() == 36 {
+        let b = s.as_bytes();
+        if b[8] == b'-' && b[13] == b'-' && b[18] == b'-' && b[23] == b'-' {
+            return s
+                .chars()
+                .filter(|&c| c != '-')
+                .all(|c| c.is_ascii_hexdigit());
+        }
+    }
+    // Compact UUID: exactly 32 hex chars
+    if s.len() == 32 {
+        return s.chars().all(|c| c.is_ascii_hexdigit());
+    }
+    false
 }
 
 // ---------------------------------------------------------------------------
@@ -893,21 +948,54 @@ mod tests {
 
     #[test]
     fn noise_entity_detection_patterns() {
-        // These should all be recognized as noise.
+        // Agent learning artifacts.
         assert!(is_noise_entity("episode:42"));
         assert!(is_noise_entity("goal:learn_rust"));
         assert!(is_noise_entity("criteria:quality_score"));
         assert!(is_noise_entity("expand:some_concept"));
         assert!(is_noise_entity("desc:a_description"));
-        assert!(is_noise_entity("rate:0.8000"));
-        assert!(is_noise_entity("0.9910"));
 
-        // These should NOT be recognized as noise.
+        // Numeric/rate/priority/status markers.
+        assert!(is_noise_entity("rate:0.8000"));
+        assert!(is_noise_entity("status:dormant"));
+        assert!(is_noise_entity("status:active"));
+        assert!(is_noise_entity("priority:69"));
+        assert!(is_noise_entity("priority:200"));
+
+        // Tool invocation names.
+        assert!(is_noise_entity("tool:similarity_search"));
+        assert!(is_noise_entity("tool:memory_recall"));
+        assert!(is_noise_entity("tool:library_search"));
+
+        // Bare numeric strings (decimal and integer).
+        assert!(is_noise_entity("0.9910"));
+        assert!(is_noise_entity("69"));
+        assert!(is_numeric_string("0.8"));
+        assert!(!is_numeric_string(""));
+        assert!(!is_numeric_string("abc"));
+
+        // File paths and document names.
+        assert!(is_noise_entity("SOUL.md"));
+        assert!(is_noise_entity("MEMORY.md"));
+        assert!(is_noise_entity("memory/"));
+        assert!(is_noise_entity("src/agent/foo.rs"));
+        assert!(is_noise_entity("config.toml"));
+        assert!(is_noise_entity("data.json"));
+
+        // UUID-like identifiers.
+        assert!(is_noise_entity("019e4909-cf4b-70e1-a703-287c3fdea3ef"));
+        assert!(is_uuid_like("019e4909cf4b70e1a703287c3fdea3ef")); // compact
+        assert!(!is_uuid_like("not-a-uuid"));
+
+        // Domain entities that must NOT be filtered.
         assert!(!is_noise_entity("Tecton"));
         assert!(!is_noise_entity("MacMini"));
         assert!(!is_noise_entity("Stor01"));
         assert!(!is_noise_entity("is-a"));
         assert!(!is_noise_entity("part-of"));
+        assert!(!is_noise_entity("child-of"));
+        assert!(!is_noise_entity("Ptah"));
+        assert!(!is_noise_entity("ForgejoActions")); // CI brand name — filtered via LLM prompt, not here
     }
 
     #[test]

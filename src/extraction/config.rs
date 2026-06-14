@@ -83,11 +83,27 @@ impl Default for ExtractionConfig {
     }
 }
 
-fn default_true() -> bool { true }
-fn default_max_chunk() -> usize { 2000 }
-fn default_min_confidence() -> f32 { 0.5 }
-fn default_max_triples() -> usize { 20 }
-fn default_max_api_calls() -> usize { 10 }
-fn default_max_tokens() -> u32 { 512 }
-fn default_temperature() -> f32 { 0.1 }
-fn default_timeout() -> u64 { 30 }
+fn default_true() -> bool {
+    true
+}
+fn default_max_chunk() -> usize {
+    2000
+}
+fn default_min_confidence() -> f32 {
+    0.5
+}
+fn default_max_triples() -> usize {
+    20
+}
+fn default_max_api_calls() -> usize {
+    10
+}
+fn default_max_tokens() -> u32 {
+    512
+}
+fn default_temperature() -> f32 {
+    0.1
+}
+fn default_timeout() -> u64 {
+    30
+}
