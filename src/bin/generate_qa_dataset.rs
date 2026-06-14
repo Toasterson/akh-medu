@@ -278,6 +278,8 @@ fn ennead_agents() -> Vec<AgentDef> {
                     dominant_archetype: "sage".into(),
                 },
                 awakened: true,
+                ocean: None,
+                ennead_role: None,
             },
         },
         AgentDef {
@@ -316,6 +318,8 @@ fn ennead_agents() -> Vec<AgentDef> {
                     dominant_archetype: "explorer".into(),
                 },
                 awakened: true,
+                ocean: None,
+                ennead_role: None,
             },
         },
         AgentDef {
@@ -359,6 +363,8 @@ fn ennead_agents() -> Vec<AgentDef> {
                     dominant_archetype: "healer".into(),
                 },
                 awakened: true,
+                ocean: None,
+                ennead_role: None,
             },
         },
         AgentDef {
@@ -397,6 +403,8 @@ fn ennead_agents() -> Vec<AgentDef> {
                     dominant_archetype: "guardian".into(),
                 },
                 awakened: true,
+                ocean: None,
+                ennead_role: None,
             },
         },
         AgentDef {
@@ -436,6 +444,8 @@ fn ennead_agents() -> Vec<AgentDef> {
                     dominant_archetype: "explorer".into(),
                 },
                 awakened: true,
+                ocean: None,
+                ennead_role: None,
             },
         },
         AgentDef {
@@ -475,6 +485,8 @@ fn ennead_agents() -> Vec<AgentDef> {
                     dominant_archetype: "explorer".into(),
                 },
                 awakened: true,
+                ocean: None,
+                ennead_role: None,
             },
         },
     ]
