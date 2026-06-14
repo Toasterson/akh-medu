@@ -38,6 +38,38 @@ use crate::extraction::config::ExternalApiConfig;
 use super::ollama::{OllamaClient, OllamaConfig, OllamaError};
 
 // ---------------------------------------------------------------------------
+// PromptMode
+// ---------------------------------------------------------------------------
+
+/// Controls how the agent's system prompt is structured for a given model.
+///
+/// Auto-detected from the model name by [`detect_prompt_mode`], but can be
+/// overridden via [`ModelManagerConfig::prompt_mode`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptMode {
+    /// Full Psyche-encoded prompt — best for capable models (e.g. DeepSeek).
+    #[default]
+    Standard,
+    /// Compact prompt with strict brevity constraints — for smaller or verbose
+    /// models (e.g. Gemma 4) that otherwise produce excessive text per cycle,
+    /// inflating OODA cycle counts.
+    Terse,
+}
+
+/// Auto-detect the prompt mode from a model identifier string.
+///
+/// Returns `PromptMode::Terse` when `model` contains `"gemma"` (case-insensitive),
+/// `PromptMode::Standard` otherwise.
+pub fn detect_prompt_mode(model: &str) -> PromptMode {
+    if model.to_ascii_lowercase().contains("gemma") {
+        PromptMode::Terse
+    } else {
+        PromptMode::Standard
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------------
 
@@ -55,6 +87,16 @@ pub struct ModelManagerConfig {
     /// TTL in seconds before an idle agent entry is evicted (default: 300 = 5 min).
     #[serde(default = "default_ttl")]
     pub idle_ttl_secs: u64,
+    /// Explicit prompt mode override.
+    ///
+    /// When `None` (the default), the mode is auto-detected from `ollama.model`:
+    /// any model whose name contains `"gemma"` (case-insensitive) gets
+    /// [`PromptMode::Terse`]; everything else gets [`PromptMode::Standard`].
+    ///
+    /// Set to `Some(PromptMode::Terse)` to force terse mode for other small or
+    /// verbose models, or `Some(PromptMode::Standard)` to suppress auto-detection.
+    #[serde(default)]
+    pub prompt_mode: Option<PromptMode>,
 }
 
 impl Default for ModelManagerConfig {
@@ -63,6 +105,7 @@ impl Default for ModelManagerConfig {
             ollama: OllamaConfig::default(),
             fallback_api: None,
             idle_ttl_secs: default_ttl(),
+            prompt_mode: None,
         }
     }
 }
@@ -152,17 +195,33 @@ pub struct AgentModelManager {
     config: ModelManagerConfig,
     ollama: OllamaClient,
     agents: Mutex<HashMap<String, AgentEntry>>,
+    /// Resolved prompt mode for this manager (auto-detected or config-overridden).
+    prompt_mode: PromptMode,
 }
 
 impl AgentModelManager {
     /// Create a new manager with the given config.
     pub fn new(config: ModelManagerConfig) -> Self {
+        let prompt_mode = config
+            .prompt_mode
+            .unwrap_or_else(|| detect_prompt_mode(&config.ollama.model));
         let ollama = OllamaClient::new(config.ollama.clone());
+        tracing::debug!(
+            model = %config.ollama.model,
+            ?prompt_mode,
+            "model manager initialised",
+        );
         Self {
             config,
             ollama,
             agents: Mutex::new(HashMap::new()),
+            prompt_mode,
         }
+    }
+
+    /// Return the prompt mode in effect for this manager.
+    pub fn prompt_mode(&self) -> PromptMode {
+        self.prompt_mode
     }
 
     // ── Registration ───────────────────────────────────────────────────────
@@ -175,7 +234,7 @@ impl AgentModelManager {
     /// Callers can pass `None` for `psyche` to get a generic system prompt
     /// keyed only on the agent's name.
     pub fn load_agent(&self, agent_id: &str, agent_name: &str, psyche: Option<&Psyche>) {
-        let prompt = build_system_prompt(agent_id, agent_name, psyche);
+        let prompt = build_system_prompt(agent_id, agent_name, psyche, self.prompt_mode);
         let mut agents = self.agents.lock().expect("model manager lock poisoned");
         let entry = agents.entry(agent_id.to_string()).or_insert_with(|| AgentEntry {
             system_prompt: prompt.clone(),
@@ -391,7 +450,34 @@ impl AgentModelManager {
 /// knowledge-graph facts.
 ///
 /// When `psyche` is `None`, a minimal generic prompt is returned.
-pub fn build_system_prompt(agent_id: &str, agent_name: &str, psyche: Option<&Psyche>) -> String {
+///
+/// When `mode` is [`PromptMode::Terse`], a strict brevity constraint block is
+/// appended.  This significantly reduces OODA cycle counts for smaller or verbose
+/// models such as Gemma 4 (observed: 30 cycles/fact → ~4 cycles/fact baseline).
+pub fn build_system_prompt(
+    agent_id: &str,
+    agent_name: &str,
+    psyche: Option<&Psyche>,
+    mode: PromptMode,
+) -> String {
+    let body = build_system_prompt_body(agent_id, agent_name, psyche);
+    match mode {
+        PromptMode::Standard => body,
+        PromptMode::Terse => format!("{body}\n\n{TERSE_CONSTRAINTS}"),
+    }
+}
+
+/// Terse-mode constraint block injected for verbose/small models (e.g. Gemma 4).
+///
+/// Keeps each model response under ~50 tokens so the OODA loop converges in
+/// fewer cycles per fact.
+const TERSE_CONSTRAINTS: &str = "\
+## Response Constraints (Terse Mode)\n\
+CRITICAL: Respond in at most 2 sentences. No preamble. No summaries.\n\
+State only the required answer or the chosen tool and its parameters.\n\
+Do not explain your reasoning. Do not repeat the question. Just act.";
+
+fn build_system_prompt_body(agent_id: &str, agent_name: &str, psyche: Option<&Psyche>) -> String {
     let Some(p) = psyche else {
         return format!(
             "You are {agent_name} (id: {agent_id}), an autonomous neuro-symbolic AI agent. \
@@ -498,7 +584,7 @@ mod tests {
 
     #[test]
     fn build_system_prompt_none_psyche() {
-        let prompt = build_system_prompt("a1", "GenericAgent", None);
+        let prompt = build_system_prompt("a1", "GenericAgent", None, PromptMode::Standard);
         assert!(prompt.contains("GenericAgent"));
         assert!(prompt.contains("a1"));
         assert!(prompt.contains("neuro-symbolic"));
@@ -507,7 +593,7 @@ mod tests {
     #[test]
     fn build_system_prompt_tecton_contains_ptah_traits() {
         let p = tecton_psyche();
-        let prompt = build_system_prompt("tecton-01", "Tecton", Some(&p));
+        let prompt = build_system_prompt("tecton-01", "Tecton", Some(&p), PromptMode::Standard);
         assert!(prompt.contains("Ptah"));
         assert!(prompt.contains("creative"));
         assert!(prompt.contains("inspiring"));
@@ -517,7 +603,7 @@ mod tests {
     #[test]
     fn build_system_prompt_thoth_contains_thoth_traits() {
         let p = thoth_psyche();
-        let prompt = build_system_prompt("thoth-01", "Thoth", Some(&p));
+        let prompt = build_system_prompt("thoth-01", "Thoth", Some(&p), PromptMode::Standard);
         assert!(prompt.contains("Thoth"));
         assert!(prompt.contains("analytical"));
         assert!(prompt.contains("scholarly"));
@@ -525,9 +611,90 @@ mod tests {
 
     #[test]
     fn tecton_and_thoth_produce_different_prompts() {
-        let tecton = build_system_prompt("t1", "Tecton", Some(&tecton_psyche()));
-        let thoth = build_system_prompt("t2", "Thoth", Some(&thoth_psyche()));
+        let tecton = build_system_prompt("t1", "Tecton", Some(&tecton_psyche()), PromptMode::Standard);
+        let thoth = build_system_prompt("t2", "Thoth", Some(&thoth_psyche()), PromptMode::Standard);
         assert_ne!(tecton, thoth, "different psyches must produce different prompts");
+    }
+
+    // ── PromptMode tests ────────────────────────────────────────────────
+
+    #[test]
+    fn detect_prompt_mode_gemma_is_terse() {
+        assert_eq!(detect_prompt_mode("gemma4:e4b"), PromptMode::Terse);
+        assert_eq!(detect_prompt_mode("gemma3:27b"), PromptMode::Terse);
+        assert_eq!(detect_prompt_mode("Gemma4:e4b"), PromptMode::Terse);
+        assert_eq!(detect_prompt_mode("GEMMA"), PromptMode::Terse);
+    }
+
+    #[test]
+    fn detect_prompt_mode_non_gemma_is_standard() {
+        assert_eq!(detect_prompt_mode("deepseek-r1"), PromptMode::Standard);
+        assert_eq!(detect_prompt_mode("llama3:8b"), PromptMode::Standard);
+        assert_eq!(detect_prompt_mode("mistral:7b"), PromptMode::Standard);
+        assert_eq!(detect_prompt_mode(""), PromptMode::Standard);
+    }
+
+    #[test]
+    fn terse_prompt_contains_constraints() {
+        let prompt = build_system_prompt("a1", "Akh", None, PromptMode::Terse);
+        assert!(
+            prompt.contains("Terse Mode"),
+            "terse prompt must include constraint block: {prompt}",
+        );
+        assert!(
+            prompt.contains("2 sentences"),
+            "terse prompt must cap response length: {prompt}",
+        );
+    }
+
+    #[test]
+    fn standard_prompt_lacks_terse_constraints() {
+        let prompt = build_system_prompt("a1", "Akh", None, PromptMode::Standard);
+        assert!(
+            !prompt.contains("Terse Mode"),
+            "standard prompt must not include constraint block",
+        );
+    }
+
+    #[test]
+    fn manager_auto_detects_gemma_as_terse() {
+        let cfg = ModelManagerConfig {
+            ollama: OllamaConfig {
+                model: "gemma4:e4b".into(),
+                ..OllamaConfig::default()
+            },
+            ..ModelManagerConfig::default()
+        };
+        let mgr = AgentModelManager::new(cfg);
+        assert_eq!(mgr.prompt_mode(), PromptMode::Terse);
+    }
+
+    #[test]
+    fn manager_auto_detects_deepseek_as_standard() {
+        let cfg = ModelManagerConfig {
+            ollama: OllamaConfig {
+                model: "deepseek-r1:14b".into(),
+                ..OllamaConfig::default()
+            },
+            ..ModelManagerConfig::default()
+        };
+        let mgr = AgentModelManager::new(cfg);
+        assert_eq!(mgr.prompt_mode(), PromptMode::Standard);
+    }
+
+    #[test]
+    fn manager_config_override_beats_auto_detect() {
+        // Gemma model but explicitly forced to Standard.
+        let cfg = ModelManagerConfig {
+            ollama: OllamaConfig {
+                model: "gemma4:e4b".into(),
+                ..OllamaConfig::default()
+            },
+            prompt_mode: Some(PromptMode::Standard),
+            ..ModelManagerConfig::default()
+        };
+        let mgr = AgentModelManager::new(cfg);
+        assert_eq!(mgr.prompt_mode(), PromptMode::Standard);
     }
 
     #[test]
@@ -580,6 +747,7 @@ mod tests {
             },
             fallback_api: None,
             idle_ttl_secs: 300,
+            prompt_mode: None,
         };
         let mgr = AgentModelManager::new(cfg);
         mgr.load_agent("a1", "Alice", None);

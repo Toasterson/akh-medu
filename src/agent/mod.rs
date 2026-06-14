@@ -227,7 +227,7 @@ pub use semantic_enrichment::{EnrichmentResult, SemanticPredicates};
 pub use mcts::{MctsConfig, MctsNode, MctsPlanner, MctsReflection, MctsResult, prune_tree};
 pub use model_manager::{
     AgentModelManager, ModelManagerConfig, ModelManagerError, ModelManagerResult,
-    build_system_prompt,
+    PromptMode, build_system_prompt, detect_prompt_mode,
 };
 pub use ollama::{OllamaClient, OllamaConfig, OllamaError, OllamaResult};
 pub use sleep::{ConsolidationPhase, SleepConfig, SleepCycle, SleepMetrics};

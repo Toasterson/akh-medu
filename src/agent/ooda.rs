@@ -185,6 +185,25 @@ pub fn run_ooda_cycle_with_mode(
         );
     }
 
+    // ── OODA transcript (profiling) ───────────────────────────────────────
+    // Emitted at DEBUG level so it is opt-in via RUST_LOG=akh=debug.
+    // Captures per-cycle metrics useful for comparing model efficiency
+    // (e.g. Gemma 4 vs DeepSeek cycles-per-fact).
+    tracing::debug!(
+        cycle,
+        active_goals    = observation.active_goals.len(),
+        wm_size         = observation.working_memory_size,
+        knowledge_facts = orientation.relevant_knowledge.len(),
+        inferences      = orientation.inferences.len(),
+        memory_pressure = orientation.memory_pressure,
+        chosen_tool     = %decision.chosen_tool,
+        reasoning       = %decision.reasoning,
+        tool_success    = action_result.tool_output.success,
+        goal_progress   = ?action_result.goal_progress,
+        contaminants_purged,
+        "ooda:transcript",
+    );
+
     Ok(OodaCycleResult {
         cycle_number: cycle,
         observation,
