@@ -537,8 +537,19 @@ pub struct RunAgentParams {
     #[schemars(description = "Target workspace (default: \"default\")")]
     #[serde(default = "default_workspace", deserialize_with = "deserialize_workspace")]
     pub workspace: String,
-    #[schemars(description = "Comma-separated goals for the agent to pursue")]
+    #[schemars(
+        description = "Goals for the agent to pursue. Separate multiple goals with blank lines, \
+                        newlines, or semicolons. Commas within goal text are preserved as-is. \
+                        Ignored when `structured_goals` is non-empty."
+    )]
+    #[serde(default)]
     pub goals: String,
+    #[schemars(
+        description = "Explicit list of goals (takes precedence over the `goals` text field when \
+                        non-empty). Prefer this form when goals contain commas or list syntax."
+    )]
+    #[serde(default)]
+    pub structured_goals: Vec<String>,
     #[schemars(description = "Maximum OODA cycles (default: 10)")]
     #[serde(default, deserialize_with = "deserialize_opt_u32_or_str")]
     pub max_cycles: Option<u32>,
@@ -2146,7 +2157,16 @@ impl AkhMcpServer {
             let cycles = params.max_cycles.unwrap_or(10) as usize;
             agent.set_max_cycles(cycles);
             agent.clear_goals();
-            let goal_list: Vec<&str> = params.goals.split(',').map(|s| s.trim()).collect();
+            let goal_list = if !params.structured_goals.is_empty() {
+                params
+                    .structured_goals
+                    .iter()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect::<Vec<_>>()
+            } else {
+                parse_goal_text(&params.goals)
+            };
             for g in &goal_list {
                 agent
                     .add_goal(g, 128, "Agent-determined completion")
@@ -6826,6 +6846,39 @@ impl AkhMcpServer {
     }
 }
 
+// ── Goal text parsing ───────────────────────────────────────────────────
+
+/// Parse a free-text goals string into individual goal descriptions.
+///
+/// Splits on newlines and semicolons only — commas are preserved so that
+/// natural-language list phrasing like "Manage A, B, and C." stays intact
+/// as a single goal. Markdown list markers (`- `, `* `, `N. `) are stripped
+/// from each line after splitting.
+pub(crate) fn parse_goal_text(text: &str) -> Vec<String> {
+    text.split(['\n', ';'])
+        .filter_map(|s| {
+            let s = strip_list_marker(s.trim());
+            let s = s.trim();
+            if s.is_empty() { None } else { Some(s.to_string()) }
+        })
+        .collect()
+}
+
+/// Strip a leading markdown list marker from a trimmed line.
+fn strip_list_marker(s: &str) -> &str {
+    if let Some(rest) = s.strip_prefix("- ").or_else(|| s.strip_prefix("* ")) {
+        return rest;
+    }
+    // Numbered list: "1. ", "2. ", …
+    let digits_end = s.find(|c: char| !c.is_ascii_digit()).unwrap_or(0);
+    if digits_end > 0 {
+        if let Some(rest) = s[digits_end..].strip_prefix(". ") {
+            return rest;
+        }
+    }
+    s
+}
+
 // ── ServerHandler impl ──────────────────────────────────────────────────
 
 #[rmcp::tool_handler]
@@ -7005,5 +7058,78 @@ mod tests {
     #[test]
     fn default_workspace_returns_default() {
         assert_eq!(default_workspace(), "default");
+    }
+
+    #[test]
+    fn parse_goal_text_comma_is_not_a_delimiter() {
+        // The bug: "Manage A, B, C and D." must stay as one goal, not four.
+        let goals = parse_goal_text("Manage A, B, C and D.");
+        assert_eq!(goals, vec!["Manage A, B, C and D."]);
+    }
+
+    #[test]
+    fn parse_goal_text_real_world_comma_list() {
+        // Regression for the reported repro case.
+        let input = "Maintain anima cron pipeline (merge-loop, promote-loop, push-diffs, open-prs, check-prs, auto-close-landed). Surface decisions for Toasty.";
+        let goals = parse_goal_text(input);
+        assert_eq!(goals.len(), 1);
+        assert_eq!(goals[0], input);
+    }
+
+    #[test]
+    fn parse_goal_text_splits_on_newline() {
+        let goals = parse_goal_text("Goal one\nGoal two\nGoal three");
+        assert_eq!(goals, vec!["Goal one", "Goal two", "Goal three"]);
+    }
+
+    #[test]
+    fn parse_goal_text_splits_on_semicolon() {
+        let goals = parse_goal_text("Goal one; Goal two; Goal three");
+        assert_eq!(goals, vec!["Goal one", "Goal two", "Goal three"]);
+    }
+
+    #[test]
+    fn parse_goal_text_strips_markdown_bullet_markers() {
+        let goals = parse_goal_text("- Goal one\n* Goal two\n3. Goal three");
+        assert_eq!(goals, vec!["Goal one", "Goal two", "Goal three"]);
+    }
+
+    #[test]
+    fn parse_goal_text_ignores_blank_lines() {
+        let goals = parse_goal_text("Goal one\n\nGoal two\n\n");
+        assert_eq!(goals, vec!["Goal one", "Goal two"]);
+    }
+
+    #[test]
+    fn parse_goal_text_mixed_newline_and_semicolon() {
+        let goals = parse_goal_text("Goal A\nGoal B; Goal C");
+        assert_eq!(goals, vec!["Goal A", "Goal B", "Goal C"]);
+    }
+
+    #[test]
+    fn strip_list_marker_dash() {
+        assert_eq!(strip_list_marker("- some goal"), "some goal");
+    }
+
+    #[test]
+    fn strip_list_marker_star() {
+        assert_eq!(strip_list_marker("* some goal"), "some goal");
+    }
+
+    #[test]
+    fn strip_list_marker_numbered() {
+        assert_eq!(strip_list_marker("1. some goal"), "some goal");
+        assert_eq!(strip_list_marker("42. some goal"), "some goal");
+    }
+
+    #[test]
+    fn strip_list_marker_no_marker() {
+        assert_eq!(strip_list_marker("plain text"), "plain text");
+    }
+
+    #[test]
+    fn strip_list_marker_preserves_leading_comma() {
+        // Commas must not be treated as markers.
+        assert_eq!(strip_list_marker(",item"), ",item");
     }
 }
