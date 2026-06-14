@@ -73,6 +73,7 @@ pub mod preference;
 pub mod priority_reasoning;
 pub mod project;
 pub mod reflect;
+pub mod relation_enrichment;
 pub mod resource;
 pub mod semantic_enrichment;
 pub mod sleep;

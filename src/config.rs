@@ -248,6 +248,7 @@ impl DaemonSection {
                 .map_or(defaults.knowledge_elicitation_interval, Duration::from_secs),
             kg_compaction_interval: defaults.kg_compaction_interval,
             delegation_interval: defaults.delegation_interval,
+            relation_enrichment_interval: defaults.relation_enrichment_interval,
             max_cycles: self.max_cycles,
         }
     }

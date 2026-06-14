@@ -1189,6 +1189,16 @@ pub fn derivation_kind_prose(kind: &DerivationKind) -> String {
                 "perceived via {modality} (confidence: {confidence:.2}, source: {source_id})"
             )
         }
+        DerivationKind::RelationEnrichment {
+            relations_added,
+            triples_added,
+            ratio_before,
+            ratio_after,
+        } => {
+            format!(
+                "relation enrichment: +{relations_added} predicates, +{triples_added} links, ratio {ratio_before:.2}→{ratio_after:.2}"
+            )
+        }
     }
 }
 

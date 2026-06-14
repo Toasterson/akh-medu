@@ -786,6 +786,21 @@ pub enum DerivationKind {
         /// Opaque source identifier (e.g. file path, device name, or URI).
         source_id: String,
     },
+
+    // --- Relation enrichment (work item 019e4026) ----------------------------
+
+    /// The relation-enrichment daemon pass injected predicate symbols and
+    /// linking triples to improve the entity:relation ratio.
+    RelationEnrichment {
+        /// New `SymbolKind::Relation` symbols created this run.
+        relations_added: usize,
+        /// Linking triples added to connect sparse / orphaned entities.
+        triples_added: usize,
+        /// Entity:relation ratio before the pass.
+        ratio_before: f32,
+        /// Entity:relation ratio after the pass.
+        ratio_after: f32,
+    },
 }
 
 impl DerivationKind {
@@ -895,6 +910,7 @@ impl DerivationKind {
             Self::KgCompaction { .. } => 100,
             Self::AffectiveAppraisal { .. } => 101,
             Self::Perceived { .. } => 102,
+            Self::RelationEnrichment { .. } => 103,
         }
     }
 }

@@ -105,6 +105,12 @@ pub struct DaemonConfig {
     /// completed results, asserts result triples into the KG, and stores
     /// delegation provenance.
     pub delegation_interval: Duration,
+    /// Relation-enrichment interval (default: 60 min).
+    ///
+    /// Runs the [`relation_enrichment::run_relation_enrichment`] pass which
+    /// injects missing predicate symbols and links orphaned entities to drive
+    /// the entity:relation ratio toward the healthy 2–3:1 target.
+    pub relation_enrichment_interval: Duration,
     /// Maximum OODA cycles (0 = unlimited).
     pub max_cycles: usize,
 }
@@ -130,6 +136,7 @@ impl Default for DaemonConfig {
             knowledge_elicitation_interval: Duration::from_secs(1800), // 30 min
             kg_compaction_interval: Duration::from_secs(1800), // 30 min
             delegation_interval: Duration::from_secs(10),
+            relation_enrichment_interval: Duration::from_secs(3600), // 60 min
             max_cycles: 0,
         }
     }
@@ -262,6 +269,7 @@ impl AgentDaemon {
         let mut elicitation_tick = interval(self.config.knowledge_elicitation_interval);
         let mut kg_compaction_tick = interval(self.config.kg_compaction_interval);
         let mut delegation_tick = interval(self.config.delegation_interval);
+        let mut relation_enrichment_tick = interval(self.config.relation_enrichment_interval);
 
         tokio::task::block_in_place(|| {
             self.lock_agent().sink().emit(&AkhMessage::system(
@@ -356,6 +364,9 @@ impl AgentDaemon {
                 }
                 _ = delegation_tick.tick() => {
                     self.run_delegation_tick().await;
+                }
+                _ = relation_enrichment_tick.tick() => {
+                    tokio::task::block_in_place(|| self.run_relation_enrichment());
                 }
                 _ = self.wait_for_shutdown() => {
                     tokio::task::block_in_place(|| {
@@ -1166,6 +1177,51 @@ impl AgentDaemon {
         }
     }
 
+    /// Run one relation-enrichment pass.
+    ///
+    /// Injects missing predicate symbols and links orphaned entities to drive
+    /// the entity:relation ratio toward the healthy 2–3:1 target range.
+    /// Releases the agent lock before the pass runs to avoid blocking HTTP
+    /// handlers during the symbol-scan loop.
+    fn run_relation_enrichment(&self) {
+        use super::relation_enrichment::{RelationEnrichmentConfig, run_relation_enrichment};
+
+        // Brief lock: clone the engine Arc, then release.
+        let engine = {
+            let agent = self.agent.lock().unwrap();
+            agent.engine.clone()
+        };
+
+        let config = RelationEnrichmentConfig::default();
+        match run_relation_enrichment(&engine, &config) {
+            Ok(metrics) => {
+                if metrics.relations_added > 0 || metrics.triples_added > 0 {
+                    if let Ok(agent) = self.agent.lock() {
+                        agent.sink().emit(&AkhMessage::system(format!(
+                            "[daemon:relation-enrichment] +{} predicates, +{} links, ratio {:.2}→{:.2} ({}x under-represented)",
+                            metrics.relations_added,
+                            metrics.triples_added,
+                            metrics.ratio_before,
+                            metrics.ratio_after,
+                            metrics.under_represented_count,
+                        )));
+                    }
+                }
+                tracing::info!(
+                    relations_added = metrics.relations_added,
+                    triples_added = metrics.triples_added,
+                    ratio_before = metrics.ratio_before,
+                    ratio_after = metrics.ratio_after,
+                    under_represented = metrics.under_represented_count,
+                    "daemon: relation enrichment complete",
+                );
+            }
+            Err(e) => {
+                tracing::debug!(error = %e, "daemon: relation enrichment skipped");
+            }
+        }
+    }
+
     /// Phase 32 — proactive LLM knowledge elicitation for gap domains.
     ///
     /// Identifies domains with low triple density from recent gap analysis,
@@ -1550,6 +1606,10 @@ mod tests {
         assert_eq!(
             config.knowledge_elicitation_interval,
             Duration::from_secs(1800)
+        );
+        assert_eq!(
+            config.relation_enrichment_interval,
+            Duration::from_secs(3600)
         );
         assert_eq!(config.max_cycles, 0);
     }
