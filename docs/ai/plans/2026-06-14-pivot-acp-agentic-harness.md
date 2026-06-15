@@ -335,5 +335,9 @@ deleted; outbound MCP stays.
   abstraction), 056 (OpenClaw local-markdown import). ADRs are authored at their
   phase boundary (053 lands with P1; 052 with P2; etc.).
 - Update `docs/ai/architecture.md` (transport change, new modules) at P2/P3.
-- Anima work items per phase under project `019d9844-ce74-7993-a9f0-c953b8f04a4e`.
-- Seshat ingest of this plan + each ADR.
+- **Anima work items are created and managed manually by the operator** — agents
+  do **not** auto-create them. Rationale: the end goal is an illumos akh runner
+  that Anima itself *consumes* over ACP, so akh-medu must not take a build-time
+  dependency on Anima being provisioned (chicken-and-egg). Agents ingest the ACP
+  work into **Seshat only**.
+- Seshat ingest of this plan + each ADR (the canonical searchable backing).
