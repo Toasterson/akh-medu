@@ -427,7 +427,7 @@ fn dispatch_akh(
         "meta/capabilities" => Ok(serde_json::json!({
             "protocol": "acp",
             "version": crate::client::ACP_PROTOCOL_VERSION,
-            "groups": ["meta", "workspace", "symbols", "triples"],
+            "groups": ["meta", "workspace", "symbols", "triples", "query"],
             "methods": [
                 "_akh/health",
                 "_akh/meta/capabilities",
@@ -436,6 +436,7 @@ fn dispatch_akh(
                 "_akh/triples/from",
                 "_akh/symbols/create",
                 "_akh/triples/add",
+                "_akh/query/sparql",
             ],
         })),
 
@@ -548,6 +549,30 @@ fn dispatch_akh(
                 "symbols_added": symbols_added,
                 "triples_added": triples_added,
             }))
+        }
+
+        // ── query group (read-only SPARQL SELECT; requires a persistent
+        //    engine — the daemon's workspaces are persistent). ──────────────
+        "query/sparql" => {
+            let query = params
+                .get("query")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "missing required param: query".to_string())?;
+            let rows = engine
+                .sparql_query(query)
+                .map_err(|e| format!("sparql query failed: {e}"))?;
+            // Each row is a solution: a list of (variable, value) bindings.
+            let solutions: Vec<serde_json::Value> = rows
+                .into_iter()
+                .map(|row| {
+                    let obj: serde_json::Map<String, serde_json::Value> = row
+                        .into_iter()
+                        .map(|(var, val)| (var, serde_json::Value::String(val)))
+                        .collect();
+                    serde_json::Value::Object(obj)
+                })
+                .collect();
+            Ok(serde_json::json!({ "count": solutions.len(), "solutions": solutions }))
         }
 
         other => Err(format!("unknown _akh data-plane method: _akh/{other}")),
@@ -1474,6 +1499,58 @@ mod tests {
         let created = call("_akh/symbols/create", serde_json::json!({ "label": "Mars" })).await;
         assert_eq!(created["label"], "Mars");
         assert!(created["id"].as_u64().is_some(), "symbol id expected: {created}");
+
+        shutdown_tx.send(true).expect("send shutdown");
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), server).await;
+    }
+
+    /// The query group: `_akh/query/sparql` runs a SELECT over a persistent
+    /// (SPARQL-enabled) engine and returns solution bindings. Uses a tempdir
+    /// data-dir because `sparql_query` requires persistence — exactly what the
+    /// daemon's workspaces have.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn acp_ext_query_sparql() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().join("kg");
+        std::fs::create_dir_all(&data_dir).expect("data dir");
+
+        let engine = Engine::new(EngineConfig {
+            dimension: Dimension::TEST,
+            data_dir: Some(data_dir),
+            ..Default::default()
+        })
+        .expect("persistent engine");
+        engine
+            .ingest_label_triples(&[("Sun".to_string(), "is-a".to_string(), "Star".to_string(), 1.0)])
+            .expect("seed");
+        engine.persist().expect("persist");
+        let engine = Arc::new(engine);
+        let processor = ChatProcessor::new(&engine, NluPipeline::new());
+        let agent = Agent::new(Arc::clone(&engine), AgentConfig::default()).expect("agent");
+        let me = AkhAcpAgent::new(engine, Arc::new(Mutex::new(agent)), processor);
+
+        let sock = dir.path().join("akh-acp-query.sock");
+        let listener = UnixListener::bind(&sock).expect("bind unix");
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let server = tokio::spawn(async move { serve_unix_loop(me, listener, shutdown_rx).await });
+
+        let res = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            ext_request_unix(
+                &sock,
+                "_akh/query/sparql",
+                serde_json::json!({ "query": "SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 50" }),
+            ),
+        )
+        .await
+        .expect("query timed out")
+        .expect("query ok");
+
+        assert!(
+            res["count"].as_u64().unwrap() >= 1,
+            "expected ≥1 SPARQL solution for the seeded triple: {res}"
+        );
+        assert!(res["solutions"].as_array().is_some_and(|s| !s.is_empty()));
 
         shutdown_tx.send(true).expect("send shutdown");
         let _ = tokio::time::timeout(std::time::Duration::from_secs(5), server).await;

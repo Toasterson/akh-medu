@@ -898,6 +898,11 @@ enum AcpOp {
         #[arg(long, default_value = "entity")]
         kind: String,
     },
+    /// Run a read-only SPARQL SELECT against the akh's knowledge graph.
+    Query {
+        /// SPARQL SELECT query (e.g. "SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 20").
+        query: String,
+    },
 }
 
 /// Dispatch an `akh acp <op>` command: discover the daemon, send the matching
@@ -935,6 +940,9 @@ fn run_acp_command(op: &AcpOp) -> Result<()> {
             "_akh/symbols/create",
             serde_json::json!({ "label": label, "kind": kind }),
         ),
+        AcpOp::Query { query } => {
+            ("_akh/query/sparql", serde_json::json!({ "query": query }))
+        }
     };
 
     let rt = tokio::runtime::Builder::new_multi_thread()
