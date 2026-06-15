@@ -208,6 +208,12 @@ enum Commands {
         fresh: bool,
     },
 
+    /// Query a running akh's data-plane directly over ACP (`_akh/*` methods).
+    Acp {
+        #[command(subcommand)]
+        op: AcpOp,
+    },
+
     /// Manage the shared content library (ingest books, websites, documents).
     Library {
         #[command(subcommand)]
@@ -852,6 +858,70 @@ enum SeedAction {
     },
     /// Show which seeds have been applied.
     Status,
+}
+
+/// Read-only data-plane operations exposed over ACP `_akh/*` methods.
+#[derive(Subcommand)]
+enum AcpOp {
+    /// Show the akh's status (workspace name + symbol/triple counts).
+    Status,
+    /// Show the data-plane capabilities the akh advertises.
+    Capabilities,
+    /// List symbols (capped).
+    Symbols {
+        /// Maximum number of symbols to return.
+        #[arg(long, default_value_t = 50)]
+        limit: u64,
+    },
+    /// List triples originating from a symbol (by label or id).
+    Triples {
+        /// Subject symbol — a label (e.g. "Sun") or numeric id.
+        symbol: String,
+    },
+}
+
+/// Dispatch an `akh acp <op>` command: discover the daemon, send the matching
+/// `_akh/*` request over ACP, and pretty-print the JSON result. Self-contained
+/// so both the normal and client-only dispatch paths can call it.
+#[cfg(feature = "acp")]
+fn run_acp_command(op: &AcpOp) -> Result<()> {
+    let paths = akh_medu::paths::AkhPaths::resolve()
+        .map_err(|e| miette::miette!("cannot resolve XDG paths: {e}"))?;
+    let info = akh_medu::client::discover_server(&paths)
+        .ok_or_else(|| miette::miette!("No running akhomed server found."))?;
+
+    let (method, params): (&str, serde_json::Value) = match op {
+        AcpOp::Status => ("_akh/workspace/status", serde_json::json!({})),
+        AcpOp::Capabilities => ("_akh/meta/capabilities", serde_json::json!({})),
+        AcpOp::Symbols { limit } => ("_akh/symbols/list", serde_json::json!({ "limit": limit })),
+        AcpOp::Triples { symbol } => {
+            ("_akh/triples/from", serde_json::json!({ "symbol": symbol }))
+        }
+    };
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .into_diagnostic()?;
+    let result = if let Some(sock) = info.acp_socket.as_deref() {
+        rt.block_on(akh_medu::acp::ext_request_unix(sock, method, params))
+            .map_err(miette::Report::from)?
+    } else if let Some(tcp) = info.acp_tcp.as_deref() {
+        rt.block_on(akh_medu::acp::ext_request_tcp(tcp, method, params))
+            .map_err(miette::Report::from)?
+    } else {
+        miette::bail!(
+            "akhomed is running but advertises no ACP endpoint — build the daemon with --features acp."
+        );
+    };
+
+    println!("{}", serde_json::to_string_pretty(&result).into_diagnostic()?);
+    Ok(())
+}
+
+#[cfg(not(feature = "acp"))]
+fn run_acp_command(_op: &AcpOp) -> Result<()> {
+    miette::bail!("The `acp` subcommand requires building `akh` with --features acp.")
 }
 
 #[derive(Subcommand)]
@@ -3625,6 +3695,8 @@ fn main() -> Result<()> {
             agent.persist_session().into_diagnostic()?;
         }
 
+        Commands::Acp { op } => run_acp_command(&op)?,
+
         Commands::Chat { skill, headless, fresh } => {
             let ws_name = cli.workspace.clone();
 
@@ -5451,6 +5523,8 @@ fn run_client_only(cli: Cli) -> Result<()> {
         },
 
         // ── Chat ──────────────────────────────────────────────────────────
+        Commands::Acp { op } => run_acp_command(&op)?,
+
         Commands::Chat { skill: _, headless, fresh: _ } => {
             if headless {
                 miette::bail!(

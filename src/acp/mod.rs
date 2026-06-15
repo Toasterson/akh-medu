@@ -409,20 +409,84 @@ impl JsonRpcRequest for AkhExtRequest {
 /// access needs no agent lock (engine methods take `&self`); operations that
 /// mutate the agent would route through `spawn_blocking` per ADR-027 (none yet).
 /// Returns the JSON result, or an error string surfaced as a JSON-RPC error.
-fn dispatch_akh(engine: &Engine, method: &str, _params: &serde_json::Value) -> Result<serde_json::Value, String> {
+fn dispatch_akh(
+    engine: &Engine,
+    workspace: &str,
+    method: &str,
+    params: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
     let op = method.strip_prefix("_akh/").unwrap_or(method);
     match op {
+        // ── meta group ──────────────────────────────────────────────────
         "health" => Ok(serde_json::json!({
             "status": "ok",
+            "workspace": workspace,
             "symbols": engine.all_symbols().len(),
             "triples": engine.all_triples().len(),
         })),
         "meta/capabilities" => Ok(serde_json::json!({
             "protocol": "acp",
             "version": crate::client::ACP_PROTOCOL_VERSION,
-            "groups": ["meta"],
-            "methods": ["_akh/health", "_akh/meta/capabilities"],
+            "groups": ["meta", "workspace", "symbols", "triples"],
+            "methods": [
+                "_akh/health",
+                "_akh/meta/capabilities",
+                "_akh/workspace/status",
+                "_akh/symbols/list",
+                "_akh/triples/from",
+            ],
         })),
+
+        // ── workspace group ─────────────────────────────────────────────
+        "workspace/status" => Ok(serde_json::json!({
+            "workspace": workspace,
+            "symbols": engine.all_symbols().len(),
+            "triples": engine.all_triples().len(),
+        })),
+
+        // ── symbols group (read-only) ───────────────────────────────────
+        "symbols/list" => {
+            let limit = params
+                .get("limit")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(100) as usize;
+            let all = engine.all_symbols();
+            let total = all.len();
+            let symbols: Vec<_> = all.into_iter().take(limit).collect();
+            serde_json::to_value(serde_json::json!({
+                "count": total,
+                "returned": symbols.len(),
+                "symbols": symbols,
+            }))
+            .map_err(|e| e.to_string())
+        }
+
+        // ── triples group (read-only) ───────────────────────────────────
+        "triples/from" => {
+            let sym = params
+                .get("symbol")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "missing required param: symbol".to_string())?;
+            let id = engine
+                .resolve_symbol(sym)
+                .map_err(|e| format!("unknown symbol '{sym}': {e}"))?;
+            let triples: Vec<_> = engine
+                .triples_from(id)
+                .into_iter()
+                .map(|t| {
+                    serde_json::json!({
+                        "predicate": engine.resolve_label(t.predicate),
+                        "object": engine.resolve_label(t.object),
+                        "confidence": t.confidence,
+                    })
+                })
+                .collect();
+            Ok(serde_json::json!({
+                "symbol": engine.resolve_label(id),
+                "triples": triples,
+            }))
+        }
+
         other => Err(format!("unknown _akh data-plane method: _akh/{other}")),
     }
 }
@@ -505,12 +569,13 @@ fn build_connection(
                 let me = me.clone();
                 move |message: Dispatch, _cx: ConnectionTo<Client>| {
                     let engine = Arc::clone(&me.engine);
+                    let workspace = me.name.clone();
                     async move {
                         MatchDispatch::new(message)
                             .if_request(
                                 async move |req: AkhExtRequest,
                                             responder: Responder<AkhExtResponse>| {
-                                    match dispatch_akh(&engine, &req.method, &req.params) {
+                                    match dispatch_akh(&engine, &workspace, &req.method, &req.params) {
                                         Ok(value) => responder.respond(AkhExtResponse(value)),
                                         Err(e) => responder.respond_with_error(
                                             agent_client_protocol::Error::method_not_found()
@@ -1217,6 +1282,71 @@ mod tests {
         .await
         .expect("ext unknown timed out");
         assert!(unknown.is_err(), "unknown _akh method must error");
+
+        shutdown_tx.send(true).expect("send shutdown");
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), server).await;
+    }
+
+    /// The read-only introspection group (`workspace/status`, `symbols/list`,
+    /// `triples/from`) returns engine-backed JSON over the data-plane.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn acp_ext_introspection_group() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("akh-acp-introspect.sock");
+
+        let me = workspace().with_name("default");
+        let listener = UnixListener::bind(&sock).expect("bind unix");
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let server = tokio::spawn(async move { serve_unix_loop(me, listener, shutdown_rx).await });
+
+        let call = |method: &'static str, params: serde_json::Value| {
+            let sock = sock.clone();
+            async move {
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(15),
+                    ext_request_unix(&sock, method, params),
+                )
+                .await
+                .expect("ext request timed out")
+                .expect("ext request ok")
+            }
+        };
+
+        // workspace/status
+        let st = call("_akh/workspace/status", serde_json::json!({})).await;
+        assert_eq!(st["workspace"], "default");
+        assert!(st["symbols"].as_u64().unwrap() >= 3, "Sun/Star/is-a ⇒ ≥3 symbols: {st}");
+
+        // symbols/list (the seed has labels Sun, Star, is-a)
+        let syms = call("_akh/symbols/list", serde_json::json!({ "limit": 50 })).await;
+        let labels: Vec<&str> = syms["symbols"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|s| s["label"].as_str())
+            .collect();
+        assert!(labels.contains(&"Sun"), "symbols/list missing Sun: {labels:?}");
+
+        // triples/from Sun → is-a Star
+        let tr = call("_akh/triples/from", serde_json::json!({ "symbol": "Sun" })).await;
+        assert_eq!(tr["symbol"], "Sun");
+        assert!(
+            tr["triples"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|t| t["object"] == "Star"),
+            "triples/from Sun missing object Star: {tr}"
+        );
+
+        // missing required param → clean error.
+        let bad = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            ext_request_unix(&sock, "_akh/triples/from", serde_json::json!({})),
+        )
+        .await
+        .expect("timed out");
+        assert!(bad.is_err(), "triples/from without symbol must error");
 
         shutdown_tx.send(true).expect("send shutdown");
         let _ = tokio::time::timeout(std::time::Duration::from_secs(5), server).await;
