@@ -4738,7 +4738,51 @@ fn run_client_only(cli: Cli) -> Result<()> {
                 println!("  rules:   {}", activation.rules_loaded);
                 println!("  memory:  {} bytes", activation.memory_bytes);
             }
+            // Export/Import are local filesystem operations (archive/unarchive a
+            // skill directory) — no server or engine needed, so they work in
+            // client-only mode exactly as in the full build. (Pre-existing gap;
+            // see ADR-057.)
+            SkillAction::Export { name, output } => {
+                let skill_base = cli
+                    .data_dir
+                    .as_deref()
+                    .unwrap_or_else(|| Path::new(".akh-medu"));
+                let skill_dir = skill_base.join("skills").join(&name);
+                if !skill_dir.exists() {
+                    return Err(miette::miette!(
+                        "skill directory not found: {}",
+                        skill_dir.display()
+                    ));
+                }
+                let archive_name = output.unwrap_or_else(|| format!("{name}.akhskill"));
+                let archive_path = Path::new(&archive_name);
+                akh_medu::skills::share::export_skill(&skill_dir, archive_path)
+                    .map_err(|e| miette::miette!("{e}"))?;
+                println!("Exported skill '{}' to {}", name, archive_path.display());
+            }
+            SkillAction::Import { path } => {
+                let archive_path = Path::new(&path);
+                let skill_base = cli
+                    .data_dir
+                    .as_deref()
+                    .unwrap_or_else(|| Path::new(".akh-medu"));
+                let skills_dir = skill_base.join("skills");
+                std::fs::create_dir_all(&skills_dir).into_diagnostic()?;
+                let skill_id = akh_medu::skills::share::import_skill(archive_path, &skills_dir)
+                    .map_err(|e| miette::miette!("{e}"))?;
+                println!("Imported skill '{}' into {}", skill_id, skills_dir.display());
+            }
         },
+
+        // `akh cluster` needs a local engine (it ingests live cluster topology),
+        // which client-only deliberately strips — so it cannot run here. See
+        // ADR-057; the parallel client-only dispatch goes away in the collapse.
+        Commands::Cluster { .. } => {
+            miette::bail!(
+                "`akh cluster` requires a local engine and is not available in client-only \
+                 mode. Run it from a full (server) akhomed build."
+            );
+        }
 
         // ── Render ────────────────────────────────────────────────────────
         Commands::Render {
