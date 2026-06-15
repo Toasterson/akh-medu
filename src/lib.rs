@@ -29,6 +29,8 @@
 //! engine.add_triple(&Triple::new(sun.id, is_a.id, star.id)).unwrap();
 //! ```
 
+#[cfg(feature = "acp")]
+pub mod acp;
 pub mod agent;
 pub mod api_types;
 pub mod bench_phase41g;
