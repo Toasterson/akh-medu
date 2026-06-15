@@ -878,6 +878,26 @@ enum AcpOp {
         /// Subject symbol — a label (e.g. "Sun") or numeric id.
         symbol: String,
     },
+    /// Add a triple to the akh's knowledge graph.
+    AddTriple {
+        /// Subject label.
+        subject: String,
+        /// Predicate (relation) label.
+        predicate: String,
+        /// Object label.
+        object: String,
+        /// Confidence in [0.0, 1.0].
+        #[arg(long, default_value_t = 1.0)]
+        confidence: f64,
+    },
+    /// Create (or resolve) a symbol by label.
+    CreateSymbol {
+        /// Symbol label.
+        label: String,
+        /// Symbol kind: `entity` (default) or `relation`.
+        #[arg(long, default_value = "entity")]
+        kind: String,
+    },
 }
 
 /// Dispatch an `akh acp <op>` command: discover the daemon, send the matching
@@ -897,6 +917,24 @@ fn run_acp_command(op: &AcpOp) -> Result<()> {
         AcpOp::Triples { symbol } => {
             ("_akh/triples/from", serde_json::json!({ "symbol": symbol }))
         }
+        AcpOp::AddTriple {
+            subject,
+            predicate,
+            object,
+            confidence,
+        } => (
+            "_akh/triples/add",
+            serde_json::json!({
+                "subject": subject,
+                "predicate": predicate,
+                "object": object,
+                "confidence": confidence,
+            }),
+        ),
+        AcpOp::CreateSymbol { label, kind } => (
+            "_akh/symbols/create",
+            serde_json::json!({ "label": label, "kind": kind }),
+        ),
     };
 
     let rt = tokio::runtime::Builder::new_multi_thread()

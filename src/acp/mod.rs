@@ -434,6 +434,8 @@ fn dispatch_akh(
                 "_akh/workspace/status",
                 "_akh/symbols/list",
                 "_akh/triples/from",
+                "_akh/symbols/create",
+                "_akh/triples/add",
             ],
         })),
 
@@ -484,6 +486,67 @@ fn dispatch_akh(
             Ok(serde_json::json!({
                 "symbol": engine.resolve_label(id),
                 "triples": triples,
+            }))
+        }
+
+        // ── write group (engine KG mutations; &self + internal sync, no agent
+        //    lock; persisted immediately). Unguarded for now — a permission
+        //    layer (request_permission) lands in P4. ─────────────────────────
+        "symbols/create" => {
+            let label = params
+                .get("label")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "missing required param: label".to_string())?;
+            let kind = params
+                .get("kind")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("entity");
+            let id = match kind {
+                "relation" => engine.resolve_or_create_relation(label),
+                _ => engine.resolve_or_create_entity(label),
+            }
+            .map_err(|e| format!("create failed: {e}"))?;
+            engine.persist().map_err(|e| format!("persist failed: {e}"))?;
+            Ok(serde_json::json!({
+                "id": id.get(),
+                "label": engine.resolve_label(id),
+                "kind": kind,
+            }))
+        }
+
+        "triples/add" => {
+            let subject = params
+                .get("subject")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "missing required param: subject".to_string())?;
+            let predicate = params
+                .get("predicate")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "missing required param: predicate".to_string())?;
+            let object = params
+                .get("object")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "missing required param: object".to_string())?;
+            let confidence = params
+                .get("confidence")
+                .and_then(serde_json::Value::as_f64)
+                .unwrap_or(1.0) as f32;
+            let (symbols_added, triples_added) = engine
+                .ingest_label_triples(&[(
+                    subject.to_string(),
+                    predicate.to_string(),
+                    object.to_string(),
+                    confidence,
+                )])
+                .map_err(|e| format!("ingest failed: {e}"))?;
+            engine.persist().map_err(|e| format!("persist failed: {e}"))?;
+            Ok(serde_json::json!({
+                "subject": subject,
+                "predicate": predicate,
+                "object": object,
+                "confidence": confidence,
+                "symbols_added": symbols_added,
+                "triples_added": triples_added,
             }))
         }
 
@@ -1347,6 +1410,63 @@ mod tests {
         .await
         .expect("timed out");
         assert!(bad.is_err(), "triples/from without symbol must error");
+
+        shutdown_tx.send(true).expect("send shutdown");
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), server).await;
+    }
+
+    /// The write group: `_akh/triples/add` mutates the KG and the change is
+    /// immediately visible via `_akh/triples/from`; `_akh/symbols/create`
+    /// resolves/creates a symbol.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn acp_ext_write_group() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("akh-acp-write.sock");
+
+        let me = workspace();
+        let listener = UnixListener::bind(&sock).expect("bind unix");
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let server = tokio::spawn(async move { serve_unix_loop(me, listener, shutdown_rx).await });
+
+        let call = |method: &'static str, params: serde_json::Value| {
+            let sock = sock.clone();
+            async move {
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(15),
+                    ext_request_unix(&sock, method, params),
+                )
+                .await
+                .expect("ext request timed out")
+                .expect("ext request ok")
+            }
+        };
+
+        // add a triple → at least one triple asserted.
+        let add = call(
+            "_akh/triples/add",
+            serde_json::json!({ "subject": "Moon", "predicate": "orbits", "object": "Earth" }),
+        )
+        .await;
+        assert!(
+            add["triples_added"].as_u64().unwrap() >= 1,
+            "expected ≥1 triple added: {add}"
+        );
+
+        // it is immediately readable back.
+        let back = call("_akh/triples/from", serde_json::json!({ "symbol": "Moon" })).await;
+        assert!(
+            back["triples"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|t| t["object"] == "Earth" && t["predicate"] == "orbits"),
+            "added triple not visible: {back}"
+        );
+
+        // create a symbol.
+        let created = call("_akh/symbols/create", serde_json::json!({ "label": "Mars" })).await;
+        assert_eq!(created["label"], "Mars");
+        assert!(created["id"].as_u64().is_some(), "symbol id expected: {created}");
 
         shutdown_tx.send(true).expect("send shutdown");
         let _ = tokio::time::timeout(std::time::Duration::from_secs(5), server).await;
