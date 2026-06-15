@@ -427,7 +427,7 @@ fn dispatch_akh(
         "meta/capabilities" => Ok(serde_json::json!({
             "protocol": "acp",
             "version": crate::client::ACP_PROTOCOL_VERSION,
-            "groups": ["meta", "workspace", "symbols", "triples", "query"],
+            "groups": ["meta", "workspace", "symbols", "triples", "query", "memory"],
             "methods": [
                 "_akh/health",
                 "_akh/meta/capabilities",
@@ -437,6 +437,7 @@ fn dispatch_akh(
                 "_akh/symbols/create",
                 "_akh/triples/add",
                 "_akh/query/sparql",
+                "_akh/memory/recall",
             ],
         })),
 
@@ -575,8 +576,97 @@ fn dispatch_akh(
             Ok(serde_json::json!({ "count": solutions.len(), "solutions": solutions }))
         }
 
+        // ── memory group (read-only episodic recall). `AgentPredicates::init`
+        //    is resolve-or-create on `&Engine` (idempotent — the agent already
+        //    created these relations at init), so no agent lock is needed. This
+        //    mirrors the `memory_recall` tool the agent uses on itself: resolve
+        //    the requested query symbols and recall by them, or fall back to a
+        //    pure recency scan when none resolve.
+        "memory/recall" => {
+            let top_k = params
+                .get("top_k")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(5) as usize;
+
+            // Accept a comma-separated `query` string and/or a `symbols` array.
+            let mut requested: Vec<String> = Vec::new();
+            if let Some(s) = params.get("query").and_then(serde_json::Value::as_str) {
+                requested.extend(
+                    s.split(',')
+                        .map(|p| p.trim().to_string())
+                        .filter(|p| !p.is_empty()),
+                );
+            }
+            if let Some(arr) = params.get("symbols").and_then(serde_json::Value::as_array) {
+                requested.extend(
+                    arr.iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .map(str::to_string),
+                );
+            }
+
+            let predicates = crate::agent::AgentPredicates::init(engine)
+                .map_err(|e| format!("failed to resolve agent predicates: {e}"))?;
+
+            // Resolve requested symbols; report unresolvable ones so the caller
+            // can tell "no episodes" apart from "typo in the query".
+            let mut query_ids = Vec::new();
+            let mut unresolved = Vec::new();
+            for label in &requested {
+                match engine.resolve_symbol(label) {
+                    Ok(id) => query_ids.push(id),
+                    Err(_) => unresolved.push(label.clone()),
+                }
+            }
+
+            let (episodes, mode) = if query_ids.is_empty() {
+                let eps = crate::agent::memory::recall_recent_episodes(engine, &predicates, top_k)
+                    .map_err(|e| format!("recall failed: {e}"))?;
+                (eps, "recent")
+            } else {
+                let eps =
+                    crate::agent::memory::recall_episodes(engine, &query_ids, &predicates, top_k, None)
+                        .map_err(|e| format!("recall failed: {e}"))?;
+                (eps, "matched")
+            };
+
+            let episodes_json: Vec<serde_json::Value> =
+                episodes.iter().map(|ep| episode_to_json(engine, ep)).collect();
+
+            Ok(serde_json::json!({
+                "mode": mode,
+                "count": episodes_json.len(),
+                "unresolved": unresolved,
+                "episodes": episodes_json,
+            }))
+        }
+
         other => Err(format!("unknown _akh data-plane method: _akh/{other}")),
     }
+}
+
+/// Serialize an [`EpisodicEntry`] to JSON, resolving its symbol references to
+/// human-readable labels. `EpisodicEntry` is not `Serialize` (it holds raw
+/// [`SymbolId`]s), so the data-plane projects it to a label-anchored object.
+fn episode_to_json(engine: &Engine, ep: &crate::agent::memory::EpisodicEntry) -> serde_json::Value {
+    serde_json::json!({
+        "symbol": engine.resolve_label(ep.symbol_id),
+        "summary": ep.summary,
+        "consolidation_reason": ep.consolidation_reason,
+        "relevance_score": ep.relevance_score,
+        "timestamp": ep.timestamp,
+        "affective_valence": ep.affective_valence,
+        "learnings": ep
+            .learnings
+            .iter()
+            .map(|id| engine.resolve_label(*id))
+            .collect::<Vec<_>>(),
+        "tags": ep
+            .tags
+            .iter()
+            .map(|id| engine.resolve_label(*id))
+            .collect::<Vec<_>>(),
+    })
 }
 
 fn build_connection(
@@ -1551,6 +1641,92 @@ mod tests {
             "expected ≥1 SPARQL solution for the seeded triple: {res}"
         );
         assert!(res["solutions"].as_array().is_some_and(|s| !s.is_empty()));
+
+        shutdown_tx.send(true).expect("send shutdown");
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), server).await;
+    }
+
+    /// The memory group: `_akh/memory/recall` returns episodic memories. With no
+    /// query it falls back to a recency scan; an unresolvable query symbol is
+    /// reported in `unresolved` (so the caller can distinguish a typo from an
+    /// empty memory). Seeds one episode via `index_cycle_episode` — the same
+    /// path the OODA loop uses, so what we recall is what the agent would.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn acp_ext_memory_recall() {
+        use crate::agent::memory::index_cycle_episode;
+
+        let engine = Engine::new(EngineConfig {
+            dimension: Dimension::TEST,
+            ..Default::default()
+        })
+        .expect("engine");
+
+        let predicates = crate::agent::AgentPredicates::init(&engine).expect("predicates");
+        index_cycle_episode(
+            &engine,
+            &predicates,
+            1,
+            "learn about stars",
+            None,
+            "memory_recall",
+            "made progress",
+        )
+        .expect("seed episode");
+
+        let engine = Arc::new(engine);
+        let processor = ChatProcessor::new(&engine, NluPipeline::new());
+        let agent = Agent::new(Arc::clone(&engine), AgentConfig::default()).expect("agent");
+        let me = AkhAcpAgent::new(engine, Arc::new(Mutex::new(agent)), processor);
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("akh-acp-memory.sock");
+        let listener = UnixListener::bind(&sock).expect("bind unix");
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let server = tokio::spawn(async move { serve_unix_loop(me, listener, shutdown_rx).await });
+
+        // No query → recency fallback returns the seeded episode.
+        let recent = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            ext_request_unix(&sock, "_akh/memory/recall", serde_json::json!({ "top_k": 5 })),
+        )
+        .await
+        .expect("recall timed out")
+        .expect("recall ok");
+        assert_eq!(recent["mode"], "recent");
+        assert!(
+            recent["count"].as_u64().unwrap() >= 1,
+            "expected ≥1 recent episode: {recent}"
+        );
+        assert!(
+            recent["episodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|e| e["summary"].as_str().is_some_and(|s| s.contains("memory_recall"))),
+            "seeded episode summary missing: {recent}"
+        );
+
+        // Unresolvable query → reported in `unresolved`, recency fallback still runs.
+        let typo = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            ext_request_unix(
+                &sock,
+                "_akh/memory/recall",
+                serde_json::json!({ "query": "no_such_symbol_xyz" }),
+            ),
+        )
+        .await
+        .expect("recall timed out")
+        .expect("recall ok");
+        assert_eq!(typo["mode"], "recent", "unresolved query falls back to recency");
+        assert!(
+            typo["unresolved"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|v| v == "no_such_symbol_xyz"),
+            "unresolved symbol should be reported: {typo}"
+        );
 
         shutdown_tx.send(true).expect("send shutdown");
         let _ = tokio::time::timeout(std::time::Duration::from_secs(5), server).await;

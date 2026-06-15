@@ -903,6 +903,17 @@ enum AcpOp {
         /// SPARQL SELECT query (e.g. "SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 20").
         query: String,
     },
+    /// Recall the akh's episodic memories. With no `--query`, returns the most
+    /// recent episodes; with `--query`, recalls episodes linked to those symbols
+    /// (comma-separated), falling back to recency if none resolve.
+    Recall {
+        /// Comma-separated query symbols (e.g. "Sun,Star"). Omit for recent episodes.
+        #[arg(long)]
+        query: Option<String>,
+        /// Maximum number of episodes to return.
+        #[arg(long, default_value_t = 5)]
+        limit: u64,
+    },
 }
 
 /// Dispatch an `akh acp <op>` command: discover the daemon, send the matching
@@ -942,6 +953,13 @@ fn run_acp_command(op: &AcpOp) -> Result<()> {
         ),
         AcpOp::Query { query } => {
             ("_akh/query/sparql", serde_json::json!({ "query": query }))
+        }
+        AcpOp::Recall { query, limit } => {
+            let mut params = serde_json::json!({ "top_k": limit });
+            if let Some(q) = query {
+                params["query"] = serde_json::Value::String(q.clone());
+            }
+            ("_akh/memory/recall", params)
         }
     };
 
