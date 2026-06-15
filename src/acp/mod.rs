@@ -1380,15 +1380,22 @@ mod tests {
         assert_eq!(st["workspace"], "default");
         assert!(st["symbols"].as_u64().unwrap() >= 3, "Sun/Star/is-a ⇒ ≥3 symbols: {st}");
 
-        // symbols/list (the seed has labels Sun, Star, is-a)
-        let syms = call("_akh/symbols/list", serde_json::json!({ "limit": 50 })).await;
+        // symbols/list — the engine also registers many built-in symbols, so
+        // request all of them (count == returned) to be sure the seeded "Sun"
+        // is in the set. (A bounded `limit` returns an arbitrary subset, by
+        // design — that is what `symbols/list` does.)
+        let syms = call("_akh/symbols/list", serde_json::json!({ "limit": 1_000_000 })).await;
+        assert_eq!(
+            syms["count"], syms["returned"],
+            "limit was meant to return every symbol: {syms}"
+        );
         let labels: Vec<&str> = syms["symbols"]
             .as_array()
             .unwrap()
             .iter()
             .filter_map(|s| s["label"].as_str())
             .collect();
-        assert!(labels.contains(&"Sun"), "symbols/list missing Sun: {labels:?}");
+        assert!(labels.contains(&"Sun"), "symbols/list missing seeded Sun");
 
         // triples/from Sun → is-a Star
         let tr = call("_akh/triples/from", serde_json::json!({ "symbol": "Sun" })).await;
