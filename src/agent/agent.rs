@@ -301,10 +301,20 @@ impl Agent {
             )),
             None => std::sync::Arc::new(crate::fs::LocalFs::denied()),
         };
-        registry.register(Box::new(tools::FileIoTool::new(fs)));
+        registry.register(Box::new(tools::FileIoTool::new(fs.clone())));
+        // Claude-Code-parity coding tools, sharing the same sandbox so reads
+        // and writes stay confined to the akh's roots.
+        registry.register(Box::new(tools::EditTool::new(fs.clone())));
+        registry.register(Box::new(tools::GlobTool::new(fs.clone())));
+        registry.register(Box::new(tools::GrepTool::new(fs.clone())));
         registry.register(Box::new(tools::HttpFetchTool));
+        registry.register(Box::new(tools::WebSearchTool));
         registry.register(Box::new(tools::ShellExecTool));
         registry.register(Box::new(tools::UserInteractTool));
+        // Structured task list (TodoWrite-style working state).
+        registry.register(Box::new(tools::TaskListTool::new(std::sync::Arc::new(
+            std::sync::Mutex::new(Vec::new()),
+        ))));
 
         // Autonomous reasoning tools.
         registry.register(Box::new(tools::InferRulesTool));
