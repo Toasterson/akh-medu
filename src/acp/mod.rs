@@ -1,33 +1,43 @@
-//! ACP (Agent Client Protocol) transport — P0 spike.
+//! ACP (Agent Client Protocol) transport — P2 server.
 //!
-//! This module proves that akh-medu can serve as an **ACP agent over a Unix
-//! domain socket**, wrapping the existing [`ChatProcessor`] for ONE in-process
-//! workspace. It is intentionally minimal: it de-risks the byte-stream transport
-//! and the ADR-027 concurrency invariant, not the full P2 server.
+//! akh-medu serves as an **ACP agent over Unix domain sockets and TCP**,
+//! wrapping the existing [`ChatProcessor`]. P2 increment 1 (this module) lands
+//! the transport + protocol surface in the library:
 //!
-//! # What it does
-//!
-//! - `initialize` → advertise minimal (default) capabilities, echo the protocol
-//!   version, and report agent name/version.
-//! - `session/new` → mint a fresh session id (the spike serves a single
-//!   workspace, so the id is purely a handle).
+//! - `initialize` → advertise capabilities, echo the protocol version, report
+//!   agent name/version.
+//! - `session/new` → mint a fresh session id (a handle for one workspace).
 //! - `session/prompt` → run [`ChatProcessor::process_input`] under the ADR-027
 //!   discipline (lock the agent inside [`tokio::task::spawn_blocking`], never
-//!   across an `.await`), stream the concatenated [`AkhMessage`] text back as a
-//!   `session/update` `AgentMessageChunk`, then respond with
+//!   across an `.await`), then stream each structured [`AkhMessage`] back as a
+//!   `session/update` via [`AcpSink`] (visible content → `AgentMessageChunk`,
+//!   introspective content → `AgentThoughtChunk`), and respond
 //!   [`StopReason::EndTurn`].
 //! - Everything else falls through to the crate's default handler.
 //!
 //! # Transport
 //!
 //! `agent-client-protocol` is `futures`-based: its [`ByteStreams`] transport
-//! wants `futures::io::{AsyncRead, AsyncWrite}`. We bridge tokio's [`UnixStream`]
-//! halves into those traits with [`tokio_util::compat`].
+//! wants `futures::io::{AsyncRead, AsyncWrite}`. Tokio's [`UnixStream`] /
+//! [`TcpStream`] halves are bridged into those traits with [`tokio_util::compat`],
+//! so the same dispatch logic serves both. [`serve_unix_loop`] /
+//! [`serve_tcp_loop`] are the production accept loops (task-per-connection, with
+//! a watch-channel shutdown).
+//!
+//! # Deferred to later P2 increments
+//!
+//! Multi-workspace resolution (a `WorkspaceProvider` over akhomed's
+//! `ServerState`), the `_akh/*` extension-method data-plane, the discovery
+//! record, and the daemon wiring (Unix + TCP listeners alongside REST during
+//! migration). Note: `AgentCapabilities` has no `_meta` field in the crate, so
+//! data-plane capability groups will be advertised via a custom
+//! `_akh/meta/capabilities` ext method rather than `_meta`.
 //!
 //! [`ChatProcessor`]: crate::chat::ChatProcessor
 //! [`AkhMessage`]: crate::message::AkhMessage
 //! [`ByteStreams`]: agent_client_protocol::ByteStreams
 //! [`UnixStream`]: tokio::net::UnixStream
+//! [`TcpStream`]: tokio::net::TcpStream
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -42,13 +52,14 @@ use agent_client_protocol::{
 };
 use miette::Diagnostic;
 use thiserror::Error;
-use tokio::net::{UnixListener, UnixStream};
+use tokio::net::{TcpListener, TcpStream, UnixListener, UnixStream};
+use tokio::sync::watch;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use crate::agent::Agent;
 use crate::chat::ChatProcessor;
 use crate::engine::Engine;
-use crate::message::AkhMessage;
+use crate::message::{AkhMessage, MessageSink};
 
 // ──────────────────────────────────────────────────────────────────────────
 // Errors
@@ -179,17 +190,18 @@ impl AkhAcpAgent {
     ///
     /// Locks (engine clone is cheap `Arc`, agent + processor `Mutex`es) are
     /// acquired and released entirely inside the [`spawn_blocking`] closure, so
-    /// no `std::sync::Mutex` guard ever crosses the `.await`. The returned
-    /// `String` is the rendered, concatenated response — the caller emits any
-    /// ACP messages only after this future resolves.
+    /// no `std::sync::Mutex` guard ever crosses the `.await`. Returns the
+    /// structured [`AkhMessage`]s; the caller streams them to the client as
+    /// `session/update` notifications (via [`AcpSink`]) only after this future
+    /// resolves — never while a guard is held.
     ///
     /// [`spawn_blocking`]: tokio::task::spawn_blocking
-    async fn run_prompt(&self, text: String) -> AcpResult<String> {
+    async fn run_turn(&self, text: String) -> AcpResult<Vec<AkhMessage>> {
         let engine = Arc::clone(&self.engine);
         let agent = Arc::clone(&self.agent);
         let processor = Arc::clone(&self.processor);
 
-        let responses: Vec<AkhMessage> = tokio::task::spawn_blocking(move || {
+        tokio::task::spawn_blocking(move || {
             // ── ADR-027: lock, process, drop — all synchronous, no await. ──
             let mut agent = agent.lock().unwrap_or_else(|e| e.into_inner());
             let mut processor = processor.lock().unwrap_or_else(|e| e.into_inner());
@@ -199,53 +211,101 @@ impl AkhAcpAgent {
         .await
         .map_err(|e| AcpError::Worker {
             message: e.to_string(),
-        })?;
-
-        Ok(render_messages(&responses))
+        })
     }
 }
 
 // ──────────────────────────────────────────────────────────────────────────
-// AkhMessage rendering (spike-grade: a simple match → display text)
+// AcpSink — stream AkhMessages to the client as session/update notifications
 // ──────────────────────────────────────────────────────────────────────────
 
-/// Render a slice of [`AkhMessage`] into a single display string for the spike.
+/// A [`MessageSink`] that streams each [`AkhMessage`] to the connected ACP
+/// client as a `session/update` notification on a live [`ConnectionTo`].
 ///
-/// This is deliberately a thin `format!`/match — the full structured mapping to
-/// rich ACP content blocks is deferred to the P2 server.
-fn render_messages(messages: &[AkhMessage]) -> String {
-    messages
-        .iter()
-        .map(render_message)
-        .collect::<Vec<_>>()
-        .join("\n")
+/// Construct one per prompt turn from the request's [`ConnectionTo<Client>`] and
+/// [`SessionId`], then [`MessageSink::emit_batch`] the turn's responses. Sends
+/// are best-effort: a failure (client gone mid-turn) is logged, not propagated,
+/// since [`MessageSink::emit`] is infallible by contract.
+///
+/// [`ConnectionTo`]: agent_client_protocol::ConnectionTo
+#[derive(Clone)]
+pub struct AcpSink {
+    conn: ConnectionTo<Client>,
+    session_id: SessionId,
 }
 
-/// Render a single [`AkhMessage`] variant to display text.
-fn render_message(msg: &AkhMessage) -> String {
+impl AcpSink {
+    /// Build a sink bound to one client connection + session.
+    pub fn new(conn: ConnectionTo<Client>, session_id: SessionId) -> Self {
+        Self { conn, session_id }
+    }
+
+    /// Send one mapped `session/update`, logging (not raising) on failure.
+    fn send(&self, update: SessionUpdate) {
+        if let Err(e) = self
+            .conn
+            .send_notification(SessionNotification::new(self.session_id.clone(), update))
+        {
+            tracing::warn!("ACP session/update send failed (client gone?): {e}");
+        }
+    }
+}
+
+impl MessageSink for AcpSink {
+    fn emit(&self, msg: &AkhMessage) {
+        self.send(to_session_update(msg));
+    }
+}
+
+/// Map one [`AkhMessage`] to the ACP [`SessionUpdate`] variant that best fits it.
+///
+/// Visible answer content (facts, narrative, system notes, tool output, prompts,
+/// errors) becomes an `AgentMessageChunk` so a client's `read_to_string()`
+/// collects it; introspective content (reasoning steps, knowledge gaps, goal
+/// progress, audit entries) becomes an `AgentThoughtChunk` so it is surfaced as
+/// agent "thinking" rather than the answer. Structured fields beyond the text
+/// (confidence, provenance, tool-call lifecycle) are folded into the rendered
+/// text for now; richer `ToolCallUpdate`/`Plan` mappings are a later increment.
+fn to_session_update(msg: &AkhMessage) -> SessionUpdate {
+    let chunk = |text: String| ContentChunk::new(ContentBlock::Text(TextContent::new(text)));
     match msg {
-        AkhMessage::Fact { text, confidence, .. } => match confidence {
-            Some(c) => format!("{text} (confidence {c:.2})"),
-            None => text.clone(),
-        },
-        AkhMessage::Reasoning { step, expression } => match expression {
-            Some(expr) => format!("{step} :: {expr}"),
-            None => step.clone(),
-        },
-        AkhMessage::Gap { entity, description } => format!("gap: {entity} — {description}"),
+        AkhMessage::Fact { text, confidence, .. } => {
+            let body = match confidence {
+                Some(c) => format!("{text} (confidence {c:.2})"),
+                None => text.clone(),
+            };
+            SessionUpdate::AgentMessageChunk(chunk(body))
+        }
+        AkhMessage::Narrative { text, .. } => SessionUpdate::AgentMessageChunk(chunk(text.clone())),
+        AkhMessage::System { text } => SessionUpdate::AgentMessageChunk(chunk(text.clone())),
         AkhMessage::ToolResult { tool, success, output } => {
             let status = if *success { "ok" } else { "failed" };
-            format!("[{tool}:{status}] {output}")
+            SessionUpdate::AgentMessageChunk(chunk(format!("[{tool}:{status}] {output}")))
         }
-        AkhMessage::Narrative { text, .. } => text.clone(),
-        AkhMessage::System { text } => text.clone(),
-        AkhMessage::Error { code, message, .. } => format!("error[{code}]: {message}"),
-        AkhMessage::GoalProgress { goal, status, detail } => match detail {
-            Some(d) => format!("goal {goal} [{status}]: {d}"),
-            None => format!("goal {goal} [{status}]"),
-        },
-        AkhMessage::Prompt { question } => question.clone(),
-        AkhMessage::AuditLog { kind, summary, .. } => format!("audit[{kind}]: {summary}"),
+        AkhMessage::Prompt { question } => SessionUpdate::AgentMessageChunk(chunk(question.clone())),
+        AkhMessage::Error { code, message, .. } => {
+            SessionUpdate::AgentMessageChunk(chunk(format!("error[{code}]: {message}")))
+        }
+        AkhMessage::Reasoning { step, expression } => {
+            let body = match expression {
+                Some(expr) => format!("{step} :: {expr}"),
+                None => step.clone(),
+            };
+            SessionUpdate::AgentThoughtChunk(chunk(body))
+        }
+        AkhMessage::Gap { entity, description } => {
+            SessionUpdate::AgentThoughtChunk(chunk(format!("gap: {entity} — {description}")))
+        }
+        AkhMessage::GoalProgress { goal, status, detail } => {
+            let body = match detail {
+                Some(d) => format!("goal {goal} [{status}]: {d}"),
+                None => format!("goal {goal} [{status}]"),
+            };
+            SessionUpdate::AgentThoughtChunk(chunk(body))
+        }
+        AkhMessage::AuditLog { kind, summary, .. } => {
+            SessionUpdate::AgentThoughtChunk(chunk(format!("audit[{kind}]: {summary}")))
+        }
     }
 }
 
@@ -313,23 +373,16 @@ fn build_connection(
 
                         // Run the synchronous chat turn off the async runtime,
                         // honoring ADR-027 (locks live only inside the closure).
-                        let rendered = me.run_prompt(text).await.map_err(|e| {
+                        let responses = me.run_turn(text).await.map_err(|e| {
                             agent_client_protocol::Error::internal_error()
                                 .data(e.to_string())
                         })?;
 
-                        // Emit the rendered answer as an agent message chunk so
-                        // the client's `read_to_string()` collects it. Sent only
-                        // AFTER the blocking guard is gone (it is — `run_prompt`
-                        // already awaited and dropped its guards).
-                        if !rendered.is_empty() {
-                            cx.send_notification(SessionNotification::new(
-                                session_id,
-                                SessionUpdate::AgentMessageChunk(ContentChunk::new(
-                                    ContentBlock::Text(TextContent::new(rendered)),
-                                )),
-                            ))?;
-                        }
+                        // Stream each structured response as its own
+                        // `session/update`. Sent only AFTER the blocking guards
+                        // are gone (`run_turn` already awaited + dropped them),
+                        // so no `std::sync::Mutex` guard ever crosses the await.
+                        AcpSink::new(cx, session_id).emit_batch(&responses);
 
                         responder.respond(PromptResponse::new(StopReason::EndTurn))
                     }
@@ -412,6 +465,94 @@ pub async fn serve_unix(me: AkhAcpAgent, path: impl AsRef<Path>) -> AcpResult<()
     })?;
 
     serve_stream(me, stream).await
+}
+
+/// Serve the ACP agent over a tokio [`TcpStream`].
+///
+/// Identical to [`serve_stream`] but for TCP: the stream's halves are split and
+/// bridged into the crate's `futures`-based [`ByteStreams`] transport. The byte
+/// protocol is transport-agnostic, so a TCP client and a Unix client are served
+/// by the exact same dispatch logic.
+pub async fn serve_tcp_stream(me: AkhAcpAgent, stream: TcpStream) -> AcpResult<()> {
+    // Disable Nagle so small JSON-RPC frames are not delayed.
+    let _ = stream.set_nodelay(true);
+    let (read_half, write_half) = stream.into_split();
+    let incoming = read_half.compat();
+    let outgoing = write_half.compat_write();
+
+    let transport = ByteStreams::new(outgoing, incoming);
+
+    use agent_client_protocol::ConnectTo;
+    build_connection(me).connect_to(transport).await?;
+    Ok(())
+}
+
+/// Accept connections on a bound [`UnixListener`] until `shutdown` flips to
+/// `true`, serving each on its own task.
+///
+/// This is the production accept loop: the cheap-to-clone [`AkhAcpAgent`]
+/// (`Arc`-backed) is cloned per connection, so many clients are served
+/// concurrently against the same shared engine/agent. A failed connection logs
+/// and is dropped; it does not tear down the loop.
+pub async fn serve_unix_loop(
+    me: AkhAcpAgent,
+    listener: UnixListener,
+    mut shutdown: watch::Receiver<bool>,
+) -> AcpResult<()> {
+    loop {
+        tokio::select! {
+            accepted = listener.accept() => {
+                let (stream, _addr) = accepted.map_err(|source| AcpError::Accept {
+                    path: PathBuf::from("<acp-unix-listener>"),
+                    source,
+                })?;
+                let conn = me.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = serve_stream(conn, stream).await {
+                        tracing::warn!("ACP unix connection ended with error: {e}");
+                    }
+                });
+            }
+            res = shutdown.changed() => {
+                // Sender dropped (Err) or signalled true → stop accepting.
+                if res.is_err() || *shutdown.borrow() {
+                    tracing::info!("ACP unix accept loop shutting down");
+                    return Ok(());
+                }
+            }
+        }
+    }
+}
+
+/// Accept connections on a bound [`TcpListener`] until `shutdown` flips to
+/// `true`, serving each on its own task. TCP analogue of [`serve_unix_loop`].
+pub async fn serve_tcp_loop(
+    me: AkhAcpAgent,
+    listener: TcpListener,
+    mut shutdown: watch::Receiver<bool>,
+) -> AcpResult<()> {
+    loop {
+        tokio::select! {
+            accepted = listener.accept() => {
+                let (stream, _addr) = accepted.map_err(|source| AcpError::Accept {
+                    path: PathBuf::from("<acp-tcp-listener>"),
+                    source,
+                })?;
+                let conn = me.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = serve_tcp_stream(conn, stream).await {
+                        tracing::warn!("ACP tcp connection ended with error: {e}");
+                    }
+                });
+            }
+            res = shutdown.changed() => {
+                if res.is_err() || *shutdown.borrow() {
+                    tracing::info!("ACP tcp accept loop shutting down");
+                    return Ok(());
+                }
+            }
+        }
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -541,5 +682,139 @@ mod tests {
             }
         }
         panic!("could not connect to ACP Unix socket at {path:?}");
+    }
+
+    /// Drive a full ACP prompt lifecycle (initialize → session/new →
+    /// session/prompt → read) over an already-connected Unix stream, returning
+    /// the concatenated agent message text. Hard-bounded so a deadlock fails
+    /// fast instead of hanging.
+    async fn unix_client_prompt(stream: UnixStream, prompt: &'static str) -> String {
+        let (read_half, write_half) = stream.into_split();
+        let transport = ByteStreams::new(write_half.compat_write(), read_half.compat());
+        let lifecycle = Client
+            .builder()
+            .name("akh-acp-test-client")
+            .connect_with(transport, async move |cx| {
+                cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+                    .block_task()
+                    .await?;
+                cx.build_session_cwd()?
+                    .block_task()
+                    .run_until(async move |mut session| {
+                        session.send_prompt(prompt)?;
+                        session.read_to_string().await
+                    })
+                    .await
+            });
+        tokio::time::timeout(std::time::Duration::from_secs(15), lifecycle)
+            .await
+            .expect("unix client lifecycle timed out (transport/protocol deadlock)")
+            .expect("unix client lifecycle completed")
+    }
+
+    /// TCP analogue of [`unix_client_prompt`].
+    async fn tcp_client_prompt(stream: TcpStream, prompt: &'static str) -> String {
+        let (read_half, write_half) = stream.into_split();
+        let transport = ByteStreams::new(write_half.compat_write(), read_half.compat());
+        let lifecycle = Client
+            .builder()
+            .name("akh-acp-tcp-test-client")
+            .connect_with(transport, async move |cx| {
+                cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+                    .block_task()
+                    .await?;
+                cx.build_session_cwd()?
+                    .block_task()
+                    .run_until(async move |mut session| {
+                        session.send_prompt(prompt)?;
+                        session.read_to_string().await
+                    })
+                    .await
+            });
+        tokio::time::timeout(std::time::Duration::from_secs(15), lifecycle)
+            .await
+            .expect("tcp client lifecycle timed out (transport/protocol deadlock)")
+            .expect("tcp client lifecycle completed")
+    }
+
+    /// Same prompt turn as the Unix test, but over a real **TCP** socket —
+    /// proves the byte protocol is transport-agnostic (Unix/TCP parity).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn acp_tcp_prompt_turn() {
+        let me = workspace();
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind tcp");
+        let addr = listener.local_addr().expect("local addr");
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept tcp");
+            serve_tcp_stream(me, stream).await
+        });
+
+        let stream = TcpStream::connect(addr).await.expect("connect tcp");
+        let answer = tcp_client_prompt(stream, "What is the Sun?").await;
+        assert!(
+            !answer.trim().is_empty(),
+            "expected non-empty ACP/TCP response, got: {answer:?}"
+        );
+
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), server).await;
+    }
+
+    /// The accept loop serves more than one connection against the same shared
+    /// agent, then exits cleanly when the shutdown watch flips.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn acp_unix_accept_loop_serves_multiple_connections() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("akh-acp-loop.sock");
+
+        let me = workspace();
+        let listener = UnixListener::bind(&sock).expect("bind unix");
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let loop_task = tokio::spawn(async move { serve_unix_loop(me, listener, shutdown_rx).await });
+
+        // Two clients, served sequentially against the same loop + shared agent.
+        let a = unix_client_prompt(connect_with_retry(&sock).await, "What is the Sun?").await;
+        assert!(!a.trim().is_empty(), "first connection got empty answer: {a:?}");
+        let b = unix_client_prompt(connect_with_retry(&sock).await, "What is the Sun?").await;
+        assert!(!b.trim().is_empty(), "second connection got empty answer: {b:?}");
+
+        // Signal shutdown; the loop must return Ok promptly.
+        shutdown_tx.send(true).expect("send shutdown");
+        let joined = tokio::time::timeout(std::time::Duration::from_secs(5), loop_task)
+            .await
+            .expect("accept loop did not shut down within 5s")
+            .expect("accept loop task joined");
+        joined.expect("accept loop returned Ok");
+    }
+
+    /// The structured mapping routes visible answers to AgentMessageChunk and
+    /// introspective content to AgentThoughtChunk.
+    #[test]
+    fn to_session_update_routes_variants() {
+        let is_msg = |u: SessionUpdate| matches!(u, SessionUpdate::AgentMessageChunk(_));
+        let is_thought = |u: SessionUpdate| matches!(u, SessionUpdate::AgentThoughtChunk(_));
+
+        assert!(is_msg(to_session_update(&AkhMessage::Fact {
+            text: "the Sun is a star".into(),
+            confidence: Some(0.9),
+            provenance: None,
+        })));
+        assert!(is_msg(to_session_update(&AkhMessage::Narrative {
+            text: "hello".into(),
+            grammar: "default".into(),
+        })));
+        assert!(is_msg(to_session_update(&AkhMessage::Error {
+            code: "x".into(),
+            message: "boom".into(),
+            help: None,
+        })));
+        assert!(is_thought(to_session_update(&AkhMessage::Reasoning {
+            step: "consider".into(),
+            expression: None,
+        })));
+        assert!(is_thought(to_session_update(&AkhMessage::Gap {
+            entity: "E".into(),
+            description: "missing".into(),
+        })));
     }
 }
