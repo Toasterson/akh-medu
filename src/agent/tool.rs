@@ -357,11 +357,20 @@ impl std::fmt::Debug for ToolRegistry {
 }
 
 /// Truncate a string for audit summaries, appending "..." if cut.
+///
+/// Truncation lands on a UTF-8 char boundary: audit summaries include tool
+/// output (web/file content) and params that can place a multibyte character
+/// across byte `max_len`, where a naive `&s[..max_len]` would panic — and this
+/// runs in the registry's audit wrapper around *every* tool call.
 fn truncate_summary(s: &str, max_len: usize) -> String {
     if s.len() <= max_len {
         s.to_string()
     } else {
-        format!("{}...", &s[..max_len])
+        let mut end = max_len;
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}...", &s[..end])
     }
 }
 
@@ -371,6 +380,21 @@ mod tests {
 
     use super::*;
     use crate::agent::tool_manifest::{Capability, DangerInfo, DangerLevel, ToolSource};
+
+    #[test]
+    fn truncate_summary_handles_multibyte_at_boundary() {
+        // 100 × "あ" = 300 bytes; byte 200 lands inside a 3-byte char.
+        // A naive &s[..200] would panic — this must not.
+        let s = "あ".repeat(100);
+        assert!(!s.is_char_boundary(200));
+        let out = truncate_summary(&s, 200);
+        assert!(out.ends_with("..."));
+        // Truncated body is valid UTF-8 and shorter than the cap.
+        let body = out.trim_end_matches("...");
+        assert!(body.len() <= 200 && body.is_char_boundary(body.len()));
+        // ASCII shorter than the cap is returned unchanged.
+        assert_eq!(truncate_summary("hello", 200), "hello");
+    }
 
     struct DummyTool;
     impl Tool for DummyTool {

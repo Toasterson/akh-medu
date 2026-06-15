@@ -94,6 +94,13 @@ pub trait Filesystem: Send + Sync {
     fn read_roots(&self) -> &[PathBuf];
     /// Whether writes are possible at all (a writable root is configured).
     fn is_writable(&self) -> bool;
+    /// On-disk byte length of a file (read-sandboxed). Lets directory-walking
+    /// tools skip oversized files *before* materializing them.
+    fn file_size(&self, path: &Path) -> FsResult<u64>;
+    /// Whether the path is itself a symlink (does NOT follow it). Directory
+    /// walks use this to avoid following symlinks — preventing cycles
+    /// (stack-overflow) and symlink escapes, matching `find`/`ripgrep` defaults.
+    fn is_symlink(&self, path: &Path) -> bool;
 }
 
 /// A sandboxed local filesystem: reads confined to `read_roots`, writes to
@@ -241,6 +248,21 @@ impl Filesystem for LocalFs {
     fn is_writable(&self) -> bool {
         !self.write_roots.is_empty()
     }
+
+    fn file_size(&self, path: &Path) -> FsResult<u64> {
+        let resolved = self.resolve_read(path)?;
+        let meta = std::fs::metadata(&resolved).map_err(|source| FsError::Io {
+            path: resolved.display().to_string(),
+            source,
+        })?;
+        Ok(meta.len())
+    }
+
+    fn is_symlink(&self, path: &Path) -> bool {
+        std::fs::symlink_metadata(path)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false)
+    }
 }
 
 /// Canonicalize each root, keeping the original if it cannot be canonicalized
@@ -382,5 +404,30 @@ mod tests {
             fs.write(Path::new("x"), "y"),
             Err(FsError::WritesDisabled)
         ));
+    }
+
+    #[test]
+    fn file_size_is_sandboxed() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        std::fs::write(root.join("f.txt"), "12345").unwrap();
+        let fs = LocalFs::read_only(vec![root.clone()]);
+        assert_eq!(fs.file_size(&root.join("f.txt")).unwrap(), 5);
+        // Outside the sandbox → denied (not a size).
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("big.txt"), "xxxx").unwrap();
+        assert!(fs.file_size(&outside.path().join("big.txt")).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn is_symlink_detects_without_following() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        std::fs::write(root.join("real.txt"), "x").unwrap();
+        std::os::unix::fs::symlink(root.join("real.txt"), root.join("link.txt")).unwrap();
+        let fs = LocalFs::read_only(vec![root.clone()]);
+        assert!(fs.is_symlink(&root.join("link.txt")));
+        assert!(!fs.is_symlink(&root.join("real.txt")));
     }
 }

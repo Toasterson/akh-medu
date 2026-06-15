@@ -185,10 +185,19 @@ impl GlobTool {
             if *truncated {
                 return;
             }
+            // Do not follow symlinks (matches find/ripgrep defaults): a
+            // symlinked directory pointing back into the tree would otherwise
+            // inflate results with bogus duplicate paths up to MAX_DEPTH, and a
+            // symlinked leaf pointing outside the sandbox would be reported as a
+            // match (path-existence disclosure).
+            if self.fs.is_symlink(&entry) {
+                continue;
+            }
             // Build the relative path from the file name, not by stripping a
-            // base prefix (which the canonicalizing sandbox can defeat).
-            let name = match entry.file_name() {
-                Some(n) => n.to_string_lossy().into_owned(),
+            // base prefix (which the canonicalizing sandbox can defeat). Skip
+            // names that are not valid UTF-8 (a lossy name cannot be re-opened).
+            let name = match entry.file_name().and_then(|n| n.to_str()) {
+                Some(n) => n.to_string(),
                 None => continue,
             };
             let rel = if rel_prefix.is_empty() {
@@ -273,6 +282,32 @@ mod tests {
 
     fn tool_for(root: &Path) -> GlobTool {
         GlobTool::new(Arc::new(LocalFs::sandbox(root)))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn glob_does_not_follow_symlinks() {
+        // A symlink pointing back into the tree must not be followed: otherwise
+        // results inflate with bogus loop/loop/... duplicate paths (and can
+        // crowd out real matches under the cap).
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("a.rs"), "fn a() {}").unwrap();
+        std::os::unix::fs::symlink(root, root.join("loop")).unwrap();
+
+        let tool = tool_for(root);
+        let engine = test_engine();
+        let input = ToolInput::new()
+            .with_param("pattern", "**/*.rs")
+            .with_param("path", root.to_string_lossy().to_string());
+        let out = tool.execute(&engine, input).unwrap();
+        assert!(out.success, "result: {}", out.result);
+        assert!(out.result.contains("a.rs"), "should find a.rs: {}", out.result);
+        assert!(
+            !out.result.contains("loop/"),
+            "must not follow the symlink into loop/...: {}",
+            out.result
+        );
     }
 
     #[test]

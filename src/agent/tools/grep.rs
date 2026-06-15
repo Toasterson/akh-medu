@@ -31,6 +31,11 @@ const MAX_FILES_SCANNED: usize = 5_000;
 /// Maximum number of content lines emitted in `content` mode.
 const MAX_CONTENT_LINES: usize = 200;
 
+/// Maximum directory recursion depth. Bounds the walk even when a subtree
+/// contains no files (so the file cap never trips) — e.g. a deeply nested
+/// chain. Mirrors the Glob tool's guard.
+const MAX_DEPTH: usize = 64;
+
 /// Search file contents by regex through a sandboxed [`Filesystem`].
 pub struct GrepTool {
     /// The sandbox the tool reads through. A [`crate::fs::LocalFs::denied`]
@@ -59,8 +64,8 @@ impl GrepTool {
     /// Recursively collect files under `dir` (skipping directories that fail to
     /// list), capping the total at [`MAX_FILES_SCANNED`]. Directories are
     /// detected by a successful `read_dir`; anything else is treated as a file.
-    fn collect_files(&self, dir: &Path, out: &mut Vec<PathBuf>) {
-        if out.len() >= MAX_FILES_SCANNED {
+    fn collect_files(&self, dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
+        if out.len() >= MAX_FILES_SCANNED || depth > MAX_DEPTH {
             return;
         }
         let entries = match self.fs.read_dir(dir) {
@@ -77,10 +82,16 @@ impl GrepTool {
             if out.len() >= MAX_FILES_SCANNED {
                 return;
             }
+            // Do not follow symlinks (matches find/ripgrep defaults): this
+            // prevents in-root symlink cycles from recursing forever (stack
+            // overflow) and stops a symlinked leaf from being listed as a file.
+            if self.fs.is_symlink(&entry) {
+                continue;
+            }
             // A successful read_dir means it's a directory → recurse; otherwise
             // it's a leaf file.
             if self.fs.read_dir(&entry).is_ok() {
-                self.collect_files(&entry, out);
+                self.collect_files(&entry, depth + 1, out);
             } else {
                 out.push(entry);
             }
@@ -217,7 +228,7 @@ impl Tool for GrepTool {
 
         // Collect candidate files (the walk skips directories it cannot list).
         let mut files = Vec::new();
-        self.collect_files(&base, &mut files);
+        self.collect_files(&base, 0, &mut files);
 
         // Per-file match accumulation.
         let mut matched_files: Vec<String> = Vec::new();
@@ -230,13 +241,21 @@ impl Tool for GrepTool {
             if !matches_glob(file, &glob_re) {
                 continue;
             }
+            // Skip oversized files BEFORE reading them, so a multi-GB file is
+            // never materialized in memory. An unreadable size (permission,
+            // vanished) skips the file too.
+            match self.fs.file_size(file) {
+                Ok(size) if size as usize > MAX_FILE_SIZE => continue,
+                Ok(_) => {}
+                Err(_) => continue,
+            }
             // Read the file; skip ones that error (permission, vanished, …).
             let contents = match self.fs.read_to_string(file) {
                 Ok(c) => c,
                 Err(_) => continue,
             };
-            // Skip oversized and binary (NUL-containing) files gracefully.
-            if contents.len() > MAX_FILE_SIZE || contents.as_bytes().contains(&0) {
+            // Skip binary (NUL-containing) files gracefully.
+            if contents.as_bytes().contains(&0) {
                 continue;
             }
             scanned += 1;
@@ -380,6 +399,27 @@ mod tests {
         .unwrap();
         let tool = GrepTool::new(Arc::new(LocalFs::sandbox(&root)));
         (tool, dir)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn grep_does_not_follow_symlink_cycle() {
+        // An in-root symlink cycle (loop -> root) used to recurse forever and
+        // overflow the stack (the file cap never trips on a dir-only cycle).
+        // The walk must skip the symlink and still find the real file.
+        let (tool, dir) = setup();
+        std::os::unix::fs::symlink(dir.path(), dir.path().join("loop")).unwrap();
+        let engine = test_engine();
+        let input = ToolInput::new()
+            .with_param("pattern", "alpha")
+            .with_param("output_mode", "files_with_matches");
+        let out = tool.execute(&engine, input).unwrap();
+        assert!(out.success, "result: {}", out.result);
+        assert!(
+            out.result.contains("alpha.rs"),
+            "should still find the real file: {}",
+            out.result
+        );
     }
 
     #[test]
