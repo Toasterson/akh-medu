@@ -427,7 +427,7 @@ fn dispatch_akh(
         "meta/capabilities" => Ok(serde_json::json!({
             "protocol": "acp",
             "version": crate::client::ACP_PROTOCOL_VERSION,
-            "groups": ["meta", "workspace", "symbols", "triples", "query", "memory"],
+            "groups": ["meta", "workspace", "symbols", "triples", "query", "memory", "infer"],
             "methods": [
                 "_akh/health",
                 "_akh/meta/capabilities",
@@ -438,6 +438,7 @@ fn dispatch_akh(
                 "_akh/triples/add",
                 "_akh/query/sparql",
                 "_akh/memory/recall",
+                "_akh/infer/activate",
             ],
         })),
 
@@ -639,6 +640,92 @@ fn dispatch_akh(
                 "unresolved": unresolved,
                 "episodes": episodes_json,
             }))
+        }
+
+        // ── infer group (read-only spreading-activation inference). `engine.infer`
+        //    takes `&self`; the optional provenance-ledger write is internally
+        //    synchronized, so no agent lock is needed. Seeds are required —
+        //    unlike recall there is no recency fallback, so an all-unresolvable
+        //    seed set is a clean error rather than a silent empty result.
+        "infer/activate" => {
+            // Seeds: a comma-separated `seeds`/`query` string and/or a `seeds` array.
+            let mut requested: Vec<String> = Vec::new();
+            for key in ["seeds", "query"] {
+                if let Some(s) = params.get(key).and_then(serde_json::Value::as_str) {
+                    requested.extend(
+                        s.split(',')
+                            .map(|p| p.trim().to_string())
+                            .filter(|p| !p.is_empty()),
+                    );
+                }
+            }
+            if let Some(arr) = params.get("seeds").and_then(serde_json::Value::as_array) {
+                requested.extend(
+                    arr.iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .map(str::to_string),
+                );
+            }
+
+            let top_k = params
+                .get("top_k")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(10) as usize;
+            let max_depth = params
+                .get("max_depth")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(1) as usize;
+            let min_confidence = params
+                .get("min_confidence")
+                .and_then(serde_json::Value::as_f64)
+                .unwrap_or(0.1) as f32;
+
+            let mut seed_ids = Vec::new();
+            let mut unresolved = Vec::new();
+            for label in &requested {
+                match engine.resolve_symbol(label) {
+                    Ok(id) => seed_ids.push(id),
+                    Err(_) => unresolved.push(label.clone()),
+                }
+            }
+
+            if seed_ids.is_empty() {
+                Err(format!(
+                    "infer/activate requires at least one resolvable seed symbol \
+                     (none of {} requested resolved: {unresolved:?})",
+                    requested.len()
+                ))
+            } else {
+                let query = crate::infer::InferenceQuery {
+                    seeds: seed_ids,
+                    top_k,
+                    max_depth,
+                    min_confidence,
+                    ..Default::default()
+                };
+                let result = engine
+                    .infer(&query)
+                    .map_err(|e| format!("inference failed: {e}"))?;
+
+                let activations: Vec<serde_json::Value> = result
+                    .activations
+                    .iter()
+                    .map(|(id, score)| {
+                        serde_json::json!({
+                            "symbol": engine.resolve_label(*id),
+                            "score": score,
+                        })
+                    })
+                    .collect();
+
+                Ok(serde_json::json!({
+                    "count": activations.len(),
+                    "max_depth": max_depth,
+                    "unresolved": unresolved,
+                    "provenance_records": result.provenance.len(),
+                    "activations": activations,
+                }))
+            }
         }
 
         other => Err(format!("unknown _akh data-plane method: _akh/{other}")),
@@ -1727,6 +1814,63 @@ mod tests {
                 .any(|v| v == "no_such_symbol_xyz"),
             "unresolved symbol should be reported: {typo}"
         );
+
+        shutdown_tx.send(true).expect("send shutdown");
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), server).await;
+    }
+
+    /// The infer group: `_akh/infer/activate` runs spreading-activation from a
+    /// seed and returns activated symbols with scores. An all-unresolvable seed
+    /// set is a clean error (no recency fallback, unlike recall).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn acp_ext_infer_activate() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("akh-acp-infer.sock");
+
+        // workspace() seeds ("Sun", "is-a", "Star").
+        let me = workspace();
+        let listener = UnixListener::bind(&sock).expect("bind unix");
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let server = tokio::spawn(async move { serve_unix_loop(me, listener, shutdown_rx).await });
+
+        // Seeding from "Sun" activates at least one symbol (cf. integration's
+        // inference test on the same Sun/is-a/Star shape).
+        let act = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            ext_request_unix(
+                &sock,
+                "_akh/infer/activate",
+                serde_json::json!({ "seeds": "Sun", "max_depth": 1, "top_k": 10 }),
+            ),
+        )
+        .await
+        .expect("infer timed out")
+        .expect("infer ok");
+        assert!(
+            act["count"].as_u64().unwrap() >= 1,
+            "expected ≥1 activation from Sun: {act}"
+        );
+        assert!(
+            act["activations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|a| a["symbol"].is_string() && a["score"].is_number()),
+            "each activation must carry a label + score: {act}"
+        );
+
+        // No resolvable seed → clean error, not an empty success.
+        let bad = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            ext_request_unix(
+                &sock,
+                "_akh/infer/activate",
+                serde_json::json!({ "seeds": "no_such_symbol_xyz" }),
+            ),
+        )
+        .await
+        .expect("infer timed out");
+        assert!(bad.is_err(), "all-unresolvable seeds must error: {bad:?}");
 
         shutdown_tx.send(true).expect("send shutdown");
         let _ = tokio::time::timeout(std::time::Duration::from_secs(5), server).await;

@@ -914,6 +914,20 @@ enum AcpOp {
         #[arg(long, default_value_t = 5)]
         limit: u64,
     },
+    /// Run spreading-activation inference from one or more seed symbols.
+    Infer {
+        /// Comma-separated seed symbols (e.g. "Sun,Moon").
+        seeds: String,
+        /// Maximum number of activated symbols to return.
+        #[arg(long, default_value_t = 10)]
+        limit: u64,
+        /// Maximum inference depth (multi-step reasoning).
+        #[arg(long, default_value_t = 1)]
+        depth: u64,
+        /// Minimum activation confidence to include.
+        #[arg(long, default_value_t = 0.1)]
+        min_confidence: f64,
+    },
 }
 
 /// Dispatch an `akh acp <op>` command: discover the daemon, send the matching
@@ -961,6 +975,20 @@ fn run_acp_command(op: &AcpOp) -> Result<()> {
             }
             ("_akh/memory/recall", params)
         }
+        AcpOp::Infer {
+            seeds,
+            limit,
+            depth,
+            min_confidence,
+        } => (
+            "_akh/infer/activate",
+            serde_json::json!({
+                "seeds": seeds,
+                "top_k": limit,
+                "max_depth": depth,
+                "min_confidence": min_confidence,
+            }),
+        ),
     };
 
     let rt = tokio::runtime::Builder::new_multi_thread()
