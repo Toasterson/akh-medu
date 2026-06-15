@@ -1,4 +1,7 @@
-# ADR 057 — `akh` is a client of `akhomed`; retire the `client-only` feature in the ACP collapse
+# ADR 059 — `akh` is a client of `akhomed`; retire the `client-only` feature in the ACP collapse
+
+> Note: renumbered from 057 → 059 to avoid collision with `057-code-understanding-kg.md`
+> (committed earlier on a parallel branch, which also renumbered live-training → 058).
 
 > Date: 2026-06-15
 > Status: Accepted

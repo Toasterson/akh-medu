@@ -4741,7 +4741,7 @@ fn run_client_only(cli: Cli) -> Result<()> {
             // Export/Import are local filesystem operations (archive/unarchive a
             // skill directory) — no server or engine needed, so they work in
             // client-only mode exactly as in the full build. (Pre-existing gap;
-            // see ADR-057.)
+            // see ADR-059.)
             SkillAction::Export { name, output } => {
                 let skill_base = cli
                     .data_dir
@@ -4776,7 +4776,7 @@ fn run_client_only(cli: Cli) -> Result<()> {
 
         // `akh cluster` needs a local engine (it ingests live cluster topology),
         // which client-only deliberately strips — so it cannot run here. See
-        // ADR-057; the parallel client-only dispatch goes away in the collapse.
+        // ADR-059; the parallel client-only dispatch goes away in the collapse.
         Commands::Cluster { .. } => {
             miette::bail!(
                 "`akh cluster` requires a local engine and is not available in client-only \
