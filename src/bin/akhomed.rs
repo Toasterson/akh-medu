@@ -1644,6 +1644,106 @@ async fn ws_handler(
     })
 }
 
+/// Bring up the ACP transport (Unix socket + optional TCP) for one workspace,
+/// serving alongside the REST/WS server during the migration to ACP-only.
+///
+/// Returns `(unix_socket_path, tcp_addr, accept_loop_handles)` — the path/addr
+/// strings (present only for transports that bound successfully) go into the
+/// discovery record; the handles are joined on shutdown. A failure to open the
+/// workspace or bind a listener disables that transport and is logged, never
+/// fatal — the daemon still serves REST.
+#[cfg(feature = "acp")]
+async fn start_acp_server(
+    state: Arc<ServerState>,
+    acp_cfg: akh_medu::config::AcpSection,
+    paths: &AkhPaths,
+    fallback_ws: &str,
+    shutdown_rx: tokio::sync::watch::Receiver<bool>,
+) -> (Option<String>, Option<String>, Vec<tokio::task::JoinHandle<()>>) {
+    use akh_medu::acp::{serve_tcp_loop, serve_unix_loop, AkhAcpAgent};
+    use std::path::PathBuf;
+
+    let ws = acp_cfg
+        .workspace
+        .clone()
+        .unwrap_or_else(|| fallback_ws.to_string());
+
+    // Resolve the akh's shared engine + agent (ADR-027) and build a chat
+    // processor from a cheap clone of the cached NLU pipeline (Arc-shared
+    // models — no second model load).
+    let engine = match state.get_engine(&ws).await {
+        Ok(e) => e,
+        Err((_, msg)) => {
+            tracing::warn!(workspace = %ws, error = %msg, "ACP disabled: cannot open workspace");
+            return (None, None, Vec::new());
+        }
+    };
+    let agent = match state.get_agent(&ws).await {
+        Ok(a) => a,
+        Err((_, msg)) => {
+            tracing::warn!(workspace = %ws, error = %msg, "ACP disabled: cannot load agent");
+            return (None, None, Vec::new());
+        }
+    };
+    let nlu = state.get_nlu_pipeline(&ws, &engine).await;
+    let processor = {
+        let p = nlu.lock().unwrap_or_else(|e| e.into_inner());
+        akh_medu::chat::ChatProcessor::new(&engine, p.clone())
+    };
+    let acp_agent = AkhAcpAgent::new(engine, agent, processor).with_name(&ws);
+
+    let mut handles = Vec::new();
+    let mut socket_str = None;
+    let mut tcp_str = None;
+
+    if acp_cfg.unix {
+        let sock = acp_cfg
+            .socket_path
+            .clone()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| paths.runtime_dir.join("akhomed-acp.sock"));
+        // Clear a stale socket so bind() doesn't fail with EADDRINUSE.
+        let _ = std::fs::remove_file(&sock);
+        match tokio::net::UnixListener::bind(&sock) {
+            Ok(listener) => {
+                tracing::info!(socket = %sock.display(), workspace = %ws, "ACP serving on Unix socket");
+                socket_str = Some(sock.display().to_string());
+                let a = acp_agent.clone();
+                let rx = shutdown_rx.clone();
+                handles.push(tokio::spawn(async move {
+                    if let Err(e) = serve_unix_loop(a, listener, rx).await {
+                        tracing::error!("ACP unix accept loop ended: {e}");
+                    }
+                }));
+            }
+            Err(e) => {
+                tracing::error!(path = %sock.display(), error = %e, "ACP unix bind failed");
+            }
+        }
+    }
+
+    if let Some(addr) = acp_cfg.tcp_addr() {
+        match tokio::net::TcpListener::bind(&addr).await {
+            Ok(listener) => {
+                tracing::info!(addr = %addr, workspace = %ws, "ACP serving on TCP");
+                tcp_str = Some(addr);
+                let a = acp_agent.clone();
+                let rx = shutdown_rx.clone();
+                handles.push(tokio::spawn(async move {
+                    if let Err(e) = serve_tcp_loop(a, listener, rx).await {
+                        tracing::error!("ACP tcp accept loop ended: {e}");
+                    }
+                }));
+            }
+            Err(e) => {
+                tracing::error!(addr = %addr, error = %e, "ACP tcp bind failed");
+            }
+        }
+    }
+
+    (socket_str, tcp_str, handles)
+}
+
 async fn handle_ws_session(
     mut socket: WebSocket,
     shared_agent: Arc<Mutex<Agent>>,
@@ -3564,8 +3664,9 @@ async fn main() {
 
     tracing::info!("akhomed initialized");
 
-    // Write PID file so `akh` CLI can discover this server.
-    if let Err(e) = akh_medu::client::write_pid_file(&paths, port_num, &bind) {
+    // Write PID file so `akh` CLI can discover this server. ACP transport
+    // details (socket/tcp) are filled in later, once those listeners bind.
+    if let Err(e) = akh_medu::client::write_pid_file(&paths, port_num, &bind, None, None) {
         tracing::warn!("failed to write PID file: {e}");
     }
 
@@ -4051,6 +4152,32 @@ async fn main() {
         .await
         .expect("failed to bind");
 
+    // ── ACP transport (Unix socket + optional TCP), served alongside REST ──
+    // during the migration to ACP-only. Behind the `acp` feature; when absent,
+    // the daemon is REST/WS-only exactly as before.
+    #[cfg(feature = "acp")]
+    let (acp_shutdown_tx, acp_handles, acp_socket_path) = {
+        let acp_cfg = state.config.read().await.acp.clone();
+        let fallback_ws = auto_start
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "default".to_string());
+        let (acp_tx, acp_rx) = tokio::sync::watch::channel(false);
+        let (acp_socket, acp_tcp, handles) =
+            start_acp_server(Arc::clone(&state), acp_cfg, &paths, &fallback_ws, acp_rx).await;
+        // Republish the discovery record now that ACP endpoints are known.
+        if let Err(e) = akh_medu::client::write_pid_file(
+            &paths,
+            port_num,
+            &bind,
+            acp_socket.as_deref(),
+            acp_tcp.as_deref(),
+        ) {
+            tracing::warn!("failed to update PID file with ACP endpoints: {e}");
+        }
+        (acp_tx, handles, acp_socket)
+    };
+
     // Serve with graceful shutdown on SIGTERM/SIGINT.
     let paths_for_shutdown = paths.clone();
     let state_for_shutdown = state;
@@ -4072,6 +4199,19 @@ async fn main() {
                 ctrl_c.await.ok();
             }
             tracing::info!("akhomed shutting down — draining workspace daemons");
+
+            // Stop ACP accept loops first so no new sessions start mid-drain.
+            #[cfg(feature = "acp")]
+            {
+                tracing::info!("stopping ACP listeners");
+                let _ = acp_shutdown_tx.send(true);
+                for h in acp_handles {
+                    let _ = tokio::time::timeout(Duration::from_secs(3), h).await;
+                }
+                if let Some(path) = acp_socket_path {
+                    let _ = std::fs::remove_file(path);
+                }
+            }
 
             // Signal all workspace daemons to stop, then join with timeout.
             let mut daemons = state_for_shutdown.daemons.write().await;

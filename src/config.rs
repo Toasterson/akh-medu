@@ -81,6 +81,69 @@ pub struct AkhomedConfig {
     /// Upstream MCP service endpoints (anima, seshat).
     #[serde(default)]
     pub upstreams: UpstreamsSection,
+
+    /// ACP (Agent Client Protocol) transport settings.
+    #[serde(default)]
+    pub acp: AcpSection,
+}
+
+/// ACP transport configuration. Effective only when the daemon is built with the
+/// `acp` feature. By default the Unix socket is served and TCP is disabled.
+///
+/// Example TOML:
+/// ```toml
+/// [acp]
+/// unix = true
+/// # socket_path = "/run/akh-medu/akhomed-acp.sock"  # default: {runtime_dir}/akhomed-acp.sock
+/// tcp_bind = "127.0.0.1"
+/// tcp_port = 8201
+/// # workspace = "default"   # default: first auto_start workspace, else "default"
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AcpSection {
+    /// Serve ACP over a Unix domain socket (default `true`).
+    #[serde(default = "default_acp_unix")]
+    pub unix: bool,
+    /// Override the Unix socket path. `None` ⇒ `{runtime_dir}/akhomed-acp.sock`.
+    #[serde(default)]
+    pub socket_path: Option<String>,
+    /// TCP bind host for ACP, e.g. `"127.0.0.1"`. Requires `tcp_port`.
+    #[serde(default)]
+    pub tcp_bind: Option<String>,
+    /// TCP port for ACP. `None` disables the TCP listener.
+    #[serde(default)]
+    pub tcp_port: Option<u16>,
+    /// Workspace (akh) the ACP server binds to. `None` ⇒ first auto-start
+    /// workspace, falling back to `"default"`.
+    #[serde(default)]
+    pub workspace: Option<String>,
+}
+
+impl Default for AcpSection {
+    fn default() -> Self {
+        Self {
+            unix: default_acp_unix(),
+            socket_path: None,
+            tcp_bind: None,
+            tcp_port: None,
+            workspace: None,
+        }
+    }
+}
+
+fn default_acp_unix() -> bool {
+    true
+}
+
+impl AcpSection {
+    /// Resolved TCP bind address (`host:port`) if TCP serving is enabled.
+    /// Requires `tcp_port`; the host defaults to `127.0.0.1` when only the port
+    /// is set.
+    pub fn tcp_addr(&self) -> Option<String> {
+        let port = self.tcp_port?;
+        let host = self.tcp_bind.as_deref().unwrap_or("127.0.0.1");
+        Some(format!("{host}:{port}"))
+    }
 }
 
 // ---------------------------------------------------------------------------

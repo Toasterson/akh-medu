@@ -36,12 +36,28 @@ use crate::vsa::item_memory::SearchResult;
 // Server discovery
 // ---------------------------------------------------------------------------
 
+/// ACP protocol version advertised in the discovery record.
+pub const ACP_PROTOCOL_VERSION: &str = "1";
+
 /// Information about a running akhomed instance.
+///
+/// The `acp_*` fields are a superset added for the ACP transport; they are
+/// `#[serde(default)]` so a discovery file written by an older binary (only
+/// `pid`/`port`/`bind`) still deserializes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerInfo {
     pub pid: u32,
     pub port: u16,
     pub bind: String,
+    /// ACP Unix socket path, if the daemon serves ACP over a socket.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acp_socket: Option<String>,
+    /// ACP TCP address (`host:port`), if the daemon serves ACP over TCP.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acp_tcp: Option<String>,
+    /// ACP protocol version, present iff any ACP transport is served.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acp_version: Option<String>,
 }
 
 impl ServerInfo {
@@ -108,11 +124,26 @@ pub fn discover_server(paths: &AkhPaths) -> Option<ServerInfo> {
 }
 
 /// Write a PID file for the current akhomed process.
-pub fn write_pid_file(paths: &AkhPaths, port: u16, bind: &str) -> std::io::Result<()> {
+///
+/// `acp_socket` / `acp_tcp` describe the ACP transports the daemon is serving
+/// (pass `None` for either that is disabled); when at least one is present the
+/// record also advertises [`ACP_PROTOCOL_VERSION`].
+pub fn write_pid_file(
+    paths: &AkhPaths,
+    port: u16,
+    bind: &str,
+    acp_socket: Option<&str>,
+    acp_tcp: Option<&str>,
+) -> std::io::Result<()> {
+    let acp_version = (acp_socket.is_some() || acp_tcp.is_some())
+        .then(|| ACP_PROTOCOL_VERSION.to_string());
     let info = ServerInfo {
         pid: std::process::id(),
         port,
         bind: bind.to_string(),
+        acp_socket: acp_socket.map(str::to_string),
+        acp_tcp: acp_tcp.map(str::to_string),
+        acp_version,
     };
     let json = serde_json::to_string_pretty(&info).expect("ServerInfo is always serializable");
     std::fs::write(paths.pid_file(), json)
@@ -1498,5 +1529,42 @@ impl AkhClient {
         resp.into_json().map_err(|e| ClientError::Response {
             message: format!("failed to parse JSON: {e}"),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_server_info_without_acp_fields_parses() {
+        // A discovery file written by a pre-ACP binary.
+        let legacy = r#"{ "pid": 1234, "port": 8200, "bind": "0.0.0.0" }"#;
+        let info: ServerInfo = serde_json::from_str(legacy).expect("legacy ServerInfo must parse");
+        assert_eq!(info.pid, 1234);
+        assert_eq!(info.port, 8200);
+        assert!(info.acp_socket.is_none());
+        assert!(info.acp_tcp.is_none());
+        assert!(info.acp_version.is_none());
+        assert_eq!(info.base_url(), "http://127.0.0.1:8200");
+    }
+
+    #[test]
+    fn server_info_with_acp_round_trips_and_omits_none() {
+        let info = ServerInfo {
+            pid: 7,
+            port: 8200,
+            bind: "127.0.0.1".into(),
+            acp_socket: Some("/run/akh-medu/akhomed-acp.sock".into()),
+            acp_tcp: None,
+            acp_version: Some(ACP_PROTOCOL_VERSION.to_string()),
+        };
+        let json = serde_json::to_string(&info).expect("serialize");
+        // `None` fields are omitted from the record.
+        assert!(!json.contains("acp_tcp"), "None acp_tcp must be skipped: {json}");
+        assert!(json.contains("akhomed-acp.sock"));
+        let back: ServerInfo = serde_json::from_str(&json).expect("round-trip");
+        assert_eq!(back.acp_socket.as_deref(), Some("/run/akh-medu/akhomed-acp.sock"));
+        assert_eq!(back.acp_version.as_deref(), Some(ACP_PROTOCOL_VERSION));
     }
 }
