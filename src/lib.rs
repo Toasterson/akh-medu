@@ -53,6 +53,7 @@ pub mod engine;
 pub mod extraction;
 pub mod error;
 pub mod export;
+pub mod fs;
 pub mod glyph;
 pub mod grammar;
 pub mod graph;

@@ -516,8 +516,10 @@ mod tests {
         registry.register(Box::new(tools::ReasonTool));
         registry.register(Box::new(tools::SimilaritySearchTool));
 
-        let scratch_dir = None;
-        registry.register(Box::new(tools::FileIoTool::new(scratch_dir)));
+        // Lightweight semantic-profile registry: no filesystem access.
+        registry.register(Box::new(tools::FileIoTool::new(std::sync::Arc::new(
+            crate::fs::LocalFs::denied(),
+        ))));
 
         (engine, registry)
     }

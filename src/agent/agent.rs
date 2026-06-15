@@ -290,8 +290,18 @@ impl Agent {
         registry.register(Box::new(tools::SimilaritySearchTool));
 
         // External world-interaction tools.
-        let scratch_dir = engine.config().data_dir.as_ref().map(|d| d.join("scratch"));
-        registry.register(Box::new(tools::FileIoTool::new(scratch_dir)));
+        // Reads are sandboxed to the whole workspace data dir; writes stay
+        // confined to a `scratch/` subdir. With no data dir (in-memory engine)
+        // the filesystem fails closed.
+        let fs: std::sync::Arc<dyn crate::fs::Filesystem> = match engine.config().data_dir.as_ref()
+        {
+            Some(dir) => std::sync::Arc::new(crate::fs::LocalFs::new(
+                vec![dir.clone()],
+                vec![dir.join("scratch")],
+            )),
+            None => std::sync::Arc::new(crate::fs::LocalFs::denied()),
+        };
+        registry.register(Box::new(tools::FileIoTool::new(fs)));
         registry.register(Box::new(tools::HttpFetchTool));
         registry.register(Box::new(tools::ShellExecTool));
         registry.register(Box::new(tools::UserInteractTool));

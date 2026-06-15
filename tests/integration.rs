@@ -2213,7 +2213,9 @@ fn file_io_tool_read_write() {
     let scratch = dir.path().to_path_buf();
 
     let engine = test_engine();
-    let tool = akh_medu::agent::tools::FileIoTool::new(Some(scratch.clone()));
+    let tool = akh_medu::agent::tools::FileIoTool::new(std::sync::Arc::new(
+        akh_medu::fs::LocalFs::sandbox(scratch.clone()),
+    ));
 
     // Write a file.
     let mut params = HashMap::new();
@@ -2245,7 +2247,9 @@ fn file_io_tool_denies_outside_scratch() {
     let scratch = dir.path().to_path_buf();
 
     let engine = test_engine();
-    let tool = akh_medu::agent::tools::FileIoTool::new(Some(scratch));
+    let tool = akh_medu::agent::tools::FileIoTool::new(std::sync::Arc::new(
+        akh_medu::fs::LocalFs::sandbox(scratch),
+    ));
 
     // Try writing to an absolute path outside scratch.
     let mut params = HashMap::new();
