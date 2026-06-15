@@ -1,9 +1,11 @@
-# ADR 047 — Live KG→LLM Training
+# ADR 058 — Live KG→LLM Training
 
 > Date: 2026-04-09
 > Status: Accepted
 > Phase: 27
 > Supersedes: None
+> Renumbered: 2026-06-15 — was ADR 047 (collided with ADR 047 — Seshat's
+>             Archive); reassigned 058. No content change.
 
 ## Context
 
