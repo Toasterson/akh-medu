@@ -47,8 +47,10 @@ use agent_client_protocol::schema::{
     NewSessionRequest, NewSessionResponse, PromptRequest, PromptResponse, ProtocolVersion,
     SessionId, SessionNotification, SessionUpdate, StopReason, TextContent,
 };
+use agent_client_protocol::util::{json_cast, MatchDispatch};
 use agent_client_protocol::{
-    ActiveSession, Agent as AcpRole, ByteStreams, Client, ConnectTo, ConnectionTo, Responder,
+    ActiveSession, Agent as AcpRole, ByteStreams, Client, ConnectTo, ConnectionTo, Dispatch,
+    JsonRpcMessage, JsonRpcRequest, JsonRpcResponse, Responder, UntypedMessage,
 };
 use miette::Diagnostic;
 use thiserror::Error;
@@ -335,6 +337,96 @@ fn to_session_update(msg: &AkhMessage) -> SessionUpdate {
 /// Returns a [`Builder`](agent_client_protocol::Builder) that is itself a
 /// `ConnectTo<Client>` — i.e. it serves the [`Client`] counterpart over whatever
 /// transport it is connected to.
+// ──────────────────────────────────────────────────────────────────────────
+// `_akh/*` data-plane — custom JSON-RPC extension methods
+// ──────────────────────────────────────────────────────────────────────────
+//
+// ACP routes any method starting with `_` to an extension channel. Because the
+// method name is dynamic, it does not fit the crate's fixed-method typed-request
+// model, so the data-plane rides a single custom request type
+// ([`AkhExtRequest`]) whose `matches_method` claims the `_akh/` prefix — the
+// same pattern as the crate's `EchoRequestResponse` test. The agent dispatches
+// these via `on_receive_dispatch` (the catch-all after the typed
+// initialize/session handlers); the client sends them with [`ext_request_unix`]
+// / [`ext_request_tcp`]. New data-plane operations are added by extending
+// [`dispatch_akh`] (server) — the transport stays fixed.
+
+/// A `_akh/<group>/<op>` data-plane request: carries the full wire method and
+/// its JSON params.
+#[derive(Debug, Clone)]
+struct AkhExtRequest {
+    method: String,
+    params: serde_json::Value,
+}
+
+impl JsonRpcMessage for AkhExtRequest {
+    fn matches_method(method: &str) -> bool {
+        method.starts_with("_akh/")
+    }
+    fn method(&self) -> &str {
+        &self.method
+    }
+    fn to_untyped_message(&self) -> Result<UntypedMessage, agent_client_protocol::Error> {
+        UntypedMessage::new(&self.method, &self.params)
+    }
+    fn parse_message(
+        method: &str,
+        params: &impl serde::Serialize,
+    ) -> Result<Self, agent_client_protocol::Error> {
+        if !Self::matches_method(method) {
+            return Err(agent_client_protocol::Error::method_not_found());
+        }
+        Ok(Self {
+            method: method.to_string(),
+            params: json_cast(params)?,
+        })
+    }
+}
+
+/// The JSON result of an [`AkhExtRequest`].
+#[derive(Debug, Clone)]
+struct AkhExtResponse(serde_json::Value);
+
+impl JsonRpcResponse for AkhExtResponse {
+    fn into_json(self, _method: &str) -> Result<serde_json::Value, agent_client_protocol::Error> {
+        Ok(self.0)
+    }
+    fn from_value(
+        _method: &str,
+        value: serde_json::Value,
+    ) -> Result<Self, agent_client_protocol::Error> {
+        Ok(Self(value))
+    }
+}
+
+impl JsonRpcRequest for AkhExtRequest {
+    type Response = AkhExtResponse;
+}
+
+/// Dispatch one `_akh/*` data-plane operation against the engine.
+///
+/// `method` is the full wire method (e.g. `"_akh/health"`). Read-only engine
+/// access needs no agent lock (engine methods take `&self`); operations that
+/// mutate the agent would route through `spawn_blocking` per ADR-027 (none yet).
+/// Returns the JSON result, or an error string surfaced as a JSON-RPC error.
+fn dispatch_akh(engine: &Engine, method: &str, _params: &serde_json::Value) -> Result<serde_json::Value, String> {
+    let op = method.strip_prefix("_akh/").unwrap_or(method);
+    match op {
+        "health" => Ok(serde_json::json!({
+            "status": "ok",
+            "symbols": engine.all_symbols().len(),
+            "triples": engine.all_triples().len(),
+        })),
+        "meta/capabilities" => Ok(serde_json::json!({
+            "protocol": "acp",
+            "version": crate::client::ACP_PROTOCOL_VERSION,
+            "groups": ["meta"],
+            "methods": ["_akh/health", "_akh/meta/capabilities"],
+        })),
+        other => Err(format!("unknown _akh data-plane method: _akh/{other}")),
+    }
+}
+
 fn build_connection(
     me: AkhAcpAgent,
 ) -> impl agent_client_protocol::ConnectTo<Client> {
@@ -405,6 +497,34 @@ fn build_connection(
                 }
             },
             agent_client_protocol::on_receive_request!(),
+        )
+        // ── _akh/* data-plane (catch-all, after the typed handlers) ─────────
+        .on_receive_dispatch_from(
+            Client,
+            {
+                let me = me.clone();
+                move |message: Dispatch, _cx: ConnectionTo<Client>| {
+                    let engine = Arc::clone(&me.engine);
+                    async move {
+                        MatchDispatch::new(message)
+                            .if_request(
+                                async move |req: AkhExtRequest,
+                                            responder: Responder<AkhExtResponse>| {
+                                    match dispatch_akh(&engine, &req.method, &req.params) {
+                                        Ok(value) => responder.respond(AkhExtResponse(value)),
+                                        Err(e) => responder.respond_with_error(
+                                            agent_client_protocol::Error::method_not_found()
+                                                .data(e),
+                                        ),
+                                    }
+                                },
+                            )
+                            .await
+                            .done()
+                    }
+                }
+            },
+            agent_client_protocol::on_receive_dispatch!(),
         )
 }
 
@@ -652,6 +772,69 @@ where
     let (read_half, write_half) = stream.into_split();
     let transport = ByteStreams::new(write_half.compat_write(), read_half.compat());
     run_session(transport, name, f).await
+}
+
+/// Send one `_akh/*` data-plane request over `transport` and return its JSON
+/// result. Connects, `initialize`s, sends the request, and disconnects — the
+/// one-shot shape that fits stateless CLI data commands (no chat session).
+async fn ext_request<T>(transport: T, method: &str, params: serde_json::Value) -> AcpResult<serde_json::Value>
+where
+    T: ConnectTo<Client> + 'static,
+{
+    let method = method.to_string();
+    Client
+        .builder()
+        .name("akh-ext-client")
+        .connect_with(transport, async move |cx| {
+            cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+                .block_task()
+                .await?;
+            let resp: AkhExtResponse = cx
+                .send_request(AkhExtRequest { method, params })
+                .block_task()
+                .await?;
+            Ok(resp.0)
+        })
+        .await
+        .map_err(AcpError::from)
+}
+
+/// Send a `_akh/*` data-plane request to a daemon over a Unix socket.
+///
+/// `method` must include the leading `_akh/` (e.g. `"_akh/health"`).
+pub async fn ext_request_unix(
+    path: impl AsRef<Path>,
+    method: &str,
+    params: serde_json::Value,
+) -> AcpResult<serde_json::Value> {
+    let path = path.as_ref();
+    let stream = UnixStream::connect(path)
+        .await
+        .map_err(|source| AcpError::Connect {
+            target: path.display().to_string(),
+            source,
+        })?;
+    let (read_half, write_half) = stream.into_split();
+    let transport = ByteStreams::new(write_half.compat_write(), read_half.compat());
+    ext_request(transport, method, params).await
+}
+
+/// Send a `_akh/*` data-plane request to a daemon over TCP (`host:port`).
+pub async fn ext_request_tcp(
+    addr: &str,
+    method: &str,
+    params: serde_json::Value,
+) -> AcpResult<serde_json::Value> {
+    let stream = TcpStream::connect(addr)
+        .await
+        .map_err(|source| AcpError::Connect {
+            target: addr.to_string(),
+            source,
+        })?;
+    let _ = stream.set_nodelay(true);
+    let (read_half, write_half) = stream.into_split();
+    let transport = ByteStreams::new(write_half.compat_write(), read_half.compat());
+    ext_request(transport, method, params).await
 }
 
 /// Interactive headless chat loop over one ACP session: read a line from stdin,
@@ -987,6 +1170,53 @@ mod tests {
 
         assert!(!a.trim().is_empty(), "first turn empty: {a:?}");
         assert!(!b.trim().is_empty(), "second turn empty: {b:?}");
+
+        shutdown_tx.send(true).expect("send shutdown");
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), server).await;
+    }
+
+    /// The `_akh/*` data-plane: a client `ext_request` reaches the server's
+    /// dispatch handler and gets a structured JSON result back.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn acp_ext_health_and_capabilities() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("akh-acp-ext.sock");
+
+        let me = workspace();
+        let listener = UnixListener::bind(&sock).expect("bind unix");
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let server = tokio::spawn(async move { serve_unix_loop(me, listener, shutdown_rx).await });
+
+        // _akh/health → status ok + counts (the seeded triple ⇒ ≥1 triple).
+        let health = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            ext_request_unix(&sock, "_akh/health", serde_json::json!({})),
+        )
+        .await
+        .expect("ext health timed out")
+        .expect("ext health ok");
+        assert_eq!(health["status"], "ok");
+        assert!(health["triples"].as_u64().unwrap() >= 1, "expected seeded triples: {health}");
+
+        // _akh/meta/capabilities → advertises the data-plane.
+        let caps = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            ext_request_unix(&sock, "_akh/meta/capabilities", serde_json::json!({})),
+        )
+        .await
+        .expect("ext caps timed out")
+        .expect("ext caps ok");
+        assert_eq!(caps["protocol"], "acp");
+        assert!(caps["methods"].as_array().unwrap().iter().any(|m| m == "_akh/health"));
+
+        // An unknown method is a clean error, not a hang or panic.
+        let unknown = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            ext_request_unix(&sock, "_akh/does/not/exist", serde_json::json!({})),
+        )
+        .await
+        .expect("ext unknown timed out");
+        assert!(unknown.is_err(), "unknown _akh method must error");
 
         shutdown_tx.send(true).expect("send shutdown");
         let _ = tokio::time::timeout(std::time::Duration::from_secs(5), server).await;
