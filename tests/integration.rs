@@ -2220,7 +2220,7 @@ fn file_io_tool_read_write() {
     params.insert("action".into(), "write".into());
     params.insert("path".into(), "hello.txt".into());
     params.insert("content".into(), "Hello from agent!".into());
-    let input = ToolInput { params };
+    let input = ToolInput::from(params);
     let out = tool.execute(&engine, input).unwrap();
     assert!(out.success, "write should succeed: {}", out.result);
     assert!(out.result.contains("17 bytes"));
@@ -2230,7 +2230,7 @@ fn file_io_tool_read_write() {
     let mut params = HashMap::new();
     params.insert("action".into(), "read".into());
     params.insert("path".into(), read_path.to_string_lossy().into());
-    let input = ToolInput { params };
+    let input = ToolInput::from(params);
     let out = tool.execute(&engine, input).unwrap();
     assert!(out.success, "read should succeed: {}", out.result);
     assert!(out.result.contains("Hello from agent!"));
@@ -2252,7 +2252,7 @@ fn file_io_tool_denies_outside_scratch() {
     params.insert("action".into(), "write".into());
     params.insert("path".into(), "/tmp/evil.txt".into());
     params.insert("content".into(), "should not work".into());
-    let input = ToolInput { params };
+    let input = ToolInput::from(params);
     let out = tool.execute(&engine, input).unwrap();
     assert!(!out.success, "write outside scratch should be denied");
     assert!(out.result.contains("denied") || out.result.contains("outside"));
@@ -2268,7 +2268,7 @@ fn shell_exec_tool_runs_command() {
 
     let mut params = HashMap::new();
     params.insert("command".into(), "echo hello_world".into());
-    let input = ToolInput { params };
+    let input = ToolInput::from(params);
     let out = tool.execute(&engine, input).unwrap();
     assert!(out.success, "echo should succeed: {}", out.result);
     assert!(out.result.contains("hello_world"));
@@ -2285,7 +2285,7 @@ fn shell_exec_tool_timeout() {
     let mut params = HashMap::new();
     params.insert("command".into(), "sleep 60".into());
     params.insert("timeout".into(), "1".into());
-    let input = ToolInput { params };
+    let input = ToolInput::from(params);
     let out = tool.execute(&engine, input).unwrap();
     assert!(!out.success, "should have timed out");
     assert!(out.result.contains("timed out"));
@@ -2301,7 +2301,7 @@ fn shell_exec_tool_exit_code() {
 
     let mut params = HashMap::new();
     params.insert("command".into(), "false".into());
-    let input = ToolInput { params };
+    let input = ToolInput::from(params);
     let out = tool.execute(&engine, input).unwrap();
     assert!(!out.success, "false should report failure");
     assert!(out.result.contains("Exit code: 1"));

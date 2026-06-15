@@ -35,10 +35,21 @@ pub struct ToolParam {
 }
 
 /// Input to a tool execution.
+///
+/// Values are [`serde_json::Value`], so a parameter can be a string, number,
+/// bool, array, or nested object. The string-based API ([`with_param`](Self::with_param),
+/// [`get`](Self::get), [`require`](Self::require)) is preserved verbatim —
+/// `with_param` stores a JSON string and `get`/`require` return the borrowed
+/// `&str` of a JSON-string value — so the existing ~285 call sites and the flat
+/// `{string:string}` WASM/CLI wire contracts are unchanged. Typed/structured
+/// accessors ([`with_value`](Self::with_value), [`get_bool`](Self::get_bool),
+/// [`get_i64`](Self::get_i64), [`get_str_list`](Self::get_str_list),
+/// [`get_value`](Self::get_value), …) are additive, for tools whose inputs are
+/// genuinely structured (e.g. the task-list tool's array of task objects).
 #[derive(Debug, Clone, Default)]
 pub struct ToolInput {
-    /// Named parameters.
-    pub params: HashMap<String, String>,
+    /// Named parameters, each a JSON value.
+    pub params: serde_json::Map<String, serde_json::Value>,
 }
 
 impl ToolInput {
@@ -47,23 +58,126 @@ impl ToolInput {
         Self::default()
     }
 
-    /// Add a parameter.
+    /// Add a string parameter (back-compatible: stores a JSON string).
     pub fn with_param(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.params
+            .insert(name.into(), serde_json::Value::String(value.into()));
+        self
+    }
+
+    /// Add a parameter with an arbitrary JSON value (number, bool, array,
+    /// nested object). Use this for structured tool inputs.
+    pub fn with_value(
+        mut self,
+        name: impl Into<String>,
+        value: impl Into<serde_json::Value>,
+    ) -> Self {
         self.params.insert(name.into(), value.into());
         self
     }
 
-    /// Get a parameter value.
+    /// Get a parameter as a string slice.
+    ///
+    /// Returns `Some` only when the value is a JSON string — preserving the
+    /// historical string-map semantics for the existing `get`/`require` callers.
     pub fn get(&self, name: &str) -> Option<&str> {
-        self.params.get(name).map(|s| s.as_str())
+        self.params.get(name).and_then(|v| v.as_str())
     }
 
-    /// Get a required parameter, returning an error if missing.
+    /// Get a required string parameter, returning an error if missing.
     pub fn require(&self, name: &str, tool_name: &str) -> AgentResult<&str> {
         self.get(name).ok_or(AgentError::ToolExecution {
             tool_name: tool_name.into(),
             message: format!("missing required parameter: {name}"),
         })
+    }
+
+    /// Get the raw JSON value for a parameter.
+    pub fn get_value(&self, name: &str) -> Option<&serde_json::Value> {
+        self.params.get(name)
+    }
+
+    /// Get a boolean parameter, accepting either a JSON bool or the legacy
+    /// string encodings (`"true"`/`"1"`/`"yes"` / `"false"`/`"0"`/`"no"`,
+    /// case-insensitive). Returns `None` for any other shape.
+    pub fn get_bool(&self, name: &str) -> Option<bool> {
+        match self.params.get(name)? {
+            serde_json::Value::Bool(b) => Some(*b),
+            serde_json::Value::String(s) => {
+                let s = s.trim();
+                if s.eq_ignore_ascii_case("true") || s == "1" || s.eq_ignore_ascii_case("yes") {
+                    Some(true)
+                } else if s.eq_ignore_ascii_case("false")
+                    || s == "0"
+                    || s.eq_ignore_ascii_case("no")
+                {
+                    Some(false)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Get an integer parameter, accepting a JSON number or a numeric string.
+    pub fn get_i64(&self, name: &str) -> Option<i64> {
+        match self.params.get(name)? {
+            serde_json::Value::Number(n) => n.as_i64(),
+            serde_json::Value::String(s) => s.trim().parse().ok(),
+            _ => None,
+        }
+    }
+
+    /// Get an unsigned integer parameter, accepting a JSON number or string.
+    pub fn get_u64(&self, name: &str) -> Option<u64> {
+        match self.params.get(name)? {
+            serde_json::Value::Number(n) => n.as_u64(),
+            serde_json::Value::String(s) => s.trim().parse().ok(),
+            _ => None,
+        }
+    }
+
+    /// Get a float parameter, accepting a JSON number or numeric string.
+    pub fn get_f64(&self, name: &str) -> Option<f64> {
+        match self.params.get(name)? {
+            serde_json::Value::Number(n) => n.as_f64(),
+            serde_json::Value::String(s) => s.trim().parse().ok(),
+            _ => None,
+        }
+    }
+
+    /// Get a list of strings, accepting either a JSON string array or a single
+    /// comma-separated string (the legacy encoding used by `tags`,
+    /// `query_symbols`, `subjects`). Entries are trimmed and empties dropped;
+    /// returns an empty vec when the parameter is absent.
+    pub fn get_str_list(&self, name: &str) -> Vec<String> {
+        match self.params.get(name) {
+            Some(serde_json::Value::Array(items)) => items
+                .iter()
+                .filter_map(|v| v.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
+            Some(serde_json::Value::String(s)) => s
+                .split(',')
+                .map(|p| p.trim().to_string())
+                .filter(|p| !p.is_empty())
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+}
+
+impl From<HashMap<String, String>> for ToolInput {
+    /// Build an input from a flat string map (e.g. persisted trigger params),
+    /// wrapping each value as a JSON string.
+    fn from(map: HashMap<String, String>) -> Self {
+        let params = map
+            .into_iter()
+            .map(|(k, v)| (k, serde_json::Value::String(v)))
+            .collect();
+        Self { params }
     }
 }
 
