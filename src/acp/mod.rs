@@ -44,11 +44,11 @@ use std::sync::{Arc, Mutex};
 
 use agent_client_protocol::schema::{
     AgentCapabilities, ContentBlock, ContentChunk, InitializeRequest, InitializeResponse,
-    NewSessionRequest, NewSessionResponse, PromptRequest, PromptResponse, SessionId,
-    SessionNotification, SessionUpdate, StopReason, TextContent,
+    NewSessionRequest, NewSessionResponse, PromptRequest, PromptResponse, ProtocolVersion,
+    SessionId, SessionNotification, SessionUpdate, StopReason, TextContent,
 };
 use agent_client_protocol::{
-    Agent as AcpRole, ByteStreams, Client, ConnectionTo, Responder,
+    ActiveSession, Agent as AcpRole, ByteStreams, Client, ConnectTo, ConnectionTo, Responder,
 };
 use miette::Diagnostic;
 use thiserror::Error;
@@ -113,6 +113,22 @@ pub enum AcpError {
     Protocol {
         /// Human-readable description from the protocol layer.
         message: String,
+    },
+
+    /// A client failed to connect to a daemon's ACP endpoint.
+    #[error("failed to connect to ACP daemon at {target}: {source}")]
+    #[diagnostic(
+        code(akh::acp::connect),
+        help(
+            "Ensure akhomed is running and the ACP socket/TCP endpoint advertised \
+             in the discovery record is correct and reachable."
+        )
+    )]
+    Connect {
+        /// The socket path or TCP address that could not be reached.
+        target: String,
+        /// The underlying I/O error.
+        source: std::io::Error,
     },
 
     /// The blocking task that ran the synchronous engine panicked or was cancelled.
@@ -556,6 +572,161 @@ pub async fn serve_tcp_loop(
 }
 
 // ──────────────────────────────────────────────────────────────────────────
+// Client — connect to a daemon and drive sessions over ACP
+// ──────────────────────────────────────────────────────────────────────────
+
+/// Connect over `transport`, `initialize`, start ONE persistent session, then
+/// run `f` with the live [`ActiveSession`] and a clone of the agent
+/// [`ConnectionTo`].
+///
+/// `f` owns the session for its whole duration, so it may issue many
+/// `send_prompt` turns — and later `_akh/*` ext requests via the connection —
+/// over the single connection. The crate keeps the connection alive until `f`
+/// returns; on return the protocol loop drains and the transport closes. This
+/// is the lifetime constraint of the ACP client: the connection cannot outlive
+/// `f`, so the interactive loop must live inside it.
+async fn run_session<T, R, F>(transport: T, name: &str, f: F) -> AcpResult<R>
+where
+    T: ConnectTo<Client> + 'static,
+    F: AsyncFnOnce(
+        ActiveSession<'static, AcpRole>,
+        ConnectionTo<AcpRole>,
+    ) -> Result<R, agent_client_protocol::Error>,
+{
+    Client
+        .builder()
+        .name(name.to_string())
+        .connect_with(transport, async move |cx| {
+            cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+                .block_task()
+                .await?;
+            let session = cx
+                .build_session_cwd()?
+                .block_task()
+                .start_session()
+                .await?;
+            f(session, cx).await
+        })
+        .await
+        .map_err(AcpError::from)
+}
+
+/// Connect to an ACP daemon over a Unix socket and run `f` over one session.
+///
+/// `f` receives a started [`ActiveSession`] (call `send_prompt` / `read_to_string`
+/// / `read_update` on it, repeatedly) and a [`ConnectionTo`] for ext requests.
+pub async fn chat_over_unix<R, F>(path: impl AsRef<Path>, name: &str, f: F) -> AcpResult<R>
+where
+    F: AsyncFnOnce(
+        ActiveSession<'static, AcpRole>,
+        ConnectionTo<AcpRole>,
+    ) -> Result<R, agent_client_protocol::Error>,
+{
+    let path = path.as_ref();
+    let stream = UnixStream::connect(path)
+        .await
+        .map_err(|source| AcpError::Connect {
+            target: path.display().to_string(),
+            source,
+        })?;
+    let (read_half, write_half) = stream.into_split();
+    let transport = ByteStreams::new(write_half.compat_write(), read_half.compat());
+    run_session(transport, name, f).await
+}
+
+/// Connect to an ACP daemon over TCP (`host:port`) and run `f` over one session.
+pub async fn chat_over_tcp<R, F>(addr: &str, name: &str, f: F) -> AcpResult<R>
+where
+    F: AsyncFnOnce(
+        ActiveSession<'static, AcpRole>,
+        ConnectionTo<AcpRole>,
+    ) -> Result<R, agent_client_protocol::Error>,
+{
+    let stream = TcpStream::connect(addr)
+        .await
+        .map_err(|source| AcpError::Connect {
+            target: addr.to_string(),
+            source,
+        })?;
+    let _ = stream.set_nodelay(true);
+    let (read_half, write_half) = stream.into_split();
+    let transport = ByteStreams::new(write_half.compat_write(), read_half.compat());
+    run_session(transport, name, f).await
+}
+
+/// Interactive headless chat loop over one ACP session: read a line from stdin,
+/// send it as a prompt, print the turn's response; repeat until EOF or `/quit`.
+///
+/// `label` is the akh/workspace name shown in the banner. Lives in the library
+/// so the CLI need not depend on `agent-client-protocol` directly.
+async fn headless_loop(
+    session: &mut ActiveSession<'static, AcpRole>,
+    label: &str,
+) -> Result<(), agent_client_protocol::Error> {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let to_err =
+        |e: std::io::Error| agent_client_protocol::Error::internal_error().data(e.to_string());
+
+    let mut stderr = tokio::io::stderr();
+    let _ = stderr
+        .write_all(
+            format!("Connected to akh '{label}' over ACP. Type a message; Ctrl-D or /quit to exit.\n")
+                .as_bytes(),
+        )
+        .await;
+    let _ = stderr.flush().await;
+
+    let mut lines = BufReader::new(tokio::io::stdin()).lines();
+    loop {
+        let _ = stderr.write_all(b"> ").await;
+        let _ = stderr.flush().await;
+
+        let Some(line) = lines.next_line().await.map_err(to_err)? else {
+            break;
+        };
+        let msg = line.trim();
+        if msg.is_empty() {
+            continue;
+        }
+        if matches!(msg, "/quit" | "/exit" | "quit" | "exit") {
+            break;
+        }
+
+        session.send_prompt(msg)?;
+        let resp = session.read_to_string().await?;
+        if !resp.trim().is_empty() {
+            println!("{resp}");
+        }
+    }
+    Ok(())
+}
+
+/// Connect to a daemon over a Unix socket and run an interactive headless chat
+/// (stdin/stdout) over one persistent ACP session.
+pub async fn run_headless_chat_unix(
+    path: impl AsRef<Path>,
+    name: &str,
+    label: &str,
+) -> AcpResult<()> {
+    let label = label.to_string();
+    chat_over_unix(path, name, async move |mut session, _cx| {
+        headless_loop(&mut session, &label).await
+    })
+    .await
+}
+
+/// Connect to a daemon over TCP (`host:port`) and run an interactive headless
+/// chat over one persistent ACP session.
+pub async fn run_headless_chat_tcp(addr: &str, name: &str, label: &str) -> AcpResult<()> {
+    let label = label.to_string();
+    chat_over_tcp(addr, name, async move |mut session, _cx| {
+        headless_loop(&mut session, &label).await
+    })
+    .await
+}
+
+// ──────────────────────────────────────────────────────────────────────────
 // End-to-end test: real Unix socket, real ACP client ↔ ACP agent.
 // ──────────────────────────────────────────────────────────────────────────
 
@@ -785,6 +956,40 @@ mod tests {
             .expect("accept loop did not shut down within 5s")
             .expect("accept loop task joined");
         joined.expect("accept loop returned Ok");
+    }
+
+    /// The reusable client (`chat_over_unix`) holds ONE connection + session and
+    /// issues TWO prompt turns over it — proving persistent multi-turn sessions
+    /// (the basis for `akh chat` over ACP).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn acp_client_persistent_session_two_prompts() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("akh-acp-client.sock");
+
+        let me = workspace();
+        let listener = UnixListener::bind(&sock).expect("bind unix");
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let server = tokio::spawn(async move { serve_unix_loop(me, listener, shutdown_rx).await });
+
+        let (a, b) = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            chat_over_unix(&sock, "akh-acp-test-client", async move |mut session, _cx| {
+                session.send_prompt("What is the Sun?")?;
+                let a = session.read_to_string().await?;
+                session.send_prompt("What is the Sun?")?;
+                let b = session.read_to_string().await?;
+                Ok::<(String, String), agent_client_protocol::Error>((a, b))
+            }),
+        )
+        .await
+        .expect("client timed out (transport/protocol deadlock)")
+        .expect("client session completed");
+
+        assert!(!a.trim().is_empty(), "first turn empty: {a:?}");
+        assert!(!b.trim().is_empty(), "second turn empty: {b:?}");
+
+        shutdown_tx.send(true).expect("send shutdown");
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), server).await;
     }
 
     /// The structured mapping routes visible answers to AgentMessageChunk and

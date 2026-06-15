@@ -3628,6 +3628,32 @@ fn main() -> Result<()> {
         Commands::Chat { skill, headless, fresh } => {
             let ws_name = cli.workspace.clone();
 
+            // Headless + a running daemon that advertises an ACP endpoint →
+            // talk to the akh purely over ACP (the pure-ACP client path).
+            // Falls through to the local engine when no daemon / no ACP.
+            #[cfg(feature = "acp")]
+            if headless
+                && let Some(ref paths) = xdg_paths
+                && let Some(server_info) = akh_medu::client::discover_server(paths)
+            {
+                let rt = tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .build()
+                    .into_diagnostic()?;
+                if let Some(sock) = server_info.acp_socket.as_deref() {
+                    eprintln!("Connecting to akh '{ws_name}' over ACP (unix:{sock})...");
+                    return rt
+                        .block_on(akh_medu::acp::run_headless_chat_unix(sock, "akh-cli", &ws_name))
+                        .map_err(miette::Report::from);
+                } else if let Some(tcp) = server_info.acp_tcp.as_deref() {
+                    eprintln!("Connecting to akh '{ws_name}' over ACP (tcp:{tcp})...");
+                    return rt
+                        .block_on(akh_medu::acp::run_headless_chat_tcp(tcp, "akh-cli", &ws_name))
+                        .map_err(miette::Report::from);
+                }
+                // Daemon found but built without ACP — fall through to local.
+            }
+
             // Try remote TUI via akhomed if available (non-headless only).
             #[cfg(feature = "daemon")]
             if !headless {
