@@ -28,7 +28,9 @@ use tokio::sync::RwLock;
 use tower_http::cors::CorsLayer;
 
 use akh_medu::agent::trigger::{Trigger, TriggerStore};
+use akh_medu::agent::model_manager::AgentModelManager;
 use akh_medu::agent::{Agent, AgentConfig};
+use akh_medu::akh_config::AkhConfig;
 use akh_medu::client::DaemonStatus;
 use akh_medu::mcp;
 use akh_medu::config::AkhomedConfig;
@@ -66,6 +68,9 @@ struct ServerState {
     /// Cached NLU pipeline per workspace — avoids reloading 1GB+ LLM model on
     /// every WS connection or MCP chat call.
     nlu_pipelines: RwLock<HashMap<String, Arc<Mutex<akh_medu::nlu::NluPipeline>>>>,
+    /// Cached per-akh config (`akh.toml`) per workspace — model pin, explicit
+    /// system prompt, related workspaces, autonomy, etc. (P1 / ADR-053).
+    akh_configs: Arc<RwLock<HashMap<String, Arc<AkhConfig>>>>,
     /// Broadcast channel for audit entries — WS clients subscribe to this.
     audit_broadcast: tokio::sync::broadcast::Sender<akh_medu::audit::AuditEntry>,
     /// Shared registry of per-workspace pause handles. Daemons write their
@@ -91,9 +96,47 @@ impl ServerState {
             agents: Arc::new(RwLock::new(HashMap::new())),
             psyche_snapshots: Arc::new(RwLock::new(HashMap::new())),
             nlu_pipelines: RwLock::new(HashMap::new()),
+            akh_configs: Arc::new(RwLock::new(HashMap::new())),
             audit_broadcast: audit_tx,
             daemon_pauses: RwLock::new(HashMap::new()),
         }
+    }
+
+    /// Get or lazily load the [`AkhConfig`] (`akh.toml`) for a workspace.
+    ///
+    /// The akh config is the existing per-workspace config file parsed as an
+    /// [`AkhConfig`]; a legacy workspace-only TOML loads with all akh-level
+    /// fields defaulted, and a missing file yields a name-only default — so this
+    /// never fails for a workspace that opens. A *malformed* config is a hard
+    /// error rather than being silently masked.
+    async fn get_akh_config(&self, name: &str) -> Result<Arc<AkhConfig>, (StatusCode, String)> {
+        {
+            let map = self.akh_configs.read().await;
+            if let Some(cfg) = map.get(name) {
+                return Ok(Arc::clone(cfg));
+            }
+        }
+
+        let config_path = self.paths.workspace_config_file(name);
+        let cfg = if config_path.exists() {
+            AkhConfig::load(&config_path).map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("failed to load akh config for \"{name}\": {e}"),
+                )
+            })?
+        } else {
+            tracing::debug!(
+                workspace = %name,
+                "no akh.toml found; using name-only akh defaults"
+            );
+            AkhConfig::with_name(name)
+        };
+
+        let cfg = Arc::new(cfg);
+        let mut map = self.akh_configs.write().await;
+        let entry = map.entry(name.to_string()).or_insert(Arc::clone(&cfg));
+        Ok(Arc::clone(entry))
     }
 
     /// Get or lazily open an engine for the given workspace.
@@ -191,7 +234,7 @@ impl ServerState {
 
         // Slow path: create agent (heavy sync work inside spawn_blocking).
         let engine = self.get_engine(name).await?;
-        let agent = tokio::task::spawn_blocking({
+        let mut agent = tokio::task::spawn_blocking({
             let engine = Arc::clone(&engine);
             move || {
                 let config = AgentConfig::default();
@@ -217,6 +260,18 @@ impl ServerState {
         })?;
 
         tracing::info!(workspace = %name, "shared agent created");
+
+        // Wire the per-akh model manager: pinned model + Ollama endpoint +
+        // authoritative system prompt (P1 / ADR-053). Construction is cheap
+        // (config clone + empty registry), and attaching it before the agent is
+        // shared means the first prompt turn already routes to the akh's pinned
+        // model with its own prompt. A missing/legacy akh.toml yields defaults,
+        // reproducing today's behaviour.
+        let akh_config = self.get_akh_config(name).await?;
+        let manager = Arc::new(AgentModelManager::new(akh_config.to_model_manager_config()));
+        agent.set_model_manager(manager);
+        agent.register_with_model_manager(name, name);
+
         // Extract the snapshot Arc before moving agent into Mutex so it can be
         // registered without ever re-acquiring the agent lock.
         let snapshot = agent.psyche_snapshot();

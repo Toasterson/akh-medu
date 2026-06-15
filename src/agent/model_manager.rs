@@ -97,6 +97,13 @@ pub struct ModelManagerConfig {
     /// verbose models, or `Some(PromptMode::Standard)` to suppress auto-detection.
     #[serde(default)]
     pub prompt_mode: Option<PromptMode>,
+    /// Explicit, authoritative system prompt for this akh. When `Some`, it
+    /// *replaces* the psyche-derived prompt in [`assemble_system_prompt`] (the
+    /// `prompt_mode` brevity block is *not* applied — an explicit prompt is
+    /// verbatim); when `None`, the psyche-derived prompt is used. Sourced from
+    /// `AkhConfig.system_prompt`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_prompt: Option<String>,
 }
 
 impl Default for ModelManagerConfig {
@@ -106,6 +113,7 @@ impl Default for ModelManagerConfig {
             fallback_api: None,
             idle_ttl_secs: default_ttl(),
             prompt_mode: None,
+            system_prompt: None,
         }
     }
 }
@@ -234,7 +242,13 @@ impl AgentModelManager {
     /// Callers can pass `None` for `psyche` to get a generic system prompt
     /// keyed only on the agent's name.
     pub fn load_agent(&self, agent_id: &str, agent_name: &str, psyche: Option<&Psyche>) {
-        let prompt = build_system_prompt(agent_id, agent_name, psyche, self.prompt_mode);
+        let prompt = assemble_system_prompt(
+            agent_id,
+            agent_name,
+            psyche,
+            self.config.system_prompt.as_deref(),
+            self.prompt_mode,
+        );
         let mut agents = self.agents.lock().expect("model manager lock poisoned");
         let entry = agents.entry(agent_id.to_string()).or_insert_with(|| AgentEntry {
             system_prompt: prompt.clone(),
@@ -378,6 +392,21 @@ impl AgentModelManager {
         agents.contains_key(agent_id)
     }
 
+    /// The assembled system prompt currently stored for an agent, if registered.
+    ///
+    /// Exposes the result of [`assemble_system_prompt`] so callers (and tests)
+    /// can confirm which prompt — explicit override or psyche-derived — an akh
+    /// will send, without performing inference.
+    pub fn system_prompt_for(&self, agent_id: &str) -> Option<String> {
+        let agents = self.agents.lock().expect("model manager lock poisoned");
+        agents.get(agent_id).map(|e| e.system_prompt.clone())
+    }
+
+    /// The model name this manager is pinned to (the akh's pinned model).
+    pub fn model(&self) -> &str {
+        &self.config.ollama.model
+    }
+
     // ── Fallback helpers ──────────────────────────────────────────────────
 
     fn generate_via_fallback(
@@ -444,6 +473,33 @@ impl AgentModelManager {
 
 /// Build a Psyche-encoded system prompt for an agent (Method A).
 ///
+/// Single authoritative system-prompt assembly entry point.
+///
+/// Precedence (ADR-053):
+/// 1. An explicit, non-empty `explicit` prompt (from `AkhConfig.system_prompt`)
+///    is returned **verbatim** — it fully replaces the psyche-derived text, with
+///    no archetype/persona framing appended.
+/// 2. Otherwise the psyche-derived prompt from [`build_system_prompt`] is used.
+///
+/// This collapses the previously-scattered prompt-assembly logic so callers on
+/// the inference path go through exactly one function.
+pub fn assemble_system_prompt(
+    agent_id: &str,
+    agent_name: &str,
+    psyche: Option<&Psyche>,
+    explicit: Option<&str>,
+    mode: PromptMode,
+) -> String {
+    if let Some(text) = explicit {
+        if !text.trim().is_empty() {
+            // Authoritative: returned verbatim. `mode` (incl. Terse brevity) is
+            // intentionally NOT applied — the operator owns the full prompt.
+            return text.to_string();
+        }
+    }
+    build_system_prompt(agent_id, agent_name, psyche, mode)
+}
+
 /// Translates the agent's Jungian psyche configuration into a natural-language
 /// system prompt that Ollama injects as the `system` role in every request.
 /// Two agents with different psyches will produce different responses to identical
@@ -454,6 +510,9 @@ impl AgentModelManager {
 /// When `mode` is [`PromptMode::Terse`], a strict brevity constraint block is
 /// appended.  This significantly reduces OODA cycle counts for smaller or verbose
 /// models such as Gemma 4 (observed: 30 cycles/fact → ~4 cycles/fact baseline).
+///
+/// Prefer [`assemble_system_prompt`] on the inference path — it adds the
+/// explicit-prompt override on top of this psyche-derived fallback.
 pub fn build_system_prompt(
     agent_id: &str,
     agent_name: &str,
@@ -698,6 +757,62 @@ mod tests {
     }
 
     #[test]
+    fn assemble_prefers_explicit_prompt_verbatim() {
+        let explicit = "You are Thoth, keeper of records.";
+        // Even with a rich psyche present, the explicit prompt wins verbatim.
+        let prompt = assemble_system_prompt(
+            "t1",
+            "Thoth",
+            Some(&thoth_psyche()),
+            Some(explicit),
+            PromptMode::Standard,
+        );
+        assert_eq!(prompt, explicit);
+        assert!(!prompt.contains("archetype"), "no psyche framing is appended");
+    }
+
+    #[test]
+    fn assemble_falls_back_to_psyche_when_no_explicit() {
+        let psyche_prompt =
+            build_system_prompt("t1", "Thoth", Some(&thoth_psyche()), PromptMode::Standard);
+        let assembled =
+            assemble_system_prompt("t1", "Thoth", Some(&thoth_psyche()), None, PromptMode::Standard);
+        assert_eq!(assembled, psyche_prompt);
+    }
+
+    #[test]
+    fn assemble_ignores_blank_explicit_prompt() {
+        let psyche_prompt =
+            build_system_prompt("t1", "Thoth", Some(&thoth_psyche()), PromptMode::Standard);
+        let assembled = assemble_system_prompt(
+            "t1",
+            "Thoth",
+            Some(&thoth_psyche()),
+            Some("   \n  "),
+            PromptMode::Standard,
+        );
+        assert_eq!(
+            assembled, psyche_prompt,
+            "a whitespace-only explicit prompt is treated as absent"
+        );
+    }
+
+    #[test]
+    fn load_agent_uses_explicit_prompt_from_config() {
+        let cfg = ModelManagerConfig {
+            system_prompt: Some("You are a pinned akh.".into()),
+            ..Default::default()
+        };
+        let mgr = AgentModelManager::new(cfg);
+        // Even with a psyche, the configured explicit prompt is authoritative.
+        mgr.load_agent("a1", "Alice", Some(&thoth_psyche()));
+        assert_eq!(
+            mgr.system_prompt_for("a1").as_deref(),
+            Some("You are a pinned akh.")
+        );
+    }
+
+    #[test]
     fn load_agent_is_idempotent() {
         let mgr = AgentModelManager::new(ModelManagerConfig::default());
         mgr.load_agent("a1", "Alice", None);
@@ -747,7 +862,7 @@ mod tests {
             },
             fallback_api: None,
             idle_ttl_secs: 300,
-            prompt_mode: None,
+            ..Default::default()
         };
         let mgr = AgentModelManager::new(cfg);
         mgr.load_agent("a1", "Alice", None);

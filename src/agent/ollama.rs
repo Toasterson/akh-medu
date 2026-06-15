@@ -28,6 +28,15 @@ pub struct OllamaConfig {
     /// Set to "0" to unload the model immediately after the request.
     #[serde(default = "default_keep_alive")]
     pub keep_alive: String,
+    /// Optional API key for cloud endpoints (e.g. `ollama.com`). When present,
+    /// requests carry an `Authorization: Bearer <key>` header. Supports the
+    /// `env:VAR` indirection — `"env:OLLAMA_API_KEY"` reads the token from the
+    /// named environment variable at call time. If that variable is unset (or
+    /// empty), [`OllamaConfig::resolved_api_key`] logs a warning and sends **no**
+    /// auth header rather than a malformed `Bearer env:VAR` token. A local
+    /// endpoint leaves this `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
 }
 
 impl Default for OllamaConfig {
@@ -37,6 +46,7 @@ impl Default for OllamaConfig {
             model: default_model(),
             timeout_secs: default_timeout(),
             keep_alive: default_keep_alive(),
+            api_key: None,
         }
     }
 }
@@ -45,6 +55,35 @@ fn default_base_url() -> String { "http://localhost:11434".into() }
 fn default_model() -> String { "gemma4:e4b".into() }
 fn default_timeout() -> u64 { 120 }
 fn default_keep_alive() -> String { "5m".into() }
+
+impl OllamaConfig {
+    /// Resolve the API key, expanding an `env:VAR` reference at call time.
+    ///
+    /// - `None` (local endpoint, no key) → `None`.
+    /// - `"env:VAR"` with `VAR` set to a non-empty value → `Some(value)`.
+    /// - `"env:VAR"` with `VAR` unset or empty → logs a warning and returns
+    ///   `None`. Returning the literal `"env:VAR"` as a bearer token would only
+    ///   produce a confusing `401`, so we omit the header and surface the
+    ///   misconfiguration in the logs instead.
+    /// - any other value → used verbatim as the bearer token.
+    pub fn resolved_api_key(&self) -> Option<String> {
+        let raw = self.api_key.as_ref()?;
+        match raw.strip_prefix("env:") {
+            Some(var) => match std::env::var(var) {
+                Ok(val) if !val.is_empty() => Some(val),
+                _ => {
+                    tracing::warn!(
+                        env_var = var,
+                        "Ollama api_key references env:{var} but it is unset/empty; \
+                         sending no Authorization header"
+                    );
+                    None
+                }
+            },
+            None => Some(raw.clone()),
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Error
@@ -123,10 +162,11 @@ impl OllamaClient {
     /// when Ollama is not running.
     pub fn health_check(&self) -> bool {
         let url = format!("{}/api/tags", self.config.base_url.trim_end_matches('/'));
-        ureq::get(&url)
-            .timeout(std::time::Duration::from_secs(5))
-            .call()
-            .is_ok()
+        let mut req = ureq::get(&url).timeout(std::time::Duration::from_secs(5));
+        if let Some(key) = self.config.resolved_api_key() {
+            req = req.set("Authorization", &format!("Bearer {key}"));
+        }
+        req.call().is_ok()
     }
 
     /// Generate a chat response from the model.
@@ -151,9 +191,13 @@ impl OllamaClient {
             "keep_alive": self.config.keep_alive,
         });
 
-        let response = ureq::post(&url)
+        let mut req = ureq::post(&url)
             .set("Content-Type", "application/json")
-            .timeout(std::time::Duration::from_secs(self.config.timeout_secs))
+            .timeout(std::time::Duration::from_secs(self.config.timeout_secs));
+        if let Some(key) = self.config.resolved_api_key() {
+            req = req.set("Authorization", &format!("Bearer {key}"));
+        }
+        let response = req
             .send_json(&body)
             .map_err(|e| match e {
                 ureq::Error::Status(status, resp) => OllamaError::RequestFailed {
@@ -191,11 +235,13 @@ impl OllamaClient {
             "keep_alive": "0",
             "stream": false,
         });
-        if let Err(e) = ureq::post(&url)
+        let mut req = ureq::post(&url)
             .set("Content-Type", "application/json")
-            .timeout(std::time::Duration::from_secs(5))
-            .send_json(&body)
-        {
+            .timeout(std::time::Duration::from_secs(5));
+        if let Some(key) = self.config.resolved_api_key() {
+            req = req.set("Authorization", &format!("Bearer {key}"));
+        }
+        if let Err(e) = req.send_json(&body) {
             tracing::debug!("hint_unload: Ollama did not acknowledge unload hint: {e}");
         }
     }
@@ -216,6 +262,51 @@ mod tests {
         assert_eq!(cfg.model, "gemma4:e4b");
         assert_eq!(cfg.timeout_secs, 120);
         assert_eq!(cfg.keep_alive, "5m");
+    }
+
+    #[test]
+    fn resolved_api_key_none_for_local() {
+        let cfg = OllamaConfig::default();
+        assert!(cfg.resolved_api_key().is_none());
+    }
+
+    #[test]
+    fn resolved_api_key_used_verbatim_when_no_env_prefix() {
+        let cfg = OllamaConfig {
+            api_key: Some("sk-literal-token".into()),
+            ..OllamaConfig::default()
+        };
+        assert_eq!(cfg.resolved_api_key().as_deref(), Some("sk-literal-token"));
+    }
+
+    #[test]
+    fn resolved_api_key_expands_env_reference() {
+        // Unique var name to avoid racing other tests that read the environment.
+        const VAR: &str = "AKH_TEST_OLLAMA_KEY_8842";
+        // SAFETY: edition-2024 requires explicit unsafe for env mutation; this is
+        // a process-local test with a unique variable name.
+        unsafe {
+            std::env::set_var(VAR, "resolved-secret");
+        }
+        let cfg = OllamaConfig {
+            api_key: Some(format!("env:{VAR}")),
+            ..OllamaConfig::default()
+        };
+        assert_eq!(cfg.resolved_api_key().as_deref(), Some("resolved-secret"));
+        unsafe {
+            std::env::remove_var(VAR);
+        }
+    }
+
+    #[test]
+    fn resolved_api_key_none_when_env_unset() {
+        // A unique, definitely-unset variable name.
+        let cfg = OllamaConfig {
+            api_key: Some("env:AKH_TEST_DEFINITELY_UNSET_3317".into()),
+            ..OllamaConfig::default()
+        };
+        // Must NOT leak the literal "env:VAR" as a bearer token.
+        assert_eq!(cfg.resolved_api_key(), None);
     }
 
     #[test]
