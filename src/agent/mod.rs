@@ -66,6 +66,7 @@ pub mod ooda;
 pub mod ollama;
 pub mod openclaw;
 pub mod output;
+pub mod permission;
 pub mod pim;
 pub mod plan;
 pub mod plan_monitor;

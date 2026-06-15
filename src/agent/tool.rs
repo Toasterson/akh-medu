@@ -242,6 +242,12 @@ pub struct ToolRegistry {
     tools: HashMap<String, Box<dyn Tool>>,
     manifests: HashMap<String, ToolManifest>,
     audit_ledger: Option<Arc<AuditLedger>>,
+    /// Permission policy consulted before every dispatch. Defaults to
+    /// [`PermissionMode::Bypass`] (allow all) so a standalone akh is unaffected.
+    policy: super::permission::PermissionPolicy,
+    /// Optional approver for [`PermissionDecision::Ask`] tools (e.g. an ACP
+    /// client bridge). With none attached, `Ask` fails closed.
+    asker: Option<Arc<dyn super::permission::PermissionAsker>>,
 }
 
 impl ToolRegistry {
@@ -251,12 +257,30 @@ impl ToolRegistry {
             tools: HashMap::new(),
             manifests: HashMap::new(),
             audit_ledger: None,
+            policy: super::permission::PermissionPolicy::default(),
+            asker: None,
         }
     }
 
     /// Attach an audit ledger for automatic tool invocation logging.
     pub fn set_audit_ledger(&mut self, ledger: Arc<AuditLedger>) {
         self.audit_ledger = Some(ledger);
+    }
+
+    /// Set the permission mode gating tool execution.
+    pub fn set_permission_mode(&mut self, mode: super::permission::PermissionMode) {
+        self.policy = super::permission::PermissionPolicy::new(mode);
+    }
+
+    /// The active permission mode.
+    pub fn permission_mode(&self) -> super::permission::PermissionMode {
+        self.policy.mode
+    }
+
+    /// Attach an approver that resolves `Ask` decisions (e.g. an ACP
+    /// `session/request_permission` bridge).
+    pub fn set_permission_asker(&mut self, asker: Arc<dyn super::permission::PermissionAsker>) {
+        self.asker = Some(asker);
     }
 
     /// Register a tool. Caches its manifest on registration.
@@ -302,6 +326,32 @@ impl ToolRegistry {
         let tool = self
             .get(name)
             .ok_or_else(|| AgentError::ToolNotFound { name: name.into() })?;
+
+        // Permission gate (no-op under the default Bypass mode). A denied or
+        // unapproved tool returns a failed ToolOutput rather than Err, so the
+        // OODA loop's tool-error isolation is preserved.
+        if let Some(manifest) = self.manifests.get(name) {
+            use super::permission::PermissionDecision;
+            match self.policy.decide(manifest) {
+                PermissionDecision::Allow => {}
+                PermissionDecision::Deny(reason) => {
+                    return Ok(ToolOutput::err(format!("permission denied: {reason}")));
+                }
+                PermissionDecision::Ask(reason) => {
+                    let summary = truncate_summary(&format!("{:?}", input.params), 200);
+                    let approved = self
+                        .asker
+                        .as_ref()
+                        .map(|a| a.ask(manifest, &summary))
+                        .unwrap_or(false);
+                    if !approved {
+                        return Ok(ToolOutput::err(format!(
+                            "permission required but not granted: {reason}"
+                        )));
+                    }
+                }
+            }
+        }
 
         let start = std::time::Instant::now();
         let result = tool.execute(engine, input.clone());
@@ -394,6 +444,61 @@ mod tests {
         assert!(body.len() <= 200 && body.is_char_boundary(body.len()));
         // ASCII shorter than the cap is returned unchanged.
         assert_eq!(truncate_summary("hello", 200), "hello");
+    }
+
+    #[test]
+    fn permission_gate_denies_under_plan_mode() {
+        use crate::agent::permission::PermissionMode;
+        use crate::engine::{Engine, EngineConfig};
+        use crate::vsa::Dimension;
+
+        struct WriteTool;
+        impl Tool for WriteTool {
+            fn signature(&self) -> ToolSignature {
+                ToolSignature {
+                    name: "w".into(),
+                    description: "w".into(),
+                    parameters: vec![],
+                }
+            }
+            fn execute(&self, _e: &Engine, _i: ToolInput) -> AgentResult<ToolOutput> {
+                Ok(ToolOutput::ok("did write"))
+            }
+            fn manifest(&self) -> ToolManifest {
+                ToolManifest {
+                    name: "w".into(),
+                    description: "w".into(),
+                    parameters: vec![],
+                    danger: DangerInfo {
+                        level: DangerLevel::Dangerous,
+                        capabilities: HashSet::from([Capability::WriteFilesystem]),
+                        description: "w".into(),
+                        shadow_triggers: vec![],
+                    },
+                    source: ToolSource::Native,
+                }
+            }
+        }
+
+        let engine = Engine::new(EngineConfig {
+            dimension: Dimension::TEST,
+            ..Default::default()
+        })
+        .unwrap();
+
+        // Default (Bypass) → the write tool runs.
+        let mut reg = ToolRegistry::new();
+        reg.register(Box::new(WriteTool));
+        assert!(
+            reg.execute("w", ToolInput::new(), &engine).unwrap().success,
+            "bypass mode should allow the write tool"
+        );
+
+        // Plan mode → denied (failed ToolOutput, not Err — OODA isolation kept).
+        reg.set_permission_mode(PermissionMode::Plan);
+        let out = reg.execute("w", ToolInput::new(), &engine).unwrap();
+        assert!(!out.success, "plan mode should deny the write tool");
+        assert!(out.result.contains("permission denied"), "result: {}", out.result);
     }
 
     struct DummyTool;
