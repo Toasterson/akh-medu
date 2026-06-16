@@ -928,6 +928,13 @@ enum AcpOp {
         #[arg(long, default_value_t = 0.1)]
         min_confidence: f64,
     },
+    /// Show or set the akh's tool-permission mode. With no `--set`, reports the
+    /// current mode.
+    PermissionMode {
+        /// New mode to apply: bypass | standard | accept_edits | plan.
+        #[arg(long)]
+        set: Option<String>,
+    },
 }
 
 /// Dispatch an `akh acp <op>` command: discover the daemon, send the matching
@@ -989,6 +996,13 @@ fn run_acp_command(op: &AcpOp) -> Result<()> {
                 "min_confidence": min_confidence,
             }),
         ),
+        AcpOp::PermissionMode { set } => {
+            let mut params = serde_json::json!({});
+            if let Some(mode) = set {
+                params["mode"] = serde_json::Value::String(mode.clone());
+            }
+            ("_akh/permission/mode", params)
+        }
     };
 
     let rt = tokio::runtime::Builder::new_multi_thread()

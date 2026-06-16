@@ -1612,6 +1612,16 @@ impl Agent {
         self.tool_registry.list()
     }
 
+    /// Set the permission mode gating this agent's tool execution.
+    pub fn set_permission_mode(&mut self, mode: crate::agent::permission::PermissionMode) {
+        self.tool_registry.set_permission_mode(mode);
+    }
+
+    /// The active tool-permission mode.
+    pub fn permission_mode(&self) -> crate::agent::permission::PermissionMode {
+        self.tool_registry.permission_mode()
+    }
+
     /// Get a reference to the wrapped engine.
     pub fn engine(&self) -> &Engine {
         &self.engine

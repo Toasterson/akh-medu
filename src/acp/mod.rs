@@ -43,9 +43,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use agent_client_protocol::schema::{
-    AgentCapabilities, ContentBlock, ContentChunk, InitializeRequest, InitializeResponse,
-    NewSessionRequest, NewSessionResponse, PromptRequest, PromptResponse, ProtocolVersion,
-    SessionId, SessionNotification, SessionUpdate, StopReason, TextContent,
+    AgentCapabilities, ClientCapabilities, ContentBlock, ContentChunk, InitializeRequest,
+    InitializeResponse, NewSessionRequest, NewSessionResponse, PromptRequest, PromptResponse,
+    ProtocolVersion, SessionId, SessionNotification, SessionUpdate, StopReason, TextContent,
 };
 use agent_client_protocol::util::{json_cast, MatchDispatch};
 use agent_client_protocol::{
@@ -175,6 +175,10 @@ pub struct AkhAcpAgent {
     processor: Arc<Mutex<ChatProcessor>>,
     /// Agent name advertised during `initialize`.
     name: String,
+    /// Client filesystem/terminal capabilities captured at `initialize`.
+    /// Consulted before issuing client-side `fs/*` or `terminal/*` requests
+    /// (the Remote-FS path); `None` until the client initializes.
+    client_caps: Arc<Mutex<Option<ClientCapabilities>>>,
 }
 
 impl AkhAcpAgent {
@@ -194,6 +198,7 @@ impl AkhAcpAgent {
             agent,
             processor: Arc::new(Mutex::new(processor)),
             name: "akh-medu".to_string(),
+            client_caps: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -409,6 +414,10 @@ impl JsonRpcRequest for AkhExtRequest {
 /// access needs no agent lock (engine methods take `&self`); operations that
 /// mutate the agent would route through `spawn_blocking` per ADR-027 (none yet).
 /// Returns the JSON result, or an error string surfaced as a JSON-RPC error.
+///
+/// NOTE: agent-mutating data-plane methods (e.g. `_akh/permission/mode`) are
+/// NOT handled here — they take the agent lock and run in `spawn_blocking`
+/// (ADR-027) from the dispatch handler. This function is read-only engine work.
 fn dispatch_akh(
     engine: &Engine,
     workspace: &str,
@@ -427,7 +436,7 @@ fn dispatch_akh(
         "meta/capabilities" => Ok(serde_json::json!({
             "protocol": "acp",
             "version": crate::client::ACP_PROTOCOL_VERSION,
-            "groups": ["meta", "workspace", "symbols", "triples", "query", "memory", "infer"],
+            "groups": ["meta", "workspace", "symbols", "triples", "query", "memory", "infer", "permission"],
             "methods": [
                 "_akh/health",
                 "_akh/meta/capabilities",
@@ -439,6 +448,7 @@ fn dispatch_akh(
                 "_akh/query/sparql",
                 "_akh/memory/recall",
                 "_akh/infer/activate",
+                "_akh/permission/mode",
             ],
         })),
 
@@ -756,6 +766,29 @@ fn episode_to_json(engine: &Engine, ep: &crate::agent::memory::EpisodicEntry) ->
     })
 }
 
+/// Parse a wire permission-mode string into a [`PermissionMode`].
+fn parse_permission_mode(s: &str) -> Option<crate::agent::permission::PermissionMode> {
+    use crate::agent::permission::PermissionMode;
+    match s.trim().to_ascii_lowercase().as_str() {
+        "bypass" => Some(PermissionMode::Bypass),
+        "standard" => Some(PermissionMode::Standard),
+        "accept_edits" | "acceptedits" | "accept-edits" => Some(PermissionMode::AcceptEdits),
+        "plan" => Some(PermissionMode::Plan),
+        _ => None,
+    }
+}
+
+/// Render a [`PermissionMode`] as its wire string.
+fn permission_mode_str(mode: crate::agent::permission::PermissionMode) -> &'static str {
+    use crate::agent::permission::PermissionMode;
+    match mode {
+        PermissionMode::Bypass => "bypass",
+        PermissionMode::Standard => "standard",
+        PermissionMode::AcceptEdits => "accept_edits",
+        PermissionMode::Plan => "plan",
+    }
+}
+
 fn build_connection(
     me: AkhAcpAgent,
 ) -> impl agent_client_protocol::ConnectTo<Client> {
@@ -770,6 +803,11 @@ fn build_connection(
                 move |req: InitializeRequest, responder: Responder<InitializeResponse>, _cx| {
                     let me = me.clone();
                     async move {
+                        // Capture the client's fs/terminal capabilities for the
+                        // Remote-FS path (P4.5 (c)); gating fs/* + terminal/*
+                        // requests on what the client advertised.
+                        *me.client_caps.lock().unwrap_or_else(|e| e.into_inner()) =
+                            Some(req.client_capabilities.clone());
                         // Echo the client's protocol version; advertise default
                         // (minimal) agent capabilities for the spike.
                         let resp = InitializeResponse::new(req.protocol_version)
@@ -835,11 +873,50 @@ fn build_connection(
                 move |message: Dispatch, _cx: ConnectionTo<Client>| {
                     let engine = Arc::clone(&me.engine);
                     let workspace = me.name.clone();
+                    let agent = Arc::clone(&me.agent);
                     async move {
                         MatchDispatch::new(message)
                             .if_request(
                                 async move |req: AkhExtRequest,
                                             responder: Responder<AkhExtResponse>| {
+                                    let method: &str = &req.method;
+                                    // Agent-mutating method: take the agent lock
+                                    // inside spawn_blocking (ADR-027). GET when no
+                                    // "mode" param; SET otherwise.
+                                    if method == "_akh/permission/mode" {
+                                        let params = req.params.clone();
+                                        let result = tokio::task::spawn_blocking(move || {
+                                            let mut a =
+                                                agent.lock().unwrap_or_else(|e| e.into_inner());
+                                            if let Some(mode_str) = params
+                                                .get("mode")
+                                                .and_then(serde_json::Value::as_str)
+                                            {
+                                                match parse_permission_mode(mode_str) {
+                                                    Some(mode) => a.set_permission_mode(mode),
+                                                    None => return Err(format!(
+                                                        "unknown permission mode \"{mode_str}\" \
+                                                         (expected bypass|standard|accept_edits|plan)"
+                                                    )),
+                                                }
+                                            }
+                                            Ok(permission_mode_str(a.permission_mode()))
+                                        })
+                                        .await;
+                                        return match result {
+                                            Ok(Ok(mode)) => responder.respond(AkhExtResponse(
+                                                serde_json::json!({ "mode": mode }),
+                                            )),
+                                            Ok(Err(e)) => responder.respond_with_error(
+                                                agent_client_protocol::Error::invalid_params()
+                                                    .data(e),
+                                            ),
+                                            Err(join_err) => responder.respond_with_error(
+                                                agent_client_protocol::Error::internal_error()
+                                                    .data(join_err.to_string()),
+                                            ),
+                                        };
+                                    }
                                     match dispatch_akh(&engine, &workspace, &req.method, &req.params) {
                                         Ok(value) => responder.respond(AkhExtResponse(value)),
                                         Err(e) => responder.respond_with_error(
@@ -1871,6 +1948,56 @@ mod tests {
         .await
         .expect("infer timed out");
         assert!(bad.is_err(), "all-unresolvable seeds must error: {bad:?}");
+
+        shutdown_tx.send(true).expect("send shutdown");
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), server).await;
+    }
+
+    /// The permission group: `_akh/permission/mode` reports the active mode and
+    /// sets a new one (agent-locked via spawn_blocking). Default is bypass;
+    /// an unknown mode is a clean error.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn acp_ext_permission_mode_get_set() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("akh-acp-perm.sock");
+        let me = workspace();
+        let listener = UnixListener::bind(&sock).expect("bind unix");
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let server = tokio::spawn(async move { serve_unix_loop(me, listener, shutdown_rx).await });
+
+        let call = |params: serde_json::Value| {
+            let sock = sock.clone();
+            async move {
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(15),
+                    ext_request_unix(&sock, "_akh/permission/mode", params),
+                )
+                .await
+                .expect("ext request timed out")
+                .expect("ext request ok")
+            }
+        };
+
+        // GET (no mode param) → default bypass.
+        let got = call(serde_json::json!({})).await;
+        assert_eq!(got["mode"], "bypass");
+
+        // SET → plan, echoed back.
+        let set = call(serde_json::json!({ "mode": "plan" })).await;
+        assert_eq!(set["mode"], "plan");
+
+        // GET again → the change persisted on the agent.
+        let got2 = call(serde_json::json!({})).await;
+        assert_eq!(got2["mode"], "plan", "mode should persist: {got2}");
+
+        // Unknown mode → clean error (not a silent no-op).
+        let bad = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            ext_request_unix(&sock, "_akh/permission/mode", serde_json::json!({ "mode": "nope" })),
+        )
+        .await
+        .expect("timed out");
+        assert!(bad.is_err(), "unknown permission mode must error");
 
         shutdown_tx.send(true).expect("send shutdown");
         let _ = tokio::time::timeout(std::time::Duration::from_secs(5), server).await;
