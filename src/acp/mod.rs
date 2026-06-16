@@ -219,7 +219,11 @@ impl AkhAcpAgent {
     /// resolves — never while a guard is held.
     ///
     /// [`spawn_blocking`]: tokio::task::spawn_blocking
-    async fn run_turn(&self, text: String) -> AcpResult<Vec<AkhMessage>> {
+    async fn run_turn(
+        &self,
+        text: String,
+        asker: Option<Arc<dyn crate::agent::permission::PermissionAsker>>,
+    ) -> AcpResult<Vec<AkhMessage>> {
         let engine = Arc::clone(&self.engine);
         let agent = Arc::clone(&self.agent);
         let processor = Arc::clone(&self.processor);
@@ -228,7 +232,17 @@ impl AkhAcpAgent {
             // ── ADR-027: lock, process, drop — all synchronous, no await. ──
             let mut agent = agent.lock().unwrap_or_else(|e| e.into_inner());
             let mut processor = processor.lock().unwrap_or_else(|e| e.into_inner());
-            processor.process_input(&text, &mut agent, &engine)
+            // Install the per-turn permission approver (if any) so tool calls
+            // made during the turn can prompt the client; remove it before the
+            // closure returns so its channel closes and the approver task ends.
+            if let Some(asker) = asker {
+                agent.set_permission_asker(asker);
+                let out = processor.process_input(&text, &mut agent, &engine);
+                agent.clear_permission_asker();
+                out
+            } else {
+                processor.process_input(&text, &mut agent, &engine)
+            }
             // Guards drop here, at end of closure scope.
         })
         .await
@@ -766,6 +780,87 @@ fn episode_to_json(engine: &Engine, ep: &crate::agent::memory::EpisodicEntry) ->
     })
 }
 
+// ──────────────────────────────────────────────────────────────────────────
+// Permission bridge — sync tool path ↔ async session/request_permission
+// ──────────────────────────────────────────────────────────────────────────
+
+/// A pending approval, sent from the (synchronous, blocking) tool path to the
+/// async approver task that owns the client connection.
+struct PermissionAskRequest {
+    tool_name: String,
+    danger: String,
+    input_summary: String,
+    /// The approver replies here with allow (`true`) / reject (`false`).
+    reply: tokio::sync::oneshot::Sender<bool>,
+}
+
+/// A [`PermissionAsker`](crate::agent::permission::PermissionAsker) that bridges
+/// the blocking tool-execution path (inside `spawn_blocking`) to the async ACP
+/// handler: `ask` sends the request over a channel and blocks on the reply.
+/// Failing to reach the approver (channel closed) denies — fail closed.
+struct AcpPermissionAsker {
+    tx: tokio::sync::mpsc::Sender<PermissionAskRequest>,
+}
+
+impl crate::agent::permission::PermissionAsker for AcpPermissionAsker {
+    fn ask(
+        &self,
+        manifest: &crate::agent::tool_manifest::ToolManifest,
+        input_summary: &str,
+    ) -> bool {
+        let (reply, reply_rx) = tokio::sync::oneshot::channel();
+        let req = PermissionAskRequest {
+            tool_name: manifest.name.clone(),
+            danger: manifest.danger.level.to_string(),
+            input_summary: input_summary.to_string(),
+            reply,
+        };
+        // We are inside spawn_blocking, so blocking_send / blocking_recv are
+        // correct (never call these on an async runtime thread).
+        if self.tx.blocking_send(req).is_err() {
+            return false;
+        }
+        reply_rx.blocking_recv().unwrap_or(false)
+    }
+}
+
+/// Service permission asks for one prompt turn: for each request, call the
+/// client's `session/request_permission` and relay the decision. Ends when the
+/// channel closes (the asker is dropped at end of turn).
+async fn serve_permission_asks(
+    mut rx: tokio::sync::mpsc::Receiver<PermissionAskRequest>,
+    cx: ConnectionTo<Client>,
+    session_id: SessionId,
+) {
+    use agent_client_protocol::schema::{
+        PermissionOption, PermissionOptionKind, RequestPermissionOutcome, RequestPermissionRequest,
+        ToolCallId, ToolCallUpdate, ToolCallUpdateFields,
+    };
+    while let Some(req) = rx.recv().await {
+        let title = format!(
+            "Run tool \"{}\" [{}] — {}",
+            req.tool_name, req.danger, req.input_summary
+        );
+        let tool_call = ToolCallUpdate::new(
+            ToolCallId::new(req.tool_name.clone()),
+            ToolCallUpdateFields::new().title(title),
+        );
+        let options = vec![
+            PermissionOption::new("allow", "Allow", PermissionOptionKind::AllowOnce),
+            PermissionOption::new("reject", "Reject", PermissionOptionKind::RejectOnce),
+        ];
+        let request = RequestPermissionRequest::new(session_id.clone(), tool_call, options);
+        let approved = match cx.send_request(request).block_task().await {
+            Ok(resp) => match resp.outcome {
+                RequestPermissionOutcome::Selected(sel) => sel.option_id.0.as_ref() == "allow",
+                _ => false, // Cancelled / future variants → deny.
+            },
+            Err(_) => false, // client error → deny.
+        };
+        let _ = req.reply.send(approved);
+    }
+}
+
 /// Parse a wire permission-mode string into a [`PermissionMode`].
 fn parse_permission_mode(s: &str) -> Option<crate::agent::permission::PermissionMode> {
     use crate::agent::permission::PermissionMode;
@@ -846,12 +941,32 @@ fn build_connection(
                         let session_id = req.session_id.clone();
                         let text = concat_prompt(&req.prompt);
 
+                        // Per-turn permission bridge: a sync asker (consulted
+                        // inside the blocking chat turn when the policy says
+                        // "Ask") relays to this async approver task, which calls
+                        // session/request_permission on the client. Under the
+                        // default Bypass mode the asker is simply never invoked.
+                        let (perm_tx, perm_rx) =
+                            tokio::sync::mpsc::channel::<PermissionAskRequest>(8);
+                        let approver = tokio::spawn(serve_permission_asks(
+                            perm_rx,
+                            cx.clone(),
+                            session_id.clone(),
+                        ));
+                        let asker: Arc<dyn crate::agent::permission::PermissionAsker> =
+                            Arc::new(AcpPermissionAsker { tx: perm_tx });
+
                         // Run the synchronous chat turn off the async runtime,
                         // honoring ADR-027 (locks live only inside the closure).
-                        let responses = me.run_turn(text).await.map_err(|e| {
+                        let responses = me.run_turn(text, Some(asker)).await.map_err(|e| {
                             agent_client_protocol::Error::internal_error()
                                 .data(e.to_string())
                         })?;
+
+                        // The asker (and its Sender) was dropped at the end of
+                        // the turn, so the approver's channel is now closed —
+                        // wait for it to drain and finish.
+                        let _ = approver.await;
 
                         // Stream each structured response as its own
                         // `session/update`. Sent only AFTER the blocking guards
@@ -2001,6 +2116,60 @@ mod tests {
 
         shutdown_tx.send(true).expect("send shutdown");
         let _ = tokio::time::timeout(std::time::Duration::from_secs(5), server).await;
+    }
+
+    /// The permission bridge relays a blocking `ask` (from inside the tool
+    /// path) to an async approver and returns its decision — the spawn_blocking
+    /// ↔ async hop that lets a tool prompt the client mid-turn.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn permission_asker_bridge_relays_decision() {
+        use crate::agent::permission::PermissionAsker;
+        use crate::agent::tool_manifest::{
+            Capability, DangerInfo, DangerLevel, ToolManifest, ToolSource,
+        };
+        use std::collections::HashSet;
+
+        fn manifest(name: &str) -> ToolManifest {
+            ToolManifest {
+                name: name.into(),
+                description: "t".into(),
+                parameters: vec![],
+                danger: DangerInfo {
+                    level: DangerLevel::Dangerous,
+                    capabilities: HashSet::from([Capability::WriteFilesystem]),
+                    description: "t".into(),
+                    shadow_triggers: vec![],
+                },
+                source: ToolSource::Native,
+            }
+        }
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<PermissionAskRequest>(4);
+        // Simulated client approver: approve "edit", reject everything else.
+        let approver = tokio::spawn(async move {
+            while let Some(req) = rx.recv().await {
+                let _ = req.reply.send(req.tool_name == "edit");
+            }
+        });
+
+        let asker = Arc::new(AcpPermissionAsker { tx });
+
+        let a = asker.clone();
+        let approved_edit =
+            tokio::task::spawn_blocking(move || a.ask(&manifest("edit"), "path=x"))
+                .await
+                .unwrap();
+        let a = asker.clone();
+        let approved_shell =
+            tokio::task::spawn_blocking(move || a.ask(&manifest("shell_exec"), "cmd=y"))
+                .await
+                .unwrap();
+
+        assert!(approved_edit, "edit should be approved");
+        assert!(!approved_shell, "shell_exec should be rejected");
+
+        drop(asker); // close the channel so the approver task ends
+        let _ = approver.await;
     }
 
     /// The structured mapping routes visible answers to AgentMessageChunk and

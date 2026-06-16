@@ -283,6 +283,11 @@ impl ToolRegistry {
         self.asker = Some(asker);
     }
 
+    /// Remove any attached approver. `Ask` decisions then fail closed (deny).
+    pub fn clear_permission_asker(&mut self) {
+        self.asker = None;
+    }
+
     /// Register a tool. Caches its manifest on registration.
     /// If a tool with the same name exists, it is replaced.
     pub fn register(&mut self, tool: Box<dyn Tool>) {

@@ -1622,6 +1622,20 @@ impl Agent {
         self.tool_registry.permission_mode()
     }
 
+    /// Attach an approver that resolves `Ask` permission decisions (e.g. an ACP
+    /// `session/request_permission` bridge) for the duration of a turn.
+    pub fn set_permission_asker(
+        &mut self,
+        asker: std::sync::Arc<dyn crate::agent::permission::PermissionAsker>,
+    ) {
+        self.tool_registry.set_permission_asker(asker);
+    }
+
+    /// Remove the permission approver (`Ask` then fails closed).
+    pub fn clear_permission_asker(&mut self) {
+        self.tool_registry.clear_permission_asker();
+    }
+
     /// Get a reference to the wrapped engine.
     pub fn engine(&self) -> &Engine {
         &self.engine
