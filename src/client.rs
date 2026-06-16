@@ -75,9 +75,17 @@ impl ServerInfo {
 /// Discover a running akhomed server via its PID file.
 ///
 /// Returns `Some(ServerInfo)` when:
-/// 1. The PID file exists and parses correctly
-/// 2. The process is still alive (`kill(pid, 0)` succeeds)
-/// 3. The server responds to `GET /health`
+/// 1. The PID file exists and parses correctly,
+/// 2. the process is still alive (`kill(pid, 0)` succeeds), and
+/// 3. the daemon's **ACP transport is reachable** — a connect to the advertised
+///    Unix socket (preferred) or TCP address succeeds.
+///
+/// Step 3 is the ACP-native liveness probe (ADR-061 P8.2): it confirms the
+/// listener is actually accepting connections, not merely that the PID exists.
+/// It replaces the old `GET /health` check, which now survives only as a
+/// fallback for a legacy / ACP-disabled daemon (a record carrying no `acp_*`
+/// transport). That fallback is removed once REST is deleted (ADR-061 P8.4),
+/// leaving ACP as the sole liveness signal.
 pub fn discover_server(paths: &AkhPaths) -> Option<ServerInfo> {
     let pid_path = paths.pid_file();
     let contents = match std::fs::read_to_string(&pid_path) {
@@ -102,7 +110,22 @@ pub fn discover_server(paths: &AkhPaths) -> Option<ServerInfo> {
         return None;
     }
 
-    // Health-check the server.
+    // ACP-native liveness: probe the socket/TCP the daemon advertises.
+    if info.acp_socket.is_some() || info.acp_tcp.is_some() {
+        if acp_transport_alive(&info) {
+            return Some(info);
+        }
+        tracing::warn!(
+            pid = info.pid,
+            acp_socket = ?info.acp_socket,
+            acp_tcp = ?info.acp_tcp,
+            "akhomed process alive but its ACP transport is not accepting connections"
+        );
+        return None;
+    }
+
+    // Legacy / ACP-disabled daemon: fall back to the REST health check.
+    // (Removed entirely when REST is deleted — ADR-061 P8.4.)
     let url = format!("{}/health", info.base_url());
     match ureq::get(&url).timeout(std::time::Duration::from_secs(10)).call() {
         Ok(resp) if resp.status() == 200 => Some(info),
@@ -121,6 +144,33 @@ pub fn discover_server(paths: &AkhPaths) -> Option<ServerInfo> {
             None
         }
     }
+}
+
+/// Probe whether the daemon's ACP transport is accepting connections.
+///
+/// Prefers the Unix socket (local, cheapest); falls back to TCP with a short
+/// connect timeout. A successful connect proves the ACP accept loop is live;
+/// the probe drops the connection immediately without an `initialize` turn,
+/// which the server's per-connection task tolerates (it simply ends).
+fn acp_transport_alive(info: &ServerInfo) -> bool {
+    use std::net::ToSocketAddrs;
+
+    #[cfg(unix)]
+    if let Some(sock) = &info.acp_socket
+        && std::os::unix::net::UnixStream::connect(sock).is_ok()
+    {
+        return true;
+    }
+
+    if let Some(addr) = &info.acp_tcp
+        && let Ok(mut addrs) = addr.to_socket_addrs()
+        && let Some(sa) = addrs.next()
+        && std::net::TcpStream::connect_timeout(&sa, std::time::Duration::from_secs(2)).is_ok()
+    {
+        return true;
+    }
+
+    false
 }
 
 /// Write a PID file for the current akhomed process.
@@ -1566,5 +1616,89 @@ mod tests {
         let back: ServerInfo = serde_json::from_str(&json).expect("round-trip");
         assert_eq!(back.acp_socket.as_deref(), Some("/run/akh-medu/akhomed-acp.sock"));
         assert_eq!(back.acp_version.as_deref(), Some(ACP_PROTOCOL_VERSION));
+    }
+
+    // ── ACP-native discovery liveness (P8.2) ────────────────────────────────
+
+    /// Build an `AkhPaths` whose `runtime_dir` (hence `pid_file`) is the given
+    /// dir; the other roots are unused by discovery.
+    fn test_paths(runtime_dir: &std::path::Path) -> AkhPaths {
+        AkhPaths {
+            config_dir: runtime_dir.join("config"),
+            data_dir: runtime_dir.join("data"),
+            state_dir: runtime_dir.join("state"),
+            runtime_dir: runtime_dir.to_path_buf(),
+            cache_dir: runtime_dir.join("cache"),
+        }
+    }
+
+    /// A live ACP Unix socket ⇒ discovery succeeds: the probe connects to the
+    /// advertised socket and confirms the listener is accepting.
+    #[cfg(unix)]
+    #[test]
+    fn discover_succeeds_when_acp_socket_is_live() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let runtime_dir = tmp.path().join("run");
+        std::fs::create_dir_all(&runtime_dir).expect("runtime dir");
+        let paths = test_paths(&runtime_dir);
+
+        // Bind a real ACP-style Unix socket so a connect succeeds.
+        let sock = tmp.path().join("acp.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&sock).expect("bind socket");
+        let sock_str = sock.to_str().unwrap();
+
+        write_pid_file(&paths, 8200, "127.0.0.1", Some(sock_str), None).expect("write pid");
+
+        let found = discover_server(&paths).expect("live ACP socket should be discovered");
+        assert_eq!(found.acp_socket.as_deref(), Some(sock_str));
+    }
+
+    /// An advertised-but-dead ACP socket ⇒ discovery returns `None` even though
+    /// the PID (this process) is alive: liveness is the transport, not the PID.
+    #[cfg(unix)]
+    #[test]
+    fn discover_fails_when_acp_socket_is_dead() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let runtime_dir = tmp.path().join("run");
+        std::fs::create_dir_all(&runtime_dir).expect("runtime dir");
+        let paths = test_paths(&runtime_dir);
+
+        // A socket path nobody is listening on.
+        let dead = tmp.path().join("nobody.sock");
+        write_pid_file(&paths, 8200, "127.0.0.1", Some(dead.to_str().unwrap()), None)
+            .expect("write pid");
+
+        assert!(
+            discover_server(&paths).is_none(),
+            "a dead ACP socket must not be discovered even with a live PID"
+        );
+    }
+
+    /// The TCP branch of the probe: a bound listener is alive; a refused address
+    /// is not.
+    #[test]
+    fn acp_transport_alive_probes_tcp() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind tcp");
+        let addr = listener.local_addr().expect("addr").to_string();
+        let live = ServerInfo {
+            pid: 1,
+            port: 8200,
+            bind: "127.0.0.1".into(),
+            acp_socket: None,
+            acp_tcp: Some(addr),
+            acp_version: Some(ACP_PROTOCOL_VERSION.into()),
+        };
+        assert!(acp_transport_alive(&live), "bound TCP listener should probe alive");
+
+        // Port 1 on localhost has no listener ⇒ connection refused ⇒ not alive.
+        let dead = ServerInfo {
+            pid: 1,
+            port: 8200,
+            bind: "127.0.0.1".into(),
+            acp_socket: None,
+            acp_tcp: Some("127.0.0.1:1".into()),
+            acp_version: None,
+        };
+        assert!(!acp_transport_alive(&dead), "refused TCP address should probe dead");
     }
 }
