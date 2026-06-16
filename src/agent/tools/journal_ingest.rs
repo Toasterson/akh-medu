@@ -544,7 +544,7 @@ fn ingest_chunk(
         let text_input = ToolInput::new()
             .with_param("text", &chunk.body)
             .with_param("max_sentences", "200");
-        match TextIngestTool.execute(engine, text_input) {
+        match TextIngestTool::default().execute(engine, text_input) {
             Ok(output) => {
                 for sym in &output.symbols_involved {
                     let _ = engine.add_triple(&Triple::new(

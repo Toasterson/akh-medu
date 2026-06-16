@@ -26,9 +26,12 @@ use crate::agent::tool_manifest::{
 };
 use crate::compartment::ContextDomain;
 use crate::engine::Engine;
+use crate::fs::Filesystem;
 use crate::graph::Triple;
 use crate::provenance::{DerivationKind, ProvenanceRecord};
 use crate::symbol::{SymbolId, SymbolKind};
+use std::path::Path;
+use std::sync::Arc;
 use crate::vsa::code_encode::{
     encode_code_vector, AstNodeTypes, AstPathContext,
 };
@@ -797,7 +800,20 @@ fn analogy_search(
 // ---------------------------------------------------------------------------
 
 /// Tool for mining structural code patterns from markdown/HTML examples.
-pub struct PatternMineTool;
+///
+/// `fs: Some(..)` confines `source`-as-file-path reads to the akh's sandbox;
+/// `None` (default, operator-driven contexts) reads raw.
+#[derive(Default)]
+pub struct PatternMineTool {
+    fs: Option<Arc<dyn Filesystem>>,
+}
+
+impl PatternMineTool {
+    /// Sandboxed: a `source` file read is confined to the akh's filesystem.
+    pub fn sandboxed(fs: Arc<dyn Filesystem>) -> Self {
+        Self { fs: Some(fs) }
+    }
+}
 
 impl Tool for PatternMineTool {
     fn signature(&self) -> ToolSignature {
@@ -895,14 +911,17 @@ impl PatternMineTool {
             .unwrap_or(2);
         let language_filter = input.get("language").unwrap_or("rust");
 
-        // Read from file or use inline text
+        // Read from file or use inline text. The "is it a file path" probe and
+        // the read both honour the sandbox when one is attached.
         let text = if source_text.len() < 512
             && !source_text.contains('\n')
-            && std::path::Path::new(source_text).exists()
+            && crate::fs::exists_optional(self.fs.as_ref(), Path::new(source_text))
         {
-            std::fs::read_to_string(source_text).map_err(|e| AgentError::ToolExecution {
-                tool_name: "pattern_mine".into(),
-                message: format!("failed to read file: {e}"),
+            crate::fs::read_optional(self.fs.as_ref(), Path::new(source_text)).map_err(|e| {
+                AgentError::ToolExecution {
+                    tool_name: "pattern_mine".into(),
+                    message: format!("failed to read file: {e}"),
+                }
             })?
         } else {
             source_text.to_string()
@@ -1334,7 +1353,7 @@ def greet(name):
     #[test]
     fn tool_execute_mine_mode() {
         let engine = test_engine();
-        let tool = PatternMineTool;
+        let tool = PatternMineTool::default();
 
         let md = "\
 # Tutorial
@@ -1370,7 +1389,7 @@ fn transform(src: &str) -> Result<Output, Error> {
     #[test]
     fn tool_execute_search_mode() {
         let engine = test_engine();
-        let tool = PatternMineTool;
+        let tool = PatternMineTool::default();
 
         // First mine some patterns
         let md = "\

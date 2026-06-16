@@ -1853,7 +1853,7 @@ impl AkhMcpServer {
             let input = ToolInput::new()
                 .with_param("text", &params.text)
                 .with_param("max_sentences", "100");
-            let tool = TextIngestTool;
+            let tool = TextIngestTool::default();
             let output = tool.execute(&engine, input).map_err(|e| format!("{e}"))?;
             let _ = engine.persist();
             Ok(output.result)

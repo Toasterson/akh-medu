@@ -752,7 +752,7 @@ async fn ingest_csv_handler(
             .with_param("path", tmp.to_str().unwrap_or(""))
             .with_param("format", &req.format);
 
-        let tool = CsvIngestTool;
+        let tool = CsvIngestTool::default();
         let output = tool.execute(&engine, input).map_err(|e| format!("{e}"))?;
 
         let _ = std::fs::remove_file(&tmp);
@@ -783,7 +783,7 @@ async fn ingest_text_handler(
             .with_param("text", &req.text)
             .with_param("max_sentences", req.max_sentences.to_string());
 
-        let tool = TextIngestTool;
+        let tool = TextIngestTool::default();
         let output = tool.execute(&engine, input).map_err(|e| format!("{e}"))?;
 
         let _ = engine.persist();

@@ -2951,7 +2951,7 @@ fn csv_ingest_spo_and_entity() {
     let input = ToolInput::new()
         .with_param("path", spo_path.to_str().unwrap())
         .with_param("format", "spo");
-    let result = CsvIngestTool.execute(&engine, input).unwrap();
+    let result = CsvIngestTool::default().execute(&engine, input).unwrap();
     assert!(result.success);
     assert!(result.result.contains("2 triples ingested"));
 
@@ -2961,7 +2961,7 @@ fn csv_ingest_spo_and_entity() {
     let input = ToolInput::new()
         .with_param("path", entity_path.to_str().unwrap())
         .with_param("format", "entity");
-    let result = CsvIngestTool.execute(&engine, input).unwrap();
+    let result = CsvIngestTool::default().execute(&engine, input).unwrap();
     assert!(result.success);
     assert!(result.result.contains("2 triples ingested"));
 }
@@ -2976,7 +2976,7 @@ fn text_ingest_extracts_triples() {
         "text",
         "Dogs are mammals. Paris is located in France. The wheel is part of the car.",
     );
-    let result = TextIngestTool.execute(&engine, input).unwrap();
+    let result = TextIngestTool::default().execute(&engine, input).unwrap();
     assert!(result.success);
     assert!(result.result.contains("extracted 3 triple(s)"));
 }
@@ -3181,7 +3181,7 @@ fn chat_roundtrip_intent_pipeline() {
     if let akh_medu::agent::UserIntent::Assert { text } = intent {
         use akh_medu::agent::tool::Tool;
         let tool_input = akh_medu::agent::ToolInput::new().with_param("text", &text);
-        let output = akh_medu::agent::tools::TextIngestTool
+        let output = akh_medu::agent::tools::TextIngestTool::default()
             .execute(&engine, tool_input)
             .unwrap();
         assert!(
@@ -3242,7 +3242,7 @@ fn core_features_work_standalone() {
     use akh_medu::agent::tool::Tool;
     let input =
         akh_medu::agent::ToolInput::new().with_param("text", "Paris is the capital of France");
-    let output = akh_medu::agent::tools::TextIngestTool
+    let output = akh_medu::agent::tools::TextIngestTool::default()
         .execute(&engine, input)
         .unwrap();
     assert!(output.success);

@@ -1275,7 +1275,7 @@ impl ChatProcessor {
     ) -> Vec<AkhMessage> {
         use crate::agent::tool::Tool;
         let tool_input = crate::agent::ToolInput::new().with_param("text", text);
-        match crate::agent::tools::TextIngestTool.execute(engine, tool_input) {
+        match crate::agent::tools::TextIngestTool::default().execute(engine, tool_input) {
             Ok(output) => {
                 vec![AkhMessage::tool_result(tool_label, output.success, &output.result)]
             }

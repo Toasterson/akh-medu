@@ -19,6 +19,7 @@
 
 use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 
 use miette::Diagnostic;
 use thiserror::Error;
@@ -101,6 +102,31 @@ pub trait Filesystem: Send + Sync {
     /// walks use this to avoid following symlinks — preventing cycles
     /// (stack-overflow) and symlink escapes, matching `find`/`ripgrep` defaults.
     fn is_symlink(&self, path: &Path) -> bool;
+}
+
+/// Read a file through an optional sandbox.
+///
+/// `Some(fs)` enforces read containment; `None` falls back to a raw read — for
+/// operator-driven contexts (the CLI / daemon ingest endpoints) where the human
+/// chose the path. Tools registered for the autonomous agent pass `Some` so the
+/// akh cannot read outside its sandbox.
+pub fn read_optional(fs: Option<&Arc<dyn Filesystem>>, path: &Path) -> FsResult<String> {
+    match fs {
+        Some(fs) => fs.read_to_string(path),
+        None => std::fs::read_to_string(path).map_err(|source| FsError::Io {
+            path: path.display().to_string(),
+            source,
+        }),
+    }
+}
+
+/// Whether a path exists, through an optional sandbox. `Some(fs)` only reports
+/// existence for in-sandbox paths; `None` is a raw existence check.
+pub fn exists_optional(fs: Option<&Arc<dyn Filesystem>>, path: &Path) -> bool {
+    match fs {
+        Some(fs) => fs.exists(path),
+        None => path.exists(),
+    }
 }
 
 /// A sandboxed local filesystem: reads confined to `read_roots`, writes to

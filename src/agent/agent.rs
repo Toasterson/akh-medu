@@ -320,9 +320,11 @@ impl Agent {
         registry.register(Box::new(tools::InferRulesTool));
         registry.register(Box::new(tools::GapAnalysisTool));
 
-        // Ingest tools.
-        registry.register(Box::new(tools::CsvIngestTool));
-        registry.register(Box::new(tools::TextIngestTool));
+        // Ingest tools. The single-file ingesters share the agent's sandbox so
+        // their reads stay within the workspace (code/journal ingesters still
+        // read raw — sandboxing those walks folds into the ingestion rework).
+        registry.register(Box::new(tools::CsvIngestTool::sandboxed(fs.clone())));
+        registry.register(Box::new(tools::TextIngestTool::sandboxed(fs.clone())));
         registry.register(Box::new(tools::CodeIngestTool));
         registry.register(Box::new(tools::ContentIngestTool));
         registry.register(Box::new(tools::JournalIngestTool));
@@ -336,7 +338,7 @@ impl Agent {
         // Code generation, validation, and pattern mining.
         registry.register(Box::new(tools::CodeGenTool));
         registry.register(Box::new(tools::CompileFeedbackTool));
-        registry.register(Box::new(tools::PatternMineTool));
+        registry.register(Box::new(tools::PatternMineTool::sandboxed(fs.clone())));
 
         // Agent management (multi-agent orchestration).
         registry.register(Box::new(tools::AgentListTool));

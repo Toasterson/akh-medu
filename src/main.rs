@@ -1453,7 +1453,7 @@ fn main() -> Result<()> {
                 }
                 IngestFormat::Csv => {
                     use akh_medu::agent::tool::{Tool, ToolInput};
-                    use akh_medu::agent::tools::CsvIngestTool;
+                    use akh_medu::agent::tools::CsvIngestTool; // operator-driven CLI: unsandboxed
 
                     let csv_format_str = match csv_format {
                         CsvFormat::Spo => "spo",
@@ -1463,7 +1463,7 @@ fn main() -> Result<()> {
                         .with_param("path", file.to_str().unwrap_or(""))
                         .with_param("format", csv_format_str);
 
-                    let tool = CsvIngestTool;
+                    let tool = CsvIngestTool::default();
                     let output = tool.execute(&engine, input).into_diagnostic()?;
                     println!("{}", output.result);
                 }
@@ -1475,7 +1475,7 @@ fn main() -> Result<()> {
                         .with_param("text", format!("file:{}", file.display()))
                         .with_param("max_sentences", max_sentences.to_string());
 
-                    let tool = TextIngestTool;
+                    let tool = TextIngestTool::default();
                     let output = tool.execute(&engine, input).into_diagnostic()?;
                     println!("{}", output.result);
                 }
