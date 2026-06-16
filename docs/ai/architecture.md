@@ -1,6 +1,6 @@
 # Akh-medu Architecture
 
-> Last updated: 2026-04-14 (Kubernetes deployment: Helm chart + Docker images, ADR 048)
+> Last updated: 2026-06-16 (Pure-ACP pivot P4: Filesystem sandbox + Claude-Code tool parity + permission layer, ADR 060)
 
 ## Overview
 
@@ -233,6 +233,35 @@ Commands that cannot work remotely (CSV/text ingest, headless chat, CalDAV sync,
 | `server` | `akhomed` | HTTP+WS server with full engine |
 
 ADR: `docs/ai/decisions/023-client-only-mode.md`
+
+## ACP Agentic Harness (Pure-ACP pivot, P0–P5)
+
+The daemon is migrating from a multi-surface HTTP server (REST + WebSocket +
+inbound MCP + web UI) to a single transport: the **Agent Client Protocol (ACP)**
+over a Unix socket and TCP. `akhomed` is the ACP **agent**; the TUI, CLI, and
+Anima are ACP **clients** (ADR-059). Outbound MCP to Anima/Seshat stays.
+
+- **Transport** (`src/acp/`): `agent-client-protocol` 0.14; `session/prompt` →
+  `ChatProcessor` run in `spawn_blocking` (ADR-027), `AkhMessage`s streamed back
+  as `session/update` via `AcpSink`. A `_akh/<group>/<op>` data-plane carries
+  read/admin ops (meta, workspace, symbols, triples, query, memory, infer,
+  permission) over the same connection; cognitive ops are the agent LLM's
+  *tools*, not client methods (the data-plane is deliberately small).
+- **First-class akh** (`src/akh_config.rs`, ADR-053): `akh.toml` pins
+  `{model + ollama endpoint + system prompt}` per workspace.
+- **Filesystem sandbox** (`src/fs/`, ADR-060): a `Filesystem` trait with a
+  `LocalFs` backend confining reads/writes to separate allow-listed roots with
+  symlink-safe canonical containment (no-follow-symlinks walks, depth caps).
+  All file-touching tools go through `Arc<dyn Filesystem>` — closing the old
+  read-anywhere / parent-only-write holes.
+- **Claude-Code tool parity** (ADR-060): `ToolInput` re-backed by
+  `serde_json::Value` (string API preserved); new Edit / Glob / Grep /
+  WebSearch / structured `task_list` tools, all sandbox-routed. Tool count 34.
+- **Permission layer** (`src/agent/permission.rs`, ADR-060): a sync
+  `PermissionPolicy` (Bypass default / Standard / AcceptEdits / Plan) gates
+  side-effecting tools at `ToolRegistry::execute`; a supervising client sets the
+  mode via `_akh/permission/mode` and resolves interactive `Ask` decisions over
+  `session/request_permission` (bridged across the spawn_blocking↔async boundary).
 
 ## Storage Architecture
 
