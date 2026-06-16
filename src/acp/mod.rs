@@ -63,6 +63,9 @@ use crate::chat::ChatProcessor;
 use crate::engine::Engine;
 use crate::message::{AkhMessage, MessageSink};
 
+pub mod control;
+pub use control::{is_control_method, ControlFuture, ServerControl, CONTROL_METHODS};
+
 // ──────────────────────────────────────────────────────────────────────────
 // Errors
 // ──────────────────────────────────────────────────────────────────────────
@@ -179,6 +182,12 @@ pub struct AkhAcpAgent {
     /// Consulted before issuing client-side `fs/*` or `terminal/*` requests
     /// (the Remote-FS path); `None` until the client initializes.
     client_caps: Arc<Mutex<Option<ClientCapabilities>>>,
+    /// Server-level control-plane backend (akhomed's `ServerState`). Handles the
+    /// `_akh/{workspace,daemon,config}/*` methods that span the whole daemon
+    /// rather than one workspace. `None` for in-process single-workspace setups
+    /// (tests, embedded use) — those methods then return a clean "no backend"
+    /// error. See [`ServerControl`].
+    control: Option<Arc<dyn ServerControl>>,
 }
 
 impl AkhAcpAgent {
@@ -199,6 +208,7 @@ impl AkhAcpAgent {
             processor: Arc::new(Mutex::new(processor)),
             name: "akh-medu".to_string(),
             client_caps: Arc::new(Mutex::new(None)),
+            control: None,
         }
     }
 
@@ -206,6 +216,18 @@ impl AkhAcpAgent {
     #[must_use]
     pub fn with_name(mut self, name: impl Into<String>) -> Self {
         self.name = name.into();
+        self
+    }
+
+    /// Attach a server-level control-plane backend.
+    ///
+    /// Wires the `_akh/{workspace,daemon,config}/*` methods to akhomed's
+    /// `ServerState` (or any [`ServerControl`] impl). Without it, those methods
+    /// return a "no backend wired" error and `_akh/meta/capabilities` omits the
+    /// control groups.
+    #[must_use]
+    pub fn with_control(mut self, control: Arc<dyn ServerControl>) -> Self {
+        self.control = Some(control);
         self
     }
 
@@ -432,9 +454,15 @@ impl JsonRpcRequest for AkhExtRequest {
 /// NOTE: agent-mutating data-plane methods (e.g. `_akh/permission/mode`) are
 /// NOT handled here — they take the agent lock and run in `spawn_blocking`
 /// (ADR-027) from the dispatch handler. This function is read-only engine work.
+///
+/// `has_control` reflects whether a [`ServerControl`] backend is wired (it owns
+/// the control-plane methods, dispatched *before* this function). It only
+/// affects `_akh/meta/capabilities`, which advertises the control groups +
+/// methods so a client never offers an op the server can't honour.
 fn dispatch_akh(
     engine: &Engine,
     workspace: &str,
+    has_control: bool,
     method: &str,
     params: &serde_json::Value,
 ) -> Result<serde_json::Value, String> {
@@ -447,11 +475,13 @@ fn dispatch_akh(
             "symbols": engine.all_symbols().len(),
             "triples": engine.all_triples().len(),
         })),
-        "meta/capabilities" => Ok(serde_json::json!({
-            "protocol": "acp",
-            "version": crate::client::ACP_PROTOCOL_VERSION,
-            "groups": ["meta", "workspace", "symbols", "triples", "query", "memory", "infer", "permission"],
-            "methods": [
+        "meta/capabilities" => {
+            // Per-workspace data-plane (always present).
+            let mut groups = vec![
+                "meta", "workspace", "symbols", "triples", "query", "memory", "infer",
+                "permission",
+            ];
+            let mut methods = vec![
                 "_akh/health",
                 "_akh/meta/capabilities",
                 "_akh/workspace/status",
@@ -463,8 +493,21 @@ fn dispatch_akh(
                 "_akh/memory/recall",
                 "_akh/infer/activate",
                 "_akh/permission/mode",
-            ],
-        })),
+            ];
+            // Server-level control-plane (only when a backend is wired).
+            if has_control {
+                groups.push("daemon");
+                groups.push("config");
+                methods.extend(control::CONTROL_METHODS.iter().copied());
+            }
+            Ok(serde_json::json!({
+                "protocol": "acp",
+                "version": crate::client::ACP_PROTOCOL_VERSION,
+                "control_plane": has_control,
+                "groups": groups,
+                "methods": methods,
+            }))
+        }
 
         // ── workspace group ─────────────────────────────────────────────
         "workspace/status" => Ok(serde_json::json!({
@@ -989,12 +1032,41 @@ fn build_connection(
                     let engine = Arc::clone(&me.engine);
                     let workspace = me.name.clone();
                     let agent = Arc::clone(&me.agent);
+                    let control = me.control.clone();
+                    let has_control = control.is_some();
                     async move {
                         MatchDispatch::new(message)
                             .if_request(
                                 async move |req: AkhExtRequest,
                                             responder: Responder<AkhExtResponse>| {
                                     let method: &str = &req.method;
+                                    // Server-level control-plane (workspace/
+                                    // daemon/config ops that span the whole
+                                    // daemon). Routed to the ServerControl
+                                    // backend before the per-workspace data-plane.
+                                    if is_control_method(method) {
+                                        return match &control {
+                                            Some(ctrl) => match ctrl
+                                                .dispatch(&req.method, &req.params)
+                                                .await
+                                            {
+                                                Ok(value) => {
+                                                    responder.respond(AkhExtResponse(value))
+                                                }
+                                                Err(e) => responder.respond_with_error(
+                                                    agent_client_protocol::Error::internal_error()
+                                                        .data(e),
+                                                ),
+                                            },
+                                            None => responder.respond_with_error(
+                                                agent_client_protocol::Error::method_not_found()
+                                                    .data(format!(
+                                                        "control-plane method {method} requires a \
+                                                         ServerControl backend (none wired)"
+                                                    )),
+                                            ),
+                                        };
+                                    }
                                     // Agent-mutating method: take the agent lock
                                     // inside spawn_blocking (ADR-027). GET when no
                                     // "mode" param; SET otherwise.
@@ -1032,7 +1104,13 @@ fn build_connection(
                                             ),
                                         };
                                     }
-                                    match dispatch_akh(&engine, &workspace, &req.method, &req.params) {
+                                    match dispatch_akh(
+                                        &engine,
+                                        &workspace,
+                                        has_control,
+                                        &req.method,
+                                        &req.params,
+                                    ) {
                                         Ok(value) => responder.respond(AkhExtResponse(value)),
                                         Err(e) => responder.respond_with_error(
                                             agent_client_protocol::Error::method_not_found()
@@ -2208,5 +2286,150 @@ mod tests {
             entity: "E".into(),
             description: "missing".into(),
         })));
+    }
+
+    // ── control-plane routing (the ServerControl seam) ──────────────────────
+    //
+    // These exercise the *router*: that `_akh/{workspace,daemon,config}/*` is
+    // peeled off and forwarded to the wired backend, that the per-workspace
+    // data-plane still answers alongside it, and that `meta/capabilities`
+    // reflects whether a backend is present. The real `ServerControl` impl over
+    // akhomed's `ServerState` is tested in that binary; here a mock stands in.
+
+    /// A stand-in [`ServerControl`] backend: it never touches a real
+    /// `ServerState`, just returns canned JSON keyed by the control method (and
+    /// echoes a param, to prove params flow through the router).
+    struct MockControl;
+
+    impl ServerControl for MockControl {
+        fn dispatch<'a>(
+            &'a self,
+            method: &'a str,
+            params: &'a serde_json::Value,
+        ) -> ControlFuture<'a> {
+            let op = method.strip_prefix("_akh/").unwrap_or(method).to_string();
+            let params = params.clone();
+            Box::pin(async move {
+                match op.as_str() {
+                    "workspace/list" => Ok(serde_json::json!({ "workspaces": ["alpha", "beta"] })),
+                    "workspace/create" => Ok(serde_json::json!({
+                        "name": params.get("name").and_then(|v| v.as_str()).unwrap_or(""),
+                        "created": true,
+                    })),
+                    "daemon/status" => Ok(serde_json::json!({ "running": false })),
+                    "config/get" => Ok(serde_json::json!({ "config": { "mock": true } })),
+                    other => Err(format!("mock backend has no op: {other}")),
+                }
+            })
+        }
+    }
+
+    /// With a control backend wired, the `_akh/{workspace,daemon,config}/*`
+    /// methods route to it; the per-workspace data-plane still answers its own
+    /// methods; and `_akh/meta/capabilities` advertises the control groups.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn acp_control_plane_routes_to_backend() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("akh-acp-control.sock");
+        let me = workspace().with_control(Arc::new(MockControl));
+        let listener = UnixListener::bind(&sock).expect("bind unix");
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let server = tokio::spawn(async move { serve_unix_loop(me, listener, shutdown_rx).await });
+
+        let call = |method: &'static str, params: serde_json::Value| {
+            let sock = sock.clone();
+            async move {
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(60),
+                    ext_request_unix(&sock, method, params),
+                )
+                .await
+                .expect("ext request timed out")
+            }
+        };
+
+        // control-plane: workspace/list → backend's canned answer.
+        let list = call("_akh/workspace/list", serde_json::json!({}))
+            .await
+            .expect("list ok");
+        assert_eq!(list["workspaces"][0], "alpha");
+
+        // control-plane: params flow through the router to the backend.
+        let created = call("_akh/workspace/create", serde_json::json!({ "name": "gamma" }))
+            .await
+            .expect("create ok");
+        assert_eq!(created["name"], "gamma");
+        assert_eq!(created["created"], true);
+
+        // control-plane: daemon/status routes (not mistaken for data-plane).
+        let st = call("_akh/daemon/status", serde_json::json!({}))
+            .await
+            .expect("status ok");
+        assert_eq!(st["running"], false);
+
+        // the per-workspace data-plane still works alongside the control-plane.
+        let health = call("_akh/health", serde_json::json!({}))
+            .await
+            .expect("health ok");
+        assert_eq!(health["status"], "ok");
+
+        // meta/capabilities advertises the control groups + methods.
+        let caps = call("_akh/meta/capabilities", serde_json::json!({}))
+            .await
+            .expect("caps ok");
+        assert_eq!(caps["control_plane"], true);
+        let methods = caps["methods"].as_array().unwrap();
+        assert!(methods.iter().any(|m| m == "_akh/workspace/list"));
+        assert!(methods.iter().any(|m| m == "_akh/daemon/start"));
+        assert!(methods.iter().any(|m| m == "_akh/config/set"));
+        let groups = caps["groups"].as_array().unwrap();
+        assert!(groups.iter().any(|g| g == "daemon"));
+        assert!(groups.iter().any(|g| g == "config"));
+
+        // a control method the backend doesn't implement → clean error.
+        let err = call("_akh/config/set", serde_json::json!({})).await;
+        assert!(err.is_err(), "unimplemented control op must error: {err:?}");
+
+        shutdown_tx.send(true).expect("send shutdown");
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(30), server).await;
+    }
+
+    /// Without a control backend, the control-plane methods return a clean
+    /// "no backend" error (never silently mis-routed to the data-plane), and
+    /// `_akh/meta/capabilities` omits the control groups + methods.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn acp_control_plane_absent_errors() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("akh-acp-nocontrol.sock");
+        let me = workspace(); // no .with_control(..)
+        let listener = UnixListener::bind(&sock).expect("bind unix");
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let server = tokio::spawn(async move { serve_unix_loop(me, listener, shutdown_rx).await });
+
+        // control method without a backend → error, not a data-plane fall-through.
+        let err = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            ext_request_unix(&sock, "_akh/workspace/list", serde_json::json!({})),
+        )
+        .await
+        .expect("request timed out");
+        assert!(err.is_err(), "control method must error with no backend: {err:?}");
+
+        // capabilities omit the control surface.
+        let caps = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            ext_request_unix(&sock, "_akh/meta/capabilities", serde_json::json!({})),
+        )
+        .await
+        .expect("caps timed out")
+        .expect("caps ok");
+        assert_eq!(caps["control_plane"], false);
+        let methods = caps["methods"].as_array().unwrap();
+        assert!(!methods.iter().any(|m| m == "_akh/workspace/list"));
+        let groups = caps["groups"].as_array().unwrap();
+        assert!(!groups.iter().any(|g| g == "daemon"));
+
+        shutdown_tx.send(true).expect("send shutdown");
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(30), server).await;
     }
 }

@@ -335,6 +335,151 @@ impl ServerState {
             .or_insert(Arc::clone(&shared));
         Arc::clone(entry)
     }
+
+    // ── daemon lifecycle (shared by the REST handlers and the ACP control-plane)
+    //
+    // These hold the actual logic; the REST handlers and `ServerControl` impl
+    // are thin adapters. When REST is deleted (ADR-061 increment 4) only the
+    // adapters vanish — this stays.
+
+    /// Start (or return the already-running) background daemon for a workspace.
+    ///
+    /// `max_cycles == 0` means run indefinitely. Background tasks are gated by
+    /// the akh's `[autonomy]` config (P5): a fresh akh runs only always-on infra
+    /// unless it opts in. Idempotent — a second call while one is live returns
+    /// the existing status rather than spawning a duplicate.
+    async fn spawn_workspace_daemon(
+        &self,
+        ws_name: &str,
+        max_cycles: usize,
+    ) -> Result<DaemonStatus, (StatusCode, String)> {
+        // Already running? Return its current status.
+        {
+            let daemons = self.daemons.read().await;
+            if let Some(d) = daemons.get(ws_name)
+                && !d.handle.is_finished()
+            {
+                return Ok(d.status.lock().await.clone());
+            }
+        }
+
+        let engine = self.get_engine(ws_name).await?;
+        let shared_agent = self.get_agent(ws_name).await?;
+
+        // Build DaemonConfig from global config with request-level override.
+        let mut daemon_config = self.config.read().await.daemon.to_daemon_config();
+        if max_cycles > 0 {
+            daemon_config.max_cycles = max_cycles;
+        }
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let trigger_count = TriggerStore::new(&engine).list().len();
+
+        let status = Arc::new(tokio::sync::Mutex::new(DaemonStatus {
+            running: true,
+            total_cycles: 0,
+            started_at: now,
+            trigger_count,
+            last_persist_at: None,
+            last_learning_at: None,
+            last_sleep_at: None,
+            last_goal_gen_at: None,
+            active_goals: 0,
+            kg_symbols: 0,
+            kg_triples: 0,
+            knowledge_density: None,
+            last_compaction_at: None,
+        }));
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let daemon_status = Arc::clone(&status);
+        let daemon_ws_name = ws_name.to_string();
+
+        // Register pause handle so MCP can suspend/resume this daemon.
+        let pause_handle = mcp::DaemonPauseHandle::new();
+        self.daemon_pauses
+            .write()
+            .await
+            .insert(ws_name.to_string(), pause_handle.clone());
+        let task_handle = pause_handle.clone();
+
+        // P5: gate background tasks by the akh's [autonomy] config.
+        let autonomy = self
+            .get_akh_config(ws_name)
+            .await
+            .map(|c| c.autonomy.clone())
+            .unwrap_or_default();
+
+        let handle = tokio::task::spawn(async move {
+            run_daemon_task(
+                shared_agent,
+                daemon_status,
+                shutdown_rx,
+                daemon_config,
+                autonomy,
+                daemon_ws_name,
+                task_handle,
+            )
+            .await;
+        });
+
+        let daemon = WorkspaceDaemon {
+            handle,
+            shutdown_tx,
+            status: Arc::clone(&status),
+        };
+
+        let st = status.lock().await.clone();
+        self.daemons.write().await.insert(ws_name.to_string(), daemon);
+        Ok(st)
+    }
+
+    /// Stop a workspace's background daemon. Returns `true` if one was running,
+    /// `false` if there was nothing to stop.
+    async fn stop_workspace_daemon(&self, ws_name: &str) -> bool {
+        let mut daemons = self.daemons.write().await;
+        if let Some(d) = daemons.remove(ws_name) {
+            let _ = d.shutdown_tx.send(true);
+            // Give the task a moment to finish.
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(5), d.handle).await;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Snapshot a workspace's daemon status, enriched with live KG stats. When
+    /// no daemon is running, returns a `running: false` zero-status.
+    async fn daemon_status_snapshot(&self, ws_name: &str) -> DaemonStatus {
+        let daemons = self.daemons.read().await;
+        if let Some(d) = daemons.get(ws_name) {
+            let mut st = d.status.lock().await.clone();
+            if let Ok(engine) = self.get_engine(ws_name).await {
+                st.kg_symbols = engine.all_symbols().len();
+                st.kg_triples = engine.all_triples().len();
+            }
+            st
+        } else {
+            DaemonStatus {
+                running: false,
+                total_cycles: 0,
+                started_at: 0,
+                trigger_count: 0,
+                last_persist_at: None,
+                last_learning_at: None,
+                last_sleep_at: None,
+                last_goal_gen_at: None,
+                active_goals: 0,
+                kg_symbols: 0,
+                kg_triples: 0,
+                knowledge_density: None,
+                last_compaction_at: None,
+            }
+        }
+    }
 }
 
 // ── Response types ────────────────────────────────────────────────────────
@@ -1410,99 +1555,18 @@ async fn start_daemon_handler(
     Path(ws_name): Path<String>,
     body: Option<Json<StartDaemonReq>>,
 ) -> Result<Json<DaemonStatus>, (StatusCode, String)> {
-    // Check if already running.
-    {
-        let daemons = state.daemons.read().await;
-        if let Some(d) = daemons.get(&ws_name)
-            && !d.handle.is_finished() {
-                let st = d.status.lock().await;
-                return Ok(Json(st.clone()));
-            }
-    }
-
-    let engine = state.get_engine(&ws_name).await?;
-    let shared_agent = state.get_agent(&ws_name).await?;
     let max_cycles = body.map(|b| b.max_cycles).unwrap_or(0);
-
-    // Build DaemonConfig from global config with request-level override.
-    let mut daemon_config = state.config.read().await.daemon.to_daemon_config();
-    if max_cycles > 0 {
-        daemon_config.max_cycles = max_cycles;
-    }
-
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-
-    let trigger_count = TriggerStore::new(&engine).list().len();
-
-    let status = Arc::new(tokio::sync::Mutex::new(DaemonStatus {
-        running: true,
-        total_cycles: 0,
-        started_at: now,
-        trigger_count,
-        last_persist_at: None,
-        last_learning_at: None,
-        last_sleep_at: None,
-        last_goal_gen_at: None,
-        active_goals: 0,
-        kg_symbols: 0,
-        kg_triples: 0,
-        knowledge_density: None,
-        last_compaction_at: None,
-    }));
-
-    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-
-    let daemon_status = Arc::clone(&status);
-    let daemon_ws_name = ws_name.clone();
-
-    // Register pause handle so MCP can suspend/resume this daemon.
-    let pause_handle = mcp::DaemonPauseHandle::new();
-    state.daemon_pauses.write().await.insert(ws_name.clone(), pause_handle.clone());
-
-    let task_handle = pause_handle.clone();
-    // P5: gate background tasks by the akh's [autonomy] config (master-off by
-    // default → daemon runs only always-on infra unless the akh opts in).
-    let autonomy = state
-        .get_akh_config(&ws_name)
+    state
+        .spawn_workspace_daemon(&ws_name, max_cycles)
         .await
-        .map(|c| c.autonomy.clone())
-        .unwrap_or_default();
-    let handle = tokio::task::spawn(async move {
-        run_daemon_task(
-            shared_agent,
-            daemon_status,
-            shutdown_rx,
-            daemon_config,
-            autonomy,
-            daemon_ws_name,
-            task_handle,
-        )
-        .await;
-    });
-
-    let daemon = WorkspaceDaemon {
-        handle,
-        shutdown_tx,
-        status: Arc::clone(&status),
-    };
-
-    let st = status.lock().await.clone();
-    state.daemons.write().await.insert(ws_name, daemon);
-    Ok(Json(st))
+        .map(Json)
 }
 
 async fn stop_daemon_handler(
     State(state): State<Arc<ServerState>>,
     Path(ws_name): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let mut daemons = state.daemons.write().await;
-    if let Some(d) = daemons.remove(&ws_name) {
-        let _ = d.shutdown_tx.send(true);
-        // Give the task a moment to finish.
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), d.handle).await;
+    if state.stop_workspace_daemon(&ws_name).await {
         Ok(Json(serde_json::json!({"stopped": true})))
     } else {
         Err((
@@ -1516,32 +1580,7 @@ async fn daemon_status_handler(
     State(state): State<Arc<ServerState>>,
     Path(ws_name): Path<String>,
 ) -> Result<Json<DaemonStatus>, (StatusCode, String)> {
-    let daemons = state.daemons.read().await;
-    if let Some(d) = daemons.get(&ws_name) {
-        let mut st = d.status.lock().await.clone();
-        // Enrich with live KG stats from the engine.
-        if let Ok(engine) = state.get_engine(&ws_name).await {
-            st.kg_symbols = engine.all_symbols().len();
-            st.kg_triples = engine.all_triples().len();
-        }
-        Ok(Json(st))
-    } else {
-        Ok(Json(DaemonStatus {
-            running: false,
-            total_cycles: 0,
-            started_at: 0,
-            trigger_count: 0,
-            last_persist_at: None,
-            last_learning_at: None,
-            last_sleep_at: None,
-            last_goal_gen_at: None,
-            active_goals: 0,
-            kg_symbols: 0,
-            kg_triples: 0,
-            knowledge_density: None,
-            last_compaction_at: None,
-        }))
-    }
+    Ok(Json(state.daemon_status_snapshot(&ws_name).await))
 }
 
 /// Background daemon task: delegates to [`AgentDaemon`] for the full set of
@@ -1654,6 +1693,132 @@ async fn ws_handler(
     })
 }
 
+/// akhomed's `ServerState` as the ACP **control-plane** backend (ADR-061
+/// increment 1). Serves the `_akh/{workspace,daemon,config}/*` methods that
+/// span the whole daemon — the ones with no home in a single-workspace
+/// `Engine`. Wired into the ACP agent via `AkhAcpAgent::with_control`; the
+/// per-workspace data-plane (`_akh/health`, `symbols/*`, …) is handled inside
+/// the `acp` module instead.
+///
+/// Daemon ops take an explicit `workspace` param (the control-plane is flat,
+/// not bound to one akh); `config/{get,set}` operate on the global
+/// `AkhomedConfig`. Errors collapse to a string surfaced as a JSON-RPC error.
+#[cfg(feature = "acp")]
+impl akh_medu::acp::ServerControl for ServerState {
+    fn dispatch<'a>(
+        &'a self,
+        method: &'a str,
+        params: &'a serde_json::Value,
+    ) -> akh_medu::acp::ControlFuture<'a> {
+        Box::pin(async move {
+            let op = method.strip_prefix("_akh/").unwrap_or(method);
+            match op {
+                // ── workspace group ──────────────────────────────────────
+                "workspace/list" => Ok(serde_json::json!({
+                    "workspaces": self.paths.list_workspaces(),
+                })),
+                "workspace/create" => {
+                    let name = params
+                        .get("name")
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or_else(|| "missing required param: name".to_string())?;
+                    let manager = WorkspaceManager::new(self.paths.clone());
+                    let config = akh_medu::workspace::WorkspaceConfig {
+                        name: name.to_string(),
+                        ..Default::default()
+                    };
+                    manager
+                        .create(config)
+                        .map_err(|e| format!("create failed: {e}"))?;
+                    // Optional role assignment (mirrors the REST create body).
+                    if let Some(role) = params.get("role").and_then(serde_json::Value::as_str) {
+                        let engine = self.get_engine(name).await.map_err(|(_, m)| m)?;
+                        engine
+                            .assign_role(role)
+                            .map_err(|e| format!("assign_role failed: {e}"))?;
+                        engine.persist().map_err(|e| format!("persist failed: {e}"))?;
+                    }
+                    Ok(serde_json::json!({ "name": name, "created": true }))
+                }
+                "workspace/delete" => {
+                    let name = params
+                        .get("name")
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or_else(|| "missing required param: name".to_string())?;
+                    // Drop the cached engine + agent before removing the data.
+                    self.workspaces.write().await.remove(name);
+                    self.agents.write().await.remove(name);
+                    let manager = WorkspaceManager::new(self.paths.clone());
+                    manager
+                        .delete(name)
+                        .map_err(|e| format!("delete failed: {e}"))?;
+                    Ok(serde_json::json!({ "deleted": name }))
+                }
+
+                // ── daemon group (explicit `workspace` param) ────────────
+                "daemon/start" => {
+                    let ws = params
+                        .get("workspace")
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or_else(|| "missing required param: workspace".to_string())?;
+                    let max_cycles = params
+                        .get("max_cycles")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(0) as usize;
+                    let st = self
+                        .spawn_workspace_daemon(ws, max_cycles)
+                        .await
+                        .map_err(|(_, m)| m)?;
+                    serde_json::to_value(st).map_err(|e| e.to_string())
+                }
+                "daemon/stop" => {
+                    let ws = params
+                        .get("workspace")
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or_else(|| "missing required param: workspace".to_string())?;
+                    let stopped = self.stop_workspace_daemon(ws).await;
+                    Ok(serde_json::json!({ "stopped": stopped }))
+                }
+                "daemon/status" => {
+                    let ws = params
+                        .get("workspace")
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or_else(|| "missing required param: workspace".to_string())?;
+                    let st = self.daemon_status_snapshot(ws).await;
+                    serde_json::to_value(st).map_err(|e| e.to_string())
+                }
+
+                // ── config group (global AkhomedConfig) ──────────────────
+                "config/get" => {
+                    let config = self.config.read().await;
+                    let value = serde_json::to_value(&*config).map_err(|e| e.to_string())?;
+                    Ok(serde_json::json!({ "config": value }))
+                }
+                "config/set" => {
+                    let cfg_val = params.get("config").ok_or_else(|| {
+                        "missing required param: config (the full AkhomedConfig object)".to_string()
+                    })?;
+                    let new_config: AkhomedConfig = serde_json::from_value(cfg_val.clone())
+                        .map_err(|e| format!("invalid config payload: {e}"))?;
+                    let config_path = self.paths.global_config_file();
+                    new_config
+                        .save(&config_path)
+                        .map_err(|e| format!("save failed: {e}"))?;
+                    *self.config.write().await = new_config.clone();
+                    tracing::info!(
+                        path = %config_path.display(),
+                        "config updated via ACP control-plane"
+                    );
+                    let value = serde_json::to_value(&new_config).map_err(|e| e.to_string())?;
+                    Ok(serde_json::json!({ "config": value }))
+                }
+
+                other => Err(format!("unknown control-plane method: _akh/{other}")),
+            }
+        })
+    }
+}
+
 /// Bring up the ACP transport (Unix socket + optional TCP) for one workspace,
 /// serving alongside the REST/WS server during the migration to ACP-only.
 ///
@@ -1700,7 +1865,12 @@ async fn start_acp_server(
         let p = nlu.lock().unwrap_or_else(|e| e.into_inner());
         akh_medu::chat::ChatProcessor::new(&engine, p.clone())
     };
-    let acp_agent = AkhAcpAgent::new(engine, agent, processor).with_name(&ws);
+    // Wire the server-level control-plane: `ServerState` answers the
+    // `_akh/{workspace,daemon,config}/*` methods that span the whole daemon.
+    let control: Arc<dyn akh_medu::acp::ServerControl> = state.clone();
+    let acp_agent = AkhAcpAgent::new(engine, agent, processor)
+        .with_name(&ws)
+        .with_control(control);
 
     let mut handles = Vec::new();
     let mut socket_str = None;
@@ -4263,4 +4433,149 @@ async fn main() {
 
     // Belt-and-suspenders: clean up PID file on normal exit too.
     akh_medu::client::remove_pid_file(&paths);
+}
+
+// ── ACP control-plane (`ServerControl for ServerState`) ─────────────────────
+//
+// Exercises the real backend directly (no socket): the lib's routing tests
+// (`src/acp/mod.rs`) use a mock; here we drive `ServerState::dispatch` against
+// a tempdir-backed state to prove the workspace + config ops actually mutate
+// disk. Daemon ops are covered by their (unchanged) REST behaviour and only the
+// cheap, agent-free `daemon/status` path is checked here.
+#[cfg(all(test, feature = "acp"))]
+mod control_plane_tests {
+    use super::*;
+    use akh_medu::acp::ServerControl;
+    use serde_json::json;
+
+    /// Build a `ServerState` rooted under a fresh tempdir.
+    fn temp_state() -> (tempfile::TempDir, ServerState) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let base = tmp.path();
+        let paths = AkhPaths {
+            config_dir: base.join("config"),
+            data_dir: base.join("data"),
+            state_dir: base.join("state"),
+            runtime_dir: base.join("run"),
+            cache_dir: base.join("cache"),
+        };
+        paths.ensure_dirs().expect("ensure dirs");
+        let state = ServerState::new(paths, AkhomedConfig::default());
+        (tmp, state)
+    }
+
+    #[tokio::test]
+    async fn control_workspace_lifecycle() {
+        let (_tmp, state) = temp_state();
+
+        // list → empty to start.
+        let list = state
+            .dispatch("_akh/workspace/list", &json!({}))
+            .await
+            .expect("list ok");
+        assert_eq!(list["workspaces"].as_array().unwrap().len(), 0);
+
+        // create "alpha".
+        let created = state
+            .dispatch("_akh/workspace/create", &json!({ "name": "alpha" }))
+            .await
+            .expect("create ok");
+        assert_eq!(created["name"], "alpha");
+        assert_eq!(created["created"], true);
+
+        // list now contains it.
+        let list = state
+            .dispatch("_akh/workspace/list", &json!({}))
+            .await
+            .expect("list ok");
+        let names: Vec<&str> = list["workspaces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert!(names.contains(&"alpha"), "created workspace missing: {list}");
+
+        // delete it.
+        let deleted = state
+            .dispatch("_akh/workspace/delete", &json!({ "name": "alpha" }))
+            .await
+            .expect("delete ok");
+        assert_eq!(deleted["deleted"], "alpha");
+
+        let list = state
+            .dispatch("_akh/workspace/list", &json!({}))
+            .await
+            .expect("list ok");
+        assert_eq!(list["workspaces"].as_array().unwrap().len(), 0);
+
+        // missing required param → error.
+        let bad = state.dispatch("_akh/workspace/create", &json!({})).await;
+        assert!(bad.is_err(), "create without name must error");
+    }
+
+    #[tokio::test]
+    async fn control_config_round_trips_to_disk() {
+        let (_tmp, state) = temp_state();
+
+        // get → wraps the AkhomedConfig.
+        let got = state
+            .dispatch("_akh/config/get", &json!({}))
+            .await
+            .expect("get ok");
+        assert!(got["config"].is_object(), "config should be an object: {got}");
+
+        // set with a mutated config → persisted + reflected on get.
+        let cfg = AkhomedConfig {
+            acp: akh_medu::config::AcpSection {
+                tcp_port: Some(8299),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let set = state
+            .dispatch("_akh/config/set", &json!({ "config": cfg }))
+            .await
+            .expect("set ok");
+        assert_eq!(set["config"]["acp"]["tcp_port"], 8299);
+
+        // it landed on disk (config.toml under config_dir).
+        assert!(
+            state.paths.global_config_file().exists(),
+            "config/set should have written config.toml"
+        );
+
+        // get reflects the change.
+        let got = state
+            .dispatch("_akh/config/get", &json!({}))
+            .await
+            .expect("get ok");
+        assert_eq!(got["config"]["acp"]["tcp_port"], 8299);
+
+        // set without a `config` param → error (never silently resets).
+        let bad = state.dispatch("_akh/config/set", &json!({})).await;
+        assert!(bad.is_err(), "config/set without config payload must error");
+    }
+
+    #[tokio::test]
+    async fn control_daemon_status_when_idle() {
+        let (_tmp, state) = temp_state();
+        // No daemon running → cheap zero-status (no engine/agent construction).
+        let st = state
+            .dispatch("_akh/daemon/status", &json!({ "workspace": "alpha" }))
+            .await
+            .expect("status ok");
+        assert_eq!(st["running"], false);
+
+        // daemon ops require an explicit workspace.
+        let bad = state.dispatch("_akh/daemon/status", &json!({})).await;
+        assert!(bad.is_err(), "daemon/status without workspace must error");
+    }
+
+    #[tokio::test]
+    async fn control_unknown_method_errors() {
+        let (_tmp, state) = temp_state();
+        let bad = state.dispatch("_akh/workspace/teleport", &json!({})).await;
+        assert!(bad.is_err(), "unknown control method must error");
+    }
 }
