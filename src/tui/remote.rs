@@ -444,8 +444,9 @@ mod tests {
             });
         });
 
-        // Wait for the socket to be created before connecting.
-        for _ in 0..400 {
+        // Wait for the socket to be created before connecting (≤4s — generous
+        // so heavy parallel test load can't lose the race to a short budget).
+        for _ in 0..800 {
             if sock.exists() {
                 break;
             }
@@ -464,9 +465,13 @@ mod tests {
         let mut chat = RemoteChat::connect(&info, "default").expect("RemoteChat connect");
         chat.send_input("What is the Sun?");
 
-        // Poll the sync channel like the TUI does (bounded so it can never hang).
+        // Poll the sync channel like the TUI does (bounded so it can never
+        // hang). The budget is ≤30s (1500 × 20ms): the relay+turn finishes in
+        // well under a second normally, so this only bounds a genuine hang —
+        // generous enough that CPU starvation under full-suite parallel load
+        // cannot trip it (was 10s, which flaked).
         let mut answer: Option<String> = None;
-        for _ in 0..500 {
+        for _ in 0..1500 {
             if let Some(msg) = chat.try_recv() {
                 if let AkhMessage::Error { code, message, .. } = &msg {
                     panic!("ACP relay surfaced an error [{code}]: {message}");

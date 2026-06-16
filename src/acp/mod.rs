@@ -1436,6 +1436,13 @@ pub async fn run_headless_chat_tcp(addr: &str, name: &str, label: &str) -> AcpRe
 // ──────────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
+// NOTE: the `tokio::time::timeout(..)` guards in these socket tests are
+// deliberately generous (60s for an operation, 30s for a post-shutdown join).
+// They exist only to bound a genuine hang (a wedged server / deadlock), NOT to
+// assert latency — a prompt turn finishes in well under a second. Each test
+// runs a multi-thread runtime, so under full-suite parallel load the runtimes
+// oversubscribe the CPU and a tight (e.g. 15s) budget flakes spuriously. Do not
+// tighten these back; if a test legitimately needs >60s, something is wrong.
 mod tests {
     use super::*;
     use crate::agent::AgentConfig;
@@ -1521,7 +1528,7 @@ mod tests {
 
         // Hard bound: a transport/protocol deadlock must fail fast, never hang.
         let answer: String = tokio::time::timeout(
-            std::time::Duration::from_secs(15),
+            std::time::Duration::from_secs(60),
             client_lifecycle,
         )
         .await
@@ -1538,7 +1545,7 @@ mod tests {
         // server may still be parked on the dispatch loop; bound the join so the test
         // can never hang, and don't fail the spike if the loop hasn't unwound yet
         // (runtime shutdown at test end cancels any still-running spawned task).
-        match tokio::time::timeout(std::time::Duration::from_secs(5), server).await {
+        match tokio::time::timeout(std::time::Duration::from_secs(30), server).await {
             Ok(joined) => joined
                 .expect("server task joined")
                 .expect("server served without protocol error"),
@@ -1582,7 +1589,7 @@ mod tests {
                     })
                     .await
             });
-        tokio::time::timeout(std::time::Duration::from_secs(15), lifecycle)
+        tokio::time::timeout(std::time::Duration::from_secs(60), lifecycle)
             .await
             .expect("unix client lifecycle timed out (transport/protocol deadlock)")
             .expect("unix client lifecycle completed")
@@ -1607,7 +1614,7 @@ mod tests {
                     })
                     .await
             });
-        tokio::time::timeout(std::time::Duration::from_secs(15), lifecycle)
+        tokio::time::timeout(std::time::Duration::from_secs(60), lifecycle)
             .await
             .expect("tcp client lifecycle timed out (transport/protocol deadlock)")
             .expect("tcp client lifecycle completed")
@@ -1633,7 +1640,7 @@ mod tests {
             "expected non-empty ACP/TCP response, got: {answer:?}"
         );
 
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), server).await;
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(30), server).await;
     }
 
     /// The accept loop serves more than one connection against the same shared
@@ -1656,7 +1663,7 @@ mod tests {
 
         // Signal shutdown; the loop must return Ok promptly.
         shutdown_tx.send(true).expect("send shutdown");
-        let joined = tokio::time::timeout(std::time::Duration::from_secs(5), loop_task)
+        let joined = tokio::time::timeout(std::time::Duration::from_secs(30), loop_task)
             .await
             .expect("accept loop did not shut down within 5s")
             .expect("accept loop task joined");
@@ -1677,7 +1684,7 @@ mod tests {
         let server = tokio::spawn(async move { serve_unix_loop(me, listener, shutdown_rx).await });
 
         let (a, b) = tokio::time::timeout(
-            std::time::Duration::from_secs(15),
+            std::time::Duration::from_secs(60),
             chat_over_unix(&sock, "akh-acp-test-client", async move |mut session, _cx| {
                 session.send_prompt("What is the Sun?")?;
                 let a = session.read_to_string().await?;
@@ -1694,7 +1701,7 @@ mod tests {
         assert!(!b.trim().is_empty(), "second turn empty: {b:?}");
 
         shutdown_tx.send(true).expect("send shutdown");
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), server).await;
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(30), server).await;
     }
 
     /// The `_akh/*` data-plane: a client `ext_request` reaches the server's
@@ -1711,7 +1718,7 @@ mod tests {
 
         // _akh/health → status ok + counts (the seeded triple ⇒ ≥1 triple).
         let health = tokio::time::timeout(
-            std::time::Duration::from_secs(15),
+            std::time::Duration::from_secs(60),
             ext_request_unix(&sock, "_akh/health", serde_json::json!({})),
         )
         .await
@@ -1722,7 +1729,7 @@ mod tests {
 
         // _akh/meta/capabilities → advertises the data-plane.
         let caps = tokio::time::timeout(
-            std::time::Duration::from_secs(15),
+            std::time::Duration::from_secs(60),
             ext_request_unix(&sock, "_akh/meta/capabilities", serde_json::json!({})),
         )
         .await
@@ -1733,7 +1740,7 @@ mod tests {
 
         // An unknown method is a clean error, not a hang or panic.
         let unknown = tokio::time::timeout(
-            std::time::Duration::from_secs(15),
+            std::time::Duration::from_secs(60),
             ext_request_unix(&sock, "_akh/does/not/exist", serde_json::json!({})),
         )
         .await
@@ -1741,7 +1748,7 @@ mod tests {
         assert!(unknown.is_err(), "unknown _akh method must error");
 
         shutdown_tx.send(true).expect("send shutdown");
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), server).await;
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(30), server).await;
     }
 
     /// The read-only introspection group (`workspace/status`, `symbols/list`,
@@ -1760,7 +1767,7 @@ mod tests {
             let sock = sock.clone();
             async move {
                 tokio::time::timeout(
-                    std::time::Duration::from_secs(15),
+                    std::time::Duration::from_secs(60),
                     ext_request_unix(&sock, method, params),
                 )
                 .await
@@ -1805,7 +1812,7 @@ mod tests {
 
         // missing required param → clean error.
         let bad = tokio::time::timeout(
-            std::time::Duration::from_secs(15),
+            std::time::Duration::from_secs(60),
             ext_request_unix(&sock, "_akh/triples/from", serde_json::json!({})),
         )
         .await
@@ -1813,7 +1820,7 @@ mod tests {
         assert!(bad.is_err(), "triples/from without symbol must error");
 
         shutdown_tx.send(true).expect("send shutdown");
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), server).await;
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(30), server).await;
     }
 
     /// The write group: `_akh/triples/add` mutates the KG and the change is
@@ -1833,7 +1840,7 @@ mod tests {
             let sock = sock.clone();
             async move {
                 tokio::time::timeout(
-                    std::time::Duration::from_secs(15),
+                    std::time::Duration::from_secs(60),
                     ext_request_unix(&sock, method, params),
                 )
                 .await
@@ -1870,7 +1877,7 @@ mod tests {
         assert!(created["id"].as_u64().is_some(), "symbol id expected: {created}");
 
         shutdown_tx.send(true).expect("send shutdown");
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), server).await;
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(30), server).await;
     }
 
     /// The query group: `_akh/query/sparql` runs a SELECT over a persistent
@@ -1904,7 +1911,7 @@ mod tests {
         let server = tokio::spawn(async move { serve_unix_loop(me, listener, shutdown_rx).await });
 
         let res = tokio::time::timeout(
-            std::time::Duration::from_secs(15),
+            std::time::Duration::from_secs(60),
             ext_request_unix(
                 &sock,
                 "_akh/query/sparql",
@@ -1922,7 +1929,7 @@ mod tests {
         assert!(res["solutions"].as_array().is_some_and(|s| !s.is_empty()));
 
         shutdown_tx.send(true).expect("send shutdown");
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), server).await;
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(30), server).await;
     }
 
     /// The memory group: `_akh/memory/recall` returns episodic memories. With no
@@ -1965,7 +1972,7 @@ mod tests {
 
         // No query → recency fallback returns the seeded episode.
         let recent = tokio::time::timeout(
-            std::time::Duration::from_secs(15),
+            std::time::Duration::from_secs(60),
             ext_request_unix(&sock, "_akh/memory/recall", serde_json::json!({ "top_k": 5 })),
         )
         .await
@@ -1987,7 +1994,7 @@ mod tests {
 
         // Unresolvable query → reported in `unresolved`, recency fallback still runs.
         let typo = tokio::time::timeout(
-            std::time::Duration::from_secs(15),
+            std::time::Duration::from_secs(60),
             ext_request_unix(
                 &sock,
                 "_akh/memory/recall",
@@ -2008,7 +2015,7 @@ mod tests {
         );
 
         shutdown_tx.send(true).expect("send shutdown");
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), server).await;
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(30), server).await;
     }
 
     /// The infer group: `_akh/infer/activate` runs spreading-activation from a
@@ -2028,7 +2035,7 @@ mod tests {
         // Seeding from "Sun" activates at least one symbol (cf. integration's
         // inference test on the same Sun/is-a/Star shape).
         let act = tokio::time::timeout(
-            std::time::Duration::from_secs(15),
+            std::time::Duration::from_secs(60),
             ext_request_unix(
                 &sock,
                 "_akh/infer/activate",
@@ -2053,7 +2060,7 @@ mod tests {
 
         // No resolvable seed → clean error, not an empty success.
         let bad = tokio::time::timeout(
-            std::time::Duration::from_secs(15),
+            std::time::Duration::from_secs(60),
             ext_request_unix(
                 &sock,
                 "_akh/infer/activate",
@@ -2065,7 +2072,7 @@ mod tests {
         assert!(bad.is_err(), "all-unresolvable seeds must error: {bad:?}");
 
         shutdown_tx.send(true).expect("send shutdown");
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), server).await;
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(30), server).await;
     }
 
     /// The permission group: `_akh/permission/mode` reports the active mode and
@@ -2084,7 +2091,7 @@ mod tests {
             let sock = sock.clone();
             async move {
                 tokio::time::timeout(
-                    std::time::Duration::from_secs(15),
+                    std::time::Duration::from_secs(60),
                     ext_request_unix(&sock, "_akh/permission/mode", params),
                 )
                 .await
@@ -2107,7 +2114,7 @@ mod tests {
 
         // Unknown mode → clean error (not a silent no-op).
         let bad = tokio::time::timeout(
-            std::time::Duration::from_secs(15),
+            std::time::Duration::from_secs(60),
             ext_request_unix(&sock, "_akh/permission/mode", serde_json::json!({ "mode": "nope" })),
         )
         .await
@@ -2115,7 +2122,7 @@ mod tests {
         assert!(bad.is_err(), "unknown permission mode must error");
 
         shutdown_tx.send(true).expect("send shutdown");
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), server).await;
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(30), server).await;
     }
 
     /// The permission bridge relays a blocking `ask` (from inside the tool
