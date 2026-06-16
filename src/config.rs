@@ -205,7 +205,8 @@ impl UpstreamEndpointConfig {
 pub struct DaemonSection {
     /// Workspaces to auto-start daemons for on boot.
     ///
-    /// Defaults to `["default"]`. Set to empty list to disable auto-start.
+    /// Defaults to `[]` (P5: a fresh akh runs no background daemon). Add a
+    /// workspace name to opt in, or override via `AKH_AUTO_START` / `--auto-start`.
     #[serde(default = "default_auto_start")]
     pub auto_start: Vec<String>,
 
@@ -229,7 +230,8 @@ impl Default for DaemonSection {
 }
 
 fn default_auto_start() -> Vec<String> {
-    vec!["default".into()]
+    // P5: off by default — no workspace auto-starts a background daemon.
+    Vec::new()
 }
 
 /// Optional overrides for daemon task intervals (all in seconds).
@@ -380,7 +382,7 @@ mod tests {
         let config = AkhomedConfig::default();
         let toml_str = toml::to_string_pretty(&config).unwrap();
         let parsed: AkhomedConfig = toml::from_str(&toml_str).unwrap();
-        assert_eq!(parsed.daemon.auto_start, vec!["default".to_string()]);
+        assert!(parsed.daemon.auto_start.is_empty(), "P5: auto_start is empty by default");
         assert_eq!(parsed.daemon.max_cycles, 0);
     }
 
@@ -416,7 +418,7 @@ auto_start = []
     #[test]
     fn load_nonexistent_returns_defaults() {
         let config = AkhomedConfig::load(Path::new("/tmp/akh-does-not-exist.toml")).unwrap();
-        assert_eq!(config.daemon.auto_start, vec!["default".to_string()]);
+        assert!(config.daemon.auto_start.is_empty(), "P5: auto_start is empty by default");
     }
 
     #[test]

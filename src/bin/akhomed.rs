@@ -1463,12 +1463,20 @@ async fn start_daemon_handler(
     state.daemon_pauses.write().await.insert(ws_name.clone(), pause_handle.clone());
 
     let task_handle = pause_handle.clone();
+    // P5: gate background tasks by the akh's [autonomy] config (master-off by
+    // default → daemon runs only always-on infra unless the akh opts in).
+    let autonomy = state
+        .get_akh_config(&ws_name)
+        .await
+        .map(|c| c.autonomy.clone())
+        .unwrap_or_default();
     let handle = tokio::task::spawn(async move {
         run_daemon_task(
             shared_agent,
             daemon_status,
             shutdown_rx,
             daemon_config,
+            autonomy,
             daemon_ws_name,
             task_handle,
         )
@@ -1545,12 +1553,14 @@ async fn run_daemon_task(
     status: Arc<tokio::sync::Mutex<DaemonStatus>>,
     shutdown_rx: tokio::sync::watch::Receiver<bool>,
     daemon_config: akh_medu::agent::DaemonConfig,
+    autonomy: akh_medu::akh_config::AutonomyConfig,
     ws_name: String,
     pause_handle: mcp::DaemonPauseHandle,
 ) {
     use akh_medu::agent::AgentDaemon;
 
     let mut daemon = AgentDaemon::new(shared_agent, daemon_config)
+        .with_autonomy(autonomy)
         .with_shutdown(shutdown_rx)
         .with_status(Arc::clone(&status))
         .with_pause_handles(pause_handle.paused, pause_handle.cycle_done);
@@ -3702,6 +3712,12 @@ async fn main() {
                     let daemon_status = Arc::clone(&status);
                     let daemon_ws = ws_name.clone();
                     let dc = daemon_config.clone();
+                    // P5: per-akh automation gating from [autonomy] (off by default).
+                    let autonomy = state
+                        .get_akh_config(ws_name)
+                        .await
+                        .map(|c| c.autonomy.clone())
+                        .unwrap_or_default();
                     let pause_handle = mcp::DaemonPauseHandle::new();
                     state.daemon_pauses.write().await.insert(ws_name.clone(), pause_handle.clone());
                     let task_handle = pause_handle.clone();
@@ -3711,6 +3727,7 @@ async fn main() {
                             daemon_status,
                             shutdown_rx,
                             dc,
+                            autonomy,
                             daemon_ws,
                             task_handle,
                         )

@@ -2137,7 +2137,16 @@ fn main() -> Result<()> {
 
                     let rt = tokio::runtime::Runtime::new().into_diagnostic()?;
                     let shared_agent = Arc::new(Mutex::new(agent));
-                    let mut daemon = AgentDaemon::new(shared_agent, daemon_config);
+                    // Running `akh daemon` is itself the explicit opt-in to
+                    // autonomy (P5 off-by-default applies to akhomed auto-start,
+                    // not to a deliberately-invoked daemon), so enable the master
+                    // switch here.
+                    let autonomy = akh_medu::akh_config::AutonomyConfig {
+                        enabled: true,
+                        ..Default::default()
+                    };
+                    let mut daemon =
+                        AgentDaemon::new(shared_agent, daemon_config).with_autonomy(autonomy);
                     rt.block_on(daemon.run()).into_diagnostic()?;
                 }
 

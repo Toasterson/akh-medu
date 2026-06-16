@@ -121,9 +121,23 @@ pub struct AutonomyConfig {
     /// Master switch. When false, no background automation runs (default).
     #[serde(default)]
     pub enabled: bool,
-    /// Per-task enable/disable overrides (only consulted when `enabled` is true).
+    /// Per-task enable/disable overrides keyed by daemon task name. An explicit
+    /// override **always wins** over the master switch — so a single task can be
+    /// turned on with the master off (`enabled=false` + `goal_generation=true`),
+    /// or turned off with the master on.
     #[serde(default)]
     pub tasks: std::collections::BTreeMap<String, bool>,
+}
+
+impl AutonomyConfig {
+    /// Whether a named daemon task should run. An explicit per-task override
+    /// takes precedence; otherwise the task follows the master switch.
+    pub fn task_enabled(&self, task: &str) -> bool {
+        match self.tasks.get(task) {
+            Some(&v) => v,
+            None => self.enabled,
+        }
+    }
 }
 
 /// Filesystem access mode for an akh's tools (consumed by P4).
@@ -301,6 +315,39 @@ mod tests {
         assert_eq!(cfg.ollama_endpoint, OllamaEndpoint::default());
         assert!(cfg.model.is_none());
         assert!(cfg.system_prompt.is_none());
+    }
+
+    #[test]
+    fn autonomy_task_enabled_override_wins() {
+        let mut a = AutonomyConfig::default();
+        // Master off (default) → every task off.
+        assert!(!a.enabled);
+        assert!(!a.task_enabled("reflection"));
+        // Explicit on with the master off → exactly that task runs.
+        a.tasks.insert("goal_generation".into(), true);
+        assert!(a.task_enabled("goal_generation"));
+        assert!(!a.task_enabled("reflection"));
+        // Master on → tasks follow it, except an explicit off.
+        a.enabled = true;
+        a.tasks.insert("reflection".into(), false);
+        assert!(a.task_enabled("equivalence"), "unlisted follows master");
+        assert!(!a.task_enabled("reflection"), "explicit off wins");
+        assert!(a.task_enabled("goal_generation"), "explicit on still on");
+    }
+
+    #[test]
+    fn autonomy_per_task_parses_from_toml() {
+        // master off + a single task enabled — the canonical "run exactly one".
+        let toml = r#"
+            name = "thoth"
+            [autonomy]
+            enabled = false
+            tasks = { goal_generation = true }
+        "#;
+        let cfg: AkhConfig = toml::from_str(toml).expect("parse");
+        assert!(!cfg.autonomy.enabled);
+        assert!(cfg.autonomy.task_enabled("goal_generation"));
+        assert!(!cfg.autonomy.task_enabled("reflection"));
     }
 
     #[test]

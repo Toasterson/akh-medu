@@ -16,6 +16,7 @@ use std::time::Duration;
 
 use super::Agent;
 use super::error::AgentResult;
+use crate::akh_config::AutonomyConfig;
 use crate::client::DaemonStatus;
 use crate::message::AkhMessage;
 
@@ -169,6 +170,10 @@ pub struct AgentDaemon {
     shutdown: Option<tokio::sync::watch::Receiver<bool>>,
     /// Optional shared status for real-time monitoring from HTTP handlers.
     status: Option<Arc<tokio::sync::Mutex<DaemonStatus>>>,
+    /// Per-akh automation gating (P5). Defaults to master-off, so a daemon
+    /// constructed without explicit autonomy runs only always-on infra tasks
+    /// (session persistence + user-trigger evaluation).
+    autonomy: AutonomyConfig,
 }
 
 impl AgentDaemon {
@@ -182,7 +187,20 @@ impl AgentDaemon {
             cycle_done: Arc::new(tokio::sync::Notify::new()),
             shutdown: None,
             status: None,
+            autonomy: AutonomyConfig::default(),
         }
+    }
+
+    /// Set the per-akh automation gating (from `akh.toml` `[autonomy]`).
+    pub fn with_autonomy(mut self, autonomy: AutonomyConfig) -> Self {
+        self.autonomy = autonomy;
+        self
+    }
+
+    /// Whether a gated background task is enabled for this akh. Always-on infra
+    /// tasks (persist, trigger evaluation) do not consult this.
+    fn task_enabled(&self, task: &str) -> bool {
+        self.autonomy.task_enabled(task)
     }
 
     /// Pause the daemon — prevents new cycle/learning work from acquiring
@@ -277,16 +295,15 @@ impl AgentDaemon {
             ));
         });
 
-        // Startup: ensure causal world model covers all registered tools.
-        // Runs before goal generation so the world model is available for the
-        // first OODA cycle.
-        self.bootstrap_causal_schemas();
-
-        // Startup burst: seed goals so the akh can start acting immediately.
+        // Startup burst (P5-gated): seed the causal world model + initial goals
+        // so an autonomy-enabled akh can act immediately. A fresh akh with
+        // automation off seeds nothing and stays idle until prompted.
         // Continuous learning is deliberately NOT run at startup — it holds the
-        // agent mutex for 30-120s (network I/O + ingestion), blocking all HTTP
-        // handlers.  The interval timer will kick it off naturally.
-        tokio::task::block_in_place(|| self.run_goal_generation());
+        // agent mutex for 30-120s (network I/O + ingestion), blocking handlers.
+        if self.task_enabled("goal_generation") {
+            self.bootstrap_causal_schemas();
+            tokio::task::block_in_place(|| self.run_goal_generation());
+        }
 
         loop {
             // When paused, spin-sleep — prevents daemon from acquiring
@@ -296,77 +313,117 @@ impl AgentDaemon {
                 continue;
             }
 
+            // P5: each cognitive task arm is gated by `task_enabled(..)`; the
+            // ticker still fires but does nothing when disabled. `persist` and
+            // `trigger` are always-on infra (session durability + user-authored
+            // triggers, which are opt-in by being added).
             tokio::select! {
                 _ = equivalence_tick.tick() => {
-                    tokio::task::block_in_place(|| self.run_equivalence_learning());
+                    if self.task_enabled("equivalence") {
+                        tokio::task::block_in_place(|| self.run_equivalence_learning());
+                    }
                 }
                 _ = reflection_tick.tick() => {
-                    tokio::task::block_in_place(|| self.run_reflection());
+                    if self.task_enabled("reflection") {
+                        tokio::task::block_in_place(|| self.run_reflection());
+                    }
                 }
                 _ = consolidation_tick.tick() => {
-                    tokio::task::block_in_place(|| self.run_consolidation_check());
+                    if self.task_enabled("consolidation") {
+                        tokio::task::block_in_place(|| self.run_consolidation_check());
+                    }
                 }
                 _ = schema_tick.tick() => {
-                    tokio::task::block_in_place(|| self.run_schema_discovery());
+                    if self.task_enabled("schema_discovery") {
+                        tokio::task::block_in_place(|| self.run_schema_discovery());
+                    }
                 }
                 _ = rules_tick.tick() => {
-                    tokio::task::block_in_place(|| self.run_rule_inference());
+                    if self.task_enabled("rule_inference") {
+                        tokio::task::block_in_place(|| self.run_rule_inference());
+                    }
                 }
                 _ = gaps_tick.tick() => {
-                    tokio::task::block_in_place(|| self.run_gap_analysis());
+                    if self.task_enabled("gap_analysis") {
+                        tokio::task::block_in_place(|| self.run_gap_analysis());
+                    }
                 }
                 _ = persist_tick.tick() => {
+                    // Always on: session persistence is infra, not autonomy.
                     tokio::task::block_in_place(|| self.persist());
                 }
                 _ = idle_cycle_tick.tick() => {
-                    tokio::task::block_in_place(|| self.run_idle_cycle());
-                    if self.config.max_cycles > 0 && self.total_cycles >= self.config.max_cycles {
-                        tokio::task::block_in_place(|| {
-                            self.lock_agent().sink().emit(&AkhMessage::system(
-                                format!(
-                                    "daemon: max cycles ({}) reached, shutting down",
-                                    self.config.max_cycles,
-                                ),
-                            ));
-                        });
-                        break;
+                    if self.task_enabled("idle_cycle") {
+                        tokio::task::block_in_place(|| self.run_idle_cycle());
+                        if self.config.max_cycles > 0 && self.total_cycles >= self.config.max_cycles {
+                            tokio::task::block_in_place(|| {
+                                self.lock_agent().sink().emit(&AkhMessage::system(
+                                    format!(
+                                        "daemon: max cycles ({}) reached, shutting down",
+                                        self.config.max_cycles,
+                                    ),
+                                ));
+                            });
+                            break;
+                        }
                     }
                 }
                 _ = continuous_learning_tick.tick() => {
-                    tokio::task::block_in_place(|| self.run_continuous_learning());
+                    if self.task_enabled("continuous_learning") {
+                        tokio::task::block_in_place(|| self.run_continuous_learning());
+                    }
                 }
                 _ = goal_gen_tick.tick() => {
-                    tokio::task::block_in_place(|| self.run_goal_generation());
+                    if self.task_enabled("goal_generation") {
+                        tokio::task::block_in_place(|| self.run_goal_generation());
+                    }
                 }
                 _ = sleep_tick.tick() => {
-                    tokio::task::block_in_place(|| self.run_sleep_cycle());
+                    if self.task_enabled("sleep_cycle") {
+                        tokio::task::block_in_place(|| self.run_sleep_cycle());
+                    }
                 }
                 _ = trigger_tick.tick() => {
+                    // Always on: user-authored triggers are opt-in by existing.
                     tokio::task::block_in_place(|| self.run_trigger_evaluation());
                 }
                 _ = extraction_tick.tick() => {
-                    tokio::task::block_in_place(|| self.run_knowledge_extraction());
+                    if self.task_enabled("knowledge_extraction") {
+                        tokio::task::block_in_place(|| self.run_knowledge_extraction());
+                    }
                 }
                 _ = bridge_training_tick.tick() => {
-                    // run_bridge_training dispatches heavy work to spawn_blocking
-                    // internally; block_in_place covers only the brief mutex
-                    // acquisition at the start.
-                    tokio::task::block_in_place(|| self.run_bridge_training());
+                    if self.task_enabled("bridge_training") {
+                        // run_bridge_training dispatches heavy work to spawn_blocking
+                        // internally; block_in_place covers only the brief mutex
+                        // acquisition at the start.
+                        tokio::task::block_in_place(|| self.run_bridge_training());
+                    }
                 }
                 _ = openclaw_sync_tick.tick() => {
-                    self.run_openclaw_sync();
+                    if self.task_enabled("openclaw_sync") {
+                        self.run_openclaw_sync();
+                    }
                 }
                 _ = elicitation_tick.tick() => {
-                    self.run_knowledge_elicitation_task();
+                    if self.task_enabled("knowledge_elicitation") {
+                        self.run_knowledge_elicitation_task();
+                    }
                 }
                 _ = kg_compaction_tick.tick() => {
-                    self.run_kg_compaction();
+                    if self.task_enabled("kg_compaction") {
+                        self.run_kg_compaction();
+                    }
                 }
                 _ = delegation_tick.tick() => {
-                    self.run_delegation_tick().await;
+                    if self.task_enabled("delegation") {
+                        self.run_delegation_tick().await;
+                    }
                 }
                 _ = relation_enrichment_tick.tick() => {
-                    tokio::task::block_in_place(|| self.run_relation_enrichment());
+                    if self.task_enabled("relation_enrichment") {
+                        tokio::task::block_in_place(|| self.run_relation_enrichment());
+                    }
                 }
                 _ = self.wait_for_shutdown() => {
                     tokio::task::block_in_place(|| {
