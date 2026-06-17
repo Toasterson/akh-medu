@@ -30,11 +30,35 @@ use crate::message::AkhMessage;
 /// A centered model-picker overlay (the `/model` popup).
 #[cfg(feature = "acp")]
 pub struct ModelPicker {
-    /// Model names returned by `_akh/model/list` (may be empty for a cloud
-    /// endpoint that lists nothing).
+    /// All model names returned by `_akh/model/list`, sorted (may be empty for a
+    /// cloud endpoint that lists nothing). This is the unfiltered universe; the
+    /// rows actually shown are [`ModelPicker::filtered`].
     pub models: Vec<String>,
-    /// Index of the currently highlighted row.
+    /// Type-ahead filter: only models whose name starts with this (case-
+    /// insensitive) are shown. Empty = show all.
+    pub filter: String,
+    /// Index into the *filtered* list of the currently highlighted row.
     pub selected: usize,
+}
+
+#[cfg(feature = "acp")]
+impl ModelPicker {
+    /// The models currently visible given the type-ahead [`filter`]: a
+    /// case-insensitive prefix match over the (already sorted) `models`. An
+    /// empty filter shows everything.
+    ///
+    /// [`filter`]: ModelPicker::filter
+    #[must_use]
+    pub fn filtered(&self) -> Vec<&String> {
+        if self.filter.is_empty() {
+            return self.models.iter().collect();
+        }
+        let needle = self.filter.to_ascii_lowercase();
+        self.models
+            .iter()
+            .filter(|m| m.to_ascii_lowercase().starts_with(&needle))
+            .collect()
+    }
 }
 
 /// TUI application state (ACP client).
@@ -228,8 +252,10 @@ impl AkhTui {
     }
 
     /// Route a key to the open model picker. Up/Down move the (clamped)
-    /// selection; Enter applies the highlighted model via `_akh/model/set` and
-    /// closes the picker; Esc closes without applying.
+    /// selection within the filtered view; printable chars extend the type-ahead
+    /// filter and Backspace trims it (both reset the selection to the top);
+    /// Enter applies the highlighted model via `_akh/model/set` and closes the
+    /// picker; Esc closes without applying.
     fn handle_picker_key(&mut self, code: KeyCode) {
         let Some(picker) = self.picker.as_mut() else {
             return;
@@ -239,17 +265,28 @@ impl AkhTui {
                 picker.selected = picker.selected.saturating_sub(1);
             }
             KeyCode::Down => {
-                if !picker.models.is_empty() {
-                    picker.selected = (picker.selected + 1).min(picker.models.len() - 1);
+                let len = picker.filtered().len();
+                if len > 0 {
+                    picker.selected = (picker.selected + 1).min(len - 1);
                 }
+            }
+            KeyCode::Char(c) => {
+                // Type to filter; a narrower list invalidates the old index.
+                picker.filter.push(c);
+                picker.selected = 0;
+            }
+            KeyCode::Backspace => {
+                picker.filter.pop();
+                picker.selected = 0;
             }
             KeyCode::Esc => {
                 self.picker = None;
             }
             KeyCode::Enter => {
-                // Take the chosen model out, then close the picker before the
-                // (blocking) control call so the overlay isn't left up.
-                let chosen = picker.models.get(picker.selected).cloned();
+                // Take the chosen model out of the *filtered* view, then close
+                // the picker before the (blocking) control call so the overlay
+                // isn't left up.
+                let chosen = picker.filtered().get(picker.selected).map(|m| (*m).clone());
                 self.picker = None;
                 if let Some(model) = chosen {
                     self.set_model(&model);
@@ -291,7 +328,7 @@ impl AkhTui {
                     )));
                 }
                 let current = v.get("current").and_then(serde_json::Value::as_str);
-                let models: Vec<String> = v
+                let mut models: Vec<String> = v
                     .get("models")
                     .and_then(serde_json::Value::as_array)
                     .map(|arr| {
@@ -301,6 +338,7 @@ impl AkhTui {
                             .collect()
                     })
                     .unwrap_or_default();
+                models.sort();
 
                 if models.is_empty() {
                     // Nothing to pick from — guide the user to the direct form.
@@ -314,7 +352,11 @@ impl AkhTui {
                 let selected = current
                     .and_then(|c| models.iter().position(|m| m == c))
                     .unwrap_or(0);
-                self.picker = Some(ModelPicker { models, selected });
+                self.picker = Some(ModelPicker {
+                    models,
+                    filter: String::new(),
+                    selected,
+                });
             }
             Err(e) => self.messages.push(AkhMessage::error(
                 "model",

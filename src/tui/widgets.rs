@@ -246,26 +246,37 @@ pub fn render(
 }
 
 /// Draw the centered model-picker overlay: a bordered, scrollable list of model
-/// names with the selected row highlighted. The area underneath is cleared
-/// first ([`Clear`]) so the chat does not bleed through.
+/// names with the selected row highlighted. The list is the picker's
+/// type-ahead-*filtered* view, and the border title echoes the active filter so
+/// the user can see what they're typing. The area underneath is cleared first
+/// ([`Clear`]) so the chat does not bleed through.
 #[cfg(feature = "acp")]
 pub fn render_model_picker(frame: &mut Frame, picker: &ModelPicker) {
     let area = centered_rect(60, 60, frame.area());
     // Clear whatever is underneath before drawing the popup.
     frame.render_widget(Clear, area);
 
-    let items: Vec<ListItem> = picker
-        .models
-        .iter()
-        .map(|m| ListItem::new(Line::from(Span::raw(m.clone()))))
-        .collect();
+    let visible = picker.filtered();
+    let items: Vec<ListItem> = if visible.is_empty() {
+        vec![ListItem::new(Line::from(Span::styled(
+            "(no models match)",
+            Style::default().fg(Color::DarkGray),
+        )))]
+    } else {
+        visible
+            .iter()
+            .map(|m| ListItem::new(Line::from(Span::raw((*m).clone()))))
+            .collect()
+    };
+
+    let title = if picker.filter.is_empty() {
+        " Select model (↑/↓, type to filter, Enter, Esc) ".to_string()
+    } else {
+        format!(" Select model — filter: {}▏ ", picker.filter)
+    };
 
     let list = List::new(items)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Select model (↑/↓, Enter, Esc) "),
-        )
+        .block(Block::default().borders(Borders::ALL).title(title))
         .highlight_style(
             Style::default()
                 .bg(Color::Cyan)
@@ -275,8 +286,8 @@ pub fn render_model_picker(frame: &mut Frame, picker: &ModelPicker) {
         .highlight_symbol("▸ ");
 
     let mut state = ListState::default();
-    if !picker.models.is_empty() {
-        state.select(Some(picker.selected.min(picker.models.len() - 1)));
+    if !visible.is_empty() {
+        state.select(Some(picker.selected.min(visible.len() - 1)));
     }
     frame.render_stateful_widget(list, area, &mut state);
 }
