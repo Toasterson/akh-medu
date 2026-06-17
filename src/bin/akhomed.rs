@@ -760,7 +760,7 @@ async fn main() {
     // Load global config from $XDG_CONFIG_HOME/akh-medu/config.toml.
     // Creates a default config file on first boot.
     let config_path = paths.global_config_file();
-    let config = match AkhomedConfig::load_or_create(&config_path) {
+    let mut config = match AkhomedConfig::load_or_create(&config_path) {
         Ok(c) => {
             tracing::info!(path = %config_path.display(), "loaded config");
             c
@@ -770,6 +770,24 @@ async fn main() {
             AkhomedConfig::default()
         }
     };
+
+    // ACP TCP env overrides (mirrors AKH_SERVER_* / AKH_AUTO_START). Lets the
+    // Helm chart enable + expose the ACP TCP listener — the daemon's only inbound
+    // surface (ADR-061) — without mounting a config.toml. `AKH_ACP_TCP_PORT`
+    // turns TCP on; `AKH_ACP_TCP_BIND` sets the host (config defaults to the
+    // loopback `127.0.0.1`, so set `0.0.0.0` to reach a kubelet probe/Service).
+    if let Ok(p) = std::env::var("AKH_ACP_TCP_PORT") {
+        match p.trim().parse::<u16>() {
+            Ok(port) => config.acp.tcp_port = Some(port),
+            Err(e) => tracing::warn!("ignoring invalid AKH_ACP_TCP_PORT={p:?}: {e}"),
+        }
+    }
+    if let Ok(host) = std::env::var("AKH_ACP_TCP_BIND") {
+        let host = host.trim();
+        if !host.is_empty() {
+            config.acp.tcp_bind = Some(host.to_string());
+        }
+    }
 
     // AKH_AUTO_START env var overrides config if set.
     // "default" is treated as "no auto-start" (daemons are paused by default).

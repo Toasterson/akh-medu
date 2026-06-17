@@ -29,22 +29,38 @@ spec:
           image: {{ include "akh-medu.akhomed.image" . }}
           imagePullPolicy: {{ .Values.akhomed.image.pullPolicy }}
           ports:
-            - name: http
-              containerPort: {{ .Values.akhomed.env.AKH_SERVER_PORT | default 8200 }}
+            - name: acp
+              containerPort: {{ .Values.akhomed.acp.tcpPort | default 8201 }}
               protocol: TCP
           env:
             {{- range $key, $val := .Values.akhomed.env }}
             - name: {{ $key }}
               value: {{ $val | quote }}
             {{- end }}
-            - name: AKH_HOME
+            # All akh dirs live on the mounted /data PVC. akhomed resolves paths
+            # via XDG_* (+ HOME); it never read the old AKH_HOME.
+            - name: HOME
               value: /data
+            - name: XDG_DATA_HOME
+              value: /data
+            - name: XDG_CONFIG_HOME
+              value: /data/config
+            - name: XDG_STATE_HOME
+              value: /data/state
+            - name: XDG_RUNTIME_DIR
+              value: /data/run
+            # Enable + bind the ACP TCP listener (see values `akhomed.acp`).
+            - name: AKH_ACP_TCP_PORT
+              value: {{ .Values.akhomed.acp.tcpPort | quote }}
+            - name: AKH_ACP_TCP_BIND
+              value: {{ .Values.akhomed.acp.tcpBind | quote }}
           volumeMounts:
             - name: data
               mountPath: /data
             {{- if .Values.akhomed.models.enabled }}
+            # akhomed reads models from $XDG_DATA_HOME/akh-medu/models.
             - name: models
-              mountPath: /data/models
+              mountPath: /data/akh-medu/models
             {{- end }}
           {{- with .Values.akhomed.probes.liveness }}
           livenessProbe:
