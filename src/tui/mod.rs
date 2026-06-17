@@ -27,11 +27,25 @@ use miette::IntoDiagnostic;
 #[cfg(feature = "acp")]
 use crate::message::AkhMessage;
 
+/// A centered model-picker overlay (the `/model` popup).
+#[cfg(feature = "acp")]
+pub struct ModelPicker {
+    /// Model names returned by `_akh/model/list` (may be empty for a cloud
+    /// endpoint that lists nothing).
+    pub models: Vec<String>,
+    /// Index of the currently highlighted row.
+    pub selected: usize,
+}
+
 /// TUI application state (ACP client).
 #[cfg(feature = "acp")]
 pub struct AkhTui {
     workspace: String,
     remote: remote::RemoteChat,
+    /// Discovery record for the connected daemon — used to issue one-shot
+    /// `_akh/*` control calls (model list/set) over a fresh short-lived ACP
+    /// connection, independent of the persistent chat session.
+    info: crate::client::ServerInfo,
     messages: Vec<AkhMessage>,
     input_buffer: String,
     scroll_offset: usize,
@@ -40,15 +54,27 @@ pub struct AkhTui {
     show_audit: bool,
     /// Whether tool/agent "thinking" steps are expanded (default: collapsed).
     show_thinking: bool,
+    /// Active model-picker overlay (the `/model` popup). When `Some`, key input
+    /// is routed to the picker instead of the chat input.
+    picker: Option<ModelPicker>,
 }
 
 #[cfg(feature = "acp")]
 impl AkhTui {
     /// Create a new TUI instance with a remote ACP backend.
-    pub fn new_remote(workspace: String, remote: remote::RemoteChat) -> Self {
+    ///
+    /// `info` is the daemon's discovery record; it is retained so the TUI can
+    /// issue one-shot `_akh/*` control calls (e.g. model switching) over a fresh
+    /// connection without disturbing the persistent chat session.
+    pub fn new_remote(
+        workspace: String,
+        remote: remote::RemoteChat,
+        info: crate::client::ServerInfo,
+    ) -> Self {
         Self {
             workspace,
             remote,
+            info,
             messages: vec![AkhMessage::system(
                 "Connected to akhomed. Type a question or command. /help for commands, /quit to exit.",
             )],
@@ -57,6 +83,7 @@ impl AkhTui {
             should_quit: false,
             show_audit: true,
             show_thinking: false,
+            picker: None,
         }
     }
 
@@ -91,6 +118,7 @@ impl AkhTui {
                         &self.input_buffer,
                         self.scroll_offset,
                         self.show_thinking,
+                        self.picker.as_ref(),
                     );
                 })
                 .into_diagnostic()?;
@@ -148,6 +176,13 @@ impl AkhTui {
     }
 
     fn handle_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
+        // When the model picker is open it owns all key input: arrows move the
+        // selection, Enter applies the highlighted model, Esc dismisses. Normal
+        // chat keys (typing / send / Tab-thinking) only apply when it is closed.
+        if self.picker.is_some() {
+            self.handle_picker_key(code);
+            return;
+        }
         match code {
             KeyCode::Enter => {
                 let input = self.input_buffer.trim().to_string();
@@ -192,6 +227,127 @@ impl AkhTui {
         }
     }
 
+    /// Route a key to the open model picker. Up/Down move the (clamped)
+    /// selection; Enter applies the highlighted model via `_akh/model/set` and
+    /// closes the picker; Esc closes without applying.
+    fn handle_picker_key(&mut self, code: KeyCode) {
+        let Some(picker) = self.picker.as_mut() else {
+            return;
+        };
+        match code {
+            KeyCode::Up => {
+                picker.selected = picker.selected.saturating_sub(1);
+            }
+            KeyCode::Down => {
+                if !picker.models.is_empty() {
+                    picker.selected = (picker.selected + 1).min(picker.models.len() - 1);
+                }
+            }
+            KeyCode::Esc => {
+                self.picker = None;
+            }
+            KeyCode::Enter => {
+                // Take the chosen model out, then close the picker before the
+                // (blocking) control call so the overlay isn't left up.
+                let chosen = picker.models.get(picker.selected).cloned();
+                self.picker = None;
+                if let Some(model) = chosen {
+                    self.set_model(&model);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Issue one `_akh/model/set` to switch the running model, reporting the
+    /// outcome as a System message.
+    fn set_model(&mut self, model: &str) {
+        let params = serde_json::json!({ "workspace": self.workspace, "model": model });
+        match self.control_call("_akh/model/set", params) {
+            Ok(v) => {
+                let m = v.get("model").and_then(serde_json::Value::as_str).unwrap_or(model);
+                self.messages
+                    .push(AkhMessage::system(format!("Model set to '{m}'.")));
+            }
+            Err(e) => self
+                .messages
+                .push(AkhMessage::error("model", format!("model set failed: {e}"))),
+        }
+    }
+
+    /// List the akh's models via `_akh/model/list` and open the picker.
+    ///
+    /// Pre-selects the current model when present in the list. A cloud endpoint
+    /// that lists no models (the common `ollama.com` case) still gets a picker —
+    /// it shows an informational line — so the user is told to type
+    /// `/model <name>` instead of the picker silently failing.
+    fn open_model_picker(&mut self) {
+        let params = serde_json::json!({ "workspace": self.workspace });
+        match self.control_call("_akh/model/list", params) {
+            Ok(v) => {
+                if let Some(err) = v.get("error").and_then(serde_json::Value::as_str) {
+                    self.messages.push(AkhMessage::system(format!(
+                        "(could not list models: {err})"
+                    )));
+                }
+                let current = v.get("current").and_then(serde_json::Value::as_str);
+                let models: Vec<String> = v
+                    .get("models")
+                    .and_then(serde_json::Value::as_array)
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(serde_json::Value::as_str)
+                            .map(str::to_string)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                if models.is_empty() {
+                    // Nothing to pick from — guide the user to the direct form.
+                    let cur = current.unwrap_or("(none)");
+                    self.messages.push(AkhMessage::system(format!(
+                        "No models listed (current: {cur}). Use /model <name> to switch."
+                    )));
+                    return;
+                }
+
+                let selected = current
+                    .and_then(|c| models.iter().position(|m| m == c))
+                    .unwrap_or(0);
+                self.picker = Some(ModelPicker { models, selected });
+            }
+            Err(e) => self.messages.push(AkhMessage::error(
+                "model",
+                format!("model list failed: {e}"),
+            )),
+        }
+    }
+
+    /// Issue one short-lived `_akh/*` control call over a fresh ACP connection
+    /// (Unix socket preferred, else TCP), blocking the event loop for its
+    /// duration. This does NOT touch the persistent chat session. Errors —
+    /// including "no ACP endpoint advertised" — are mapped to a `String`.
+    fn control_call(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| format!("failed to build runtime: {e}"))?;
+        let method = method.to_string();
+        if let Some(sock) = self.info.acp_socket.clone() {
+            rt.block_on(crate::acp::ext_request_unix(&sock, &method, params))
+                .map_err(|e| e.to_string())
+        } else if let Some(tcp) = self.info.acp_tcp.clone() {
+            rt.block_on(crate::acp::ext_request_tcp(&tcp, &method, params))
+                .map_err(|e| e.to_string())
+        } else {
+            Err("daemon advertises no ACP endpoint for control calls".to_string())
+        }
+    }
+
     fn process_input(&mut self, input: &str) {
         // TUI commands start with '/'.
         if let Some(cmd) = input.strip_prefix('/') {
@@ -218,14 +374,54 @@ impl AkhTui {
     fn handle_command(&mut self, cmd: &str) {
         let parts: Vec<&str> = cmd.splitn(2, ' ').collect();
         match parts[0] {
-            "quit" | "q" => {
+            "quit" | "q" | "exit" => {
                 self.should_quit = true;
             }
             "help" | "h" => {
                 self.messages.push(AkhMessage::system(
-                    "Commands: /goals, /status, /seed <pack>, /audit, /quit. Tab toggles thinking steps."
+                    "Commands: /model [name], /effort <low|medium|high|off>, /goals, /status, \
+                     /seed <pack>, /audit, /quit. /model with no name opens a picker. \
+                     Tab toggles thinking steps."
                         .to_string(),
                 ));
+            }
+            "model" => {
+                let arg = parts.get(1).map(|s| s.trim()).filter(|s| !s.is_empty());
+                match arg {
+                    // `/model <name>` — set directly.
+                    Some(name) => self.set_model(name),
+                    // `/model` — list and open the picker.
+                    None => self.open_model_picker(),
+                }
+            }
+            "effort" => {
+                let level = parts.get(1).map(|s| s.trim()).unwrap_or("");
+                match level.to_ascii_lowercase().as_str() {
+                    "low" | "medium" | "high" | "off" => {
+                        let params = serde_json::json!({
+                            "workspace": self.workspace,
+                            "effort": level,
+                        });
+                        match self.control_call("_akh/model/set", params) {
+                            Ok(v) => {
+                                let e = v
+                                    .get("effort")
+                                    .and_then(serde_json::Value::as_str)
+                                    .unwrap_or("default");
+                                self.messages.push(AkhMessage::system(format!(
+                                    "Reasoning effort set to '{e}'."
+                                )));
+                            }
+                            Err(err) => self.messages.push(AkhMessage::error(
+                                "model",
+                                format!("effort set failed: {err}"),
+                            )),
+                        }
+                    }
+                    _ => self.messages.push(AkhMessage::system(
+                        "Usage: /effort <low|medium|high|off>".to_string(),
+                    )),
+                }
             }
             "audit" => {
                 self.show_audit = !self.show_audit;
@@ -256,6 +452,6 @@ pub fn launch_remote(
     let remote = remote::RemoteChat::connect(info, workspace)
         .map_err(|e| miette::miette!("failed to connect: {e}"))?;
 
-    let mut tui = AkhTui::new_remote(workspace.to_string(), remote);
+    let mut tui = AkhTui::new_remote(workspace.to_string(), remote, info.clone());
     tui.run()
 }

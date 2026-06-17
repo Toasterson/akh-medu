@@ -19,6 +19,7 @@ use tokio::sync::RwLock;
 
 use akh_medu::agent::trigger::TriggerStore;
 use akh_medu::agent::model_manager::AgentModelManager;
+use akh_medu::agent::ollama::OllamaClient;
 use akh_medu::agent::{Agent, AgentConfig};
 use akh_medu::akh_config::AkhConfig;
 use akh_medu::client::DaemonStatus;
@@ -654,6 +655,124 @@ impl akh_medu::acp::ServerControl for ServerState {
                     );
                     let value = serde_json::to_value(&new_config).map_err(|e| e.to_string())?;
                     Ok(serde_json::json!({ "config": value }))
+                }
+
+                // ── model group (per-akh model + reasoning effort) ────────
+                //
+                // `model/list` builds a transient OllamaClient from the akh's
+                // config and queries `/api/tags`; a cloud endpoint that lists
+                // nothing (or errors) still returns the current model/effort so
+                // the TUI picker can open. `model/set` persists akh.toml AND
+                // rebuilds the running model manager so the next chat turn uses
+                // the new model/effort.
+                "model/list" => {
+                    let ws = params
+                        .get("workspace")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("default");
+                    let cfg = self.get_akh_config(ws).await?;
+                    let mm = cfg.to_model_manager_config();
+                    let current = mm.ollama.model.clone();
+                    let effort = mm.ollama.reasoning_effort.clone();
+                    let client = OllamaClient::new(mm.ollama);
+                    match client.list_models() {
+                        Ok(models) => Ok(serde_json::json!({
+                            "current": current,
+                            "effort": effort,
+                            "models": models,
+                        })),
+                        // Cloud endpoints frequently 404 `/api/tags` or are
+                        // overloaded — don't fail the whole call, just report no
+                        // models + the error so the picker still opens.
+                        Err(e) => Ok(serde_json::json!({
+                            "current": current,
+                            "effort": effort,
+                            "models": Vec::<String>::new(),
+                            "error": e.to_string(),
+                        })),
+                    }
+                }
+                "model/set" => {
+                    let ws = params
+                        .get("workspace")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("default")
+                        .to_string();
+                    let model = params
+                        .get("model")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string);
+                    let effort_raw = params
+                        .get("effort")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string);
+                    if model.is_none() && effort_raw.is_none() {
+                        return Err(
+                            "model/set requires at least one of: model, effort".to_string()
+                        );
+                    }
+
+                    // (a) Load the akh config (fall back to name-only defaults
+                    //     so a missing/broken akh.toml still applies the change).
+                    let config_path = self.paths.workspace_config_file(&ws);
+                    let mut cfg = AkhConfig::load(&config_path)
+                        .unwrap_or_else(|_| AkhConfig::with_name(&ws));
+
+                    // (b) Apply the requested fields.
+                    if let Some(m) = &model {
+                        cfg.model = Some(m.clone());
+                    }
+                    if let Some(level) = &effort_raw {
+                        match level.trim().to_ascii_lowercase().as_str() {
+                            "low" | "medium" | "high" => {
+                                cfg.reasoning_effort = Some(level.trim().to_ascii_lowercase())
+                            }
+                            "off" | "none" => cfg.reasoning_effort = None,
+                            other => {
+                                return Err(format!(
+                                    "unknown reasoning effort \"{other}\" \
+                                     (expected low|medium|high|off)"
+                                ));
+                            }
+                        }
+                    }
+
+                    // (c) Persist akh.toml.
+                    cfg.save(&config_path)
+                        .map_err(|e| format!("save akh.toml failed: {e}"))?;
+
+                    let new_model = cfg.model.clone();
+                    let new_effort = cfg.reasoning_effort.clone();
+                    let mm_config = cfg.to_model_manager_config();
+
+                    // (d) Rebuild the running model manager so the next chat turn
+                    //     uses the new model/effort. ADR-027: the agent
+                    //     std::sync::Mutex is locked only synchronously (no await
+                    //     held across the lock).
+                    let agent = self.get_agent(&ws).await?;
+                    {
+                        let mut a = agent.lock().unwrap_or_else(|e| e.into_inner());
+                        a.set_model_manager(Arc::new(AgentModelManager::new(mm_config)));
+                        a.register_with_model_manager(&ws, &ws);
+                    }
+
+                    // Refresh the cached akh.toml so subsequent reads (and the
+                    // next get_agent rebuild) see the persisted change.
+                    self.akh_configs
+                        .write()
+                        .await
+                        .insert(ws.clone(), Arc::new(cfg));
+
+                    tracing::info!(
+                        workspace = %ws,
+                        model = ?new_model,
+                        effort = ?new_effort,
+                        "model/effort updated via ACP control-plane"
+                    );
+                    Ok(serde_json::json!({
+                        "model": new_model,
+                        "effort": new_effort,
+                    }))
                 }
 
                 other => Err(format!("unknown control-plane method: _akh/{other}")),

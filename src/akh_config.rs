@@ -175,6 +175,14 @@ pub struct AkhConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
 
+    /// Reasoning-effort hint for the akh's reasoning cloud model: `"low"`,
+    /// `"medium"`, or `"high"`. `None` (the default) leaves the model's own
+    /// default in effect. Carried into [`OllamaConfig::reasoning_effort`] by
+    /// [`Self::to_model_manager_config`] and sent as `think` on the chat path.
+    /// Serialized as a top-level scalar (before the `[ollama_endpoint]` table).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+
     /// Authoritative system prompt. When `Some`, it **replaces** the
     /// psyche-derived prompt; when `None`, the psyche-derived prompt is used.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -212,6 +220,7 @@ impl Default for AkhConfig {
         Self {
             workspace: WorkspaceConfig::default(),
             model: None,
+            reasoning_effort: None,
             system_prompt: None,
             is_main: true,
             related_workspaces: Vec::new(),
@@ -294,6 +303,7 @@ impl AkhConfig {
         if let Some(model) = &self.model {
             ollama.model = model.clone();
         }
+        ollama.reasoning_effort = self.reasoning_effort.clone();
         ModelManagerConfig {
             ollama,
             system_prompt: self.system_prompt.clone(),
@@ -454,6 +464,37 @@ mod tests {
         assert_eq!(mm.ollama.base_url, "https://ollama.com");
         assert_eq!(mm.ollama.api_key.as_deref(), Some("env:OLLAMA_API_KEY"));
         assert_eq!(mm.system_prompt.as_deref(), Some("You are Thoth."));
+    }
+
+    #[test]
+    fn reasoning_effort_threads_into_model_manager_config() {
+        let mut cfg = AkhConfig::with_name("thoth");
+        cfg.reasoning_effort = Some("medium".into());
+        let mm = cfg.to_model_manager_config();
+        assert_eq!(mm.ollama.reasoning_effort.as_deref(), Some("medium"));
+
+        // None ⇒ the OllamaConfig field stays None (model default).
+        let bare = AkhConfig::with_name("ptah");
+        assert!(bare.to_model_manager_config().ollama.reasoning_effort.is_none());
+    }
+
+    #[test]
+    fn reasoning_effort_persists_as_top_level_scalar() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("akh.toml");
+        let mut cfg = AkhConfig::with_name("thoth");
+        cfg.model = Some("gpt-oss:120b-cloud".into());
+        cfg.reasoning_effort = Some("high".into());
+        cfg.save(&path).expect("save");
+
+        let content = std::fs::read_to_string(&path).expect("read");
+        // The scalar must precede the [ollama_endpoint] table for valid TOML.
+        let effort_at = content.find("reasoning_effort").expect("effort present");
+        let table_at = content.find("[ollama_endpoint]").expect("table present");
+        assert!(effort_at < table_at, "reasoning_effort must serialize before the table:\n{content}");
+
+        let loaded = AkhConfig::load(&path).expect("load");
+        assert_eq!(loaded.reasoning_effort.as_deref(), Some("high"));
     }
 
     #[test]

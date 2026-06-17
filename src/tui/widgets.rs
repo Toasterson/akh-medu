@@ -1,12 +1,17 @@
 //! TUI widget rendering: message list, input area, status bar.
 
+#[cfg(feature = "acp")]
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout};
+#[cfg(feature = "acp")]
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+#[cfg(feature = "acp")]
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
 use crate::message::AkhMessage;
+#[cfg(feature = "acp")]
+use crate::tui::ModelPicker;
 
 /// Render a single AkhMessage as a styled Line.
 pub fn message_to_line(msg: &AkhMessage) -> Line<'static> {
@@ -139,6 +144,10 @@ pub fn message_to_line(msg: &AkhMessage) -> Line<'static> {
 /// Tool/agent "steps" (`ToolResult` messages — the model's tool calls and their
 /// results) collapse into a single one-line summary unless `show_thinking` is
 /// on, so a multi-tool turn doesn't bury the final answer. Toggle with Tab.
+///
+/// When `picker` is `Some`, the model-picker overlay is drawn centered ON TOP of
+/// the main layout (see [`render_model_picker`]).
+#[cfg(feature = "acp")]
 pub fn render(
     frame: &mut Frame,
     workspace: &str,
@@ -146,6 +155,7 @@ pub fn render(
     input: &str,
     scroll_offset: usize,
     show_thinking: bool,
+    picker: Option<&ModelPicker>,
 ) {
     let [header_area, messages_area, input_area] = Layout::vertical([
         Constraint::Length(1),
@@ -228,4 +238,64 @@ pub fn render(
     let cursor_x = (input_area.x + 1 + input.chars().count() as u16)
         .min(input_area.x + input_area.width.saturating_sub(2));
     frame.set_cursor_position((cursor_x, input_area.y + 1));
+
+    // Model picker overlays the main layout when open.
+    if let Some(picker) = picker {
+        render_model_picker(frame, picker);
+    }
+}
+
+/// Draw the centered model-picker overlay: a bordered, scrollable list of model
+/// names with the selected row highlighted. The area underneath is cleared
+/// first ([`Clear`]) so the chat does not bleed through.
+#[cfg(feature = "acp")]
+pub fn render_model_picker(frame: &mut Frame, picker: &ModelPicker) {
+    let area = centered_rect(60, 60, frame.area());
+    // Clear whatever is underneath before drawing the popup.
+    frame.render_widget(Clear, area);
+
+    let items: Vec<ListItem> = picker
+        .models
+        .iter()
+        .map(|m| ListItem::new(Line::from(Span::raw(m.clone()))))
+        .collect();
+
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Select model (↑/↓, Enter, Esc) "),
+        )
+        .highlight_style(
+            Style::default()
+                .bg(Color::Cyan)
+                .fg(Color::Black)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("▸ ");
+
+    let mut state = ListState::default();
+    if !picker.models.is_empty() {
+        state.select(Some(picker.selected.min(picker.models.len() - 1)));
+    }
+    frame.render_stateful_widget(list, area, &mut state);
+}
+
+/// Compute a Rect centered within `area`, sized to `percent_x` × `percent_y`
+/// of it.
+#[cfg(feature = "acp")]
+fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
+    let [_, vmid, _] = Layout::vertical([
+        Constraint::Percentage((100 - percent_y) / 2),
+        Constraint::Percentage(percent_y),
+        Constraint::Percentage((100 - percent_y) / 2),
+    ])
+    .areas(area);
+    let [_, mid, _] = Layout::horizontal([
+        Constraint::Percentage((100 - percent_x) / 2),
+        Constraint::Percentage(percent_x),
+        Constraint::Percentage((100 - percent_x) / 2),
+    ])
+    .areas(vmid);
+    mid
 }

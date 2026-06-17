@@ -37,6 +37,14 @@ pub struct OllamaConfig {
     /// endpoint leaves this `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
+    /// Reasoning-effort hint for the agentic `chat` path. When `Some(level)`
+    /// (one of `"low"`/`"medium"`/`"high"`), [`OllamaClient::chat`] sets
+    /// `think: "<level>"` in the request body — accepted by Ollama's reasoning
+    /// cloud models (gpt-oss/glm). `None` (the default) omits the field, leaving
+    /// the model's own default in effect. The plain [`OllamaClient::generate`]
+    /// path is intentionally unaffected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
 }
 
 impl Default for OllamaConfig {
@@ -47,6 +55,7 @@ impl Default for OllamaConfig {
             timeout_secs: default_timeout(),
             keep_alive: default_keep_alive(),
             api_key: None,
+            reasoning_effort: None,
         }
     }
 }
@@ -204,6 +213,54 @@ impl OllamaClient {
         req.call().is_ok()
     }
 
+    /// List the model names the endpoint advertises via `GET /api/tags`.
+    ///
+    /// Carries the same `Authorization: Bearer` header as [`health_check`] /
+    /// [`chat`] for cloud endpoints. Parses `{"models":[{"name":"..."},...]}`
+    /// and returns the names. A cloud endpoint (e.g. `ollama.com`) may return an
+    /// empty `models` array; that is reported as an empty `Vec`, not an error.
+    /// Transport/HTTP/parse failures are returned as [`OllamaError`] so the
+    /// caller can degrade gracefully (the picker still opens; the user types a
+    /// name).
+    ///
+    /// [`health_check`]: Self::health_check
+    /// [`chat`]: Self::chat
+    pub fn list_models(&self) -> OllamaResult<Vec<String>> {
+        let url = format!("{}/api/tags", self.config.base_url.trim_end_matches('/'));
+        let mut req = ureq::get(&url).timeout(std::time::Duration::from_secs(self.config.timeout_secs));
+        if let Some(key) = self.config.resolved_api_key() {
+            req = req.set("Authorization", &format!("Bearer {key}"));
+        }
+        let response = req.call().map_err(|e| match e {
+            ureq::Error::Status(status, resp) => OllamaError::RequestFailed {
+                url: url.clone(),
+                status,
+                body: resp.into_string().unwrap_or_default(),
+                model: self.config.model.clone(),
+            },
+            other => OllamaError::Unreachable {
+                url: url.clone(),
+                reason: other.to_string(),
+            },
+        })?;
+
+        let body: serde_json::Value = response.into_json().map_err(|e| OllamaError::ParseFailed {
+            reason: format!("JSON decode failed: {e}"),
+        })?;
+
+        let names = body
+            .get("models")
+            .and_then(serde_json::Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|m| m.get("name").and_then(serde_json::Value::as_str))
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        Ok(names)
+    }
+
     /// Generate a chat response from the model.
     ///
     /// Sends a non-streaming `/api/chat` request with a `system` turn followed
@@ -287,6 +344,11 @@ impl OllamaClient {
         });
         if !tools.is_empty() {
             body["tools"] = serde_json::Value::Array(tools.to_vec());
+        }
+        // Reasoning-effort hint (chat path only): Ollama's reasoning cloud models
+        // (gpt-oss/glm) accept `think: "low"|"medium"|"high"`. Absent ⇒ model default.
+        if let Some(level) = &self.config.reasoning_effort {
+            body["think"] = serde_json::Value::String(level.clone());
         }
 
         let mut req = ureq::post(&url)
@@ -412,6 +474,42 @@ mod tests {
         };
         // Must NOT leak the literal "env:VAR" as a bearer token.
         assert_eq!(cfg.resolved_api_key(), None);
+    }
+
+    #[test]
+    fn reasoning_effort_defaults_to_none_and_skips_serialization() {
+        let cfg = OllamaConfig::default();
+        assert!(cfg.reasoning_effort.is_none());
+        // skip_serializing_if = Option::is_none ⇒ absent from the serialized form.
+        let json = serde_json::to_string(&cfg).expect("serialize");
+        assert!(
+            !json.contains("reasoning_effort"),
+            "None reasoning_effort must be skipped: {json}"
+        );
+    }
+
+    #[test]
+    fn reasoning_effort_round_trips_when_set() {
+        let cfg = OllamaConfig {
+            reasoning_effort: Some("high".into()),
+            ..OllamaConfig::default()
+        };
+        let json = serde_json::to_string(&cfg).expect("serialize");
+        let back: OllamaConfig = serde_json::from_str(&json).expect("round-trip");
+        assert_eq!(back.reasoning_effort.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn list_models_returns_error_when_unreachable() {
+        let cfg = OllamaConfig {
+            base_url: "http://127.0.0.1:19999".into(),
+            timeout_secs: 2,
+            ..OllamaConfig::default()
+        };
+        let client = OllamaClient::new(cfg);
+        // No live endpoint ⇒ the caller gets an error to handle gracefully,
+        // never a panic.
+        assert!(client.list_models().is_err());
     }
 
     #[test]
