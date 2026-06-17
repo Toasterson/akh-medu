@@ -1331,6 +1331,60 @@ where
         .map_err(AcpError::from)
 }
 
+/// Retry budget for connecting to a daemon whose listener may still be coming
+/// up. Bounded so a genuinely-down daemon still fails within a couple seconds.
+const ACP_CONNECT_RETRY_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// `true` for the transient errors seen while a just-spawned daemon finishes
+/// binding its listener: ECONNREFUSED (socket bound, not yet accepting) and
+/// ENOENT (socket file not created yet). Anything else is a real failure.
+///
+/// This is the race the in-process ACP tests hit under full-suite CPU load: the
+/// socket file exists (`bind` ran) but the accept loop isn't ready, so the first
+/// `connect` is refused. Retrying briefly turns that into a clean connection —
+/// and equally hardens a real client racing a daemon that's still starting up.
+fn acp_connect_transient(e: &std::io::Error) -> bool {
+    matches!(
+        e.kind(),
+        std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
+    )
+}
+
+/// Connect to a Unix socket, retrying [`acp_connect_transient`] failures with
+/// capped backoff until [`ACP_CONNECT_RETRY_BUDGET`] is spent.
+async fn connect_unix_retrying(path: &Path) -> std::io::Result<UnixStream> {
+    let mut delay = std::time::Duration::from_millis(20);
+    let mut elapsed = std::time::Duration::ZERO;
+    loop {
+        match UnixStream::connect(path).await {
+            Ok(s) => return Ok(s),
+            Err(e) if elapsed < ACP_CONNECT_RETRY_BUDGET && acp_connect_transient(&e) => {
+                tokio::time::sleep(delay).await;
+                elapsed += delay;
+                delay = (delay * 2).min(std::time::Duration::from_millis(150));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// TCP analogue of [`connect_unix_retrying`].
+async fn connect_tcp_retrying(addr: &str) -> std::io::Result<TcpStream> {
+    let mut delay = std::time::Duration::from_millis(20);
+    let mut elapsed = std::time::Duration::ZERO;
+    loop {
+        match TcpStream::connect(addr).await {
+            Ok(s) => return Ok(s),
+            Err(e) if elapsed < ACP_CONNECT_RETRY_BUDGET && acp_connect_transient(&e) => {
+                tokio::time::sleep(delay).await;
+                elapsed += delay;
+                delay = (delay * 2).min(std::time::Duration::from_millis(150));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
 /// Connect to an ACP daemon over a Unix socket and run `f` over one session.
 ///
 /// `f` receives a started [`ActiveSession`] (call `send_prompt` / `read_to_string`
@@ -1343,7 +1397,7 @@ where
     ) -> Result<R, agent_client_protocol::Error>,
 {
     let path = path.as_ref();
-    let stream = UnixStream::connect(path)
+    let stream = connect_unix_retrying(path)
         .await
         .map_err(|source| AcpError::Connect {
             target: path.display().to_string(),
@@ -1362,7 +1416,7 @@ where
         ConnectionTo<AcpRole>,
     ) -> Result<R, agent_client_protocol::Error>,
 {
-    let stream = TcpStream::connect(addr)
+    let stream = connect_tcp_retrying(addr)
         .await
         .map_err(|source| AcpError::Connect {
             target: addr.to_string(),
@@ -1408,7 +1462,7 @@ pub async fn ext_request_unix(
     params: serde_json::Value,
 ) -> AcpResult<serde_json::Value> {
     let path = path.as_ref();
-    let stream = UnixStream::connect(path)
+    let stream = connect_unix_retrying(path)
         .await
         .map_err(|source| AcpError::Connect {
             target: path.display().to_string(),
@@ -1425,7 +1479,7 @@ pub async fn ext_request_tcp(
     method: &str,
     params: serde_json::Value,
 ) -> AcpResult<serde_json::Value> {
-    let stream = TcpStream::connect(addr)
+    let stream = connect_tcp_retrying(addr)
         .await
         .map_err(|source| AcpError::Connect {
             target: addr.to_string(),
@@ -1643,6 +1697,37 @@ mod tests {
             }
         }
         panic!("could not connect to ACP Unix socket at {path:?}");
+    }
+
+    /// Regression (ADR-061 P8.8): the *production* `connect_unix_retrying` —
+    /// used by `chat_over_unix`/`ext_request_unix` — must ride through the
+    /// daemon-startup races, ENOENT (socket file not created yet) then
+    /// ECONNREFUSED (bound, not yet accepting). Before this retry a single early
+    /// `connect` aborted the session, which flaked the TUI relay test under
+    /// full-suite CPU load (the in-process socket tests above never saw it
+    /// because they use the `connect_with_retry` test helper).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn connect_unix_retrying_rides_through_late_listener() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("late.sock");
+
+        // Listener comes up ~120ms late — far inside the 2s retry budget. The
+        // first connects hit ENOENT/ECONNREFUSED; the retry must still land.
+        let bind_sock = sock.clone();
+        let server = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+            let listener = tokio::net::UnixListener::bind(&bind_sock).expect("late bind");
+            // Hold the listener open long enough for the client to connect.
+            let _ =
+                tokio::time::timeout(std::time::Duration::from_secs(5), listener.accept()).await;
+        });
+
+        let connected = connect_unix_retrying(&sock).await;
+        assert!(
+            connected.is_ok(),
+            "connect_unix_retrying must ride through a late listener: {connected:?}"
+        );
+        let _ = server.await;
     }
 
     /// Drive a full ACP prompt lifecycle (initialize → session/new →
