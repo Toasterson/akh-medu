@@ -8,6 +8,8 @@
 //! The whole app is gated behind the `acp` feature: without it, this module
 //! exports nothing.
 
+#[cfg(feature = "acp")]
+pub mod markdown;
 pub mod remote;
 pub mod sink;
 pub mod widgets;
@@ -81,6 +83,15 @@ pub struct AkhTui {
     /// Active model-picker overlay (the `/model` popup). When `Some`, key input
     /// is routed to the picker instead of the chat input.
     picker: Option<ModelPicker>,
+    /// Whether a prompt turn is in flight — drives the progress spinner. Set when
+    /// a prompt is sent, cleared on [`remote::ChatUpdate::TurnEnd`].
+    awaiting: bool,
+    /// Animation tick for the spinner; advanced each event-loop iteration while
+    /// [`awaiting`](Self::awaiting).
+    spinner_frame: usize,
+    /// Index in `messages` of the in-progress streamed answer, so successive
+    /// answer deltas append to one growing message. `None` between turns.
+    stream_idx: Option<usize>,
 }
 
 #[cfg(feature = "acp")]
@@ -108,6 +119,9 @@ impl AkhTui {
             show_audit: true,
             show_thinking: false,
             picker: None,
+            awaiting: false,
+            spinner_frame: 0,
+            stream_idx: None,
         }
     }
 
@@ -133,6 +147,12 @@ impl AkhTui {
             // Drain pending messages from backend.
             self.drain_backend_messages();
 
+            // Advance the spinner while a turn is in flight (the event poll
+            // below ticks ~10×/s when idle, giving a steady animation).
+            if self.awaiting {
+                self.spinner_frame = self.spinner_frame.wrapping_add(1);
+            }
+
             terminal
                 .draw(|frame| {
                     widgets::render(
@@ -142,6 +162,8 @@ impl AkhTui {
                         &self.input_buffer,
                         self.scroll_offset,
                         self.show_thinking,
+                        self.awaiting,
+                        self.spinner_frame,
                         self.picker.as_ref(),
                     );
                 })
@@ -184,13 +206,75 @@ impl AkhTui {
         Ok(())
     }
 
-    /// Drain pending messages from the backend.
+    /// Drain pending streaming updates from the backend, accumulating answer /
+    /// thought deltas into growing messages and stopping the spinner at the end
+    /// of the turn.
     fn drain_backend_messages(&mut self) {
-        let show_audit = self.show_audit;
-        while let Some(msg) = self.remote.try_recv() {
-            if show_audit || !matches!(msg, AkhMessage::AuditLog { .. }) {
-                self.messages.push(msg);
+        while let Some(update) = self.remote.try_recv() {
+            match update {
+                remote::ChatUpdate::AnswerDelta(delta) => self.append_answer(&delta),
+                remote::ChatUpdate::ThoughtDelta(delta) => self.append_thought(&delta),
+                remote::ChatUpdate::Notice(msg) => {
+                    // A discrete out-of-band message breaks the streaming runs.
+                    self.stream_idx = None;
+                    if self.show_audit || !matches!(msg, AkhMessage::AuditLog { .. }) {
+                        self.messages.push(msg);
+                        self.autoscroll();
+                    }
+                }
+                remote::ChatUpdate::TurnEnd => {
+                    self.awaiting = false;
+                    self.stream_idx = None;
+                    self.autoscroll();
+                }
             }
+        }
+    }
+
+    /// Append a delta to the in-progress streamed answer, creating the answer
+    /// message on the first delta of a run.
+    fn append_answer(&mut self, delta: &str) {
+        match self.stream_idx {
+            Some(i) if matches!(self.messages.get(i), Some(AkhMessage::Narrative { .. })) => {
+                if let Some(AkhMessage::Narrative { text, .. }) = self.messages.get_mut(i) {
+                    text.push_str(delta);
+                }
+            }
+            _ => {
+                self.messages
+                    .push(AkhMessage::narrative(delta.to_string(), "acp"));
+                self.stream_idx = Some(self.messages.len() - 1);
+            }
+        }
+        self.autoscroll();
+    }
+
+    /// Append a delta to the current "thinking" block (reasoning + tool steps),
+    /// coalescing consecutive thought deltas into one collapsible message. A
+    /// thought breaks the answer run, so a later answer delta starts fresh.
+    fn append_thought(&mut self, delta: &str) {
+        self.stream_idx = None;
+        let coalesce = matches!(
+            self.messages.last(),
+            Some(AkhMessage::ToolResult { tool, .. }) if tool == "thinking"
+        );
+        if coalesce {
+            if let Some(AkhMessage::ToolResult { output, .. }) = self.messages.last_mut() {
+                output.push_str(delta);
+            }
+        } else {
+            self.messages
+                .push(AkhMessage::tool_result("thinking", true, delta.to_string()));
+        }
+        self.autoscroll();
+    }
+
+    /// Snap the view to the newest message if the user was already near the
+    /// bottom; preserves scroll position when reading back through history.
+    fn autoscroll(&mut self) {
+        let last = self.messages.len().saturating_sub(1);
+        if self.scroll_offset + 5 >= last {
+            self.scroll_offset = last;
         }
     }
 
@@ -402,15 +486,12 @@ impl AkhTui {
             question: format!("> {input}"),
         });
 
+        // Begin a new turn: a fresh answer run, spinner on.
+        self.stream_idx = None;
+        self.awaiting = true;
+        self.spinner_frame = 0;
         self.remote.send_input(input);
-
-        // Auto-scroll to bottom only if user was already near the bottom
-        // (within 5 messages). This preserves the scroll position when reading
-        // older messages and typing a new question.
-        let at_bottom = self.scroll_offset + 5 >= self.messages.len().saturating_sub(1);
-        if at_bottom {
-            self.scroll_offset = self.messages.len().saturating_sub(1);
-        }
+        self.autoscroll();
     }
 
     fn handle_command(&mut self, cmd: &str) {

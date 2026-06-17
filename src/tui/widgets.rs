@@ -148,6 +148,7 @@ pub fn message_to_line(msg: &AkhMessage) -> Line<'static> {
 /// When `picker` is `Some`, the model-picker overlay is drawn centered ON TOP of
 /// the main layout (see [`render_model_picker`]).
 #[cfg(feature = "acp")]
+#[allow(clippy::too_many_arguments)]
 pub fn render(
     frame: &mut Frame,
     workspace: &str,
@@ -155,6 +156,8 @@ pub fn render(
     input: &str,
     scroll_offset: usize,
     show_thinking: bool,
+    awaiting: bool,
+    spinner_frame: usize,
     picker: Option<&ModelPicker>,
 ) {
     let [header_area, messages_area, input_area] = Layout::vertical([
@@ -213,7 +216,7 @@ pub fn render(
                 ]));
             }
         } else {
-            lines.push(message_to_line(&messages[i]));
+            lines.extend(message_to_lines(&messages[i]));
             i += 1;
         }
     }
@@ -230,9 +233,20 @@ pub fn render(
         .wrap(Wrap { trim: false });
     frame.render_widget(messages_widget, messages_area);
 
-    // Input box + a live cursor at the end of the typed text.
+    // Input box + a live cursor at the end of the typed text. While a turn is in
+    // flight, the border title becomes an animated spinner instead of the prompt.
+    let title: Line = if awaiting {
+        Line::from(Span::styled(
+            format!(" {} ", spinner_text(spinner_frame)),
+            Style::default()
+                .fg(Color::Rgb(212, 175, 55)) // gilded "Egyptian gold"
+                .add_modifier(Modifier::BOLD),
+        ))
+    } else {
+        Line::from(" > ")
+    };
     let input_widget = Paragraph::new(input)
-        .block(Block::default().borders(Borders::ALL).title(" > "))
+        .block(Block::default().borders(Borders::ALL).title(title))
         .style(Style::default().fg(Color::White));
     frame.render_widget(input_widget, input_area);
     let cursor_x = (input_area.x + 1 + input.chars().count() as u16)
@@ -310,3 +324,39 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
     .areas(vmid);
     mid
 }
+
+/// Render one message into one-or-more display lines.
+///
+/// Narrative answers are passed through the Markdown renderer (headings, lists,
+/// code, emphasis) and so can expand to several lines; every other message kind
+/// is a single line via [`message_to_line`].
+#[cfg(feature = "acp")]
+fn message_to_lines(msg: &AkhMessage) -> Vec<Line<'static>> {
+    match msg {
+        AkhMessage::Narrative { text, .. } => {
+            let lines = crate::tui::markdown::render_markdown(text);
+            if lines.is_empty() {
+                vec![Line::default()]
+            } else {
+                lines
+            }
+        }
+        other => vec![message_to_line(other)],
+    }
+}
+
+/// The progress spinner shown in the input border while a turn is in flight.
+///
+/// A static ankh (☥ — the most universally rendered Egyptian glyph) paired with
+/// a braille wheel for smooth motion across terminals. For a terminal with an
+/// Egyptian Hieroglyphs font, swap [`SPINNER_WHEEL`] for a hieroglyph cycle such
+/// as `["𓂀", "𓂁", "𓂃", "𓂀"]`.
+#[cfg(feature = "acp")]
+fn spinner_text(frame: usize) -> String {
+    let tick = SPINNER_WHEEL[frame % SPINNER_WHEEL.len()];
+    format!("☥ {tick} thinking…")
+}
+
+/// Braille wheel frames for the [`spinner_text`] animation.
+#[cfg(feature = "acp")]
+const SPINNER_WHEEL: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];

@@ -21,9 +21,10 @@
 use serde_json::{Value, json};
 
 use super::Agent;
+use super::ollama::StreamEvent;
 use super::tool::{ToolInput, ToolRegistry};
 use crate::engine::Engine;
-use crate::message::AkhMessage;
+use crate::message::{AkhMessage, MessageSink};
 
 /// Hard ceiling on tool-call rounds in one turn — a backstop against a model
 /// that loops calling tools without ever answering.
@@ -33,24 +34,42 @@ const DEFAULT_MAX_ROUNDS: usize = 8;
 const ARG_PREVIEW_LEN: usize = 160;
 
 impl Agent {
-    /// Run one LLM-driven agentic turn.
+    /// Run one LLM-driven agentic turn, **streaming** its narration to `sink`.
     ///
     /// The akh's pinned model answers `user_prompt`, optionally calling any
     /// registered tool (gated by the permission policy) in a loop until it
-    /// returns a final answer or [`DEFAULT_MAX_ROUNDS`] is reached. The returned
-    /// [`AkhMessage`]s narrate the turn: each tool call and its result, then the
-    /// final answer.
+    /// returns a final answer or [`DEFAULT_MAX_ROUNDS`] is reached. Rather than
+    /// buffering, each piece of the turn is emitted to `sink` the instant it is
+    /// produced: answer text arrives as [`AkhMessage::Narrative`] deltas as the
+    /// model generates, chain-of-thought as [`AkhMessage::Reasoning`] deltas, and
+    /// each tool call + result as a collapsible [`AkhMessage::ToolResult`] step.
     ///
-    /// Returns `None` when there is **no usable model backend** — either no model
-    /// manager is attached or Ollama is unreachable — signalling the caller to
-    /// fall back to the symbolic [`ChatProcessor`](crate::chat::ChatProcessor).
-    /// `agent_id` keys the model manager's per-akh system-prompt cache.
+    /// Returns `Some(())` when the turn was handled (answer emitted, or an error
+    /// surfaced through `sink`), or `None` when there is **no usable model
+    /// backend** — no model manager attached, or Ollama unreachable — signalling
+    /// the caller to fall back to the symbolic
+    /// [`ChatProcessor`](crate::chat::ChatProcessor). `agent_id` keys the model
+    /// manager's per-akh system-prompt cache.
+    ///
+    /// Each round tries the streaming Ollama path and, on a transport/HTTP
+    /// failure, falls back to one non-streaming `chat` call for that round (whose
+    /// text is then emitted as a single message) so a streaming hiccup degrades
+    /// gracefully instead of dropping the turn.
+    ///
+    /// ## Concurrency
+    ///
+    /// `sink.emit` is synchronous and non-blocking (it hands the message to a
+    /// channel / notification send), so emitting from inside the
+    /// [`spawn_blocking`](tokio::task::spawn_blocking) turn while the agent
+    /// `Mutex` is held does not violate ADR-027 — no guard ever crosses an
+    /// `.await`.
     pub fn run_agentic_turn(
         &mut self,
         engine: &Engine,
         agent_id: &str,
         user_prompt: &str,
-    ) -> Option<Vec<AkhMessage>> {
+        sink: &dyn MessageSink,
+    ) -> Option<()> {
         // Clone the Arc out so the rest of the method can borrow other `self`
         // fields (tool_registry, psyche, conversation_state) freely.
         let mgr = self.model_manager.clone()?;
@@ -64,14 +83,37 @@ impl Agent {
         let tools = ollama_tool_catalog(&self.tool_registry);
 
         let mut conversation: Vec<Value> = vec![json!({"role": "user", "content": user_prompt})];
-        let mut out: Vec<AkhMessage> = Vec::new();
 
         for _round in 0..DEFAULT_MAX_ROUNDS {
-            let turn = match mgr.chat_with_tools(agent_id, &conversation, &tools) {
-                Ok(t) => t,
-                Err(e) => {
-                    out.push(AkhMessage::error("llm", e.to_string()));
-                    return Some(out);
+            // Stream this round. Content deltas become live answer text, thinking
+            // deltas become live reasoning. `used_fallback` records whether the
+            // streaming path failed and we silently retried non-streaming — in
+            // which case nothing was streamed and we emit the result ourselves.
+            let mut used_fallback = false;
+            let turn = {
+                let mut on_event = |ev: StreamEvent| match ev {
+                    StreamEvent::Content(delta) => sink.emit(&AkhMessage::narrative(delta, "acp")),
+                    StreamEvent::Thinking(delta) => sink.emit(&AkhMessage::Reasoning {
+                        step: delta,
+                        expression: None,
+                    }),
+                };
+                match mgr.chat_with_tools_streaming(agent_id, &conversation, &tools, &mut on_event) {
+                    Ok(t) => t,
+                    Err(stream_err) => {
+                        tracing::warn!(
+                            agent_id,
+                            "streaming chat failed ({stream_err}); falling back to non-streaming"
+                        );
+                        used_fallback = true;
+                        match mgr.chat_with_tools(agent_id, &conversation, &tools) {
+                            Ok(t) => t,
+                            Err(e) => {
+                                sink.emit(&AkhMessage::error("llm", e.to_string()));
+                                return Some(());
+                            }
+                        }
+                    }
                 }
             };
 
@@ -92,16 +134,26 @@ impl Agent {
                 let answer = turn.content.trim();
                 if !answer.is_empty() {
                     self.conversation_state_mut().record_agent_turn(answer);
-                    out.push(AkhMessage::narrative(answer, "acp"));
+                    // Streaming already emitted the answer as deltas; only the
+                    // non-streaming fallback still needs to emit it.
+                    if used_fallback {
+                        sink.emit(&AkhMessage::narrative(answer, "acp"));
+                    }
                 }
-                return Some(out);
+                return Some(());
             }
 
-            // Intermediate reasoning the model emitted alongside its tool calls,
-            // surfaced as a collapsible "thinking" step.
-            let reasoning = turn.content.trim();
-            if !reasoning.is_empty() {
-                out.push(AkhMessage::tool_result("reasoning", true, reasoning.to_string()));
+            // Tool round. Any prose the model emitted alongside its tool calls is
+            // reasoning; on the fallback path it was not streamed, so surface it
+            // as a thinking step here (the streaming path already did).
+            if used_fallback {
+                let reasoning = turn.content.trim();
+                if !reasoning.is_empty() {
+                    sink.emit(&AkhMessage::Reasoning {
+                        step: reasoning.to_string(),
+                        expression: None,
+                    });
+                }
             }
 
             // Execute each requested tool; the call (args) and its result form one
@@ -113,7 +165,7 @@ impl Agent {
                     Err(e) => (false, format!("tool error: {e}")),
                 };
 
-                out.push(AkhMessage::tool_result(
+                sink.emit(&AkhMessage::tool_result(
                     tc.name.clone(),
                     success,
                     format!("({}) → {}", preview_args(&tc.arguments), result),
@@ -122,10 +174,10 @@ impl Agent {
             }
         }
 
-        out.push(AkhMessage::system(format!(
+        sink.emit(&AkhMessage::system(format!(
             "(stopped after {DEFAULT_MAX_ROUNDS} tool-call rounds without a final answer)"
         )));
-        Some(out)
+        Some(())
     }
 }
 

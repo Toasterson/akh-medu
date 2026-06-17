@@ -355,6 +355,39 @@ impl AgentModelManager {
         Ok(self.ollama.chat(&messages, tools)?)
     }
 
+    /// Streaming counterpart of [`chat_with_tools`](Self::chat_with_tools).
+    ///
+    /// Identical prompt assembly (agent system prompt prepended), but delegates
+    /// to [`OllamaClient::chat_stream`] so the answer/thinking deltas reach
+    /// `on_event` as the model generates. Returns the assembled
+    /// [`AssistantTurn`] (full content + any tool calls). No remote fallback —
+    /// same Ollama-only constraint as the non-streaming path.
+    pub fn chat_with_tools_streaming(
+        &self,
+        agent_id: &str,
+        conversation: &[serde_json::Value],
+        tools: &[serde_json::Value],
+        on_event: &mut dyn FnMut(super::ollama::StreamEvent),
+    ) -> ModelManagerResult<AssistantTurn> {
+        let system_prompt = {
+            let mut agents = self.agents.lock().expect("model manager lock poisoned");
+            let entry =
+                agents
+                    .get_mut(agent_id)
+                    .ok_or_else(|| ModelManagerError::AgentNotLoaded {
+                        agent_id: agent_id.into(),
+                    })?;
+            entry.last_used = Instant::now();
+            entry.system_prompt.clone()
+        };
+
+        let mut messages = Vec::with_capacity(conversation.len() + 1);
+        messages.push(serde_json::json!({"role": "system", "content": system_prompt}));
+        messages.extend_from_slice(conversation);
+
+        Ok(self.ollama.chat_stream(&messages, tools, on_event)?)
+    }
+
     // ── Lifecycle ─────────────────────────────────────────────────────────
 
     /// Evict agent entries that have been idle longer than `idle_ttl_secs`.

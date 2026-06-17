@@ -185,6 +185,23 @@ pub struct AssistantTurn {
     pub tool_calls: Vec<ToolCall>,
 }
 
+/// One incremental piece of a streaming chat turn, delivered to the
+/// [`OllamaClient::chat_stream`] callback as the model generates.
+///
+/// Reasoning ("thinking") models split their output into two channels: the
+/// user-facing `content` (the answer) and a separate `thinking` stream (the
+/// chain-of-thought, shown when `think` is enabled). We surface them as distinct
+/// events so the UI can render the answer prominently and fold the thinking into
+/// a collapsible "thinking" section.
+#[derive(Debug, Clone)]
+pub enum StreamEvent {
+    /// A delta of user-facing answer text (`message.content`).
+    Content(String),
+    /// A delta of chain-of-thought text (`message.thinking`), emitted only by
+    /// reasoning models with `think` enabled.
+    Thinking(String),
+}
+
 // ---------------------------------------------------------------------------
 // Client
 // ---------------------------------------------------------------------------
@@ -392,6 +409,119 @@ impl OllamaClient {
         })
     }
 
+    /// Run one tool-enabled `/api/chat` turn with **streaming** enabled.
+    ///
+    /// Identical to [`chat`](Self::chat) in request shape (same `messages`,
+    /// `tools`, and `think` handling) but sets `"stream": true`, so the server
+    /// responds with newline-delimited JSON: one object per token-ish chunk.
+    /// Each chunk's `message.content` / `message.thinking` delta is delivered to
+    /// `on_event` as it arrives ([`StreamEvent::Content`] / [`StreamEvent::Thinking`]),
+    /// letting the caller render the answer live. Tool calls (`message.tool_calls`)
+    /// are accumulated and returned in the final [`AssistantTurn`] — they are not
+    /// streamed token-by-token by Ollama.
+    ///
+    /// The returned `AssistantTurn.content` is the concatenation of all content
+    /// deltas (thinking is intentionally **not** folded in). On any transport or
+    /// HTTP error the call returns an [`OllamaError`]; callers that want a
+    /// non-streaming fallback should catch it and retry with [`chat`](Self::chat).
+    /// Unparseable NDJSON lines are skipped defensively rather than aborting the
+    /// stream.
+    pub fn chat_stream(
+        &self,
+        messages: &[serde_json::Value],
+        tools: &[serde_json::Value],
+        on_event: &mut dyn FnMut(StreamEvent),
+    ) -> OllamaResult<AssistantTurn> {
+        use std::io::BufRead;
+
+        let url = format!("{}/api/chat", self.config.base_url.trim_end_matches('/'));
+
+        let mut body = serde_json::json!({
+            "model": self.config.model,
+            "messages": messages,
+            "stream": true,
+            "keep_alive": self.config.keep_alive,
+        });
+        if !tools.is_empty() {
+            body["tools"] = serde_json::Value::Array(tools.to_vec());
+        }
+        if let Some(level) = &self.config.reasoning_effort {
+            body["think"] = serde_json::Value::String(level.clone());
+        }
+
+        let mut req = ureq::post(&url)
+            .set("Content-Type", "application/json")
+            .timeout(std::time::Duration::from_secs(self.config.timeout_secs));
+        if let Some(key) = self.config.resolved_api_key() {
+            req = req.set("Authorization", &format!("Bearer {key}"));
+        }
+        let response = req.send_json(&body).map_err(|e| match e {
+            ureq::Error::Status(status, resp) => OllamaError::RequestFailed {
+                url: url.clone(),
+                status,
+                body: resp.into_string().unwrap_or_default(),
+                model: self.config.model.clone(),
+            },
+            other => OllamaError::Unreachable {
+                url: url.clone(),
+                reason: other.to_string(),
+            },
+        })?;
+
+        let mut content = String::new();
+        let mut tool_calls: Vec<ToolCall> = Vec::new();
+        let reader = std::io::BufReader::new(response.into_reader());
+        for line in reader.lines() {
+            let line = line.map_err(|e| OllamaError::Unreachable {
+                url: url.clone(),
+                reason: format!("stream read error: {e}"),
+            })?;
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            // Parse each NDJSON chunk leniently — a malformed line is skipped,
+            // not fatal, so one odd frame can't abort an otherwise-good stream.
+            let Ok(chunk) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            if let Some(msg) = chunk.get("message") {
+                if let Some(delta) = msg.get("content").and_then(serde_json::Value::as_str)
+                    && !delta.is_empty()
+                {
+                    content.push_str(delta);
+                    on_event(StreamEvent::Content(delta.to_string()));
+                }
+                if let Some(delta) = msg.get("thinking").and_then(serde_json::Value::as_str)
+                    && !delta.is_empty()
+                {
+                    on_event(StreamEvent::Thinking(delta.to_string()));
+                }
+                if let Some(calls) = msg.get("tool_calls").and_then(serde_json::Value::as_array) {
+                    for call in calls {
+                        if let Some(func) = call.get("function")
+                            && let Some(name) =
+                                func.get("name").and_then(serde_json::Value::as_str)
+                        {
+                            tool_calls.push(ToolCall {
+                                name: name.to_string(),
+                                arguments: func
+                                    .get("arguments")
+                                    .cloned()
+                                    .unwrap_or(serde_json::Value::Null),
+                            });
+                        }
+                    }
+                }
+            }
+            if chunk.get("done").and_then(serde_json::Value::as_bool) == Some(true) {
+                break;
+            }
+        }
+
+        Ok(AssistantTurn { content, tool_calls })
+    }
+
     /// Hint Ollama to unload the model immediately by sending a request with
     /// `keep_alive: "0"`. This is best-effort — failure is logged, not returned.
     pub fn hint_unload(&self) {
@@ -421,6 +551,76 @@ impl OllamaClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `chat_stream` parses Ollama's newline-delimited streaming response:
+    /// content deltas concatenate into `AssistantTurn.content` and arrive as
+    /// `Content` events in order, `thinking` deltas arrive as `Thinking` events
+    /// (and are NOT folded into content), and `tool_calls` are collected.
+    #[test]
+    fn chat_stream_parses_ndjson_deltas_and_tool_calls() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        // NDJSON body: two content chunks, a thinking chunk, a tool call, done.
+        let body = concat!(
+            "{\"message\":{\"content\":\"Hel\"}}\n",
+            "{\"message\":{\"content\":\"lo\"}}\n",
+            "{\"message\":{\"thinking\":\"hmm\"}}\n",
+            "{\"message\":{\"tool_calls\":[{\"function\":{\"name\":\"search\",\"arguments\":{\"q\":\"x\"}}}]}}\n",
+            "{\"done\":true}\n",
+        );
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock");
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf); // drain request (best-effort)
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+
+        let client = OllamaClient::new(OllamaConfig {
+            base_url: format!("http://127.0.0.1:{port}"),
+            ..OllamaConfig::default()
+        });
+
+        let mut events = Vec::new();
+        let turn = client
+            .chat_stream(
+                &[serde_json::json!({"role": "user", "content": "hi"})],
+                &[],
+                &mut |ev| events.push(ev),
+            )
+            .expect("chat_stream ok");
+        let _ = server.join();
+
+        assert_eq!(turn.content, "Hello", "content deltas concatenate");
+        assert_eq!(turn.tool_calls.len(), 1);
+        assert_eq!(turn.tool_calls[0].name, "search");
+        assert_eq!(turn.tool_calls[0].arguments["q"], "x");
+
+        let content: Vec<&str> = events
+            .iter()
+            .filter_map(|e| match e {
+                StreamEvent::Content(s) => Some(s.as_str()),
+                StreamEvent::Thinking(_) => None,
+            })
+            .collect();
+        assert_eq!(content, ["Hel", "lo"], "content events arrive in order");
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, StreamEvent::Thinking(s) if s == "hmm")),
+            "thinking delta surfaced as a Thinking event"
+        );
+    }
 
     #[test]
     fn default_config_values() {

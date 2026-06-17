@@ -20,6 +20,10 @@ mod inner {
     use std::sync::mpsc;
     use std::thread;
 
+    use agent_client_protocol::schema::{ContentBlock, ContentChunk, SessionNotification, SessionUpdate};
+    use agent_client_protocol::util::MatchDispatch;
+    use agent_client_protocol::SessionMessage;
+
     use crate::client::ServerInfo;
     use crate::message::AkhMessage;
 
@@ -27,6 +31,25 @@ mod inner {
     enum Outbound {
         Input(String),
         Command(String),
+    }
+
+    /// One incremental piece of a streaming chat turn, surfaced to the TUI event
+    /// loop via [`RemoteChat::try_recv`].
+    ///
+    /// A turn streams as a sequence of deltas terminated by [`ChatUpdate::TurnEnd`]:
+    /// answer text arrives as [`AnswerDelta`](ChatUpdate::AnswerDelta) chunks (to
+    /// be concatenated), chain-of-thought + tool steps as
+    /// [`ThoughtDelta`](ChatUpdate::ThoughtDelta) chunks, and out-of-band whole
+    /// messages (errors, connection loss) as [`Notice`](ChatUpdate::Notice).
+    pub enum ChatUpdate {
+        /// A delta of the agent's answer text (ACP `AgentMessageChunk`).
+        AnswerDelta(String),
+        /// A delta of the agent's thinking / a tool step (ACP `AgentThoughtChunk`).
+        ThoughtDelta(String),
+        /// A complete out-of-band message (error, system notice, disconnect).
+        Notice(AkhMessage),
+        /// The current turn finished (ACP `StopReason`) — stop the spinner.
+        TurnEnd,
     }
 
     /// Which ACP transport the daemon advertised in its discovery record.
@@ -37,12 +60,12 @@ mod inner {
 
     /// Handle to a background ACP session.
     ///
-    /// The API mirrors the legacy WebSocket backend exactly so the TUI event
-    /// loop is unchanged: `send_input`/`send_command` dispatch user actions and
-    /// `try_recv` polls for responses — all non-blocking.
+    /// `send_input`/`send_command` dispatch user actions and `try_recv` polls for
+    /// streaming [`ChatUpdate`]s — all non-blocking, so the TUI event loop never
+    /// stalls.
     pub struct RemoteChat {
         tx: mpsc::Sender<Outbound>,
-        rx: mpsc::Receiver<AkhMessage>,
+        rx: mpsc::Receiver<ChatUpdate>,
         disconnected: bool,
     }
 
@@ -67,7 +90,7 @@ mod inner {
 
             // Channels: TUI → session (outbound), session → TUI (inbound).
             let (out_tx, out_rx) = mpsc::channel::<Outbound>();
-            let (in_tx, in_rx) = mpsc::channel::<AkhMessage>();
+            let (in_tx, in_rx) = mpsc::channel::<ChatUpdate>();
 
             thread::Builder::new()
                 .name("acp-remote".into())
@@ -79,10 +102,10 @@ mod inner {
                     {
                         Ok(rt) => rt,
                         Err(e) => {
-                            let _ = in_tx.send(AkhMessage::error(
+                            let _ = in_tx.send(ChatUpdate::Notice(AkhMessage::error(
                                 "acp",
                                 format!("failed to create tokio runtime: {e}"),
-                            ));
+                            )));
                             return;
                         }
                     };
@@ -108,14 +131,17 @@ mod inner {
             let _ = self.tx.send(Outbound::Command(cmd.to_string()));
         }
 
-        /// Poll for the next response (non-blocking).
-        pub fn try_recv(&mut self) -> Option<AkhMessage> {
+        /// Poll for the next streaming update (non-blocking).
+        pub fn try_recv(&mut self) -> Option<ChatUpdate> {
             match self.rx.try_recv() {
-                Ok(msg) => Some(msg),
+                Ok(update) => Some(update),
                 Err(mpsc::TryRecvError::Disconnected) => {
                     if !self.disconnected {
                         self.disconnected = true;
-                        Some(AkhMessage::error("acp", "server connection lost"))
+                        Some(ChatUpdate::Notice(AkhMessage::error(
+                            "acp",
+                            "server connection lost",
+                        )))
                     } else {
                         None
                     }
@@ -132,11 +158,12 @@ mod inner {
 
     /// Background task: open ONE ACP session and relay between the TUI channels
     /// and the akh. User inputs become `session/prompt` turns; each turn's
-    /// answer text is forwarded back to the TUI as a narrative message.
+    /// `session/update` notifications are forwarded back to the TUI as streaming
+    /// [`ChatUpdate`]s as they arrive, terminated by [`ChatUpdate::TurnEnd`].
     async fn acp_task(
         endpoint: Endpoint,
         out_rx: mpsc::Receiver<Outbound>,
-        in_tx: mpsc::Sender<AkhMessage>,
+        in_tx: mpsc::Sender<ChatUpdate>,
     ) {
         let in_err = in_tx.clone();
 
@@ -151,25 +178,28 @@ mod inner {
                 match out_rx.try_recv() {
                     Ok(Outbound::Input(text)) => {
                         if let Err(e) = session.send_prompt(&text) {
-                            let _ = in_tx.send(AkhMessage::error("acp", e.to_string()));
+                            let _ = in_tx.send(ChatUpdate::Notice(AkhMessage::error(
+                                "acp",
+                                e.to_string(),
+                            )));
+                            let _ = in_tx.send(ChatUpdate::TurnEnd);
                             break;
                         }
-                        match session.read_to_string().await {
-                            Ok(resp) => {
-                                if !resp.trim().is_empty() {
-                                    let _ = in_tx.send(AkhMessage::narrative(resp, "acp"));
-                                }
-                            }
-                            Err(e) => {
-                                let _ = in_tx.send(AkhMessage::error("acp", e.to_string()));
-                                break;
-                            }
+                        // Stream this turn's updates until its stop reason,
+                        // forwarding answer/thought deltas live.
+                        if let Err(e) = relay_turn(&mut session, &in_tx).await {
+                            let _ = in_tx.send(ChatUpdate::Notice(AkhMessage::error(
+                                "acp",
+                                e.to_string(),
+                            )));
+                            let _ = in_tx.send(ChatUpdate::TurnEnd);
+                            break;
                         }
                     }
                     Ok(Outbound::Command(cmd)) => {
-                        let _ = in_tx.send(AkhMessage::system(format!(
+                        let _ = in_tx.send(ChatUpdate::Notice(AkhMessage::system(format!(
                             "command '{cmd}' is not yet available over ACP"
-                        )));
+                        ))));
                     }
                     Err(mpsc::TryRecvError::Empty) => {
                         tokio::time::sleep(std::time::Duration::from_millis(40)).await;
@@ -185,8 +215,59 @@ mod inner {
             Endpoint::Tcp(addr) => crate::acp::chat_over_tcp(&addr, "akh-tui", run).await,
         };
         if let Err(e) = result {
-            let _ = in_err.send(AkhMessage::error("acp", format!("ACP session ended: {e}")));
+            let _ = in_err.send(ChatUpdate::Notice(AkhMessage::error(
+                "acp",
+                format!("ACP session ended: {e}"),
+            )));
         }
+    }
+
+    /// Read one turn's `session/update` notifications until its stop reason,
+    /// forwarding each text delta to the TUI as a [`ChatUpdate`].
+    ///
+    /// `AgentMessageChunk`s become [`ChatUpdate::AnswerDelta`] (the live answer);
+    /// `AgentThoughtChunk`s become [`ChatUpdate::ThoughtDelta`] (thinking + tool
+    /// steps). A [`StopReason`](agent_client_protocol::schema::StopReason) ends
+    /// the turn and emits [`ChatUpdate::TurnEnd`]. Non-text / unhandled updates
+    /// are ignored.
+    async fn relay_turn(
+        session: &mut agent_client_protocol::ActiveSession<'static, agent_client_protocol::Agent>,
+        in_tx: &mpsc::Sender<ChatUpdate>,
+    ) -> Result<(), agent_client_protocol::Error> {
+        loop {
+            match session.read_update().await? {
+                SessionMessage::SessionMessage(dispatch) => {
+                    MatchDispatch::new(dispatch)
+                        .if_notification(async |notif: SessionNotification| {
+                            match notif.update {
+                                SessionUpdate::AgentMessageChunk(ContentChunk {
+                                    content: ContentBlock::Text(text),
+                                    ..
+                                }) => {
+                                    let _ = in_tx.send(ChatUpdate::AnswerDelta(text.text));
+                                }
+                                SessionUpdate::AgentThoughtChunk(ContentChunk {
+                                    content: ContentBlock::Text(text),
+                                    ..
+                                }) => {
+                                    let _ = in_tx.send(ChatUpdate::ThoughtDelta(text.text));
+                                }
+                                _ => {}
+                            }
+                            Ok(())
+                        })
+                        .await
+                        .otherwise_ignore()?;
+                }
+                SessionMessage::StopReason(_) => {
+                    let _ = in_tx.send(ChatUpdate::TurnEnd);
+                    break;
+                }
+                // `SessionMessage` is `#[non_exhaustive]`; ignore future variants.
+                _ => {}
+            }
+        }
+        Ok(())
     }
 }
 
@@ -195,7 +276,7 @@ pub use inner::*;
 
 #[cfg(all(test, feature = "acp"))]
 mod tests {
-    use super::RemoteChat;
+    use super::{ChatUpdate, RemoteChat};
     use crate::agent::{Agent, AgentConfig};
     use crate::chat::ChatProcessor;
     use crate::client::ServerInfo;
@@ -267,21 +348,22 @@ mod tests {
         let mut chat = RemoteChat::connect(&info, "default").expect("RemoteChat connect");
         chat.send_input("What is the Sun?");
 
-        // Poll the sync channel like the TUI does (bounded so it can never
-        // hang). The budget is ≤30s (1500 × 20ms): the relay+turn finishes in
-        // well under a second normally, so this only bounds a genuine hang —
-        // generous enough that CPU starvation under full-suite parallel load
-        // cannot trip it (was 10s, which flaked).
-        let mut answer: Option<String> = None;
-        for _ in 0..1500 {
-            if let Some(msg) = chat.try_recv() {
-                if let AkhMessage::Error { code, message, .. } = &msg {
-                    panic!("ACP relay surfaced an error [{code}]: {message}");
-                }
-                let text = msg.to_plain_text();
-                if !text.trim().is_empty() {
-                    answer = Some(text);
-                    break;
+        // Poll the sync channel like the TUI does, accumulating the streamed
+        // answer deltas until the turn ends (bounded so it can never hang). The
+        // budget is ≤30s (1500 × 20ms): the relay+turn finishes in well under a
+        // second normally, so this only bounds a genuine hang — generous enough
+        // that CPU starvation under full-suite parallel load cannot trip it.
+        let mut answer = String::new();
+        'poll: for _ in 0..1500 {
+            while let Some(update) = chat.try_recv() {
+                match update {
+                    ChatUpdate::AnswerDelta(s) => answer.push_str(&s),
+                    ChatUpdate::ThoughtDelta(_) => {}
+                    ChatUpdate::Notice(AkhMessage::Error { code, message, .. }) => {
+                        panic!("ACP relay surfaced an error [{code}]: {message}");
+                    }
+                    ChatUpdate::Notice(_) => {}
+                    ChatUpdate::TurnEnd => break 'poll,
                 }
             }
             std::thread::sleep(std::time::Duration::from_millis(20));
@@ -291,7 +373,7 @@ mod tests {
         let _ = server_thread.join();
 
         assert!(
-            answer.is_some(),
+            !answer.trim().is_empty(),
             "expected the ACP RemoteChat backend to relay a non-empty answer"
         );
     }

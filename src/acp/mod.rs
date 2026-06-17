@@ -231,28 +231,38 @@ impl AkhAcpAgent {
         self
     }
 
-    /// Run a single prompt turn under the ADR-027 lock discipline.
+    /// Run a single prompt turn under the ADR-027 lock discipline, **streaming**
+    /// its narration to `sink` as the turn unfolds.
     ///
-    /// Locks (engine clone is cheap `Arc`, agent + processor `Mutex`es) are
-    /// acquired and released entirely inside the [`spawn_blocking`] closure, so
-    /// no `std::sync::Mutex` guard ever crosses the `.await`. Returns the
-    /// structured [`AkhMessage`]s; the caller streams them to the client as
-    /// `session/update` notifications (via [`AcpSink`]) only after this future
-    /// resolves — never while a guard is held.
+    /// The turn runs inside [`spawn_blocking`]: the agent + processor `Mutex`es
+    /// are acquired and released entirely inside the closure, and each
+    /// [`AkhMessage`] is handed to `sink` (a non-blocking channel send) the
+    /// instant it is produced — answer text, reasoning, and tool steps stream
+    /// out live rather than being batched at turn-end. Because the send is
+    /// synchronous (never an `.await`), no `std::sync::Mutex` guard crosses an
+    /// await, preserving ADR-027.
+    ///
+    /// Returns the blocking task's [`JoinHandle`]; the caller drains the paired
+    /// channel into a [`AcpSink`] concurrently, then awaits the handle. The
+    /// `sink` is dropped when the closure ends, closing the channel so the drain
+    /// loop terminates.
     ///
     /// [`spawn_blocking`]: tokio::task::spawn_blocking
-    async fn run_turn(
+    /// [`JoinHandle`]: tokio::task::JoinHandle
+    fn run_turn(
         &self,
         text: String,
         asker: Option<Arc<dyn crate::agent::permission::PermissionAsker>>,
-    ) -> AcpResult<Vec<AkhMessage>> {
+        sink: ChannelSink,
+    ) -> tokio::task::JoinHandle<()> {
         let engine = Arc::clone(&self.engine);
         let agent = Arc::clone(&self.agent);
         let processor = Arc::clone(&self.processor);
         let agent_id = self.name.clone();
 
         tokio::task::spawn_blocking(move || {
-            // ── ADR-027: lock, process, drop — all synchronous, no await. ──
+            // ── ADR-027: lock, process (emitting via the channel sink), drop —
+            // all synchronous, no await while a guard is held. ──
             let mut agent = agent.lock().unwrap_or_else(|e| e.into_inner());
             let mut processor = processor.lock().unwrap_or_else(|e| e.into_inner());
             // Install the per-turn permission approver (if any) so tool calls
@@ -262,21 +272,44 @@ impl AkhAcpAgent {
             if let Some(asker) = asker {
                 agent.set_permission_asker(asker);
             }
-            // Prefer the LLM agentic loop (the akh's pinned Ollama model + tools);
-            // fall back to the symbolic ChatProcessor when no model backend is
-            // reachable, so a daemon with no Ollama configured is unaffected.
-            let out = match agent.run_agentic_turn(&engine, &agent_id, &text) {
-                Some(msgs) => msgs,
-                None => processor.process_input(&text, &mut agent, &engine),
-            };
+            // Prefer the LLM agentic loop (the akh's pinned Ollama model + tools),
+            // which streams directly into `sink`; fall back to the symbolic
+            // ChatProcessor when no model backend is reachable, emitting its
+            // (batched) output through the same sink so the wire shape matches.
+            if agent
+                .run_agentic_turn(&engine, &agent_id, &text, &sink)
+                .is_none()
+            {
+                let out = processor.process_input(&text, &mut agent, &engine);
+                sink.emit_batch(&out);
+            }
             agent.clear_permission_asker();
-            out
-            // Guards drop here, at end of closure scope.
+            // Guards + sink drop here; the dropped sink closes the channel.
         })
-        .await
-        .map_err(|e| AcpError::Worker {
-            message: e.to_string(),
-        })
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// ChannelSink — bridge the synchronous turn to the async session/update drain
+// ──────────────────────────────────────────────────────────────────────────
+
+/// A [`MessageSink`] that forwards each [`AkhMessage`] over an unbounded channel
+/// to an async drain task.
+///
+/// The chat turn runs inside [`spawn_blocking`](tokio::task::spawn_blocking) and
+/// must not touch the ACP connection directly (that lives on the async side), so
+/// it streams its messages through this sink; the prompt handler receives them
+/// and re-emits each as a `session/update` via [`AcpSink`]. The send is
+/// non-blocking, so emitting while the agent `Mutex` is held is ADR-027-safe.
+struct ChannelSink {
+    tx: tokio::sync::mpsc::UnboundedSender<AkhMessage>,
+}
+
+impl MessageSink for ChannelSink {
+    fn emit(&self, msg: &AkhMessage) {
+        // A closed receiver (client gone) just drops the message — best-effort,
+        // matching the `MessageSink::emit` infallible contract.
+        let _ = self.tx.send(msg.clone());
     }
 }
 
@@ -344,8 +377,13 @@ fn to_session_update(msg: &AkhMessage) -> SessionUpdate {
         AkhMessage::Narrative { text, .. } => SessionUpdate::AgentMessageChunk(chunk(text.clone())),
         AkhMessage::System { text } => SessionUpdate::AgentMessageChunk(chunk(text.clone())),
         AkhMessage::ToolResult { tool, success, output } => {
+            // Tool calls + their results are turn "steps", not the answer — map
+            // them to thought chunks so the client folds them into the
+            // collapsible thinking section rather than the response body.
+            // Trailing newline keeps each tool step on its own line when the
+            // client coalesces a turn's thought chunks into one block.
             let status = if *success { "ok" } else { "failed" };
-            SessionUpdate::AgentMessageChunk(chunk(format!("[{tool}:{status}] {output}")))
+            SessionUpdate::AgentThoughtChunk(chunk(format!("[{tool}:{status}] {output}\n")))
         }
         AkhMessage::Prompt { question } => SessionUpdate::AgentMessageChunk(chunk(question.clone())),
         AkhMessage::Error { code, message, .. } => {
@@ -1005,23 +1043,33 @@ fn build_connection(
                         let asker: Arc<dyn crate::agent::permission::PermissionAsker> =
                             Arc::new(AcpPermissionAsker { tx: perm_tx });
 
-                        // Run the synchronous chat turn off the async runtime,
-                        // honoring ADR-027 (locks live only inside the closure).
-                        let responses = me.run_turn(text, Some(asker)).await.map_err(|e| {
-                            agent_client_protocol::Error::internal_error()
-                                .data(e.to_string())
-                        })?;
+                        // Run the synchronous chat turn off the async runtime
+                        // (ADR-027: locks live only inside the closure). It
+                        // streams its narration through an unbounded channel; we
+                        // forward each message to the client as a `session/update`
+                        // as it arrives, so the answer appears live rather than
+                        // in one batch at turn-end.
+                        let (msg_tx, mut msg_rx) =
+                            tokio::sync::mpsc::unbounded_channel::<AkhMessage>();
+                        let handle =
+                            me.run_turn(text, Some(asker), ChannelSink { tx: msg_tx });
 
-                        // The asker (and its Sender) was dropped at the end of
-                        // the turn, so the approver's channel is now closed —
-                        // wait for it to drain and finish.
+                        let sink = AcpSink::new(cx, session_id.clone());
+                        while let Some(msg) = msg_rx.recv().await {
+                            sink.emit(&msg);
+                        }
+
+                        // Channel closed ⇒ the turn finished and dropped its sink.
+                        // Join to surface a panicked turn task, and let the
+                        // approver (whose Sender was dropped with the asker at
+                        // turn-end) drain and finish.
+                        if let Err(e) = handle.await {
+                            sink.emit(&AkhMessage::error(
+                                "acp",
+                                format!("turn task failed: {e}"),
+                            ));
+                        }
                         let _ = approver.await;
-
-                        // Stream each structured response as its own
-                        // `session/update`. Sent only AFTER the blocking guards
-                        // are gone (`run_turn` already awaited + dropped them),
-                        // so no `std::sync::Mutex` guard ever crosses the await.
-                        AcpSink::new(cx, session_id).emit_batch(&responses);
 
                         responder.respond(PromptResponse::new(StopReason::EndTurn))
                     }
