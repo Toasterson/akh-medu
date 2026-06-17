@@ -15,7 +15,6 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use axum::http::StatusCode;
 use tokio::sync::RwLock;
 
 use akh_medu::agent::trigger::TriggerStore;
@@ -117,7 +116,7 @@ impl ServerState {
     /// fields defaulted, and a missing file yields a name-only default — so this
     /// never fails for a workspace that opens. A *malformed* config is a hard
     /// error rather than being silently masked.
-    async fn get_akh_config(&self, name: &str) -> Result<Arc<AkhConfig>, (StatusCode, String)> {
+    async fn get_akh_config(&self, name: &str) -> Result<Arc<AkhConfig>, String> {
         {
             let map = self.akh_configs.read().await;
             if let Some(cfg) = map.get(name) {
@@ -127,12 +126,8 @@ impl ServerState {
 
         let config_path = self.paths.workspace_config_file(name);
         let cfg = if config_path.exists() {
-            AkhConfig::load(&config_path).map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("failed to load akh config for \"{name}\": {e}"),
-                )
-            })?
+            AkhConfig::load(&config_path)
+                .map_err(|e| format!("failed to load akh config for \"{name}\": {e}"))?
         } else {
             tracing::debug!(
                 workspace = %name,
@@ -148,7 +143,7 @@ impl ServerState {
     }
 
     /// Get or lazily open an engine for the given workspace.
-    async fn get_engine(&self, name: &str) -> Result<Arc<Engine>, (StatusCode, String)> {
+    async fn get_engine(&self, name: &str) -> Result<Arc<Engine>, String> {
         // Check if already loaded.
         {
             let map = self.workspaces.read().await;
@@ -160,10 +155,7 @@ impl ServerState {
         // Try to load it.
         let ws_paths = self.paths.workspace(name);
         if !ws_paths.root.exists() {
-            return Err((
-                StatusCode::NOT_FOUND,
-                format!("workspace \"{name}\" not found"),
-            ));
+            return Err(format!("workspace \"{name}\" not found"));
         }
 
         let config = EngineConfig {
@@ -173,12 +165,8 @@ impl ServerState {
             ..Default::default()
         };
 
-        let engine = Engine::new(config).map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("failed to open workspace \"{name}\": {e}"),
-            )
-        })?;
+        let engine = Engine::new(config)
+            .map_err(|e| format!("failed to open workspace \"{name}\": {e}"))?;
 
         // Wire audit broadcast sender so WS clients receive live entries.
         if let Some(ledger) = engine.audit_ledger() {
@@ -231,7 +219,7 @@ impl ServerState {
     /// One Agent per workspace — daemon, HTTP handlers, and WS sessions all
     /// share the same instance. Construction is heavy (Agent::resume
     /// deserializes + rebuilds KG state), so we cache in `self.agents`.
-    async fn get_agent(&self, name: &str) -> Result<Arc<Mutex<Agent>>, (StatusCode, String)> {
+    async fn get_agent(&self, name: &str) -> Result<Arc<Mutex<Agent>>, String> {
         // Fast path: already cached.
         {
             let agents = self.agents.read().await;
@@ -254,18 +242,8 @@ impl ServerState {
             }
         })
         .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("agent task panicked: {e}"),
-            )
-        })?
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("failed to create agent: {e}"),
-            )
-        })?;
+        .map_err(|e| format!("agent task panicked: {e}"))?
+        .map_err(|e| format!("failed to create agent: {e}"))?;
 
         tracing::info!(workspace = %name, "shared agent created");
 
@@ -360,7 +338,7 @@ impl ServerState {
         &self,
         ws_name: &str,
         max_cycles: usize,
-    ) -> Result<DaemonStatus, (StatusCode, String)> {
+    ) -> Result<DaemonStatus, String> {
         // Already running? Return its current status.
         {
             let daemons = self.daemons.read().await;
@@ -562,7 +540,7 @@ impl akh_medu::acp::ServerControl for ServerState {
                         .map_err(|e| format!("create failed: {e}"))?;
                     // Optional role assignment (mirrors the REST create body).
                     if let Some(role) = params.get("role").and_then(serde_json::Value::as_str) {
-                        let engine = self.get_engine(name).await.map_err(|(_, m)| m)?;
+                        let engine = self.get_engine(name).await?;
                         engine
                             .assign_role(role)
                             .map_err(|e| format!("assign_role failed: {e}"))?;
@@ -597,8 +575,7 @@ impl akh_medu::acp::ServerControl for ServerState {
                         .unwrap_or(0) as usize;
                     let st = self
                         .spawn_workspace_daemon(ws, max_cycles)
-                        .await
-                        .map_err(|(_, m)| m)?;
+                        .await?;
                     serde_json::to_value(st).map_err(|e| e.to_string())
                 }
                 "daemon/stop" => {
@@ -678,14 +655,14 @@ async fn start_acp_server(
     // models — no second model load).
     let engine = match state.get_engine(&ws).await {
         Ok(e) => e,
-        Err((_, msg)) => {
+        Err(msg) => {
             tracing::warn!(workspace = %ws, error = %msg, "ACP disabled: cannot open workspace");
             return (None, None, Vec::new());
         }
     };
     let agent = match state.get_agent(&ws).await {
         Ok(a) => a,
-        Err((_, msg)) => {
+        Err(msg) => {
             tracing::warn!(workspace = %ws, error = %msg, "ACP disabled: cannot load agent");
             return (None, None, Vec::new());
         }
@@ -931,7 +908,7 @@ async fn main() {
                     );
                     tracing::info!(workspace = %ws_name, "daemon auto-started");
                 }
-                Err((_status_code, msg)) => {
+                Err(msg) => {
                     tracing::warn!(
                         workspace = %ws_name,
                         error = %msg,

@@ -246,8 +246,7 @@ fn print_acp(result: &serde_json::Value) -> Result<()> {
 }
 
 /// Dispatch an `akh acp <op>` command: discover the daemon, send the matching
-/// `_akh/*` request over ACP, and pretty-print the JSON result. Self-contained
-/// so both the normal and client-only dispatch paths can call it.
+/// `_akh/*` request over ACP, and pretty-print the JSON result.
 #[cfg(feature = "acp")]
 fn run_acp_command(op: &AcpOp) -> Result<()> {
     let (method, params): (&str, serde_json::Value) = match op {

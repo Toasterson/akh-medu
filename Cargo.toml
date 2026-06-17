@@ -77,13 +77,10 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 clap = { version = "4.5", features = ["derive"] }
 
-# Server (feature-gated)
-axum = { version = "0.8", features = ["ws"], optional = true }
+# Async runtime (feature-gated; shared by the daemon and the ACP server)
 tokio = { version = "1", features = ["full"], optional = true }
-tower-http = { version = "0.6", features = ["cors"], optional = true }
 
-# WebSocket client for TUI remote mode (feature-gated)
-tokio-tungstenite = { version = "0.26", optional = true }
+# Stream combinators for the oxifed federation channel (feature-gated)
 futures-util = { version = "0.3", optional = true }
 
 # WASM tool runtime (feature-gated)
@@ -92,7 +89,6 @@ wasmtime = { version = "29", features = ["component-model"], optional = true }
 # Federation via oxifed (feature-gated)
 lapin = { version = "2", optional = true }
 deadpool-lapin = { version = "0.12", optional = true }
-reqwest = { version = "0.12", features = ["json"], optional = true }
 
 # Email channel (feature-gated)
 mail-parser = { version = "0.11", optional = true }
@@ -148,11 +144,13 @@ tokio-util = { version = "0.7", features = ["compat"], optional = true }
 futures = { version = "0.3", optional = true }
 
 [features]
-default = ["nlu-candle"]
-client-only = [ "daemon" ]  # Strips local engine from akh binary; requires running akhomed server
-daemon = ["tokio", "tokio-tungstenite", "futures-util"]
-server = ["daemon", "axum", "tower-http"]
-oxifed = ["daemon", "lapin", "deadpool-lapin", "reqwest"]
+default = ["nlu-candle", "acp"]
+daemon = ["tokio"]
+# `server` = the akhomed daemon feature set: workspace daemons + the ACP
+# inbound transport. (Pre-ADR-061 it pulled axum/tower-http for REST/WS;
+# those surfaces are gone, so it now just means daemon + acp.)
+server = ["daemon", "acp"]
+oxifed = ["daemon", "lapin", "deadpool-lapin", "futures-util"]
 email = ["mail-parser", "imap", "native-tls", "lettre"]
 calendar = ["icalendar", "chrono"]
 wasm-tools = ["wasmtime"]
