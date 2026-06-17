@@ -1,34 +1,17 @@
 //! akh CLI: neuro-symbolic AI engine.
 
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
 use miette::{IntoDiagnostic, Result};
 
-use akh_medu::agent::{Agent, AgentConfig};
-use akh_medu::engine::{Engine, EngineConfig};
-use akh_medu::grammar::Language;
-use akh_medu::vsa::Dimension;
-
 #[derive(Parser)]
 #[command(name = "akh", version, about = "Neuro-symbolic AI engine")]
 struct Cli {
-    /// Data directory for persistent storage (overrides XDG workspace path).
-    #[arg(long, global = true)]
-    data_dir: Option<PathBuf>,
-
-    /// Workspace name (default: "default"). Workspaces live under XDG data dir.
+    /// Workspace name (default: "default") — selects which akh to talk to over
+    /// ACP. `akh` is a pure ACP client: all engine work happens in the daemon.
     #[arg(short = 'w', long, global = true, default_value = "default")]
     workspace: String,
-
-    /// Hypervector dimension.
-    #[arg(long, global = true, default_value = "10000")]
-    dimension: usize,
-
-    /// Default language for parsing (en, ru, ar, fr, es, auto).
-    #[arg(long, global = true, default_value = "auto")]
-    language: String,
 
     #[command(subcommand)]
     command: Commands,
@@ -36,26 +19,17 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Initialize a new workspace (creates XDG directory structure).
-    Init,
-
-    /// Manage workspaces.
+    /// Manage workspaces (over ACP — the daemon owns the engines).
     Workspace {
         #[command(subcommand)]
         action: WorkspaceAction,
     },
 
-    /// Interactive chat with the akh over ACP (launches TUI, or --headless).
+    /// Interactive chat with the akh over ACP (launches the TUI, or --headless).
     Chat {
-        /// Skill pack to load on start (optional).
-        #[arg(long)]
-        skill: Option<String>,
-        /// Headless mode: use plain stdin/stdout instead of TUI.
+        /// Headless mode: plain stdin/stdout instead of the TUI.
         #[arg(long)]
         headless: bool,
-        /// Fresh start: ignore persisted session and goals.
-        #[arg(long)]
-        fresh: bool,
     },
 
     /// Query a running akh's data-plane directly over ACP (`_akh/*` methods).
@@ -356,6 +330,70 @@ fn run_config_acp(action: ConfigAction) -> Result<()> {
     print_acp(&result)
 }
 
+/// Dispatch `akh workspace <action>` over the ACP control-plane
+/// (`_akh/workspace/*`). The daemon owns the engines, so even create/delete go
+/// over ACP — `akh` never touches a workspace on disk.
+#[cfg(feature = "acp")]
+fn run_workspace_acp(current_ws: &str, action: WorkspaceAction) -> Result<()> {
+    let (method, params): (&str, serde_json::Value) = match action {
+        WorkspaceAction::List => ("_akh/workspace/list", serde_json::json!({})),
+        WorkspaceAction::Create { name, role } => {
+            let mut params = serde_json::json!({ "name": name });
+            if let Some(role) = role {
+                params["role"] = serde_json::Value::String(role);
+            }
+            ("_akh/workspace/create", params)
+        }
+        WorkspaceAction::Delete { name } => {
+            ("_akh/workspace/delete", serde_json::json!({ "name": name }))
+        }
+        WorkspaceAction::Info { name } => {
+            let target = name.unwrap_or_else(|| current_ws.to_string());
+            ("_akh/workspace/info", serde_json::json!({ "name": target }))
+        }
+    };
+    let result = acp_call(method, params)?;
+    print_acp(&result)
+}
+
+/// Dispatch `akh chat`: discover the running daemon and converse over ACP — the
+/// TUI backend (default) or a headless stdin/stdout loop. `akh` has no local
+/// engine, so this errors when no daemon is running.
+#[cfg(feature = "acp")]
+fn run_chat_acp(ws_name: &str, headless: bool) -> Result<()> {
+    let paths = akh_medu::paths::AkhPaths::resolve()
+        .map_err(|e| miette::miette!("cannot resolve XDG paths: {e}"))?;
+    let info = akh_medu::client::discover_server(&paths).ok_or_else(|| {
+        miette::miette!(
+            "No running akhomed daemon found. Start one first (`akh service start`, \
+             or run `akhomed`) and retry — `akh` is a pure ACP client with no local engine."
+        )
+    })?;
+
+    if !headless {
+        eprintln!("Connecting to akh '{ws_name}' over ACP...");
+        return akh_medu::tui::launch_remote(ws_name, &info);
+    }
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .into_diagnostic()?;
+    if let Some(sock) = info.acp_socket.as_deref() {
+        eprintln!("Connecting to akh '{ws_name}' over ACP (unix:{sock})...");
+        rt.block_on(akh_medu::acp::run_headless_chat_unix(sock, "akh-cli", ws_name))
+            .map_err(miette::Report::from)
+    } else if let Some(tcp) = info.acp_tcp.as_deref() {
+        eprintln!("Connecting to akh '{ws_name}' over ACP (tcp:{tcp})...");
+        rt.block_on(akh_medu::acp::run_headless_chat_tcp(tcp, "akh-cli", ws_name))
+            .map_err(miette::Report::from)
+    } else {
+        miette::bail!(
+            "akhomed is running but advertises no ACP endpoint — build it with --features acp."
+        )
+    }
+}
+
 #[cfg(not(feature = "acp"))]
 fn run_acp_command(_op: &AcpOp) -> Result<()> {
     miette::bail!("The `acp` subcommand requires building `akh` with --features acp.")
@@ -369,6 +407,16 @@ fn run_daemon_acp(_workspace: &str, _action: DaemonAction) -> Result<()> {
 #[cfg(not(feature = "acp"))]
 fn run_config_acp(_action: ConfigAction) -> Result<()> {
     miette::bail!("The `config` subcommand requires building `akh` with --features acp.")
+}
+
+#[cfg(not(feature = "acp"))]
+fn run_workspace_acp(_current_ws: &str, _action: WorkspaceAction) -> Result<()> {
+    miette::bail!("The `workspace` subcommand requires building `akh` with --features acp.")
+}
+
+#[cfg(not(feature = "acp"))]
+fn run_chat_acp(_ws_name: &str, _headless: bool) -> Result<()> {
+    miette::bail!("The `chat` subcommand requires building `akh` with --features acp.")
 }
 
 #[derive(Subcommand)]
@@ -450,152 +498,10 @@ fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
-    // Resolve paths and engine config, then dispatch.
     {
-    let language = Language::from_code(&cli.language).unwrap_or(Language::Auto);
-
-    // Resolve data directory: explicit --data-dir wins, otherwise XDG workspace.
-    let (data_dir, compartments_dir, xdg_paths) = if let Some(ref explicit) = cli.data_dir {
-        (Some(explicit.clone()), None, None)
-    } else {
-        match akh_medu::paths::AkhPaths::resolve() {
-            Ok(paths) => {
-                let ws = paths.workspace(&cli.workspace);
-                let dir = ws.kg_dir.clone();
-                let comp_dir = ws.compartments_dir.clone();
-                (Some(dir), Some(comp_dir), Some(paths))
-            }
-            Err(_) => (None, None, None),
-        }
-    };
-
-    let config = EngineConfig {
-        dimension: Dimension(cli.dimension),
-        data_dir: data_dir.clone(),
-        compartments_dir: compartments_dir.clone(),
-        language,
-        ..Default::default()
-    };
-
     match cli.command {
-        Commands::Init => {
-            // Resolve the effective data directory.
-            let effective_dir = if let Some(ref explicit) = cli.data_dir {
-                explicit.clone()
-            } else if let Some(ref paths) = xdg_paths {
-                let ws_paths = paths.workspace(&cli.workspace);
-                paths.ensure_dirs().into_diagnostic()?;
-                ws_paths.ensure_dirs().into_diagnostic()?;
 
-                // Save default workspace config if it doesn't exist.
-                let config_path = paths.workspace_config_file(&cli.workspace);
-                if !config_path.exists() {
-                    let ws_config = akh_medu::workspace::WorkspaceConfig::with_name(&cli.workspace);
-                    ws_config.save(&config_path).into_diagnostic()?;
-                }
-
-                ws_paths.kg_dir.clone()
-            } else {
-                PathBuf::from(".akh-medu")
-            };
-
-            let config = EngineConfig {
-                data_dir: Some(effective_dir.clone()),
-                dimension: Dimension(cli.dimension),
-                language,
-                ..Default::default()
-            };
-            let engine = Engine::new(config).into_diagnostic()?;
-            println!(
-                "Initialized workspace \"{}\" at {}",
-                cli.workspace,
-                effective_dir.display()
-            );
-            println!("{}", engine.info());
-        }
-
-        Commands::Workspace { action } => {
-            let paths = xdg_paths.ok_or_else(|| {
-                miette::miette!("Cannot resolve XDG paths. Set HOME environment variable.")
-            })?;
-            paths.ensure_dirs().into_diagnostic()?;
-
-            let mgr = akh_medu::workspace::WorkspaceManager::new(paths);
-
-            match action {
-                WorkspaceAction::List => {
-                    let names = mgr.list();
-                    if names.is_empty() {
-                        println!(
-                            "No workspaces found. Create one with: akh workspace create <name>"
-                        );
-                    } else {
-                        println!("Workspaces:");
-                        for name in &names {
-                            println!("  {name}");
-                        }
-                    }
-                }
-                WorkspaceAction::Create { name, role } => {
-                    let ws_config = akh_medu::workspace::WorkspaceConfig::with_name(&name);
-                    let ws_paths = mgr.create(ws_config).into_diagnostic()?;
-                    println!(
-                        "Created workspace \"{name}\" at {}",
-                        ws_paths.root.display()
-                    );
-
-                    if let Some(ref role_name) = role {
-                        let engine_config = EngineConfig {
-                            dimension: Dimension(cli.dimension),
-                            data_dir: Some(ws_paths.kg_dir.clone()),
-                            compartments_dir: Some(ws_paths.compartments_dir.clone()),
-                            language,
-                            ..Default::default()
-                        };
-                        let engine = Engine::new(engine_config).into_diagnostic()?;
-                        engine.assign_role(role_name).into_diagnostic()?;
-                        engine.persist().into_diagnostic()?;
-                        println!("Assigned role \"{role_name}\" to workspace \"{name}\".");
-                    }
-                }
-                WorkspaceAction::Delete { name } => {
-                    mgr.delete(&name).into_diagnostic()?;
-                    println!("Deleted workspace \"{name}\".");
-                }
-                WorkspaceAction::Info { name } => {
-                    let ws_name = name.as_deref().unwrap_or(&cli.workspace);
-                    let info = mgr.info(ws_name).into_diagnostic()?;
-                    println!("Workspace: {}", info.name);
-                    println!("  Dimension: {}", info.dimension);
-                    println!("  Encoding: {}", info.encoding);
-                    println!("  Language: {}", info.language);
-                    println!("  Max memory: {} MB", info.max_memory_mb);
-                    println!(
-                        "  Seed packs: {}",
-                        if info.seed_packs.is_empty() {
-                            "(none)".to_string()
-                        } else {
-                            info.seed_packs.join(", ")
-                        }
-                    );
-                    let ws_paths = mgr.paths().workspace(ws_name);
-                    println!("  Data dir: {}", ws_paths.root.display());
-
-                    // Show assigned role if any.
-                    let engine_config = EngineConfig {
-                        dimension: Dimension(cli.dimension),
-                        data_dir: Some(ws_paths.kg_dir.clone()),
-                        compartments_dir: Some(ws_paths.compartments_dir.clone()),
-                        language,
-                        ..Default::default()
-                    };
-                    if let Ok(engine) = Engine::new(engine_config)
-                        && let Some(role) = engine.assigned_role() {
-                            println!("  Role: {role}");
-                        }
-                }
-            }
-        }
+        Commands::Workspace { action } => run_workspace_acp(&cli.workspace, action)?,
 
         Commands::Acp { op } => run_acp_command(&op)?,
 
@@ -603,143 +509,7 @@ fn main() -> Result<()> {
 
         Commands::Config { action } => run_config_acp(action)?,
 
-        Commands::Chat { skill, headless, fresh } => {
-            let ws_name = cli.workspace.clone();
-
-            // Headless + a running daemon that advertises an ACP endpoint →
-            // talk to the akh purely over ACP (the pure-ACP client path).
-            // Falls through to the local engine when no daemon / no ACP.
-            #[cfg(feature = "acp")]
-            if headless
-                && let Some(ref paths) = xdg_paths
-                && let Some(server_info) = akh_medu::client::discover_server(paths)
-            {
-                let rt = tokio::runtime::Builder::new_multi_thread()
-                    .enable_all()
-                    .build()
-                    .into_diagnostic()?;
-                if let Some(sock) = server_info.acp_socket.as_deref() {
-                    eprintln!("Connecting to akh '{ws_name}' over ACP (unix:{sock})...");
-                    return rt
-                        .block_on(akh_medu::acp::run_headless_chat_unix(sock, "akh-cli", &ws_name))
-                        .map_err(miette::Report::from);
-                } else if let Some(tcp) = server_info.acp_tcp.as_deref() {
-                    eprintln!("Connecting to akh '{ws_name}' over ACP (tcp:{tcp})...");
-                    return rt
-                        .block_on(akh_medu::acp::run_headless_chat_tcp(tcp, "akh-cli", &ws_name))
-                        .map_err(miette::Report::from);
-                }
-                // Daemon found but built without ACP — fall through to local.
-            }
-
-            // Try remote TUI over ACP if a daemon is running (non-headless only).
-            #[cfg(feature = "acp")]
-            if !headless {
-                if let Some(ref paths) = xdg_paths
-                    && let Some(server_info) = akh_medu::client::discover_server(paths) {
-                        eprintln!("Connecting to akh '{ws_name}' over ACP...");
-                        return akh_medu::tui::launch_remote(&ws_name, &server_info);
-                    }
-                eprintln!("warning: akhomed not running, using local engine");
-            }
-
-            let engine = Arc::new(Engine::new(config).into_diagnostic()?);
-
-            // Load skill if specified.
-            if let Some(ref skill_name) = skill {
-                match engine.load_skill(skill_name) {
-                    Ok(activation) => {
-                        println!(
-                            "Loaded skill: {} ({} triples, {} rules)",
-                            skill_name, activation.triples_loaded, activation.rules_loaded,
-                        );
-                    }
-                    Err(e) => {
-                        eprintln!("Warning: failed to load skill \"{skill_name}\": {e}");
-                    }
-                }
-
-                // Run grounding after skill load.
-                let ops = engine.ops();
-                let im = engine.item_memory();
-                let grounding_config = akh_medu::vsa::grounding::GroundingConfig::default();
-                if let Ok(result) =
-                    akh_medu::vsa::grounding::ground_all(&engine, ops, im, &grounding_config)
-                    && result.symbols_updated > 0 {
-                        println!(
-                            "Grounded {} symbols in {} round(s).",
-                            result.symbols_updated, result.rounds_completed,
-                        );
-                    }
-            }
-
-            let agent_config = AgentConfig {
-                max_cycles: 20,
-                ..Default::default()
-            };
-
-            if !headless {
-                // TUI mode (local fallback).
-                akh_medu::tui::launch(&ws_name, engine, agent_config, fresh)?;
-            } else {
-                // Headless mode: use ChatProcessor for unified input processing.
-                let mut agent = if !fresh && Agent::has_persisted_session(&engine) {
-                    Agent::resume(Arc::clone(&engine), agent_config).into_diagnostic()?
-                } else {
-                    Agent::new(Arc::clone(&engine), agent_config).into_diagnostic()?
-                };
-                if fresh {
-                    agent.clear_goals();
-                }
-
-                // Create ChatProcessor with NLU pipeline.
-                let data_dir = engine.config().data_dir.as_deref();
-                let nlu_pipeline = engine
-                    .store()
-                    .get_meta(b"nlu_ranker_state")
-                    .ok()
-                    .flatten()
-                    .and_then(|bytes| akh_medu::nlu::parse_ranker::ParseRanker::from_bytes(&bytes))
-                    .map(|ranker| akh_medu::nlu::NluPipeline::with_ranker_and_models(ranker, data_dir))
-                    .unwrap_or_else(|| akh_medu::nlu::NluPipeline::new_with_models(data_dir));
-                let mut chat_processor = akh_medu::chat::ChatProcessor::new(&engine, nlu_pipeline);
-
-                println!("akh chat (headless). Type 'quit' to exit.\n");
-                use std::io::Write as _;
-
-                loop {
-                    print!("> ");
-                    std::io::stdout().flush().ok();
-                    let mut input = String::new();
-                    match std::io::stdin().read_line(&mut input) {
-                        Ok(0) => break,
-                        Ok(_) => {}
-                        Err(e) => {
-                            eprintln!("Read error: {e}");
-                            break;
-                        }
-                    }
-
-                    let trimmed = input.trim();
-                    if trimmed.is_empty() {
-                        continue;
-                    }
-                    if trimmed == "quit" || trimmed == "exit" || trimmed == "q" {
-                        break;
-                    }
-
-                    let responses = chat_processor.process_input(trimmed, &mut agent, &engine);
-                    for msg in &responses {
-                        println!("{}", msg.to_plain_text());
-                    }
-                    println!();
-                }
-
-                chat_processor.persist_nlu_state(&engine);
-                agent.persist_session().into_diagnostic()?;
-                println!("Session saved.");
-            }
-        }
+        Commands::Chat { headless } => run_chat_acp(&cli.workspace, headless)?,
 
         Commands::Service { action } => {
             dispatch_service(action)?;

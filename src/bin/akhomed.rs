@@ -583,6 +583,21 @@ impl akh_medu::acp::ServerControl for ServerState {
                         .map_err(|e| format!("delete failed: {e}"))?;
                     Ok(serde_json::json!({ "deleted": name }))
                 }
+                "workspace/info" => {
+                    let name = params
+                        .get("name")
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or_else(|| "missing required param: name".to_string())?;
+                    // Opens (lazily loads) the engine and reports live KG stats.
+                    let engine = self.get_engine(name).await?;
+                    Ok(serde_json::json!({
+                        "name": name,
+                        "kg_symbols": engine.all_symbols().len(),
+                        "kg_triples": engine.all_triples().len(),
+                        "role": engine.assigned_role(),
+                        "data_dir": self.paths.workspace(name).root.display().to_string(),
+                    }))
+                }
 
                 // ── daemon group (explicit `workspace` param) ────────────
                 "daemon/start" => {
@@ -953,6 +968,36 @@ async fn main() {
                         error = %msg,
                         "failed to auto-start daemon (workspace may not exist yet)",
                     );
+                }
+            }
+        }
+    }
+
+    // Self-bootstrap the ACP workspace. A pure-ACP `akh` client can't create the
+    // first workspace (the daemon must already serve ACP to accept
+    // `_akh/workspace/create`), and the ACP server can only bind an *existing*
+    // workspace — so ensure the one it will bind exists before starting it. The
+    // resolution here must match `start_acp_server`'s (acp.workspace → first
+    // auto_start → "default").
+    #[cfg(feature = "acp")]
+    {
+        let acp_ws = state
+            .config
+            .read()
+            .await
+            .acp
+            .workspace
+            .clone()
+            .or_else(|| auto_start.first().cloned())
+            .unwrap_or_else(|| "default".to_string());
+        if !paths.workspace(&acp_ws).exists() {
+            let wsm = WorkspaceManager::new(paths.clone());
+            match wsm.create(akh_medu::workspace::WorkspaceConfig::with_name(&acp_ws)) {
+                Ok(_) => {
+                    tracing::info!(workspace = %acp_ws, "auto-created ACP workspace (self-bootstrap)")
+                }
+                Err(e) => {
+                    tracing::warn!(workspace = %acp_ws, error = %e, "failed to auto-create ACP workspace")
                 }
             }
         }

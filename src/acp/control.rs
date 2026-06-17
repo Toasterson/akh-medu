@@ -63,6 +63,7 @@ pub const CONTROL_METHODS: &[&str] = &[
     "_akh/workspace/list",
     "_akh/workspace/create",
     "_akh/workspace/delete",
+    "_akh/workspace/info",
     "_akh/daemon/start",
     "_akh/daemon/stop",
     "_akh/daemon/status",
