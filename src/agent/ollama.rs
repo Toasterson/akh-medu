@@ -139,6 +139,41 @@ struct ChatResponse {
 #[derive(Debug, Deserialize)]
 struct ChatMessage {
     content: Option<String>,
+    /// Tool calls the model wants executed (Ollama `/api/chat` tool calling).
+    /// Absent on plain text turns — defaults to empty.
+    #[serde(default)]
+    tool_calls: Vec<RawToolCall>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawToolCall {
+    function: RawToolFunction,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawToolFunction {
+    name: String,
+    /// Ollama returns arguments as a JSON object (not a stringified blob).
+    #[serde(default)]
+    arguments: serde_json::Value,
+}
+
+/// One tool call the model requested in a [`OllamaClient::chat`] turn.
+#[derive(Debug, Clone)]
+pub struct ToolCall {
+    /// Tool name (must match a registered tool).
+    pub name: String,
+    /// Arguments object the model supplied.
+    pub arguments: serde_json::Value,
+}
+
+/// The assistant's reply to one tool-enabled chat turn.
+#[derive(Debug, Clone, Default)]
+pub struct AssistantTurn {
+    /// Natural-language content. May be empty when the model only calls tools.
+    pub content: String,
+    /// Tool calls to execute before the model can answer. Empty ⇒ final answer.
+    pub tool_calls: Vec<ToolCall>,
 }
 
 // ---------------------------------------------------------------------------
@@ -223,6 +258,76 @@ impl OllamaClient {
             .ok_or_else(|| OllamaError::ParseFailed {
                 reason: "message.content missing or empty in Ollama response".into(),
             })
+    }
+
+    /// Run one tool-enabled `/api/chat` turn.
+    ///
+    /// `messages` is the full conversation so far — each a JSON object with at
+    /// least `role` + `content`; assistant turns may carry `tool_calls` and tool
+    /// results use `{"role":"tool","content":...}`. `tools` is the function
+    /// catalog (Ollama/OpenAI shape: `{"type":"function","function":{name,
+    /// description,parameters}}`); pass an empty slice to disable tool calling.
+    ///
+    /// Returns the assistant's text plus any tool calls it wants executed. An
+    /// empty `tool_calls` means the turn is a final answer. Unlike [`generate`],
+    /// an empty `content` is **not** an error — the model legitimately returns no
+    /// prose when it only wants to call tools.
+    pub fn chat(
+        &self,
+        messages: &[serde_json::Value],
+        tools: &[serde_json::Value],
+    ) -> OllamaResult<AssistantTurn> {
+        let url = format!("{}/api/chat", self.config.base_url.trim_end_matches('/'));
+
+        let mut body = serde_json::json!({
+            "model": self.config.model,
+            "messages": messages,
+            "stream": false,
+            "keep_alive": self.config.keep_alive,
+        });
+        if !tools.is_empty() {
+            body["tools"] = serde_json::Value::Array(tools.to_vec());
+        }
+
+        let mut req = ureq::post(&url)
+            .set("Content-Type", "application/json")
+            .timeout(std::time::Duration::from_secs(self.config.timeout_secs));
+        if let Some(key) = self.config.resolved_api_key() {
+            req = req.set("Authorization", &format!("Bearer {key}"));
+        }
+        let response = req.send_json(&body).map_err(|e| match e {
+            ureq::Error::Status(status, resp) => OllamaError::RequestFailed {
+                url: url.clone(),
+                status,
+                body: resp.into_string().unwrap_or_default(),
+                model: self.config.model.clone(),
+            },
+            other => OllamaError::Unreachable {
+                url: url.clone(),
+                reason: other.to_string(),
+            },
+        })?;
+
+        let chat_resp: ChatResponse =
+            response.into_json().map_err(|e| OllamaError::ParseFailed {
+                reason: format!("JSON decode failed: {e}"),
+            })?;
+
+        let msg = chat_resp.message.ok_or_else(|| OllamaError::ParseFailed {
+            reason: "Ollama chat response had no message".into(),
+        })?;
+
+        Ok(AssistantTurn {
+            content: msg.content.unwrap_or_default(),
+            tool_calls: msg
+                .tool_calls
+                .into_iter()
+                .map(|tc| ToolCall {
+                    name: tc.function.name,
+                    arguments: tc.function.arguments,
+                })
+                .collect(),
+        })
     }
 
     /// Hint Ollama to unload the model immediately by sending a request with

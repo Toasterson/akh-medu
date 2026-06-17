@@ -35,7 +35,7 @@ use thiserror::Error;
 use crate::compartment::psyche::{ArchetypeWeights, Psyche};
 use crate::extraction::config::ExternalApiConfig;
 
-use super::ollama::{OllamaClient, OllamaConfig, OllamaError};
+use super::ollama::{AssistantTurn, OllamaClient, OllamaConfig, OllamaError};
 
 // ---------------------------------------------------------------------------
 // PromptMode
@@ -320,6 +320,39 @@ impl AgentModelManager {
         Err(ModelManagerError::NoBackendAvailable {
             agent_id: agent_id.into(),
         })
+    }
+
+    /// Run one tool-enabled chat turn for the agent.
+    ///
+    /// Prepends the agent's cached (psyche-/config-derived) system prompt to
+    /// `conversation`, then calls Ollama `/api/chat` with the `tools` catalog.
+    /// Unlike [`generate`](Self::generate) there is **no** remote fallback — tool
+    /// calling is an Ollama-only capability for now, so callers should gate on
+    /// [`ollama_available`](Self::ollama_available) and degrade to the symbolic
+    /// pipeline when it returns `false`.
+    pub fn chat_with_tools(
+        &self,
+        agent_id: &str,
+        conversation: &[serde_json::Value],
+        tools: &[serde_json::Value],
+    ) -> ModelManagerResult<AssistantTurn> {
+        let system_prompt = {
+            let mut agents = self.agents.lock().expect("model manager lock poisoned");
+            let entry =
+                agents
+                    .get_mut(agent_id)
+                    .ok_or_else(|| ModelManagerError::AgentNotLoaded {
+                        agent_id: agent_id.into(),
+                    })?;
+            entry.last_used = Instant::now();
+            entry.system_prompt.clone()
+        };
+
+        let mut messages = Vec::with_capacity(conversation.len() + 1);
+        messages.push(serde_json::json!({"role": "system", "content": system_prompt}));
+        messages.extend_from_slice(conversation);
+
+        Ok(self.ollama.chat(&messages, tools)?)
     }
 
     // ── Lifecycle ─────────────────────────────────────────────────────────

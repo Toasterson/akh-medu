@@ -249,22 +249,28 @@ impl AkhAcpAgent {
         let engine = Arc::clone(&self.engine);
         let agent = Arc::clone(&self.agent);
         let processor = Arc::clone(&self.processor);
+        let agent_id = self.name.clone();
 
         tokio::task::spawn_blocking(move || {
             // ── ADR-027: lock, process, drop — all synchronous, no await. ──
             let mut agent = agent.lock().unwrap_or_else(|e| e.into_inner());
             let mut processor = processor.lock().unwrap_or_else(|e| e.into_inner());
             // Install the per-turn permission approver (if any) so tool calls
-            // made during the turn can prompt the client; remove it before the
-            // closure returns so its channel closes and the approver task ends.
+            // made during the turn — by the LLM loop or the symbolic pipeline —
+            // can prompt the client; removed before the closure returns so its
+            // channel closes and the approver task ends.
             if let Some(asker) = asker {
                 agent.set_permission_asker(asker);
-                let out = processor.process_input(&text, &mut agent, &engine);
-                agent.clear_permission_asker();
-                out
-            } else {
-                processor.process_input(&text, &mut agent, &engine)
             }
+            // Prefer the LLM agentic loop (the akh's pinned Ollama model + tools);
+            // fall back to the symbolic ChatProcessor when no model backend is
+            // reachable, so a daemon with no Ollama configured is unaffected.
+            let out = match agent.run_agentic_turn(&engine, &agent_id, &text) {
+                Some(msgs) => msgs,
+                None => processor.process_input(&text, &mut agent, &engine),
+            };
+            agent.clear_permission_asker();
+            out
             // Guards drop here, at end of closure scope.
         })
         .await
