@@ -1,18 +1,20 @@
 //! akhomed — the akh-medu daemon.
 //!
-//! Single authority over engine instances; the `akh` CLI connects here.
-//! Hosts N engine workspaces with REST and WebSocket APIs.
+//! Single authority over engine instances; ACP clients (the `akh` CLI/TUI,
+//! Anima) connect here. Hosts N engine workspaces behind a single inbound
+//! transport — the Agent Client Protocol (Unix socket + optional TCP). The
+//! legacy surfaces (REST, WebSocket, web UI, inbound MCP) were retired in
+//! ADR-061 (P8.4 deleted REST/WS/web-UI; P8.5 the inbound MCP server).
 //!
-//! Build and run: `cargo run --features server --bin akhomed`
+//! Build and run: `cargo run --features server,acp --bin akhomed`
 //!
-//! See `docs/ai/decisions/023-client-only-mode.md` for the full endpoint inventory.
+//! See `docs/ai/decisions/061-acp-only-retire-legacy-surfaces.md`.
 
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use axum::Router;
 use axum::http::StatusCode;
 use tokio::sync::RwLock;
 
@@ -21,7 +23,6 @@ use akh_medu::agent::model_manager::AgentModelManager;
 use akh_medu::agent::{Agent, AgentConfig};
 use akh_medu::akh_config::AkhConfig;
 use akh_medu::client::DaemonStatus;
-use akh_medu::mcp;
 use akh_medu::config::AkhomedConfig;
 use akh_medu::engine::{Engine, EngineConfig};
 use akh_medu::paths::AkhPaths;
@@ -39,9 +40,9 @@ struct ServerState {
     /// One shared Agent per workspace — daemon, HTTP handlers, and WS sessions
     /// all operate on the same instance. See ADR-027.
     agents: Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>,
-    /// Non-blocking psyche snapshots shared with McpState.  Populated at agent
-    /// creation time so monitoring reads never block on the agent mutex.
-    psyche_snapshots: mcp::PsycheSnapshotMap,
+    /// Non-blocking psyche snapshots.  Populated at agent creation time so
+    /// monitoring reads never block on the agent mutex.
+    psyche_snapshots: PsycheSnapshotMap,
     /// Cached NLU pipeline per workspace — avoids reloading 1GB+ LLM model on
     /// every WS connection or MCP chat call.
     nlu_pipelines: RwLock<HashMap<String, Arc<Mutex<akh_medu::nlu::NluPipeline>>>>,
@@ -51,8 +52,8 @@ struct ServerState {
     /// Broadcast channel for audit entries — WS clients subscribe to this.
     audit_broadcast: tokio::sync::broadcast::Sender<akh_medu::audit::AuditEntry>,
     /// Shared registry of per-workspace pause handles. Daemons write their
-    /// handles here; McpState reads them for suspend/resume via MCP.
-    daemon_pauses: RwLock<HashMap<String, mcp::DaemonPauseHandle>>,
+    /// handles here; the daemon control-plane reads them for suspend/resume.
+    daemon_pauses: RwLock<HashMap<String, DaemonPauseHandle>>,
 }
 
 /// Background daemon state for a workspace.
@@ -60,6 +61,36 @@ struct WorkspaceDaemon {
     handle: tokio::task::JoinHandle<()>,
     shutdown_tx: tokio::sync::watch::Sender<bool>,
     status: Arc<tokio::sync::Mutex<DaemonStatus>>,
+}
+
+/// Per-workspace psyche snapshot map.
+///
+/// Each value is an `Arc<RwLock<Option<Psyche>>>` extracted from the agent at
+/// creation time so monitoring code can read psyche state without holding the
+/// agent mutex. (Formerly shared with the inbound MCP server's `McpState`;
+/// after ADR-061 P8.5 only `ServerState` uses it.)
+type PsycheSnapshotMap = Arc<
+    RwLock<
+        HashMap<String, Arc<std::sync::RwLock<Option<akh_medu::compartment::psyche::Psyche>>>>,
+    >,
+>;
+
+/// Pause control for a single workspace daemon. The daemon clones `paused` /
+/// `cycle_done` into its `AgentDaemon`; the control-plane toggles `paused` and
+/// waits on `cycle_done` to suspend/resume cleanly between OODA cycles.
+#[derive(Clone)]
+struct DaemonPauseHandle {
+    paused: Arc<std::sync::atomic::AtomicBool>,
+    cycle_done: Arc<tokio::sync::Notify>,
+}
+
+impl DaemonPauseHandle {
+    fn new() -> Self {
+        Self {
+            paused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            cycle_done: Arc::new(tokio::sync::Notify::new()),
+        }
+    }
 }
 
 impl ServerState {
@@ -375,8 +406,8 @@ impl ServerState {
         let daemon_status = Arc::clone(&status);
         let daemon_ws_name = ws_name.to_string();
 
-        // Register pause handle so MCP can suspend/resume this daemon.
-        let pause_handle = mcp::DaemonPauseHandle::new();
+        // Register pause handle so the control-plane can suspend/resume this daemon.
+        let pause_handle = DaemonPauseHandle::new();
         self.daemon_pauses
             .write()
             .await
@@ -470,7 +501,7 @@ async fn run_daemon_task(
     daemon_config: akh_medu::agent::DaemonConfig,
     autonomy: akh_medu::akh_config::AutonomyConfig,
     ws_name: String,
-    pause_handle: mcp::DaemonPauseHandle,
+    pause_handle: DaemonPauseHandle,
 ) {
     use akh_medu::agent::AgentDaemon;
 
@@ -733,9 +764,10 @@ async fn main() {
         )
         .init();
 
+    // `bind`/`port` no longer bind an HTTP listener (ADR-061 P8.5) — they are
+    // retained only for the discovery PID record consumed by `akh` clients.
     let bind = std::env::var("AKH_SERVER_BIND").unwrap_or_else(|_| "0.0.0.0".to_string());
     let port = std::env::var("AKH_SERVER_PORT").unwrap_or_else(|_| "8200".to_string());
-    let addr = format!("{bind}:{port}");
 
     let paths = AkhPaths::resolve().unwrap_or_else(|e| {
         tracing::error!("failed to resolve XDG paths: {e}");
@@ -874,7 +906,7 @@ async fn main() {
                         .await
                         .map(|c| c.autonomy.clone())
                         .unwrap_or_default();
-                    let pause_handle = mcp::DaemonPauseHandle::new();
+                    let pause_handle = DaemonPauseHandle::new();
                     state.daemon_pauses.write().await.insert(ws_name.clone(), pause_handle.clone());
                     let task_handle = pause_handle.clone();
                     let handle = tokio::task::spawn(async move {
@@ -910,47 +942,10 @@ async fn main() {
         }
     }
 
-    // All HTTP + WebSocket routes are retired (ADR-061 P8.4) — the daemon's
-    // surface is ACP (see `start_acp_server`). axum lingers only to host the
-    // inbound MCP server below; it is removed entirely when MCP is retired
-    // (ADR-061 P8.5), at which point this block and axum go too.
-    let app: Router = Router::new();
-
-    // ── MCP server (feature-gated) ──────────────────────────────────
-    #[cfg(feature = "mcp")]
-    let app = {
-        use rmcp::transport::streamable_http_server::{
-            StreamableHttpService, session::local::LocalSessionManager,
-        };
-
-        let upstreams = state.config.read().await.upstreams.clone();
-        let mcp_state = Arc::new(akh_medu::mcp::McpState::new(
-            paths.clone(),
-            Arc::clone(&state.workspaces),
-            Arc::clone(&state.agents),
-            Arc::clone(&state.psyche_snapshots),
-            upstreams,
-        ));
-
-        let mcp_service = StreamableHttpService::new(
-            move || Ok(akh_medu::mcp::AkhMcpServer::new(Arc::clone(&mcp_state))),
-            LocalSessionManager::default().into(),
-            Default::default(),
-        );
-
-        tracing::info!("MCP server mounted at /mcp");
-        app.nest_service("/mcp", mcp_service)
-    };
-
-    tracing::info!("akhomed listening on {addr}");
-
-    let listener = tokio::net::TcpListener::bind(&addr)
-        .await
-        .expect("failed to bind");
-
-    // ── ACP transport (Unix socket + optional TCP), served alongside REST ──
-    // during the migration to ACP-only. Behind the `acp` feature; when absent,
-    // the daemon is REST/WS-only exactly as before.
+    // ── ACP transport (Unix socket + optional TCP) ── the daemon's sole
+    // inbound surface after ADR-061 P8.5 (REST/WS/web-UI/inbound-MCP retired).
+    // Behind the `acp` feature; with it off the daemon has no inbound surface
+    // and simply runs its workspace daemons until signalled.
     #[cfg(feature = "acp")]
     let (acp_shutdown_tx, acp_handles, acp_socket_path) = {
         let acp_cfg = state.config.read().await.acp.clone();
@@ -974,71 +969,70 @@ async fn main() {
         (acp_tx, handles, acp_socket)
     };
 
-    // Serve with graceful shutdown on SIGTERM/SIGINT.
+    // No HTTP/WS/MCP surface remains (ADR-061 P8.5) — ACP is the only inbound
+    // transport. Hold the process open until SIGTERM/SIGINT, then drain the ACP
+    // accept loops and workspace daemons. The ACP listeners and workspace
+    // daemons run as their own spawned tasks; main just waits and tears down.
     let paths_for_shutdown = paths.clone();
     let state_for_shutdown = state;
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
-            let ctrl_c = tokio::signal::ctrl_c();
-            #[cfg(unix)]
-            {
-                let mut sigterm =
-                    tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                        .expect("failed to register SIGTERM handler");
-                tokio::select! {
-                    _ = ctrl_c => {},
-                    _ = sigterm.recv() => {},
-                }
-            }
-            #[cfg(not(unix))]
-            {
-                ctrl_c.await.ok();
-            }
-            tracing::info!("akhomed shutting down — draining workspace daemons");
 
-            // Stop ACP accept loops first so no new sessions start mid-drain.
-            #[cfg(feature = "acp")]
-            {
-                tracing::info!("stopping ACP listeners");
-                let _ = acp_shutdown_tx.send(true);
-                for h in acp_handles {
-                    let _ = tokio::time::timeout(Duration::from_secs(3), h).await;
-                }
-                if let Some(path) = acp_socket_path {
-                    let _ = std::fs::remove_file(path);
-                }
-            }
+    let ctrl_c = tokio::signal::ctrl_c();
+    #[cfg(unix)]
+    {
+        let mut sigterm =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("failed to register SIGTERM handler");
+        tokio::select! {
+            _ = ctrl_c => {},
+            _ = sigterm.recv() => {},
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        ctrl_c.await.ok();
+    }
+    tracing::info!("akhomed shutting down — draining workspace daemons");
 
-            // Signal all workspace daemons to stop, then join with timeout.
-            let mut daemons = state_for_shutdown.daemons.write().await;
-            let mut aborted = false;
-            for (name, mut daemon) in daemons.drain() {
-                tracing::info!(workspace = %name, "stopping workspace daemon");
-                let _ = daemon.shutdown_tx.send(true);
-                match tokio::time::timeout(Duration::from_secs(5), &mut daemon.handle).await {
-                    Ok(Ok(())) => tracing::info!(workspace = %name, "daemon stopped cleanly"),
-                    Ok(Err(e)) => tracing::warn!(workspace = %name, error = %e, "daemon task panicked"),
-                    Err(_) => {
-                        tracing::warn!(workspace = %name, "daemon did not stop within 5s, aborting");
-                        daemon.handle.abort();
-                        aborted = true;
-                    }
-                }
-            }
-            drop(daemons);
+    // Stop ACP accept loops first so no new sessions start mid-drain.
+    #[cfg(feature = "acp")]
+    {
+        tracing::info!("stopping ACP listeners");
+        let _ = acp_shutdown_tx.send(true);
+        for h in acp_handles {
+            let _ = tokio::time::timeout(Duration::from_secs(3), h).await;
+        }
+        if let Some(path) = acp_socket_path {
+            let _ = std::fs::remove_file(path);
+        }
+    }
 
-            akh_medu::client::remove_pid_file(&paths_for_shutdown);
-
-            // abort() only cancels at .await points. Daemon tasks run sync CPU
-            // work that never yields, so abort alone won't stop them. Force exit
-            // after a short grace period to avoid leaving the process hanging.
-            if aborted {
-                tracing::info!("force-exiting after abort (daemon tasks run sync CPU work)");
-                std::process::exit(0);
+    // Signal all workspace daemons to stop, then join with timeout.
+    let mut daemons = state_for_shutdown.daemons.write().await;
+    let mut aborted = false;
+    for (name, mut daemon) in daemons.drain() {
+        tracing::info!(workspace = %name, "stopping workspace daemon");
+        let _ = daemon.shutdown_tx.send(true);
+        match tokio::time::timeout(Duration::from_secs(5), &mut daemon.handle).await {
+            Ok(Ok(())) => tracing::info!(workspace = %name, "daemon stopped cleanly"),
+            Ok(Err(e)) => tracing::warn!(workspace = %name, error = %e, "daemon task panicked"),
+            Err(_) => {
+                tracing::warn!(workspace = %name, "daemon did not stop within 5s, aborting");
+                daemon.handle.abort();
+                aborted = true;
             }
-        })
-        .await
-        .expect("server error");
+        }
+    }
+    drop(daemons);
+
+    akh_medu::client::remove_pid_file(&paths_for_shutdown);
+
+    // abort() only cancels at .await points. Daemon tasks run sync CPU work
+    // that never yields, so abort alone won't stop them. Force exit after a
+    // short grace period to avoid leaving the process hanging.
+    if aborted {
+        tracing::info!("force-exiting after abort (daemon tasks run sync CPU work)");
+        std::process::exit(0);
+    }
 
     // Belt-and-suspenders: clean up PID file on normal exit too.
     akh_medu::client::remove_pid_file(&paths);

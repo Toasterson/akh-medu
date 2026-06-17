@@ -129,9 +129,6 @@ safetensors = { version = "0.7", optional = true }
 # Deferred until Burn reaches stable release with decoupled dataset crate.
 # burn = { version = "0.21", optional = true, default-features = false, features = ["train", "ndarray", "std"] }
 
-# MCP server (feature-gated)
-rmcp = { version = "0.17", features = ["server", "transport-streamable-http-server"], optional = true }
-
 # Calendar (feature-gated)
 icalendar = { version = "0.16", optional = true, features = ["parser"] }
 chrono = { version = "0.4", optional = true, features = ["serde"] }
@@ -162,7 +159,6 @@ wasm-tools = ["wasmtime"]
 nlu-ml = ["ort", "tokenizers"]
 nlu-llm = ["llama-cpp-2", "encoding_rs"]
 nlu-full = ["nlu-ml", "nlu-llm"]
-mcp = ["server", "rmcp"]
 delegation = ["daemon"]
 candle-backend = ["candle-core", "candle-nn", "candle-transformers", "safetensors", "tokenizers"]
 nlu-candle = ["candle-backend"]

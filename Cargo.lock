@@ -178,7 +178,6 @@ dependencies = [
  "redb",
  "regex",
  "reqwest",
- "rmcp",
  "safetensors 0.7.0",
  "scraper",
  "serde",
