@@ -1,21 +1,14 @@
 //! akh CLI: neuro-symbolic AI engine.
 
 use std::path::PathBuf;
-#[cfg(not(feature = "client-only"))]
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
 use miette::{IntoDiagnostic, Result};
 
-#[cfg(not(feature = "client-only"))]
 use akh_medu::agent::{Agent, AgentConfig};
-#[cfg(feature = "client-only")]
-use akh_medu::client::AkhClient;
-#[cfg(not(feature = "client-only"))]
 use akh_medu::engine::{Engine, EngineConfig};
-#[cfg(not(feature = "client-only"))]
 use akh_medu::grammar::Language;
-#[cfg(not(feature = "client-only"))]
 use akh_medu::vsa::Dimension;
 
 #[derive(Parser)]
@@ -435,16 +428,6 @@ enum ConfigAction {
     },
 }
 
-/// Resolve an [`AkhClient`]: requires a running akhomed server (client-only mode).
-#[cfg(feature = "client-only")]
-fn resolve_client(
-    workspace: &str,
-    xdg_paths: Option<&akh_medu::paths::AkhPaths>,
-) -> Result<AkhClient> {
-    akh_medu::client::require_server(workspace, xdg_paths).into_diagnostic()
-}
-
-
 fn main() -> Result<()> {
     miette::set_hook(Box::new(|_| {
         Box::new(
@@ -468,12 +451,7 @@ fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
-    // In client-only mode, route all commands through a running akhomed server.
-    #[cfg(feature = "client-only")]
-    return run_client_only(cli);
-
-    // Normal mode: resolve paths and engine config, then dispatch locally.
-    #[cfg(not(feature = "client-only"))]
+    // Resolve paths and engine config, then dispatch.
     {
     let language = Language::from_code(&cli.language).unwrap_or(Language::Auto);
 
@@ -655,12 +633,12 @@ fn main() -> Result<()> {
                 // Daemon found but built without ACP — fall through to local.
             }
 
-            // Try remote TUI via akhomed if available (non-headless only).
-            #[cfg(feature = "daemon")]
+            // Try remote TUI over ACP if a daemon is running (non-headless only).
+            #[cfg(all(feature = "daemon", feature = "acp"))]
             if !headless {
                 if let Some(ref paths) = xdg_paths
                     && let Some(server_info) = akh_medu::client::discover_server(paths) {
-                        eprintln!("Connecting to akhomed at {}...", server_info.base_url());
+                        eprintln!("Connecting to akh '{ws_name}' over ACP...");
                         return akh_medu::tui::launch_remote(&ws_name, &server_info);
                     }
                 eprintln!("warning: akhomed not running, using local engine");
@@ -777,7 +755,7 @@ fn main() -> Result<()> {
     }
 
     Ok(())
-    } // #[cfg(not(feature = "client-only"))]
+    }
 }
 
 /// Dispatch `akh service` subcommands. Works without an Engine.
@@ -864,110 +842,4 @@ fn dispatch_setup(action: SetupAction) -> Result<()> {
     Ok(())
 }
 
-/// Route all commands through a running akhomed server (client-only mode).
-///
-/// This function mirrors the main dispatch but uses [`AkhClient`] remote
-/// methods instead of local Engine/Agent instances.
-#[cfg(feature = "client-only")]
-fn run_client_only(cli: Cli) -> Result<()> {
-    // Service and Setup commands work without a running server.
-    if let Commands::Service { action } = cli.command {
-        return dispatch_service(action);
-    }
-    if let Commands::Setup { action } = cli.command {
-        return dispatch_setup(action);
-    }
-
-    let xdg_paths = akh_medu::paths::AkhPaths::resolve().ok();
-    let client = resolve_client(&cli.workspace, xdg_paths.as_ref())?;
-
-    match cli.command {
-        // ── Init ──────────────────────────────────────────────────────────
-        Commands::Init => {
-            client
-                .workspace_create(&cli.workspace, None)
-                .into_diagnostic()?;
-            println!(
-                "Initialized workspace \"{}\" (via server).",
-                cli.workspace
-            );
-        }
-
-        // ── Workspace ─────────────────────────────────────────────────────
-        Commands::Workspace { action } => match action {
-            WorkspaceAction::List => {
-                let names = client.workspace_list().into_diagnostic()?;
-                if names.is_empty() {
-                    println!(
-                        "No workspaces found. Create one with: akh workspace create <name>"
-                    );
-                } else {
-                    println!("Workspaces:");
-                    for name in &names {
-                        println!("  {name}");
-                    }
-                }
-            }
-            WorkspaceAction::Create { name, role } => {
-                client
-                    .workspace_create(&name, role.as_deref())
-                    .into_diagnostic()?;
-                println!("Created workspace \"{name}\" (via server).");
-                if let Some(ref role_name) = role {
-                    println!("Assigned role \"{role_name}\" to workspace \"{name}\".");
-                }
-            }
-            WorkspaceAction::Delete { name } => {
-                client.workspace_delete(&name).into_diagnostic()?;
-                println!("Deleted workspace \"{name}\".");
-            }
-            WorkspaceAction::Info { name: _ } => {
-                let info = client.info().into_diagnostic()?;
-                println!("{info}");
-            }
-        },
-
-        Commands::Acp { op } => run_acp_command(&op)?,
-
-        Commands::Daemon { action } => run_daemon_acp(&cli.workspace, action)?,
-
-        Commands::Config { action } => run_config_acp(action)?,
-
-        Commands::Chat { skill: _, headless, fresh: _ } => {
-            if headless {
-                miette::bail!(
-                    "Headless chat is not available in client-only mode.\n\
-                     Use TUI mode (without --headless) to connect to akhomed."
-                );
-            }
-            #[cfg(feature = "daemon")]
-            {
-                let paths = xdg_paths.ok_or_else(|| {
-                    miette::miette!("Cannot resolve XDG paths. Set HOME environment variable.")
-                })?;
-                let server_info = akh_medu::client::discover_server(&paths).ok_or_else(|| {
-                    miette::miette!("No running akhomed server found.")
-                })?;
-                eprintln!("Connecting to akhomed at {}...", server_info.base_url());
-                return akh_medu::tui::launch_remote(&cli.workspace, &server_info);
-            }
-            #[cfg(not(feature = "daemon"))]
-            miette::bail!(
-                "TUI requires --features daemon. Build with: cargo build --features client-only,daemon"
-            );
-        }
-
-        // ── Library ───────────────────────────────────────────────────────
-        Commands::Service { action } => {
-            dispatch_service(action)?;
-        }
-
-        // ── Setup (handled by early return, unreachable) ────────────────
-        Commands::Setup { .. } => unreachable!("handled by early return"),
-
-        // ── Wiki (Akhipedia) — not yet available via remote client ───────
-    }
-
-    Ok(())
-}
 

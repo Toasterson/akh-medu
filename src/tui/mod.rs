@@ -38,7 +38,7 @@ enum ChatBackend {
     /// Direct local engine and agent.
     Local(Box<LocalBackend>),
     /// WebSocket connection to akhomed.
-    #[cfg(feature = "daemon")]
+    #[cfg(all(feature = "daemon", feature = "acp"))]
     Remote {
         remote: remote::RemoteChat,
     },
@@ -105,7 +105,7 @@ impl AkhTui {
     }
 
     /// Create a new TUI instance with a remote WS backend.
-    #[cfg(feature = "daemon")]
+    #[cfg(all(feature = "daemon", feature = "acp"))]
     pub fn new_remote(workspace: String, remote: remote::RemoteChat) -> Self {
         Self {
             workspace,
@@ -212,7 +212,7 @@ impl AkhTui {
                         .filter(|m| show_audit || !matches!(m, AkhMessage::AuditLog { .. })),
                 );
             }
-            #[cfg(feature = "daemon")]
+            #[cfg(all(feature = "daemon", feature = "acp"))]
             ChatBackend::Remote { ref mut remote } => {
                 while let Some(msg) = remote.try_recv() {
                     if show_audit || !matches!(msg, AkhMessage::AuditLog { .. }) {
@@ -236,7 +236,7 @@ impl AkhTui {
                     .count();
                 (local.agent.cycle_count(), symbol_count, goal_count)
             }
-            #[cfg(feature = "daemon")]
+            #[cfg(all(feature = "daemon", feature = "acp"))]
             ChatBackend::Remote { .. } => {
                 // Remote mode: status info comes from server messages.
                 (0, 0, 0)
@@ -248,7 +248,7 @@ impl AkhTui {
     fn grammar(&self) -> String {
         match self.backend {
             ChatBackend::Local(ref local) => local.chat_processor.grammar().to_string(),
-            #[cfg(feature = "daemon")]
+            #[cfg(all(feature = "daemon", feature = "acp"))]
             ChatBackend::Remote { .. } => "narrative".to_string(),
         }
     }
@@ -335,7 +335,7 @@ impl AkhTui {
                 local.operator_handle.push_text(input);
                 self.process_inbound_local();
             }
-            #[cfg(feature = "daemon")]
+            #[cfg(all(feature = "daemon", feature = "acp"))]
             ChatBackend::Remote { ref remote, .. } => {
                 remote.send_input(input);
             }
@@ -430,7 +430,7 @@ impl AkhTui {
             "goals" | "status" | "seed" => {
                 match self.backend {
                     ChatBackend::Local(..) => self.handle_command_local(parts[0], parts.get(1).copied()),
-                    #[cfg(feature = "daemon")]
+                    #[cfg(all(feature = "daemon", feature = "acp"))]
                     ChatBackend::Remote { ref remote, .. } => {
                         // Forward as a command to the server.
                         remote.send_command(cmd);
@@ -530,7 +530,7 @@ pub fn launch(
 }
 
 /// Launch the TUI connected to a remote akhomed server.
-#[cfg(feature = "daemon")]
+#[cfg(all(feature = "daemon", feature = "acp"))]
 pub fn launch_remote(
     workspace: &str,
     info: &crate::client::ServerInfo,
