@@ -38,6 +38,8 @@ pub struct AkhTui {
     should_quit: bool,
     /// Whether audit log entries are displayed in the message stream.
     show_audit: bool,
+    /// Whether tool/agent "thinking" steps are expanded (default: collapsed).
+    show_thinking: bool,
 }
 
 #[cfg(feature = "acp")]
@@ -54,6 +56,7 @@ impl AkhTui {
             scroll_offset: 0,
             should_quit: false,
             show_audit: true,
+            show_thinking: false,
         }
     }
 
@@ -81,19 +84,13 @@ impl AkhTui {
 
             terminal
                 .draw(|frame| {
-                    let (cycle_count, symbol_count, goal_count) = self.status_counts();
-
-                    let grammar = self.grammar();
                     widgets::render(
                         frame,
                         &self.workspace,
-                        &grammar,
                         &self.messages,
                         &self.input_buffer,
                         self.scroll_offset,
-                        cycle_count,
-                        symbol_count,
-                        goal_count,
+                        self.show_thinking,
                     );
                 })
                 .into_diagnostic()?;
@@ -145,17 +142,6 @@ impl AkhTui {
         }
     }
 
-    /// Get (cycle_count, symbol_count, goal_count) for the status bar.
-    fn status_counts(&self) -> (u64, usize, usize) {
-        // Remote mode: status info comes from server messages.
-        (0, 0, 0)
-    }
-
-    /// Get the current grammar archetype name.
-    fn grammar(&self) -> String {
-        "narrative".to_string()
-    }
-
     /// Called on exit — persist session, etc.
     fn on_exit(&mut self) -> miette::Result<()> {
         Ok(())
@@ -175,6 +161,10 @@ impl AkhTui {
             }
             KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
                 self.should_quit = true;
+            }
+            KeyCode::Tab => {
+                // Expand/collapse the tool/agent "thinking" steps.
+                self.show_thinking = !self.show_thinking;
             }
             KeyCode::Char(c) => {
                 self.input_buffer.push(c);
@@ -233,19 +223,9 @@ impl AkhTui {
             }
             "help" | "h" => {
                 self.messages.push(AkhMessage::system(
-                    "Commands: /grammar <name>, /goals, /status, /seed <pack>, /audit, /quit".to_string(),
+                    "Commands: /goals, /status, /seed <pack>, /audit, /quit. Tab toggles thinking steps."
+                        .to_string(),
                 ));
-            }
-            "grammar" | "g" => {
-                if let Some(name) = parts.get(1) {
-                    self.messages
-                        .push(AkhMessage::system(format!("Grammar switched to: {name}")));
-                } else {
-                    let current = self.grammar();
-                    self.messages.push(AkhMessage::system(format!(
-                        "Current grammar: {current}. Use /grammar <name> to switch.",
-                    )));
-                }
             }
             "audit" => {
                 self.show_audit = !self.show_audit;

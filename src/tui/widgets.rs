@@ -134,24 +134,23 @@ pub fn message_to_line(msg: &AkhMessage) -> Line<'static> {
     }
 }
 
-/// Main TUI layout rendering.
-#[allow(clippy::too_many_arguments)]
+/// Main TUI layout: header, message stream, input box (with a live cursor).
+///
+/// Tool/agent "steps" (`ToolResult` messages — the model's tool calls and their
+/// results) collapse into a single one-line summary unless `show_thinking` is
+/// on, so a multi-tool turn doesn't bury the final answer. Toggle with Tab.
 pub fn render(
     frame: &mut Frame,
     workspace: &str,
-    grammar: &str,
     messages: &[AkhMessage],
     input: &str,
     scroll_offset: usize,
-    cycle_count: u64,
-    symbol_count: usize,
-    goal_count: usize,
+    show_thinking: bool,
 ) {
-    let [header_area, messages_area, input_area, status_area] = Layout::vertical([
+    let [header_area, messages_area, input_area] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Fill(1),
         Constraint::Length(3),
-        Constraint::Length(1),
     ])
     .areas(frame.area());
 
@@ -164,14 +163,55 @@ pub fn render(
                 .bg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::raw(format!(" :: workspace: {workspace} :: grammar: {grammar} ")),
+        Span::raw(format!(" :: workspace: {workspace}  ")),
+        Span::styled(
+            if show_thinking {
+                "[Tab: hide thinking]"
+            } else {
+                "[Tab: show thinking]"
+            },
+            Style::default().fg(Color::DarkGray),
+        ),
     ]));
     frame.render_widget(header, header_area);
 
-    // Messages area.
-    let lines: Vec<Line> = messages.iter().map(message_to_line).collect();
-    let visible_lines = if lines.len() > scroll_offset {
-        &lines[scroll_offset..]
+    // Message stream. Collapse runs of tool/agent steps into one summary line
+    // unless the user expanded them (opencode-style).
+    let mut lines: Vec<Line> = Vec::new();
+    let mut i = 0;
+    while i < messages.len() {
+        if matches!(messages[i], AkhMessage::ToolResult { .. }) {
+            let start = i;
+            while i < messages.len() && matches!(messages[i], AkhMessage::ToolResult { .. }) {
+                i += 1;
+            }
+            if show_thinking {
+                for m in &messages[start..i] {
+                    lines.push(message_to_line(m));
+                }
+            } else {
+                let count = i - start;
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        format!("▸ {count} step{}", if count == 1 { "" } else { "s" }),
+                        Style::default().fg(Color::Yellow),
+                    ),
+                    Span::styled(
+                        "  (Tab to expand)",
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                ]));
+            }
+        } else {
+            lines.push(message_to_line(&messages[i]));
+            i += 1;
+        }
+    }
+
+    // Clamp scroll to the rendered line count (collapsing changes the count).
+    let scroll = scroll_offset.min(lines.len().saturating_sub(1));
+    let visible_lines = if lines.len() > scroll {
+        &lines[scroll..]
     } else {
         &[]
     };
@@ -180,33 +220,12 @@ pub fn render(
         .wrap(Wrap { trim: false });
     frame.render_widget(messages_widget, messages_area);
 
-    // Input area.
+    // Input box + a live cursor at the end of the typed text.
     let input_widget = Paragraph::new(input)
         .block(Block::default().borders(Borders::ALL).title(" > "))
         .style(Style::default().fg(Color::White));
     frame.render_widget(input_widget, input_area);
-
-    // Status bar.
-    let status = Paragraph::new(Line::from(vec![
-        Span::styled(
-            format!(" cycles: {cycle_count} "),
-            Style::default().fg(Color::DarkGray),
-        ),
-        Span::raw("| "),
-        Span::styled(
-            format!("symbols: {symbol_count} "),
-            Style::default().fg(Color::DarkGray),
-        ),
-        Span::raw("| "),
-        Span::styled(
-            format!("goals: {goal_count} active "),
-            Style::default().fg(Color::DarkGray),
-        ),
-        Span::raw("| "),
-        Span::styled(
-            format!("grammar: {grammar} "),
-            Style::default().fg(Color::DarkGray),
-        ),
-    ]));
-    frame.render_widget(status, status_area);
+    let cursor_x = (input_area.x + 1 + input.chars().count() as u16)
+        .min(input_area.x + input_area.width.saturating_sub(2));
+    frame.set_cursor_position((cursor_x, input_area.y + 1));
 }

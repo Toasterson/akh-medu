@@ -97,21 +97,27 @@ impl Agent {
                 return Some(out);
             }
 
-            // Execute each requested tool, feeding the result back to the model.
-            for tc in &turn.tool_calls {
-                out.push(AkhMessage::system(format!(
-                    "→ {}({})",
-                    tc.name,
-                    preview_args(&tc.arguments)
-                )));
+            // Intermediate reasoning the model emitted alongside its tool calls,
+            // surfaced as a collapsible "thinking" step.
+            let reasoning = turn.content.trim();
+            if !reasoning.is_empty() {
+                out.push(AkhMessage::tool_result("reasoning", true, reasoning.to_string()));
+            }
 
+            // Execute each requested tool; the call (args) and its result form one
+            // collapsible step the TUI folds under "▸ N steps".
+            for tc in &turn.tool_calls {
                 let input = tool_input_from_args(&tc.arguments);
                 let (success, result) = match self.tool_registry.execute(&tc.name, input, engine) {
                     Ok(o) => (o.success, o.result),
                     Err(e) => (false, format!("tool error: {e}")),
                 };
 
-                out.push(AkhMessage::tool_result(tc.name.clone(), success, result.clone()));
+                out.push(AkhMessage::tool_result(
+                    tc.name.clone(),
+                    success,
+                    format!("({}) → {}", preview_args(&tc.arguments), result),
+                ));
                 conversation.push(json!({"role": "tool", "content": result}));
             }
         }
