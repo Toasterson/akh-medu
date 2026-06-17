@@ -1,53 +1,37 @@
-//! Unified ratatui-based TUI replacing all three chat modes.
+//! Unified ratatui-based TUI — a pure ACP (remote) chat client.
 //!
 //! The TUI provides: scrollable message output, input area, status bar,
-//! and TUI commands (e.g., `/grammar`, `/workspace`, `/goals`, `/quit`).
+//! and TUI commands (e.g., `/grammar`, `/goals`, `/quit`). It connects to a
+//! running akhomed daemon over the Agent Client Protocol; there is no longer a
+//! local-engine backend (`akh` is a pure ACP client).
 //!
-//! Supports two backends:
-//! - **Local**: direct agent + engine (current behavior)
-//! - **Remote**: WebSocket connection to akhomed (feature-gated behind `daemon`)
+//! The whole app is gated behind the `acp` feature: without it, this module
+//! exports nothing.
 
 pub mod remote;
 pub mod sink;
 pub mod widgets;
 
+#[cfg(feature = "acp")]
 use std::sync::Arc;
+#[cfg(feature = "acp")]
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(feature = "acp")]
 use std::time::Duration;
 
+#[cfg(feature = "acp")]
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
+#[cfg(feature = "acp")]
 use miette::IntoDiagnostic;
 
-use crate::agent::{Agent, AgentConfig, IdleScheduler, InboundHandle};
-use crate::chat::ChatProcessor;
-use crate::engine::Engine;
+#[cfg(feature = "acp")]
 use crate::message::AkhMessage;
 
-/// Local backend state: agent + engine bundled for the TUI.
-struct LocalBackend {
-    agent: Box<Agent>,
-    engine: Arc<Engine>,
-    tui_sink: Arc<sink::TuiSink>,
-    idle_scheduler: IdleScheduler,
-    operator_handle: InboundHandle,
-    chat_processor: ChatProcessor,
-}
-
-/// The chat backend: either a local agent+engine or a remote WS connection.
-enum ChatBackend {
-    /// Direct local engine and agent.
-    Local(Box<LocalBackend>),
-    /// ACP connection to akhomed (the akh's daemon).
-    #[cfg(feature = "acp")]
-    Remote {
-        remote: remote::RemoteChat,
-    },
-}
-
-/// TUI application state.
+/// TUI application state (ACP client).
+#[cfg(feature = "acp")]
 pub struct AkhTui {
     workspace: String,
-    backend: ChatBackend,
+    remote: remote::RemoteChat,
     messages: Vec<AkhMessage>,
     input_buffer: String,
     scroll_offset: usize,
@@ -56,60 +40,13 @@ pub struct AkhTui {
     show_audit: bool,
 }
 
+#[cfg(feature = "acp")]
 impl AkhTui {
-    /// Create a new TUI instance with a local engine backend.
-    pub fn new_local(workspace: String, engine: Arc<Engine>, mut agent: Agent) -> Self {
-        let tui_sink = Arc::new(sink::TuiSink::new());
-
-        // Set up the operator channel so input flows through the channel abstraction.
-        agent.set_sink(tui_sink.clone());
-        let operator_handle = agent.setup_operator_channel();
-
-        // Wire audit ledger to TUI sink so entries appear live.
-        if let Some(ledger) = engine.audit_ledger() {
-            ledger.set_sink(tui_sink.clone());
-        }
-
-        // Restore NLU ranker from durable storage if available,
-        // and attempt to load ML/LLM models from data_dir.
-        let data_dir = engine.config().data_dir.as_deref();
-        let nlu_pipeline = engine
-            .store()
-            .get_meta(b"nlu_ranker_state")
-            .ok()
-            .flatten()
-            .and_then(|bytes| crate::nlu::parse_ranker::ParseRanker::from_bytes(&bytes))
-            .map(|ranker| crate::nlu::NluPipeline::with_ranker_and_models(ranker, data_dir))
-            .unwrap_or_else(|| crate::nlu::NluPipeline::new_with_models(data_dir));
-
-        let chat_processor = ChatProcessor::new(&engine, nlu_pipeline);
-
-        Self {
-            workspace,
-            backend: ChatBackend::Local(Box::new(LocalBackend {
-                agent: Box::new(agent),
-                engine,
-                tui_sink,
-                idle_scheduler: IdleScheduler::default(),
-                operator_handle,
-                chat_processor,
-            })),
-            messages: vec![AkhMessage::system(
-                "Welcome to akh. Type a question or command. /help for commands, /quit to exit.",
-            )],
-            input_buffer: String::new(),
-            scroll_offset: 0,
-            should_quit: false,
-            show_audit: true,
-        }
-    }
-
-    /// Create a new TUI instance with a remote WS backend.
-    #[cfg(feature = "acp")]
+    /// Create a new TUI instance with a remote ACP backend.
     pub fn new_remote(workspace: String, remote: remote::RemoteChat) -> Self {
         Self {
             workspace,
-            backend: ChatBackend::Remote { remote },
+            remote,
             messages: vec![AkhMessage::system(
                 "Connected to akhomed. Type a question or command. /help for commands, /quit to exit.",
             )],
@@ -186,8 +123,6 @@ impl AkhTui {
                     },
                     _ => {}
                 }
-            } else {
-                self.on_idle();
             }
         }
 
@@ -203,76 +138,26 @@ impl AkhTui {
     /// Drain pending messages from the backend.
     fn drain_backend_messages(&mut self) {
         let show_audit = self.show_audit;
-        match self.backend {
-            ChatBackend::Local(ref local) => {
-                let pending = local.tui_sink.drain();
-                self.messages.extend(
-                    pending
-                        .into_iter()
-                        .filter(|m| show_audit || !matches!(m, AkhMessage::AuditLog { .. })),
-                );
-            }
-            #[cfg(feature = "acp")]
-            ChatBackend::Remote { ref mut remote } => {
-                while let Some(msg) = remote.try_recv() {
-                    if show_audit || !matches!(msg, AkhMessage::AuditLog { .. }) {
-                        self.messages.push(msg);
-                    }
-                }
+        while let Some(msg) = self.remote.try_recv() {
+            if show_audit || !matches!(msg, AkhMessage::AuditLog { .. }) {
+                self.messages.push(msg);
             }
         }
     }
 
     /// Get (cycle_count, symbol_count, goal_count) for the status bar.
     fn status_counts(&self) -> (u64, usize, usize) {
-        match self.backend {
-            ChatBackend::Local(ref local) => {
-                let symbol_count = local.engine.all_symbols().len();
-                let goal_count = local
-                    .agent
-                    .goals()
-                    .iter()
-                    .filter(|g| matches!(g.status, crate::agent::GoalStatus::Active))
-                    .count();
-                (local.agent.cycle_count(), symbol_count, goal_count)
-            }
-            #[cfg(feature = "acp")]
-            ChatBackend::Remote { .. } => {
-                // Remote mode: status info comes from server messages.
-                (0, 0, 0)
-            }
-        }
+        // Remote mode: status info comes from server messages.
+        (0, 0, 0)
     }
 
     /// Get the current grammar archetype name.
     fn grammar(&self) -> String {
-        match self.backend {
-            ChatBackend::Local(ref local) => local.chat_processor.grammar().to_string(),
-            #[cfg(feature = "acp")]
-            ChatBackend::Remote { .. } => "narrative".to_string(),
-        }
-    }
-
-    /// Called on idle (no key events).
-    #[allow(irrefutable_let_patterns)]
-    fn on_idle(&mut self) {
-        if let ChatBackend::Local(ref mut local) = self.backend
-            && let Some(result) = local.idle_scheduler.tick(&mut local.agent)
-        {
-            self.messages.push(AkhMessage::system(format!(
-                "[idle:{}] {}",
-                result.task, result.summary,
-            )));
-        }
+        "narrative".to_string()
     }
 
     /// Called on exit — persist session, etc.
-    #[allow(irrefutable_let_patterns)]
     fn on_exit(&mut self) -> miette::Result<()> {
-        if let ChatBackend::Local(ref mut local) = self.backend {
-            local.agent.persist_session().into_diagnostic()?;
-            local.chat_processor.persist_nlu_state(&local.engine);
-        }
         Ok(())
     }
 
@@ -329,17 +214,7 @@ impl AkhTui {
             question: format!("> {input}"),
         });
 
-        match self.backend {
-            ChatBackend::Local(ref local) => {
-                // Push through the operator channel, then process locally.
-                local.operator_handle.push_text(input);
-                self.process_inbound_local();
-            }
-            #[cfg(feature = "acp")]
-            ChatBackend::Remote { ref remote, .. } => {
-                remote.send_input(input);
-            }
-        }
+        self.remote.send_input(input);
 
         // Auto-scroll to bottom only if user was already near the bottom
         // (within 5 messages). This preserves the scroll position when reading
@@ -348,50 +223,6 @@ impl AkhTui {
         if at_bottom {
             self.scroll_offset = self.messages.len().saturating_sub(1);
         }
-    }
-
-    /// Drain all pending inbound messages from the agent's channel registry
-    /// and dispatch each one through intent classification.
-    #[allow(irrefutable_let_patterns)]
-    fn process_inbound_local(&mut self) {
-        // Drain and process inbound messages in two passes to avoid borrow conflicts.
-        let texts: Vec<String> = {
-            let ChatBackend::Local(ref mut local) = self.backend else {
-                return;
-            };
-
-            let inbound = local.agent.drain_inbound();
-            let mut texts = Vec::new();
-            for msg in &inbound {
-                // Auto-register interlocutor on first interaction.
-                let _ = local.agent.ensure_interlocutor(
-                    &msg.sender,
-                    &msg.channel_id,
-                    crate::agent::ChannelKind::Operator,
-                );
-                if let Some(text) = msg.text() {
-                    texts.push(text.to_string());
-                }
-            }
-            texts
-        };
-
-        for text in &texts {
-            self.process_input_local(text);
-        }
-    }
-
-    /// Process input against the local engine/agent via the unified ChatProcessor.
-    #[allow(irrefutable_let_patterns)]
-    fn process_input_local(&mut self, input: &str) {
-        let ChatBackend::Local(ref mut local) = self.backend else {
-            return;
-        };
-        let responses =
-            local
-                .chat_processor
-                .process_input(input, &mut local.agent, &local.engine);
-        self.messages.extend(responses);
     }
 
     fn handle_command(&mut self, cmd: &str) {
@@ -407,10 +238,6 @@ impl AkhTui {
             }
             "grammar" | "g" => {
                 if let Some(name) = parts.get(1) {
-                    #[allow(irrefutable_let_patterns)]
-                    if let ChatBackend::Local(ref mut local) = self.backend {
-                        local.chat_processor.set_grammar(name);
-                    }
                     self.messages
                         .push(AkhMessage::system(format!("Grammar switched to: {name}")));
                 } else {
@@ -428,14 +255,8 @@ impl AkhTui {
                 )));
             }
             "goals" | "status" | "seed" => {
-                match self.backend {
-                    ChatBackend::Local(..) => self.handle_command_local(parts[0], parts.get(1).copied()),
-                    #[cfg(feature = "acp")]
-                    ChatBackend::Remote { ref remote, .. } => {
-                        // Forward as a command to the server.
-                        remote.send_command(cmd);
-                    }
-                }
+                // Forward as a command to the server.
+                self.remote.send_command(cmd);
             }
             _ => {
                 self.messages.push(AkhMessage::system(format!(
@@ -444,89 +265,6 @@ impl AkhTui {
             }
         }
     }
-
-    /// Handle /goals, /status, /seed locally.
-    #[allow(irrefutable_let_patterns)]
-    fn handle_command_local(&mut self, cmd: &str, arg: Option<&str>) {
-        let ChatBackend::Local(ref local) = self.backend else {
-            return;
-        };
-        let agent = &local.agent;
-        let engine = &local.engine;
-
-        match cmd {
-            "goals" => {
-                let goals = agent.goals();
-                if goals.is_empty() {
-                    self.messages
-                        .push(AkhMessage::system("No goals.".to_string()));
-                } else {
-                    for g in goals {
-                        self.messages.push(AkhMessage::goal_progress(
-                            &g.description,
-                            format!(
-                                "[P{}] {} ({}, {} cycles)",
-                                g.priority, g.description, g.status, g.cycles_worked,
-                            ),
-                        ));
-                    }
-                }
-            }
-            "status" => {
-                let info = engine.info();
-                self.messages.push(AkhMessage::system(format!("{info}")));
-            }
-            "seed" => {
-                if let Some(pack_name) = arg {
-                    let registry = crate::seeds::SeedRegistry::bundled();
-                    match registry.apply(pack_name, engine) {
-                        Ok(report) => {
-                            if report.already_applied {
-                                self.messages.push(AkhMessage::system(format!(
-                                    "Seed \"{}\" already applied.",
-                                    report.id
-                                )));
-                            } else {
-                                self.messages.push(AkhMessage::system(format!(
-                                    "Applied seed \"{}\": {} triples.",
-                                    report.id, report.triples_applied,
-                                )));
-                            }
-                        }
-                        Err(e) => {
-                            self.messages.push(AkhMessage::error("seed", e.to_string()));
-                        }
-                    }
-                } else {
-                    self.messages
-                        .push(AkhMessage::system("Usage: /seed <pack-name>".to_string()));
-                }
-            }
-            _ => {}
-        }
-    }
-
-}
-
-/// Launch the TUI with a local engine and workspace.
-pub fn launch(
-    workspace: &str,
-    engine: Arc<Engine>,
-    agent_config: AgentConfig,
-    fresh: bool,
-) -> miette::Result<()> {
-    let mut agent = if !fresh && Agent::has_persisted_session(&engine) {
-        Agent::resume(Arc::clone(&engine), agent_config).into_diagnostic()?
-    } else {
-        Agent::new(Arc::clone(&engine), agent_config).into_diagnostic()?
-    };
-
-    if fresh {
-        agent.clear_goals();
-    }
-
-    let mut tui = AkhTui::new_local(workspace.to_string(), engine, agent);
-    tui.run()
 }
 
 /// Launch the TUI connected to a remote akhomed server.
