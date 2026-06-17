@@ -15,7 +15,7 @@
 // ──────────────────────────────────────────────────────────────────────────
 // ACP backend (preferred)
 // ──────────────────────────────────────────────────────────────────────────
-#[cfg(all(feature = "daemon", feature = "acp"))]
+#[cfg(feature = "acp")]
 mod inner {
     use std::sync::mpsc;
     use std::thread;
@@ -190,10 +190,10 @@ mod inner {
     }
 }
 
-#[cfg(all(feature = "daemon", feature = "acp"))]
+#[cfg(feature = "acp")]
 pub use inner::*;
 
-#[cfg(all(test, feature = "daemon", feature = "acp"))]
+#[cfg(all(test, feature = "acp"))]
 mod tests {
     use super::RemoteChat;
     use crate::agent::{Agent, AgentConfig};

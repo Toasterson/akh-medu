@@ -633,7 +633,7 @@ fn main() -> Result<()> {
             }
 
             // Try remote TUI over ACP if a daemon is running (non-headless only).
-            #[cfg(all(feature = "daemon", feature = "acp"))]
+            #[cfg(feature = "acp")]
             if !headless {
                 if let Some(ref paths) = xdg_paths
                     && let Some(server_info) = akh_medu::client::discover_server(paths) {
