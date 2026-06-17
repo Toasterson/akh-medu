@@ -1,6 +1,6 @@
 # Akh-medu Architecture
 
-> Last updated: 2026-06-16 (Pure-ACP pivot P4: Filesystem sandbox + Claude-Code tool parity + permission layer, ADR 060)
+> Last updated: 2026-06-17 (Pure-ACP pivot **P8 COMPLETE**: the legacy inbound surfaces — REST API, WebSocket chat, bundled web UI, inbound MCP server — are retired; ACP is now akhomed's sole inbound transport. ADR 061)
 
 ## Overview
 
@@ -37,10 +37,10 @@ crates/seshat/          — Seshat's Archive service: pgvector schema (SeaORM), 
 ├── simd/                5 modules — runtime SIMD kernel dispatch (AVX2 / generic)
 ├── skills/              1 module  — skillpack lifecycle (Cold/Warm/Hot)
 ├── store/               3 modules — tiered storage (hot/warm/cold)
-├── tui/                 6 modules — ratatui terminal UI, WebSocket remote
+├── tui/                 6 modules — ratatui terminal UI, ACP remote backend
 ├── vsa/                 5 modules — HyperVec, VsaOps, encoding, item memory (HNSW), code pattern encoding (Phase 10f)
 ├── chat.rs                        — unified ChatProcessor (NLU-first AbsTree dispatch: dialogue acts, facts, queries, goals; DialogueManager integration)
-├── api_types.rs                   — shared request/response types for akhomed ↔ AkhClient wire format
+├── acp/                           — ACP transport (agent-client-protocol): serve_unix/serve_tcp, control-plane (ServerControl), `_akh/*` data-plane, `session/prompt` → ChatProcessor bridge (ADR 059/060/061)
 ├── engine.rs                      — facade composing all subsystems (Phase9Config, 9 stored registries, wired add_triple/remove_triple pipeline)
 ├── error.rs                       — miette + thiserror rich diagnostics
 ├── rule_macro.rs                  — rule macro predicates (Phase 9g): RuleMacro trait, registry, genls/relationAllExists/relationExistsAll
@@ -50,15 +50,13 @@ crates/seshat/          — Seshat's Archive service: pgvector schema (SeaORM), 
 ├── tms.rs                         — truth maintenance system (Phase 9c): support sets, retraction cascades
 ├── symbol.rs                      — SymbolId (NonZeroU64), SymbolKind, allocator
 ├── pipeline.rs                    — composable stage pipelines
-├── mcp/                 1 module  — MCP server (feature-gated): AkhMcpServer with 36 tools for Claude Code integration (ADR-029). Phase 1: granular bootstrap (resolve_identity, ritual_of_awakening, expand_domain, analyze_prerequisites, assess_competence, remove_triple). Phase 2: agent introspection (agent_run_cycle, agent_goals, agent_recall, agent_psyche). Phase 3: knowledge introspection (triples_of, provenance_of, export_symbols, infer_analogy).
+├── upstream_client.rs             — OUTBOUND MCP client to Anima/Seshat (ureq + JSON-RPC/SSE, no rmcp; currently dormant — see ADR-061)
 ├── service.rs                     — macOS launchd service management (plist generation, install/uninstall/start/stop/status)
-└── main.rs                        — CLI (clap) with 50+ subcommands
-
-data/web/                          — embedded web UI (htmx + Alpine.js SPA)
-├── index.html                     — single-page app: workspace select, awakening ceremony, chat + audit log
-├── style.css                      — dark theme, message type styling, stage timeline animations
-└── vendor/                        — bundled JS (htmx 2.x, Alpine.js 3.x) — no CDN dependency
+└── main.rs                        — CLI (clap): control plane (init · workspace · daemon · config · acp) + chat
 ```
+
+> Retired in P8 (ADR-061): `src/mcp/` (inbound MCP server), `src/api_types.rs`
+> (REST DTOs), `data/web/` (HTMX/Alpine web UI), and the WebSocket TUI backend.
 
 ## Core Data Model
 
@@ -202,44 +200,26 @@ The `ingest_document`, `ingest_file`, and `ingest_url` functions accept an optio
 
 ADR: `docs/ai/decisions/022-nlu-architecture.md`
 
-## Client-Only Build Mode
+## ACP Agentic Harness (Pure-ACP — sole transport; P0–P8 complete)
 
-The `akh` binary supports a `client-only` feature flag for lightweight remote-only deployments:
+ACP — the **Agent Client Protocol** over a Unix socket and optional TCP — is
+`akhomed`'s single inbound transport. `akhomed` is the ACP **agent**; the TUI,
+CLI, and Anima are ACP **clients** (ADR-059). The legacy surfaces it once served
+alongside ACP — a ~104-route REST API, WebSocket chat, a bundled HTMX/Alpine web
+UI, and an inbound MCP server — were deleted in **P8** (ADR-061), and
+`axum`/`tower-http`/`tokio-tungstenite`/`reqwest`/`rmcp` are no longer akh-medu
+dependencies. Outbound MCP to Anima/Seshat stays (`src/upstream_client.rs`).
 
-```
-cargo build --features client-only --bin akh
-```
+The 8 P8 increments: P8.1 ACP control-plane (`ServerControl`) · P8.2 ACP-native
+discovery probe · P8.3 trim CLI to control-plane + chat · P8.4 delete
+REST/WS/web-UI · P8.5 delete inbound MCP server · P8.6 drop axum/REST deps +
+collapse the feature graph (`acp` is now a **default** feature; `server` =
+`daemon + acp`; `client-only` retired) · P8.7 K8s/Helm → ACP-TCP (tcpSocket
+probes, XDG data path, exposed TCP) · P8.8 bounded connect-retry hardening.
 
-### Architecture
-
-- **Feature flag**: `client-only` in `Cargo.toml` — no extra dependencies, strips local engine from `akh`
-- **Transport**: All 50+ CLI commands route through HTTP to a running `akhomed` server
-- **Discovery**: PID file (`~/.local/state/akh-medu/{ws}/akhomed.pid`) + health check
-- **Shared types**: `src/api_types.rs` defines request/response structs used by both akhomed handlers and `AkhClient`
-- **Error handling**: `ClientError::NoServer` with miette diagnostic telling the user to start akhomed
-
-### Command Dispatch
-
-Under `client-only`, `main.rs` calls `run_client_only(cli)` which routes every subcommand through `AkhClient::Remote`. The non-client-only codepath is completely unchanged (feature-gated behind `#[cfg(not(feature = "client-only"))]`).
-
-Commands that cannot work remotely (CSV/text ingest, headless chat, CalDAV sync, library watch) bail with informative diagnostics.
-
-### Feature Combinations
-
-| Features | Binary | Behavior |
-|----------|--------|----------|
-| (default) | `akh` | Local engine with remote fallback |
-| `client-only` | `akh` | Remote only, requires akhomed |
-| `server` | `akhomed` | HTTP+WS server with full engine |
-
-ADR: `docs/ai/decisions/023-client-only-mode.md`
-
-## ACP Agentic Harness (Pure-ACP pivot, P0–P5)
-
-The daemon is migrating from a multi-surface HTTP server (REST + WebSocket +
-inbound MCP + web UI) to a single transport: the **Agent Client Protocol (ACP)**
-over a Unix socket and TCP. `akhomed` is the ACP **agent**; the TUI, CLI, and
-Anima are ACP **clients** (ADR-059). Outbound MCP to Anima/Seshat stays.
+The former `client-only` build mode (a thin HTTP `akh` against a remote akhomed)
+is retired with REST — `akh` talks to a daemon over ACP (`daemon`/`config`/`acp`
+control commands), discovered via the PID record's ACP socket/TCP endpoints.
 
 - **Transport** (`src/acp/`): `agent-client-protocol` 0.14; `session/prompt` →
   `ChatProcessor` run in `spawn_blocking` (ADR-027), `AkhMessage`s streamed back
@@ -457,13 +437,13 @@ Phase 14a–14i: Purpose-driven bootstrapping with identity (9 sub-phases):
 
 | Binary | Purpose | Features |
 |--------|---------|----------|
-| `akh` | CLI client | default (full) or `client-only` (thin HTTP client) |
-| `akhomed` | Background server/daemon | `server`, `daemon` |
+| `akh` | CLI client + TUI (ACP) | default (includes `acp`) |
+| `akhomed` | ACP daemon (agent) | `server` (= `daemon` + `acp`) |
 | `seshd` | Seshat's Archive MCP service | `embedding` (crate: `seshat`) |
 
 ### Daemon Mode (Primary)
 
-`akhomed` is the primary deployment path. It runs as an HTTP server (axum) with per-workspace agent daemons that execute 12 background tasks on independent tokio intervals:
+`akhomed` is the primary deployment path. It serves ACP over a Unix socket (and optional TCP) with per-workspace agent daemons that execute 12 background tasks on independent tokio intervals:
 
 - Equivalence learning, reflection, consolidation, schema discovery, rule inference, gap analysis
 - Session persistence, idle OODA cycles, continuous learning (Semantic Scholar / OpenAlex / Open Library)
@@ -487,13 +467,13 @@ Logs: `~/Library/Logs/akh-medu/akhomed.{stdout,stderr}.log`
 
 ### Monitoring
 
-`DaemonStatus` (GET `/workspaces/{ws}/daemon`) provides:
+`DaemonStatus` (ACP `_akh/daemon/status`, workspace param) provides:
 - Core: running, total_cycles, started_at, trigger_count
 - Task timestamps: last_persist_at, last_learning_at, last_sleep_at, last_goal_gen_at
 - KG stats: active_goals, kg_symbols, kg_triples
 
 Scripts:
-- `scripts/smoke-test.sh` — HTTP endpoint verification (~20 endpoints)
+- `scripts/smoke-test.sh` — legacy REST endpoint check; **stale post-ADR-061** (akhomed has no HTTP surface — verify via an ACP client instead)
 - `scripts/stability-monitor.sh` — CSV logging (RSS, KG size, cycles) for overnight monitoring
 
 ### Kubernetes Deployment (ADR-048)
@@ -512,7 +492,7 @@ charts/akh-medu/
     ├── seshd-service.yaml
     ├── seshd-configmap.yaml      # seshat.toml (DB URL from subchart secret)
     ├── seshd-pvc.yaml            # 1Gi models
-    └── *-ingress.yaml            # Optional per service
+    └── seshd-ingress.yaml        # Optional (seshd HTTP only; akhomed is raw-TCP ACP, exposed via Service, no ingress)
 ```
 
 PostgreSQL uses `pgvector/pgvector:pg16` image with `CREATE EXTENSION vector` in initdb.

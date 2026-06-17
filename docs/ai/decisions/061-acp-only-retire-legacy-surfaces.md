@@ -1,7 +1,7 @@
 # ADR 061 — Retire REST/WS/web-UI/inbound-MCP; go ACP-only (the P8 rip-out)
 
 > Date: 2026-06-16
-> Status: Accepted
+> Status: Implemented (P8.1–P8.8 landed 2026-06-17 on branch `claude/naughty-johnson-1add1a`; see commits `9e1c00e`…`8547069`)
 > Phase: P8 (Pure-ACP Agentic Harness pivot — retire the legacy inbound surfaces)
 > Depends on: ADR-059 (akh client / akhomed server), ADR-060 (tooling), the parked-data-plane decision (memory `project-acp-client-vs-agent-tools`)
 > Plan: [`docs/ai/plans/2026-06-14-pivot-acp-agentic-harness.md`](../plans/2026-06-14-pivot-acp-agentic-harness.md)

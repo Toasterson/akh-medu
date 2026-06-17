@@ -1,7 +1,7 @@
 # Akh-Medu → Pure-ACP Agentic Harness
 
 > Date: 2026-06-14
-> Status: In progress (P0 complete)
+> Status: In progress — P0–P5 done; **P8 (legacy-surface rip-out, ADR-061) COMPLETE** (2026-06-17, branch `claude/naughty-johnson-1add1a`); P6 (peer-Engine federation) and P7 (OpenClaw import + Awaken) not started.
 > Anima project: `019d9844-ce74-7993-a9f0-c953b8f04a4e` ("Akh-Medu")
 > ADRs: 052 (ACP sole transport), 053 (first-class AkhConfig), 054 (peer-Engine
 >       federation), 055 (filesystem abstraction), 056 (OpenClaw markdown import)
