@@ -1,6 +1,6 @@
 # Akh-medu Architecture
 
-> Last updated: 2026-06-17 (Pure-ACP pivot **P8 COMPLETE**: the legacy inbound surfaces — REST API, WebSocket chat, bundled web UI, inbound MCP server — are retired; ACP is now akhomed's sole inbound transport. ADR 061)
+> Last updated: 2026-06-17 (Pure-ACP pivot **P8 COMPLETE**: the legacy inbound surfaces — REST API, WebSocket chat, bundled web UI, inbound MCP server — are retired; ACP is now akhomed's sole inbound transport. ADR 061. Then: TUI **streaming chat** — turns stream live over `session/update` (token-level via Ollama `stream:true`), with a progress spinner and Markdown rendering.)
 
 ## Overview
 
@@ -222,11 +222,22 @@ is retired with REST — `akh` talks to a daemon over ACP (`daemon`/`config`/`ac
 control commands), discovered via the PID record's ACP socket/TCP endpoints.
 
 - **Transport** (`src/acp/`): `agent-client-protocol` 0.14; `session/prompt` →
-  `ChatProcessor` run in `spawn_blocking` (ADR-027), `AkhMessage`s streamed back
-  as `session/update` via `AcpSink`. A `_akh/<group>/<op>` data-plane carries
-  read/admin ops (meta, workspace, symbols, triples, query, memory, infer,
-  permission) over the same connection; cognitive ops are the agent LLM's
-  *tools*, not client methods (the data-plane is deliberately small).
+  the LLM agentic loop (`run_agentic_turn`, else symbolic `ChatProcessor`) run in
+  `spawn_blocking` (ADR-027). The turn now **streams**: each `AkhMessage` is
+  emitted to a `ChannelSink` the instant it is produced and the prompt handler
+  drains it concurrently into `session/update` notifications (answer →
+  `AgentMessageChunk`, reasoning + tool steps → `AgentThoughtChunk`); the client
+  consumes them incrementally via `read_update`. Token-level answer streaming
+  rides Ollama's `/api/chat` `stream:true` (`OllamaClient::chat_stream`, content
+  vs `thinking` deltas). A `_akh/<group>/<op>` data-plane carries read/admin ops
+  (meta, workspace, symbols, triples, query, memory, infer, permission, model)
+  over the same connection; cognitive ops are the agent LLM's *tools*, not
+  client methods (the data-plane is deliberately small).
+- **TUI** (`src/tui/`): pure-ACP ratatui client. Streams answer deltas into one
+  growing message, folds thinking/tool steps into a collapsible block (Tab),
+  renders answers as Markdown (`tui/markdown.rs`), and shows an animated spinner
+  in the input border while a turn is in flight. `/model` (picker + type-ahead
+  filter) and `/effort` switch the live model over `_akh/model/*`.
 - **First-class akh** (`src/akh_config.rs`, ADR-053): `akh.toml` pins
   `{model + ollama endpoint + system prompt}` per workspace.
 - **Filesystem sandbox** (`src/fs/`, ADR-060): a `Filesystem` trait with a
