@@ -114,8 +114,11 @@ impl ServerState {
     /// The akh config is the existing per-workspace config file parsed as an
     /// [`AkhConfig`]; a legacy workspace-only TOML loads with all akh-level
     /// fields defaulted, and a missing file yields a name-only default — so this
-    /// never fails for a workspace that opens. A *malformed* config is a hard
-    /// error rather than being silently masked.
+    /// never fails for a workspace that opens. A *malformed* config is **not**
+    /// fatal: it logs a `tracing::warn!` (naming the file and parse error) and
+    /// falls back to name-only defaults, mirroring [`Self::get_engine`]'s
+    /// tolerance of a broken workspace TOML so a bad `akh.toml` can't keep the
+    /// whole ACP server from starting.
     async fn get_akh_config(&self, name: &str) -> Result<Arc<AkhConfig>, String> {
         {
             let map = self.akh_configs.read().await;
@@ -126,8 +129,26 @@ impl ServerState {
 
         let config_path = self.paths.workspace_config_file(name);
         let cfg = if config_path.exists() {
-            AkhConfig::load(&config_path)
-                .map_err(|e| format!("failed to load akh config for \"{name}\": {e}"))?
+            match AkhConfig::load(&config_path) {
+                Ok(cfg) => cfg,
+                // A malformed akh.toml (e.g. a hand-written file missing the
+                // required `name`) used to abort ACP startup. Match get_engine's
+                // forgiveness: warn loudly so a real misconfiguration is still
+                // visible, then fall back to name-only defaults. Note this
+                // silently drops any akh-level settings the file *did* parse
+                // (model pin, system prompt, endpoint) — fix the file to apply them.
+                Err(e) => {
+                    tracing::warn!(
+                        workspace = %name,
+                        config = %config_path.display(),
+                        error = %e,
+                        "akh.toml failed to parse; falling back to name-only akh \
+                         defaults (model pin, system prompt, and endpoint settings \
+                         are ignored until the file is fixed)"
+                    );
+                    AkhConfig::with_name(name)
+                }
+            }
         } else {
             tracing::debug!(
                 workspace = %name,
@@ -1153,6 +1174,36 @@ mod control_plane_tests {
         // set without a `config` param → error (never silently resets).
         let bad = state.dispatch("_akh/config/set", &json!({})).await;
         assert!(bad.is_err(), "config/set without config payload must error");
+    }
+
+    #[tokio::test]
+    async fn get_akh_config_tolerates_malformed_toml() {
+        let (_tmp, state) = temp_state();
+
+        // A hand-written akh.toml that omits the flattened, required `name`
+        // field. Everything else is valid — the sole defect is the missing
+        // name, which `AkhConfig::load` rejects with a `missing field name`
+        // parse error. Before the fix this aborted ACP startup.
+        let config_path = state.paths.workspace_config_file("default");
+        std::fs::write(
+            &config_path,
+            "model = \"x\"\n\n[ollama_endpoint]\nkind = \"local\"\n",
+        )
+        .expect("write malformed default.toml");
+
+        // It must load (not error), defaulting the name to the workspace.
+        let cfg = state
+            .get_akh_config("default")
+            .await
+            .expect("malformed akh.toml must fall back, not error");
+        assert_eq!(cfg.name(), "default", "name defaults to the workspace");
+        // The fallback is name-only defaults: the unparseable file's akh-level
+        // settings are intentionally dropped (the warning tells the operator).
+        assert!(cfg.model.is_none(), "broken config falls back to defaults");
+
+        // A second call returns the cached Arc.
+        let again = state.get_akh_config("default").await.expect("cached load");
+        assert!(Arc::ptr_eq(&cfg, &again), "config should be cached");
     }
 
     #[tokio::test]
