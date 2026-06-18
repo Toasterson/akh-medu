@@ -1,6 +1,6 @@
 # Akh-medu Architecture
 
-> Last updated: 2026-06-17 (Pure-ACP pivot **P8 COMPLETE**: the legacy inbound surfaces — REST API, WebSocket chat, bundled web UI, inbound MCP server — are retired; ACP is now akhomed's sole inbound transport. ADR 061. Then: TUI **streaming chat** — turns stream live over `session/update` (token-level via Ollama `stream:true`), with a progress spinner and Markdown rendering.)
+> Last updated: 2026-06-18 (Phase 38a: `akhomed-store` crate — Postgres-backed relocatable-Akh foundation, ADR 049. Prior: Pure-ACP pivot **P8 COMPLETE** — legacy inbound surfaces (REST/WebSocket/web UI/inbound MCP) retired, ACP is akhomed's sole inbound transport, ADR 061; TUI streaming chat.)
 
 ## Overview
 
@@ -263,6 +263,26 @@ Cold (redb)        — ACID transactions, durable, slower writes
 Provenance (redb)  — multi-index ledger (derived/source/kind)
 SPARQL (oxigraph)  — persistent RDF store for structured queries
 ```
+
+### Postgres backing store (Phase 38, `crates/akhomed-store`)
+
+Phase 38 makes an Akh **relocatable**: the truth of its state lives in Postgres
+while the daemon keeps the stores above as an in-process cache. Sub-phase **38a**
+(implemented) ships the foundation — it does not yet change the boot path:
+
+- New leaf crate `crates/akhomed-store/`: SeaORM entities + `sea-orm-migration`
+  migrations for two schemas, plus a pool builder and the `akhomed-migrate` CLI.
+- `akhomed.*` schema: `akh` (host-independent identity PK), `facts` (every
+  triple, backs the oxigraph cache + future AGE view), `mutation_log` (the
+  streaming WAL — 38b), `snapshots` (38c), `psyche`, `provenance`, `episodes`.
+- `workspaces.*` schema: `workspace`, `membership`, `active_microtheories` —
+  workspaces and multi-Akh membership as first-class rows (38f).
+- Gated behind the `postgres` cargo feature (folded into `server`); the lean
+  `akh` client never compiles SeaORM. Runtime-optional: with no `[postgres]`
+  config section the daemon logs a warning and runs in legacy local-only mode.
+- `[postgres]` config: `url`, `pool_size`, `connect_timeout_secs`,
+  `migrate_on_start` (`DATABASE_URL` overrides `url`). Pool plumbed into
+  `ServerState`; consumed by the WAL flusher / snapshot writer in 38b/38c.
 
 ## Provenance
 

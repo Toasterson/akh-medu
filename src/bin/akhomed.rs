@@ -51,9 +51,12 @@ struct ServerState {
     akh_configs: Arc<RwLock<HashMap<String, Arc<AkhConfig>>>>,
     /// Broadcast channel for audit entries — WS clients subscribe to this.
     audit_broadcast: tokio::sync::broadcast::Sender<akh_medu::audit::AuditEntry>,
-    /// Shared registry of per-workspace pause handles. Daemons write their
     /// handles here; the daemon control-plane reads them for suspend/resume.
     daemon_pauses: RwLock<HashMap<String, DaemonPauseHandle>>,
+    /// Phase 38: optional Postgres backing-store pool. `None` when no
+    /// `[postgres]` section is configured (legacy local-only mode). Consumed by
+    /// the mutation WAL flusher and snapshot writer in sub-phases 38b/38c.
+    pg_pool: Option<Arc<akhomed_store::DatabaseConnection>>,
 }
 
 /// Background daemon state for a workspace.
@@ -94,7 +97,11 @@ impl DaemonPauseHandle {
 }
 
 impl ServerState {
-    fn new(paths: AkhPaths, config: AkhomedConfig) -> Self {
+    fn new(
+        paths: AkhPaths,
+        config: AkhomedConfig,
+        pg_pool: Option<Arc<akhomed_store::DatabaseConnection>>,
+    ) -> Self {
         let (audit_tx, _) = tokio::sync::broadcast::channel(256);
         Self {
             paths,
@@ -107,6 +114,7 @@ impl ServerState {
             akh_configs: Arc::new(RwLock::new(HashMap::new())),
             audit_broadcast: audit_tx,
             daemon_pauses: RwLock::new(HashMap::new()),
+            pg_pool,
         }
     }
 
@@ -162,6 +170,12 @@ impl ServerState {
         let mut map = self.akh_configs.write().await;
         let entry = map.entry(name.to_string()).or_insert(Arc::clone(&cfg));
         Ok(Arc::clone(entry))
+    }
+
+    /// The Postgres backing-store pool, if configured. `None` in local-only mode.
+    #[allow(dead_code)] // consumed by the WAL flusher / snapshot writer in 38b/38c
+    fn pg_pool(&self) -> Option<&Arc<akhomed_store::DatabaseConnection>> {
+        self.pg_pool.as_ref()
     }
 
     /// Get or lazily open an engine for the given workspace.
@@ -886,6 +900,52 @@ async fn start_acp_server(
     (socket_str, tcp_str, handles)
 }
 
+/// Phase 38: open the Postgres backing-store pool if `[postgres]` is configured.
+///
+/// Returns `None` (and logs a clear warning) when no `[postgres]` section is
+/// present, so the daemon degrades to legacy local-only mode. A connection or
+/// migration failure is also non-fatal: it logs an error and falls back to
+/// local-only rather than refusing to boot.
+async fn init_postgres(
+    config: &AkhomedConfig,
+) -> Option<Arc<akhomed_store::DatabaseConnection>> {
+    let Some(pg) = config.postgres.as_ref() else {
+        tracing::warn!(
+            "[postgres] not configured — running in legacy local-only mode \
+             (no WAL, no cross-host relocation; Phase 38)"
+        );
+        return None;
+    };
+
+    // DATABASE_URL overrides the configured URL (K8s secret injection).
+    let url = std::env::var("DATABASE_URL").unwrap_or_else(|_| pg.url.clone());
+    let opts = akhomed_store::PoolOptions {
+        url,
+        max_connections: pg.pool_size,
+        connect_timeout: std::time::Duration::from_secs(pg.connect_timeout_secs),
+    };
+
+    match akhomed_store::connect(&opts).await {
+        Ok(db) => {
+            tracing::info!("connected to PostgreSQL backing store");
+            if pg.migrate_on_start {
+                match akhomed_store::run_migrations(&db).await {
+                    Ok(()) => tracing::info!("akhomed-store migrations complete"),
+                    Err(e) => {
+                        tracing::error!(error = %e, "migrations failed — falling back to local-only mode");
+                        return None;
+                    }
+                }
+            }
+            Some(Arc::new(db))
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "PostgreSQL unavailable — falling back to local-only mode");
+            None
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt()
@@ -1008,9 +1068,15 @@ async fn main() {
         merged
     };
 
-    let state = Arc::new(ServerState::new(paths.clone(), config));
+    // Phase 38: open the Postgres backing store (or fall back to local-only).
+    let pg_pool = init_postgres(&config).await;
 
-    tracing::info!("akhomed initialized");
+    let state = Arc::new(ServerState::new(paths.clone(), config, pg_pool));
+
+    tracing::info!(
+        postgres = state.pg_pool().is_some(),
+        "akhomed initialized"
+    );
 
     // Write PID file so `akh` CLI can discover this server. ACP transport
     // details (socket/tcp) are filled in later, once those listeners bind.
@@ -1243,7 +1309,7 @@ mod control_plane_tests {
             cache_dir: base.join("cache"),
         };
         paths.ensure_dirs().expect("ensure dirs");
-        let state = ServerState::new(paths, AkhomedConfig::default());
+        let state = ServerState::new(paths, AkhomedConfig::default(), None);
         (tmp, state)
     }
 

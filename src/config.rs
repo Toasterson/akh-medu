@@ -85,6 +85,11 @@ pub struct AkhomedConfig {
     /// ACP (Agent Client Protocol) transport settings.
     #[serde(default)]
     pub acp: AcpSection,
+
+    /// Phase 38: Postgres backing store. When absent, the daemon runs in legacy
+    /// local-only mode (oxigraph + redb on disk, no WAL / relocation).
+    #[serde(default)]
+    pub postgres: Option<PostgresConfig>,
 }
 
 /// ACP transport configuration. Effective only when the daemon is built with the
@@ -144,6 +149,49 @@ impl AcpSection {
         let host = self.tcp_bind.as_deref().unwrap_or("127.0.0.1");
         Some(format!("{host}:{port}"))
     }
+}
+
+// ---------------------------------------------------------------------------
+// Postgres backing store (Phase 38)
+// ---------------------------------------------------------------------------
+
+/// PostgreSQL backing-store configuration.
+///
+/// Example TOML:
+/// ```toml
+/// [postgres]
+/// url = "postgres://akh:akh@postgres-ha.cluster:5432/akhmedu"
+/// pool_size = 10
+/// connect_timeout_secs = 10
+/// migrate_on_start = true
+/// ```
+///
+/// `DATABASE_URL` in the environment overrides `url` at startup (useful for
+/// Kubernetes secret injection), mirroring Seshat's behaviour.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PostgresConfig {
+    /// Connection URL, e.g. `postgres://user:pass@host:5432/akhmedu`.
+    pub url: String,
+
+    /// Maximum number of pooled connections.
+    #[serde(default = "default_pg_pool_size")]
+    pub pool_size: u32,
+
+    /// Timeout, in seconds, for establishing a new connection.
+    #[serde(default = "default_pg_connect_timeout_secs")]
+    pub connect_timeout_secs: u64,
+
+    /// Run pending migrations automatically on daemon start.
+    #[serde(default)]
+    pub migrate_on_start: bool,
+}
+
+fn default_pg_pool_size() -> u32 {
+    10
+}
+
+fn default_pg_connect_timeout_secs() -> u64 {
+    10
 }
 
 // ---------------------------------------------------------------------------
@@ -445,6 +493,45 @@ url = "http://seshat.local:4200"
         let config = AkhomedConfig::default();
         assert!(config.upstreams.anima.is_none());
         assert!(config.upstreams.seshat.is_none());
+    }
+
+    #[test]
+    fn postgres_section_parses_with_defaults() {
+        let toml_str = r#"
+[postgres]
+url = "postgres://akh:pw@db.local:5432/akhmedu"
+"#;
+        let config: AkhomedConfig = toml::from_str(toml_str).unwrap();
+        let pg = config.postgres.as_ref().unwrap();
+        assert_eq!(pg.url, "postgres://akh:pw@db.local:5432/akhmedu");
+        assert_eq!(pg.pool_size, 10);
+        assert_eq!(pg.connect_timeout_secs, 10);
+        assert!(!pg.migrate_on_start);
+    }
+
+    #[test]
+    fn postgres_section_honours_overrides() {
+        let toml_str = r#"
+[postgres]
+url = "postgres://db/akh"
+pool_size = 25
+connect_timeout_secs = 5
+migrate_on_start = true
+"#;
+        let config: AkhomedConfig = toml::from_str(toml_str).unwrap();
+        let pg = config.postgres.as_ref().unwrap();
+        assert_eq!(pg.pool_size, 25);
+        assert_eq!(pg.connect_timeout_secs, 5);
+        assert!(pg.migrate_on_start);
+    }
+
+    #[test]
+    fn postgres_section_absent_means_local_only() {
+        let config = AkhomedConfig::default();
+        assert!(config.postgres.is_none());
+        // A config with only a [daemon] section must still parse with no [postgres].
+        let config: AkhomedConfig = toml::from_str("[daemon]\nauto_start = []\n").unwrap();
+        assert!(config.postgres.is_none());
     }
 
     #[test]
