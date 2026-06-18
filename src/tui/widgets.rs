@@ -315,49 +315,116 @@ fn render_footer(frame: &mut Frame, area: Rect, tui: &AkhTui) {
     frame.render_widget(footer, area);
 }
 
-/// The right sidebar: stacked Context / Goals / Capabilities panels.
-///
-/// Phase A renders the scaffold; the live data feed (token usage, goals, tools,
-/// skills) arrives with the `_akh/status` poller in Phase C, at which point these
-/// placeholders are replaced with real rows from the cached snapshot.
+/// The right sidebar: stacked Context / Goals / Capabilities panels, populated
+/// from the latest `_akh/status` snapshot (the status poller, Phase C). Before
+/// the first poll lands (`snapshot` is `None`) the panels show a "connecting"
+/// placeholder; under a busy turn the snapshot is `stale` and agent-derived rows
+/// fall back while engine-derived skills stay live.
 #[cfg(feature = "acp")]
 fn render_sidebar(frame: &mut Frame, area: Rect, tui: &AkhTui) {
     let [ctx_area, goals_area, caps_area] = Layout::vertical([
         Constraint::Length(4),
         Constraint::Fill(1),
-        Constraint::Length(6),
+        Constraint::Length(8),
     ])
     .areas(area);
 
     let dim = Style::default().fg(Color::DarkGray);
-    let turn = if tui.awaiting {
-        "● turn in flight"
-    } else {
-        "○ idle"
+    let snap = tui.snapshot.as_ref();
+
+    // ── Context: token usage (Phase D) + cycle + activity ──
+    let context_lines: Vec<Line> = match snap {
+        Some(s) => {
+            let tokens = s.usage.as_ref().map(|u| u.total_tokens).unwrap_or(0);
+            let tok_line = if tokens > 0 {
+                format!("tokens: {tokens}")
+            } else {
+                "tokens: — (Phase D)".to_string()
+            };
+            let cycle = s.cycle.map_or_else(|| "—".to_string(), |c| c.to_string());
+            let activity = if s.stale {
+                "● agent busy"
+            } else if tui.awaiting {
+                "● turn in flight"
+            } else {
+                "○ idle"
+            };
+            vec![
+                Line::from(Span::styled(tok_line, dim)),
+                Line::from(Span::styled(format!("cycle: {cycle}  {activity}"), dim)),
+            ]
+        }
+        None => vec![
+            Line::from(Span::styled("tokens: —", dim)),
+            Line::from(Span::styled("· connecting ·", dim)),
+        ],
     };
+    frame.render_widget(
+        Paragraph::new(context_lines).block(panel_block("Context")),
+        ctx_area,
+    );
 
-    let context = Paragraph::new(vec![
-        Line::from(Span::styled("tokens: —", dim)),
-        Line::from(Span::styled(turn, dim)),
-    ])
-    .block(panel_block("Context"));
-    frame.render_widget(context, ctx_area);
+    // ── Goals: active-plan progress header + status-marked goal rows ──
+    let goal_lines: Vec<Line> = match snap {
+        Some(s) if !s.goals.is_empty() => {
+            let mut lines: Vec<Line> = Vec::new();
+            if let Some(p) = &s.plan {
+                let done = p
+                    .steps
+                    .iter()
+                    .filter(|st| st.status.as_str() == "completed")
+                    .count();
+                lines.push(Line::from(Span::styled(
+                    format!("▶ {}/{} {}", done, p.steps.len(), truncate(&p.strategy, 18)),
+                    Style::default().fg(Color::Magenta),
+                )));
+            }
+            let room = (goals_area.height.saturating_sub(2) as usize).saturating_sub(lines.len());
+            for g in s.goals.iter().take(room) {
+                let (marker, color) = goal_marker(g.status_label());
+                lines.push(Line::from(vec![
+                    Span::styled(format!("{marker} "), Style::default().fg(color)),
+                    Span::raw(truncate(&g.description, 26)),
+                ]));
+            }
+            lines
+        }
+        Some(s) if s.stale => vec![Line::from(Span::styled("agent busy…", dim))],
+        Some(_) => vec![Line::from(Span::styled("no goals", dim))],
+        None => vec![Line::from(Span::styled("· connecting ·", dim))],
+    };
+    frame.render_widget(
+        Paragraph::new(goal_lines)
+            .block(panel_block("Goals"))
+            .wrap(Wrap { trim: false }),
+        goals_area,
+    );
 
-    let goals = Paragraph::new(vec![
-        Line::from(Span::styled("no goals loaded", dim)),
-        Line::from(Span::styled("(live in Phase C)", dim)),
-    ])
-    .block(panel_block("Goals"))
-    .wrap(Wrap { trim: false });
-    frame.render_widget(goals, goals_area);
-
-    let caps = Paragraph::new(vec![
-        Line::from(Span::styled("tools:  —", dim)),
-        Line::from(Span::styled("skills: —", dim)),
-        Line::from(Span::styled("· awaiting daemon ·", dim)),
-    ])
-    .block(panel_block("Capabilities"));
-    frame.render_widget(caps, caps_area);
+    // ── Capabilities: tool + skill counts, then a few skill names ──
+    let cap_lines: Vec<Line> = match snap {
+        Some(s) => {
+            let mut lines = vec![
+                Line::from(Span::styled(format!("tools:  {}", s.tools.len()), dim)),
+                Line::from(Span::styled(format!("skills: {}", s.skills.len()), dim)),
+            ];
+            for sk in s.skills.iter().take(3) {
+                lines.push(Line::from(Span::styled(
+                    format!("  · {}", truncate(&sk.name, 24)),
+                    dim,
+                )));
+            }
+            lines
+        }
+        None => vec![
+            Line::from(Span::styled("tools:  —", dim)),
+            Line::from(Span::styled("skills: —", dim)),
+            Line::from(Span::styled("· connecting ·", dim)),
+        ],
+    };
+    frame.render_widget(
+        Paragraph::new(cap_lines).block(panel_block("Capabilities")),
+        caps_area,
+    );
 }
 
 /// A bordered sidebar-panel block with a cyan, bold title.
@@ -369,6 +436,32 @@ fn panel_block(title: &str) -> Block<'static> {
             .fg(Color::Cyan)
             .add_modifier(Modifier::BOLD),
     ))
+}
+
+/// Marker glyph + colour for a goal's status label (the serialized `GoalStatus`
+/// variant name).
+#[cfg(feature = "acp")]
+fn goal_marker(status: &str) -> (&'static str, Color) {
+    match status {
+        "Active" => ("●", Color::Green),
+        "Completed" => ("✓", Color::Cyan),
+        "Failed" | "Cancelled" => ("✗", Color::Red),
+        "Pending" | "Proposed" => ("○", Color::Yellow),
+        "Suspended" | "Dormant" => ("◌", Color::DarkGray),
+        _ => ("·", Color::Gray),
+    }
+}
+
+/// Truncate to `max` chars with a trailing ellipsis (char-aware, never splits a
+/// multibyte boundary).
+#[cfg(feature = "acp")]
+fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() > max {
+        let head: String = s.chars().take(max.saturating_sub(1)).collect();
+        format!("{head}…")
+    } else {
+        s.to_string()
+    }
 }
 
 /// Draw the centered model-picker overlay: a bordered, scrollable list of model

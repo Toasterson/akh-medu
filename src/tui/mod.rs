@@ -12,6 +12,8 @@
 pub mod markdown;
 pub mod remote;
 pub mod sink;
+#[cfg(feature = "acp")]
+pub mod status;
 pub mod widgets;
 
 #[cfg(feature = "acp")]
@@ -172,6 +174,10 @@ pub struct AkhTui {
     /// Active command-palette overlay (the `ctrl+p` popup). When `Some`, key
     /// input is routed to the palette instead of the chat input.
     palette: Option<CommandPalette>,
+    /// Latest sidebar snapshot from the status poller (`_akh/status`). `None`
+    /// until the first poll lands; drives the live Context/Goals/Capabilities
+    /// panels.
+    snapshot: Option<status::StatusSnapshot>,
 }
 
 #[cfg(feature = "acp")]
@@ -208,6 +214,7 @@ impl AkhTui {
             effort_label: None,
             git_branch: detect_git_branch(),
             palette: None,
+            snapshot: None,
         }
     }
 
@@ -236,6 +243,11 @@ impl AkhTui {
         loop {
             // Drain pending messages from backend.
             self.drain_backend_messages();
+
+            // Pick up the latest sidebar snapshot from the status poller.
+            if let Some(snap) = self.remote.try_recv_snapshot() {
+                self.snapshot = Some(snap);
+            }
 
             // Advance the spinner while a turn is in flight (the event poll
             // below ticks ~10×/s when idle, giving a steady animation).
@@ -546,6 +558,66 @@ impl AkhTui {
             .map(str::to_string)
     }
 
+    /// Fetch a fresh `_akh/status` snapshot synchronously for the `/goals` and
+    /// `/status` commands. Best-effort: `None` on any transport/parse error.
+    fn fetch_status(&self) -> Option<status::StatusSnapshot> {
+        let v = self.control_call("_akh/status", serde_json::json!({})).ok()?;
+        serde_json::from_value(v).ok()
+    }
+
+    /// Print the akh's current goals into the message stream (also shown live in
+    /// the sidebar).
+    fn show_goals(&mut self) {
+        let Some(snap) = self.fetch_status() else {
+            self.messages
+                .push(AkhMessage::error("status", "could not fetch goals"));
+            return;
+        };
+        if snap.goals.is_empty() {
+            let note = if snap.stale {
+                " (agent busy — try again)"
+            } else {
+                ""
+            };
+            self.messages
+                .push(AkhMessage::system(format!("No goals.{note}")));
+            return;
+        }
+        self.messages
+            .push(AkhMessage::system(format!("Goals ({}):", snap.goals.len())));
+        for g in &snap.goals {
+            self.messages.push(AkhMessage::system(format!(
+                "  • [{}] {} (p{})",
+                g.status_label(),
+                g.description,
+                g.priority
+            )));
+        }
+        self.autoscroll();
+    }
+
+    /// Print a one-line workspace/agent status summary into the message stream.
+    fn show_status(&mut self) {
+        let Some(snap) = self.fetch_status() else {
+            self.messages
+                .push(AkhMessage::error("status", "could not fetch status"));
+            return;
+        };
+        let cycle = snap
+            .cycle
+            .map_or_else(|| "—".to_string(), |c| c.to_string());
+        let stale = if snap.stale { " (stale: agent busy)" } else { "" };
+        self.messages.push(AkhMessage::system(format!(
+            "Status — workspace {ws} · cycle {cycle} · {g} goals · {t} tools · {s} skills · {p} projects{stale}",
+            ws = self.workspace,
+            g = snap.goals.len(),
+            t = snap.tools.len(),
+            s = snap.skills.len(),
+            p = snap.projects.len(),
+        )));
+        self.autoscroll();
+    }
+
     /// Issue one `_akh/model/set` to switch the running model, reporting the
     /// outcome as a System message.
     fn set_model(&mut self, model: &str) {
@@ -739,8 +811,10 @@ impl AkhTui {
                 self.messages
                     .push(AkhMessage::system(format!("Sidebar {state}.")));
             }
-            "goals" | "status" | "seed" => {
-                // Forward as a command to the server.
+            "goals" => self.show_goals(),
+            "status" => self.show_status(),
+            "seed" => {
+                // Seed packs over ACP are a later increment.
                 self.remote.send_command(cmd);
             }
             _ => {

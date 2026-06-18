@@ -26,6 +26,7 @@ mod inner {
 
     use crate::client::ServerInfo;
     use crate::message::AkhMessage;
+    use crate::tui::status::StatusSnapshot;
 
     /// A user action queued from the TUI to the background ACP session.
     enum Outbound {
@@ -53,6 +54,7 @@ mod inner {
     }
 
     /// Which ACP transport the daemon advertised in its discovery record.
+    #[derive(Clone)]
     enum Endpoint {
         Unix(String),
         Tcp(String),
@@ -66,6 +68,9 @@ mod inner {
     pub struct RemoteChat {
         tx: mpsc::Sender<Outbound>,
         rx: mpsc::Receiver<ChatUpdate>,
+        /// Latest sidebar snapshots from the status poller — a channel separate
+        /// from `rx` so poller liveness never masks a lost chat session.
+        snapshot_rx: mpsc::Receiver<StatusSnapshot>,
         disconnected: bool,
     }
 
@@ -87,10 +92,16 @@ mod inner {
                             rebuild the daemon with --features acp"
                     .to_string());
             };
+            // A clone for the independent status poller (sibling thread).
+            let poll_endpoint = endpoint.clone();
 
-            // Channels: TUI → session (outbound), session → TUI (inbound).
+            // Channels: TUI → session (outbound), session → TUI (inbound), plus a
+            // dedicated snapshot channel for the status poller (kept off the chat
+            // channel so polling liveness can't mask a lost chat session — `rx`
+            // reports Disconnected only when all its senders drop).
             let (out_tx, out_rx) = mpsc::channel::<Outbound>();
             let (in_tx, in_rx) = mpsc::channel::<ChatUpdate>();
+            let (snap_tx, snap_rx) = mpsc::channel::<StatusSnapshot>();
 
             thread::Builder::new()
                 .name("acp-remote".into())
@@ -113,9 +124,27 @@ mod inner {
                 })
                 .map_err(|e| format!("failed to spawn ACP thread: {e}"))?;
 
+            // Status poller: a sibling thread that periodically fetches
+            // `_akh/status` for the sidebar over one-shot connections. Detached —
+            // it dies with the process when the TUI exits (best-effort, like the
+            // chat thread); a failed poll is skipped and retried.
+            thread::Builder::new()
+                .name("acp-status-poll".into())
+                .spawn(move || {
+                    let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                    else {
+                        return;
+                    };
+                    rt.block_on(status_poll_task(poll_endpoint, snap_tx));
+                })
+                .map_err(|e| format!("failed to spawn status-poll thread: {e}"))?;
+
             Ok(Self {
                 tx: out_tx,
                 rx: in_rx,
+                snapshot_rx: snap_rx,
                 disconnected: false,
             })
         }
@@ -153,6 +182,17 @@ mod inner {
         /// Whether the ACP connection has been lost.
         pub fn is_disconnected(&self) -> bool {
             self.disconnected
+        }
+
+        /// Drain to the most recent sidebar snapshot (non-blocking). Coalesces
+        /// any backlog so the UI always renders the latest, never a stale queued
+        /// one; `None` when no new snapshot has arrived since the last call.
+        pub fn try_recv_snapshot(&self) -> Option<StatusSnapshot> {
+            let mut latest = None;
+            while let Ok(snap) = self.snapshot_rx.try_recv() {
+                latest = Some(snap);
+            }
+            latest
         }
     }
 
@@ -219,6 +259,31 @@ mod inner {
                 "acp",
                 format!("ACP session ended: {e}"),
             )));
+        }
+    }
+
+    /// Background task: every ~1.5 s fetch `_akh/status` over a fresh one-shot
+    /// ACP connection and forward the deserialized [`StatusSnapshot`] to the TUI.
+    /// A failed poll (daemon busy / restarting / no `_akh/status`) is skipped
+    /// silently; the loop ends when the snapshot receiver is dropped (TUI closed).
+    async fn status_poll_task(endpoint: Endpoint, tx: mpsc::Sender<StatusSnapshot>) {
+        loop {
+            let params = serde_json::json!({});
+            let result = match &endpoint {
+                Endpoint::Unix(path) => {
+                    crate::acp::ext_request_unix(path, "_akh/status", params).await
+                }
+                Endpoint::Tcp(addr) => {
+                    crate::acp::ext_request_tcp(addr, "_akh/status", params).await
+                }
+            };
+            if let Ok(value) = result
+                && let Ok(snapshot) = serde_json::from_value::<StatusSnapshot>(value)
+                && tx.send(snapshot).is_err()
+            {
+                break; // TUI closed — stop polling.
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
         }
     }
 
