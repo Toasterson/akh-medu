@@ -59,6 +59,7 @@ use tokio::sync::watch;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use crate::agent::Agent;
+use crate::agent::{GoalStatus, PlanStatus, StepStatus};
 use crate::chat::ChatProcessor;
 use crate::engine::Engine;
 use crate::message::{AkhMessage, MessageSink};
@@ -523,7 +524,7 @@ fn dispatch_akh(
             // Per-workspace data-plane (always present).
             let mut groups = vec![
                 "meta", "workspace", "symbols", "triples", "query", "memory", "infer",
-                "permission",
+                "permission", "goals", "tools", "skills", "projects", "status",
             ];
             let mut methods = vec![
                 "_akh/health",
@@ -537,6 +538,11 @@ fn dispatch_akh(
                 "_akh/memory/recall",
                 "_akh/infer/activate",
                 "_akh/permission/mode",
+                "_akh/goals",
+                "_akh/tools",
+                "_akh/skills",
+                "_akh/projects",
+                "_akh/status",
             ];
             // Server-level control-plane (only when a backend is wired).
             if has_control {
@@ -558,6 +564,13 @@ fn dispatch_akh(
             "workspace": workspace,
             "symbols": engine.all_symbols().len(),
             "triples": engine.all_triples().len(),
+        })),
+
+        // ── skills group (engine-derivable; no agent lock needed, so it is
+        //    served here rather than in `dispatch_akh_agent`) ──────────────
+        "skills" => Ok(serde_json::json!({
+            "workspace": workspace,
+            "skills": skills_json(engine),
         })),
 
         // ── symbols group (read-only) ───────────────────────────────────
@@ -840,6 +853,183 @@ fn dispatch_akh(
         }
 
         other => Err(format!("unknown _akh data-plane method: _akh/{other}")),
+    }
+}
+
+/// Agent-read `_akh/*` methods — `goals`, `tools`, `projects`, and the combined
+/// `status` snapshot. Distinct from [`dispatch_akh`] because these read the
+/// [`Agent`] (behind a `Mutex`), not just the [`Engine`]. (`_akh/skills` is
+/// engine-derivable and stays in [`dispatch_akh`].)
+///
+/// To honour ADR-027 ("the turn is the priority") the agent is taken with
+/// `try_lock`: when a turn holds the lock, the agent-derived fields are reported
+/// empty with `stale: true`, and only the engine-derivable fields (skills in the
+/// `status` snapshot) are filled — so a sidebar refresh never blocks behind, nor
+/// stalls, a live turn (ADR 063 §2).
+///
+/// Returns `None` when `method` is not an agent-read method, so the caller falls
+/// through to [`dispatch_akh`].
+fn dispatch_akh_agent(
+    engine: &Engine,
+    agent: &Arc<Mutex<Agent>>,
+    workspace: &str,
+    method: &str,
+    _params: &serde_json::Value,
+) -> Option<Result<serde_json::Value, String>> {
+    let op = method.strip_prefix("_akh/").unwrap_or(method);
+    match op {
+        "goals" | "tools" | "projects" | "status" => {}
+        _ => return None,
+    }
+
+    // Non-blocking acquire: a held lock (turn in flight) ⇒ no agent snapshot.
+    // Poisoned ⇒ recover the inner agent (a prior panic left it valid to read).
+    let guard = match agent.try_lock() {
+        Ok(g) => Some(g),
+        Err(std::sync::TryLockError::WouldBlock) => None,
+        Err(std::sync::TryLockError::Poisoned(p)) => Some(p.into_inner()),
+    };
+    let stale = guard.is_none();
+    let a = guard.as_deref();
+
+    let value = match op {
+        "goals" => serde_json::json!({
+            "workspace": workspace,
+            "stale": stale,
+            "goals": a.map(goals_json).unwrap_or_default(),
+        }),
+        "tools" => serde_json::json!({
+            "workspace": workspace,
+            "stale": stale,
+            "tools": a.map(tools_json).unwrap_or_default(),
+        }),
+        "projects" => serde_json::json!({
+            "workspace": workspace,
+            "stale": stale,
+            "projects": a.map(projects_json).unwrap_or_default(),
+        }),
+        // The combined snapshot backing the whole TUI sidebar in one round-trip.
+        "status" => serde_json::json!({
+            "workspace": workspace,
+            "stale": stale,
+            "cycle": a.map(Agent::cycle_count),
+            "goals": a.map(goals_json).unwrap_or_default(),
+            "plan": a.and_then(active_plan_json),
+            "tools": a.map(tools_json).unwrap_or_default(),
+            "projects": a.map(projects_json).unwrap_or_default(),
+            "skills": skills_json(engine), // engine-derivable: present even when stale
+            "usage": serde_json::Value::Null, // token metering lands in Phase D
+        }),
+        _ => unreachable!("op was filtered to the agent-read set above"),
+    };
+    Some(Ok(value))
+}
+
+/// Compact JSON projection of the agent's goals for the sidebar (capped at 50):
+/// description, status (the serialized [`GoalStatus`]), priority, cycles worked.
+fn goals_json(agent: &Agent) -> Vec<serde_json::Value> {
+    const MAX: usize = 50;
+    agent
+        .goals()
+        .iter()
+        .take(MAX)
+        .map(|g| {
+            serde_json::json!({
+                "description": g.description,
+                "status": serde_json::to_value(&g.status).unwrap_or(serde_json::Value::Null),
+                "priority": g.priority,
+                "cycles_worked": g.cycles_worked,
+            })
+        })
+        .collect()
+}
+
+/// Compact JSON projection of the registered tools (name + description).
+fn tools_json(agent: &Agent) -> Vec<serde_json::Value> {
+    agent
+        .list_tools()
+        .into_iter()
+        .map(|t| serde_json::json!({ "name": t.name, "description": t.description }))
+        .collect()
+}
+
+/// Compact JSON projection of the agent's projects (name + status + goal count).
+fn projects_json(agent: &Agent) -> Vec<serde_json::Value> {
+    agent
+        .projects()
+        .iter()
+        .map(|p| {
+            serde_json::json!({
+                "name": p.name,
+                "status": p.status.to_string(),
+                "goals": p.goals.len(),
+            })
+        })
+        .collect()
+}
+
+/// Engine-derivable JSON projection of loaded skills (id, name, state, counts).
+fn skills_json(engine: &Engine) -> Vec<serde_json::Value> {
+    engine
+        .list_skills()
+        .into_iter()
+        .map(|s| {
+            serde_json::json!({
+                "id": s.id,
+                "name": s.name,
+                "state": format!("{:?}", s.state),
+                "triples": s.triple_count,
+                "rules": s.rule_count,
+                "actions": s.action_count,
+                "plans": s.plan_count,
+            })
+        })
+        .collect()
+}
+
+/// The active goal's plan (if any) projected to JSON for the sidebar: the goal
+/// description, plan strategy/status, and each step's tool + status + rationale.
+fn active_plan_json(agent: &Agent) -> Option<serde_json::Value> {
+    let active = agent.goals().iter().find(|g| g.status == GoalStatus::Active)?;
+    let plan = agent.plan_for_goal(active.symbol_id)?;
+    let steps: Vec<_> = plan
+        .steps
+        .iter()
+        .map(|s| {
+            serde_json::json!({
+                "tool": s.tool_name,
+                "status": step_status_str(&s.status),
+                "rationale": s.rationale,
+            })
+        })
+        .collect();
+    Some(serde_json::json!({
+        "goal": active.description,
+        "strategy": plan.strategy,
+        "status": plan_status_str(&plan.status),
+        "steps": steps,
+    }))
+}
+
+/// Short, stable label for a [`StepStatus`] (the data-carrying variants collapse
+/// to their kind).
+fn step_status_str(s: &StepStatus) -> &'static str {
+    match s {
+        StepStatus::Pending => "pending",
+        StepStatus::Active => "active",
+        StepStatus::Completed => "completed",
+        StepStatus::Failed { .. } => "failed",
+        StepStatus::Skipped => "skipped",
+    }
+}
+
+/// Short, stable label for a [`PlanStatus`].
+fn plan_status_str(s: &PlanStatus) -> &'static str {
+    match s {
+        PlanStatus::Active => "active",
+        PlanStatus::Completed => "completed",
+        PlanStatus::Failed { .. } => "failed",
+        PlanStatus::Superseded => "superseded",
     }
 }
 
@@ -1155,6 +1345,28 @@ fn build_connection(
                                             Err(join_err) => responder.respond_with_error(
                                                 agent_client_protocol::Error::internal_error()
                                                     .data(join_err.to_string()),
+                                            ),
+                                        };
+                                    }
+                                    // Agent-read methods (goals/tools/projects/
+                                    // status) snapshot the agent under try_lock,
+                                    // so a sidebar refresh never blocks a live
+                                    // turn (ADR 063 §2). Engine-only methods fall
+                                    // through to dispatch_akh below.
+                                    if let Some(result) = dispatch_akh_agent(
+                                        &engine,
+                                        &agent,
+                                        &workspace,
+                                        &req.method,
+                                        &req.params,
+                                    ) {
+                                        return match result {
+                                            Ok(value) => {
+                                                responder.respond(AkhExtResponse(value))
+                                            }
+                                            Err(e) => responder.respond_with_error(
+                                                agent_client_protocol::Error::internal_error()
+                                                    .data(e),
                                             ),
                                         };
                                     }
@@ -1663,6 +1875,68 @@ mod tests {
         let shared_agent = Arc::new(Mutex::new(agent));
 
         AkhAcpAgent::new(engine, shared_agent, processor)
+    }
+
+    /// Build a bare engine + shared agent (no ACP wrapper) for exercising the
+    /// agent-read dispatch helpers directly.
+    fn engine_and_agent() -> (Arc<Engine>, Arc<Mutex<Agent>>) {
+        let engine = Engine::new(EngineConfig {
+            dimension: Dimension::TEST,
+            ..Default::default()
+        })
+        .expect("engine");
+        let engine = Arc::new(engine);
+        let agent = Agent::new(Arc::clone(&engine), AgentConfig::default()).expect("agent");
+        (engine, Arc::new(Mutex::new(agent)))
+    }
+
+    #[test]
+    fn agent_read_status_snapshot_is_fresh_when_idle() {
+        let (engine, agent) = engine_and_agent();
+
+        let v = dispatch_akh_agent(&engine, &agent, "default", "_akh/status", &serde_json::json!({}))
+            .expect("status is an agent-read method")
+            .expect("ok");
+        assert_eq!(v["stale"], serde_json::json!(false));
+        // All sidebar arrays are present (possibly empty) for a fresh agent.
+        assert!(v["goals"].is_array());
+        assert!(v["tools"].is_array());
+        assert!(v["projects"].is_array());
+        assert!(v["skills"].is_array());
+        // Usage metering is deferred to Phase D.
+        assert_eq!(v["usage"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn agent_read_reports_stale_when_agent_is_busy() {
+        let (engine, agent) = engine_and_agent();
+
+        // Simulate a turn holding the agent lock; try_lock must not block.
+        let _busy = agent.lock().expect("hold the agent lock");
+        let v = dispatch_akh_agent(&engine, &agent, "default", "_akh/status", &serde_json::json!({}))
+            .unwrap()
+            .unwrap();
+        assert_eq!(v["stale"], serde_json::json!(true));
+        // Agent-derived fields are empty under contention…
+        assert_eq!(v["goals"], serde_json::json!([]));
+        assert_eq!(v["tools"], serde_json::json!([]));
+        assert_eq!(v["cycle"], serde_json::Value::Null);
+        // …but engine-derivable skills are still served.
+        assert!(v["skills"].is_array());
+    }
+
+    #[test]
+    fn agent_read_ignores_non_agent_methods() {
+        let (engine, agent) = engine_and_agent();
+        // Engine-only / unknown methods fall through (None) to dispatch_akh.
+        assert!(
+            dispatch_akh_agent(&engine, &agent, "default", "_akh/health", &serde_json::json!({}))
+                .is_none()
+        );
+        assert!(
+            dispatch_akh_agent(&engine, &agent, "default", "_akh/skills", &serde_json::json!({}))
+                .is_none()
+        );
     }
 
     /// Full ACP lifecycle over a REAL Unix domain socket:
