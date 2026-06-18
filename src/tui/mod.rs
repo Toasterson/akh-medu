@@ -63,6 +63,67 @@ impl ModelPicker {
     }
 }
 
+/// One selectable entry in the [`CommandPalette`] — a slash command plus a
+/// one-line description shown beside it.
+#[cfg(feature = "acp")]
+pub struct PaletteItem {
+    /// The command token written after `/` (e.g. `model`).
+    pub name: &'static str,
+    /// One-line description shown beside the name in the palette.
+    pub desc: &'static str,
+    /// Whether the command takes an argument. `true` ⇒ selecting it pre-fills the
+    /// input with `/name ` so the user can type the argument; `false` ⇒ it runs
+    /// immediately on Enter.
+    pub needs_arg: bool,
+}
+
+/// The full slash-command set — the single source of truth shared by the
+/// `ctrl+p` palette, `/`-autocomplete, and `/help`.
+#[cfg(feature = "acp")]
+pub const COMMANDS: &[PaletteItem] = &[
+    PaletteItem { name: "model", desc: "switch the active model (picker if no name)", needs_arg: false },
+    PaletteItem { name: "effort", desc: "reasoning effort: low | medium | high | off", needs_arg: true },
+    PaletteItem { name: "goals", desc: "show the akh's current goals", needs_arg: false },
+    PaletteItem { name: "status", desc: "show workspace status", needs_arg: false },
+    PaletteItem { name: "seed", desc: "seed a knowledge pack by name", needs_arg: true },
+    PaletteItem { name: "audit", desc: "toggle audit-log display", needs_arg: false },
+    PaletteItem { name: "sidebar", desc: "toggle the right sidebar (ctrl+b)", needs_arg: false },
+    PaletteItem { name: "help", desc: "list commands", needs_arg: false },
+    PaletteItem { name: "quit", desc: "exit the TUI", needs_arg: false },
+];
+
+/// A centered command-palette overlay (the `ctrl+p` popup): a substring-filtered
+/// list of [`COMMANDS`] with a type-ahead filter, mirroring [`ModelPicker`].
+#[cfg(feature = "acp")]
+pub struct CommandPalette {
+    /// Type-ahead filter: only commands whose name contains this (case-
+    /// insensitive) are shown. Empty = show all.
+    pub filter: String,
+    /// Index into the *filtered* list of the currently highlighted row.
+    pub selected: usize,
+}
+
+#[cfg(feature = "acp")]
+impl CommandPalette {
+    /// The commands currently visible given the type-ahead [`filter`]: a
+    /// case-insensitive *substring* match over [`COMMANDS`] (substring, not
+    /// prefix, so `eff` finds `effort` and `dit` finds `audit`). An empty filter
+    /// shows everything.
+    ///
+    /// [`filter`]: CommandPalette::filter
+    #[must_use]
+    pub fn filtered(&self) -> Vec<&'static PaletteItem> {
+        if self.filter.is_empty() {
+            return COMMANDS.iter().collect();
+        }
+        let needle = self.filter.to_ascii_lowercase();
+        COMMANDS
+            .iter()
+            .filter(|c| c.name.contains(needle.as_str()))
+            .collect()
+    }
+}
+
 /// TUI application state (ACP client).
 #[cfg(feature = "acp")]
 pub struct AkhTui {
@@ -92,6 +153,25 @@ pub struct AkhTui {
     /// Index in `messages` of the in-progress streamed answer, so successive
     /// answer deltas append to one growing message. `None` between turns.
     stream_idx: Option<usize>,
+    /// Whether the right sidebar (context / goals / capabilities) is shown.
+    /// Toggled with `ctrl+b`; auto-hidden by the renderer below a min width.
+    show_sidebar: bool,
+    /// A short title derived from the first user prompt this session, shown in
+    /// the header in place of the bare workspace name. `None` until the first
+    /// prompt is sent.
+    session_title: Option<String>,
+    /// The active model name, fetched once at startup via `_akh/model/list`
+    /// (`current`) and refreshed when `/model` switches it. Shown in the footer.
+    model_label: Option<String>,
+    /// The reasoning-effort level last set this session via `/effort`, shown in
+    /// the footer. `None` means the daemon default (unknown to the client).
+    effort_label: Option<String>,
+    /// `repo-branch[*]` of the client's working directory (the `*` marks a dirty
+    /// tree), computed once at startup. `None` when not in a git repo.
+    git_branch: Option<String>,
+    /// Active command-palette overlay (the `ctrl+p` popup). When `Some`, key
+    /// input is routed to the palette instead of the chat input.
+    palette: Option<CommandPalette>,
 }
 
 #[cfg(feature = "acp")]
@@ -122,6 +202,12 @@ impl AkhTui {
             awaiting: false,
             spinner_frame: 0,
             stream_idx: None,
+            show_sidebar: true,
+            session_title: None,
+            model_label: None,
+            effort_label: None,
+            git_branch: detect_git_branch(),
+            palette: None,
         }
     }
 
@@ -143,6 +229,10 @@ impl AkhTui {
         crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture)
             .into_diagnostic()?;
 
+        // Fetch the active model once for the footer (best-effort — a daemon
+        // that lists nothing just leaves the footer model blank).
+        self.model_label = self.fetch_current_model();
+
         loop {
             // Drain pending messages from backend.
             self.drain_backend_messages();
@@ -154,19 +244,7 @@ impl AkhTui {
             }
 
             terminal
-                .draw(|frame| {
-                    widgets::render(
-                        frame,
-                        &self.workspace,
-                        &self.messages,
-                        &self.input_buffer,
-                        self.scroll_offset,
-                        self.show_thinking,
-                        self.awaiting,
-                        self.spinner_frame,
-                        self.picker.as_ref(),
-                    );
-                })
+                .draw(|frame| widgets::render(frame, self))
                 .into_diagnostic()?;
 
             if self.should_quit || sigterm_flag.load(Ordering::Relaxed) {
@@ -291,6 +369,10 @@ impl AkhTui {
             self.handle_picker_key(code);
             return;
         }
+        if self.palette.is_some() {
+            self.handle_palette_key(code);
+            return;
+        }
         match code {
             KeyCode::Enter => {
                 let input = self.input_buffer.trim().to_string();
@@ -304,6 +386,17 @@ impl AkhTui {
             }
             KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
                 self.should_quit = true;
+            }
+            KeyCode::Char('b') if modifiers.contains(KeyModifiers::CONTROL) => {
+                // Toggle the right sidebar.
+                self.show_sidebar = !self.show_sidebar;
+            }
+            KeyCode::Char('p') if modifiers.contains(KeyModifiers::CONTROL) => {
+                // Open the command palette.
+                self.palette = Some(CommandPalette {
+                    filter: String::new(),
+                    selected: 0,
+                });
             }
             KeyCode::Tab => {
                 // Expand/collapse the tool/agent "thinking" steps.
@@ -380,13 +473,91 @@ impl AkhTui {
         }
     }
 
+    /// Route a key to the open command palette. Mirrors [`handle_picker_key`]:
+    /// Up/Down move the (clamped) selection within the filtered view; printable
+    /// chars extend the substring filter and Backspace trims it (both reset the
+    /// selection to the top); Enter runs the highlighted command (see
+    /// [`run_palette_selection`]); Esc closes without running.
+    ///
+    /// [`handle_picker_key`]: Self::handle_picker_key
+    /// [`run_palette_selection`]: Self::run_palette_selection
+    fn handle_palette_key(&mut self, code: KeyCode) {
+        let Some(palette) = self.palette.as_mut() else {
+            return;
+        };
+        match code {
+            KeyCode::Up => {
+                palette.selected = palette.selected.saturating_sub(1);
+            }
+            KeyCode::Down => {
+                let len = palette.filtered().len();
+                if len > 0 {
+                    palette.selected = (palette.selected + 1).min(len - 1);
+                }
+            }
+            KeyCode::Char(c) => {
+                palette.filter.push(c);
+                palette.selected = 0;
+            }
+            KeyCode::Backspace => {
+                palette.filter.pop();
+                palette.selected = 0;
+            }
+            KeyCode::Esc => {
+                self.palette = None;
+            }
+            KeyCode::Enter => {
+                // Resolve the chosen command out of the *filtered* view, close
+                // the palette, then act on it.
+                let chosen = palette
+                    .filtered()
+                    .get(palette.selected)
+                    .map(|item| (item.name, item.needs_arg));
+                self.palette = None;
+                if let Some((name, needs_arg)) = chosen {
+                    self.run_palette_selection(name, needs_arg);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Act on a palette choice: a command that takes an argument pre-fills the
+    /// input with `/name ` (so the user can type the argument and press Enter);
+    /// an argument-less command runs immediately via [`handle_command`].
+    ///
+    /// [`handle_command`]: Self::handle_command
+    fn run_palette_selection(&mut self, name: &str, needs_arg: bool) {
+        if needs_arg {
+            self.input_buffer = format!("/{name} ");
+        } else {
+            self.handle_command(name);
+        }
+    }
+
+    /// Fetch the daemon's current model name via `_akh/model/list` (`current`)
+    /// for the footer. Best-effort: any error or a daemon that lists no current
+    /// model yields `None` (the footer then omits the model).
+    fn fetch_current_model(&self) -> Option<String> {
+        let params = serde_json::json!({ "workspace": self.workspace });
+        let v = self.control_call("_akh/model/list", params).ok()?;
+        v.get("current")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+    }
+
     /// Issue one `_akh/model/set` to switch the running model, reporting the
     /// outcome as a System message.
     fn set_model(&mut self, model: &str) {
         let params = serde_json::json!({ "workspace": self.workspace, "model": model });
         match self.control_call("_akh/model/set", params) {
             Ok(v) => {
-                let m = v.get("model").and_then(serde_json::Value::as_str).unwrap_or(model);
+                let m = v
+                    .get("model")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or(model)
+                    .to_string();
+                self.model_label = Some(m.clone());
                 self.messages
                     .push(AkhMessage::system(format!("Model set to '{m}'.")));
             }
@@ -481,6 +652,12 @@ impl AkhTui {
             return;
         }
 
+        // Derive the session title from the first real prompt (shown in the
+        // header in place of the bare workspace name).
+        if self.session_title.is_none() {
+            self.session_title = Some(summarize_title(input));
+        }
+
         // Show user input in the messages area.
         self.messages.push(AkhMessage::Prompt {
             question: format!("> {input}"),
@@ -503,8 +680,9 @@ impl AkhTui {
             "help" | "h" => {
                 self.messages.push(AkhMessage::system(
                     "Commands: /model [name], /effort <low|medium|high|off>, /goals, /status, \
-                     /seed <pack>, /audit, /quit. /model with no name opens a picker. \
-                     Tab toggles thinking steps."
+                     /seed <pack>, /audit, /sidebar, /quit. /model with no name opens a picker. \
+                     Keys: Tab toggles thinking · ctrl+b toggles sidebar · ctrl+p opens the \
+                     command palette."
                         .to_string(),
                 ));
             }
@@ -530,7 +708,9 @@ impl AkhTui {
                                 let e = v
                                     .get("effort")
                                     .and_then(serde_json::Value::as_str)
-                                    .unwrap_or("default");
+                                    .unwrap_or("default")
+                                    .to_string();
+                                self.effort_label = Some(e.clone());
                                 self.messages.push(AkhMessage::system(format!(
                                     "Reasoning effort set to '{e}'."
                                 )));
@@ -553,6 +733,12 @@ impl AkhTui {
                     "Audit log display: {state}"
                 )));
             }
+            "sidebar" => {
+                self.show_sidebar = !self.show_sidebar;
+                let state = if self.show_sidebar { "shown" } else { "hidden" };
+                self.messages
+                    .push(AkhMessage::system(format!("Sidebar {state}.")));
+            }
             "goals" | "status" | "seed" => {
                 // Forward as a command to the server.
                 self.remote.send_command(cmd);
@@ -566,6 +752,46 @@ impl AkhTui {
     }
 }
 
+/// Truncate a prompt into a short session title for the header: first line,
+/// whitespace-collapsed, capped at ~40 chars with an ellipsis.
+#[cfg(feature = "acp")]
+fn summarize_title(prompt: &str) -> String {
+    const MAX: usize = 40;
+    let first_line = prompt.lines().next().unwrap_or(prompt);
+    let collapsed = first_line.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.chars().count() > MAX {
+        let head: String = collapsed.chars().take(MAX - 1).collect();
+        format!("{head}…")
+    } else {
+        collapsed
+    }
+}
+
+/// Best-effort `branch[*]` of the client's current git repo for the footer: the
+/// abbreviated branch name, suffixed with `*` when the working tree is dirty.
+/// `None` outside a repo or if `git` is unavailable.
+#[cfg(feature = "acp")]
+fn detect_git_branch() -> Option<String> {
+    use std::process::Command;
+    let branch_out = Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .ok()?;
+    if !branch_out.status.success() {
+        return None;
+    }
+    let branch = String::from_utf8_lossy(&branch_out.stdout).trim().to_string();
+    if branch.is_empty() {
+        return None;
+    }
+    let dirty = Command::new("git")
+        .args(["status", "--porcelain"])
+        .output()
+        .ok()
+        .is_some_and(|o| !o.stdout.is_empty());
+    Some(if dirty { format!("{branch}*") } else { branch })
+}
+
 /// Launch the TUI connected to a remote akhomed server.
 #[cfg(feature = "acp")]
 pub fn launch_remote(
@@ -577,4 +803,57 @@ pub fn launch_remote(
 
     let mut tui = AkhTui::new_remote(workspace.to_string(), remote, info.clone());
     tui.run()
+}
+
+#[cfg(all(test, feature = "acp"))]
+mod tests {
+    use super::{CommandPalette, COMMANDS, summarize_title};
+
+    #[test]
+    fn title_keeps_short_prompts_verbatim() {
+        assert_eq!(summarize_title("what is the sun"), "what is the sun");
+    }
+
+    #[test]
+    fn title_collapses_whitespace_and_takes_first_line() {
+        assert_eq!(
+            summarize_title("  hello   world \n second line"),
+            "hello world"
+        );
+    }
+
+    #[test]
+    fn title_truncates_long_prompts_with_ellipsis() {
+        let long = "a".repeat(80);
+        let title = summarize_title(&long);
+        assert_eq!(title.chars().count(), 40);
+        assert!(title.ends_with('…'));
+    }
+
+    #[test]
+    fn palette_empty_filter_shows_all_commands() {
+        let p = CommandPalette { filter: String::new(), selected: 0 };
+        assert_eq!(p.filtered().len(), COMMANDS.len());
+    }
+
+    #[test]
+    fn palette_substring_filter_matches_anywhere_in_name() {
+        // "dit" is a substring of "audit" but not a prefix.
+        let p = CommandPalette { filter: "dit".to_string(), selected: 0 };
+        let names: Vec<&str> = p.filtered().iter().map(|c| c.name).collect();
+        assert_eq!(names, vec!["audit"]);
+    }
+
+    #[test]
+    fn palette_no_match_yields_empty() {
+        let p = CommandPalette { filter: "zzz".to_string(), selected: 0 };
+        assert!(p.filtered().is_empty());
+    }
+
+    #[test]
+    fn palette_filter_is_case_insensitive() {
+        let p = CommandPalette { filter: "MODEL".to_string(), selected: 0 };
+        let names: Vec<&str> = p.filtered().iter().map(|c| c.name).collect();
+        assert_eq!(names, vec!["model"]);
+    }
 }
