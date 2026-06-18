@@ -61,6 +61,7 @@ pub mod library;
 #[cfg(feature = "daemon")]
 pub mod upstream_client;
 pub mod message;
+pub mod mutation;
 pub mod nlu;
 pub mod partition;
 pub mod perception;
@@ -86,3 +87,6 @@ pub mod tui;
 pub mod vsa;
 pub mod wiki;
 pub mod workspace;
+/// Phase 38b: mutation write-ahead log to the Postgres backing store.
+#[cfg(feature = "postgres")]
+pub mod wal;

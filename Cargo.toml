@@ -156,9 +156,10 @@ daemon = ["tokio"]
 # those surfaces are gone, so it now just means daemon + acp.) Phase 38 folds
 # in the Postgres backing store.
 server = ["daemon", "acp", "postgres"]
-# Phase 38a: Postgres backing store. Optional at runtime (no [postgres] config =
-# legacy local-only mode); this feature only controls whether the code is built.
-postgres = ["dep:akhomed-store"]
+# Phase 38a/38b: Postgres backing store. Optional at runtime (no [postgres]
+# config = legacy local-only mode); this feature only controls whether the code
+# is built. Pulls in `tokio` because the WAL flusher (38b) is async.
+postgres = ["dep:akhomed-store", "tokio"]
 oxifed = ["daemon", "lapin", "deadpool-lapin", "futures-util"]
 email = ["mail-parser", "imap", "native-tls", "lettre"]
 calendar = ["icalendar", "chrono"]

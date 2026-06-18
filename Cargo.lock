@@ -133,6 +133,7 @@ name = "akh-medu"
 version = "0.7.0"
 dependencies = [
  "agent-client-protocol",
+ "akhomed-store",
  "anndists",
  "bincode",
  "blake3",
@@ -196,6 +197,24 @@ dependencies = [
  "unicode-normalization",
  "ureq",
  "wasmtime",
+]
+
+[[package]]
+name = "akhomed-store"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "miette 7.6.0",
+ "sea-orm",
+ "sea-orm-migration",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
@@ -7115,6 +7134,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "sha1_smol"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbfa15b3dddfee50a0fff136974b3e1bde555604ba463834a7eb7deb6417705d"
+
+[[package]]
 name = "sha2"
 version = "0.10.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8663,6 +8688,7 @@ dependencies = [
  "getrandom 0.4.1",
  "js-sys",
  "serde_core",
+ "sha1_smol",
  "wasm-bindgen",
 ]
 

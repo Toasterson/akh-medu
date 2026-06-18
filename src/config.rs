@@ -184,6 +184,19 @@ pub struct PostgresConfig {
     /// Run pending migrations automatically on daemon start.
     #[serde(default)]
     pub migrate_on_start: bool,
+
+    /// Phase 38b WAL: seconds between mutation-log flush attempts.
+    #[serde(default = "default_wal_flush_interval_secs")]
+    pub wal_flush_interval_secs: u64,
+
+    /// Phase 38b WAL: maximum rows per flush transaction.
+    #[serde(default = "default_wal_batch_size")]
+    pub wal_batch_size: usize,
+
+    /// Phase 38b WAL: in-memory buffer cap in mebibytes before the overflow
+    /// drop policy applies.
+    #[serde(default = "default_wal_max_buffer_mb")]
+    pub wal_max_buffer_mb: usize,
 }
 
 fn default_pg_pool_size() -> u32 {
@@ -192,6 +205,18 @@ fn default_pg_pool_size() -> u32 {
 
 fn default_pg_connect_timeout_secs() -> u64 {
     10
+}
+
+fn default_wal_flush_interval_secs() -> u64 {
+    2
+}
+
+fn default_wal_batch_size() -> usize {
+    64
+}
+
+fn default_wal_max_buffer_mb() -> usize {
+    16
 }
 
 // ---------------------------------------------------------------------------
@@ -507,6 +532,10 @@ url = "postgres://akh:pw@db.local:5432/akhmedu"
         assert_eq!(pg.pool_size, 10);
         assert_eq!(pg.connect_timeout_secs, 10);
         assert!(!pg.migrate_on_start);
+        // Phase 38b WAL defaults.
+        assert_eq!(pg.wal_flush_interval_secs, 2);
+        assert_eq!(pg.wal_batch_size, 64);
+        assert_eq!(pg.wal_max_buffer_mb, 16);
     }
 
     #[test]

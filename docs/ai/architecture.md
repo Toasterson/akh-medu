@@ -1,6 +1,6 @@
 # Akh-medu Architecture
 
-> Last updated: 2026-06-18 (Phase 38a: `akhomed-store` crate — Postgres-backed relocatable-Akh foundation, ADR 049. Prior: Pure-ACP pivot **P8 COMPLETE** — legacy inbound surfaces (REST/WebSocket/web UI/inbound MCP) retired, ACP is akhomed's sole inbound transport, ADR 061; TUI streaming chat.)
+> Last updated: 2026-06-18 (Phase 38a+38b: `akhomed-store` crate + mutation WAL — Postgres-backed relocatable-Akh foundation, ADR 049. Prior: Pure-ACP pivot **P8 COMPLETE** — legacy inbound surfaces (REST/WebSocket/web UI/inbound MCP) retired, ACP is akhomed's sole inbound transport, ADR 061; TUI streaming chat.)
 
 ## Overview
 
@@ -283,6 +283,27 @@ while the daemon keeps the stores above as an in-process cache. Sub-phase **38a*
 - `[postgres]` config: `url`, `pool_size`, `connect_timeout_secs`,
   `migrate_on_start` (`DATABASE_URL` overrides `url`). Pool plumbed into
   `ServerState`; consumed by the WAL flusher / snapshot writer in 38b/38c.
+
+**Sub-phase 38b (implemented) — the mutation WAL.** Every successful
+assert/retract streams to `akhomed.mutation_log` within seconds; replay (38c)
+re-applies it. Bounded loss on crash, no loss while Postgres is down.
+
+- `src/mutation.rs` (core, ungated): a tiny `MutationSink` trait + `MutationKind`
+  taxonomy (assert/retract/microtheory_load/unload/compartment_create/destroy).
+  `Engine` holds `OnceLock<Arc<dyn MutationSink>>` and calls it after a
+  successful `add_triple` / `remove_triple`. The core carries **no** SeaORM
+  dependency — the lean `akh` client is unaffected.
+- `src/wal.rs` (postgres-gated): `MutationLog` implements `MutationSink`. A
+  synchronous, byte-capped `WalBuffer` (overflow drops oldest non-`assert`
+  first) feeds an async flusher that batches inserts every `flush_interval`.
+  Failed flushes re-insert the batch at the front and retry (at-least-once;
+  replay is idempotent). Stable per-workspace Akh/workspace UUIDs via UUIDv5.
+- `akhomed-store::{ensure_akh, append_mutations}`: the typed write API; all
+  SeaORM stays in the leaf crate.
+- Daemon: `ServerState::wire_wal` installs the WAL per workspace on first load
+  (ensuring the `akhomed.akh` FK row first); flushers drain on graceful
+  shutdown. WAL tuning lives in `[postgres]`: `wal_flush_interval_secs` (2),
+  `wal_batch_size` (64), `wal_max_buffer_mb` (16).
 
 ## Provenance
 

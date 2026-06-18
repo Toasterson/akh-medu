@@ -17,15 +17,19 @@
 pub mod entity;
 pub mod error;
 pub mod migration;
+pub mod mutations;
 mod pool;
 
 pub use error::{StoreError, StoreResult};
 pub use migration::Migrator;
+pub use mutations::{MutationRow, append_mutations, ensure_akh};
 pub use pool::{PoolOptions, connect};
 
-// Re-export the connection type so downstream crates (the `akhomed` daemon)
-// can name the pool without taking a direct `sea-orm` dependency.
+// Re-export the connection type, the `sea_orm` crate, and `uuid` so downstream
+// crates (the `akhomed` daemon, its tests) can name the pool, run raw queries,
+// and build Akh/workspace ids without taking direct `sea-orm`/`uuid` deps.
 pub use sea_orm::DatabaseConnection;
+pub use {sea_orm, uuid};
 
 use sea_orm_migration::MigratorTrait;
 

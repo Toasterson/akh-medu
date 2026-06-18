@@ -164,6 +164,11 @@ pub struct Engine {
     nart_registry: RwLock<crate::graph::nart::NartRegistry>,
     predicate_hierarchy: RwLock<Option<crate::graph::predicate_hierarchy::PredicateHierarchy>>,
     hierarchy_dirty: AtomicBool,
+    /// Phase 38b: optional write-ahead-log sink. Set once when the daemon wires
+    /// a Postgres-backed `MutationLog` for this workspace; absent in local-only
+    /// mode. Every successful assert/retract is recorded here (best-effort,
+    /// non-blocking).
+    mutation_sink: std::sync::OnceLock<Arc<dyn crate::mutation::MutationSink>>,
 }
 
 impl Engine {
@@ -370,6 +375,7 @@ impl Engine {
             nart_registry: RwLock::new(crate::graph::nart::NartRegistry::new()),
             predicate_hierarchy: RwLock::new(None),
             hierarchy_dirty: AtomicBool::new(true),
+            mutation_sink: std::sync::OnceLock::new(),
         };
 
         // Restore Phase 9 registries from persistent storage if available.
@@ -454,6 +460,26 @@ impl Engine {
                     );
                 }
             }
+        }
+    }
+
+    /// Install the write-ahead-log sink (Phase 38b).
+    ///
+    /// Set once at workspace load when a Postgres backing store is configured.
+    /// Returns `Err` (ignored by callers) if a sink was already installed.
+    pub fn set_mutation_sink(
+        &self,
+        sink: Arc<dyn crate::mutation::MutationSink>,
+    ) -> Result<(), Arc<dyn crate::mutation::MutationSink>> {
+        self.mutation_sink.set(sink)
+    }
+
+    /// Record a mutation on the WAL sink if one is installed. Non-blocking; a
+    /// no-op in local-only mode.
+    #[inline]
+    fn record_mutation(&self, kind: crate::mutation::MutationKind, payload: serde_json::Value) {
+        if let Some(sink) = self.mutation_sink.get() {
+            sink.record(crate::mutation::MutationRecord::new(kind, payload));
         }
     }
 
@@ -641,6 +667,18 @@ impl Engine {
                 }
             }
         }
+
+        // --- Phase 38b: write-ahead log ---
+        self.record_mutation(
+            crate::mutation::MutationKind::Assert,
+            serde_json::json!({
+                "subject": triple.subject.get(),
+                "predicate": triple.predicate.get(),
+                "object": triple.object.get(),
+                "confidence": triple.confidence,
+                "compartment": triple.compartment_id,
+            }),
+        );
 
         Ok(())
     }
@@ -2054,6 +2092,17 @@ impl Engine {
                 cascade_depth: 0,
             });
         }
+
+        // --- Phase 38b: write-ahead log (only the primary retract; TMS-cascaded
+        // removals are re-derived on replay since the TMS rebuilds from facts) ---
+        self.record_mutation(
+            crate::mutation::MutationKind::Retract,
+            serde_json::json!({
+                "subject": subject.get(),
+                "predicate": predicate.get(),
+                "object": object.get(),
+            }),
+        );
 
         // Sync removal to SPARQL store
         if let Some(ref sparql) = self.sparql {

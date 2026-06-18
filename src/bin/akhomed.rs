@@ -57,6 +57,15 @@ struct ServerState {
     /// `[postgres]` section is configured (legacy local-only mode). Consumed by
     /// the mutation WAL flusher and snapshot writer in sub-phases 38b/38c.
     pg_pool: Option<Arc<akhomed_store::DatabaseConnection>>,
+    /// Phase 38b: per-workspace WAL flusher tasks, keyed by workspace name.
+    /// Drained on graceful shutdown so the final batch reaches Postgres.
+    wal_flushers: RwLock<HashMap<String, WalFlusher>>,
+}
+
+/// Handle to a workspace's background WAL flusher task (Phase 38b).
+struct WalFlusher {
+    shutdown: tokio::sync::watch::Sender<bool>,
+    handle: tokio::task::JoinHandle<()>,
 }
 
 /// Background daemon state for a workspace.
@@ -115,6 +124,7 @@ impl ServerState {
             audit_broadcast: audit_tx,
             daemon_pauses: RwLock::new(HashMap::new()),
             pg_pool,
+            wal_flushers: RwLock::new(HashMap::new()),
         }
     }
 
@@ -173,9 +183,75 @@ impl ServerState {
     }
 
     /// The Postgres backing-store pool, if configured. `None` in local-only mode.
-    #[allow(dead_code)] // consumed by the WAL flusher / snapshot writer in 38b/38c
     fn pg_pool(&self) -> Option<&Arc<akhomed_store::DatabaseConnection>> {
         self.pg_pool.as_ref()
+    }
+
+    /// Phase 38b: install the mutation WAL on `engine` for workspace `name`,
+    /// when a Postgres backing store is configured. Best-effort: any failure
+    /// logs and leaves the workspace in local-only mode (no WAL).
+    async fn wire_wal(&self, name: &str, engine: &Engine) {
+        let Some(pool) = self.pg_pool.as_ref() else {
+            return;
+        };
+        let akh_id = akh_medu::wal::akh_id_for(name);
+        let workspace_id = akh_medu::wal::workspace_id_for(name);
+
+        // The akh row is the FK target for mutation_log; ensure it exists first.
+        if let Err(e) = akhomed_store::ensure_akh(pool, akh_id, name, None).await {
+            tracing::warn!(workspace = %name, error = %e, "could not ensure akh row; WAL disabled");
+            return;
+        }
+
+        let wal_cfg = {
+            let cfg = self.config.read().await;
+            match cfg.postgres.as_ref() {
+                Some(pg) => akh_medu::wal::WalConfig::new(
+                    Duration::from_secs(pg.wal_flush_interval_secs),
+                    pg.wal_batch_size,
+                    pg.wal_max_buffer_mb.saturating_mul(1024 * 1024),
+                ),
+                None => akh_medu::wal::WalConfig::default(),
+            }
+        };
+
+        let log = Arc::new(akh_medu::wal::MutationLog::new(
+            (**pool).clone(),
+            akh_id,
+            workspace_id,
+            wal_cfg,
+        ));
+        if engine
+            .set_mutation_sink(Arc::clone(&log) as Arc<dyn akh_medu::mutation::MutationSink>)
+            .is_err()
+        {
+            tracing::warn!(workspace = %name, "mutation sink already installed; skipping WAL wiring");
+            return;
+        }
+
+        let (shutdown, shutdown_rx) = tokio::sync::watch::channel(false);
+        let handle = Arc::clone(&log).spawn_flusher(shutdown_rx);
+        self.wal_flushers
+            .write()
+            .await
+            .insert(name.to_string(), WalFlusher { shutdown, handle });
+        tracing::info!(workspace = %name, %akh_id, "mutation WAL enabled (Postgres backing store)");
+    }
+
+    /// Phase 38b: stop all WAL flushers, triggering a final drain to Postgres.
+    async fn shutdown_wals(&self) {
+        let flushers: Vec<(String, WalFlusher)> =
+            self.wal_flushers.write().await.drain().collect();
+        for (name, mut flusher) in flushers {
+            let _ = flusher.shutdown.send(true);
+            match tokio::time::timeout(Duration::from_secs(5), &mut flusher.handle).await {
+                Ok(_) => tracing::info!(workspace = %name, "WAL flusher drained"),
+                Err(_) => {
+                    tracing::warn!(workspace = %name, "WAL flusher did not drain within 5s, aborting");
+                    flusher.handle.abort();
+                }
+            }
+        }
     }
 
     /// Get or lazily open an engine for the given workspace.
@@ -243,6 +319,9 @@ impl ServerState {
                 }
             }
         }
+
+        // Phase 38b: install the mutation WAL (no-op in local-only mode).
+        self.wire_wal(name, &engine).await;
 
         let engine = Arc::new(engine);
         let mut map = self.workspaces.write().await;
@@ -1269,6 +1348,11 @@ async fn main() {
         }
     }
     drop(daemons);
+
+    // Phase 38b: drain WAL flushers (after the daemons stop generating
+    // mutations) so the final batch reaches Postgres.
+    tracing::info!("draining WAL flushers");
+    state_for_shutdown.shutdown_wals().await;
 
     akh_medu::client::remove_pid_file(&paths_for_shutdown);
 
