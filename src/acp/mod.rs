@@ -524,7 +524,7 @@ fn dispatch_akh(
             // Per-workspace data-plane (always present).
             let mut groups = vec![
                 "meta", "workspace", "symbols", "triples", "query", "memory", "infer",
-                "permission", "goals", "tools", "skills", "projects", "status",
+                "permission", "goals", "tools", "skills", "projects", "status", "usage",
             ];
             let mut methods = vec![
                 "_akh/health",
@@ -543,6 +543,7 @@ fn dispatch_akh(
                 "_akh/skills",
                 "_akh/projects",
                 "_akh/status",
+                "_akh/usage",
             ];
             // Server-level control-plane (only when a backend is wired).
             if has_control {
@@ -878,7 +879,7 @@ fn dispatch_akh_agent(
 ) -> Option<Result<serde_json::Value, String>> {
     let op = method.strip_prefix("_akh/").unwrap_or(method);
     match op {
-        "goals" | "tools" | "projects" | "status" => {}
+        "goals" | "tools" | "projects" | "status" | "usage" => {}
         _ => return None,
     }
 
@@ -908,6 +909,11 @@ fn dispatch_akh_agent(
             "stale": stale,
             "projects": a.map(projects_json).unwrap_or_default(),
         }),
+        "usage" => serde_json::json!({
+            "workspace": workspace,
+            "stale": stale,
+            "usage": a.and_then(usage_json),
+        }),
         // The combined snapshot backing the whole TUI sidebar in one round-trip.
         "status" => serde_json::json!({
             "workspace": workspace,
@@ -918,11 +924,27 @@ fn dispatch_akh_agent(
             "tools": a.map(tools_json).unwrap_or_default(),
             "projects": a.map(projects_json).unwrap_or_default(),
             "skills": skills_json(engine), // engine-derivable: present even when stale
-            "usage": serde_json::Value::Null, // token metering lands in Phase D
+            "usage": a.and_then(usage_json), // None when no model manager attached
         }),
         _ => unreachable!("op was filtered to the agent-read set above"),
     };
     Some(Ok(value))
+}
+
+/// JSON projection of the agent's token usage, or `None` when no model manager
+/// is attached (e.g. a daemon with no Ollama, or test agents). `context_window`
+/// is not yet known (Phase D follow-up via Ollama `/api/show`), so the client
+/// renders absolute token counts without a percentage.
+fn usage_json(agent: &Agent) -> Option<serde_json::Value> {
+    let u = agent.model_manager()?.usage();
+    Some(serde_json::json!({
+        "total_tokens": u.total_tokens(),
+        "context_tokens": u.context_tokens,
+        "prompt_tokens": u.prompt_tokens,
+        "completion_tokens": u.completion_tokens,
+        "turns": u.turns,
+        "context_window": serde_json::Value::Null,
+    }))
 }
 
 /// Compact JSON projection of the agent's goals for the sidebar (capped at 50):

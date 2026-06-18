@@ -143,6 +143,13 @@ pub type OllamaResult<T> = std::result::Result<T, OllamaError>;
 #[derive(Debug, Deserialize)]
 struct ChatResponse {
     message: Option<ChatMessage>,
+    /// Prompt (input) tokens evaluated — Ollama reports this on the final
+    /// response. Absent ⇒ 0.
+    #[serde(default)]
+    prompt_eval_count: u64,
+    /// Completion (output) tokens generated. Absent ⇒ 0.
+    #[serde(default)]
+    eval_count: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -183,6 +190,11 @@ pub struct AssistantTurn {
     pub content: String,
     /// Tool calls to execute before the model can answer. Empty ⇒ final answer.
     pub tool_calls: Vec<ToolCall>,
+    /// Prompt (input) tokens billed for this turn (Ollama `prompt_eval_count`);
+    /// 0 when the backend did not report it.
+    pub prompt_tokens: u64,
+    /// Completion (output) tokens billed for this turn (Ollama `eval_count`).
+    pub completion_tokens: u64,
 }
 
 /// One incremental piece of a streaming chat turn, delivered to the
@@ -406,6 +418,8 @@ impl OllamaClient {
                     arguments: tc.function.arguments,
                 })
                 .collect(),
+            prompt_tokens: chat_resp.prompt_eval_count,
+            completion_tokens: chat_resp.eval_count,
         })
     }
 
@@ -470,6 +484,8 @@ impl OllamaClient {
 
         let mut content = String::new();
         let mut tool_calls: Vec<ToolCall> = Vec::new();
+        let mut prompt_tokens = 0u64;
+        let mut completion_tokens = 0u64;
         let reader = std::io::BufReader::new(response.into_reader());
         for line in reader.lines() {
             let line = line.map_err(|e| OllamaError::Unreachable {
@@ -515,11 +531,25 @@ impl OllamaClient {
                 }
             }
             if chunk.get("done").and_then(serde_json::Value::as_bool) == Some(true) {
+                // The final chunk carries the turn's token counts.
+                prompt_tokens = chunk
+                    .get("prompt_eval_count")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0);
+                completion_tokens = chunk
+                    .get("eval_count")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0);
                 break;
             }
         }
 
-        Ok(AssistantTurn { content, tool_calls })
+        Ok(AssistantTurn {
+            content,
+            tool_calls,
+            prompt_tokens,
+            completion_tokens,
+        })
     }
 
     /// Hint Ollama to unload the model immediately by sending a request with

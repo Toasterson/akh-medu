@@ -107,12 +107,21 @@ pub struct ProjectView {
     pub goals: usize,
 }
 
-/// Token usage — populated in Phase D; the placeholder keeps the wire contract
-/// stable so the client deserializes today's `null` and tomorrow's object alike.
+/// Token usage from the model layer (Phase D). `context_window` is `None` until
+/// the window size is wired (Phase D follow-up via Ollama `/api/show`), in which
+/// case the meter shows absolute counts without a percentage.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct UsageView {
+    /// Cumulative tokens billed this session (prompt + completion).
     #[serde(default)]
     pub total_tokens: u64,
+    /// Most recent turn's footprint — a proxy for current context fill.
+    #[serde(default)]
+    pub context_tokens: u64,
+    /// Number of model turns recorded this session.
+    #[serde(default)]
+    pub turns: u64,
+    /// Context-window size, when known, for the `% used` figure.
     #[serde(default)]
     pub context_window: Option<u64>,
 }

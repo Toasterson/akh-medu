@@ -332,14 +332,18 @@ fn render_sidebar(frame: &mut Frame, area: Rect, tui: &AkhTui) {
     let dim = Style::default().fg(Color::DarkGray);
     let snap = tui.snapshot.as_ref();
 
-    // ── Context: token usage (Phase D) + cycle + activity ──
+    // ── Context: token usage + cycle + activity ──
     let context_lines: Vec<Line> = match snap {
         Some(s) => {
-            let tokens = s.usage.as_ref().map(|u| u.total_tokens).unwrap_or(0);
-            let tok_line = if tokens > 0 {
-                format!("tokens: {tokens}")
-            } else {
-                "tokens: — (Phase D)".to_string()
+            let tok_line = match s.usage.as_ref().filter(|u| u.total_tokens > 0) {
+                Some(u) => match u.context_window.filter(|w| *w > 0) {
+                    Some(win) => {
+                        let pct = (u.context_tokens.min(win) * 100) / win;
+                        format!("ctx {}/{win} {pct}%", u.context_tokens)
+                    }
+                    None => format!("ctx {} · {} tok", u.context_tokens, u.total_tokens),
+                },
+                None => "tokens: —".to_string(),
             };
             let cycle = s.cycle.map_or_else(|| "—".to_string(), |c| c.to_string());
             let activity = if s.stale {

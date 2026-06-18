@@ -26,6 +26,7 @@
 
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use miette::Diagnostic;
@@ -199,12 +200,71 @@ struct AgentEntry {
 /// Thread-safe via `Mutex<HashMap<...>>`.  The OODA loop is single-threaded so
 /// contention is negligible; the Mutex exists for daemon use-cases where the
 /// manager may be shared via `Arc`.
+/// Per-manager token-usage tally, accumulated across agentic chat turns.
+///
+/// Interior-mutable (atomics) so it can be updated from `&self` chat methods
+/// while the manager is shared behind an `Arc`. `prompt`/`completion` are
+/// cumulative spend; `last_context_tokens` is the most recent turn's footprint
+/// (a stand-in for "current context fill").
+#[derive(Debug, Default)]
+pub struct UsageLedger {
+    prompt_tokens: AtomicU64,
+    completion_tokens: AtomicU64,
+    turns: AtomicU64,
+    last_context_tokens: AtomicU64,
+}
+
+impl UsageLedger {
+    /// Record one model turn's token counts.
+    fn record(&self, prompt: u64, completion: u64) {
+        self.prompt_tokens.fetch_add(prompt, Ordering::Relaxed);
+        self.completion_tokens.fetch_add(completion, Ordering::Relaxed);
+        self.turns.fetch_add(1, Ordering::Relaxed);
+        self.last_context_tokens
+            .store(prompt + completion, Ordering::Relaxed);
+    }
+
+    /// A consistent-enough point-in-time copy for read-only callers.
+    fn snapshot(&self) -> UsageSnapshot {
+        UsageSnapshot {
+            prompt_tokens: self.prompt_tokens.load(Ordering::Relaxed),
+            completion_tokens: self.completion_tokens.load(Ordering::Relaxed),
+            turns: self.turns.load(Ordering::Relaxed),
+            context_tokens: self.last_context_tokens.load(Ordering::Relaxed),
+        }
+    }
+}
+
+/// Plain snapshot of a [`UsageLedger`] for reporting (e.g. `_akh/usage`).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct UsageSnapshot {
+    /// Cumulative prompt (input) tokens this session.
+    pub prompt_tokens: u64,
+    /// Cumulative completion (output) tokens this session.
+    pub completion_tokens: u64,
+    /// Number of model turns recorded.
+    pub turns: u64,
+    /// Most recent turn's token footprint (prompt + completion) — a proxy for
+    /// current context fill.
+    pub context_tokens: u64,
+}
+
+impl UsageSnapshot {
+    /// Total tokens billed this session (prompt + completion).
+    #[must_use]
+    pub fn total_tokens(&self) -> u64 {
+        self.prompt_tokens + self.completion_tokens
+    }
+}
+
 pub struct AgentModelManager {
     config: ModelManagerConfig,
     ollama: OllamaClient,
     agents: Mutex<HashMap<String, AgentEntry>>,
     /// Resolved prompt mode for this manager (auto-detected or config-overridden).
     prompt_mode: PromptMode,
+    /// Cumulative token usage across this manager's agentic turns.
+    usage: UsageLedger,
 }
 
 impl AgentModelManager {
@@ -224,12 +284,18 @@ impl AgentModelManager {
             ollama,
             agents: Mutex::new(HashMap::new()),
             prompt_mode,
+            usage: UsageLedger::default(),
         }
     }
 
     /// Return the prompt mode in effect for this manager.
     pub fn prompt_mode(&self) -> PromptMode {
         self.prompt_mode
+    }
+
+    /// A point-in-time copy of this manager's cumulative token usage.
+    pub fn usage(&self) -> UsageSnapshot {
+        self.usage.snapshot()
     }
 
     // ── Registration ───────────────────────────────────────────────────────
@@ -352,7 +418,9 @@ impl AgentModelManager {
         messages.push(serde_json::json!({"role": "system", "content": system_prompt}));
         messages.extend_from_slice(conversation);
 
-        Ok(self.ollama.chat(&messages, tools)?)
+        let turn = self.ollama.chat(&messages, tools)?;
+        self.usage.record(turn.prompt_tokens, turn.completion_tokens);
+        Ok(turn)
     }
 
     /// Streaming counterpart of [`chat_with_tools`](Self::chat_with_tools).
@@ -385,7 +453,9 @@ impl AgentModelManager {
         messages.push(serde_json::json!({"role": "system", "content": system_prompt}));
         messages.extend_from_slice(conversation);
 
-        Ok(self.ollama.chat_stream(&messages, tools, on_event)?)
+        let turn = self.ollama.chat_stream(&messages, tools, on_event)?;
+        self.usage.record(turn.prompt_tokens, turn.completion_tokens);
+        Ok(turn)
     }
 
     // ── Lifecycle ─────────────────────────────────────────────────────────
@@ -678,6 +748,20 @@ fn describe_archetypes(a: &ArchetypeWeights) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn usage_ledger_accumulates_and_snapshots() {
+        let ledger = UsageLedger::default();
+        ledger.record(100, 20);
+        ledger.record(50, 10);
+        let snap = ledger.snapshot();
+        assert_eq!(snap.prompt_tokens, 150);
+        assert_eq!(snap.completion_tokens, 30);
+        assert_eq!(snap.turns, 2);
+        assert_eq!(snap.total_tokens(), 180);
+        // context_tokens reflects only the most recent turn's footprint.
+        assert_eq!(snap.context_tokens, 60);
+    }
 
     fn tecton_psyche() -> Psyche {
         let mut p = Psyche::default();
