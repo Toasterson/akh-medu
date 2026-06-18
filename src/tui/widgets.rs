@@ -322,10 +322,11 @@ fn render_footer(frame: &mut Frame, area: Rect, tui: &AkhTui) {
 /// fall back while engine-derived skills stay live.
 #[cfg(feature = "acp")]
 fn render_sidebar(frame: &mut Frame, area: Rect, tui: &AkhTui) {
-    let [ctx_area, goals_area, caps_area] = Layout::vertical([
+    let [ctx_area, goals_area, mind_area, caps_area] = Layout::vertical([
         Constraint::Length(4),
         Constraint::Fill(1),
-        Constraint::Length(8),
+        Constraint::Length(4),
+        Constraint::Length(6),
     ])
     .areas(area);
 
@@ -402,6 +403,26 @@ fn render_sidebar(frame: &mut Frame, area: Rect, tui: &AkhTui) {
             .block(panel_block("Goals"))
             .wrap(Wrap { trim: false }),
         goals_area,
+    );
+
+    // ── Mind: knowledge-graph size + active microtheory (beyond OpenCode) ──
+    let mind_lines: Vec<Line> = match snap {
+        Some(s) => {
+            let kg_line = match s.kg.as_ref() {
+                Some(k) => format!("{} sym · {} tri", k.symbols, k.triples),
+                None => "KG: —".to_string(),
+            };
+            let active = s.active_project.as_deref().unwrap_or("—");
+            vec![
+                Line::from(Span::styled(kg_line, dim)),
+                Line::from(Span::styled(format!("active: {}", truncate(active, 22)), dim)),
+            ]
+        }
+        None => vec![Line::from(Span::styled("· connecting ·", dim))],
+    };
+    frame.render_widget(
+        Paragraph::new(mind_lines).block(panel_block("Mind")),
+        mind_area,
     );
 
     // ── Capabilities: tool + skill counts, then a few skill names ──

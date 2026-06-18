@@ -924,6 +924,11 @@ fn dispatch_akh_agent(
             "tools": a.map(tools_json).unwrap_or_default(),
             "projects": a.map(projects_json).unwrap_or_default(),
             "skills": skills_json(engine), // engine-derivable: present even when stale
+            "kg": { // engine-derivable KG size (cheap counts): present even when stale
+                "symbols": engine.symbol_count(),
+                "triples": engine.triple_count(),
+            },
+            "active_project": a.and_then(active_project_name),
             "usage": a.and_then(usage_json), // None when no model manager attached
         }),
         _ => unreachable!("op was filtered to the agent-read set above"),
@@ -933,8 +938,8 @@ fn dispatch_akh_agent(
 
 /// JSON projection of the agent's token usage, or `None` when no model manager
 /// is attached (e.g. a daemon with no Ollama, or test agents). `context_window`
-/// is not yet known (Phase D follow-up via Ollama `/api/show`), so the client
-/// renders absolute token counts without a percentage.
+/// is lazily fetched once via Ollama `/api/show`; until it lands (or if the
+/// model omits it) the client renders absolute token counts without a percentage.
 fn usage_json(agent: &Agent) -> Option<serde_json::Value> {
     let u = agent.model_manager()?.usage();
     Some(serde_json::json!({
@@ -943,8 +948,19 @@ fn usage_json(agent: &Agent) -> Option<serde_json::Value> {
         "prompt_tokens": u.prompt_tokens,
         "completion_tokens": u.completion_tokens,
         "turns": u.turns,
-        "context_window": serde_json::Value::Null,
+        "context_window": u.context_window,
     }))
+}
+
+/// Name of the currently-active project (microtheory the agent is focused on),
+/// resolved from the agenda's `active_project` id, or `None` when none is active.
+fn active_project_name(agent: &Agent) -> Option<String> {
+    let id = agent.agenda().active_project?;
+    agent
+        .projects()
+        .iter()
+        .find(|p| p.id == id)
+        .map(|p| p.name.clone())
 }
 
 /// Compact JSON projection of the agent's goals for the sidebar (capped at 50):
@@ -1925,7 +1941,10 @@ mod tests {
         assert!(v["tools"].is_array());
         assert!(v["projects"].is_array());
         assert!(v["skills"].is_array());
-        // Usage metering is deferred to Phase D.
+        // KG counts are engine-derivable, always present.
+        assert!(v["kg"]["symbols"].is_number());
+        assert!(v["kg"]["triples"].is_number());
+        // No model manager on a test agent ⇒ usage is null.
         assert_eq!(v["usage"], serde_json::Value::Null);
     }
 

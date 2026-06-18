@@ -31,9 +31,24 @@ pub struct StatusSnapshot {
     pub skills: Vec<SkillView>,
     #[serde(default)]
     pub projects: Vec<ProjectView>,
-    /// Token usage — `None` until Phase D wires metering.
+    /// Knowledge-graph size (engine-derivable; present even when `stale`).
+    #[serde(default)]
+    pub kg: Option<KgView>,
+    /// Name of the active project / microtheory, when one is focused.
+    #[serde(default)]
+    pub active_project: Option<String>,
+    /// Token usage — `None` until the model layer reports it (Phase D).
     #[serde(default)]
     pub usage: Option<UsageView>,
+}
+
+/// Knowledge-graph size for the cognitive "Mind" panel.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct KgView {
+    #[serde(default)]
+    pub symbols: u64,
+    #[serde(default)]
+    pub triples: u64,
 }
 
 /// A single goal row.
@@ -149,7 +164,9 @@ mod tests {
             "tools": [ { "name": "grep", "description": "search" } ],
             "skills": [ { "name": "k8s", "state": "Active" } ],
             "projects": [ { "name": "infra", "status": "active", "goals": 2 } ],
-            "usage": null
+            "kg": { "symbols": 1200, "triples": 3400 },
+            "active_project": "infra",
+            "usage": { "total_tokens": 180, "context_tokens": 60, "turns": 2, "context_window": 8192 }
         });
         let snap: StatusSnapshot = serde_json::from_value(json).expect("deserialize");
         assert!(!snap.stale);
@@ -161,7 +178,14 @@ mod tests {
         assert_eq!(snap.tools[0].name, "grep");
         assert_eq!(snap.skills[0].state, "Active");
         assert_eq!(snap.projects[0].goals, 2);
-        assert!(snap.usage.is_none());
+        let kg = snap.kg.expect("kg present");
+        assert_eq!(kg.symbols, 1200);
+        assert_eq!(kg.triples, 3400);
+        assert_eq!(snap.active_project.as_deref(), Some("infra"));
+        let usage = snap.usage.expect("usage present");
+        assert_eq!(usage.total_tokens, 180);
+        assert_eq!(usage.context_tokens, 60);
+        assert_eq!(usage.context_window, Some(8192));
     }
 
     #[test]

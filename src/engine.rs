@@ -1070,6 +1070,18 @@ impl Engine {
         self.registry.all()
     }
 
+    /// Cheap count of registered symbols (no clone) — for status/introspection
+    /// polled frequently, unlike [`all_symbols`](Self::all_symbols).
+    pub fn symbol_count(&self) -> usize {
+        self.registry.len()
+    }
+
+    /// Cheap count of triples in the knowledge graph (no clone) — counterpart to
+    /// [`symbol_count`](Self::symbol_count).
+    pub fn triple_count(&self) -> usize {
+        self.knowledge_graph.triple_count()
+    }
+
     /// Resolve a name-or-id string: try parsing as u64 first, then label lookup.
     pub fn resolve_symbol(&self, name_or_id: &str) -> AkhResult<SymbolId> {
         // Try numeric ID first.

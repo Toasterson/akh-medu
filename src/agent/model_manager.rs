@@ -26,7 +26,7 @@
 
 use std::collections::HashMap;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use miette::Diagnostic;
@@ -224,13 +224,15 @@ impl UsageLedger {
             .store(prompt + completion, Ordering::Relaxed);
     }
 
-    /// A consistent-enough point-in-time copy for read-only callers.
+    /// A consistent-enough point-in-time copy for read-only callers. The
+    /// `context_window` is filled by the manager (it owns that cache), not here.
     fn snapshot(&self) -> UsageSnapshot {
         UsageSnapshot {
             prompt_tokens: self.prompt_tokens.load(Ordering::Relaxed),
             completion_tokens: self.completion_tokens.load(Ordering::Relaxed),
             turns: self.turns.load(Ordering::Relaxed),
             context_tokens: self.last_context_tokens.load(Ordering::Relaxed),
+            context_window: None,
         }
     }
 }
@@ -247,6 +249,9 @@ pub struct UsageSnapshot {
     /// Most recent turn's token footprint (prompt + completion) — a proxy for
     /// current context fill.
     pub context_tokens: u64,
+    /// Model context-window size, when known (lazily fetched via `/api/show`);
+    /// `None` ⇒ the meter shows absolute counts without a percentage.
+    pub context_window: Option<u64>,
 }
 
 impl UsageSnapshot {
@@ -265,6 +270,11 @@ pub struct AgentModelManager {
     prompt_mode: PromptMode,
     /// Cumulative token usage across this manager's agentic turns.
     usage: UsageLedger,
+    /// Lazily-fetched model context-window size (0 = unknown). Populated once via
+    /// [`OllamaClient::context_length`] after the first turn.
+    context_window: AtomicU64,
+    /// Whether the one-time context-window fetch has been attempted.
+    context_window_tried: AtomicBool,
 }
 
 impl AgentModelManager {
@@ -285,6 +295,8 @@ impl AgentModelManager {
             agents: Mutex::new(HashMap::new()),
             prompt_mode,
             usage: UsageLedger::default(),
+            context_window: AtomicU64::new(0),
+            context_window_tried: AtomicBool::new(false),
         }
     }
 
@@ -293,9 +305,25 @@ impl AgentModelManager {
         self.prompt_mode
     }
 
-    /// A point-in-time copy of this manager's cumulative token usage.
+    /// A point-in-time copy of this manager's cumulative token usage, including
+    /// the cached context-window size when known.
     pub fn usage(&self) -> UsageSnapshot {
-        self.usage.snapshot()
+        let mut snap = self.usage.snapshot();
+        let window = self.context_window.load(Ordering::Relaxed);
+        snap.context_window = (window > 0).then_some(window);
+        snap
+    }
+
+    /// Lazily fetch and cache the model's context-window size, at most once
+    /// (best-effort). Called after a turn so the one `/api/show` round-trip never
+    /// blocks the first user-visible response.
+    fn ensure_context_window(&self) {
+        if self.context_window_tried.swap(true, Ordering::Relaxed) {
+            return; // already attempted
+        }
+        if let Some(window) = self.ollama.context_length() {
+            self.context_window.store(window, Ordering::Relaxed);
+        }
     }
 
     // ── Registration ───────────────────────────────────────────────────────
@@ -420,6 +448,7 @@ impl AgentModelManager {
 
         let turn = self.ollama.chat(&messages, tools)?;
         self.usage.record(turn.prompt_tokens, turn.completion_tokens);
+        self.ensure_context_window();
         Ok(turn)
     }
 
@@ -455,6 +484,7 @@ impl AgentModelManager {
 
         let turn = self.ollama.chat_stream(&messages, tools, on_event)?;
         self.usage.record(turn.prompt_tokens, turn.completion_tokens);
+        self.ensure_context_window();
         Ok(turn)
     }
 

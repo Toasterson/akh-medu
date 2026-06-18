@@ -552,6 +552,35 @@ impl OllamaClient {
         })
     }
 
+    /// Best-effort fetch of the model's context-window size via `/api/show`.
+    ///
+    /// Ollama reports it in `model_info` under an architecture-prefixed key (e.g.
+    /// `llama.context_length`, `gemma.context_length`), so we scan for any key
+    /// ending in `.context_length`. Returns `None` on any transport/parse error
+    /// or if the field is absent — callers then omit the `% used` figure.
+    pub fn context_length(&self) -> Option<u64> {
+        let url = format!("{}/api/show", self.config.base_url.trim_end_matches('/'));
+        // Send both `model` (current API) and `name` (older API) — extra keys are
+        // ignored, so one body satisfies either server version.
+        let body = serde_json::json!({
+            "model": self.config.model,
+            "name": self.config.model,
+        });
+        let mut req = ureq::post(&url)
+            .set("Content-Type", "application/json")
+            .timeout(std::time::Duration::from_secs(self.config.timeout_secs));
+        if let Some(key) = self.config.resolved_api_key() {
+            req = req.set("Authorization", &format!("Bearer {key}"));
+        }
+        let resp = req.send_json(&body).ok()?;
+        let value: serde_json::Value = resp.into_json().ok()?;
+        let model_info = value.get("model_info")?.as_object()?;
+        model_info
+            .iter()
+            .find(|(k, _)| k.ends_with(".context_length"))
+            .and_then(|(_, v)| v.as_u64())
+    }
+
     /// Hint Ollama to unload the model immediately by sending a request with
     /// `keep_alive: "0"`. This is best-effort — failure is logged, not returned.
     pub fn hint_unload(&self) {
