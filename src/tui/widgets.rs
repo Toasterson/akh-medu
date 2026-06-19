@@ -322,13 +322,16 @@ fn render_footer(frame: &mut Frame, area: Rect, tui: &AkhTui) {
 /// fall back while engine-derived skills stay live.
 #[cfg(feature = "acp")]
 fn render_sidebar(frame: &mut Frame, area: Rect, tui: &AkhTui) {
-    let [ctx_area, goals_area, mind_area, caps_area] = Layout::vertical([
-        Constraint::Length(4),
-        Constraint::Fill(1),
-        Constraint::Length(4),
-        Constraint::Length(6),
-    ])
-    .areas(area);
+    let [ctx_area, goals_area, reasoning_area, mind_area, evidence_area, caps_area] =
+        Layout::vertical([
+            Constraint::Length(4),  // Context
+            Constraint::Fill(1),    // Goals (flexes with the terminal)
+            Constraint::Length(5),  // Reasoning
+            Constraint::Length(4),  // Mind
+            Constraint::Length(5),  // Evidence
+            Constraint::Length(5),  // Capabilities
+        ])
+        .areas(area);
 
     let dim = Style::default().fg(Color::DarkGray);
     let snap = tui.snapshot.as_ref();
@@ -405,6 +408,31 @@ fn render_sidebar(frame: &mut Frame, area: Rect, tui: &AkhTui) {
         goals_area,
     );
 
+    // ── Reasoning: recent working-memory trace (newest first) ──
+    let reasoning_lines: Vec<Line> = match snap {
+        Some(s) if !s.reasoning.is_empty() => s
+            .reasoning
+            .iter()
+            .take(3)
+            .map(|r| {
+                Line::from(vec![
+                    Span::styled(
+                        format!("{} ", reason_tag(&r.kind)),
+                        Style::default().fg(reason_color(&r.kind)),
+                    ),
+                    Span::raw(truncate(&r.content, 24)),
+                ])
+            })
+            .collect(),
+        Some(s) if s.stale => vec![Line::from(Span::styled("agent busy…", dim))],
+        Some(_) => vec![Line::from(Span::styled("no recent steps", dim))],
+        None => vec![Line::from(Span::styled("· connecting ·", dim))],
+    };
+    frame.render_widget(
+        Paragraph::new(reasoning_lines).block(panel_block("Reasoning")),
+        reasoning_area,
+    );
+
     // ── Mind: knowledge-graph size + active microtheory (beyond OpenCode) ──
     let mind_lines: Vec<Line> = match snap {
         Some(s) => {
@@ -423,6 +451,34 @@ fn render_sidebar(frame: &mut Frame, area: Rect, tui: &AkhTui) {
     frame.render_widget(
         Paragraph::new(mind_lines).block(panel_block("Mind")),
         mind_area,
+    );
+
+    // ── Evidence: tracked claims + the most uncertain (belief interval) ──
+    let evidence_lines: Vec<Line> = match snap {
+        Some(s) => match &s.evidence {
+            Some(e) => {
+                let mut lines =
+                    vec![Line::from(Span::styled(format!("{} claims", e.claims), dim))];
+                for c in e.uncertain.iter().take(2) {
+                    let pct = |v: f32| (v * 100.0).round() as u32;
+                    lines.push(Line::from(vec![
+                        Span::raw(truncate(&c.claim, 14)),
+                        Span::styled(
+                            format!(" {}-{}%", pct(c.belief), pct(c.plausibility)),
+                            Style::default().fg(verdict_color(&c.verdict)),
+                        ),
+                    ]));
+                }
+                lines
+            }
+            None if s.stale => vec![Line::from(Span::styled("agent busy…", dim))],
+            None => vec![Line::from(Span::styled("no evidence", dim))],
+        },
+        None => vec![Line::from(Span::styled("· connecting ·", dim))],
+    };
+    frame.render_widget(
+        Paragraph::new(evidence_lines).block(panel_block("Evidence")),
+        evidence_area,
     );
 
     // ── Capabilities: tool + skill counts, then a few skill names ──
@@ -474,6 +530,49 @@ fn goal_marker(status: &str) -> (&'static str, Color) {
         "Pending" | "Proposed" => ("○", Color::Yellow),
         "Suspended" | "Dormant" => ("◌", Color::DarkGray),
         _ => ("·", Color::Gray),
+    }
+}
+
+/// Short tag for a reasoning entry's working-memory kind.
+#[cfg(feature = "acp")]
+fn reason_tag(kind: &str) -> &'static str {
+    match kind {
+        "Observation" => "obs",
+        "Decision" => "dec",
+        "GoalUpdate" => "goal",
+        "Inference" => "inf",
+        "ToolResult" => "tool",
+        _ => "·",
+    }
+}
+
+/// Colour for a reasoning entry's kind.
+#[cfg(feature = "acp")]
+fn reason_color(kind: &str) -> Color {
+    match kind {
+        "Decision" => Color::Yellow,
+        "Inference" => Color::Magenta,
+        "ToolResult" => Color::Green,
+        "GoalUpdate" => Color::Blue,
+        _ => Color::DarkGray,
+    }
+}
+
+/// Colour for a claim's Dempster-Shafer verdict. Matches on substrings so a
+/// change to the exact label wording can't silently drop the colour.
+#[cfg(feature = "acp")]
+fn verdict_color(verdict: &str) -> Color {
+    let v = verdict.to_ascii_lowercase();
+    if v.contains("well") || v.contains("support") {
+        Color::Green
+    } else if v.contains("false") {
+        Color::Red
+    } else if v.contains("conflict") {
+        Color::Magenta
+    } else if v.contains("insufficient") {
+        Color::DarkGray
+    } else {
+        Color::Yellow // plausible / uncertain
     }
 }
 

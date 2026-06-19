@@ -37,9 +37,49 @@ pub struct StatusSnapshot {
     /// Name of the active project / microtheory, when one is focused.
     #[serde(default)]
     pub active_project: Option<String>,
+    /// Recent reasoning trace (working-memory entries, newest first).
+    #[serde(default)]
+    pub reasoning: Vec<ReasoningView>,
+    /// Evidence / confidence summary over the agent's tracked claims.
+    #[serde(default)]
+    pub evidence: Option<EvidenceView>,
     /// Token usage — `None` until the model layer reports it (Phase D).
     #[serde(default)]
     pub usage: Option<UsageView>,
+}
+
+/// One reasoning-trace entry (a working-memory item).
+#[derive(Debug, Clone, Deserialize)]
+pub struct ReasoningView {
+    /// Phase that produced it: Observation / Decision / Inference / ToolResult / GoalUpdate.
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub content: String,
+}
+
+/// Evidence summary for the cognitive panel.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct EvidenceView {
+    /// Total claims the evidence manager is tracking.
+    #[serde(default)]
+    pub claims: u64,
+    /// The most uncertain claims (widest belief interval).
+    #[serde(default)]
+    pub uncertain: Vec<ClaimView>,
+}
+
+/// One assessed claim with its Dempster-Shafer belief interval + verdict.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ClaimView {
+    #[serde(default)]
+    pub claim: String,
+    #[serde(default)]
+    pub verdict: String,
+    #[serde(default)]
+    pub belief: f32,
+    #[serde(default)]
+    pub plausibility: f32,
 }
 
 /// Knowledge-graph size for the cognitive "Mind" panel.
@@ -166,6 +206,16 @@ mod tests {
             "projects": [ { "name": "infra", "status": "active", "goals": 2 } ],
             "kg": { "symbols": 1200, "triples": 3400 },
             "active_project": "infra",
+            "reasoning": [
+                { "kind": "Decision", "content": "probe the ACME order" },
+                { "kind": "ToolResult", "content": "order is pending" }
+            ],
+            "evidence": {
+                "claims": 5,
+                "uncertain": [
+                    { "claim": "cert renews", "verdict": "Plausible", "belief": 0.4, "plausibility": 0.8 }
+                ]
+            },
             "usage": { "total_tokens": 180, "context_tokens": 60, "turns": 2, "context_window": 8192 }
         });
         let snap: StatusSnapshot = serde_json::from_value(json).expect("deserialize");
@@ -182,6 +232,11 @@ mod tests {
         assert_eq!(kg.symbols, 1200);
         assert_eq!(kg.triples, 3400);
         assert_eq!(snap.active_project.as_deref(), Some("infra"));
+        assert_eq!(snap.reasoning.len(), 2);
+        assert_eq!(snap.reasoning[0].kind, "Decision");
+        let evidence = snap.evidence.expect("evidence present");
+        assert_eq!(evidence.claims, 5);
+        assert_eq!(evidence.uncertain[0].verdict, "Plausible");
         let usage = snap.usage.expect("usage present");
         assert_eq!(usage.total_tokens, 180);
         assert_eq!(usage.context_tokens, 60);

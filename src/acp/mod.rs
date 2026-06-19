@@ -525,6 +525,7 @@ fn dispatch_akh(
             let mut groups = vec![
                 "meta", "workspace", "symbols", "triples", "query", "memory", "infer",
                 "permission", "goals", "tools", "skills", "projects", "status", "usage",
+                "reasoning", "evidence",
             ];
             let mut methods = vec![
                 "_akh/health",
@@ -544,6 +545,8 @@ fn dispatch_akh(
                 "_akh/projects",
                 "_akh/status",
                 "_akh/usage",
+                "_akh/reasoning",
+                "_akh/evidence",
             ];
             // Server-level control-plane (only when a backend is wired).
             if has_control {
@@ -879,7 +882,7 @@ fn dispatch_akh_agent(
 ) -> Option<Result<serde_json::Value, String>> {
     let op = method.strip_prefix("_akh/").unwrap_or(method);
     match op {
-        "goals" | "tools" | "projects" | "status" | "usage" => {}
+        "goals" | "tools" | "projects" | "status" | "usage" | "reasoning" | "evidence" => {}
         _ => return None,
     }
 
@@ -914,6 +917,16 @@ fn dispatch_akh_agent(
             "stale": stale,
             "usage": a.and_then(usage_json),
         }),
+        "reasoning" => serde_json::json!({
+            "workspace": workspace,
+            "stale": stale,
+            "reasoning": a.map(reasoning_json).unwrap_or_default(),
+        }),
+        "evidence" => serde_json::json!({
+            "workspace": workspace,
+            "stale": stale,
+            "evidence": a.map(|ag| evidence_json(engine, ag)),
+        }),
         // The combined snapshot backing the whole TUI sidebar in one round-trip.
         "status" => serde_json::json!({
             "workspace": workspace,
@@ -929,6 +942,8 @@ fn dispatch_akh_agent(
                 "triples": engine.triple_count(),
             },
             "active_project": a.and_then(active_project_name),
+            "reasoning": a.map(reasoning_json).unwrap_or_default(),
+            "evidence": a.map(|ag| evidence_json(engine, ag)),
             "usage": a.and_then(usage_json), // None when no model manager attached
         }),
         _ => unreachable!("op was filtered to the agent-read set above"),
@@ -961,6 +976,48 @@ fn active_project_name(agent: &Agent) -> Option<String> {
         .iter()
         .find(|p| p.id == id)
         .map(|p| p.name.clone())
+}
+
+/// Compact JSON projection of the agent's recent reasoning trace — the most
+/// recent working-memory entries (observations, decisions, inferences, tool
+/// results), newest first, capped for the sidebar.
+fn reasoning_json(agent: &Agent) -> Vec<serde_json::Value> {
+    const MAX: usize = 6;
+    agent
+        .working_memory()
+        .recent(MAX)
+        .iter()
+        .map(|e| {
+            serde_json::json!({
+                "kind": format!("{:?}", e.kind),
+                "content": e.content,
+            })
+        })
+        .collect()
+}
+
+/// JSON projection of the agent's evidence state: total tracked claims plus the
+/// most uncertain ones (widest belief interval) with their Dempster-Shafer
+/// verdict and belief/plausibility bounds.
+fn evidence_json(engine: &Engine, agent: &Agent) -> serde_json::Value {
+    let em = agent.evidence_manager();
+    let uncertain: Vec<_> = em
+        .most_uncertain_claims(3)
+        .into_iter()
+        .map(|c| {
+            serde_json::json!({
+                "claim": engine.resolve_label(c.claim_entity),
+                "verdict": c.verdict.as_label(),
+                "belief": c.interval.belief,
+                "plausibility": c.interval.plausibility,
+                "evidence_count": c.evidence_count,
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "claims": em.claim_count(),
+        "uncertain": uncertain,
+    })
 }
 
 /// Compact JSON projection of the agent's goals for the sidebar (capped at 50):
@@ -1944,6 +2001,9 @@ mod tests {
         // KG counts are engine-derivable, always present.
         assert!(v["kg"]["symbols"].is_number());
         assert!(v["kg"]["triples"].is_number());
+        // Cognitive panels: reasoning is an array, evidence is present (fresh).
+        assert!(v["reasoning"].is_array());
+        assert!(v["evidence"]["claims"].is_number());
         // No model manager on a test agent ⇒ usage is null.
         assert_eq!(v["usage"], serde_json::Value::Null);
     }
