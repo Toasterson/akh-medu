@@ -274,7 +274,9 @@ impl NluPipeline {
             }
         }
         #[cfg(feature = "nlu-llm")]
-        {
+        if std::env::var("AKH_NLU_LLM").as_deref() == Ok("0") {
+            tracing::info!(tier = 3, "NLU LLM tier disabled (AKH_NLU_LLM=0); skipping llama-cpp translator");
+        } else {
             let llm_file = "llm/qwen2.5-1.5b-instruct-q4_k_m.gguf";
             let result = llm_translator::LlmTranslator::load(&_data_dir.join(llm_file))
                 .or_else(|_| {
@@ -298,8 +300,17 @@ impl NluPipeline {
             }
         }
         // Candle backend (Tier 3 alternative): preferred over llama-cpp-2 when available.
+        // Skippable via AKH_NLU_LLM=0 so a host whose *chat* backing already loads a
+        // large in-process Candle model (ADR 070, e.g. Gemma 4 12B) does not pay for
+        // a second copy of the weights — the two paths don't yet share one model
+        // instance, so on memory-constrained hosts loading both OOMs.
         #[cfg(feature = "candle-backend")]
-        {
+        if std::env::var("AKH_NLU_LLM").as_deref() == Ok("0") {
+            tracing::info!(
+                tier = 3,
+                "NLU LLM tier disabled (AKH_NLU_LLM=0); using tiers 1/2/4 (rules/NER/ranker) only"
+            );
+        } else {
             let result = candle_backend::CandleBackend::try_load(_data_dir)
                 .or_else(|| {
                     _shared_dir

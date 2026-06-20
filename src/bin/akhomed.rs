@@ -1971,7 +1971,14 @@ async fn main() {
             .clone()
             .or_else(|| auto_start.first().cloned())
             .unwrap_or_else(|| "default".to_string());
-        if !paths.workspace(&acp_ws).exists() {
+        // Only auto-create when the workspace is *truly* new — neither a data dir
+        // NOR a config file. Guarding on the data dir alone would overwrite an
+        // existing `akh.toml` (which carries akh-level fields like `backend`,
+        // `model`, `[ollama_endpoint]`) with a bare default WorkspaceConfig,
+        // silently dropping the chat-backing selection (ADR 070). When a config
+        // exists, the engine is built lazily from it on first ACP call.
+        let cfg_file = paths.workspace_config_file(&acp_ws);
+        if !paths.workspace(&acp_ws).exists() && !cfg_file.exists() {
             let wsm = WorkspaceManager::new(paths.clone());
             match wsm.create(akh_medu::workspace::WorkspaceConfig::with_name(&acp_ws)) {
                 Ok(_) => {

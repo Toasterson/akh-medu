@@ -136,6 +136,12 @@ pub struct CandleInferenceResult {
 
 const LLM_SUBDIR: &str = "models/llm";
 const CANDLE_MODEL_FILE: &str = "qwen2.5-1.5b-instruct-q4_k_m.gguf";
+/// Max prompt length (tokens) accepted before prefill. The original 1.5B NLU
+/// model used a small window; the chat/agentic path (ADR 070) renders the full
+/// tool catalog into the prompt, which easily exceeds a couple thousand tokens.
+/// Gemma 3/4 and Qwen2.5 all support ≥8K context, so 8192 is a safe ceiling that
+/// still bounds CPU prefill cost.
+const MAX_PROMPT_TOKENS: usize = 8192;
 const TOKENIZER_FILE: &str = "tokenizer.json";
 
 // ---------------------------------------------------------------------------
@@ -998,10 +1004,10 @@ impl CandleBackend {
 
         tracing::debug!(prompt_tokens = prompt_tokens.len(), "Candle prompt tokenized");
 
-        if prompt_tokens.len() > 1800 {
+        if prompt_tokens.len() > MAX_PROMPT_TOKENS {
             return Err(NluError::LlmGenerationFailed {
                 reason: format!(
-                    "Prompt too long ({} tokens, max 1800).",
+                    "Prompt too long ({} tokens, max {MAX_PROMPT_TOKENS}).",
                     prompt_tokens.len()
                 ),
             });
@@ -1195,9 +1201,12 @@ impl CandleBackend {
             }
         }
 
-        if prompt_tokens.len() > 1800 {
+        if prompt_tokens.len() > MAX_PROMPT_TOKENS {
             return Err(NluError::LlmGenerationFailed {
-                reason: format!("Prompt too long ({} tokens, max 1800).", prompt_tokens.len()),
+                reason: format!(
+                    "Prompt too long ({} tokens, max {MAX_PROMPT_TOKENS}).",
+                    prompt_tokens.len()
+                ),
             });
         }
 
