@@ -343,8 +343,10 @@ these points revise the *Schema sketch* and *snapshot/WAL* mechanics above.
   `curiosity_config`, `goals`, `failure_cases`, `effort_cases`, `learned_methods`,
   `competence_{tools,categories,calibration}`, `sleep_metrics`). Rationale: it is
   typed data at every point; relational storage keeps it queryable/inspectable and
-  avoids a blob/object-store. (Vector-index state — HNSW item memory, and for now
-  the Phase 25c `person_memory` index — remains rebuilt-from-KG / deferred.)
+  avoids a blob/object-store. (HNSW item memory remains in-process / rebuilt from
+  `facts`. The Phase 25c `person_memory` index is carried in `akh_state.extra` as
+  a JSON-safe `PortablePersonMemory` projection — its `(contact, topic)` tuple key
+  is flattened to a pair sequence, lossless across wake.)
 - **Backend-portable, no PG schemas.** Tables are **flat prefixed names**
   (`akhomed_*` / `workspaces_*`), not `akhomed.*` / `workspaces.*` schemas, and
   all DDL goes through the SeaORM schema **builder** (no raw SQL), list fields use
@@ -380,7 +382,7 @@ advisory lock / cross-host harness (38g) remain as originally planned.
 - **Snapshot storage**: typed relational tables, **not** bincode blobs or an object store — "it is typed data at some point" (store relationally, keep inspectable).
 - **Backend portability**: flat prefixed tables + SeaORM builder + `Json` columns + Rust-side defaults so SQLite/libSQL-Turso stays a drop-in; no PG schemas.
 - **WAL retention**: 38c does **not** truncate; watermark is the replay boundary only. Truncation + LLM WAL→facts consolidation deferred to a later SleepCycle phase.
-- **`person_memory`**: deferred from the snapshot (tuple-keyed map is not JSON-representable; needs a flatten helper or dedicated table).
+- **`person_memory`**: carried in `akh_state.extra` via a `PortablePersonMemory` projection that flattens the `(contact, topic)` tuple key to a JSON pair sequence (lossless; the original `PersonMemoryIndex` bincode format is untouched, so same-host blobs still load).
 
 ### 2026-04-25
 

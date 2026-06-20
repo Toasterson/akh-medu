@@ -323,13 +323,14 @@ pub fn capture_snapshot(
         .and_then(|p| serde_json::to_value(p).ok());
     // `extra` carries the small, scalar-ish state that has no inspectable table
     // of its own but is cheap to round-trip: the active audience, the per-goal
-    // improvement history, the HTN method-usage stats, and the cross-session
-    // continuity summary. Each is restored to its `agent:*` meta key on wake.
+    // improvement history, the HTN method-usage stats, the cross-session
+    // continuity summary, and the person-memory index. Each is restored to its
+    // `agent:*` meta key on wake.
     //
-    // NOTE: `agent:person_memory` (Phase 25c `PersonMemoryIndex`) is *not* yet
-    // carried here — its `topic_index: HashMap<(String, SymbolId), _>` has a
-    // tuple key that JSON cannot represent, so it needs a flatten helper or a
-    // dedicated table. Deferred; a woken Akh starts with an empty person index.
+    // `person_memory` (Phase 25c `PersonMemoryIndex`) rides here as a JSON-safe
+    // `PortablePersonMemory` projection — its `topic_index` tuple key can't be a
+    // JSON object key, and a KG rebuild can't recover the topic→episode mapping,
+    // so the flattened projection is the lossless path.
     let active_project_name = agent
         .agenda
         .active_project
@@ -347,6 +348,7 @@ pub fn capture_snapshot(
         "improvement_history": agent.improvement_history,
         "method_stats": agent.method_registry_htn.export_stats(),
         "session_summary": session_summary,
+        "person_memory": agent.person_memory.to_portable(),
     });
 
     Ok(SnapshotData {
@@ -951,6 +953,12 @@ fn restore_extra(store: &TieredStore, extra: Option<&serde_json::Value>) {
     }) {
         put_bincode(store, b"agent:session_summary", &summary);
     }
+    if let Some(portable) = extra.get("person_memory").and_then(|v| {
+        serde_json::from_value::<crate::agent::contact_memory::PortablePersonMemory>(v.clone()).ok()
+    }) {
+        let index = crate::agent::contact_memory::PersonMemoryIndex::from_portable(portable);
+        put_bincode(store, b"agent:person_memory", &index);
+    }
 }
 
 /// Convert a persisted `facts` row into a KG [`Triple`].
@@ -1142,6 +1150,35 @@ mod tests {
         assert_eq!(parse_consolidation_phase("DreamState"), ConsolidationPhase::DreamState);
         assert_eq!(parse_consolidation_phase("Consolidation"), ConsolidationPhase::Consolidation);
         assert_eq!(parse_consolidation_phase("garbage"), ConsolidationPhase::Wake);
+    }
+
+    #[test]
+    fn person_memory_restore_extra_writes_meta() {
+        // Wake-side: an `extra` bag with a `person_memory` portable must land as
+        // the `agent:person_memory` bincode meta that `Agent::resume` reads.
+        let tmp = tempfile::tempdir().unwrap();
+        let store = TieredStore::with_persistence(tmp.path(), "symbols").unwrap();
+
+        let ep1 = SymbolId::new(11).unwrap();
+        let ep2 = SymbolId::new(12).unwrap();
+        let topic = SymbolId::new(20).unwrap();
+        let portable = crate::agent::contact_memory::PortablePersonMemory {
+            episodes_by_contact: [("alice".to_string(), vec![ep2, ep1])].into_iter().collect(),
+            topic_index: vec![(("alice".to_string(), topic), vec![ep1])],
+            max_per_contact: 100,
+        };
+        let extra = serde_json::json!({ "person_memory": portable });
+
+        restore_extra(&store, Some(&extra));
+
+        let bytes = store
+            .get_meta(b"agent:person_memory")
+            .unwrap()
+            .expect("agent:person_memory meta written");
+        let idx: crate::agent::contact_memory::PersonMemoryIndex =
+            bincode::deserialize(&bytes).expect("deserialize as PersonMemoryIndex");
+        assert_eq!(idx.recall_with_person("alice", 10), vec![ep2, ep1]);
+        assert_eq!(idx.recall_with_person_about("alice", topic, 10), vec![ep1]);
     }
 
     #[test]

@@ -332,8 +332,9 @@ Ennead-akh over Seshat) is deferred.
   data-bearing status variants); `session_summary`/`audience`/
   `improvement_history`/`method_stats` ride in `akh_state.extra`. Managers
   (PIM/calendar/causal/contact/…) and working memory rebuild from the KG /
-  defaults; a missing optional table degrades gracefully. (`person_memory` is a
-  known deferral — its tuple-keyed map is not JSON-representable yet.)
+  defaults; a missing optional table degrades gracefully. The Phase 25c
+  `person_memory` index rides in `extra` as a JSON-safe `PortablePersonMemory`
+  projection (its `(contact, topic)` tuple key is flattened to a pair sequence).
 - Daemon: a per-workspace **snapshot ticker** (`spawn_snapshot_ticker`, alongside
   `wire_wal`) snapshots every `snapshot_interval_secs` (default 300, `0`
   disables); `shutdown_wals` stops tickers, takes a **final snapshot** per loaded
