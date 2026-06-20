@@ -22,12 +22,14 @@
 //! `VirtualContextManager` strategies, and the A/B harness.
 
 pub mod budget;
+pub mod compacting;
 pub mod error;
 pub mod manager;
 pub mod retention;
 pub mod safety;
 pub mod types;
 
+pub use compacting::CompactingManager;
 pub use error::{ContextError, ContextResult};
 pub use manager::{ContextManager, HeuristicTokenCounter, PassThroughManager, TokenCounter};
 pub use retention::{ProvenanceRetentionClassifier, Retention};

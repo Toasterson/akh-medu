@@ -104,6 +104,13 @@ impl Agent {
             tools.truncate(cap);
         }
 
+        // Record the operator turn before assembling, so the conversation's last
+        // turn IS the current prompt — a history-aware ContextManager renders the
+        // turns directly (the agent turn is recorded at the end). The symbolic
+        // path already records both speakers; this closes the gap for the agentic
+        // path so multi-turn context works (measure-first Q1).
+        self.conversation_state_mut().record_operator_turn(user_prompt);
+
         // Phase 44a (ADR 065): assemble the working context through the akh's
         // `ContextManager` instead of building the prompt ad hoc. The default
         // pass-through manager reproduces the single-user-turn behaviour

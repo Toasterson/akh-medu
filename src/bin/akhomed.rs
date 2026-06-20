@@ -1034,6 +1034,15 @@ impl ServerState {
             }
         }
 
+        // Phase 44c: assemble each turn through the curating context manager
+        // (conversation history within the model's real budget), guarded by
+        // `SafetyEnforced` so eviction can never drop a safety-pinned span. The
+        // lib default stays pass-through (tests/embedded); the daemon opts every
+        // akh into history — measure-first Q1 showed it materially helps.
+        agent.set_context_manager(Box::new(akh_medu::agent::context::SafetyEnforced::new(
+            akh_medu::agent::context::CompactingManager,
+        )));
+
         // Extract the snapshot Arc before moving agent into Mutex so it can be
         // registered without ever re-acquiring the agent lock.
         let snapshot = agent.psyche_snapshot();
