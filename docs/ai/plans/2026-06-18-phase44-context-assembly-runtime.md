@@ -10,8 +10,15 @@
   unaffected) → build 44b (budget/trim tools first; route the catalog *through* the
   manager — it's currently added in the backend, downstream of the seam); **Q3**
   recall baseline = KG symbol-overlap (Phase 42 absent), precision measurement
-  deferred to the 44g build. Next build order: **44b → 44c → 44e** (the core
-  `CompactingManager`), then 44d/44g/44h–44j. Two corrections baked into 44a:
+  deferred to the 44g build. **44c (conversation history) now landed** — the
+  `CompactingManager` renders recent turns within the model's real budget window;
+  verified live (a 2-turn coreference resolves across turns). **Model
+  capabilities are now read from the model** (GGUF `context_length` / Ollama
+  `/api/show`), the budget window is sized per-akh, and reasoning-effort is gated
+  on `supports_thinking`. Re-prioritised (windows are huge → no overflow): the
+  remaining wins are **44e** (discourse selection / session seeding), then
+  44d/44g; 44b's full allocator + a Candle-latency tool-trim are optional. Two
+  corrections baked into 44a:
   Phase 42 "Heka"/pgvector is absent (44e/g consume the existing KG recall), and
   no tokenizer reaches the agent path (hence the `TokenCounter` abstraction).
 - **Date:** 2026-06-18 (updated 2026-06-20)
