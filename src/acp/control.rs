@@ -71,6 +71,8 @@ pub const CONTROL_METHODS: &[&str] = &[
     "_akh/config/set",
     "_akh/model/list",
     "_akh/model/set",
+    "_akh/akh/snapshot",
+    "_akh/akh/wake",
 ];
 
 /// Whether `method` is a control-plane method (a member of [`CONTROL_METHODS`]).

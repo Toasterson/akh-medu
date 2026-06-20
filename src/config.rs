@@ -197,6 +197,12 @@ pub struct PostgresConfig {
     /// drop policy applies.
     #[serde(default = "default_wal_max_buffer_mb")]
     pub wal_max_buffer_mb: usize,
+
+    /// Phase 38c snapshot: seconds between automatic per-workspace snapshots of
+    /// the akh's relational state to Postgres. `0` disables the periodic
+    /// snapshot (a final snapshot on shutdown still runs). Default: 300 (5 min).
+    #[serde(default = "default_snapshot_interval_secs")]
+    pub snapshot_interval_secs: u64,
 }
 
 fn default_pg_pool_size() -> u32 {
@@ -217,6 +223,10 @@ fn default_wal_batch_size() -> usize {
 
 fn default_wal_max_buffer_mb() -> usize {
     16
+}
+
+fn default_snapshot_interval_secs() -> u64 {
+    300
 }
 
 // ---------------------------------------------------------------------------

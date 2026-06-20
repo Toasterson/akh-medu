@@ -50,6 +50,12 @@ enum Commands {
         action: ConfigAction,
     },
 
+    /// Snapshot or wake an akh's state to/from Postgres (over ACP `_akh/akh/*`).
+    Akh {
+        #[command(subcommand)]
+        action: AkhAction,
+    },
+
     /// Manage akhomed as a macOS launchd service.
     Service {
         #[command(subcommand)]
@@ -60,6 +66,22 @@ enum Commands {
     Setup {
         #[command(subcommand)]
         action: SetupAction,
+    },
+}
+
+/// Relocation ops: snapshot an akh's state to Postgres, or wake a cold akh from
+/// it (control-plane, over ACP `_akh/akh/*`).
+#[derive(Subcommand)]
+enum AkhAction {
+    /// Snapshot the akh's relational state to Postgres now.
+    Snapshot {
+        /// Workspace to snapshot (defaults to --workspace).
+        workspace: Option<String>,
+    },
+    /// Wake a cold akh from its Postgres snapshot into the local workspace.
+    Wake {
+        /// Workspace to wake (defaults to --workspace).
+        workspace: Option<String>,
     },
 }
 
@@ -356,6 +378,24 @@ fn run_workspace_acp(current_ws: &str, action: WorkspaceAction) -> Result<()> {
     print_acp(&result)
 }
 
+/// Dispatch `akh akh <action>` over the ACP control-plane (`_akh/akh/*`):
+/// snapshot the akh's state to Postgres, or wake a cold akh from it.
+#[cfg(feature = "acp")]
+fn run_akh_acp(current_ws: &str, action: AkhAction) -> Result<()> {
+    let (method, params): (&str, serde_json::Value) = match action {
+        AkhAction::Snapshot { workspace } => {
+            let ws = workspace.unwrap_or_else(|| current_ws.to_string());
+            ("_akh/akh/snapshot", serde_json::json!({ "workspace": ws }))
+        }
+        AkhAction::Wake { workspace } => {
+            let ws = workspace.unwrap_or_else(|| current_ws.to_string());
+            ("_akh/akh/wake", serde_json::json!({ "workspace": ws }))
+        }
+    };
+    let result = acp_call(method, params)?;
+    print_acp(&result)
+}
+
 /// Dispatch `akh chat`: discover the running daemon and converse over ACP — the
 /// TUI backend (default) or a headless stdin/stdout loop. `akh` has no local
 /// engine, so this errors when no daemon is running.
@@ -508,6 +548,8 @@ fn main() -> Result<()> {
         Commands::Daemon { action } => run_daemon_acp(&cli.workspace, action)?,
 
         Commands::Config { action } => run_config_acp(action)?,
+
+        Commands::Akh { action } => run_akh_acp(&cli.workspace, action)?,
 
         Commands::Chat { headless } => run_chat_acp(&cli.workspace, headless)?,
 

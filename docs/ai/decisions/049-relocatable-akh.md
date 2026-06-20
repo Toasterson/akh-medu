@@ -1,7 +1,7 @@
 # ADR 049 — Relocatable Session-Based Akh: Postgres-backed truth with in-process cache
 
 > Date: 2026-04-25
-> Status: Proposed
+> Status: Accepted — 38a–38c implemented (see **Amendment 2026-06-20** for the as-built revisions to the schema sketch below)
 > Phase: 38
 > Depends on: Phase 14 (identity, provenance), Phase 17 (evidence intervals),
 >             ADR-047 (Seshat / Postgres precedent), ADR-029 (MCP server)
@@ -328,7 +328,59 @@ sub-phase breakdown and acceptance criteria.
 - oxigraph: `src/graph/sparql.rs`
 - hnsw_rs: `src/vsa/item_memory.rs`
 
+## Amendment 2026-06-20 (as built, 38a–38c)
+
+Implementation refined the original design. The **decision and rationale stand**;
+these points revise the *Schema sketch* and *snapshot/WAL* mechanics above.
+
+- **Everything relational, no opaque blobs.** The original `akhomed.snapshots`
+  table (working_mem / episodes / state_blob as `bytea`, psyche as JSONB) is
+  **dropped**. The Akh's state is stored as **typed rows**: `akhomed_facts` +
+  `akhomed_symbols` (the KG + registry), one `akhomed_akh_state` runtime row
+  (watermark, allocator, cycle_count, sleep phase; small misc — psyche, audience,
+  improvement_history, method_stats, session_summary — in `psyche`/`extra`
+  JSONB), and **inspectable cognitive tables** (`drives`, `agenda`,
+  `curiosity_config`, `goals`, `failure_cases`, `effort_cases`, `learned_methods`,
+  `competence_{tools,categories,calibration}`, `sleep_metrics`). Rationale: it is
+  typed data at every point; relational storage keeps it queryable/inspectable and
+  avoids a blob/object-store. (Vector-index state — HNSW item memory, and for now
+  the Phase 25c `person_memory` index — remains rebuilt-from-KG / deferred.)
+- **Backend-portable, no PG schemas.** Tables are **flat prefixed names**
+  (`akhomed_*` / `workspaces_*`), not `akhomed.*` / `workspaces.*` schemas, and
+  all DDL goes through the SeaORM schema **builder** (no raw SQL), list fields use
+  `Json` (no native arrays), and UUIDs/timestamps are generated Rust-side (no DB
+  defaults). This keeps SQLite / libSQL-**Turso** a drop-in backend later. The
+  one allowed raw-SQL spot is the Postgres-only TimescaleDB step.
+- **WAL is a TimescaleDB hypertable (graceful).** `akhomed_mutation_log` is
+  promoted to a hypertable when `timescaledb` is available (probed via
+  `pg_available_extensions`); elsewhere it is a plain SeaORM table.
+- **Snapshots do NOT truncate the WAL.** The watermark (`MAX(mutation_log.seq)`
+  at snapshot time) is purely the **replay boundary** for wake; the WAL is
+  retained. WAL retention/compaction and the off-time **WAL→facts LLM
+  self-consolidation** (plus a Curator Ennead-akh synthesising shared graphs over
+  Seshat) are a **separate later phase**, not 38c.
+- **Wake reuses `Agent::resume` verbatim.** `wake` inverse-maps the rows into the
+  fresh host's redb meta (`sym_meta:` + `agent:*` bincode), then `Engine::new` +
+  `restore_triples(facts)` + replay-tail; the unchanged resume path reconstructs
+  the Akh. A missing optional table degrades to defaults / KG-rebuild.
+- **AGE unchanged (still 38d).** `facts` remains the relational truth; the AGE
+  `akhomed_kg` projection over it is still deferred.
+- **Operational surface (38c).** Daemon snapshot ticker (`[postgres]
+  snapshot_interval_secs`, default 300, `0` disables) + final snapshot on
+  shutdown; ACP control ops `_akh/akh/snapshot` / `_akh/akh/wake` and CLI
+  `akh akh snapshot|wake <ws>`.
+
+Auto boot-from-Postgres (38e), workspaces-as-rows (38f), and the split-brain
+advisory lock / cross-host harness (38g) remain as originally planned.
+
 ## Resolutions log
+
+### 2026-06-20 (38c as-built)
+
+- **Snapshot storage**: typed relational tables, **not** bincode blobs or an object store — "it is typed data at some point" (store relationally, keep inspectable).
+- **Backend portability**: flat prefixed tables + SeaORM builder + `Json` columns + Rust-side defaults so SQLite/libSQL-Turso stays a drop-in; no PG schemas.
+- **WAL retention**: 38c does **not** truncate; watermark is the replay boundary only. Truncation + LLM WAL→facts consolidation deferred to a later SleepCycle phase.
+- **`person_memory`**: deferred from the snapshot (tuple-keyed map is not JSON-representable; needs a flatten helper or dedicated table).
 
 ### 2026-04-25
 

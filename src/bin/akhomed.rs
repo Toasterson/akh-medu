@@ -60,12 +60,55 @@ struct ServerState {
     /// Phase 38b: per-workspace WAL flusher tasks, keyed by workspace name.
     /// Drained on graceful shutdown so the final batch reaches Postgres.
     wal_flushers: RwLock<HashMap<String, WalFlusher>>,
+    /// Phase 38c: per-workspace periodic snapshot tasks, keyed by workspace name.
+    /// Stopped on graceful shutdown, followed by a final synchronous snapshot.
+    snapshot_tickers: RwLock<HashMap<String, SnapshotTicker>>,
 }
 
 /// Handle to a workspace's background WAL flusher task (Phase 38b).
 struct WalFlusher {
     shutdown: tokio::sync::watch::Sender<bool>,
     handle: tokio::task::JoinHandle<()>,
+}
+
+/// Handle to a workspace's background snapshot ticker task (Phase 38c).
+struct SnapshotTicker {
+    shutdown: tokio::sync::watch::Sender<bool>,
+    handle: tokio::task::JoinHandle<()>,
+}
+
+/// Capture + persist one snapshot of `name`'s agent (Phase 38c).
+///
+/// The agent lives behind a `std::sync::Mutex`, so capture (sync) runs under the
+/// lock and the guard is dropped before the async DB persist. A not-yet-loaded
+/// agent is a quiet no-op (the ticker fires before the first interaction).
+async fn snapshot_once(
+    pool: &akhomed_store::DatabaseConnection,
+    agents: &RwLock<HashMap<String, Arc<Mutex<Agent>>>>,
+    name: &str,
+    akh_id: akhomed_store::uuid::Uuid,
+    workspace_id: akhomed_store::uuid::Uuid,
+) -> Result<(), String> {
+    let agent = {
+        let map = agents.read().await;
+        match map.get(name) {
+            Some(a) => Arc::clone(a),
+            None => return Ok(()),
+        }
+    };
+    // The akh row is the identity these rows hang off; ensure it exists.
+    akhomed_store::ensure_akh(pool, akh_id, name, None)
+        .await
+        .map_err(|e| e.to_string())?;
+    // Capture under the lock (sync), release, then persist lock-free.
+    let data = {
+        let guard = agent.lock().unwrap_or_else(|e| e.into_inner());
+        akh_medu::snapshot::capture_snapshot(&guard, akh_id, workspace_id)
+            .map_err(|e| e.to_string())?
+    };
+    akh_medu::snapshot::persist_snapshot(data, pool)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Background daemon state for a workspace.
@@ -125,6 +168,7 @@ impl ServerState {
             daemon_pauses: RwLock::new(HashMap::new()),
             pg_pool,
             wal_flushers: RwLock::new(HashMap::new()),
+            snapshot_tickers: RwLock::new(HashMap::new()),
         }
     }
 
@@ -203,15 +247,18 @@ impl ServerState {
             return;
         }
 
-        let wal_cfg = {
+        let (wal_cfg, snapshot_interval_secs) = {
             let cfg = self.config.read().await;
             match cfg.postgres.as_ref() {
-                Some(pg) => akh_medu::wal::WalConfig::new(
-                    Duration::from_secs(pg.wal_flush_interval_secs),
-                    pg.wal_batch_size,
-                    pg.wal_max_buffer_mb.saturating_mul(1024 * 1024),
+                Some(pg) => (
+                    akh_medu::wal::WalConfig::new(
+                        Duration::from_secs(pg.wal_flush_interval_secs),
+                        pg.wal_batch_size,
+                        pg.wal_max_buffer_mb.saturating_mul(1024 * 1024),
+                    ),
+                    pg.snapshot_interval_secs,
                 ),
-                None => akh_medu::wal::WalConfig::default(),
+                None => (akh_medu::wal::WalConfig::default(), 0),
             }
         };
 
@@ -236,10 +283,150 @@ impl ServerState {
             .await
             .insert(name.to_string(), WalFlusher { shutdown, handle });
         tracing::info!(workspace = %name, %akh_id, "mutation WAL enabled (Postgres backing store)");
+
+        // Phase 38c: periodic snapshot of the akh's relational state. `0` means
+        // no timer (a final snapshot on shutdown still runs).
+        if snapshot_interval_secs > 0 {
+            let ticker = self.spawn_snapshot_ticker(
+                name.to_string(),
+                Arc::clone(pool),
+                Duration::from_secs(snapshot_interval_secs),
+            );
+            self.snapshot_tickers
+                .write()
+                .await
+                .insert(name.to_string(), ticker);
+            tracing::info!(
+                workspace = %name,
+                interval_secs = snapshot_interval_secs,
+                "periodic snapshot enabled"
+            );
+        }
     }
 
-    /// Phase 38b: stop all WAL flushers, triggering a final drain to Postgres.
+    /// Spawn the background snapshot ticker for `name`. The task captures the
+    /// agent state under its (sync) lock, then persists it lock-free; it skips
+    /// quietly if the agent is not loaded yet.
+    fn spawn_snapshot_ticker(
+        &self,
+        name: String,
+        pool: Arc<akhomed_store::DatabaseConnection>,
+        interval: Duration,
+    ) -> SnapshotTicker {
+        let agents = Arc::clone(&self.agents);
+        let (shutdown, mut shutdown_rx) = tokio::sync::watch::channel(false);
+        let handle = tokio::spawn(async move {
+            let akh_id = akh_medu::wal::akh_id_for(&name);
+            let workspace_id = akh_medu::wal::workspace_id_for(&name);
+            let mut tick = tokio::time::interval(interval);
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            tick.tick().await; // consume the immediate first tick
+            loop {
+                tokio::select! {
+                    _ = tick.tick() => {
+                        if let Err(e) =
+                            snapshot_once(&pool, &agents, &name, akh_id, workspace_id).await
+                        {
+                            tracing::warn!(workspace = %name, error = %e, "periodic snapshot failed");
+                        }
+                    }
+                    _ = shutdown_rx.changed() => break,
+                }
+            }
+        });
+        SnapshotTicker { shutdown, handle }
+    }
+
+    /// Snapshot one workspace on demand (control-plane `_akh/akh/snapshot`).
+    /// Loads the agent if needed, then captures + persists its state.
+    async fn snapshot_workspace(&self, name: &str) -> Result<(), String> {
+        let Some(pool) = self.pg_pool.as_ref() else {
+            return Err("no Postgres backing store configured (no [postgres] section)".into());
+        };
+        // Ensure the agent is live so there is state to capture.
+        self.get_agent(name).await?;
+        let akh_id = akh_medu::wal::akh_id_for(name);
+        let workspace_id = akh_medu::wal::workspace_id_for(name);
+        snapshot_once(pool, &self.agents, name, akh_id, workspace_id).await
+    }
+
+    /// Wake a cold workspace from its Postgres snapshot (control-plane
+    /// `_akh/akh/wake`). Populates the local redb, then routes through the normal
+    /// lazy `get_agent` path so resume + model-manager + WAL wiring all apply.
+    async fn wake_workspace(&self, name: &str) -> Result<serde_json::Value, String> {
+        let Some(pool) = self.pg_pool.as_ref() else {
+            return Err("no Postgres backing store configured (no [postgres] section)".into());
+        };
+        // Wake operates on a *cold* workspace; a loaded one is already awake.
+        if self.workspaces.read().await.contains_key(name)
+            || self.agents.read().await.contains_key(name)
+        {
+            return Err(format!(
+                "workspace \"{name}\" is already loaded; wake operates on a cold workspace"
+            ));
+        }
+
+        let ws_paths = self.paths.workspace(name);
+        std::fs::create_dir_all(&ws_paths.kg_dir)
+            .map_err(|e| format!("cannot create workspace kg dir: {e}"))?;
+        let akh_id = akh_medu::wal::akh_id_for(name);
+        let workspace_id = akh_medu::wal::workspace_id_for(name);
+
+        // Reconstruct the local redb from Postgres. `wake` persists the KG
+        // snapshot to redb before returning; dropping the engine releases the
+        // redb lock so the lazy path can reopen it.
+        let engine = akh_medu::snapshot::wake(&ws_paths.kg_dir, akh_id, workspace_id, pool)
+            .await
+            .map_err(|e| format!("wake failed: {e}"))?;
+        let triples = engine.all_triples().len();
+        let symbols = engine.all_symbols().len();
+        drop(engine);
+
+        // Bring the akh fully online via the standard path (resume reads the redb
+        // wake just populated; this also wires the WAL + snapshot ticker).
+        self.get_agent(name).await?;
+
+        tracing::info!(workspace = %name, %akh_id, triples, symbols, "woke akh from Postgres");
+        Ok(serde_json::json!({
+            "woke": name,
+            "triples": triples,
+            "symbols": symbols,
+        }))
+    }
+
+    /// Phase 38b/38c: stop background Postgres tasks on graceful shutdown.
+    ///
+    /// Order: stop snapshot tickers, take one final snapshot per loaded
+    /// workspace (so the relational copy is current), then drain the WAL
+    /// flushers (any mutations buffered after the final snapshot land newer than
+    /// its watermark and are replayed idempotently on the next wake).
     async fn shutdown_wals(&self) {
+        // Stop periodic snapshot tickers.
+        let tickers: Vec<(String, SnapshotTicker)> =
+            self.snapshot_tickers.write().await.drain().collect();
+        for (name, ticker) in tickers {
+            let _ = ticker.shutdown.send(true);
+            if tokio::time::timeout(Duration::from_secs(5), ticker.handle)
+                .await
+                .is_err()
+            {
+                tracing::warn!(workspace = %name, "snapshot ticker did not stop within 5s");
+            }
+        }
+
+        // Final snapshot of every loaded workspace (best-effort).
+        if self.pg_pool.is_some() {
+            let names: Vec<String> = self.agents.read().await.keys().cloned().collect();
+            for name in names {
+                match self.snapshot_workspace(&name).await {
+                    Ok(()) => tracing::info!(workspace = %name, "final snapshot written on shutdown"),
+                    Err(e) => {
+                        tracing::warn!(workspace = %name, error = %e, "final snapshot on shutdown failed")
+                    }
+                }
+            }
+        }
+
         let flushers: Vec<(String, WalFlusher)> =
             self.wal_flushers.write().await.drain().collect();
         for (name, mut flusher) in flushers {
@@ -866,6 +1053,23 @@ impl akh_medu::acp::ServerControl for ServerState {
                         "model": new_model,
                         "effort": new_effort,
                     }))
+                }
+
+                // ── akh group (relocation: snapshot/wake an akh) ─────────
+                "akh/snapshot" => {
+                    let ws = params
+                        .get("workspace")
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or_else(|| "missing required param: workspace".to_string())?;
+                    self.snapshot_workspace(ws).await?;
+                    Ok(serde_json::json!({ "snapshot": ws, "ok": true }))
+                }
+                "akh/wake" => {
+                    let ws = params
+                        .get("workspace")
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or_else(|| "missing required param: workspace".to_string())?;
+                    self.wake_workspace(ws).await
                 }
 
                 other => Err(format!("unknown control-plane method: _akh/{other}")),
@@ -1540,5 +1744,42 @@ mod control_plane_tests {
         let (_tmp, state) = temp_state();
         let bad = state.dispatch("_akh/workspace/teleport", &json!({})).await;
         assert!(bad.is_err(), "unknown control method must error");
+    }
+
+    #[tokio::test]
+    async fn akh_snapshot_wake_are_registered_control_methods() {
+        // Both must be routed to the control-plane, not mistaken for data-plane.
+        assert!(akh_medu::acp::is_control_method("_akh/akh/snapshot"));
+        assert!(akh_medu::acp::is_control_method("_akh/akh/wake"));
+    }
+
+    #[tokio::test]
+    async fn akh_snapshot_wake_need_workspace_param() {
+        let (_tmp, state) = temp_state();
+        // Missing the required `workspace` param is a clean error (recognised op).
+        let r = state.dispatch("_akh/akh/snapshot", &json!({})).await;
+        assert!(
+            r.as_ref().is_err_and(|e| e.contains("workspace")),
+            "expected missing-param error, got {r:?}",
+        );
+        let r = state.dispatch("_akh/akh/wake", &json!({})).await;
+        assert!(
+            r.as_ref().is_err_and(|e| e.contains("workspace")),
+            "expected missing-param error, got {r:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn akh_snapshot_without_postgres_errors_cleanly() {
+        // temp_state has no pg_pool → snapshot reports the missing backing store
+        // rather than panicking or claiming success.
+        let (_tmp, state) = temp_state();
+        let r = state
+            .dispatch("_akh/akh/snapshot", &json!({ "workspace": "alpha" }))
+            .await;
+        assert!(
+            r.as_ref().is_err_and(|e| e.contains("Postgres")),
+            "expected no-Postgres error, got {r:?}",
+        );
     }
 }

@@ -69,27 +69,70 @@ pub enum SnapshotError {
 /// Convenience result alias.
 pub type SnapshotResult<T> = std::result::Result<T, SnapshotError>;
 
+/// An owned, lock-free capture of an Akh's state, ready to persist.
+///
+/// Produced synchronously by [`capture_snapshot`] (holding the agent lock only
+/// for the fast in-memory copy) and consumed by the async [`persist_snapshot`]
+/// (the DB I/O, which must run *without* the lock — the daemon's agent lives
+/// behind a `std::sync::Mutex` whose guard cannot cross an `.await`).
+pub struct SnapshotData {
+    akh_id: Uuid,
+    workspace_id: Uuid,
+    symbols: Vec<symbol::Model>,
+    facts: Vec<fact::Model>,
+    drives: Vec<drive::Model>,
+    agenda: Vec<agenda::Model>,
+    curiosity: Vec<curiosity_config::Model>,
+    goals: Vec<goal::Model>,
+    failures: Vec<failure_case::Model>,
+    efforts: Vec<effort_case::Model>,
+    methods: Vec<learned_method::Model>,
+    comp_tools: Vec<competence_tool::Model>,
+    comp_cats: Vec<competence_category::Model>,
+    comp_calib: Vec<competence_calibration::Model>,
+    sleep_rows: Vec<sleep_metric::Model>,
+    allocator_next: i64,
+    cycle_count: i64,
+    session_start_cycle: i64,
+    sleep_phase: String,
+    last_sleep_cycle: i64,
+    psyche: Option<serde_json::Value>,
+    extra: Option<serde_json::Value>,
+}
+
 /// Snapshot `agent`'s current state into Postgres under `(akh_id, workspace_id)`.
 ///
-/// Call with the agent locked (a consistent point — no concurrent OODA
-/// mutations). The watermark is the max `mutation_log.seq` at snapshot time;
-/// wake replays rows newer than it.
+/// Convenience wrapper = [`capture_snapshot`] + [`persist_snapshot`]. Callers
+/// that hold the agent behind a non-async mutex must instead call the two halves
+/// separately: capture under the lock, drop the guard, then `await` the persist.
 pub async fn write_snapshot(
     agent: &Agent,
     akh_id: Uuid,
     workspace_id: Uuid,
     db: &DatabaseConnection,
 ) -> SnapshotResult<()> {
+    let data = capture_snapshot(agent, akh_id, workspace_id)?;
+    persist_snapshot(data, db).await
+}
+
+/// Capture the agent's live state into owned rows (synchronous).
+///
+/// Flushes durable state to local redb, then copies the registry, KG, and
+/// cognitive subsystems into entity `Model`s. Holds no DB handle and never
+/// `await`s, so it is safe to call while holding a `std::sync::Mutex<Agent>`
+/// guard; release the guard before [`persist_snapshot`].
+pub fn capture_snapshot(
+    agent: &Agent,
+    akh_id: Uuid,
+    workspace_id: Uuid,
+) -> SnapshotResult<SnapshotData> {
     let engine = agent.engine();
 
-    // 1. Flush durable state to local redb (registry, allocator counter, KG snapshot).
+    // Flush durable state to local redb (registry, allocator counter, KG snapshot).
     agent.persist().map_err(|e| SnapshotError::Agent(e.to_string()))?;
 
-    // 2. Recovery boundary + allocator counter.
-    let watermark = akhomed_store::snapshots::current_watermark(db, akh_id).await?;
     let allocator_next = read_allocator_next(engine);
 
-    // 3. Symbols (registry → rows).
     let symbols: Vec<symbol::Model> = engine
         .dump_symbols()
         .into_iter()
@@ -104,9 +147,8 @@ pub async fn write_snapshot(
             }
         })
         .collect();
-    akhomed_store::snapshots::replace_symbols(db, akh_id, symbols).await?;
 
-    // 4. Facts (live KG → rows; retracted triples are absent).
+    // Live KG → rows; retracted triples are absent.
     let facts: Vec<fact::Model> = engine
         .all_triples()
         .into_iter()
@@ -123,9 +165,7 @@ pub async fn write_snapshot(
             compartment: t.compartment_id.clone(),
         })
         .collect();
-    akhomed_store::snapshots::replace_workspace_facts(db, workspace_id, facts).await?;
 
-    // 5. Cognitive tables.
     let drives: Vec<drive::Model> = agent
         .drives
         .drives
@@ -141,10 +181,9 @@ pub async fn write_snapshot(
             threshold: agent.drives.thresholds[i],
         })
         .collect();
-    akhomed_store::snapshots::replace_drives(db, akh_id, drives).await?;
 
     let active = agent.agenda.active_project;
-    let agenda_rows: Vec<agenda::Model> = agent
+    let agenda: Vec<agenda::Model> = agent
         .agenda
         .projects
         .iter()
@@ -155,7 +194,6 @@ pub async fn write_snapshot(
             is_active: Some(*id) == active,
         })
         .collect();
-    akhomed_store::snapshots::replace_agenda(db, akh_id, agenda_rows).await?;
 
     let c = &agent.curiosity_config;
     let curiosity = vec![curiosity_config::Model {
@@ -167,10 +205,8 @@ pub async fn write_snapshot(
         beyond_curiosity_factor: c.beyond_curiosity_factor,
         known_curiosity_factor: c.known_curiosity_factor,
     }];
-    akhomed_store::snapshots::replace_curiosity(db, akh_id, curiosity).await?;
 
     let goals: Vec<goal::Model> = agent.goals.iter().map(|g| goal_to_model(akh_id, g)).collect();
-    akhomed_store::snapshots::replace_goals(db, akh_id, goals).await?;
 
     let failures: Vec<failure_case::Model> = agent
         .failure_index
@@ -189,7 +225,6 @@ pub async fn write_snapshot(
             vector: fc.vector.clone(),
         })
         .collect();
-    akhomed_store::snapshots::replace_failure_cases(db, akh_id, failures).await?;
 
     let efforts: Vec<effort_case::Model> = agent
         .effort_index
@@ -208,7 +243,6 @@ pub async fn write_snapshot(
             initial_coverage: ec.initial_coverage as i32,
         })
         .collect();
-    akhomed_store::snapshots::replace_effort_cases(db, akh_id, efforts).await?;
 
     let methods: Vec<learned_method::Model> = agent
         .method_index
@@ -230,11 +264,10 @@ pub async fn write_snapshot(
             steps: serde_json::to_value(&m.steps).unwrap_or_default(),
         })
         .collect();
-    akhomed_store::snapshots::replace_learned_methods(db, akh_id, methods).await?;
 
     // Competence — 3 tables.
     let cm = &agent.competence_model;
-    let tools: Vec<competence_tool::Model> = cm
+    let comp_tools: Vec<competence_tool::Model> = cm
         .tools
         .iter()
         .map(|(tool, r)| competence_tool::Model {
@@ -244,8 +277,7 @@ pub async fn write_snapshot(
             attempts: r.attempts as i32,
         })
         .collect();
-    akhomed_store::snapshots::replace_competence_tools(db, akh_id, tools).await?;
-    let cats: Vec<competence_category::Model> = cm
+    let comp_cats: Vec<competence_category::Model> = cm
         .categories
         .iter()
         .map(|(category, r)| competence_category::Model {
@@ -255,8 +287,7 @@ pub async fn write_snapshot(
             attempted: r.attempted as i32,
         })
         .collect();
-    akhomed_store::snapshots::replace_competence_categories(db, akh_id, cats).await?;
-    let calib: Vec<competence_calibration::Model> = cm
+    let comp_calib: Vec<competence_calibration::Model> = cm
         .calibration_history
         .iter()
         .enumerate()
@@ -267,7 +298,6 @@ pub async fn write_snapshot(
             actual: p.actual,
         })
         .collect();
-    akhomed_store::snapshots::replace_competence_calibration(db, akh_id, calib).await?;
 
     // Sleep metrics (time series).
     let sleep_rows: Vec<sleep_metric::Model> = agent
@@ -285,9 +315,8 @@ pub async fn write_snapshot(
             duration_cycles: m.duration_cycles as i64,
         })
         .collect();
-    akhomed_store::snapshots::replace_sleep_metrics(db, akh_id, sleep_rows).await?;
 
-    // 6. The runtime-state row.
+    // Runtime-state row (sans watermark — that is read async in persist).
     let psyche = agent
         .psyche
         .as_ref()
@@ -319,9 +348,23 @@ pub async fn write_snapshot(
         "method_stats": agent.method_registry_htn.export_stats(),
         "session_summary": session_summary,
     });
-    let state = akh_state::Model {
+
+    Ok(SnapshotData {
         akh_id,
-        watermark,
+        workspace_id,
+        symbols,
+        facts,
+        drives,
+        agenda,
+        curiosity,
+        goals,
+        failures,
+        efforts,
+        methods,
+        comp_tools,
+        comp_cats,
+        comp_calib,
+        sleep_rows,
         allocator_next,
         cycle_count: agent.cycle_count as i64,
         session_start_cycle: agent.session_start_cycle as i64,
@@ -329,9 +372,68 @@ pub async fn write_snapshot(
         last_sleep_cycle: agent.sleep_cycle.last_sleep_cycle as i64,
         psyche,
         extra: Some(extra),
+    })
+}
+
+/// Persist a previously-[captured](capture_snapshot) snapshot to Postgres
+/// (async; holds no agent lock). Cognitive tables are full-replaced; `akh_state`
+/// is upserted with the recovery watermark (`MAX(mutation_log.seq)` now).
+pub async fn persist_snapshot(data: SnapshotData, db: &DatabaseConnection) -> SnapshotResult<()> {
+    use akhomed_store::snapshots as ops;
+    let SnapshotData {
+        akh_id,
+        workspace_id,
+        symbols,
+        facts,
+        drives,
+        agenda,
+        curiosity,
+        goals,
+        failures,
+        efforts,
+        methods,
+        comp_tools,
+        comp_cats,
+        comp_calib,
+        sleep_rows,
+        allocator_next,
+        cycle_count,
+        session_start_cycle,
+        sleep_phase,
+        last_sleep_cycle,
+        psyche,
+        extra,
+    } = data;
+
+    let watermark = ops::current_watermark(db, akh_id).await?;
+
+    ops::replace_symbols(db, akh_id, symbols).await?;
+    ops::replace_workspace_facts(db, workspace_id, facts).await?;
+    ops::replace_drives(db, akh_id, drives).await?;
+    ops::replace_agenda(db, akh_id, agenda).await?;
+    ops::replace_curiosity(db, akh_id, curiosity).await?;
+    ops::replace_goals(db, akh_id, goals).await?;
+    ops::replace_failure_cases(db, akh_id, failures).await?;
+    ops::replace_effort_cases(db, akh_id, efforts).await?;
+    ops::replace_learned_methods(db, akh_id, methods).await?;
+    ops::replace_competence_tools(db, akh_id, comp_tools).await?;
+    ops::replace_competence_categories(db, akh_id, comp_cats).await?;
+    ops::replace_competence_calibration(db, akh_id, comp_calib).await?;
+    ops::replace_sleep_metrics(db, akh_id, sleep_rows).await?;
+
+    let state = akh_state::Model {
+        akh_id,
+        watermark,
+        allocator_next,
+        cycle_count,
+        session_start_cycle,
+        sleep_phase,
+        last_sleep_cycle,
+        psyche,
+        extra,
         updated_at: chrono::Utc::now(),
     };
-    akhomed_store::snapshots::upsert_akh_state(db, state).await?;
+    ops::upsert_akh_state(db, state).await?;
 
     Ok(())
 }
