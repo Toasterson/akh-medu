@@ -14,8 +14,16 @@ enum Workspace {
     Dimension,
     Encoding,
     Language,
-    SeedPacks,
     CreatedAt,
+}
+
+#[derive(DeriveIden)]
+enum WorkspaceSeedPack {
+    #[sea_orm(iden = "workspaces_workspace_seed_pack")]
+    Table,
+    WorkspaceId,
+    Position,
+    PackName,
 }
 
 #[derive(DeriveIden)]
@@ -51,8 +59,36 @@ impl MigrationTrait for Migration {
                     .col(ColumnDef::new(Workspace::Dimension).integer().not_null())
                     .col(ColumnDef::new(Workspace::Encoding).text().not_null())
                     .col(ColumnDef::new(Workspace::Language).text().not_null())
-                    .col(ColumnDef::new(Workspace::SeedPacks).json().not_null())
                     .col(ColumnDef::new(Workspace::CreatedAt).timestamp_with_time_zone().not_null())
+                    .to_owned(),
+            )
+            .await?;
+
+        // workspace_seed_pack — ordered seed packs per workspace,
+        // PK (workspace_id, position). Normalises the former `seed_packs` JSON list.
+        manager
+            .create_table(
+                Table::create()
+                    .table(WorkspaceSeedPack::Table)
+                    .if_not_exists()
+                    .col(ColumnDef::new(WorkspaceSeedPack::WorkspaceId).uuid().not_null())
+                    .col(ColumnDef::new(WorkspaceSeedPack::Position).integer().not_null())
+                    .col(ColumnDef::new(WorkspaceSeedPack::PackName).text().not_null())
+                    .primary_key(
+                        Index::create()
+                            .col(WorkspaceSeedPack::WorkspaceId)
+                            .col(WorkspaceSeedPack::Position),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .if_not_exists()
+                    .name("idx_workspaces_seed_pack_by_workspace")
+                    .table(WorkspaceSeedPack::Table)
+                    .col(WorkspaceSeedPack::WorkspaceId)
                     .to_owned(),
             )
             .await?;
@@ -96,6 +132,7 @@ impl MigrationTrait for Migration {
         for table in [
             ActiveMicrotheories::Table.into_table_ref(),
             Membership::Table.into_table_ref(),
+            WorkspaceSeedPack::Table.into_table_ref(),
             Workspace::Table.into_table_ref(),
         ] {
             manager.drop_table(Table::drop().table(table).if_exists().to_owned()).await?;

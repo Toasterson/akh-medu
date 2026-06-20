@@ -1,5 +1,8 @@
 //! Entity: `akhomed.learned_methods` — procedurally-learned HTN methods. The
 //! HNSW method index is rebuilt from these rows on wake (`MethodIndex::from_methods`).
+//!
+//! The ordered steps are normalised out into
+//! [`crate::entity::learned_method_step`] (one child row per step).
 
 use sea_orm::entity::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -23,9 +26,6 @@ pub struct Model {
     pub learned_at: i64,
     pub last_used: i64,
     pub source_goal_description: String,
-    /// `Vec<GeneralizedStep>` serialised.
-    #[sea_orm(column_type = "Json")]
-    pub steps: Json,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

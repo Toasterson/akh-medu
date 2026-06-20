@@ -3,8 +3,9 @@
 //! optionals, and composite-keyed cognitive tables — without a live database.
 
 use akhomed_store::entity::{
-    akh, akh_state, competence_tool, drive, effort_case, fact, failure_case, goal, mutation_log,
-    provenance, symbol, workspace,
+    akh, akh_state, competence_tool, drive, effort_case, fact, failure_case, goal, goal_dependency,
+    goal_hierarchy, learned_method_step, mutation_log, provenance, provenance_input, symbol,
+    workspace, workspace_seed_pack,
 };
 use chrono::{DateTime, Utc};
 use serde_json::json;
@@ -71,7 +72,7 @@ fn symbol_and_fact_roundtrip() {
 
 #[test]
 fn json_columns_roundtrip() {
-    // mutation_log payload, provenance derivation + inputs (was BIGINT[]), workspace seed_packs (was TEXT[]).
+    // mutation_log payload + provenance derivation are the JSON columns we keep.
     roundtrip(&mutation_log::Model {
         seq: 1,
         akh_id: Uuid::from_u128(1),
@@ -86,7 +87,6 @@ fn json_columns_roundtrip() {
         workspace_id: Uuid::from_u128(2),
         subject: 5,
         derivation: json!({ "kind": "AgentConsolidation" }),
-        inputs: json!([1, 2, 3, 9_000_000_000_i64]),
         confidence: 0.9,
         created_at: ts(),
     });
@@ -96,8 +96,41 @@ fn json_columns_roundtrip() {
         dimension: 10000,
         encoding: "bipolar".into(),
         language: "auto".into(),
-        seed_packs: json!(["core", "ci-runner"]),
         created_at: ts(),
+    });
+}
+
+#[test]
+fn normalised_edge_and_child_tables_roundtrip() {
+    // The former JSON list-columns are now proper edge/child rows.
+    roundtrip(&goal_hierarchy::Model {
+        akh_id: Uuid::from_u128(1),
+        parent_id: 7,
+        child_id: 8,
+        position: 0,
+    });
+    roundtrip(&goal_dependency::Model {
+        akh_id: Uuid::from_u128(1),
+        goal_id: 7,
+        blocking_goal_id: 4,
+    });
+    roundtrip(&learned_method_step::Model {
+        akh_id: Uuid::from_u128(1),
+        method_id: 42,
+        step_index: 1,
+        tool: "kg_query".into(),
+        arg_pattern: "find {Entity}".into(),
+        expected_outcome: "kg_query_result".into(),
+    });
+    roundtrip(&provenance_input::Model {
+        provenance_id: 1,
+        position: 0,
+        input_symbol_id: 9_000_000_000_i64,
+    });
+    roundtrip(&workspace_seed_pack::Model {
+        workspace_id: Uuid::from_u128(3),
+        position: 0,
+        pack_name: "ci-runner".into(),
     });
 }
 
@@ -124,8 +157,6 @@ fn cognitive_tables_roundtrip() {
         cycles_worked: 3,
         last_progress_cycle: 120,
         source: Some("DriveCuriosity".into()),
-        children: json!([8, 9]),
-        blocked_by: json!([]),
         detail: Some(json!({ "estimated_effort": { "cycles": 10 } })),
     });
     roundtrip(&failure_case::Model {

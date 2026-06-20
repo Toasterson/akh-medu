@@ -12,6 +12,7 @@ pub mod episode;
 pub mod fact;
 pub mod mutation_log;
 pub mod provenance;
+pub mod provenance_input;
 pub mod symbol;
 
 // akhomed.* — cognitive state tables
@@ -24,10 +25,14 @@ pub mod drive;
 pub mod effort_case;
 pub mod failure_case;
 pub mod goal;
+pub mod goal_dependency;
+pub mod goal_hierarchy;
 pub mod learned_method;
+pub mod learned_method_step;
 pub mod sleep_metric;
 
 // workspaces.* — workspace metadata + membership
 pub mod active_microtheory;
 pub mod membership;
 pub mod workspace;
+pub mod workspace_seed_pack;

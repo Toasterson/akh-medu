@@ -17,8 +17,8 @@ use akhomed_store::chrono;
 use akhomed_store::uuid::Uuid;
 use akhomed_store::entity::{
     agenda, akh_state, competence_calibration, competence_category, competence_tool,
-    curiosity_config, drive, effort_case, fact, failure_case, goal, learned_method, sleep_metric,
-    symbol,
+    curiosity_config, drive, effort_case, fact, failure_case, goal, goal_dependency, goal_hierarchy,
+    learned_method, learned_method_step, sleep_metric, symbol,
 };
 
 use crate::agent::Agent;
@@ -84,9 +84,12 @@ pub struct SnapshotData {
     agenda: Vec<agenda::Model>,
     curiosity: Vec<curiosity_config::Model>,
     goals: Vec<goal::Model>,
+    goal_hierarchy: Vec<goal_hierarchy::Model>,
+    goal_dependencies: Vec<goal_dependency::Model>,
     failures: Vec<failure_case::Model>,
     efforts: Vec<effort_case::Model>,
     methods: Vec<learned_method::Model>,
+    method_steps: Vec<learned_method_step::Model>,
     comp_tools: Vec<competence_tool::Model>,
     comp_cats: Vec<competence_category::Model>,
     comp_calib: Vec<competence_calibration::Model>,
@@ -207,6 +210,33 @@ pub fn capture_snapshot(
     }];
 
     let goals: Vec<goal::Model> = agent.goals.iter().map(|g| goal_to_model(akh_id, g)).collect();
+    // Normalised goal DAG: `children` → ordered hierarchy edges; `blocked_by` →
+    // dependency edges.
+    let goal_hierarchy: Vec<goal_hierarchy::Model> = agent
+        .goals
+        .iter()
+        .flat_map(|g| {
+            let parent_id = g.symbol_id.get() as i64;
+            g.children.iter().enumerate().map(move |(pos, child)| goal_hierarchy::Model {
+                akh_id,
+                parent_id,
+                child_id: child.get() as i64,
+                position: pos as i32,
+            })
+        })
+        .collect();
+    let goal_dependencies: Vec<goal_dependency::Model> = agent
+        .goals
+        .iter()
+        .flat_map(|g| {
+            let goal_id = g.symbol_id.get() as i64;
+            g.blocked_by.iter().map(move |b| goal_dependency::Model {
+                akh_id,
+                goal_id,
+                blocking_goal_id: b.get() as i64,
+            })
+        })
+        .collect();
 
     let failures: Vec<failure_case::Model> = agent
         .failure_index
@@ -261,7 +291,23 @@ pub fn capture_snapshot(
             learned_at: m.learned_at as i64,
             last_used: m.last_used as i64,
             source_goal_description: m.source_goal_description.clone(),
-            steps: serde_json::to_value(&m.steps).unwrap_or_default(),
+        })
+        .collect();
+    // Normalised method steps: one ordered child row per `GeneralizedStep`.
+    let method_steps: Vec<learned_method_step::Model> = agent
+        .method_index
+        .methods()
+        .iter()
+        .flat_map(|m| {
+            let method_id = m.id.get() as i64;
+            m.steps.iter().enumerate().map(move |(idx, step)| learned_method_step::Model {
+                akh_id,
+                method_id,
+                step_index: idx as i32,
+                tool: step.tool.clone(),
+                arg_pattern: step.arg_pattern.clone(),
+                expected_outcome: step.expected_outcome.clone(),
+            })
         })
         .collect();
 
@@ -360,9 +406,12 @@ pub fn capture_snapshot(
         agenda,
         curiosity,
         goals,
+        goal_hierarchy,
+        goal_dependencies,
         failures,
         efforts,
         methods,
+        method_steps,
         comp_tools,
         comp_cats,
         comp_calib,
@@ -391,9 +440,12 @@ pub async fn persist_snapshot(data: SnapshotData, db: &DatabaseConnection) -> Sn
         agenda,
         curiosity,
         goals,
+        goal_hierarchy,
+        goal_dependencies,
         failures,
         efforts,
         methods,
+        method_steps,
         comp_tools,
         comp_cats,
         comp_calib,
@@ -415,9 +467,12 @@ pub async fn persist_snapshot(data: SnapshotData, db: &DatabaseConnection) -> Sn
     ops::replace_agenda(db, akh_id, agenda).await?;
     ops::replace_curiosity(db, akh_id, curiosity).await?;
     ops::replace_goals(db, akh_id, goals).await?;
+    ops::replace_goal_hierarchy(db, akh_id, goal_hierarchy).await?;
+    ops::replace_goal_dependencies(db, akh_id, goal_dependencies).await?;
     ops::replace_failure_cases(db, akh_id, failures).await?;
     ops::replace_effort_cases(db, akh_id, efforts).await?;
     ops::replace_learned_methods(db, akh_id, methods).await?;
+    ops::replace_learned_method_steps(db, akh_id, method_steps).await?;
     ops::replace_competence_tools(db, akh_id, comp_tools).await?;
     ops::replace_competence_categories(db, akh_id, comp_cats).await?;
     ops::replace_competence_calibration(db, akh_id, comp_calib).await?;
@@ -505,10 +560,6 @@ fn goal_to_model(akh_id: Uuid, g: &crate::agent::Goal) -> goal::Model {
         cycles_worked: g.cycles_worked as i32,
         last_progress_cycle: g.last_progress_cycle as i64,
         source,
-        children: serde_json::to_value(g.children.iter().map(|s| s.get()).collect::<Vec<_>>())
-            .unwrap_or_default(),
-        blocked_by: serde_json::to_value(g.blocked_by.iter().map(|s| s.get()).collect::<Vec<_>>())
-            .unwrap_or_default(),
         detail,
     }
 }
@@ -551,9 +602,12 @@ pub async fn wake(
     let agenda_rows = ops::load_agenda(db, akh_id).await?;
     let curiosity_rows = ops::load_curiosity(db, akh_id).await?;
     let goal_rows = ops::load_goals(db, akh_id).await?;
+    let hierarchy_rows = ops::load_goal_hierarchy(db, akh_id).await?;
+    let dependency_rows = ops::load_goal_dependencies(db, akh_id).await?;
     let failure_rows = ops::load_failure_cases(db, akh_id).await?;
     let effort_rows = ops::load_effort_cases(db, akh_id).await?;
     let method_rows = ops::load_learned_methods(db, akh_id).await?;
+    let method_step_rows = ops::load_learned_method_steps(db, akh_id).await?;
     let tool_rows = ops::load_competence_tools(db, akh_id).await?;
     let category_rows = ops::load_competence_categories(db, akh_id).await?;
     let calib_rows = ops::load_competence_calibration(db, akh_id).await?;
@@ -580,7 +634,7 @@ pub async fn wake(
         if let Some(c) = build_curiosity(&curiosity_rows) {
             put_bincode(&store, b"agent:curiosity_config", &c);
         }
-        let goals = build_goals(&goal_rows);
+        let goals = build_goals(&goal_rows, &hierarchy_rows, &dependency_rows);
         if !goals.is_empty() {
             put_bincode(&store, b"agent:goals", &goals);
         }
@@ -592,7 +646,7 @@ pub async fn wake(
         if let Some(e) = build_effort_cases(&effort_rows) {
             put_bincode(&store, b"agent:effort_cases", &e);
         }
-        if let Some(m) = build_learned_methods(&method_rows) {
+        if let Some(m) = build_learned_methods(&method_rows, &method_step_rows) {
             put_bincode(&store, b"agent:learned_methods", &m);
         }
         put_bincode(
@@ -769,14 +823,56 @@ fn build_curiosity(
     })
 }
 
-/// Reconstruct goals from the lossless `detail` JSON (the flat columns are for
-/// inspection only and drop data-bearing status variants).
-fn build_goals(rows: &[goal::Model]) -> Vec<crate::agent::Goal> {
+/// Reconstruct goals from the lossless `detail` JSON, then overlay the
+/// normalised goal DAG (`children` from [`goal_hierarchy`], `blocked_by` from
+/// [`goal_dependency`]) which is the authoritative source of those edges.
+///
+/// The flat columns are for inspection only and drop data-bearing status
+/// variants, so the rich scalar/optional state still rides in `detail`; the two
+/// list fields are reconstructed from the edge tables instead.
+fn build_goals(
+    rows: &[goal::Model],
+    hierarchy: &[goal_hierarchy::Model],
+    dependencies: &[goal_dependency::Model],
+) -> Vec<crate::agent::Goal> {
+    use std::collections::HashMap;
+
+    // parent_id → [(position, child_id)] so children keep their live ordering.
+    let mut children_by_parent: HashMap<i64, Vec<(i32, i64)>> = HashMap::new();
+    for edge in hierarchy {
+        children_by_parent
+            .entry(edge.parent_id)
+            .or_default()
+            .push((edge.position, edge.child_id));
+    }
+    for v in children_by_parent.values_mut() {
+        v.sort_by_key(|(pos, _)| *pos);
+    }
+
+    // goal_id → [blocking_goal_id].
+    let mut blocked_by_goal: HashMap<i64, Vec<i64>> = HashMap::new();
+    for edge in dependencies {
+        blocked_by_goal
+            .entry(edge.goal_id)
+            .or_default()
+            .push(edge.blocking_goal_id);
+    }
+
     rows.iter()
         .filter_map(|row| {
-            row.detail
+            let mut goal = row
+                .detail
                 .as_ref()
-                .and_then(|v| serde_json::from_value::<crate::agent::Goal>(v.clone()).ok())
+                .and_then(|v| serde_json::from_value::<crate::agent::Goal>(v.clone()).ok())?;
+            goal.children = children_by_parent
+                .get(&row.id)
+                .map(|v| v.iter().filter_map(|(_, c)| SymbolId::new(*c as u64)).collect())
+                .unwrap_or_default();
+            goal.blocked_by = blocked_by_goal
+                .get(&row.id)
+                .map(|v| v.iter().filter_map(|b| SymbolId::new(*b as u64)).collect())
+                .unwrap_or_default();
+            Some(goal)
         })
         .collect()
 }
@@ -821,21 +917,44 @@ fn build_effort_cases(rows: &[effort_case::Model]) -> Option<Vec<crate::agent::r
 
 fn build_learned_methods(
     rows: &[learned_method::Model],
+    step_rows: &[learned_method_step::Model],
 ) -> Option<Vec<crate::agent::chunking::LearnedMethod>> {
-    use crate::agent::chunking::LearnedMethod;
+    use crate::agent::chunking::{GeneralizedStep, LearnedMethod};
+    use std::collections::HashMap;
     if rows.is_empty() {
         return None;
     }
+
+    // method_id → ordered [GeneralizedStep], reconstructed from the child rows.
+    let mut steps_by_method: HashMap<i64, Vec<(i32, GeneralizedStep)>> = HashMap::new();
+    for s in step_rows {
+        steps_by_method.entry(s.method_id).or_default().push((
+            s.step_index,
+            GeneralizedStep {
+                tool: s.tool.clone(),
+                arg_pattern: s.arg_pattern.clone(),
+                expected_outcome: s.expected_outcome.clone(),
+            },
+        ));
+    }
+    for v in steps_by_method.values_mut() {
+        v.sort_by_key(|(idx, _)| *idx);
+    }
+
     Some(
         rows.iter()
             .filter_map(|r| {
                 let id = SymbolId::new(r.id as u64)?;
+                let steps = steps_by_method
+                    .get(&r.id)
+                    .map(|v| v.iter().map(|(_, s)| s.clone()).collect())
+                    .unwrap_or_default();
                 Some(LearnedMethod {
                     id,
                     name: r.name.clone(),
                     precondition_vector: r.precondition_vector.clone(),
                     precondition_pattern: r.precondition_pattern.clone(),
-                    steps: serde_json::from_value(r.steps.clone()).unwrap_or_default(),
+                    steps,
                     confidence: r.confidence,
                     usage_count: r.usage_count as u32,
                     success_count: r.success_count as u32,
@@ -1045,15 +1164,162 @@ mod tests {
             reformulated_from: None,
             estimated_effort: None,
         };
-        // Writer (full Goal into `detail`) → reader (`build_goals`).
-        let model = goal_to_model(Uuid::nil(), &goal);
-        let back = build_goals(std::slice::from_ref(&model));
+        // Writer: scalar/optional state → `detail`; `children`/`blocked_by` →
+        // normalised edge rows. Reader: `build_goals` overlays the edges back on.
+        let akh = Uuid::nil();
+        let model = goal_to_model(akh, &goal);
+        let parent_id = goal.symbol_id.get() as i64;
+        let hierarchy: Vec<goal_hierarchy::Model> = goal
+            .children
+            .iter()
+            .enumerate()
+            .map(|(pos, c)| goal_hierarchy::Model {
+                akh_id: akh,
+                parent_id,
+                child_id: c.get() as i64,
+                position: pos as i32,
+            })
+            .collect();
+        let dependencies: Vec<goal_dependency::Model> = goal
+            .blocked_by
+            .iter()
+            .map(|b| goal_dependency::Model {
+                akh_id: akh,
+                goal_id: parent_id,
+                blocking_goal_id: b.get() as i64,
+            })
+            .collect();
+        let back = build_goals(std::slice::from_ref(&model), &hierarchy, &dependencies);
         assert_eq!(back.len(), 1, "one goal reconstructed");
         assert_eq!(
             serde_json::to_value(&back[0]).unwrap(),
             serde_json::to_value(&goal).unwrap(),
-            "goal must round-trip losslessly through the detail JSON",
+            "goal must round-trip losslessly: scalars via detail, edges via tables",
         );
+        // The edge tables are the source of truth for the list fields.
+        assert_eq!(
+            back[0].children,
+            vec![SymbolId::new(8).unwrap(), SymbolId::new(9).unwrap()],
+            "children reconstructed in order from goal_hierarchy",
+        );
+        assert_eq!(
+            back[0].blocked_by,
+            vec![SymbolId::new(4).unwrap()],
+            "blocked_by reconstructed from goal_dependencies",
+        );
+    }
+
+    #[test]
+    fn goal_hierarchy_children_keep_position_order() {
+        // Edge rows arriving out of DB order must be sorted by `position`.
+        let detail = serde_json::to_value(crate::agent::Goal {
+            symbol_id: SymbolId::new(1).unwrap(),
+            description: "root".into(),
+            status: GoalStatus::Active,
+            priority: 1,
+            success_criteria: "".into(),
+            parent: None,
+            children: vec![],
+            created_at: 0,
+            cycles_worked: 0,
+            last_progress_cycle: 0,
+            source: None,
+            blocked_by: vec![],
+            priority_rationale: None,
+            justification: None,
+            reformulated_from: None,
+            estimated_effort: None,
+        })
+        .unwrap();
+        let row = goal::Model {
+            akh_id: Uuid::nil(),
+            id: 1,
+            description: "root".into(),
+            status: "Active".into(),
+            priority: 1,
+            success_criteria: "".into(),
+            parent: None,
+            created_at: 0,
+            cycles_worked: 0,
+            last_progress_cycle: 0,
+            source: None,
+            detail: Some(detail),
+        };
+        let hierarchy = vec![
+            goal_hierarchy::Model { akh_id: Uuid::nil(), parent_id: 1, child_id: 30, position: 2 },
+            goal_hierarchy::Model { akh_id: Uuid::nil(), parent_id: 1, child_id: 10, position: 0 },
+            goal_hierarchy::Model { akh_id: Uuid::nil(), parent_id: 1, child_id: 20, position: 1 },
+        ];
+        let back = build_goals(std::slice::from_ref(&row), &hierarchy, &[]);
+        assert_eq!(
+            back[0].children,
+            vec![
+                SymbolId::new(10).unwrap(),
+                SymbolId::new(20).unwrap(),
+                SymbolId::new(30).unwrap(),
+            ],
+            "children must be ordered by position, not DB row order",
+        );
+    }
+
+    #[test]
+    fn learned_method_steps_roundtrip_via_child_rows() {
+        use crate::agent::chunking::GeneralizedStep;
+        let method = learned_method::Model {
+            akh_id: Uuid::nil(),
+            id: 42,
+            name: "research-then-reason".into(),
+            precondition_pattern: "has {Entity}".into(),
+            precondition_vector: vec![0x01, 0x02],
+            confidence: 0.8,
+            usage_count: 5,
+            success_count: 4,
+            failure_count: 1,
+            learned_at: 10,
+            last_used: 20,
+            source_goal_description: "learn pyramids".into(),
+        };
+        // Step rows in non-canonical order — must be re-ordered by step_index.
+        let steps = vec![
+            learned_method_step::Model {
+                akh_id: Uuid::nil(),
+                method_id: 42,
+                step_index: 1,
+                tool: "reason".into(),
+                arg_pattern: "analyze results".into(),
+                expected_outcome: "reason_result".into(),
+            },
+            learned_method_step::Model {
+                akh_id: Uuid::nil(),
+                method_id: 42,
+                step_index: 0,
+                tool: "kg_query".into(),
+                arg_pattern: "find {Entity}".into(),
+                expected_outcome: "kg_query_result".into(),
+            },
+        ];
+        let back =
+            build_learned_methods(std::slice::from_ref(&method), &steps).expect("methods present");
+        assert_eq!(back.len(), 1, "one method reconstructed");
+        let expected = vec![
+            GeneralizedStep {
+                tool: "kg_query".into(),
+                arg_pattern: "find {Entity}".into(),
+                expected_outcome: "kg_query_result".into(),
+            },
+            GeneralizedStep {
+                tool: "reason".into(),
+                arg_pattern: "analyze results".into(),
+                expected_outcome: "reason_result".into(),
+            },
+        ];
+        assert_eq!(
+            serde_json::to_value(&back[0].steps).unwrap(),
+            serde_json::to_value(&expected).unwrap(),
+            "steps must be reconstructed in step_index order from the child rows",
+        );
+        assert_eq!(back[0].name, "research-then-reason");
+        assert_eq!(back[0].usage_count, 5);
     }
 
     #[test]

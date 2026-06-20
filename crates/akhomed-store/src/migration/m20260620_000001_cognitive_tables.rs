@@ -12,7 +12,13 @@ fn col(name: &str) -> ColumnDef {
     ColumnDef::new(Alias::new(name))
 }
 
+// Drop order matters only for FK-bearing schemas; we keep app-side integrity
+// (no DB FKs), but listing the normalised edge/child tables first keeps the
+// teardown intuitive (edges before their parents).
 const TABLES: &[&str] = &[
+    "akhomed_goal_hierarchy",
+    "akhomed_goal_dependencies",
+    "akhomed_learned_method_step",
     "akhomed_drives",
     "akhomed_agenda",
     "akhomed_curiosity_config",
@@ -96,10 +102,69 @@ impl MigrationTrait for Migration {
                     .col(col("cycles_worked").integer().not_null())
                     .col(col("last_progress_cycle").big_integer().not_null())
                     .col(col("source").text())
-                    .col(col("children").json().not_null())
-                    .col(col("blocked_by").json().not_null())
                     .col(col("detail").json())
                     .primary_key(Index::create().col(Alias::new("akh_id")).col(Alias::new("id")))
+                    .to_owned(),
+            )
+            .await?;
+
+        // goal_hierarchy — parent→child edges, PK (akh_id, parent_id, child_id)
+        manager
+            .create_table(
+                Table::create()
+                    .table(Alias::new("akhomed_goal_hierarchy"))
+                    .if_not_exists()
+                    .col(col("akh_id").uuid().not_null())
+                    .col(col("parent_id").big_integer().not_null())
+                    .col(col("child_id").big_integer().not_null())
+                    .col(col("position").integer().not_null())
+                    .primary_key(
+                        Index::create()
+                            .col(Alias::new("akh_id"))
+                            .col(Alias::new("parent_id"))
+                            .col(Alias::new("child_id")),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .if_not_exists()
+                    .name("idx_akhomed_goal_hierarchy_parent")
+                    .table(Alias::new("akhomed_goal_hierarchy"))
+                    .col(Alias::new("akh_id"))
+                    .col(Alias::new("parent_id"))
+                    .to_owned(),
+            )
+            .await?;
+
+        // goal_dependencies — "blocked-by" edges, PK (akh_id, goal_id, blocking_goal_id)
+        manager
+            .create_table(
+                Table::create()
+                    .table(Alias::new("akhomed_goal_dependencies"))
+                    .if_not_exists()
+                    .col(col("akh_id").uuid().not_null())
+                    .col(col("goal_id").big_integer().not_null())
+                    .col(col("blocking_goal_id").big_integer().not_null())
+                    .primary_key(
+                        Index::create()
+                            .col(Alias::new("akh_id"))
+                            .col(Alias::new("goal_id"))
+                            .col(Alias::new("blocking_goal_id")),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .if_not_exists()
+                    .name("idx_akhomed_goal_dependencies_goal")
+                    .table(Alias::new("akhomed_goal_dependencies"))
+                    .col(Alias::new("akh_id"))
+                    .col(Alias::new("goal_id"))
                     .to_owned(),
             )
             .await?;
@@ -161,8 +226,40 @@ impl MigrationTrait for Migration {
                     .col(col("learned_at").big_integer().not_null())
                     .col(col("last_used").big_integer().not_null())
                     .col(col("source_goal_description").text().not_null())
-                    .col(col("steps").json().not_null())
                     .primary_key(Index::create().col(Alias::new("akh_id")).col(Alias::new("id")))
+                    .to_owned(),
+            )
+            .await?;
+
+        // learned_method_step — ordered method steps, PK (akh_id, method_id, step_index)
+        manager
+            .create_table(
+                Table::create()
+                    .table(Alias::new("akhomed_learned_method_step"))
+                    .if_not_exists()
+                    .col(col("akh_id").uuid().not_null())
+                    .col(col("method_id").big_integer().not_null())
+                    .col(col("step_index").integer().not_null())
+                    .col(col("tool").text().not_null())
+                    .col(col("arg_pattern").text().not_null())
+                    .col(col("expected_outcome").text().not_null())
+                    .primary_key(
+                        Index::create()
+                            .col(Alias::new("akh_id"))
+                            .col(Alias::new("method_id"))
+                            .col(Alias::new("step_index")),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .if_not_exists()
+                    .name("idx_akhomed_learned_method_step_method")
+                    .table(Alias::new("akhomed_learned_method_step"))
+                    .col(Alias::new("akh_id"))
+                    .col(Alias::new("method_id"))
                     .to_owned(),
             )
             .await?;

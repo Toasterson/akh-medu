@@ -2,7 +2,8 @@
 //!
 //! After Phase 38f, Postgres is authoritative for workspace config; the on-disk
 //! TOML in `$XDG_CONFIG_HOME/akh-medu/workspaces/` becomes a bootstrap-only
-//! artifact. `seed_packs` is a Postgres `TEXT[]` mapped to `Vec<String>`.
+//! artifact. The seed-pack list is normalised into
+//! [`crate::entity::workspace_seed_pack`] (ordered child rows).
 
 use sea_orm::entity::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -19,11 +20,6 @@ pub struct Model {
     pub dimension: i32,
     pub encoding: String,
     pub language: String,
-
-    /// Seed packs to apply on first activation. JSON array of strings (not a
-    /// native `TEXT[]`) so the schema stays portable to SQLite/libSQL-Turso.
-    #[sea_orm(column_type = "Json")]
-    pub seed_packs: Json,
 
     pub created_at: DateTimeUtc,
 }

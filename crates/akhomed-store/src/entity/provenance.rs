@@ -1,8 +1,9 @@
 //! Entity: `akhomed.provenance` — the provenance ledger.
 //!
 //! Mirrors `crate::provenance` in the engine: each derived fact records the
-//! `DerivationKind` (as JSONB), the input symbol ids that produced it, and a
-//! confidence. `inputs` is a Postgres `BIGINT[]` mapped to `Vec<i64>`.
+//! `DerivationKind` (as JSONB) and a confidence. The input symbol ids that
+//! produced it are normalised into [`crate::entity::provenance_input`] (ordered
+//! child rows keyed by `provenance_id`).
 
 use sea_orm::entity::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -22,11 +23,6 @@ pub struct Model {
     /// Serialised `DerivationKind`.
     #[sea_orm(column_type = "Json")]
     pub derivation: Json,
-
-    /// Input `SymbolId`s as a JSON array of integers. Stored as JSON (not a
-    /// native `BIGINT[]`) so the schema stays portable to SQLite/libSQL-Turso.
-    #[sea_orm(column_type = "Json")]
-    pub inputs: Json,
 
     pub confidence: f32,
     pub created_at: DateTimeUtc,

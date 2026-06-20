@@ -1,6 +1,10 @@
 //! Entity: `akhomed.goals` — agent goals. Queryable scalars as columns; the
 //! nested optional structures (priority rationale, justification, effort
 //! estimate, reformulation, full source) ride in `detail` JSON for fidelity.
+//!
+//! The goal DAG is normalised out: `children` lives in
+//! [`crate::entity::goal_hierarchy`] (ordered edges) and `blocked_by` in
+//! [`crate::entity::goal_dependency`].
 
 use sea_orm::entity::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -24,10 +28,6 @@ pub struct Model {
     pub last_progress_cycle: i64,
     /// `GoalSource` discriminant as text (full source in `detail`).
     pub source: Option<String>,
-    #[sea_orm(column_type = "Json")]
-    pub children: Json,
-    #[sea_orm(column_type = "Json")]
-    pub blocked_by: Json,
     /// Nested optionals: priority_rationale, justification, estimated_effort,
     /// reformulated_from, full source — serialised as one JSON object.
     #[sea_orm(column_type = "Json", nullable)]

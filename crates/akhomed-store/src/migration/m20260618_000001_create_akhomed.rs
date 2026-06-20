@@ -86,9 +86,17 @@ enum Provenance {
     WorkspaceId,
     Subject,
     Derivation,
-    Inputs,
     Confidence,
     CreatedAt,
+}
+
+#[derive(DeriveIden)]
+enum ProvenanceInput {
+    #[sea_orm(iden = "akhomed_provenance_input")]
+    Table,
+    ProvenanceId,
+    Position,
+    InputSymbolId,
 }
 
 #[derive(DeriveIden)]
@@ -238,9 +246,37 @@ impl MigrationTrait for Migration {
                     .col(ColumnDef::new(Provenance::WorkspaceId).uuid().not_null())
                     .col(ColumnDef::new(Provenance::Subject).big_integer().not_null())
                     .col(ColumnDef::new(Provenance::Derivation).json().not_null())
-                    .col(ColumnDef::new(Provenance::Inputs).json().not_null())
                     .col(ColumnDef::new(Provenance::Confidence).float().not_null())
                     .col(ColumnDef::new(Provenance::CreatedAt).timestamp_with_time_zone().not_null())
+                    .to_owned(),
+            )
+            .await?;
+
+        // provenance_input — ordered input symbols per provenance record,
+        // PK (provenance_id, position). Normalises the former `inputs` JSON list.
+        manager
+            .create_table(
+                Table::create()
+                    .table(ProvenanceInput::Table)
+                    .if_not_exists()
+                    .col(ColumnDef::new(ProvenanceInput::ProvenanceId).big_integer().not_null())
+                    .col(ColumnDef::new(ProvenanceInput::Position).integer().not_null())
+                    .col(ColumnDef::new(ProvenanceInput::InputSymbolId).big_integer().not_null())
+                    .primary_key(
+                        Index::create()
+                            .col(ProvenanceInput::ProvenanceId)
+                            .col(ProvenanceInput::Position),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .if_not_exists()
+                    .name("idx_akhomed_provenance_input_by_provenance")
+                    .table(ProvenanceInput::Table)
+                    .col(ProvenanceInput::ProvenanceId)
                     .to_owned(),
             )
             .await?;
@@ -266,6 +302,7 @@ impl MigrationTrait for Migration {
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         for table in [
             Episodes::Table.into_table_ref(),
+            ProvenanceInput::Table.into_table_ref(),
             Provenance::Table.into_table_ref(),
             AkhState::Table.into_table_ref(),
             MutationLog::Table.into_table_ref(),

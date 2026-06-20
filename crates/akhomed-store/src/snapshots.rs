@@ -15,9 +15,9 @@ use sea_orm::{
 };
 use uuid::Uuid;
 
-// The macro-driven helpers fully-qualify their entity modules; only these three
-// are referenced directly by the hand-written helpers below.
-use crate::entity::{akh_state, fact, mutation_log};
+// The macro-driven helpers fully-qualify their entity modules; only these are
+// referenced directly by the hand-written helpers below.
+use crate::entity::{akh_state, fact, mutation_log, provenance_input, workspace_seed_pack};
 use crate::error::StoreResult;
 
 /// Generate `replace_*` (full-replace for an Akh) and `load_*` helpers for an
@@ -61,9 +61,12 @@ akh_scoped_ops!(drive, replace_drives, load_drives);
 akh_scoped_ops!(agenda, replace_agenda, load_agenda);
 akh_scoped_ops!(curiosity_config, replace_curiosity, load_curiosity);
 akh_scoped_ops!(goal, replace_goals, load_goals);
+akh_scoped_ops!(goal_hierarchy, replace_goal_hierarchy, load_goal_hierarchy);
+akh_scoped_ops!(goal_dependency, replace_goal_dependencies, load_goal_dependencies);
 akh_scoped_ops!(failure_case, replace_failure_cases, load_failure_cases);
 akh_scoped_ops!(effort_case, replace_effort_cases, load_effort_cases);
 akh_scoped_ops!(learned_method, replace_learned_methods, load_learned_methods);
+akh_scoped_ops!(learned_method_step, replace_learned_method_steps, load_learned_method_steps);
 akh_scoped_ops!(competence_tool, replace_competence_tools, load_competence_tools);
 akh_scoped_ops!(competence_category, replace_competence_categories, load_competence_categories);
 akh_scoped_ops!(competence_calibration, replace_competence_calibration, load_competence_calibration);
@@ -96,6 +99,75 @@ pub async fn load_workspace_facts(
 ) -> StoreResult<Vec<fact::Model>> {
     Ok(fact::Entity::find()
         .filter(fact::Column::WorkspaceId.eq(workspace_id))
+        .all(db)
+        .await?)
+}
+
+/// Replace all input rows for a provenance record (DELETE-by-`provenance_id` +
+/// insert, one txn). `provenance_input` is keyed by `provenance_id`, not
+/// `akh_id`, so it cannot use the `akh_scoped_ops!` macro.
+pub async fn replace_provenance_inputs(
+    db: &DatabaseConnection,
+    provenance_id: i64,
+    rows: Vec<provenance_input::Model>,
+) -> StoreResult<()> {
+    let txn = db.begin().await?;
+    provenance_input::Entity::delete_many()
+        .filter(provenance_input::Column::ProvenanceId.eq(provenance_id))
+        .exec(&txn)
+        .await?;
+    if !rows.is_empty() {
+        provenance_input::Entity::insert_many(rows.into_iter().map(IntoActiveModel::into_active_model))
+            .exec(&txn)
+            .await?;
+    }
+    txn.commit().await?;
+    Ok(())
+}
+
+/// Load all input rows for a provenance record, ordered by `position`.
+pub async fn load_provenance_inputs(
+    db: &DatabaseConnection,
+    provenance_id: i64,
+) -> StoreResult<Vec<provenance_input::Model>> {
+    Ok(provenance_input::Entity::find()
+        .filter(provenance_input::Column::ProvenanceId.eq(provenance_id))
+        .order_by_asc(provenance_input::Column::Position)
+        .all(db)
+        .await?)
+}
+
+/// Replace all seed-pack rows for a workspace (DELETE-by-`workspace_id` +
+/// insert, one txn). `workspace_seed_pack` is keyed by `workspace_id`.
+pub async fn replace_workspace_seed_packs(
+    db: &DatabaseConnection,
+    workspace_id: Uuid,
+    rows: Vec<workspace_seed_pack::Model>,
+) -> StoreResult<()> {
+    let txn = db.begin().await?;
+    workspace_seed_pack::Entity::delete_many()
+        .filter(workspace_seed_pack::Column::WorkspaceId.eq(workspace_id))
+        .exec(&txn)
+        .await?;
+    if !rows.is_empty() {
+        workspace_seed_pack::Entity::insert_many(
+            rows.into_iter().map(IntoActiveModel::into_active_model),
+        )
+        .exec(&txn)
+        .await?;
+    }
+    txn.commit().await?;
+    Ok(())
+}
+
+/// Load all seed-pack rows for a workspace, ordered by `position`.
+pub async fn load_workspace_seed_packs(
+    db: &DatabaseConnection,
+    workspace_id: Uuid,
+) -> StoreResult<Vec<workspace_seed_pack::Model>> {
+    Ok(workspace_seed_pack::Entity::find()
+        .filter(workspace_seed_pack::Column::WorkspaceId.eq(workspace_id))
+        .order_by_asc(workspace_seed_pack::Column::Position)
         .all(db)
         .await?)
 }
