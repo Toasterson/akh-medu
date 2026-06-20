@@ -82,7 +82,7 @@ mod inner {
         /// `workspace` is advisory here — multi-workspace session routing is a
         /// later increment.
         pub fn connect(info: &ServerInfo, workspace: &str) -> Result<Self, String> {
-            let _ = workspace;
+            let workspace = workspace.to_string();
             let endpoint = if let Some(sock) = info.acp_socket.clone() {
                 Endpoint::Unix(sock)
             } else if let Some(tcp) = info.acp_tcp.clone() {
@@ -103,6 +103,9 @@ mod inner {
             let (in_tx, in_rx) = mpsc::channel::<ChatUpdate>();
             let (snap_tx, snap_rx) = mpsc::channel::<StatusSnapshot>();
 
+            let chat_ws = workspace.clone();
+            let poll_ws = workspace;
+
             thread::Builder::new()
                 .name("acp-remote".into())
                 .spawn(move || {
@@ -120,7 +123,7 @@ mod inner {
                             return;
                         }
                     };
-                    rt.block_on(acp_task(endpoint, out_rx, in_tx));
+                    rt.block_on(acp_task(endpoint, chat_ws, out_rx, in_tx));
                 })
                 .map_err(|e| format!("failed to spawn ACP thread: {e}"))?;
 
@@ -137,7 +140,7 @@ mod inner {
                     else {
                         return;
                     };
-                    rt.block_on(status_poll_task(poll_endpoint, snap_tx));
+                    rt.block_on(status_poll_task(poll_endpoint, poll_ws, snap_tx));
                 })
                 .map_err(|e| format!("failed to spawn status-poll thread: {e}"))?;
 
@@ -202,6 +205,7 @@ mod inner {
     /// [`ChatUpdate`]s as they arrive, terminated by [`ChatUpdate::TurnEnd`].
     async fn acp_task(
         endpoint: Endpoint,
+        workspace: String,
         out_rx: mpsc::Receiver<Outbound>,
         in_tx: mpsc::Sender<ChatUpdate>,
     ) {
@@ -251,8 +255,12 @@ mod inner {
         };
 
         let result = match endpoint {
-            Endpoint::Unix(path) => crate::acp::chat_over_unix(&path, "akh-tui", run).await,
-            Endpoint::Tcp(addr) => crate::acp::chat_over_tcp(&addr, "akh-tui", run).await,
+            Endpoint::Unix(path) => {
+                crate::acp::chat_over_unix(&path, "akh-tui", &workspace, run).await
+            }
+            Endpoint::Tcp(addr) => {
+                crate::acp::chat_over_tcp(&addr, "akh-tui", &workspace, run).await
+            }
         };
         if let Err(e) = result {
             let _ = in_err.send(ChatUpdate::Notice(AkhMessage::error(
@@ -266,9 +274,13 @@ mod inner {
     /// ACP connection and forward the deserialized [`StatusSnapshot`] to the TUI.
     /// A failed poll (daemon busy / restarting / no `_akh/status`) is skipped
     /// silently; the loop ends when the snapshot receiver is dropped (TUI closed).
-    async fn status_poll_task(endpoint: Endpoint, tx: mpsc::Sender<StatusSnapshot>) {
+    async fn status_poll_task(
+        endpoint: Endpoint,
+        workspace: String,
+        tx: mpsc::Sender<StatusSnapshot>,
+    ) {
         loop {
-            let params = serde_json::json!({});
+            let params = serde_json::json!({ "workspace": workspace });
             let result = match &endpoint {
                 Endpoint::Unix(path) => {
                     crate::acp::ext_request_unix(path, "_akh/status", params).await

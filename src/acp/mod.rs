@@ -65,7 +65,10 @@ use crate::engine::Engine;
 use crate::message::{AkhMessage, MessageSink};
 
 pub mod control;
-pub use control::{is_control_method, ControlFuture, ServerControl, CONTROL_METHODS};
+pub use control::{
+    is_control_method, ControlFuture, ResolveFuture, ServerControl, WorkspaceHandles,
+    CONTROL_METHODS,
+};
 
 // ──────────────────────────────────────────────────────────────────────────
 // Errors
@@ -174,9 +177,21 @@ pub type AcpResult<T> = Result<T, AcpError>;
 /// `.await` — see [`AkhAcpAgent::run_prompt`].
 #[derive(Clone)]
 pub struct AkhAcpAgent {
-    engine: Arc<Engine>,
-    agent: Arc<Mutex<Agent>>,
-    processor: Arc<Mutex<ChatProcessor>>,
+    /// Held engine/agent/processor for the single in-process workspace (tests,
+    /// embedded use with no [`ServerControl`]). `None` in *provider mode* (the
+    /// daemon): every request resolves its workspace's handles on demand via
+    /// [`ServerControl::resolve`], so the server serves any akh per request and
+    /// pins no engine (a permanent hold would block same-host sleep/wake).
+    engine: Option<Arc<Engine>>,
+    agent: Option<Arc<Mutex<Agent>>>,
+    processor: Option<Arc<Mutex<ChatProcessor>>>,
+    /// Default workspace used when a request names none (the daemon's bound
+    /// `[acp].workspace`; the held workspace's name in embedded mode).
+    default_ws: String,
+    /// Chat session → workspace map. `session/new` records the workspace (from
+    /// the request `cwd` sentinel) so each `session/prompt` routes to the right
+    /// akh — the data-plane `-w` for chat.
+    sessions: Arc<Mutex<std::collections::HashMap<String, String>>>,
     /// Agent name advertised during `initialize`.
     name: String,
     /// Client filesystem/terminal capabilities captured at `initialize`.
@@ -204,20 +219,79 @@ impl AkhAcpAgent {
         processor: ChatProcessor,
     ) -> Self {
         Self {
-            engine,
-            agent,
-            processor: Arc::new(Mutex::new(processor)),
+            engine: Some(engine),
+            agent: Some(agent),
+            processor: Some(Arc::new(Mutex::new(processor))),
+            default_ws: "akh-medu".to_string(),
+            sessions: Arc::new(Mutex::new(std::collections::HashMap::new())),
             name: "akh-medu".to_string(),
             client_caps: Arc::new(Mutex::new(None)),
             control: None,
         }
     }
 
-    /// Override the agent name advertised during `initialize`.
+    /// Build an ACP agent in **provider mode**: it holds no workspace engine of
+    /// its own; every request resolves its workspace's handles on demand from the
+    /// [`ServerControl`] backend. `default_ws` is used when a request names none.
+    /// This is what the daemon uses so one server serves all configured akhs
+    /// (the `-w` data-plane + chat routing) and pins no engine.
+    pub fn with_provider(control: Arc<dyn ServerControl>, default_ws: impl Into<String>) -> Self {
+        let default_ws = default_ws.into();
+        Self {
+            engine: None,
+            agent: None,
+            processor: None,
+            name: default_ws.clone(),
+            default_ws,
+            sessions: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            client_caps: Arc::new(Mutex::new(None)),
+            control: Some(control),
+        }
+    }
+
+    /// Override the agent name advertised during `initialize`. In held
+    /// (single-workspace) mode this is also the default workspace, so set both.
     #[must_use]
     pub fn with_name(mut self, name: impl Into<String>) -> Self {
-        self.name = name.into();
+        let name = name.into();
+        self.default_ws = name.clone();
+        self.name = name;
         self
+    }
+
+    /// Resolve a workspace's runtime handles for one request. In provider mode
+    /// (daemon) this loads them on demand via [`ServerControl::resolve`]; in
+    /// held mode (embedded/tests) it returns the single held workspace.
+    async fn resolve_handles(
+        &self,
+        workspace: &str,
+    ) -> Result<(Arc<Engine>, Arc<Mutex<Agent>>, Arc<Mutex<ChatProcessor>>), String> {
+        if let Some(ctrl) = &self.control {
+            match ctrl.resolve(workspace).await {
+                Ok(h) => return Ok((h.engine, h.agent, h.processor)),
+                // A control wired only for the control-plane (e.g. tests, or an
+                // embed that keeps a single held engine) returns the default
+                // "not supported" — fall back to the held workspace if there is
+                // one; only error when there's nothing to fall back to.
+                Err(e) if self.engine.is_none() => return Err(e),
+                Err(_) => {}
+            }
+        }
+        match (&self.engine, &self.agent, &self.processor) {
+            (Some(e), Some(a), Some(p)) => Ok((Arc::clone(e), Arc::clone(a), Arc::clone(p))),
+            _ => Err("no workspace handles available (no engine held and no control backend)".into()),
+        }
+    }
+
+    /// The workspace a chat session is bound to (recorded at `session/new` from
+    /// the request `cwd` sentinel), or the default when unrecorded.
+    fn session_workspace(&self, session_id: &str) -> String {
+        self.sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(session_id)
+            .cloned()
+            .unwrap_or_else(|| self.default_ws.clone())
     }
 
     /// Attach a server-level control-plane backend.
@@ -251,16 +325,14 @@ impl AkhAcpAgent {
     /// [`spawn_blocking`]: tokio::task::spawn_blocking
     /// [`JoinHandle`]: tokio::task::JoinHandle
     fn run_turn(
-        &self,
+        engine: Arc<Engine>,
+        agent: Arc<Mutex<Agent>>,
+        processor: Arc<Mutex<ChatProcessor>>,
+        agent_id: String,
         text: String,
         asker: Option<Arc<dyn crate::agent::permission::PermissionAsker>>,
         sink: ChannelSink,
     ) -> tokio::task::JoinHandle<()> {
-        let engine = Arc::clone(&self.engine);
-        let agent = Arc::clone(&self.agent);
-        let processor = Arc::clone(&self.processor);
-        let agent_id = self.name.clone();
-
         tokio::task::spawn_blocking(move || {
             // ── ADR-027: lock, process (emitting via the channel sink), drop —
             // all synchronous, no await while a guard is held. ──
@@ -1297,11 +1369,30 @@ fn build_connection(
         // ── session/new ─────────────────────────────────────────────────
         .on_receive_request_from(
             Client,
-            move |_req: NewSessionRequest, responder: Responder<NewSessionResponse>, _cx| async move {
-                // Single-workspace spike: any unique handle works. Use a
-                // monotonic-ish id derived from the wall clock.
-                let session_id = SessionId::new(format!("akh-{}", next_session_suffix()));
-                responder.respond(NewSessionResponse::new(session_id))
+            {
+                let me = me.clone();
+                move |req: NewSessionRequest, responder: Responder<NewSessionResponse>, _cx| {
+                    let me = me.clone();
+                    async move {
+                        let session_id = SessionId::new(format!("akh-{}", next_session_suffix()));
+                        // The client encodes the target workspace in the session
+                        // `cwd` as the sentinel `akh-ws:<name>` (akhomed otherwise
+                        // ignores the client cwd). Record session → workspace so
+                        // each prompt routes to that akh — the chat half of `-w`.
+                        if let Some(ws) = req
+                            .cwd
+                            .to_str()
+                            .and_then(|s| s.strip_prefix("akh-ws:"))
+                            .filter(|s| !s.is_empty())
+                        {
+                            me.sessions
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .insert(session_id.to_string(), ws.to_string());
+                        }
+                        responder.respond(NewSessionResponse::new(session_id))
+                    }
+                }
             },
             agent_client_protocol::on_receive_request!(),
         )
@@ -1317,6 +1408,24 @@ fn build_connection(
                     async move {
                         let session_id = req.session_id.clone();
                         let text = concat_prompt(&req.prompt);
+
+                        // Route to the session's workspace (recorded at
+                        // session/new) and resolve its handles on demand — the
+                        // chat half of `-w`: one daemon serves any configured akh.
+                        let ws = me.session_workspace(&session_id.to_string());
+                        let (engine, agent, processor) = match me.resolve_handles(&ws).await {
+                            Ok(h) => h,
+                            Err(e) => {
+                                AcpSink::new(cx.clone(), session_id.clone()).emit(
+                                    &AkhMessage::error(
+                                        "acp",
+                                        format!("cannot open workspace \"{ws}\": {e}"),
+                                    ),
+                                );
+                                return responder
+                                    .respond(PromptResponse::new(StopReason::EndTurn));
+                            }
+                        };
 
                         // Per-turn permission bridge: a sync asker (consulted
                         // inside the blocking chat turn when the policy says
@@ -1341,8 +1450,15 @@ fn build_connection(
                         // in one batch at turn-end.
                         let (msg_tx, mut msg_rx) =
                             tokio::sync::mpsc::unbounded_channel::<AkhMessage>();
-                        let handle =
-                            me.run_turn(text, Some(asker), ChannelSink { tx: msg_tx });
+                        let handle = AkhAcpAgent::run_turn(
+                            engine,
+                            agent,
+                            processor,
+                            ws,
+                            text,
+                            Some(asker),
+                            ChannelSink { tx: msg_tx },
+                        );
 
                         let sink = AcpSink::new(cx, session_id.clone());
                         while let Some(msg) = msg_rx.recv().await {
@@ -1373,11 +1489,10 @@ fn build_connection(
             {
                 let me = me.clone();
                 move |message: Dispatch, _cx: ConnectionTo<Client>| {
-                    let engine = Arc::clone(&me.engine);
-                    let workspace = me.name.clone();
-                    let agent = Arc::clone(&me.agent);
+                    let me = me.clone();
                     let control = me.control.clone();
                     let has_control = control.is_some();
+                    let default_ws = me.default_ws.clone();
                     async move {
                         MatchDispatch::new(message)
                             .if_request(
@@ -1411,6 +1526,27 @@ fn build_connection(
                                             ),
                                         };
                                     }
+                                    // Resolve the target workspace for this
+                                    // data-plane op: a `workspace` param selects
+                                    // the akh (the `-w` data-plane); absent ⇒ the
+                                    // bound default. Loaded on demand so any
+                                    // configured akh is reachable from one daemon.
+                                    let workspace = req
+                                        .params
+                                        .get("workspace")
+                                        .and_then(serde_json::Value::as_str)
+                                        .map(str::to_string)
+                                        .unwrap_or_else(|| default_ws.clone());
+                                    let (engine, agent, _processor) =
+                                        match me.resolve_handles(&workspace).await {
+                                            Ok(h) => h,
+                                            Err(e) => {
+                                                return responder.respond_with_error(
+                                                    agent_client_protocol::Error::internal_error()
+                                                        .data(e),
+                                                );
+                                            }
+                                        };
                                     // Agent-mutating method: take the agent lock
                                     // inside spawn_blocking (ADR-027). GET when no
                                     // "mode" param; SET otherwise.
@@ -1671,7 +1807,7 @@ pub async fn serve_tcp_loop(
 /// returns; on return the protocol loop drains and the transport closes. This
 /// is the lifetime constraint of the ACP client: the connection cannot outlive
 /// `f`, so the interactive loop must live inside it.
-async fn run_session<T, R, F>(transport: T, name: &str, f: F) -> AcpResult<R>
+async fn run_session<T, R, F>(transport: T, name: &str, workspace: &str, f: F) -> AcpResult<R>
 where
     T: ConnectTo<Client> + 'static,
     F: AsyncFnOnce(
@@ -1679,6 +1815,10 @@ where
         ConnectionTo<AcpRole>,
     ) -> Result<R, agent_client_protocol::Error>,
 {
+    // Encode the target workspace in the session `cwd` as `akh-ws:<name>`; the
+    // daemon reads it at `session/new` to route this session's prompts to that
+    // akh (the chat half of `-w`). akhomed otherwise ignores the client cwd.
+    let cwd = format!("akh-ws:{workspace}");
     Client
         .builder()
         .name(name.to_string())
@@ -1687,7 +1827,7 @@ where
                 .block_task()
                 .await?;
             let session = cx
-                .build_session_cwd()?
+                .build_session(cwd)
                 .block_task()
                 .start_session()
                 .await?;
@@ -1755,7 +1895,12 @@ async fn connect_tcp_retrying(addr: &str) -> std::io::Result<TcpStream> {
 ///
 /// `f` receives a started [`ActiveSession`] (call `send_prompt` / `read_to_string`
 /// / `read_update` on it, repeatedly) and a [`ConnectionTo`] for ext requests.
-pub async fn chat_over_unix<R, F>(path: impl AsRef<Path>, name: &str, f: F) -> AcpResult<R>
+pub async fn chat_over_unix<R, F>(
+    path: impl AsRef<Path>,
+    name: &str,
+    workspace: &str,
+    f: F,
+) -> AcpResult<R>
 where
     F: AsyncFnOnce(
         ActiveSession<'static, AcpRole>,
@@ -1771,11 +1916,12 @@ where
         })?;
     let (read_half, write_half) = stream.into_split();
     let transport = ByteStreams::new(write_half.compat_write(), read_half.compat());
-    run_session(transport, name, f).await
+    run_session(transport, name, workspace, f).await
 }
 
-/// Connect to an ACP daemon over TCP (`host:port`) and run `f` over one session.
-pub async fn chat_over_tcp<R, F>(addr: &str, name: &str, f: F) -> AcpResult<R>
+/// Connect to an ACP daemon over TCP (`host:port`) and run `f` over one session
+/// bound to `workspace`.
+pub async fn chat_over_tcp<R, F>(addr: &str, name: &str, workspace: &str, f: F) -> AcpResult<R>
 where
     F: AsyncFnOnce(
         ActiveSession<'static, AcpRole>,
@@ -1791,7 +1937,7 @@ where
     let _ = stream.set_nodelay(true);
     let (read_half, write_half) = stream.into_split();
     let transport = ByteStreams::new(write_half.compat_write(), read_half.compat());
-    run_session(transport, name, f).await
+    run_session(transport, name, workspace, f).await
 }
 
 /// Send one `_akh/*` data-plane request over `transport` and return its JSON
@@ -1913,7 +2059,7 @@ pub async fn run_headless_chat_unix(
     label: &str,
 ) -> AcpResult<()> {
     let label = label.to_string();
-    chat_over_unix(path, name, async move |mut session, _cx| {
+    chat_over_unix(path, name, &label.clone(), async move |mut session, _cx| {
         headless_loop(&mut session, &label).await
     })
     .await
@@ -1923,7 +2069,7 @@ pub async fn run_headless_chat_unix(
 /// chat over one persistent ACP session.
 pub async fn run_headless_chat_tcp(addr: &str, name: &str, label: &str) -> AcpResult<()> {
     let label = label.to_string();
-    chat_over_tcp(addr, name, async move |mut session, _cx| {
+    chat_over_tcp(addr, name, &label.clone(), async move |mut session, _cx| {
         headless_loop(&mut session, &label).await
     })
     .await
@@ -2282,7 +2428,7 @@ mod tests {
 
         let (a, b) = tokio::time::timeout(
             std::time::Duration::from_secs(60),
-            chat_over_unix(&sock, "akh-acp-test-client", async move |mut session, _cx| {
+            chat_over_unix(&sock, "akh-acp-test-client", "akh-medu", async move |mut session, _cx| {
                 session.send_prompt("What is the Sun?")?;
                 let a = session.read_to_string().await?;
                 session.send_prompt("What is the Sun?")?;

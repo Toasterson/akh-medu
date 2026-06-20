@@ -18,6 +18,23 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::{Arc, Mutex};
+
+/// Per-workspace runtime handles the ACP data-plane + chat turn need.
+///
+/// Resolved on demand by [`ServerControl::resolve`] so the ACP server can serve
+/// *any* workspace per request (not just one bound at startup), and so it holds
+/// no permanent engine reference — a permanent hold would pin the workspace's
+/// store and block a same-host `sleep` → `wake`.
+pub struct WorkspaceHandles {
+    pub engine: Arc<crate::engine::Engine>,
+    pub agent: Arc<Mutex<crate::agent::Agent>>,
+    pub processor: Arc<Mutex<crate::chat::ChatProcessor>>,
+}
+
+/// The future returned by [`ServerControl::resolve`].
+pub type ResolveFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<WorkspaceHandles, String>> + Send + 'a>>;
 
 /// The future returned by [`ServerControl::dispatch`].
 ///
@@ -49,6 +66,21 @@ pub trait ServerControl: Send + Sync {
         method: &'a str,
         params: &'a serde_json::Value,
     ) -> ControlFuture<'a>;
+
+    /// Resolve a workspace's runtime handles by name, lazily loading it.
+    ///
+    /// Lets the ACP server serve any configured workspace per request (the
+    /// `-w` data-plane + chat routing) and avoids holding a permanent engine
+    /// reference (so a same-host `sleep`/`wake` can fully release the store).
+    /// Returns `Err` when the workspace cannot be opened.
+    ///
+    /// Default: unsupported — in-process embeds/tests without a multi-workspace
+    /// backend keep their single held engine/agent instead.
+    fn resolve<'a>(&'a self, _workspace: &'a str) -> ResolveFuture<'a> {
+        Box::pin(async move {
+            Err("workspace resolution not supported by this backend".to_string())
+        })
+    }
 }
 
 /// The `_akh/*` methods routed to a [`ServerControl`] backend rather than the

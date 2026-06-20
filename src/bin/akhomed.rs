@@ -857,10 +857,32 @@ impl ServerState {
             }
         }
 
-        // Try to load it.
+        // Try to load it. A workspace with a config file but no data dir yet is
+        // lazily created from that config (preserving akh-level fields), so any
+        // *configured* akh loads on first use — control-plane (snapshot/sleep),
+        // data-plane, and chat alike — not only the one bound at startup. Only a
+        // workspace with neither data dir nor config is genuinely "not found".
         let ws_paths = self.paths.workspace(name);
         if !ws_paths.root.exists() {
-            return Err(format!("workspace \"{name}\" not found"));
+            let config_path = self.paths.workspace_config_file(name);
+            if !config_path.exists() {
+                return Err(format!("workspace \"{name}\" not found"));
+            }
+            let wsm = WorkspaceManager::new(self.paths.clone());
+            let akh_cfg = AkhConfig::load(&config_path).ok();
+            let ws_cfg = akh_cfg
+                .as_ref()
+                .map(|c| c.workspace.clone())
+                .unwrap_or_else(|| akh_medu::workspace::WorkspaceConfig::with_name(name));
+            wsm.create(ws_cfg)
+                .map_err(|e| format!("failed to create workspace \"{name}\" from config: {e}"))?;
+            // `create` persists only the WorkspaceConfig view; restore the full
+            // AkhConfig so akh-level fields (backend/model/endpoint) survive.
+            if let Some(c) = akh_cfg
+                && let Err(e) = c.save(&config_path)
+            {
+                tracing::warn!(workspace = %name, error = %e, "failed to restore akh.toml after lazy create");
+            }
         }
 
         let config = EngineConfig {
@@ -1277,6 +1299,26 @@ async fn run_daemon_task(
 /// `AkhomedConfig`. Errors collapse to a string surfaced as a JSON-RPC error.
 #[cfg(feature = "acp")]
 impl akh_medu::acp::ServerControl for ServerState {
+    /// Resolve a workspace's engine + agent + a fresh chat processor (built from
+    /// the cached, Arc-shared NLU pipeline — no second model load). Lazily loads
+    /// the workspace, so the ACP server can serve any configured akh per request.
+    fn resolve<'a>(&'a self, workspace: &'a str) -> akh_medu::acp::ResolveFuture<'a> {
+        Box::pin(async move {
+            let engine = self.get_engine(workspace).await?;
+            let agent = self.get_agent(workspace).await?;
+            let nlu = self.get_nlu_pipeline(workspace, &engine).await;
+            let processor = {
+                let p = nlu.lock().unwrap_or_else(|e| e.into_inner());
+                akh_medu::chat::ChatProcessor::new(&engine, p.clone())
+            };
+            Ok(akh_medu::acp::WorkspaceHandles {
+                engine,
+                agent,
+                processor: std::sync::Arc::new(std::sync::Mutex::new(processor)),
+            })
+        })
+    }
+
     fn dispatch<'a>(
         &'a self,
         method: &'a str,
@@ -1616,31 +1658,20 @@ async fn start_acp_server(
     // Resolve the akh's shared engine + agent (ADR-027) and build a chat
     // processor from a cheap clone of the cached NLU pipeline (Arc-shared
     // models — no second model load).
-    let engine = match state.get_engine(&ws).await {
-        Ok(e) => e,
-        Err(msg) => {
-            tracing::warn!(workspace = %ws, error = %msg, "ACP disabled: cannot open workspace");
-            return (None, None, Vec::new());
-        }
-    };
-    let agent = match state.get_agent(&ws).await {
-        Ok(a) => a,
-        Err(msg) => {
-            tracing::warn!(workspace = %ws, error = %msg, "ACP disabled: cannot load agent");
-            return (None, None, Vec::new());
-        }
-    };
-    let nlu = state.get_nlu_pipeline(&ws, &engine).await;
-    let processor = {
-        let p = nlu.lock().unwrap_or_else(|e| e.into_inner());
-        akh_medu::chat::ChatProcessor::new(&engine, p.clone())
-    };
-    // Wire the server-level control-plane: `ServerState` answers the
-    // `_akh/{workspace,daemon,config}/*` methods that span the whole daemon.
+    // Warm + validate the bound workspace so a misconfigured akh fails fast and
+    // first-chat latency is low. We don't *hold* the engine here: the ACP agent
+    // runs in provider mode and resolves each request's workspace on demand from
+    // `ServerState`, so it pins no engine (a permanent hold would block a
+    // same-host `sleep`/`wake`) and serves any configured akh per request (`-w`).
+    if let Err(msg) = state.get_engine(&ws).await {
+        tracing::warn!(workspace = %ws, error = %msg, "ACP disabled: cannot open workspace");
+        return (None, None, Vec::new());
+    }
+    // Wire the server-level control-plane + per-request workspace resolution:
+    // `ServerState` answers the `_akh/{workspace,daemon,config}/*` methods and
+    // resolves engine/agent/processor for any workspace by name.
     let control: Arc<dyn akh_medu::acp::ServerControl> = state.clone();
-    let acp_agent = AkhAcpAgent::new(engine, agent, processor)
-        .with_name(&ws)
-        .with_control(control);
+    let acp_agent = AkhAcpAgent::with_provider(control, &ws);
 
     let mut handles = Vec::new();
     let mut socket_str = None;

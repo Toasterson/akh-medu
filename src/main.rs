@@ -276,8 +276,8 @@ fn print_acp(result: &serde_json::Value) -> Result<()> {
 /// Dispatch an `akh acp <op>` command: discover the daemon, send the matching
 /// `_akh/*` request over ACP, and pretty-print the JSON result.
 #[cfg(feature = "acp")]
-fn run_acp_command(op: &AcpOp) -> Result<()> {
-    let (method, params): (&str, serde_json::Value) = match op {
+fn run_acp_command(ws: &str, op: &AcpOp) -> Result<()> {
+    let (method, mut params): (&str, serde_json::Value) = match op {
         AcpOp::Status => ("_akh/workspace/status", serde_json::json!({})),
         AcpOp::Capabilities => ("_akh/meta/capabilities", serde_json::json!({})),
         AcpOp::Symbols { limit } => ("_akh/symbols/list", serde_json::json!({ "limit": limit })),
@@ -334,6 +334,12 @@ fn run_acp_command(op: &AcpOp) -> Result<()> {
             ("_akh/permission/mode", params)
         }
     };
+    // Route the data-plane op to the akh selected by `-w` (the server defaults to
+    // its bound workspace when absent). Don't override an explicit param.
+    if let Some(obj) = params.as_object_mut() {
+        obj.entry("workspace")
+            .or_insert_with(|| serde_json::Value::String(ws.to_string()));
+    }
     let result = acp_call(method, params)?;
     print_acp(&result)
 }
@@ -508,7 +514,7 @@ fn run_chat_acp(ws_name: &str, headless: bool) -> Result<()> {
 }
 
 #[cfg(not(feature = "acp"))]
-fn run_acp_command(_op: &AcpOp) -> Result<()> {
+fn run_acp_command(_ws: &str, _op: &AcpOp) -> Result<()> {
     miette::bail!("The `acp` subcommand requires building `akh` with --features acp.")
 }
 
@@ -644,7 +650,7 @@ fn main() -> Result<()> {
 
         Commands::Workspace { action } => run_workspace_acp(&cli.workspace, action)?,
 
-        Commands::Acp { op } => run_acp_command(&op)?,
+        Commands::Acp { op } => run_acp_command(&cli.workspace, &op)?,
 
         Commands::Daemon { action } => run_daemon_acp(&cli.workspace, action)?,
 
