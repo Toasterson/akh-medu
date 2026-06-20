@@ -1034,14 +1034,42 @@ impl ServerState {
             }
         }
 
-        // Phase 44c: assemble each turn through the curating context manager
-        // (conversation history within the model's real budget), guarded by
-        // `SafetyEnforced` so eviction can never drop a safety-pinned span. The
-        // lib default stays pass-through (tests/embedded); the daemon opts every
-        // akh into history — measure-first Q1 showed it materially helps.
-        agent.set_context_manager(Box::new(akh_medu::agent::context::SafetyEnforced::new(
-            akh_medu::agent::context::CompactingManager,
-        )));
+        // Phase 44b/c/h/i: assemble each turn through a curating context manager,
+        // guarded by `SafetyEnforced` so eviction can never drop a safety-pinned
+        // span. `AKH_CONTEXT_STRATEGY` selects the strategy (default `compacting`):
+        //   compacting — history + KG + recall within the model's real budget,
+        //                with budget-driven section + tool degradation (44b/c/d/e/g);
+        //   passive    — lean context; the longer thread is carried by background
+        //                consolidation + recall, not verbatim history (44h);
+        //   virtual    — MemGPT tiers (core/recall/archival) + the self-edit tools
+        //                core_memory_append/replace + archival_search (44i).
+        // The lib default stays pass-through (tests / embedded).
+        {
+            use akh_medu::agent::context::{
+                CompactingManager, ContextManager, PassiveManager, SafetyEnforced,
+                VirtualContextManager,
+            };
+            let strategy =
+                std::env::var("AKH_CONTEXT_STRATEGY").unwrap_or_else(|_| "compacting".to_string());
+            let manager: Box<dyn ContextManager> = match strategy.as_str() {
+                "passive" => Box::new(SafetyEnforced::new(PassiveManager::default())),
+                "virtual" => {
+                    // Register the self-edit memory tools with this akh's id baked
+                    // in, so each tool always edits its own akh's core memory.
+                    agent.register_tool(Box::new(
+                        akh_medu::agent::tools::CoreMemoryAppendTool::new(name),
+                    ));
+                    agent.register_tool(Box::new(
+                        akh_medu::agent::tools::CoreMemoryReplaceTool::new(name),
+                    ));
+                    agent.register_tool(Box::new(akh_medu::agent::tools::ArchivalSearchTool));
+                    Box::new(SafetyEnforced::new(VirtualContextManager::default()))
+                }
+                _ => Box::new(SafetyEnforced::new(CompactingManager)),
+            };
+            tracing::info!(workspace = %name, %strategy, "context manager attached");
+            agent.set_context_manager(manager);
+        }
 
         // Extract the snapshot Arc before moving agent into Mutex so it can be
         // registered without ever re-acquiring the agent lock.

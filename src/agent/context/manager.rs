@@ -117,6 +117,8 @@ impl ContextManager for PassThroughManager {
         section_tokens.insert(ContextSection::UserPrompt, counter.count(episode.user_prompt));
         Ok(AssembledContext {
             messages,
+            // Byte-identical to the legacy path: every tool passes through unchanged.
+            tools: episode.tool_catalog.to_vec(),
             section_tokens,
             dropped: Vec::new(),
         })

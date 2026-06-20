@@ -116,11 +116,20 @@ impl Agent {
         // the manager only budgets + renders these sections. (44e session seeding
         // rides `with_context`'s seed slot — populated when a session summary
         // exists; the windows are large so all sections fit in practice.)
-        let kg_context = {
+        let kg_context = if std::env::var("AKH_KG_DELTA").map(|v| v == "1").unwrap_or(false) {
+            // 44d delta refresh: inject only facts not already shown this session
+            // (the activation frontier that moved), trusting retained history to
+            // hold the rest. Opt-in; the default re-sends the full relevant block.
+            let seen = self.conversation_state_mut().kg_seen_mut();
+            crate::nlu::kg_context::build_kg_context_delta(engine, user_prompt, seen)
+        } else {
             let mut cache = crate::nlu::kg_context::KgContextCache::default();
             crate::nlu::kg_context::build_kg_context(engine, user_prompt, &mut cache)
         };
         let recalled = self.recall_for_prompt(engine, user_prompt, 3);
+        // 44e: a one-line continuity seed (the conversation's opening ask), so the
+        // thread survives history trimming. None on the first turn.
+        let session_seed = self.session_seed();
 
         // Phase 44a (ADR 065): assemble the working context through the akh's
         // `ContextManager` instead of building the prompt ad hoc. The default
@@ -128,7 +137,7 @@ impl Agent {
         // byte-for-byte; richer managers (history, KG, recall) slot in here
         // without the loop changing. The loop then appends assistant/tool turns
         // to this base across rounds, exactly as before.
-        let mut conversation: Vec<Value> = {
+        let (mut conversation, tools): (Vec<Value>, Vec<Value>) = {
             use super::context::{
                 ContextManager, EpisodeState, HeuristicTokenCounter, PassThroughManager,
                 TokenBudget, TokenCounter, DEFAULT_RESERVED_OUTPUT,
@@ -145,7 +154,8 @@ impl Agent {
             };
             let episode = EpisodeState::new(agent_id, user_prompt, engine)
                 .with_conversation(Some(self.conversation_state()))
-                .with_context(kg_context.as_deref(), &recalled, None);
+                .with_context(kg_context.as_deref(), &recalled, session_seed.as_deref())
+                .with_tools(&tools);
             let manager: &dyn ContextManager =
                 self.context_manager.as_deref().unwrap_or(&PASS_THROUGH);
             match manager.assemble(&episode, &budget, &counter) {
@@ -156,7 +166,7 @@ impl Agent {
                         &budget,
                         counter.label(),
                     );
-                    assembled.messages
+                    (assembled.messages, assembled.tools)
                 }
                 Err(e) => {
                     tracing::error!(
@@ -164,7 +174,7 @@ impl Agent {
                         error = %e,
                         "context assembly failed; using single-turn fallback"
                     );
-                    vec![json!({"role": "user", "content": user_prompt})]
+                    (vec![json!({"role": "user", "content": user_prompt})], tools.clone())
                 }
             }
         };

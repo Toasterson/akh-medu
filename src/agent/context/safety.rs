@@ -112,6 +112,7 @@ mod tests {
         ) -> ContextResult<AssembledContext> {
             Ok(AssembledContext {
                 messages: vec![json!({"role": "user", "content": episode.user_prompt})],
+                tools: Vec::new(),
                 section_tokens: BTreeMap::new(),
                 dropped: vec![DroppedSpan::new(
                     ContextSection::KnowledgeGraph,

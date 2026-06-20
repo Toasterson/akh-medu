@@ -89,6 +89,13 @@ pub struct TruthMaintenanceSystem {
     supports: HashMap<SymbolId, Vec<SupportSet>>,
     /// Reverse index: premise symbol → set of derived symbols that depend on it.
     dependents: HashMap<SymbolId, HashSet<SymbolId>>,
+    /// Symbols the TMS has retracted and not since re-justified. A retraction
+    /// deletes a symbol's support keys, so this is the only durable signal that a
+    /// fact was *superseded* (vs. never tracked) — consumed by Phase 44g recall
+    /// hygiene so a retracted fact never resurfaces in an akh's working context.
+    /// Serde-defaulted so TMS snapshots written before this field still load.
+    #[serde(default)]
+    retracted_symbols: HashSet<SymbolId>,
 }
 
 impl TruthMaintenanceSystem {
@@ -109,6 +116,9 @@ impl TruthMaintenanceSystem {
 
         // Add to support sets
         self.supports.entry(derived).or_default().push(support);
+
+        // A (re-)justified symbol is no longer superseded.
+        self.retracted_symbols.remove(&derived);
     }
 
     /// Get all support sets for a derived symbol.
@@ -201,6 +211,10 @@ impl TruthMaintenanceSystem {
         // The initially retracted symbol
         retracted.insert(0, symbol);
 
+        // Remember everything retracted in this cascade so recall hygiene (44g)
+        // can keep superseded facts out of the working context.
+        self.retracted_symbols.extend(retracted.iter().copied());
+
         // Clean up reverse index entries pointing to retracted symbols
         for &r in &retracted {
             for support_sets in self.supports.values() {
@@ -228,6 +242,16 @@ impl TruthMaintenanceSystem {
             .is_some_and(|sets| !sets.is_empty())
     }
 
+    /// Whether `symbol` was retracted (superseded) and not since re-justified.
+    ///
+    /// Unlike [`is_supported`](Self::is_supported), this distinguishes a fact that
+    /// was *actively retracted* from one that was simply never tracked — the
+    /// signal Phase 44g recall hygiene needs to drop superseded episodes without
+    /// nuking every untracked one.
+    pub fn was_retracted(&self, symbol: SymbolId) -> bool {
+        self.retracted_symbols.contains(&symbol)
+    }
+
     /// Get the total number of tracked symbols.
     pub fn tracked_count(&self) -> usize {
         self.supports.len()
@@ -242,6 +266,7 @@ impl TruthMaintenanceSystem {
     pub fn clear(&mut self) {
         self.supports.clear();
         self.dependents.clear();
+        self.retracted_symbols.clear();
     }
 }
 
@@ -273,6 +298,27 @@ mod tests {
         assert!(tms.is_supported(derived));
         assert_eq!(tms.supports_for(derived).len(), 1);
         assert_eq!(tms.effective_confidence(derived), 0.9);
+    }
+
+    #[test]
+    fn was_retracted_tracks_supersession() {
+        let mut tms = TruthMaintenanceSystem::new();
+        let derived = sym(10);
+        let never = sym(99);
+
+        tms.add_support(derived, SupportSet::new(vec![sym(1)], DerivationKind::Reasoned, 0.9));
+        assert!(!tms.was_retracted(derived));
+        assert!(!tms.was_retracted(never), "never-tracked symbol is not 'retracted'");
+
+        // Retract the premise → derived cascades out and is remembered as superseded.
+        tms.retract(sym(1));
+        assert!(!tms.is_supported(derived));
+        assert!(tms.was_retracted(derived), "retracted fact remembered (vs. untracked)");
+        assert!(!tms.was_retracted(never), "untracked symbol still not retracted");
+
+        // Re-justifying clears the supersession flag.
+        tms.add_support(derived, SupportSet::new(vec![sym(2)], DerivationKind::Extracted, 0.8));
+        assert!(!tms.was_retracted(derived), "re-justified fact is no longer superseded");
     }
 
     #[test]

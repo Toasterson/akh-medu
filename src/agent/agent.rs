@@ -1664,28 +1664,116 @@ impl Agent {
     }
 
     /// Recall up to `top_k` past-episode summaries relevant to `prompt`, for the
-    /// Phase 44g context section. Resolves the prompt's content words to symbols
-    /// and ranks via the existing episodic recall (symbol overlap + recency).
-    /// Empty when nothing resolves or no episodes match.
+    /// Phase 44g context section.
+    ///
+    /// Resolves the prompt's content words to seed symbols, **VSA-expands** them
+    /// with their nearest neighbours (so episodes about *related* concepts surface
+    /// too), recalls a wider candidate pool, drops any episode referencing a
+    /// **TMS-retracted** (superseded) fact, then re-ranks by a blend of VSA
+    /// relevance ⊕ recency ⊕ confidence. Empty when nothing resolves or matches.
     pub(crate) fn recall_for_prompt(&self, engine: &Engine, prompt: &str, top_k: usize) -> Vec<String> {
-        let syms: Vec<crate::symbol::SymbolId> = prompt
+        use std::collections::HashMap;
+
+        // 1. Resolve the prompt's content words to seed symbols.
+        let seeds: Vec<crate::symbol::SymbolId> = prompt
             .split_whitespace()
             .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase())
             .filter(|w| w.len() > 2)
             .filter_map(|w| engine.resolve_symbol(w.as_str()).ok())
             .collect();
-        if syms.is_empty() {
+        if seeds.is_empty() {
             return Vec::new();
         }
-        match super::memory::recall_episodes(engine, &syms, self.predicates(), top_k, None) {
-            Ok(eps) => eps
-                .into_iter()
-                .map(|e| e.summary)
-                .filter(|s| !s.trim().is_empty())
-                .take(top_k)
-                .collect(),
-            Err(_) => Vec::new(),
+
+        // 2. VSA expansion: each seed's nearest neighbours, keyed by similarity.
+        //    Binary-VSA analogy is degenerate, so trust only strong matches.
+        const SIM_FLOOR: f32 = 0.1;
+        let mut query = seeds.clone();
+        let mut sim_of: HashMap<crate::symbol::SymbolId, f32> =
+            seeds.iter().map(|s| (*s, 1.0_f32)).collect();
+        for s in &seeds {
+            if let Ok(neighbours) = engine.search_similar_to(*s, 5) {
+                for n in neighbours {
+                    if n.similarity < SIM_FLOOR {
+                        continue;
+                    }
+                    sim_of
+                        .entry(n.symbol_id)
+                        .and_modify(|v| *v = v.max(n.similarity))
+                        .or_insert(n.similarity);
+                    if !query.contains(&n.symbol_id) {
+                        query.push(n.symbol_id);
+                    }
+                }
+            }
         }
+
+        // 3. Recall a wider candidate pool over the expanded query.
+        let candidates = match super::memory::recall_episodes(
+            engine,
+            &query,
+            self.predicates(),
+            top_k.saturating_mul(4).max(top_k),
+            None,
+        ) {
+            Ok(c) => c,
+            Err(_) => return Vec::new(),
+        };
+
+        // 4. Drop superseded episodes (any learning the TMS retracted), re-rank.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let tms = engine.tms();
+        let mut scored: Vec<(f32, super::memory::EpisodicEntry)> = candidates
+            .into_iter()
+            .filter(|ep| !ep.learnings.iter().any(|l| tms.was_retracted(*l)))
+            .map(|ep| {
+                let vsa = ep
+                    .learnings
+                    .iter()
+                    .filter_map(|l| sim_of.get(l).copied())
+                    .fold(0.0_f32, f32::max);
+                let age_days = now.saturating_sub(ep.timestamp) as f32 / 86_400.0;
+                let recency = (-age_days / 30.0).exp();
+                let conf = tms.effective_confidence(ep.symbol_id) as f32;
+                let score = 0.5 * vsa + 0.3 * recency + 0.2 * ep.relevance_score.max(conf);
+                (score, ep)
+            })
+            .collect();
+        drop(tms);
+        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+
+        scored
+            .into_iter()
+            .map(|(_, e)| e.summary)
+            .filter(|s| !s.trim().is_empty())
+            .take(top_k)
+            .collect()
+    }
+
+    /// A compact continuity seed for the working context (Phase 44e).
+    ///
+    /// Returns the opening operator ask of the current conversation so an akh
+    /// keeps the thread even when middle turns are later trimmed under budget.
+    /// `None` for a fresh (≤1-turn) conversation — there the first turn *is* the
+    /// current prompt, so a seed would just duplicate it.
+    pub(crate) fn session_seed(&self) -> Option<String> {
+        let conv = self.conversation_state();
+        if conv.turns.len() <= 1 {
+            return None;
+        }
+        let opening = conv
+            .turns
+            .iter()
+            .find(|t| matches!(t.speaker, crate::agent::conversation::Speaker::Operator))?;
+        let ask = opening.text.trim();
+        if ask.is_empty() {
+            return None;
+        }
+        let ask: String = ask.chars().take(200).collect();
+        Some(format!("This conversation began with: \"{ask}\""))
     }
 
     /// Set the message sink for structured output.

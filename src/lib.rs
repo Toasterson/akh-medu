@@ -34,6 +34,7 @@ pub mod acp;
 pub mod agent;
 pub mod akh_config;
 pub mod bench_phase41g;
+pub mod bench_phase44;
 pub mod cluster;
 pub mod argumentation;
 pub mod audit;

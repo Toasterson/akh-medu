@@ -1,5 +1,20 @@
 # Phase 44 — Working-Context Assembly Runtime
 
+- **Status (2026-06-21):** **Phase 44 COMPLETE — 44a–44j all landed; 44k/44l
+  recorded-deferred** (`src/agent/context/`, `src/bench_phase44/`). All three
+  strategies are live + selectable per akh via `AKH_CONTEXT_STRATEGY`
+  (`compacting` default, `passive`, `virtual`). 44b allocator drives section + tool
+  degradation (atomic all-or-nothing); 44g recall = VSA-expanded + recency/conf
+  blend + TMS supersede filter (new `TruthMaintenanceSystem::was_retracted`); 44d
+  KG-context delta (opt-in `AKH_KG_DELTA`); 44e graph-proximity discourse +
+  session-seed source; 44h `PassiveManager`; 44i `VirtualContextManager` + KG-backed
+  core memory + `core_memory_append`/`core_memory_replace`/`archival_search` tools;
+  44j deterministic A/B harness + dated report
+  ([`docs/ai/2026-06-21-phase44j-strategy-ab.md`](../2026-06-21-phase44j-strategy-ab.md)).
+  44k (Candle KV) / 44l (Heka retrieval swap) scaffolded as `policy.rs` traits +
+  no-op defaults — gated on ADR 037 / Phase 42, neither present on this branch.
+  `cargo test --lib` green (2622). The original landing notes follow.
+
 - **Status:** **44a + 44f landed; measure-first gate CLEARED for 44b/44c/44e**
   (2026-06-20, `src/agent/context/`). Landed: the `ContextManager` seam
   (byte-identical `PassThroughManager`) + `TokenCounter` + `BudgetAllocator`/

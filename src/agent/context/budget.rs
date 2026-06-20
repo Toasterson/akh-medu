@@ -66,6 +66,47 @@ impl BudgetAllocator {
         }
         granted
     }
+
+    /// Like [`allocate`](Self::allocate) but sections listed in `atomic` are
+    /// granted **all-or-nothing**: a section that does not fit whole gets `0`
+    /// (rather than a partial grant that can't be rendered without summarising —
+    /// that's the 44c-full graduated-fidelity refinement). Divisible sections
+    /// (history, tools) still get `want.min(remaining)` so they degrade smoothly.
+    ///
+    /// This is what [`CompactingManager`](super::compacting::CompactingManager)
+    /// uses: KG / recalled / seed blocks are atomic; history + tools are divisible.
+    pub fn allocate_keep_first(
+        &self,
+        available: usize,
+        requested: &BTreeMap<ContextSection, usize>,
+        atomic: &[ContextSection],
+    ) -> BTreeMap<ContextSection, usize> {
+        let mut granted = BTreeMap::new();
+        let mut remaining = available;
+        // Pure: how much this section gets given `remaining` (atomic ⇒ whole-or-0).
+        let give = |sec: &ContextSection, want: usize, remaining: usize| -> usize {
+            if atomic.contains(sec) {
+                if want <= remaining { want } else { 0 }
+            } else {
+                want.min(remaining)
+            }
+        };
+        for sec in &self.priority {
+            if let Some(&want) = requested.get(sec) {
+                let g = give(sec, want, remaining);
+                remaining -= g;
+                granted.insert(*sec, g);
+            }
+        }
+        for (sec, &want) in requested {
+            if !granted.contains_key(sec) {
+                let g = give(sec, want, remaining);
+                remaining -= g;
+                granted.insert(*sec, g);
+            }
+        }
+        granted
+    }
 }
 
 /// Emit a structured per-turn telemetry event with token usage per section.
@@ -113,6 +154,23 @@ mod tests {
         assert_eq!(granted[&ContextSection::Tools], 0);
         let total: usize = granted.values().sum();
         assert_eq!(total, 300, "never exceeds the budget");
+    }
+
+    #[test]
+    fn atomic_sections_are_all_or_nothing() {
+        let alloc = BudgetAllocator::default();
+        let mut want = BTreeMap::new();
+        want.insert(ContextSection::UserPrompt, 20);
+        want.insert(ContextSection::KnowledgeGraph, 100); // atomic, won't fit whole
+        want.insert(ContextSection::History, 400); // divisible
+        // Budget 120: UserPrompt (20) funded; KG wants 100 but only 100 left → fits
+        // exactly; History gets 0. Drop KG by shrinking the budget instead:
+        let granted = alloc.allocate_keep_first(60, &want, &[ContextSection::KnowledgeGraph]);
+        assert_eq!(granted[&ContextSection::UserPrompt], 20);
+        assert_eq!(granted[&ContextSection::KnowledgeGraph], 0, "atomic KG didn't fit → dropped whole");
+        assert_eq!(granted[&ContextSection::History], 40, "divisible history takes the remainder");
+        let total: usize = granted.values().sum();
+        assert!(total <= 60);
     }
 
     #[test]

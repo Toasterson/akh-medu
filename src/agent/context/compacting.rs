@@ -18,9 +18,12 @@ use serde_json::json;
 
 use crate::agent::conversation::Speaker;
 
+use super::budget::BudgetAllocator;
 use super::error::ContextResult;
 use super::manager::{ContextManager, TokenCounter};
-use super::types::{AssembledContext, ContextSection, EpisodeState, StrategyId, TokenBudget};
+use super::types::{
+    AssembledContext, ContextSection, DroppedSpan, EpisodeState, StrategyId, TokenBudget,
+};
 
 /// Assembles recent conversation history + the current turn within budget.
 ///
@@ -42,85 +45,227 @@ impl ContextManager for CompactingManager {
         budget: &TokenBudget,
         counter: &dyn TokenCounter,
     ) -> ContextResult<AssembledContext> {
-        let available = budget.available();
-        let mut section_tokens: BTreeMap<ContextSection, usize> = BTreeMap::new();
-        let mut messages: Vec<serde_json::Value> = Vec::new();
-        let mut spent = 0usize;
+        assemble_with_cap(episode, budget, counter, None)
+    }
+}
 
-        // Leading context blocks, highest-priority first, each skipped if it would
-        // bust the budget: 44e session seed → 44d KG facts → 44g recalled episodes.
-        // Rendered as `system` messages (both backends surface them; ADR 065).
-        let add_block = |section: ContextSection,
-                             header: &str,
-                             body: &str,
-                             section_tokens: &mut BTreeMap<ContextSection, usize>,
-                             messages: &mut Vec<serde_json::Value>,
-                             spent: &mut usize| {
+/// Shared section assembly for the curating managers (44b/44e).
+///
+/// `history_cap` bounds how many of the most-recent turns are eligible (older
+/// turns are recorded as dropped): `None` for [`CompactingManager`] (all turns
+/// within budget), `Some(tail)` for the
+/// [`PassiveManager`](super::passive::PassiveManager), which leans on background
+/// consolidation + recall to carry the longer-term thread instead of verbatim
+/// history.
+pub(super) fn assemble_with_cap(
+    episode: &EpisodeState<'_>,
+    budget: &TokenBudget,
+    counter: &dyn TokenCounter,
+    history_cap: Option<usize>,
+) -> ContextResult<AssembledContext> {
+        let available = budget.available();
+
+        // Keep-first priority (what survives budget pressure): continuity seed →
+        // the question → grounding facts → recalled episodes → recent history →
+        // tools (trimmed first). The *render* order differs (positional): blocks
+        // lead, history + current prompt trail, closest to the generation point.
+        let allocator = BudgetAllocator::new(vec![
+            ContextSection::System,
+            ContextSection::UserPrompt,
+            ContextSection::KnowledgeGraph,
+            ContextSection::RecalledEpisodes,
+            ContextSection::History,
+            ContextSection::Tools,
+        ]);
+
+        // ── Candidate atomic blocks (each → one leading `system` message) ──
+        let make_block = |section: ContextSection,
+                          header: &str,
+                          body: &str|
+         -> Option<(ContextSection, String, usize)> {
             let body = body.trim();
             if body.is_empty() {
-                return;
+                return None;
             }
-            let block = format!("{header}\n{body}");
-            let t = counter.count(&block);
-            if *spent + t > available {
-                return;
-            }
-            *spent += t;
-            section_tokens.insert(section, t);
-            messages.push(json!({ "role": "system", "content": block }));
+            let content = format!("{header}\n{body}");
+            let tokens = counter.count(&content);
+            Some((section, content, tokens))
         };
-        if let Some(seed) = episode.session_seed {
-            add_block(ContextSection::System, "Session so far:", seed,
-                &mut section_tokens, &mut messages, &mut spent);
+        let mut blocks: Vec<(ContextSection, String, usize)> = Vec::new();
+        if let Some(seed) = episode.session_seed
+            && let Some(b) = make_block(ContextSection::System, "Session so far:", seed)
+        {
+            blocks.push(b);
         }
-        if let Some(kg) = episode.kg_context {
-            add_block(ContextSection::KnowledgeGraph, "Relevant knowledge from your memory:", kg,
-                &mut section_tokens, &mut messages, &mut spent);
+        if let Some(kg) = episode.kg_context
+            && let Some(b) =
+                make_block(ContextSection::KnowledgeGraph, "Relevant knowledge from your memory:", kg)
+        {
+            blocks.push(b);
         }
         if !episode.recalled.is_empty() {
             let body = format!("- {}", episode.recalled.join("\n- "));
-            add_block(ContextSection::RecalledEpisodes, "Relevant past episodes:", &body,
-                &mut section_tokens, &mut messages, &mut spent);
+            if let Some(b) = make_block(ContextSection::RecalledEpisodes, "Relevant past episodes:", &body)
+            {
+                blocks.push(b);
+            }
         }
 
-        // Conversation history within the remaining budget. Select newest-first
-        // (always keeping the most recent turn — the current prompt), then render
-        // chronologically. The current prompt is the last recorded turn, so no
-        // separate append is needed.
-        let has_turns = episode.conversation.map(|c| !c.turns.is_empty()).unwrap_or(false);
-        if let Some(conv) = episode.conversation.filter(|_| has_turns) {
-            let remaining = available.saturating_sub(spent);
-            let mut history_tokens = 0usize;
-            let mut chosen = Vec::new();
-            for turn in conv.turns.iter().rev() {
-                let t = counter.count(&turn.text);
-                if !chosen.is_empty() && history_tokens + t > remaining {
-                    break;
-                }
-                history_tokens += t;
-                chosen.push(turn);
-            }
-            chosen.reverse();
-            for turn in chosen {
-                let role = match turn.speaker {
-                    Speaker::Operator => "user",
-                    Speaker::Agent => "assistant",
-                };
-                messages.push(json!({ "role": role, "content": turn.text }));
-            }
-            section_tokens.insert(ContextSection::History, history_tokens);
+        // ── Divisible sections: history turns + the tool catalog ──
+        let history: Vec<(&'static str, &str, usize)> = episode
+            .conversation
+            .map(|c| {
+                c.turns
+                    .iter()
+                    .map(|t| {
+                        let role = match t.speaker {
+                            Speaker::Operator => "user",
+                            Speaker::Agent => "assistant",
+                        };
+                        (role, t.text.as_str(), counter.count(&t.text))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let history_total: usize = history.iter().map(|(_, _, t)| *t).sum();
+
+        let tool_costs: Vec<usize> = episode
+            .tool_catalog
+            .iter()
+            .map(|t| counter.count(&t.to_string()))
+            .collect();
+        let tools_total: usize = tool_costs.iter().sum();
+
+        // ── Budget division (one allocator, not three independent caps) ──
+        let mut requested: BTreeMap<ContextSection, usize> = BTreeMap::new();
+        for (section, _, tokens) in &blocks {
+            *requested.entry(*section).or_insert(0) += *tokens;
+        }
+        if history_total > 0 {
+            requested.insert(ContextSection::History, history_total);
         } else {
-            // No conversation state ⇒ the current prompt as a single user turn.
+            requested.insert(ContextSection::UserPrompt, counter.count(episode.user_prompt));
+        }
+        if tools_total > 0 {
+            requested.insert(ContextSection::Tools, tools_total);
+        }
+        // Atomic sections render whole-or-not (no partial block without a summary —
+        // that's 44c-full); history + tools degrade smoothly within their grant.
+        let atomic = [
+            ContextSection::System,
+            ContextSection::KnowledgeGraph,
+            ContextSection::RecalledEpisodes,
+            ContextSection::UserPrompt,
+        ];
+        let granted = allocator.allocate_keep_first(available, &requested, &atomic);
+
+        // ── Render ──
+        let mut messages: Vec<serde_json::Value> = Vec::new();
+        let mut section_tokens: BTreeMap<ContextSection, usize> = BTreeMap::new();
+        let mut dropped: Vec<DroppedSpan> = Vec::new();
+
+        // Leading atomic blocks, in render order (seed → kg → recalled). A block
+        // that didn't win its grant is recorded as dropped (safety can veto).
+        for (section, content, tokens) in &blocks {
+            let grant = granted.get(section).copied().unwrap_or(0);
+            if *tokens > 0 && grant >= *tokens {
+                messages.push(json!({ "role": "system", "content": content }));
+                *section_tokens.entry(*section).or_insert(0) += *tokens;
+            } else {
+                dropped.push(DroppedSpan::new(*section, content.clone(), None));
+            }
+        }
+
+        // History within its grant: 44e discourse selection chooses *which* turns
+        // (recency, or graph-proximity when the conversation carries entities),
+        // always keeping the most recent turn (= the current prompt), then renders
+        // the kept turns chronologically.
+        if history_total > 0 {
+            let conv = episode
+                .conversation
+                .expect("history_total > 0 implies a conversation is present");
+            let grant = granted.get(&ContextSection::History).copied().unwrap_or(0);
+            let proximity = super::discourse::has_proximity_signal(conv);
+            // PassiveManager caps eligibility to the last `tail` turns (the
+            // immediate exchange); the rest is carried by recall, not verbatim.
+            let considered: Option<std::collections::HashSet<usize>> = history_cap.map(|n| {
+                let start = history.len().saturating_sub(n.max(1));
+                (start..history.len()).collect()
+            });
+            let mut used = 0usize;
+            let mut keep: Vec<usize> = Vec::new();
+            for i in super::discourse::rank_turns_keep_first(conv) {
+                if let Some(set) = &considered
+                    && !set.contains(&i)
+                {
+                    continue;
+                }
+                let t = history[i].2;
+                if keep.is_empty() {
+                    used += t;
+                    keep.push(i);
+                    continue;
+                }
+                if used + t > grant {
+                    // Recency keeps a contiguous recent tail (stop); proximity may
+                    // still fit a smaller, more-relevant earlier turn (skip on).
+                    if proximity {
+                        continue;
+                    } else {
+                        break;
+                    }
+                }
+                used += t;
+                keep.push(i);
+            }
+            keep.sort_unstable(); // chronological render order
+            for &i in &keep {
+                let (role, text, _) = history[i];
+                messages.push(json!({ "role": role, "content": text }));
+            }
+            section_tokens.insert(ContextSection::History, used);
+            for (i, (_, text, _)) in history.iter().enumerate() {
+                if !keep.contains(&i) {
+                    dropped.push(DroppedSpan::new(
+                        ContextSection::History,
+                        (*text).to_string(),
+                        None,
+                    ));
+                }
+            }
+        } else {
+            // No conversation ⇒ the current prompt as a single user turn (never
+            // dropped, even under an impossibly tight budget).
             messages.push(json!({ "role": "user", "content": episode.user_prompt }));
             section_tokens.insert(ContextSection::UserPrompt, counter.count(episode.user_prompt));
         }
 
+        // Tools within their grant: keep whole tools in catalog order until full
+        // (the lowest-priority section — measure-first Q2's #1 lever for small
+        // windows). With a large window the whole catalog passes unchanged.
+        let mut tools: Vec<serde_json::Value> = Vec::new();
+        if tools_total > 0 {
+            let grant = granted.get(&ContextSection::Tools).copied().unwrap_or(0);
+            let mut used = 0usize;
+            for (tool, cost) in episode.tool_catalog.iter().zip(&tool_costs) {
+                if used + *cost <= grant {
+                    used += *cost;
+                    tools.push(tool.clone());
+                } else {
+                    dropped.push(DroppedSpan::new(ContextSection::Tools, "(tool)", None));
+                }
+            }
+            if used > 0 {
+                section_tokens.insert(ContextSection::Tools, used);
+            }
+        }
+
         Ok(AssembledContext {
             messages,
+            tools,
             section_tokens,
-            dropped: Vec::new(),
+            dropped,
         })
-    }
 }
 
 #[cfg(test)]
@@ -196,6 +341,40 @@ mod tests {
             .assemble(&episode, &TokenBudget::default(), &HeuristicTokenCounter)
             .expect("assemble");
         assert_eq!(out.messages, vec![json!({"role":"user","content":"hello"})]);
+    }
+
+    #[test]
+    fn tools_pass_through_under_a_large_budget() {
+        let (engine, _tmp) = test_engine();
+        let tools = vec![
+            json!({"type":"function","function":{"name":"a","description":"tool a"}}),
+            json!({"type":"function","function":{"name":"b","description":"tool b"}}),
+        ];
+        let episode = EpisodeState::new("a", "hi", &engine).with_tools(&tools);
+        let out = CompactingManager
+            .assemble(&episode, &TokenBudget::default(), &HeuristicTokenCounter)
+            .expect("assemble");
+        assert_eq!(out.tools.len(), 2, "large budget keeps every tool");
+        assert!(out.dropped.iter().all(|d| d.section != ContextSection::Tools));
+    }
+
+    #[test]
+    fn tools_section_trimmed_under_pressure() {
+        let (engine, _tmp) = test_engine();
+        // Three ~10-token tools; a budget that fits the prompt + ~1 tool forces a trim.
+        let tools: Vec<_> = (0..3)
+            .map(|i| json!({"type":"function","function":{"name":format!("tool{i}"),"description":"xxxxxxxxxxxxxxxxxxxx"}}))
+            .collect();
+        let episode = EpisodeState::new("a", "hi", &engine).with_tools(&tools);
+        // available = 30 - 6 = 24; the prompt is tiny, so a couple of tools fit, not all.
+        let out = CompactingManager
+            .assemble(&episode, &TokenBudget::new(30, 6), &HeuristicTokenCounter)
+            .expect("assemble");
+        assert!(out.tools.len() < 3, "tool catalog trimmed to the budget: {}", out.tools.len());
+        assert!(
+            out.dropped.iter().any(|d| d.section == ContextSection::Tools),
+            "trimmed tools recorded as dropped"
+        );
     }
 
     #[test]

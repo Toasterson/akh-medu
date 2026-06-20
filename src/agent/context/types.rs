@@ -95,6 +95,10 @@ pub struct EpisodeState<'a> {
     pub recalled: &'a [String],
     /// Session-continuity seed restored on wakeup (44e). `None` ⇒ omitted.
     pub session_seed: Option<&'a str>,
+    /// The tool catalog available this turn (44b). The manager budgets it as the
+    /// lowest-priority [`Tools`](ContextSection::Tools) section and returns the
+    /// selected subset in [`AssembledContext::tools`]. Empty ⇒ no tools.
+    pub tool_catalog: &'a [Value],
 }
 
 impl<'a> EpisodeState<'a> {
@@ -109,6 +113,7 @@ impl<'a> EpisodeState<'a> {
             kg_context: None,
             recalled: &[],
             session_seed: None,
+            tool_catalog: &[],
         }
     }
 
@@ -130,6 +135,13 @@ impl<'a> EpisodeState<'a> {
         self.kg_context = kg_context;
         self.recalled = recalled;
         self.session_seed = session_seed;
+        self
+    }
+
+    /// Attach the tool catalog for budget-driven selection (44b).
+    #[must_use]
+    pub fn with_tools(mut self, tool_catalog: &'a [Value]) -> Self {
+        self.tool_catalog = tool_catalog;
         self
     }
 }
@@ -190,6 +202,10 @@ impl DroppedSpan {
 pub struct AssembledContext {
     /// Conversation messages to send (the system prompt stays in the backend).
     pub messages: Vec<Value>,
+    /// The tool catalog to send, after budget-driven selection (44b). The
+    /// pass-through manager echoes [`EpisodeState::tool_catalog`] unchanged;
+    /// curating managers may trim it to the `Tools` section budget.
+    pub tools: Vec<Value>,
     /// Tokens consumed per section (telemetry; should sum to ≤ `budget.available()`).
     pub section_tokens: BTreeMap<ContextSection, usize>,
     /// Spans the manager declined to include (telemetry + safety enforcement).
