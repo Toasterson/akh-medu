@@ -91,6 +91,8 @@ Plans live under `docs/ai/plans/`, ADRs under `docs/ai/decisions/`.
 - **24**: Sensory Grounding (24a vision, 24b audio, 24c structured) — [plan](docs/ai/plans/2026-02-24-phase24-sensory-grounding.md)
 - **25a-25e**: People & Contacts — [phase](docs/ai/phases/phase-25-people-contacts.md), [ADR 028](docs/ai/decisions/028-people-contacts-architecture.md)
 - **32**: Knowledge Extraction (T5 Knowledge model for bootstrap elicitation, multi-pass, hallucination detection) — [plan](docs/ai/plans/2026-03-26-phase32-llm-knowledge-extraction.md), [ADR 042](docs/ai/decisions/042-llm-knowledge-extraction.md)
+- **38a–c, e, f (partial), g**: Relocatable Akh — Postgres-backed truth + WAL + snapshot/wake; `SleepLevel` + HNSW local-disk wake cache; workspace membership + `WorkspaceJoin/Leave`; relocation with `last_seen` + advisory-lock split-brain guard + [runbook](docs/ops/relocate-akh.md) + recovery harness. 38d (AGE) deferred; live `pg_notify` convergence + daemon auto-idle remain. — [plan](docs/ai/plans/2026-04-25-phase38-relocatable-akh.md), [ADR 049](docs/ai/decisions/049-relocatable-akh.md), [ADR 071](docs/ai/decisions/071-akh-cli-command-tree.md), [ADR 072](docs/ai/decisions/072-normalized-akhomed-store.md)
+- **Candle↔Ollama reconciliation**: selectable per-akh chat/agentic backing — Ollama (default, cloud-capable) or Candle (in-process GGUF, full grammar-constrained tool calling; device-limited). Forward-ported candle boundary + ROCm/HIP AMD-GPU + Gemma-4 audio. — [ADR 067](docs/ai/decisions/067-candle-conversational-boundary.md), [ADR 068](docs/ai/decisions/068-rocm-candle-gpu-backend.md), [ADR 069](docs/ai/decisions/069-gemma4-audio-native.md), [ADR 070](docs/ai/decisions/070-selectable-chat-backing.md)
 
 ### Upcoming Phases
 
