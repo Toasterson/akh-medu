@@ -66,6 +66,33 @@ struct ServerState {
     /// Phase 38c: in-flight `_akh/akh/wake` workspace names — single-flights wake
     /// so two concurrent wakes of the same cold workspace can't race on the redb.
     waking: Arc<Mutex<std::collections::HashSet<String>>>,
+    /// Per-workspace load locks serialising the slow (first-load) path of
+    /// `get_engine`: concurrent first-loads must not each build a separate Engine
+    /// (each would wire its own WAL flusher + snapshot ticker and all but the
+    /// last would leak as orphaned background tasks). Keyed by workspace name.
+    engine_load_locks: RwLock<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// Likewise for `get_agent` — avoids a wasted concurrent heavy `Agent::resume`.
+    agent_load_locks: RwLock<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+}
+
+/// Fetch (creating if needed) the per-workspace load lock from `locks`.
+///
+/// Used to serialise `get_engine` / `get_agent` slow paths per workspace name so
+/// each workspace is constructed at most once even under concurrent first-loads.
+async fn fetch_load_lock(
+    locks: &RwLock<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    name: &str,
+) -> Arc<tokio::sync::Mutex<()>> {
+    if let Some(lock) = locks.read().await.get(name) {
+        return Arc::clone(lock);
+    }
+    Arc::clone(
+        locks
+            .write()
+            .await
+            .entry(name.to_string())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
+    )
 }
 
 /// RAII token marking a workspace as mid-wake; clears the name on drop so an
@@ -189,6 +216,8 @@ impl ServerState {
             wal_flushers: RwLock::new(HashMap::new()),
             snapshot_tickers: RwLock::new(HashMap::new()),
             waking: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            engine_load_locks: RwLock::new(HashMap::new()),
+            agent_load_locks: RwLock::new(HashMap::new()),
         }
     }
 
@@ -485,6 +514,21 @@ impl ServerState {
             }
         }
 
+        // Serialize the slow path per workspace: two concurrent first-loads must
+        // not each build a separate Engine (each would wire its own WAL flusher +
+        // snapshot ticker, and all but the winner would leak as orphaned tasks).
+        let load_lock = fetch_load_lock(&self.engine_load_locks, name).await;
+        let _load_guard = load_lock.lock().await;
+
+        // Double-check: a racing winner may have populated the cache while we
+        // waited for the load lock.
+        {
+            let map = self.workspaces.read().await;
+            if let Some(engine) = map.get(name) {
+                return Ok(Arc::clone(engine));
+            }
+        }
+
         // Try to load it.
         let ws_paths = self.paths.workspace(name);
         if !ws_paths.root.exists() {
@@ -557,6 +601,21 @@ impl ServerState {
     /// deserializes + rebuilds KG state), so we cache in `self.agents`.
     async fn get_agent(&self, name: &str) -> Result<Arc<Mutex<Agent>>, String> {
         // Fast path: already cached.
+        {
+            let agents = self.agents.read().await;
+            if let Some(agent) = agents.get(name) {
+                return Ok(Arc::clone(agent));
+            }
+        }
+
+        // Serialize the slow path per workspace so concurrent first-callers don't
+        // each run the heavy `Agent::resume`; the loser reuses the winner's agent.
+        // A distinct lock map from `get_engine`'s, since `get_engine` is called
+        // below while this guard is held (same map would self-deadlock).
+        let load_lock = fetch_load_lock(&self.agent_load_locks, name).await;
+        let _load_guard = load_lock.lock().await;
+
+        // Double-check after acquiring the load lock.
         {
             let agents = self.agents.read().await;
             if let Some(agent) = agents.get(name) {
@@ -1815,5 +1874,71 @@ mod control_plane_tests {
             r.as_ref().is_err_and(|e| e.contains("Postgres")),
             "expected no-Postgres error, got {r:?}",
         );
+    }
+
+    #[tokio::test]
+    async fn get_engine_slow_path_is_single_flight() {
+        let (_tmp, state) = temp_state();
+        let state = Arc::new(state);
+
+        // Materialise the workspace on disk (create without a role does not open it).
+        state
+            .dispatch("_akh/workspace/create", &json!({ "name": "alpha" }))
+            .await
+            .expect("create");
+        assert!(
+            state.workspaces.read().await.is_empty(),
+            "create must not pre-open the engine",
+        );
+
+        // Fire N concurrent first-loads; they race on the per-workspace load lock.
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let s = Arc::clone(&state);
+            handles.push(tokio::spawn(async move { s.get_engine("alpha").await }));
+        }
+        let mut engines = Vec::new();
+        for h in handles {
+            engines.push(h.await.expect("join").expect("get_engine"));
+        }
+
+        // All callers must share exactly one Engine instance (no duplicate build,
+        // hence no leaked WAL flusher / snapshot ticker).
+        for e in &engines[1..] {
+            assert!(
+                Arc::ptr_eq(&engines[0], e),
+                "concurrent first-loads must share one engine",
+            );
+        }
+        assert_eq!(state.workspaces.read().await.len(), 1, "exactly one engine cached");
+    }
+
+    #[tokio::test]
+    async fn get_agent_slow_path_is_single_flight() {
+        let (_tmp, state) = temp_state();
+        let state = Arc::new(state);
+        state
+            .dispatch("_akh/workspace/create", &json!({ "name": "beta" }))
+            .await
+            .expect("create");
+
+        let mut handles = Vec::new();
+        for _ in 0..6 {
+            let s = Arc::clone(&state);
+            handles.push(tokio::spawn(async move { s.get_agent("beta").await }));
+        }
+        let mut agents = Vec::new();
+        for h in handles {
+            agents.push(h.await.expect("join").expect("get_agent"));
+        }
+
+        for a in &agents[1..] {
+            assert!(
+                Arc::ptr_eq(&agents[0], a),
+                "concurrent first-loads must share one agent",
+            );
+        }
+        assert_eq!(state.agents.read().await.len(), 1, "exactly one agent cached");
+        assert_eq!(state.workspaces.read().await.len(), 1, "and exactly one engine");
     }
 }
