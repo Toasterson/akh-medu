@@ -294,12 +294,30 @@ pub async fn write_snapshot(
         .and_then(|p| serde_json::to_value(p).ok());
     // `extra` carries the small, scalar-ish state that has no inspectable table
     // of its own but is cheap to round-trip: the active audience, the per-goal
-    // improvement history, and the HTN method-usage stats. Each is restored to
-    // its `agent:*` meta key on wake.
+    // improvement history, the HTN method-usage stats, and the cross-session
+    // continuity summary. Each is restored to its `agent:*` meta key on wake.
+    //
+    // NOTE: `agent:person_memory` (Phase 25c `PersonMemoryIndex`) is *not* yet
+    // carried here — its `topic_index: HashMap<(String, SymbolId), _>` has a
+    // tuple key that JSON cannot represent, so it needs a flatten helper or a
+    // dedicated table. Deferred; a woken Akh starts with an empty person index.
+    let active_project_name = agent
+        .agenda
+        .active_project
+        .and_then(|pid| agent.projects.iter().find(|p| p.id == pid))
+        .map(|p| p.name.clone());
+    let session_summary = crate::agent::memory::generate_session_summary(
+        &agent.working_memory,
+        &agent.goals,
+        active_project_name.as_deref(),
+        agent.session_start_cycle,
+        agent.cycle_count,
+    );
     let extra = serde_json::json!({
         "audience": agent.audience,
         "improvement_history": agent.improvement_history,
         "method_stats": agent.method_registry_htn.export_stats(),
+        "session_summary": session_summary,
     });
     let state = akh_state::Model {
         akh_id,
@@ -826,6 +844,11 @@ fn restore_extra(store: &TieredStore, extra: Option<&serde_json::Value>) {
     }) {
         put_bincode(store, b"agent:method_stats", &stats);
     }
+    if let Some(summary) = extra.get("session_summary").and_then(|v| {
+        serde_json::from_value::<crate::agent::memory::SessionSummary>(v.clone()).ok()
+    }) {
+        put_bincode(store, b"agent:session_summary", &summary);
+    }
 }
 
 /// Convert a persisted `facts` row into a KG [`Triple`].
@@ -873,5 +896,162 @@ fn apply_mutation(engine: &Engine, m: &akhomed_store::TailMutation) -> bool {
             engine.remove_triple(s, p, o).is_ok()
         }
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::drives::DriveKind;
+    use crate::agent::goal::{GoalSource, GoalStatus};
+
+    // The reconstruction helpers (writer-side `goal_to_model` + wake-side
+    // `build_*`) are the highest-risk paths — pure row<->struct mapping that the
+    // live wake test exercises only with default state. These cover the rich
+    // cases without needing Postgres.
+
+    #[test]
+    fn goal_detail_roundtrips_with_data_bearing_variants() {
+        let goal = crate::agent::Goal {
+            symbol_id: SymbolId::new(7).unwrap(),
+            description: "learn pyramid construction".into(),
+            status: GoalStatus::Failed {
+                reason: "insufficient evidence".into(),
+            },
+            priority: 5,
+            success_criteria: "knows the ramp theory".into(),
+            parent: Some(SymbolId::new(3).unwrap()),
+            children: vec![SymbolId::new(8).unwrap(), SymbolId::new(9).unwrap()],
+            created_at: 100,
+            cycles_worked: 3,
+            last_progress_cycle: 120,
+            source: Some(GoalSource::DriveExceeded {
+                drive: "curiosity".into(),
+                strength: 0.7,
+            }),
+            blocked_by: vec![SymbolId::new(4).unwrap()],
+            priority_rationale: None,
+            justification: None,
+            reformulated_from: None,
+            estimated_effort: None,
+        };
+        // Writer (full Goal into `detail`) → reader (`build_goals`).
+        let model = goal_to_model(Uuid::nil(), &goal);
+        let back = build_goals(std::slice::from_ref(&model));
+        assert_eq!(back.len(), 1, "one goal reconstructed");
+        assert_eq!(
+            serde_json::to_value(&back[0]).unwrap(),
+            serde_json::to_value(&goal).unwrap(),
+            "goal must round-trip losslessly through the detail JSON",
+        );
+    }
+
+    #[test]
+    fn drive_system_restores_into_canonical_slots() {
+        // Rows in non-canonical DB order; build_drive_system must place each by kind.
+        let rows = vec![
+            drive::Model {
+                akh_id: Uuid::nil(),
+                kind: "efficiency".into(),
+                strength: 0.9,
+                last_computed: 5,
+                last_triple_count: 10,
+                last_symbol_count: 4,
+                threshold: 0.4,
+            },
+            drive::Model {
+                akh_id: Uuid::nil(),
+                kind: "curiosity".into(),
+                strength: 0.1,
+                last_computed: 6,
+                last_triple_count: 11,
+                last_symbol_count: 5,
+                threshold: 0.6,
+            },
+        ];
+        let sys = build_drive_system(&rows).expect("drives present");
+        assert_eq!(sys.strength(DriveKind::Curiosity), 0.1);
+        assert_eq!(sys.strength(DriveKind::Efficiency), 0.9);
+        assert_eq!(sys.thresholds[DriveKind::Curiosity as usize], 0.6);
+        assert_eq!(sys.thresholds[DriveKind::Efficiency as usize], 0.4);
+        assert!(build_drive_system(&[]).is_none(), "no rows → None (default fallback)");
+    }
+
+    #[test]
+    fn competence_restores_maps_and_sorted_calibration() {
+        let tools = vec![competence_tool::Model {
+            akh_id: Uuid::nil(),
+            tool: "code_gen".into(),
+            successes: 8,
+            attempts: 10,
+        }];
+        let cats = vec![competence_category::Model {
+            akh_id: Uuid::nil(),
+            category: "research".into(),
+            completed: 2,
+            attempted: 3,
+        }];
+        // Out of order: seq 1 then 0 — must be sorted by seq on rebuild.
+        let calib = vec![
+            competence_calibration::Model {
+                akh_id: Uuid::nil(),
+                seq: 1,
+                predicted: 0.5,
+                actual: 1.0,
+            },
+            competence_calibration::Model {
+                akh_id: Uuid::nil(),
+                seq: 0,
+                predicted: 0.3,
+                actual: 0.0,
+            },
+        ];
+        let cm = build_competence(&tools, &cats, &calib);
+        assert_eq!(cm.tools["code_gen"].successes, 8);
+        assert_eq!(cm.tools["code_gen"].attempts, 10);
+        assert_eq!(cm.categories["research"].attempted, 3);
+        assert_eq!(cm.calibration_history.len(), 2);
+        assert_eq!(cm.calibration_history[0].predicted, 0.3, "sorted by seq");
+        assert_eq!(cm.calibration_history[1].predicted, 0.5);
+    }
+
+    #[test]
+    fn effort_case_goal_vector_bincode_roundtrips() {
+        let rows = vec![effort_case::Model {
+            akh_id: Uuid::nil(),
+            seq: 0,
+            description: "decompose".into(),
+            goal_vector: bincode::serialize(&vec![1u32, 2, 3]).unwrap(),
+            cycles_consumed: 4,
+            succeeded: true,
+            tool_usage: serde_json::json!({ "code_gen": 2, "search": 1 }),
+            initial_coverage: 3,
+        }];
+        let cases = build_effort_cases(&rows).expect("effort cases present");
+        assert_eq!(cases[0].goal_vector, vec![1u32, 2, 3]);
+        assert_eq!(cases[0].tool_usage["code_gen"], 2);
+        assert_eq!(cases[0].cycles_consumed, 4);
+        assert!(cases[0].succeeded);
+    }
+
+    #[test]
+    fn consolidation_phase_parses_debug_form() {
+        use crate::agent::sleep::ConsolidationPhase;
+        assert_eq!(parse_consolidation_phase("DreamState"), ConsolidationPhase::DreamState);
+        assert_eq!(parse_consolidation_phase("Consolidation"), ConsolidationPhase::Consolidation);
+        assert_eq!(parse_consolidation_phase("garbage"), ConsolidationPhase::Wake);
+    }
+
+    #[test]
+    fn symbol_kind_roundtrips() {
+        for kind in [
+            SymbolKind::Entity,
+            SymbolKind::Relation,
+            SymbolKind::Composite,
+            SymbolKind::Glyph { codepoint: '𓂀' },
+        ] {
+            let (s, g) = symbol_kind_parts(&kind);
+            assert_eq!(symbol_kind_from(&s, g), kind, "kind {kind:?} must round-trip");
+        }
     }
 }
