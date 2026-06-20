@@ -63,6 +63,25 @@ struct ServerState {
     /// Phase 38c: per-workspace periodic snapshot tasks, keyed by workspace name.
     /// Stopped on graceful shutdown, followed by a final synchronous snapshot.
     snapshot_tickers: RwLock<HashMap<String, SnapshotTicker>>,
+    /// Phase 38c: in-flight `_akh/akh/wake` workspace names — single-flights wake
+    /// so two concurrent wakes of the same cold workspace can't race on the redb.
+    waking: Arc<Mutex<std::collections::HashSet<String>>>,
+}
+
+/// RAII token marking a workspace as mid-wake; clears the name on drop so an
+/// early `?`-return still releases the single-flight slot.
+struct WakeGuard {
+    set: Arc<Mutex<std::collections::HashSet<String>>>,
+    name: String,
+}
+
+impl Drop for WakeGuard {
+    fn drop(&mut self) {
+        self.set
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.name);
+    }
 }
 
 /// Handle to a workspace's background WAL flusher task (Phase 38b).
@@ -169,6 +188,7 @@ impl ServerState {
             pg_pool,
             wal_flushers: RwLock::new(HashMap::new()),
             snapshot_tickers: RwLock::new(HashMap::new()),
+            waking: Arc::new(Mutex::new(std::collections::HashSet::new())),
         }
     }
 
@@ -357,6 +377,20 @@ impl ServerState {
         let Some(pool) = self.pg_pool.as_ref() else {
             return Err("no Postgres backing store configured (no [postgres] section)".into());
         };
+        // Single-flight: refuse a second concurrent wake of the same workspace
+        // (otherwise both would open the same redb and one fails confusingly).
+        // The guard clears the slot on drop, including the `?` early returns below.
+        let _wake_guard = {
+            let mut waking = self.waking.lock().unwrap_or_else(|e| e.into_inner());
+            if !waking.insert(name.to_string()) {
+                return Err(format!("wake of \"{name}\" is already in progress"));
+            }
+            WakeGuard {
+                set: Arc::clone(&self.waking),
+                name: name.to_string(),
+            }
+        };
+
         // Wake operates on a *cold* workspace; a loaded one is already awake.
         if self.workspaces.read().await.contains_key(name)
             || self.agents.read().await.contains_key(name)
