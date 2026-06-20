@@ -1174,6 +1174,124 @@ impl CandleBackend {
         })
     }
 
+    /// Prefill the model with `prompt`; return its last-position logits and the
+    /// prompt length. Mirrors [`generate_inner`](Self::generate_inner)'s prefill
+    /// so the constrained decoder can reuse it without touching the (delicate,
+    /// vendored) generate path.
+    #[cfg(feature = "candle-backend")]
+    fn prefill(&mut self, prompt: &str) -> NluResult<(Tensor, usize)> {
+        let encoding = self.tokenizer.encode(prompt, true).map_err(|e| {
+            NluError::LlmGenerationFailed {
+                reason: format!("tokenization: {e}"),
+            }
+        })?;
+        let mut prompt_tokens: Vec<u32> = encoding.get_ids().to_vec();
+
+        if matches!(self.family, ModelFamily::Gemma | ModelFamily::Gemma4) {
+            if let Some(bos) = self.tokenizer.token_to_id("<bos>") {
+                if prompt_tokens.first() != Some(&bos) {
+                    prompt_tokens.insert(0, bos);
+                }
+            }
+        }
+
+        if prompt_tokens.len() > 1800 {
+            return Err(NluError::LlmGenerationFailed {
+                reason: format!("Prompt too long ({} tokens, max 1800).", prompt_tokens.len()),
+            });
+        }
+
+        let input = Tensor::new(prompt_tokens.as_slice(), &self.device)
+            .map_err(|e| NluError::LlmGenerationFailed {
+                reason: format!("tensor: {e}"),
+            })?
+            .unsqueeze(0)
+            .map_err(|e| NluError::LlmGenerationFailed {
+                reason: format!("unsqueeze: {e}"),
+            })?;
+        let logits = self.model.forward(&input, 0).map_err(|e| {
+            NluError::LlmGenerationFailed {
+                reason: format!("prefill: {e}"),
+            }
+        })?;
+        Ok((logits, prompt_tokens.len()))
+    }
+
+    /// Generate a JSON object under grammar constraint (ADR 070).
+    ///
+    /// At each decode step only token candidates whose decoded text keeps the
+    /// output a valid JSON prefix (per [`JsonConstraint`](super::json_constraint::JsonConstraint))
+    /// are eligible; the highest-logit eligible token is chosen. The model still
+    /// decides *which* valid token (the argument semantics); the grammar
+    /// guarantees the bytes parse — so a tool call is never dropped to malformed
+    /// JSON. This is the in-process advantage Candle has over an HTTP backend:
+    /// we own the sampling loop. See `tool_call.gbnf`.
+    #[cfg(feature = "candle-backend")]
+    pub fn generate_constrained_json(&mut self, prompt: &str, max_tokens: u32) -> NluResult<String> {
+        let (mut logits, prompt_len) = self.prefill(prompt)?;
+        let mut constraint = super::json_constraint::JsonConstraint::object();
+        let mut out = String::new();
+        let mut n = 0u32;
+        let eos = self.find_eos_token();
+
+        while n < max_tokens {
+            let last = match logits.rank() {
+                3 => {
+                    let seq = logits.dim(1).map_err(|e| NluError::LlmGenerationFailed {
+                        reason: format!("dim: {e}"),
+                    })?;
+                    logits.i((0, seq - 1, ..))
+                }
+                _ => logits.i((0, ..)),
+            }
+            .map_err(|e| NluError::LlmGenerationFailed {
+                reason: format!("index: {e}"),
+            })?;
+            let scores: Vec<f32> = last.to_vec1().map_err(|e| NluError::LlmGenerationFailed {
+                reason: format!("to_vec1: {e}"),
+            })?;
+
+            // Highest-logit token whose decoded text keeps the JSON valid.
+            let mut chosen: Option<(u32, String)> = None;
+            for id in top_k_indices(&scores, 96) {
+                if Some(id) == eos {
+                    continue;
+                }
+                let piece = self.tokenizer.decode(&[id], false).unwrap_or_default();
+                if piece.is_empty() {
+                    continue;
+                }
+                if constraint.accepts(&piece) {
+                    chosen = Some((id, piece));
+                    break;
+                }
+            }
+            let Some((id, piece)) = chosen else { break };
+            let _ = constraint.push(&piece);
+            out.push_str(&piece);
+            n += 1;
+            if constraint.is_complete() {
+                break;
+            }
+
+            let next_input = Tensor::new(&[id], &self.device)
+                .map_err(|e| NluError::LlmGenerationFailed {
+                    reason: format!("tensor: {e}"),
+                })?
+                .unsqueeze(0)
+                .map_err(|e| NluError::LlmGenerationFailed {
+                    reason: format!("unsqueeze: {e}"),
+                })?;
+            logits = self
+                .model
+                .forward(&next_input, prompt_len + n as usize - 1)
+                .map_err(|e| NluError::LlmGenerationFailed {
+                    reason: format!("decode step: {e}"),
+                })?;
+        }
+        Ok(out)
+    }
+
     /// Select the best available device.
     #[cfg(feature = "candle-backend")]
     fn select_device() -> Device {
@@ -1336,6 +1454,32 @@ fn clean_generated_text(raw: &str) -> String {
     }
 
     text
+}
+
+/// Indices of the `k` highest `scores`, in descending score order.
+///
+/// Used by the grammar-constrained decoder ([`CandleBackend::generate_constrained_json`])
+/// to consider only the most-likely tokens when filtering for grammar validity.
+#[cfg(feature = "candle-backend")]
+fn top_k_indices(scores: &[f32], k: usize) -> Vec<u32> {
+    let mut idx: Vec<u32> = (0..scores.len() as u32).collect();
+    let k = k.min(idx.len());
+    if k == 0 {
+        return Vec::new();
+    }
+    // Partition so the top-k by score are first, then sort just those.
+    idx.select_nth_unstable_by(k - 1, |&a, &b| {
+        scores[b as usize]
+            .partial_cmp(&scores[a as usize])
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    idx.truncate(k);
+    idx.sort_unstable_by(|&a, &b| {
+        scores[b as usize]
+            .partial_cmp(&scores[a as usize])
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    idx
 }
 
 /// Simple weighted random sampling from a probability distribution.

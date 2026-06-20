@@ -162,6 +162,22 @@ fn default_true() -> bool {
 /// The embedded [`WorkspaceConfig`] is flattened, so its fields appear at the
 /// top level of the TOML exactly as today — an existing workspace config file is
 /// a strict subset of an `akh.toml`.
+/// Which LLM backing drives this akh's chat/agentic turn (ADR 070).
+///
+/// `Ollama` is the common default (local or `ollama.com` cloud, native
+/// function-calling). `Candle` runs an in-process GGUF model with
+/// grammar-constrained tool calling — device-limited (GPU helps, but it runs
+/// CPU-only too), for hosts that prefer fully local inference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ChatBacking {
+    /// Ollama, local or cloud (the default).
+    #[default]
+    Ollama,
+    /// In-process Candle GGUF model.
+    Candle,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AkhConfig {
     /// Embedded engine/workspace configuration (flattened: its fields stay at
@@ -191,6 +207,12 @@ pub struct AkhConfig {
     /// Whether this is the akh's MAIN memory workspace (writes target MAIN).
     #[serde(default = "default_true")]
     pub is_main: bool,
+
+    /// Which chat/agentic backing this akh uses (ADR 070): `"ollama"` (default,
+    /// local or cloud) or `"candle"` (in-process GGUF, grammar-constrained tool
+    /// calling, device-limited). Serialized as a top-level scalar.
+    #[serde(default)]
+    pub backend: ChatBacking,
 
     /// Names of related workspaces this akh federates reads across (P6).
     #[serde(default)]
@@ -223,6 +245,7 @@ impl Default for AkhConfig {
             reasoning_effort: None,
             system_prompt: None,
             is_main: true,
+            backend: ChatBacking::default(),
             related_workspaces: Vec::new(),
             path_mode: PathMode::default(),
             ollama_endpoint: OllamaEndpoint::default(),
@@ -325,6 +348,22 @@ mod tests {
         assert_eq!(cfg.ollama_endpoint, OllamaEndpoint::default());
         assert!(cfg.model.is_none());
         assert!(cfg.system_prompt.is_none());
+        assert_eq!(cfg.backend, ChatBacking::Ollama, "Ollama is the default backing");
+    }
+
+    #[test]
+    fn backend_selection_parses_and_defaults() {
+        // Absent → Ollama (back-compat: existing akh.toml keeps its behaviour).
+        let legacy: AkhConfig = toml::from_str("name = \"a\"").unwrap();
+        assert_eq!(legacy.backend, ChatBacking::Ollama);
+        // Explicit candle backing (ADR 070).
+        let candle: AkhConfig =
+            toml::from_str("name = \"a\"\nbackend = \"candle\"").unwrap();
+        assert_eq!(candle.backend, ChatBacking::Candle);
+        // Round-trips through serialization.
+        let s = toml::to_string(&candle).unwrap();
+        let back: AkhConfig = toml::from_str(&s).unwrap();
+        assert_eq!(back.backend, ChatBacking::Candle);
     }
 
     #[test]

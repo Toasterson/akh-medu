@@ -268,6 +268,10 @@ pub struct Agent {
     pub(crate) wasm_runtime: Option<super::wasm_runtime::WasmToolRuntime>,
     /// Per-agent model manager for local Gemma inference via Ollama (optional).
     pub(crate) model_manager: Option<std::sync::Arc<super::model_manager::AgentModelManager>>,
+    /// Alternative chat/agentic backing selected per-akh (ADR 070). When set,
+    /// `run_agentic_turn` drives this instead of wrapping `model_manager`
+    /// (Ollama). `None` ⇒ the Ollama path via `model_manager`.
+    pub(crate) chat_backend: Option<std::sync::Arc<dyn super::chat_backend::ChatBackend>>,
     /// Delegation manager for offloading LLM-class tasks (Phase 36).
     #[cfg(feature = "delegation")]
     pub(crate) delegation_manager: super::delegation::DelegationManager,
@@ -800,6 +804,7 @@ impl Agent {
             #[cfg(feature = "wasm-tools")]
             wasm_runtime: super::wasm_runtime::WasmToolRuntime::new().ok(),
             model_manager: None,
+            chat_backend: None,
             #[cfg(feature = "delegation")]
             delegation_manager,
         };
@@ -1740,6 +1745,15 @@ impl Agent {
         &self,
     ) -> Option<&super::model_manager::AgentModelManager> {
         self.model_manager.as_deref()
+    }
+
+    /// Set the akh's chat/agentic backing (ADR 070). When set, `run_agentic_turn`
+    /// drives this backend instead of the default Ollama path.
+    pub fn set_chat_backend(
+        &mut self,
+        backend: std::sync::Arc<dyn super::chat_backend::ChatBackend>,
+    ) {
+        self.chat_backend = Some(backend);
     }
 
     /// Register this agent with its attached model manager using the current
@@ -3738,6 +3752,7 @@ impl Agent {
             #[cfg(feature = "wasm-tools")]
             wasm_runtime: super::wasm_runtime::WasmToolRuntime::new().ok(),
             model_manager: None,
+            chat_backend: None,
             #[cfg(feature = "delegation")]
             delegation_manager,
         };

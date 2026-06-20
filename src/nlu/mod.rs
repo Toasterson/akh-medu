@@ -29,6 +29,7 @@ pub mod candle_backend;
 // (`rocm` feature); `audio` (Gemma-4) and the `vendored` hidden-states model
 // forks need the Candle backend.
 pub mod channel;
+pub mod json_constraint;
 pub mod gpu;
 #[cfg(feature = "rocm")]
 pub mod hip;

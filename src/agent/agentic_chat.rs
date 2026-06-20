@@ -70,15 +70,24 @@ impl Agent {
         user_prompt: &str,
         sink: &dyn MessageSink,
     ) -> Option<()> {
-        // Clone the Arc out so the rest of the method can borrow other `self`
-        // fields (tool_registry, psyche, conversation_state) freely.
-        let mgr = self.model_manager.clone()?;
-        if !mgr.ollama_available() {
+        // Resolve the akh's chat/agentic backing (ADR 070): an explicitly
+        // configured backend (e.g. Candle) wins; otherwise wrap the Ollama model
+        // manager. Either way the loop is backend-agnostic. `None` ⇒ no usable
+        // backend, so the caller falls back to the symbolic ChatProcessor.
+        let backend: std::sync::Arc<dyn super::chat_backend::ChatBackend> =
+            match self.chat_backend.clone() {
+                Some(b) => b,
+                None => {
+                    let mgr = self.model_manager.clone()?;
+                    std::sync::Arc::new(super::chat_backend::OllamaChatBackend::new(mgr))
+                }
+            };
+        if !backend.available() {
             return None;
         }
 
-        // Refresh the akh's system prompt from its current psyche.
-        mgr.load_agent(agent_id, agent_id, self.psyche.as_ref());
+        // Refresh per-akh state (e.g. the Ollama system-prompt cache) from psyche.
+        backend.prepare(agent_id, self.psyche.as_ref());
 
         let tools = ollama_tool_catalog(&self.tool_registry);
 
@@ -98,7 +107,7 @@ impl Agent {
                         expression: None,
                     }),
                 };
-                match mgr.chat_with_tools_streaming(agent_id, &conversation, &tools, &mut on_event) {
+                match backend.chat_with_tools_streaming(agent_id, &conversation, &tools, &mut on_event) {
                     Ok(t) => t,
                     Err(stream_err) => {
                         tracing::warn!(
@@ -106,7 +115,7 @@ impl Agent {
                             "streaming chat failed ({stream_err}); falling back to non-streaming"
                         );
                         used_fallback = true;
-                        match mgr.chat_with_tools(agent_id, &conversation, &tools) {
+                        match backend.chat_with_tools(agent_id, &conversation, &tools) {
                             Ok(t) => t,
                             Err(e) => {
                                 sink.emit(&AkhMessage::error("llm", e.to_string()));

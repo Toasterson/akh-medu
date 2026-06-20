@@ -653,6 +653,37 @@ impl ServerState {
         agent.set_model_manager(manager);
         agent.register_with_model_manager(name, name);
 
+        // ADR 070: if this akh is Candle-backed, load a local GGUF model and
+        // attach it as the chat/agentic backing (full, grammar-constrained tool
+        // calling). When the model is absent we log and leave the Ollama path —
+        // run_agentic_turn falls back to it, then to the symbolic pipeline.
+        #[cfg(feature = "candle-backend")]
+        if akh_config.backend == akh_medu::akh_config::ChatBacking::Candle {
+            let model_dir = self.paths.models_dir();
+            match akh_medu::nlu::candle_backend::CandleBackend::try_load(&model_dir) {
+                Some(cb) => {
+                    let system_prompt = akh_config.system_prompt.clone().unwrap_or_else(|| {
+                        "You are an akh: a precise, curious neuro-symbolic assistant. \
+                         Answer grounded in your knowledge graph; call tools when useful."
+                            .to_string()
+                    });
+                    let backend = std::sync::Arc::new(akh_medu::agent::chat_backend::CandleChatBackend::new(
+                        std::sync::Arc::new(std::sync::Mutex::new(cb)),
+                        system_prompt,
+                    ));
+                    agent.set_chat_backend(backend);
+                    tracing::info!(workspace = %name, backend = "candle", "Candle chat backing attached");
+                }
+                None => {
+                    tracing::warn!(
+                        workspace = %name, model_dir = %model_dir.display(),
+                        "akh.toml selects backend=candle but no GGUF model was found; \
+                         falling back to Ollama/symbolic. Run `akh setup models`."
+                    );
+                }
+            }
+        }
+
         // Extract the snapshot Arc before moving agent into Mutex so it can be
         // registered without ever re-acquiring the agent lock.
         let snapshot = agent.psyche_snapshot();

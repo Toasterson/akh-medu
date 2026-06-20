@@ -1,9 +1,11 @@
 # ADR 067: Native Candle LLM as the Conversational Boundary
 
-- **Status:** Accepted
+- **Status:** Accepted (renumbered from 052 on forward-port; the "Ollama removed
+  entirely" stance below is **superseded by [ADR 070](070-selectable-chat-backing.md)** —
+  Ollama and Candle are now co-equal, selectable per-akh)
 - **Date:** 2026-06-02
 - **Anima WI:** (chat end-to-end goal)
-- **Supersedes / relates to:** [ADR 022 (NLU architecture)](022-nlu-architecture.md), [ADR 037 (LLM-VSA deep integration)](037-llm-vsa-deep-integration.md)
+- **Supersedes / relates to:** [ADR 022 (NLU architecture)](022-nlu-architecture.md), [ADR 037 (LLM-VSA deep integration)](037-llm-vsa-deep-integration.md), [ADR 070 (selectable chat backing)](070-selectable-chat-backing.md)
 
 ## Context
 

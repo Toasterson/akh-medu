@@ -18,6 +18,7 @@ pub mod causal;
 pub mod channel;
 pub mod counterfactual;
 pub mod agentic_chat;
+pub mod chat_backend;
 pub mod event_calculus;
 pub mod channel_message;
 pub mod chat;
