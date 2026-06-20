@@ -1,13 +1,19 @@
 # Phase 44 — Working-Context Assembly Runtime
 
-- **Status:** **44a + 44f landed** (2026-06-20, `src/agent/context/`) — the
-  `ContextManager` seam (byte-identical `PassThroughManager`) + `TokenCounter` +
-  `BudgetAllocator`/telemetry, and provenance `Retention` + `SafetyEnforced`. The
-  rest (44b–44g default `CompactingManager`; 44h–44j strategies + harness) stays
-  **gated on measure-first** (see §Sequencing) — needs the 3-akh setup running
-  real models. Two exploration corrections baked into the landed code: Phase 42
-  "Heka"/pgvector is absent (44e/g consume the existing KG recall), and no
-  tokenizer reaches the agent path (hence the `TokenCounter` abstraction).
+- **Status:** **44a + 44f landed; measure-first gate CLEARED for 44b/44c/44e**
+  (2026-06-20, `src/agent/context/`). Landed: the `ContextManager` seam
+  (byte-identical `PassThroughManager`) + `TokenCounter` + `BudgetAllocator`/
+  telemetry, and provenance `Retention` + `SafetyEnforced`. Measure-first results
+  ([`docs/ai/2026-06-20-phase44-measure-first.md`](../2026-06-20-phase44-measure-first.md)):
+  **Q1** history demonstrably helps (live coreference A/B) → build 44c/44e; **Q2**
+  the **tool catalog dominates the window** (~6540 of gemma4's 8192 tokens; cloud
+  unaffected) → build 44b (budget/trim tools first; route the catalog *through* the
+  manager — it's currently added in the backend, downstream of the seam); **Q3**
+  recall baseline = KG symbol-overlap (Phase 42 absent), precision measurement
+  deferred to the 44g build. Next build order: **44b → 44c → 44e** (the core
+  `CompactingManager`), then 44d/44g/44h–44j. Two corrections baked into 44a:
+  Phase 42 "Heka"/pgvector is absent (44e/g consume the existing KG recall), and
+  no tokenizer reaches the agent path (hence the `TokenCounter` abstraction).
 - **Date:** 2026-06-18 (updated 2026-06-20)
 - **ADR:** [`docs/ai/decisions/065-context-assembly-runtime.md`](../decisions/065-context-assembly-runtime.md)
 - **Promotes:** [ADR 064 — Context Runtime](../decisions/064-context-runtime-lessons.md)
