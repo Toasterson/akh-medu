@@ -111,6 +111,17 @@ impl Agent {
         // path so multi-turn context works (measure-first Q1).
         self.conversation_state_mut().record_operator_turn(user_prompt);
 
+        // Phase 44d/44g: retrieve the input's KG context + relevant past episodes
+        // for the working-context manager. The agent owns the engine + predicates;
+        // the manager only budgets + renders these sections. (44e session seeding
+        // rides `with_context`'s seed slot — populated when a session summary
+        // exists; the windows are large so all sections fit in practice.)
+        let kg_context = {
+            let mut cache = crate::nlu::kg_context::KgContextCache::default();
+            crate::nlu::kg_context::build_kg_context(engine, user_prompt, &mut cache)
+        };
+        let recalled = self.recall_for_prompt(engine, user_prompt, 3);
+
         // Phase 44a (ADR 065): assemble the working context through the akh's
         // `ContextManager` instead of building the prompt ad hoc. The default
         // pass-through manager reproduces the single-user-turn behaviour
@@ -132,12 +143,9 @@ impl Agent {
                 Some(window) => TokenBudget::new(window, DEFAULT_RESERVED_OUTPUT),
                 None => TokenBudget::default(),
             };
-            let episode = EpisodeState {
-                agent_id,
-                user_prompt,
-                engine,
-                conversation: Some(self.conversation_state()),
-            };
+            let episode = EpisodeState::new(agent_id, user_prompt, engine)
+                .with_conversation(Some(self.conversation_state()))
+                .with_context(kg_context.as_deref(), &recalled, None);
             let manager: &dyn ContextManager =
                 self.context_manager.as_deref().unwrap_or(&PASS_THROUGH);
             match manager.assemble(&episode, &budget, &counter) {

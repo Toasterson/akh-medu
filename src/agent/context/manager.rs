@@ -151,12 +151,7 @@ mod tests {
     #[test]
     fn passthrough_is_byte_identical_to_legacy_prompt() {
         let (engine, _tmp) = test_engine();
-        let episode = EpisodeState {
-            agent_id: "akh",
-            user_prompt: "what is the capital of France?",
-            engine: &engine,
-            conversation: None,
-        };
+        let episode = EpisodeState::new("akh", "what is the capital of France?", &engine);
         let out = PassThroughManager
             .assemble(&episode, &TokenBudget::default(), &HeuristicTokenCounter)
             .expect("assemble");

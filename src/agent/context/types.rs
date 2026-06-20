@@ -87,6 +87,51 @@ pub struct EpisodeState<'a> {
     /// Prior conversation turns (consumed by the history/discourse sub-phases,
     /// 44c/44e). `None` when the caller has no conversation state.
     pub conversation: Option<&'a ConversationState>,
+    /// Pre-retrieved KG context for the current input (44d), rendered as a
+    /// leading context block. `None` ⇒ omitted. The agent retrieves it (it owns
+    /// the engine + caches); the manager only budgets + renders.
+    pub kg_context: Option<&'a str>,
+    /// Pre-ranked recalled episode summaries (44g), rendered as a context block.
+    pub recalled: &'a [String],
+    /// Session-continuity seed restored on wakeup (44e). `None` ⇒ omitted.
+    pub session_seed: Option<&'a str>,
+}
+
+impl<'a> EpisodeState<'a> {
+    /// Minimal episode (no conversation / retrieved context) — the common base
+    /// for callers that only have the current prompt + engine (tests, embeds).
+    pub fn new(agent_id: &'a str, user_prompt: &'a str, engine: &'a Engine) -> Self {
+        Self {
+            agent_id,
+            user_prompt,
+            engine,
+            conversation: None,
+            kg_context: None,
+            recalled: &[],
+            session_seed: None,
+        }
+    }
+
+    /// Attach prior conversation turns.
+    #[must_use]
+    pub fn with_conversation(mut self, conversation: Option<&'a ConversationState>) -> Self {
+        self.conversation = conversation;
+        self
+    }
+
+    /// Attach the retrieved context sections (44d KG / 44g recalled / 44e seed).
+    #[must_use]
+    pub fn with_context(
+        mut self,
+        kg_context: Option<&'a str>,
+        recalled: &'a [String],
+        session_seed: Option<&'a str>,
+    ) -> Self {
+        self.kg_context = kg_context;
+        self.recalled = recalled;
+        self.session_seed = session_seed;
+        self
+    }
 }
 
 /// The token budget for one assembly: total window minus reserved output.

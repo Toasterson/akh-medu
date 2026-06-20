@@ -126,12 +126,7 @@ mod tests {
     fn passthrough_wrapped_is_a_noop() {
         let (engine, _tmp) = test_engine();
         let mgr = SafetyEnforced::new(PassThroughManager);
-        let episode = EpisodeState {
-            agent_id: "a",
-            user_prompt: "hi",
-            engine: &engine,
-            conversation: None,
-        };
+        let episode = EpisodeState::new("a", "hi", &engine);
         let out = mgr
             .assemble(&episode, &TokenBudget::default(), &HeuristicTokenCounter)
             .expect("pass-through never violates");
@@ -150,12 +145,7 @@ mod tests {
         let mgr = SafetyEnforced::new(DroppingManager {
             anchor: Some(pinned),
         });
-        let episode = EpisodeState {
-            agent_id: "a",
-            user_prompt: "hi",
-            engine: &engine,
-            conversation: None,
-        };
+        let episode = EpisodeState::new("a", "hi", &engine);
         let err = mgr
             .assemble(&episode, &TokenBudget::default(), &HeuristicTokenCounter)
             .expect_err("dropping a pinned span must fail");
@@ -171,12 +161,7 @@ mod tests {
         let mgr = SafetyEnforced::new(DroppingManager {
             anchor: Some(plain),
         });
-        let episode = EpisodeState {
-            agent_id: "a",
-            user_prompt: "hi",
-            engine: &engine,
-            conversation: None,
-        };
+        let episode = EpisodeState::new("a", "hi", &engine);
         assert!(
             mgr.assemble(&episode, &TokenBudget::default(), &HeuristicTokenCounter)
                 .is_ok()

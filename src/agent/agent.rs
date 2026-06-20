@@ -1663,6 +1663,31 @@ impl Agent {
         &self.predicates
     }
 
+    /// Recall up to `top_k` past-episode summaries relevant to `prompt`, for the
+    /// Phase 44g context section. Resolves the prompt's content words to symbols
+    /// and ranks via the existing episodic recall (symbol overlap + recency).
+    /// Empty when nothing resolves or no episodes match.
+    pub(crate) fn recall_for_prompt(&self, engine: &Engine, prompt: &str, top_k: usize) -> Vec<String> {
+        let syms: Vec<crate::symbol::SymbolId> = prompt
+            .split_whitespace()
+            .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase())
+            .filter(|w| w.len() > 2)
+            .filter_map(|w| engine.resolve_symbol(w.as_str()).ok())
+            .collect();
+        if syms.is_empty() {
+            return Vec::new();
+        }
+        match super::memory::recall_episodes(engine, &syms, self.predicates(), top_k, None) {
+            Ok(eps) => eps
+                .into_iter()
+                .map(|e| e.summary)
+                .filter(|s| !s.trim().is_empty())
+                .take(top_k)
+                .collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
     /// Set the message sink for structured output.
     pub fn set_sink(&mut self, sink: Arc<dyn crate::message::MessageSink>) {
         self.sink = sink;

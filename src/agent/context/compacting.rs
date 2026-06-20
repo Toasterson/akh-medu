@@ -43,21 +43,59 @@ impl ContextManager for CompactingManager {
         counter: &dyn TokenCounter,
     ) -> ContextResult<AssembledContext> {
         let available = budget.available();
-        let mut section_tokens = BTreeMap::new();
-
-        // Select recent turns newest-first until the budget is spent, then render
-        // them chronologically. Falls back to just the current user prompt when
-        // there is no conversation state (embedded callers).
+        let mut section_tokens: BTreeMap<ContextSection, usize> = BTreeMap::new();
         let mut messages: Vec<serde_json::Value> = Vec::new();
-        let mut history_tokens = 0usize;
-        let mut user_prompt_tokens = counter.count(episode.user_prompt);
+        let mut spent = 0usize;
 
-        if let Some(conv) = episode.conversation.filter(|c| !c.turns.is_empty()) {
+        // Leading context blocks, highest-priority first, each skipped if it would
+        // bust the budget: 44e session seed → 44d KG facts → 44g recalled episodes.
+        // Rendered as `system` messages (both backends surface them; ADR 065).
+        let add_block = |section: ContextSection,
+                             header: &str,
+                             body: &str,
+                             section_tokens: &mut BTreeMap<ContextSection, usize>,
+                             messages: &mut Vec<serde_json::Value>,
+                             spent: &mut usize| {
+            let body = body.trim();
+            if body.is_empty() {
+                return;
+            }
+            let block = format!("{header}\n{body}");
+            let t = counter.count(&block);
+            if *spent + t > available {
+                return;
+            }
+            *spent += t;
+            section_tokens.insert(section, t);
+            messages.push(json!({ "role": "system", "content": block }));
+        };
+        if let Some(seed) = episode.session_seed {
+            add_block(ContextSection::System, "Session so far:", seed,
+                &mut section_tokens, &mut messages, &mut spent);
+        }
+        if let Some(kg) = episode.kg_context {
+            add_block(ContextSection::KnowledgeGraph, "Relevant knowledge from your memory:", kg,
+                &mut section_tokens, &mut messages, &mut spent);
+        }
+        if !episode.recalled.is_empty() {
+            let body = format!("- {}", episode.recalled.join("\n- "));
+            add_block(ContextSection::RecalledEpisodes, "Relevant past episodes:", &body,
+                &mut section_tokens, &mut messages, &mut spent);
+        }
+
+        // Conversation history within the remaining budget. Select newest-first
+        // (always keeping the most recent turn — the current prompt), then render
+        // chronologically. The current prompt is the last recorded turn, so no
+        // separate append is needed.
+        let has_turns = episode.conversation.map(|c| !c.turns.is_empty()).unwrap_or(false);
+        if let Some(conv) = episode.conversation.filter(|_| has_turns) {
+            let remaining = available.saturating_sub(spent);
+            let mut history_tokens = 0usize;
             let mut chosen = Vec::new();
             for turn in conv.turns.iter().rev() {
                 let t = counter.count(&turn.text);
-                if !chosen.is_empty() && history_tokens + t > available {
-                    break; // keep at least the most-recent turn (the current prompt)
+                if !chosen.is_empty() && history_tokens + t > remaining {
+                    break;
                 }
                 history_tokens += t;
                 chosen.push(turn);
@@ -70,18 +108,11 @@ impl ContextManager for CompactingManager {
                 };
                 messages.push(json!({ "role": role, "content": turn.text }));
             }
-            // The current prompt is the last recorded turn; its tokens are already
-            // counted in `history_tokens`, so don't double-count the section.
-            user_prompt_tokens = 0;
             section_tokens.insert(ContextSection::History, history_tokens);
-        }
-
-        // No conversation state ⇒ behave like pass-through (current prompt only).
-        if messages.is_empty() {
+        } else {
+            // No conversation state ⇒ the current prompt as a single user turn.
             messages.push(json!({ "role": "user", "content": episode.user_prompt }));
-        }
-        if user_prompt_tokens > 0 {
-            section_tokens.insert(ContextSection::UserPrompt, user_prompt_tokens);
+            section_tokens.insert(ContextSection::UserPrompt, counter.count(episode.user_prompt));
         }
 
         Ok(AssembledContext {
@@ -117,12 +148,8 @@ mod tests {
         conv.record_agent_turn("Noted.");
         conv.record_operator_turn("What city is it in?"); // the current turn
 
-        let episode = EpisodeState {
-            agent_id: "a",
-            user_prompt: "What city is it in?",
-            engine: &engine,
-            conversation: Some(&conv),
-        };
+        let episode =
+            EpisodeState::new("a", "What city is it in?", &engine).with_conversation(Some(&conv));
         let out = CompactingManager
             .assemble(&episode, &TokenBudget::default(), &HeuristicTokenCounter)
             .expect("assemble");
@@ -137,14 +164,34 @@ mod tests {
     }
 
     #[test]
+    fn renders_kg_and_recalled_context_blocks() {
+        let (engine, _tmp) = test_engine();
+        let recalled = vec!["learned that Paris is the capital of France".to_string()];
+        let episode = EpisodeState::new("a", "tell me about France", &engine).with_context(
+            Some("France capital-is Paris"),
+            &recalled,
+            Some("Earlier you discussed travel plans."),
+        );
+        let out = CompactingManager
+            .assemble(&episode, &TokenBudget::default(), &HeuristicTokenCounter)
+            .expect("assemble");
+        // Three leading `system` context blocks (seed → kg → recalled), then the
+        // current prompt as the final user turn.
+        let systems = out.messages.iter().filter(|m| m["role"] == "system").count();
+        assert_eq!(systems, 3, "seed + kg + recalled blocks: {:?}", out.messages);
+        assert!(
+            out.messages.iter().any(|m| m["content"].as_str().unwrap_or("").contains("Paris")),
+            "KG/recalled content present"
+        );
+        assert_eq!(out.messages.last().unwrap()["role"], "user");
+        assert!(out.section_tokens.contains_key(&ContextSection::KnowledgeGraph));
+        assert!(out.section_tokens.contains_key(&ContextSection::RecalledEpisodes));
+    }
+
+    #[test]
     fn empty_conversation_is_passthrough_equivalent() {
         let (engine, _tmp) = test_engine();
-        let episode = EpisodeState {
-            agent_id: "a",
-            user_prompt: "hello",
-            engine: &engine,
-            conversation: None,
-        };
+        let episode = EpisodeState::new("a", "hello", &engine);
         let out = CompactingManager
             .assemble(&episode, &TokenBudget::default(), &HeuristicTokenCounter)
             .expect("assemble");
@@ -159,12 +206,8 @@ mod tests {
         for i in 0..20 {
             conv.record_operator_turn(&format!("turn number {i} here"));
         }
-        let episode = EpisodeState {
-            agent_id: "a",
-            user_prompt: "turn number 19 here",
-            engine: &engine,
-            conversation: Some(&conv),
-        };
+        let episode = EpisodeState::new("a", "turn number 19 here", &engine)
+            .with_conversation(Some(&conv));
         // available = window - reserved; use a tiny window to force trimming.
         let out = CompactingManager
             .assemble(&episode, &TokenBudget::new(40, 16), &HeuristicTokenCounter)
