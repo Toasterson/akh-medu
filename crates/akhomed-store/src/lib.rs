@@ -31,7 +31,7 @@ pub use snapshots::TailMutation;
 // crates (the `akhomed` daemon, its tests) can name the pool, run raw queries,
 // and build Akh/workspace ids without taking direct `sea-orm`/`uuid` deps.
 pub use sea_orm::DatabaseConnection;
-pub use {sea_orm, uuid};
+pub use {chrono, sea_orm, uuid};
 
 use sea_orm_migration::MigratorTrait;
 

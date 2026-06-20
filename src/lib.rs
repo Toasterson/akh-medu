@@ -90,3 +90,6 @@ pub mod workspace;
 /// Phase 38b: mutation write-ahead log to the Postgres backing store.
 #[cfg(feature = "postgres")]
 pub mod wal;
+/// Phase 38c: snapshot the akh's relational state to Postgres + wake from it.
+#[cfg(feature = "postgres")]
+pub mod snapshot;

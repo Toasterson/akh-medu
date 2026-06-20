@@ -37,7 +37,6 @@ enum Symbols {
 enum Facts {
     #[sea_orm(iden = "akhomed_facts")]
     Table,
-    FactId,
     AkhId,
     WorkspaceId,
     Subject,
@@ -152,31 +151,24 @@ impl MigrationTrait for Migration {
                 Table::create()
                     .table(Facts::Table)
                     .if_not_exists()
-                    .col(ColumnDef::new(Facts::FactId).big_integer().not_null().auto_increment().primary_key())
-                    .col(ColumnDef::new(Facts::AkhId).uuid().not_null())
                     .col(ColumnDef::new(Facts::WorkspaceId).uuid().not_null())
                     .col(ColumnDef::new(Facts::Subject).big_integer().not_null())
                     .col(ColumnDef::new(Facts::Predicate).big_integer().not_null())
                     .col(ColumnDef::new(Facts::Object).big_integer().not_null())
+                    .col(ColumnDef::new(Facts::AkhId).uuid().not_null())
                     .col(ColumnDef::new(Facts::Confidence).float().not_null())
                     .col(ColumnDef::new(Facts::AssertedAt).timestamp_with_time_zone().not_null())
                     .col(ColumnDef::new(Facts::RetractedAt).timestamp_with_time_zone())
                     .col(ColumnDef::new(Facts::ProvenanceId).big_integer())
                     .col(ColumnDef::new(Facts::Compartment).text())
-                    .to_owned(),
-            )
-            .await?;
-        manager
-            .create_index(
-                Index::create()
-                    .if_not_exists()
-                    .name("idx_akhomed_facts_unique")
-                    .table(Facts::Table)
-                    .col(Facts::WorkspaceId)
-                    .col(Facts::Subject)
-                    .col(Facts::Predicate)
-                    .col(Facts::Object)
-                    .unique()
+                    // Content-addressed primary key (a triple is unique per workspace).
+                    .primary_key(
+                        Index::create()
+                            .col(Facts::WorkspaceId)
+                            .col(Facts::Subject)
+                            .col(Facts::Predicate)
+                            .col(Facts::Object),
+                    )
                     .to_owned(),
             )
             .await?;

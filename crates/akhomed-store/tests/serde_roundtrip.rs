@@ -56,12 +56,11 @@ fn symbol_and_fact_roundtrip() {
         label: "is-a".into(),
     });
     roundtrip(&fact::Model {
-        fact_id: 1,
-        akh_id: Uuid::from_u128(1),
         workspace_id: Uuid::from_u128(2),
         subject: 100,
         predicate: 200,
         object: 300,
+        akh_id: Uuid::from_u128(1),
         confidence: 0.75,
         asserted_at: ts(),
         retracted_at: None,

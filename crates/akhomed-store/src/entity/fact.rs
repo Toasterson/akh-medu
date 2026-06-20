@@ -10,22 +10,21 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize)]
 #[sea_orm(table_name = "akhomed_facts")]
 pub struct Model {
-    /// Surrogate key (BIGSERIAL).
-    #[sea_orm(primary_key)]
-    pub fact_id: i64,
+    /// Owning workspace (part of the content-addressed primary key).
+    #[sea_orm(primary_key, auto_increment = false)]
+    pub workspace_id: Uuid,
+    /// `SymbolId.get()` of the subject.
+    #[sea_orm(primary_key, auto_increment = false)]
+    pub subject: i64,
+    /// `SymbolId.get()` of the predicate.
+    #[sea_orm(primary_key, auto_increment = false)]
+    pub predicate: i64,
+    /// `SymbolId.get()` of the object.
+    #[sea_orm(primary_key, auto_increment = false)]
+    pub object: i64,
 
     /// Asserting Akh.
     pub akh_id: Uuid,
-
-    /// Owning workspace.
-    pub workspace_id: Uuid,
-
-    /// `SymbolId.get()` of the subject.
-    pub subject: i64,
-    /// `SymbolId.get()` of the predicate.
-    pub predicate: i64,
-    /// `SymbolId.get()` of the object.
-    pub object: i64,
 
     /// Assertion confidence in `[0, 1]`.
     pub confidence: f32,

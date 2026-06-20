@@ -1149,6 +1149,26 @@ impl Engine {
         self.knowledge_graph.all_triples()
     }
 
+    /// All registered symbols (id ↔ kind ↔ label). Used by the Phase 38c
+    /// snapshot writer to materialise the registry into Postgres.
+    pub fn dump_symbols(&self) -> Vec<SymbolMeta> {
+        self.registry.all()
+    }
+
+    /// Bulk-load triples into the KG and item memory **without** the Phase 9
+    /// pipeline or the WAL (Phase 38c wake path). Used when rebuilding a fresh
+    /// engine's KG from `akhomed.facts`; the WAL sink must not be installed yet,
+    /// so this does not re-log. Returns the number of triples loaded.
+    pub fn restore_triples(&self, triples: &[Triple]) -> AkhResult<usize> {
+        let count = self.knowledge_graph.bulk_load(triples)?;
+        for t in triples {
+            self.item_memory.get_or_create(&self.ops, t.subject);
+            self.item_memory.get_or_create(&self.ops, t.predicate);
+            self.item_memory.get_or_create(&self.ops, t.object);
+        }
+        Ok(count)
+    }
+
     /// Execute a SPARQL SELECT query.
     pub fn sparql_query(&self, sparql: &str) -> AkhResult<Vec<Vec<(String, String)>>> {
         let store = self.sparql.as_ref().ok_or(EngineError::InvalidConfig {
