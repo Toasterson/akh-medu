@@ -1,7 +1,14 @@
 # Phase 44 — Working-Context Assembly Runtime
 
-- **Status:** Planned (gated on measure-first; see §Sequencing)
-- **Date:** 2026-06-18
+- **Status:** **44a + 44f landed** (2026-06-20, `src/agent/context/`) — the
+  `ContextManager` seam (byte-identical `PassThroughManager`) + `TokenCounter` +
+  `BudgetAllocator`/telemetry, and provenance `Retention` + `SafetyEnforced`. The
+  rest (44b–44g default `CompactingManager`; 44h–44j strategies + harness) stays
+  **gated on measure-first** (see §Sequencing) — needs the 3-akh setup running
+  real models. Two exploration corrections baked into the landed code: Phase 42
+  "Heka"/pgvector is absent (44e/g consume the existing KG recall), and no
+  tokenizer reaches the agent path (hence the `TokenCounter` abstraction).
+- **Date:** 2026-06-18 (updated 2026-06-20)
 - **ADR:** [`docs/ai/decisions/065-context-assembly-runtime.md`](../decisions/065-context-assembly-runtime.md)
 - **Promotes:** [ADR 064 — Context Runtime](../decisions/064-context-runtime-lessons.md)
   (lessons 1/2/4/5) + its [research](../research/2026-06-18-lean-ctx-context-management-lessons.md)

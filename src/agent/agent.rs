@@ -272,6 +272,10 @@ pub struct Agent {
     /// `run_agentic_turn` drives this instead of wrapping `model_manager`
     /// (Ollama). `None` ⇒ the Ollama path via `model_manager`.
     pub(crate) chat_backend: Option<std::sync::Arc<dyn super::chat_backend::ChatBackend>>,
+    /// Working-context assembly strategy (Phase 44a, ADR 065). `None` ⇒ the
+    /// byte-identical pass-through manager (current behaviour). When set,
+    /// `run_agentic_turn` builds each prompt through it.
+    pub(crate) context_manager: Option<Box<dyn super::context::ContextManager>>,
     /// Delegation manager for offloading LLM-class tasks (Phase 36).
     #[cfg(feature = "delegation")]
     pub(crate) delegation_manager: super::delegation::DelegationManager,
@@ -805,6 +809,7 @@ impl Agent {
             wasm_runtime: super::wasm_runtime::WasmToolRuntime::new().ok(),
             model_manager: None,
             chat_backend: None,
+            context_manager: None,
             #[cfg(feature = "delegation")]
             delegation_manager,
         };
@@ -1754,6 +1759,14 @@ impl Agent {
         backend: std::sync::Arc<dyn super::chat_backend::ChatBackend>,
     ) {
         self.chat_backend = Some(backend);
+    }
+
+    /// Attach a working-context assembly strategy (Phase 44a, ADR 065). `None`
+    /// (the default) uses the byte-identical pass-through manager, so an akh with
+    /// no manager set behaves exactly as before. Shipped managers should be
+    /// wrapped in [`SafetyEnforced`](super::context::SafetyEnforced) by the caller.
+    pub fn set_context_manager(&mut self, manager: Box<dyn super::context::ContextManager>) {
+        self.context_manager = Some(manager);
     }
 
     /// Register this agent with its attached model manager using the current
@@ -3753,6 +3766,7 @@ impl Agent {
             wasm_runtime: super::wasm_runtime::WasmToolRuntime::new().ok(),
             model_manager: None,
             chat_backend: None,
+            context_manager: None,
             #[cfg(feature = "delegation")]
             delegation_manager,
         };

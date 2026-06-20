@@ -28,6 +28,7 @@ pub mod contact_memory;
 pub mod contact_rel;
 pub mod contact_style;
 pub mod constraint_check;
+pub mod context;
 pub mod conversation;
 pub mod credibility;
 pub mod chunking;

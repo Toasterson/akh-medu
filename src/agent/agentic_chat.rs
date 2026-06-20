@@ -91,7 +91,49 @@ impl Agent {
 
         let tools = ollama_tool_catalog(&self.tool_registry);
 
-        let mut conversation: Vec<Value> = vec![json!({"role": "user", "content": user_prompt})];
+        // Phase 44a (ADR 065): assemble the working context through the akh's
+        // `ContextManager` instead of building the prompt ad hoc. The default
+        // pass-through manager reproduces the single-user-turn behaviour
+        // byte-for-byte; richer managers (history, KG, recall) slot in here
+        // without the loop changing. The loop then appends assistant/tool turns
+        // to this base across rounds, exactly as before.
+        let mut conversation: Vec<Value> = {
+            use super::context::{
+                ContextManager, EpisodeState, HeuristicTokenCounter, PassThroughManager,
+                TokenBudget, TokenCounter,
+            };
+            static PASS_THROUGH: PassThroughManager = PassThroughManager;
+            let counter = HeuristicTokenCounter;
+            // TODO(44b): size the window from the akh's model config once measured.
+            let budget = TokenBudget::default();
+            let episode = EpisodeState {
+                agent_id,
+                user_prompt,
+                engine,
+                conversation: Some(self.conversation_state()),
+            };
+            let manager: &dyn ContextManager =
+                self.context_manager.as_deref().unwrap_or(&PASS_THROUGH);
+            match manager.assemble(&episode, &budget, &counter) {
+                Ok(assembled) => {
+                    super::context::budget::record_assembly_telemetry(
+                        &manager.id(),
+                        &assembled,
+                        &budget,
+                        counter.label(),
+                    );
+                    assembled.messages
+                }
+                Err(e) => {
+                    tracing::error!(
+                        agent_id,
+                        error = %e,
+                        "context assembly failed; using single-turn fallback"
+                    );
+                    vec![json!({"role": "user", "content": user_prompt})]
+                }
+            }
+        };
 
         for _round in 0..DEFAULT_MAX_ROUNDS {
             // Stream this round. Content deltas become live answer text, thinking
