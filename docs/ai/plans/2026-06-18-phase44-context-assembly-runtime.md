@@ -15,10 +15,15 @@
   verified live (a 2-turn coreference resolves across turns). **Model
   capabilities are now read from the model** (GGUF `context_length` / Ollama
   `/api/show`), the budget window is sized per-akh, and reasoning-effort is gated
-  on `supports_thinking`. Re-prioritised (windows are huge → no overflow): the
-  remaining wins are **44e** (discourse selection / session seeding), then
-  44d/44g; 44b's full allocator + a Candle-latency tool-trim are optional. Two
-  corrections baked into 44a:
+  on `supports_thinking`. **44c (history), 44d (KG context), 44g (recalled
+  episodes), and 44e's section wiring (session-seed slot + recency/budget
+  discourse) all landed** — the `CompactingManager` renders seed → KG → recalled →
+  history as budgeted leading sections; verified live (history resolves
+  coreference; "rust" → "memory-safe" with a `KnowledgeGraph` section). Remaining:
+  44h/44i (Passive/Virtual) + 44j (A/B harness); refinements: 44g VSA-blend + Q3
+  precision, 44e graph-proximity discourse + a session-summary source for the
+  seed, 44d per-cycle deltas, 44b's full allocator + a Candle-latency tool-trim.
+  Two corrections baked into 44a:
   Phase 42 "Heka"/pgvector is absent (44e/g consume the existing KG recall), and
   no tokenizer reaches the agent path (hence the `TokenCounter` abstraction).
 - **Date:** 2026-06-18 (updated 2026-06-20)
