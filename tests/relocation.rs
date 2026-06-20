@@ -59,8 +59,7 @@ async fn recover_for_seed(url: &str, seed: u64) {
         .map(|i| engine.create_symbol(SymbolKind::Entity, &format!("E{i}")).unwrap().id)
         .collect();
 
-    // Model of the expected final triple set.
-    let mut model: BTreeSet<(u64, u64, u64)> = BTreeSet::new();
+    // Seed a small pre-snapshot triple set among the test entities.
     for _ in 0..8 {
         let s = ents[rng.gen_range(0..ents.len())];
         let o = ents[rng.gen_range(0..ents.len())];
@@ -68,10 +67,18 @@ async fn recover_for_seed(url: &str, seed: u64) {
             continue;
         }
         engine.add_triple(&Triple::new(s, is_a, o)).unwrap();
-        model.insert((s.get(), is_a.get(), o.get()));
     }
 
     let agent = Agent::new(Arc::clone(&engine), AgentConfig::default()).expect("agent");
+
+    // `Agent::new` bootstraps the well-known `agent:` predicates *and* the causal
+    // world-model schemas derived from the tool registry into the engine, so the
+    // snapshot captures the engine's *entire* triple set — not just the asserts
+    // above. The recovery expectation is therefore (full snapshot baseline) ⊕
+    // (WAL tail); seed `model` from the live engine here rather than tracking
+    // individual asserts, then let the random tail below mutate it.
+    let mut model: BTreeSet<(u64, u64, u64)> = triple_set(&engine);
+
     ensure_akh(&db, akh_id, "reloc-test", None).await.unwrap();
     write_snapshot(&agent, akh_id, workspace_id, &db)
         .await

@@ -72,13 +72,10 @@ async fn main() -> miette::Result<()> {
         opts.max_connections = max;
     }
 
-    tracing::info!("connecting to PostgreSQL");
-    let db = akhomed_store::connect(&opts)
-        .await
-        .wrap_err("opening the akhomed Postgres pool")?;
-
-    tracing::info!("running migrations");
-    akhomed_store::run_migrations(&db)
+    // Advisory-locked migration: opens its own dedicated single connection,
+    // serializing against any other host migrating the same cluster at once.
+    tracing::info!("connecting to PostgreSQL and applying migrations (advisory-locked)");
+    akhomed_store::run_migrations_locked(&opts)
         .await
         .wrap_err("applying akhomed-store migrations")?;
 

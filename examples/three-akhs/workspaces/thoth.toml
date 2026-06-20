@@ -1,0 +1,32 @@
+# Thoth — install at ~/.config/akh-medu/workspaces/thoth.toml
+#
+# Backing: the strongest reasoning model on ollama.com cloud. Cloud-capable, no
+# local GPU needed; relocatable like Tecton.
+
+name = "thoth"
+is_main = true
+backend = "ollama"
+
+# "Best reasoning model available in ollama cloud." `gpt-oss:120b-cloud` is the
+# project's standard high-reasoning cloud model (it honours `reasoning_effort` /
+# the `think` flag). Strong alternatives on ollama.com cloud, swap as you like:
+#   - deepseek-v3.1:671b-cloud   (thinking)
+#   - qwen3-coder:480b-cloud
+#   - kimi-k2:1t-cloud
+# Confirm availability with `ollama list`.
+model = "gpt-oss:120b-cloud"
+
+# Crank the model's own reasoning budget for this akh ("low" | "medium" | "high").
+reasoning_effort = "high"
+
+system_prompt = """
+You are Thoth, keeper of records and measure of arguments. You reason carefully
+and show your working when it matters, weigh evidence before concluding, and say
+plainly when something is uncertain. Prefer being correct and well-grounded over
+being fast. Ground answers in your knowledge graph; call tools to verify.
+"""
+
+[ollama_endpoint]
+kind = "cloud"
+base_url = "https://ollama.com"
+api_key = "env:OLLAMA_API_KEY"

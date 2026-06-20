@@ -7,8 +7,8 @@
 use akhomed_store::uuid::Uuid;
 use akhomed_store::{
     MutationRow, PoolOptions, append_mutations, connect, ensure_akh, join_workspace,
-    leave_workspace, list_members, release_akh_lock, run_migrations, touch_last_seen,
-    try_acquire_akh_lock,
+    leave_workspace, list_members, release_akh_lock, run_migrations, run_migrations_locked,
+    touch_last_seen, try_acquire_akh_lock,
 };
 use sea_orm::{ConnectionTrait, DbBackend, Statement};
 
@@ -128,4 +128,61 @@ async fn advisory_lock_acquire_release_and_heartbeat() {
 
     // Heartbeat updates last_seen without error.
     touch_last_seen(&db, akh, akhomed_store::chrono::Utc::now()).await.unwrap();
+}
+
+/// Swap the database name in a `postgres://…/db?query` URL, preserving the query
+/// string (e.g. `?sslmode=disable`).
+fn swap_db(url: &str, db: &str) -> String {
+    let (base, query) = match url.split_once('?') {
+        Some((b, q)) => (b, Some(q)),
+        None => (url, None),
+    };
+    let prefix = &base[..base.rfind('/').expect("url has a path /")];
+    match query {
+        Some(q) => format!("{prefix}/{db}?{q}"),
+        None => format!("{prefix}/{db}"),
+    }
+}
+
+/// Several daemons starting against the same *fresh* cluster database race on
+/// creating `seaql_migrations` — without serialization some fail with a
+/// duplicate-key error on `pg_type`. [`run_migrations_locked`] takes a Postgres
+/// advisory lock so concurrent migrators queue; all must succeed. We isolate the
+/// first-migration window on a throwaway database so the race is real (the shared
+/// test DB is already migrated by the time other tests run).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires AKH_TEST_PG_URL"]
+async fn concurrent_locked_migrators_do_not_race() {
+    let Ok(url) = std::env::var("AKH_TEST_PG_URL") else {
+        eprintln!("skipping: set AKH_TEST_PG_URL");
+        return;
+    };
+
+    // Throwaway database carved off the same cluster.
+    let admin = connect(&PoolOptions::new(url.clone())).await.expect("admin connect");
+    let dbname = "akh_mig_race_test";
+    let drop = format!("DROP DATABASE IF EXISTS {dbname} WITH (FORCE)");
+    admin.execute_unprepared(&drop).await.expect("drop pre-existing");
+    admin
+        .execute_unprepared(&format!("CREATE DATABASE {dbname}"))
+        .await
+        .expect("create throwaway db");
+
+    let opts = PoolOptions::new(swap_db(&url, dbname));
+
+    // Fire several locked migrators at once against the empty schema.
+    let handles: Vec<_> = (0..6)
+        .map(|_| {
+            let o = opts.clone();
+            tokio::spawn(async move { run_migrations_locked(&o).await })
+        })
+        .collect();
+    for h in handles {
+        h.await
+            .expect("join migrator task")
+            .expect("each concurrent migrator must succeed under the advisory lock");
+    }
+
+    // Cleanup (FORCE terminates the migrators' now-idle pooled connections).
+    admin.execute_unprepared(&drop).await.expect("drop throwaway db");
 }

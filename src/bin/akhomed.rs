@@ -754,14 +754,31 @@ impl ServerState {
     /// Exposes the same runner the daemon calls on start when `migrate_on_start`
     /// is set; requires Postgres.
     async fn run_migrations_op(&self) -> Result<serde_json::Value, String> {
-        let Some(pool) = self.pg_pool.as_ref() else {
+        if self.pg_pool.is_none() {
             return Err(
                 "migrations require a Postgres backing store (no [postgres] section configured). \
                  Add a [postgres] section to akhomed's config.toml (or set DATABASE_URL) and retry."
                     .into(),
             );
+        }
+        // Build a fresh PoolOptions from config so the migration runs under its
+        // own advisory-locked single connection (safe even if other hosts are
+        // migrating the same cluster concurrently), rather than on the shared
+        // pool. Drop the config guard before the await.
+        let opts = {
+            let cfg = self.config.read().await;
+            let pg = cfg.postgres.as_ref().ok_or_else(|| {
+                "migrations require a Postgres backing store (no [postgres] section configured)."
+                    .to_string()
+            })?;
+            let url = std::env::var("DATABASE_URL").unwrap_or_else(|_| pg.url.clone());
+            akhomed_store::PoolOptions {
+                url,
+                max_connections: pg.pool_size,
+                connect_timeout: std::time::Duration::from_secs(pg.connect_timeout_secs),
+            }
         };
-        akhomed_store::run_migrations(pool)
+        akhomed_store::run_migrations_locked(&opts)
             .await
             .map_err(|e| e.to_string())?;
         tracing::info!("akhomed-store migrations run via ACP control-plane");
@@ -1706,7 +1723,9 @@ async fn init_postgres(
         Ok(db) => {
             tracing::info!("connected to PostgreSQL backing store");
             if pg.migrate_on_start {
-                match akhomed_store::run_migrations(&db).await {
+                // Advisory-locked so several hosts starting against one fresh
+                // cluster database don't race on creating `seaql_migrations`.
+                match akhomed_store::run_migrations_locked(&opts).await {
                     Ok(()) => tracing::info!("akhomed-store migrations complete"),
                     Err(e) => {
                         tracing::error!(error = %e, "migrations failed — falling back to local-only mode");
