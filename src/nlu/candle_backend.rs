@@ -136,11 +136,11 @@ pub struct CandleInferenceResult {
 
 const LLM_SUBDIR: &str = "models/llm";
 const CANDLE_MODEL_FILE: &str = "qwen2.5-1.5b-instruct-q4_k_m.gguf";
-/// Max prompt length (tokens) accepted before prefill. The original 1.5B NLU
-/// model used a small window; the chat/agentic path (ADR 070) renders the full
-/// tool catalog into the prompt, which easily exceeds a couple thousand tokens.
-/// Gemma 3/4 and Qwen2.5 all support ≥8K context, so 8192 is a safe ceiling that
-/// still bounds CPU prefill cost.
+/// Fallback prompt ceiling (tokens) used only when a GGUF does not declare
+/// `<arch>.context_length`. The real window is read from the model file at load
+/// (`CandleBackend::context_length`) — e.g. Gemma-4-12B declares 262144 — so the
+/// agentic path's full tool catalog (~6.6K tokens) fits comfortably; the earlier
+/// hardcoded cap was wrong. 8192 is a conservative floor for metadata-less GGUFs.
 const MAX_PROMPT_TOKENS: usize = 8192;
 const TOKENIZER_FILE: &str = "tokenizer.json";
 
@@ -161,6 +161,11 @@ pub struct CandleBackend {
     device: Device,
     /// Model family (Qwen2 / Gemma) — drives chat templating and EOS tokens.
     family: ModelFamily,
+    /// Real context window (tokens) read from the GGUF `<arch>.context_length`
+    /// metadata — e.g. Gemma-4-12B = 262144. Used as the prompt ceiling and as
+    /// the budget window (Phase 44b), replacing a hardcoded guess. Falls back to
+    /// [`MAX_PROMPT_TOKENS`] when the metadata is absent.
+    context_length: usize,
     config: CandleConfig,
     model_path: PathBuf,
 }
@@ -229,6 +234,25 @@ impl CandleBackend {
         let family = ModelFamily::from_architecture(&architecture);
         tracing::info!(architecture = %architecture, family = ?family, "detected GGUF model family");
 
+        // Read the model's real context window from the GGUF metadata before
+        // `from_gguf` consumes `content`. e.g. `gemma4.context_length = 262144`.
+        // This is the model capability, not a guess — used as the prompt ceiling
+        // and the Phase 44 budget window.
+        let context_length = content
+            .metadata
+            .get(&format!("{architecture}.context_length"))
+            .and_then(|v| {
+                v.to_u32()
+                    .map(|x| x as usize)
+                    .or_else(|_| v.to_u64().map(|x| x as usize))
+                    .or_else(|_| v.to_i32().map(|x| x as usize))
+                    .or_else(|_| v.to_i64().map(|x| x as usize))
+                    .ok()
+            })
+            .filter(|&n| n > 0)
+            .unwrap_or(MAX_PROMPT_TOKENS);
+        tracing::info!(context_length, architecture = %architecture, "model context window (from GGUF)");
+
         let model = match family {
             ModelFamily::Gemma4 => {
                 let m = super::vendored::quantized_gemma4::ModelWeights::from_gguf(
@@ -273,9 +297,17 @@ impl CandleBackend {
             tokenizer,
             device,
             family,
+            context_length,
             config,
             model_path: model_path.to_path_buf(),
         })
+    }
+
+    /// The model's context window (tokens), read from the GGUF
+    /// `<arch>.context_length` metadata (fallback [`MAX_PROMPT_TOKENS`]).
+    #[cfg(feature = "candle-backend")]
+    pub fn context_length(&self) -> usize {
+        self.context_length
     }
 
     /// Non-feature-gated stub.
@@ -1004,11 +1036,12 @@ impl CandleBackend {
 
         tracing::debug!(prompt_tokens = prompt_tokens.len(), "Candle prompt tokenized");
 
-        if prompt_tokens.len() > MAX_PROMPT_TOKENS {
+        if prompt_tokens.len() > self.context_length {
             return Err(NluError::LlmGenerationFailed {
                 reason: format!(
-                    "Prompt too long ({} tokens, max {MAX_PROMPT_TOKENS}).",
-                    prompt_tokens.len()
+                    "Prompt too long ({} tokens, model context window is {}).",
+                    prompt_tokens.len(),
+                    self.context_length
                 ),
             });
         }
@@ -1201,11 +1234,12 @@ impl CandleBackend {
             }
         }
 
-        if prompt_tokens.len() > MAX_PROMPT_TOKENS {
+        if prompt_tokens.len() > self.context_length {
             return Err(NluError::LlmGenerationFailed {
                 reason: format!(
-                    "Prompt too long ({} tokens, max {MAX_PROMPT_TOKENS}).",
-                    prompt_tokens.len()
+                    "Prompt too long ({} tokens, model context window is {}).",
+                    prompt_tokens.len(),
+                    self.context_length
                 ),
             });
         }

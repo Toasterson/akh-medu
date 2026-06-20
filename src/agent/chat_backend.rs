@@ -43,6 +43,23 @@ pub enum ChatBackendError {
     TurnFailed { backend: String, reason: String },
 }
 
+/// What a model can do, read from the model itself — not guessed.
+///
+/// Populated from the GGUF metadata for Candle (`<arch>.context_length`) and from
+/// Ollama's `/api/show` for the Ollama backing (`capabilities` + `model_info`).
+/// Consumed by the context-assembly budget (Phase 44 — `context_window`) and to
+/// gate the reasoning-effort (`think`) flag (`supports_thinking`).
+#[derive(Debug, Clone, Default)]
+pub struct ModelCapabilities {
+    /// Context window in tokens, if known (e.g. gemma4-12B = 262144,
+    /// glm-5.2 = 1_000_000, gpt-oss:120b = 131072).
+    pub context_window: Option<usize>,
+    /// The model accepts a reasoning-effort / `think` request.
+    pub supports_thinking: bool,
+    /// The model supports tool / function calling.
+    pub supports_tools: bool,
+}
+
 /// A chat/agentic LLM backing for the agentic turn loop.
 ///
 /// Implementors translate a tool-enabled conversation into an [`AssistantTurn`]
@@ -60,6 +77,13 @@ pub trait ChatBackend: Send + Sync {
     /// Refresh per-akh state (e.g. the system prompt) before a turn. Default:
     /// no-op.
     fn prepare(&self, _agent_id: &str, _psyche: Option<&crate::compartment::psyche::Psyche>) {}
+
+    /// The model's capabilities, read from the model (GGUF metadata / Ollama
+    /// `/api/show`). Default: unknown. Consumed by the Phase 44 context budget
+    /// (window) and reasoning-effort gating.
+    fn capabilities(&self) -> ModelCapabilities {
+        ModelCapabilities::default()
+    }
 
     /// One tool-enabled chat turn: the model answers `conversation`, optionally
     /// requesting tools from `tools` (OpenAI-style function schemas).
@@ -116,6 +140,10 @@ impl ChatBackend for OllamaChatBackend {
     fn prepare(&self, agent_id: &str, psyche: Option<&crate::compartment::psyche::Psyche>) {
         // Refresh the akh's cached system prompt from its current psyche.
         self.mgr.load_agent(agent_id, agent_id, psyche);
+    }
+
+    fn capabilities(&self) -> ModelCapabilities {
+        self.mgr.capabilities()
     }
 
     fn chat_with_tools(
@@ -181,6 +209,17 @@ impl ChatBackend for CandleChatBackend {
 
     fn available(&self) -> bool {
         self.backend.lock().is_ok()
+    }
+
+    fn capabilities(&self) -> ModelCapabilities {
+        // Context window from the GGUF metadata; Gemma/Qwen GGUFs here support
+        // tool calling via the family template but are not "thinking" models.
+        let context_window = self.backend.lock().ok().map(|b| b.context_length());
+        ModelCapabilities {
+            context_window,
+            supports_thinking: false,
+            supports_tools: true,
+        }
     }
 
     fn chat_with_tools(

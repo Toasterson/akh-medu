@@ -27,34 +27,43 @@ behaves like the "no history" case. → **Build 44c (graduated-fidelity history)
 
 ## Q2 — Real token window + what dominates it  ✅ (gates 44b)
 
-Measured on the live Gemma akh (full tool catalog, user prompt `"hi"`):
+**Correction (the windows are huge — read from the model, not guessed).** The
+8192 cap was a leftover; the real windows, now read from the model file/API:
 
-| Quantity | Value |
-|---|---|
-| Model window (gemma4-12B, our cap) | **8192** tokens |
-| Reserved for output | 1024 → **7168** available |
-| Real prompt sent to the model (candle-tokenized) | **6605** tokens |
-| ↳ user prompt | 1 token |
-| ↳ system prompt (psyche/explicit) | ~few dozen |
-| ↳ **tool catalog** | **~6540 tokens (~80% of the window)** |
-| 44a ContextManager-assembled context (pass-through) | **1 token** |
+| Model | Window | Source |
+|---|---|---|
+| gemma4-12B (Candle) | **262144** | GGUF `gemma4.context_length` |
+| glm-5.2 (Tecton, cloud) | **1000000** | `/api/show` `model_info` |
+| gpt-oss:120b (Thoth, cloud) | **131072** | `/api/show` `model_info` |
+
+Real prompt with the **full tool catalog** (candle-tokenized, user prompt `"hi"`):
+**6605 tokens** — user 1, system a few dozen, **tool catalog ~6540**. Against the
+real windows that is **~2.5% of gemma4's, ~0.65% of glm-5.2's** — *not* a
+constraint. (My earlier "80% of the window" was wrong because of the 8192 cap.)
 
 Findings:
-- **The tool catalog is the dominant context cost by far** — it alone nearly
-  fills a small-context model's window, leaving ~no room for history/KG/recall.
-  This is why the Candle Gemma akh needs `AKH_AGENT_MAX_TOOLS=0` to be usable; the
-  cloud akhs (glm-5.2/gpt-oss, large windows) absorb the full catalog fine.
+- **Window pressure is not the problem** — every deployed model has a 128K–1M
+  window; the tool catalog + history + KG all fit comfortably. So 44b's
+  original framing ("budget to fit the window") is **low-urgency**.
+- **For the Candle akh the real constraint is COMPUTE, not window** — gemma4-12B
+  agentic turns are slow because of the partial GPU offload (attention/lm_head on
+  CPU) × the prefill of a ~6.6K-token prompt. So trimming the tool catalog still
+  matters, but as a **latency** lever, not overflow avoidance. Cloud akhs are
+  fast and unconstrained.
+- **Implemented from this finding:** model capabilities are now read from the
+  model — `CandleBackend::context_length()` (GGUF) and `OllamaClient::capabilities()`
+  (`/api/show`: context window + `thinking`/`tools`); the agentic `TokenBudget`
+  window is sized per-akh from them (verified live: gemma 262144, glm-5.2
+  1000000), and `reasoning_effort`/`think` is now gated on `supports_thinking`.
 - **Architectural note for 44b:** the tool catalog is assembled in the *backend*
-  (`ollama_tool_catalog` in `run_agentic_turn`, then rendered by each
-  `ChatBackend`), *downstream* of the `ContextManager` — which is why 44a's
-  telemetry sees only the 1-token user prompt. The budget allocator (44b) must
-  route the tool catalog *through* the manager (as a `Tools` section) to budget
-  it. The allocator's default priority already places `Tools` last (degraded
-  first), which is the correct order.
-- → **Build 44b**: one allocator over `{system, KG, history, recalled, tools}`
-  sized to the measured window; the first, highest-value lever is **trimming /
-  budgeting the tool catalog** (a measured, configurable cap rather than the
-  blunt `AKH_AGENT_MAX_TOOLS=0`).
+  (`ollama_tool_catalog` in `run_agentic_turn`), *downstream* of the
+  `ContextManager` (44a telemetry sees only the 1-token user prompt). A future
+  tool-budgeting step would route the catalog through the manager (the allocator
+  already orders `Tools` last = trimmed first) — but motivated by Candle latency,
+  not window overflow.
+- → **Re-prioritise:** 44b (window budget) is low-urgency; the data-justified win
+  is **44c/44e (conversation history)** per Q1. A Candle-latency tool-trim is a
+  separate, optional lever.
 
 ## Q3 — KG-recall quality baseline  ◑ baseline established; precision deferred (gates 44g)
 
@@ -71,8 +80,13 @@ against the symbol-overlap baseline. This does not block 44b/44c/44e.
 
 ## Gate status + next build order
 
-- **Cleared:** Q1 + Q2 → **44b → 44c → 44e** are unblocked (the core
-  `CompactingManager`: budget allocator + graduated-fidelity history + discourse).
-- **Deferred:** Q3's precision number → measured during the **44g** build.
-- 44d (delta KG), 44h (Passive), 44i (Virtual), 44j (A/B harness) follow per the
-  plan's dependency order; 44k/44l remain recorded-deferred.
+- **Cleared:** Q1 + Q2. The measurements **re-prioritise** the plan: windows are
+  huge, so 44b (budget-to-fit-window) is **low-urgency**, and the clear win is
+  **conversation history (44c/44e)** — currently absent, demonstrably helpful.
+- **Done as a direct consequence:** model capabilities are read from the model
+  (GGUF / `/api/show`), the budget window is sized per-akh, reasoning is gated.
+- **Next:** 44c — inject recent conversation turns into the agentic prompt
+  (start of the `CompactingManager`), then 44e (discourse selection). A
+  Candle-latency tool-trim and 44b's full allocator are optional follow-ups.
+- **Deferred:** Q3's recall precision → measured during the **44g** build; 44d
+  (delta KG), 44h/44i (Passive/Virtual), 44j (harness); 44k/44l recorded-deferred.

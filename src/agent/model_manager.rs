@@ -326,6 +326,13 @@ impl AgentModelManager {
         }
     }
 
+    /// The pinned model's capabilities (context window, thinking/tools support),
+    /// read once from Ollama's `/api/show` and cached. Used by the Phase 44
+    /// context budget and reasoning-effort gating.
+    pub fn capabilities(&self) -> super::chat_backend::ModelCapabilities {
+        self.ollama.capabilities().clone()
+    }
+
     // ── Registration ───────────────────────────────────────────────────────
 
     /// Register (or refresh) an agent with its Psyche encoding.

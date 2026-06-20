@@ -113,12 +113,18 @@ impl Agent {
         let mut conversation: Vec<Value> = {
             use super::context::{
                 ContextManager, EpisodeState, HeuristicTokenCounter, PassThroughManager,
-                TokenBudget, TokenCounter,
+                TokenBudget, TokenCounter, DEFAULT_RESERVED_OUTPUT,
             };
             static PASS_THROUGH: PassThroughManager = PassThroughManager;
             let counter = HeuristicTokenCounter;
-            // TODO(44b): size the window from the akh's model config once measured.
-            let budget = TokenBudget::default();
+            // Size the budget window from the model's real capabilities (GGUF
+            // metadata for Candle, `/api/show` for Ollama) — e.g. gemma4-12B =
+            // 262144, glm-5.2 = 1_000_000 — not a hardcoded guess. Falls back to
+            // the default window when capabilities are unknown.
+            let budget = match backend.capabilities().context_window {
+                Some(window) => TokenBudget::new(window, DEFAULT_RESERVED_OUTPUT),
+                None => TokenBudget::default(),
+            };
             let episode = EpisodeState {
                 agent_id,
                 user_prompt,

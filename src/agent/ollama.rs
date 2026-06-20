@@ -221,12 +221,67 @@ pub enum StreamEvent {
 /// Synchronous Ollama REST client.
 pub struct OllamaClient {
     config: OllamaConfig,
+    /// Model capabilities from `/api/show`, fetched once and cached.
+    capabilities: std::sync::OnceLock<super::chat_backend::ModelCapabilities>,
 }
 
 impl OllamaClient {
     /// Create a new client with the given config.
     pub fn new(config: OllamaConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            capabilities: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// Model capabilities (context window, thinking/tools support) via
+    /// `POST /api/show`, fetched once and cached. Falls back to "unknown"
+    /// ([`Default`]) on any failure (offline, older server) so callers degrade.
+    pub fn capabilities(&self) -> &super::chat_backend::ModelCapabilities {
+        self.capabilities
+            .get_or_init(|| self.fetch_capabilities().unwrap_or_default())
+    }
+
+    fn fetch_capabilities(&self) -> Option<super::chat_backend::ModelCapabilities> {
+        let url = format!("{}/api/show", self.config.base_url.trim_end_matches('/'));
+        let mut req =
+            ureq::post(&url).timeout(std::time::Duration::from_secs(self.config.timeout_secs));
+        if let Some(key) = self.config.resolved_api_key() {
+            req = req.set("Authorization", &format!("Bearer {key}"));
+        }
+        let resp: serde_json::Value = req
+            .send_json(serde_json::json!({ "model": self.config.model }))
+            .ok()?
+            .into_json()
+            .ok()?;
+        let caps = resp.get("capabilities").and_then(|c| c.as_array());
+        let has = |name: &str| {
+            caps.map(|a| a.iter().any(|v| v.as_str() == Some(name)))
+                .unwrap_or(false)
+        };
+        // model_info holds `<arch>.context_length` (the key is arch-prefixed).
+        let context_window = resp
+            .get("model_info")
+            .and_then(|m| m.as_object())
+            .and_then(|m| {
+                m.iter()
+                    .find(|(k, _)| k.ends_with(".context_length"))
+                    .and_then(|(_, v)| v.as_u64())
+            })
+            .map(|n| n as usize);
+        let caps = super::chat_backend::ModelCapabilities {
+            context_window,
+            supports_thinking: has("thinking"),
+            supports_tools: has("tools"),
+        };
+        tracing::info!(
+            model = %self.config.model,
+            context_window = ?caps.context_window,
+            thinking = caps.supports_thinking,
+            tools = caps.supports_tools,
+            "ollama model capabilities (/api/show)"
+        );
+        Some(caps)
     }
 
     /// Returns `true` if the Ollama server is reachable.
@@ -377,7 +432,14 @@ impl OllamaClient {
         // Reasoning-effort hint (chat path only): Ollama's reasoning cloud models
         // (gpt-oss/glm) accept `think: "low"|"medium"|"high"`. Absent ⇒ model default.
         if let Some(level) = &self.config.reasoning_effort {
-            body["think"] = serde_json::Value::String(level.clone());
+            if self.capabilities().supports_thinking {
+                body["think"] = serde_json::Value::String(level.clone());
+            } else {
+                tracing::debug!(
+                    model = %self.config.model,
+                    "reasoning_effort set but model lacks the 'thinking' capability; not sending think"
+                );
+            }
         }
 
         let mut req = ureq::post(&url)
@@ -460,7 +522,14 @@ impl OllamaClient {
             body["tools"] = serde_json::Value::Array(tools.to_vec());
         }
         if let Some(level) = &self.config.reasoning_effort {
-            body["think"] = serde_json::Value::String(level.clone());
+            if self.capabilities().supports_thinking {
+                body["think"] = serde_json::Value::String(level.clone());
+            } else {
+                tracing::debug!(
+                    model = %self.config.model,
+                    "reasoning_effort set but model lacks the 'thinking' capability; not sending think"
+                );
+            }
         }
 
         let mut req = ureq::post(&url)
@@ -559,26 +628,8 @@ impl OllamaClient {
     /// ending in `.context_length`. Returns `None` on any transport/parse error
     /// or if the field is absent — callers then omit the `% used` figure.
     pub fn context_length(&self) -> Option<u64> {
-        let url = format!("{}/api/show", self.config.base_url.trim_end_matches('/'));
-        // Send both `model` (current API) and `name` (older API) — extra keys are
-        // ignored, so one body satisfies either server version.
-        let body = serde_json::json!({
-            "model": self.config.model,
-            "name": self.config.model,
-        });
-        let mut req = ureq::post(&url)
-            .set("Content-Type", "application/json")
-            .timeout(std::time::Duration::from_secs(self.config.timeout_secs));
-        if let Some(key) = self.config.resolved_api_key() {
-            req = req.set("Authorization", &format!("Bearer {key}"));
-        }
-        let resp = req.send_json(&body).ok()?;
-        let value: serde_json::Value = resp.into_json().ok()?;
-        let model_info = value.get("model_info")?.as_object()?;
-        model_info
-            .iter()
-            .find(|(k, _)| k.ends_with(".context_length"))
-            .and_then(|(_, v)| v.as_u64())
+        // Delegates to the cached `/api/show` capabilities (one round-trip total).
+        self.capabilities().context_window.map(|n| n as u64)
     }
 
     /// Hint Ollama to unload the model immediately by sending a request with
