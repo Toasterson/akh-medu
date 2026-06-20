@@ -165,16 +165,19 @@ Env knobs (set in the daemon's environment):
   prefill and makes turns very slow. `0` runs the akh tool-free (pure chat). Cloud
   akhs (Tecton/Thoth) don't need this — the cloud handles the full prompt fast.
 
-Limitations as of this writing:
+**One daemon serves all akhs.** `akh -w <name> <chat|acp status|akh …>` routes to
+`<name>` regardless of the daemon's `[acp].workspace` — the ACP server resolves
+each request's workspace on demand and any configured akh loads on first use. So
+a single `akhomed` serves Tecton, Thoth, and Gemma together; `[acp].workspace` is
+just the default when `-w` is omitted. (Verified live: one daemon answered all
+three via `-w`, and a same-host `akh akh sleep` → `akh akh wake` round-trips
+cleanly.)
 
-- **One daemon binds one akh's data-plane.** `akh -w <name> chat` / `acp status`
-  go to the daemon's `[acp].workspace`, not `<name>` — only the *control-plane*
-  (`akh -w <name> akh snapshot/sleep/wake/relocate`, `migrate`) honours `-w`. To
-  use several akhs today, bind one per daemon (`[acp].workspace`) — or run one
-  daemon per akh. Per-request data-plane workspace routing is a planned fix.
+Remaining caveats:
+
 - **Candle GPU offload is partial** (linear GEMMs only; attention/lm_head still
   CPU), so gemma4-12B agentic turns are slow — pair it with `AKH_AGENT_MAX_TOOLS`
   to keep prompts short. Cloud akhs are unaffected.
-- **Same-host `wake` after `sleep`** of the *bound* akh can hit a redb lock (the
-  ACP server pins the engine). Cross-host relocation (fresh data dir) is the
-  supported path and is covered by `tests/relocation.rs`.
+- **A data-plane call resolves the akh's agent**, so the first request to a
+  Candle akh (even `acp status`) triggers its model load (~tens of seconds for
+  12B). Engine-only ops could skip the agent load — a later optimization.
