@@ -445,7 +445,11 @@ fn capitalize(s: &str) -> String {
 }
 
 /// Resolve labels and add a triple to the engine.
-fn ingest_extracted(
+///
+/// `pub(crate)` so [`ChatProcessor::assert_abstree_triples`](crate::chat::ChatProcessor)
+/// can land an already-parsed assertable AbsTree straight to the KG, reusing the
+/// high-quality NLU parse instead of re-running the lossy regex ingester.
+pub(crate) fn ingest_extracted(
     engine: &Engine,
     subject: &str,
     predicate: &str,

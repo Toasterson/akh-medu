@@ -114,6 +114,11 @@ pub fn parse_prose(input: &str, ctx: &ParseContext) -> ParseResult {
         return result;
     }
 
+    // 4b. Locative/relational copula ("X is in Y", "X is part of Y")
+    if let Some(tree) = try_locative(trimmed) {
+        return ParseResult::Facts(vec![tree]);
+    }
+
     // 5. Declarative facts (subject-predicate-object)
     if let Some(tree) = try_fact(&tokens, &lexicon) {
         return ParseResult::Facts(vec![tree]);
@@ -433,8 +438,77 @@ fn try_quantified(input: &str, tokens: &[Token], lexicon: &Lexicon) -> Option<Ab
         return None;
     }
 
-    let scope = AbsTree::Freeform(after.to_string());
+    // Parse the scope (everything after the quantifier) into a real triple so
+    // it can be asserted with the quantifier stripped — e.g. "All men are
+    // mortal" → Quantified(∀, Triple(men, is-a, mortal)) rather than wrapping
+    // "men are mortal" as opaque Freeform (which the regex ingester then stored
+    // under the literal subject "All men"). Falls back to Freeform if the scope
+    // isn't a clean subject-predicate-object.
+    let q_pos = tokens.iter().position(|t| !t.semantically_void)?;
+    let scope = try_fact(&tokens[q_pos + 1..], lexicon)
+        .unwrap_or_else(|| AbsTree::Freeform(after.to_string()));
     Some(AbsTree::quantified(quantifier, scope))
+}
+
+/// Parse "X <copula> <prep> Y" (e.g. "Paris is in France", "Lungs are part of
+/// the body") into `Triple(X, <prep>, Y)` so locative/partitive facts assert at
+/// Tier 1 instead of falling to the slow LLM tier — and so the preposition is
+/// kept as the relation (rather than dropping it to "X is Y").
+fn try_locative(input: &str) -> Option<AbsTree> {
+    const COPULA: &[&str] = &["is", "are", "was", "were"];
+    // Multi-word relations checked first, then single prepositions.
+    const REL2: &[(&str, &str, &str)] = &[("part", "of", "part-of")];
+    const PREP: &[&str] = &["in", "at", "on", "inside", "within", "near"];
+
+    let lower = input.trim().trim_end_matches(['.', '!']).to_lowercase();
+    let words: Vec<&str> = lower.split_whitespace().collect();
+    if words.len() < 4 {
+        return None;
+    }
+    for i in 1..words.len() {
+        if !COPULA.contains(&words[i]) {
+            continue;
+        }
+        // "X is part of Y"
+        if i + 3 < words.len() {
+            if let Some((_, _, label)) = REL2
+                .iter()
+                .find(|(a, b, _)| words[i + 1] == *a && words[i + 2] == *b)
+            {
+                let subject = words[..i].join(" ");
+                let object = strip_leading_article(&words[i + 3..]);
+                if !subject.is_empty() && !object.is_empty() {
+                    return Some(AbsTree::triple(
+                        AbsTree::entity(&subject),
+                        AbsTree::relation(*label),
+                        AbsTree::entity(&object),
+                    ));
+                }
+            }
+        }
+        // "X is in Y"
+        if i + 2 < words.len() && PREP.contains(&words[i + 1]) {
+            let subject = words[..i].join(" ");
+            let object = strip_leading_article(&words[i + 2..]);
+            if !subject.is_empty() && !object.is_empty() {
+                return Some(AbsTree::triple(
+                    AbsTree::entity(&subject),
+                    AbsTree::relation(words[i + 1]),
+                    AbsTree::entity(&object),
+                ));
+            }
+        }
+    }
+    None
+}
+
+/// Join words, dropping a leading article ("the France" → "France").
+fn strip_leading_article(words: &[&str]) -> String {
+    let start = match words.first() {
+        Some(&("a" | "an" | "the")) => 1,
+        _ => 0,
+    };
+    words[start..].join(" ")
 }
 
 /// Try to parse a comparative: "X is bigger than Y" / "X больше чем Y".
