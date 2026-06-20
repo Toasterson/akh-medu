@@ -6,7 +6,9 @@
 
 use akhomed_store::uuid::Uuid;
 use akhomed_store::{
-    MutationRow, PoolOptions, append_mutations, connect, ensure_akh, run_migrations,
+    MutationRow, PoolOptions, append_mutations, connect, ensure_akh, join_workspace,
+    leave_workspace, list_members, release_akh_lock, run_migrations, touch_last_seen,
+    try_acquire_akh_lock,
 };
 use sea_orm::{ConnectionTrait, DbBackend, Statement};
 
@@ -58,4 +60,72 @@ async fn ensure_akh_is_idempotent_and_append_writes_rows() {
     // Empty batch is a no-op.
     assert_eq!(append_mutations(&db, akh, workspace, &[]).await.unwrap(), 0);
     assert_eq!(mutation_count(&db, akh).await, 2);
+}
+
+#[tokio::test]
+#[ignore = "requires AKH_TEST_PG_URL"]
+async fn membership_join_list_leave_roundtrip() {
+    let Ok(url) = std::env::var("AKH_TEST_PG_URL") else {
+        eprintln!("skipping: set AKH_TEST_PG_URL");
+        return;
+    };
+    let db = connect(&PoolOptions::new(url)).await.expect("connect");
+    run_migrations(&db).await.expect("migrate");
+
+    let workspace = Uuid::new_v4();
+    let akh = Uuid::new_v4();
+    ensure_akh(&db, akh, "member-test-akh", None).await.unwrap();
+
+    // Initially no members.
+    assert!(list_members(&db, workspace).await.unwrap().is_empty());
+
+    // Join is idempotent: two joins -> one row.
+    let now = akhomed_store::chrono::Utc::now();
+    join_workspace(&db, workspace, akh, "member", now).await.unwrap();
+    join_workspace(&db, workspace, akh, "member", now).await.unwrap();
+    let members = list_members(&db, workspace).await.unwrap();
+    assert_eq!(members.len(), 1);
+    assert_eq!(members[0].akh_id, akh);
+    assert_eq!(members[0].role, "member");
+
+    // Leave removes the row (and reports it).
+    assert!(leave_workspace(&db, workspace, akh).await.unwrap());
+    assert!(list_members(&db, workspace).await.unwrap().is_empty());
+    // Leaving again is a no-op (reports false).
+    assert!(!leave_workspace(&db, workspace, akh).await.unwrap());
+}
+
+#[tokio::test]
+#[ignore = "requires AKH_TEST_PG_URL"]
+async fn advisory_lock_acquire_release_and_heartbeat() {
+    let Ok(url) = std::env::var("AKH_TEST_PG_URL") else {
+        eprintln!("skipping: set AKH_TEST_PG_URL");
+        return;
+    };
+    // The advisory lock is session-scoped — a single-connection pool keeps all
+    // statements on one backend so acquire/contend/release behave deterministically.
+    let opts = PoolOptions {
+        max_connections: 1,
+        ..PoolOptions::new(url.clone())
+    };
+    let db = connect(&opts).await.expect("connect");
+    run_migrations(&db).await.expect("migrate");
+
+    let akh = Uuid::new_v4();
+    ensure_akh(&db, akh, "lock-test-akh", None).await.unwrap();
+
+    // First acquire succeeds; a second connection cannot take it.
+    assert!(try_acquire_akh_lock(&db, akh).await.unwrap());
+    let other = connect(&PoolOptions { max_connections: 1, ..PoolOptions::new(url) })
+        .await
+        .expect("connect other");
+    assert!(!try_acquire_akh_lock(&other, akh).await.unwrap());
+
+    // Release on the holder, then the other connection can take it.
+    assert!(release_akh_lock(&db, akh).await.unwrap());
+    assert!(try_acquire_akh_lock(&other, akh).await.unwrap());
+    assert!(release_akh_lock(&other, akh).await.unwrap());
+
+    // Heartbeat updates last_seen without error.
+    touch_last_seen(&db, akh, akhomed_store::chrono::Utc::now()).await.unwrap();
 }

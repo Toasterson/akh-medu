@@ -552,6 +552,11 @@ fn dispatch_akh(
             if has_control {
                 groups.push("daemon");
                 groups.push("config");
+                // Phase 38 operator groups: akh lifecycle/relocation, AGE
+                // projection refresh (stub), and the migration runner.
+                groups.push("akh");
+                groups.push("projection");
+                groups.push("migrate");
                 methods.extend(control::CONTROL_METHODS.iter().copied());
             }
             Ok(serde_json::json!({

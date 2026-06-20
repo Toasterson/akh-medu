@@ -56,6 +56,19 @@ enum Commands {
         action: AkhAction,
     },
 
+    /// Refresh the AGE graph projection (read-model) over ACP
+    /// (`_akh/projection/*`). The projection is the queryable graph view of the
+    /// relational truth; `refresh` rebuilds it (Phase 38d — currently a stub).
+    Projection {
+        #[command(subcommand)]
+        action: ProjectionAction,
+    },
+
+    /// Run the akhomed-store database migrations on demand over ACP
+    /// (`_akh/migrate`). Equivalent to the daemon's start-up `migrate_on_start`,
+    /// surfaced as an explicit operator verb. Requires a Postgres backing store.
+    Migrate,
+
     /// Manage akhomed as a macOS launchd service.
     Service {
         #[command(subcommand)]
@@ -69,8 +82,8 @@ enum Commands {
     },
 }
 
-/// Relocation ops: snapshot an akh's state to Postgres, or wake a cold akh from
-/// it (control-plane, over ACP `_akh/akh/*`).
+/// Relocation / lifecycle ops: snapshot, wake, sleep, or relocate an akh
+/// (control-plane, over ACP `_akh/akh/*`).
 #[derive(Subcommand)]
 enum AkhAction {
     /// Snapshot the akh's relational state to Postgres now.
@@ -83,6 +96,25 @@ enum AkhAction {
         /// Workspace to wake (defaults to --workspace).
         workspace: Option<String>,
     },
+    /// Deep-sleep the akh: snapshot + flush, then free its in-memory engine and
+    /// stop its background tasks. Wake it later with `akh akh wake`.
+    Sleep {
+        /// Workspace to sleep (defaults to --workspace).
+        workspace: Option<String>,
+    },
+    /// Prepare the akh to move hosts: snapshot + flush so another host can
+    /// `akh akh wake` it. Requires a Postgres backing store.
+    Relocate {
+        /// Workspace to relocate (defaults to --workspace).
+        workspace: Option<String>,
+    },
+}
+
+/// AGE graph-projection ops (control-plane, over ACP `_akh/projection/*`).
+#[derive(Subcommand)]
+enum ProjectionAction {
+    /// Rebuild the AGE graph projection from relational truth (Phase 38d stub).
+    Refresh,
 }
 
 #[derive(Subcommand)]
@@ -373,6 +405,16 @@ fn run_workspace_acp(current_ws: &str, action: WorkspaceAction) -> Result<()> {
             let target = name.unwrap_or_else(|| current_ws.to_string());
             ("_akh/workspace/info", serde_json::json!({ "name": target }))
         }
+        WorkspaceAction::Join { id } => {
+            ("_akh/workspace/join", serde_json::json!({ "id": id }))
+        }
+        WorkspaceAction::Leave { id } => {
+            ("_akh/workspace/leave", serde_json::json!({ "id": id }))
+        }
+        WorkspaceAction::ListMembers { id } => (
+            "_akh/workspace/list-members",
+            serde_json::json!({ "id": id }),
+        ),
     };
     let result = acp_call(method, params)?;
     print_acp(&result)
@@ -391,8 +433,39 @@ fn run_akh_acp(current_ws: &str, action: AkhAction) -> Result<()> {
             let ws = workspace.unwrap_or_else(|| current_ws.to_string());
             ("_akh/akh/wake", serde_json::json!({ "workspace": ws }))
         }
+        AkhAction::Sleep { workspace } => {
+            let ws = workspace.unwrap_or_else(|| current_ws.to_string());
+            ("_akh/akh/sleep", serde_json::json!({ "workspace": ws }))
+        }
+        AkhAction::Relocate { workspace } => {
+            let ws = workspace.unwrap_or_else(|| current_ws.to_string());
+            ("_akh/akh/relocate", serde_json::json!({ "workspace": ws }))
+        }
     };
     let result = acp_call(method, params)?;
+    print_acp(&result)
+}
+
+/// Dispatch `akh projection <action>` over the ACP control-plane
+/// (`_akh/projection/*`). The projection is the AGE graph read-model rebuilt
+/// from relational truth (Phase 38d — currently a stub).
+#[cfg(feature = "acp")]
+fn run_projection_acp(current_ws: &str, action: ProjectionAction) -> Result<()> {
+    let (method, params): (&str, serde_json::Value) = match action {
+        ProjectionAction::Refresh => (
+            "_akh/projection/refresh",
+            serde_json::json!({ "workspace": current_ws }),
+        ),
+    };
+    let result = acp_call(method, params)?;
+    print_acp(&result)
+}
+
+/// Dispatch `akh migrate` over the ACP control-plane (`_akh/migrate`): run the
+/// akhomed-store migrations against the daemon's Postgres backing store.
+#[cfg(feature = "acp")]
+fn run_migrate_acp() -> Result<()> {
+    let result = acp_call("_akh/migrate", serde_json::json!({}))?;
     print_acp(&result)
 }
 
@@ -459,6 +532,16 @@ fn run_chat_acp(_ws_name: &str, _headless: bool) -> Result<()> {
     miette::bail!("The `chat` subcommand requires building `akh` with --features acp.")
 }
 
+#[cfg(not(feature = "acp"))]
+fn run_projection_acp(_current_ws: &str, _action: ProjectionAction) -> Result<()> {
+    miette::bail!("The `projection` subcommand requires building `akh` with --features acp.")
+}
+
+#[cfg(not(feature = "acp"))]
+fn run_migrate_acp() -> Result<()> {
+    miette::bail!("The `migrate` subcommand requires building `akh` with --features acp.")
+}
+
 #[derive(Subcommand)]
 enum WorkspaceAction {
     /// List all workspaces.
@@ -480,6 +563,24 @@ enum WorkspaceAction {
     Info {
         /// Workspace name (defaults to current workspace).
         name: Option<String>,
+    },
+    /// Join a workspace: add this akh as a member (knowledge sharing). Requires
+    /// a Postgres backing store.
+    Join {
+        /// Workspace id/name to join.
+        id: String,
+    },
+    /// Leave a workspace: remove this akh's membership. Requires a Postgres
+    /// backing store.
+    Leave {
+        /// Workspace id/name to leave.
+        id: String,
+    },
+    /// List the akhs that are members of a workspace. Requires a Postgres
+    /// backing store.
+    ListMembers {
+        /// Workspace id/name to list members of.
+        id: String,
     },
 }
 
@@ -550,6 +651,10 @@ fn main() -> Result<()> {
         Commands::Config { action } => run_config_acp(action)?,
 
         Commands::Akh { action } => run_akh_acp(&cli.workspace, action)?,
+
+        Commands::Projection { action } => run_projection_acp(&cli.workspace, action)?,
+
+        Commands::Migrate => run_migrate_acp()?,
 
         Commands::Chat { headless } => run_chat_acp(&cli.workspace, headless)?,
 

@@ -115,6 +115,10 @@ impl Drop for WakeGuard {
 struct WalFlusher {
     shutdown: tokio::sync::watch::Sender<bool>,
     handle: tokio::task::JoinHandle<()>,
+    /// The log itself, so sleep/relocate can force a synchronous flush of the
+    /// buffer before evicting the engine (Phase 38e/g) instead of waiting for
+    /// the next interval tick.
+    log: Arc<akh_medu::wal::MutationLog>,
 }
 
 /// Handle to a workspace's background snapshot ticker task (Phase 38c).
@@ -327,10 +331,14 @@ impl ServerState {
 
         let (shutdown, shutdown_rx) = tokio::sync::watch::channel(false);
         let handle = Arc::clone(&log).spawn_flusher(shutdown_rx);
-        self.wal_flushers
-            .write()
-            .await
-            .insert(name.to_string(), WalFlusher { shutdown, handle });
+        self.wal_flushers.write().await.insert(
+            name.to_string(),
+            WalFlusher {
+                shutdown,
+                handle,
+                log: Arc::clone(&log),
+            },
+        );
         tracing::info!(workspace = %name, %akh_id, "mutation WAL enabled (Postgres backing store)");
 
         // Phase 38c: periodic snapshot of the akh's relational state. `0` means
@@ -429,11 +437,17 @@ impl ServerState {
             ));
         }
 
+        let akh_id = akh_medu::wal::akh_id_for(name);
+        let workspace_id = akh_medu::wal::workspace_id_for(name);
+
+        // 38g split-brain guard: a cold akh may live on another host. Acquire its
+        // Postgres advisory lock before touching state so two hosts can't wake the
+        // same akh concurrently; refuse fast (non-zero CLI exit) if it's held.
+        self.acquire_akh_lock_or_refuse(name, akh_id, "wake").await?;
+
         let ws_paths = self.paths.workspace(name);
         std::fs::create_dir_all(&ws_paths.kg_dir)
             .map_err(|e| format!("cannot create workspace kg dir: {e}"))?;
-        let akh_id = akh_medu::wal::akh_id_for(name);
-        let workspace_id = akh_medu::wal::workspace_id_for(name);
 
         // Reconstruct the local redb from Postgres. `wake` persists the KG
         // snapshot to redb before returning; dropping the engine releases the
@@ -449,12 +463,309 @@ impl ServerState {
         // wake just populated; this also wires the WAL + snapshot ticker).
         self.get_agent(name).await?;
 
+        // Heartbeat: mark this host as the akh's live owner (best-effort).
+        if let Err(e) =
+            akhomed_store::touch_last_seen(pool, akh_id, akhomed_store::chrono::Utc::now()).await
+        {
+            tracing::warn!(workspace = %name, error = %e, "could not update last_seen after wake");
+        }
+
         tracing::info!(workspace = %name, %akh_id, triples, symbols, "woke akh from Postgres");
         Ok(serde_json::json!({
             "woke": name,
             "triples": triples,
             "symbols": symbols,
         }))
+    }
+
+    /// 38g split-brain guard: try to take the Akh's Postgres advisory lock,
+    /// erroring with an operator-facing message if another host holds it.
+    ///
+    /// `op` names the action (`"wake"` / `"relocate"`) for the error text. A
+    /// transient DB error acquiring the lock is treated as a *refusal* (fail
+    /// closed) rather than silently proceeding — split-brain is worse than a
+    /// retry. No-op when there is no Postgres pool (local-only mode has a single
+    /// host by construction, so there is nothing to guard against).
+    async fn acquire_akh_lock_or_refuse(
+        &self,
+        name: &str,
+        akh_id: akhomed_store::uuid::Uuid,
+        op: &str,
+    ) -> Result<(), String> {
+        let Some(pool) = self.pg_pool.as_ref() else {
+            return Ok(());
+        };
+        match akhomed_store::try_acquire_akh_lock(pool, akh_id).await {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(format!(
+                "refusing to {op} \"{name}\": another host already holds the akh's \
+                 advisory lock (split-brain guard). Confirm no other akhomed is \
+                 serving this akh, then retry."
+            )),
+            Err(e) => Err(format!(
+                "could not acquire the akh advisory lock for \"{name}\" ({e}); \
+                 refusing to {op} to avoid split-brain. Check the Postgres backing store."
+            )),
+        }
+    }
+
+    /// Release the Akh's advisory lock (best-effort) — paired with
+    /// [`Self::acquire_akh_lock_or_refuse`] so a later wake on this host can
+    /// re-acquire. No-op without a pool. Logs (does not error) on failure.
+    async fn release_akh_lock(&self, name: &str, akh_id: akhomed_store::uuid::Uuid) {
+        let Some(pool) = self.pg_pool.as_ref() else {
+            return;
+        };
+        if let Err(e) = akhomed_store::release_akh_lock(pool, akh_id).await {
+            tracing::warn!(workspace = %name, error = %e, "could not release akh advisory lock");
+        }
+    }
+
+    /// Evict a workspace's cached engine + agent and stop its background tasks
+    /// (daemon, WAL flusher, snapshot ticker), freeing the akh's memory. Shared
+    /// by `sleep_workspace`; the akh's durable state must already be persisted
+    /// (snapshot + WAL flush) before calling this, or unflushed mutations are lost.
+    async fn evict_workspace(&self, name: &str) {
+        // Stop the OODA daemon first so no further mutations are produced.
+        self.stop_workspace_daemon(name).await;
+
+        // Stop + drain the snapshot ticker.
+        if let Some(ticker) = self.snapshot_tickers.write().await.remove(name) {
+            let _ = ticker.shutdown.send(true);
+            if tokio::time::timeout(Duration::from_secs(5), ticker.handle)
+                .await
+                .is_err()
+            {
+                tracing::warn!(workspace = %name, "snapshot ticker did not stop within 5s on evict");
+            }
+        }
+
+        // Stop + drain the WAL flusher (the final batch was already flushed by
+        // the caller's snapshot path; this drains anything buffered since).
+        if let Some(mut flusher) = self.wal_flushers.write().await.remove(name) {
+            let _ = flusher.shutdown.send(true);
+            match tokio::time::timeout(Duration::from_secs(5), &mut flusher.handle).await {
+                Ok(_) => tracing::info!(workspace = %name, "WAL flusher drained on evict"),
+                Err(_) => {
+                    tracing::warn!(workspace = %name, "WAL flusher did not drain within 5s on evict, aborting");
+                    flusher.handle.abort();
+                }
+            }
+        }
+
+        // Drop the cached agent + engine + ancillary caches so memory is freed.
+        // Dropping the engine releases the redb lock so a later wake can reopen it.
+        self.agents.write().await.remove(name);
+        self.workspaces.write().await.remove(name);
+        self.psyche_snapshots.write().await.remove(name);
+        self.nlu_pipelines.write().await.remove(name);
+        self.daemon_pauses.write().await.remove(name);
+
+        // Release the advisory lock so this host (or another) can re-acquire on
+        // the next wake (no-op in local-only mode).
+        self.release_akh_lock(name, akh_medu::wal::akh_id_for(name))
+            .await;
+    }
+
+    /// Deep-sleep a workspace (control-plane `_akh/akh/sleep`).
+    ///
+    /// Force a WAL flush + write a snapshot (so the akh is recoverable), then
+    /// evict its cached engine + agent and stop its background tasks to free
+    /// memory. Without a Postgres pool this still evicts (freeing RAM) but warns
+    /// that durability requires Postgres — there is no relational copy to wake from.
+    async fn sleep_workspace(&self, name: &str) -> Result<serde_json::Value, String> {
+        if self.pg_pool.is_some() {
+            // Snapshot first so the relational copy is current; snapshot_workspace
+            // loads the agent if needed (so there is state to capture) and ensures
+            // the akh row exists.
+            self.snapshot_workspace(name).await?;
+            // Flush the WAL synchronously so any mutation since the snapshot
+            // reaches Postgres before we drop the in-memory engine.
+            self.flush_wal(name).await;
+            self.evict_workspace(name).await;
+            tracing::info!(workspace = %name, "akh deep-slept (snapshot + evict)");
+            Ok(serde_json::json!({
+                "workspace": name,
+                "slept": true,
+                "level": "deep",
+            }))
+        } else {
+            // Local-only: nothing to snapshot to, but freeing memory is still
+            // useful. Persist the local redb best-effort, then evict.
+            if let Ok(engine) = self.get_engine(name).await
+                && let Err(e) = engine.persist()
+            {
+                tracing::warn!(workspace = %name, error = %e, "local persist before sleep failed");
+            }
+            self.evict_workspace(name).await;
+            tracing::warn!(workspace = %name, "akh slept (local-only: evicted, no Postgres durability)");
+            Ok(serde_json::json!({
+                "workspace": name,
+                "slept": true,
+                "level": "deep",
+                "note": "evicted from memory, but durable relocation needs a [postgres] backing store",
+            }))
+        }
+    }
+
+    /// Force a synchronous WAL flush for `name`, if a flusher is wired (Phase
+    /// 38e/g). Used by sleep/relocate so any mutation since the snapshot reaches
+    /// Postgres before the in-memory engine is dropped — without waiting for the
+    /// next interval tick. A no-op when no flusher is wired (local-only mode).
+    async fn flush_wal(&self, name: &str) {
+        let log = self
+            .wal_flushers
+            .read()
+            .await
+            .get(name)
+            .map(|f| Arc::clone(&f.log));
+        if let Some(log) = log {
+            // flush_once drains at most one batch; loop until the buffer is empty
+            // so the relational copy is fully current before eviction/hand-off.
+            let mut total = 0usize;
+            loop {
+                let flushed = log.flush_once().await;
+                total += flushed;
+                if flushed == 0 || log.pending() == 0 {
+                    break;
+                }
+            }
+            tracing::debug!(workspace = %name, rows = total, "forced WAL flush before sleep/relocate");
+        }
+    }
+
+    /// Relocate a workspace (control-plane `_akh/akh/relocate`).
+    ///
+    /// Force a WAL flush + snapshot so another host can `akh akh wake` this akh,
+    /// then update `last_seen`. Requires Postgres — relocation is meaningless
+    /// without the shared backing store, so without a pool this returns a clear
+    /// error telling the operator to configure `[postgres]`.
+    async fn relocate_workspace(&self, name: &str) -> Result<serde_json::Value, String> {
+        let Some(pool) = self.pg_pool.as_ref() else {
+            return Err(
+                "relocation requires a Postgres backing store (no [postgres] section configured). \
+                 Add a [postgres] section to akhomed's config.toml (or set DATABASE_URL) so the \
+                 akh's state can be woken on another host."
+                    .into(),
+            );
+        };
+        let akh_id = akh_medu::wal::akh_id_for(name);
+
+        // Guard against another host already owning this akh.
+        self.acquire_akh_lock_or_refuse(name, akh_id, "relocate")
+            .await?;
+
+        // Snapshot (loads the agent if needed) + flush so the relational copy is
+        // current and complete before we hand off.
+        self.snapshot_workspace(name).await?;
+        self.flush_wal(name).await;
+
+        // Mark the heartbeat so the recovery host sees a fresh `last_seen`.
+        if let Err(e) =
+            akhomed_store::touch_last_seen(pool, akh_id, akhomed_store::chrono::Utc::now()).await
+        {
+            tracing::warn!(workspace = %name, error = %e, "could not update last_seen on relocate");
+        }
+
+        // Release the lock so the recovery host can acquire it on wake.
+        self.release_akh_lock(name, akh_id).await;
+
+        tracing::info!(workspace = %name, %akh_id, "akh prepared for relocation");
+        Ok(serde_json::json!({
+            "workspace": name,
+            "relocatable": true,
+            "hint": "run `akh akh wake` on the recovery host",
+        }))
+    }
+
+    /// Join: upsert a membership row for this workspace's akh (38f). The
+    /// workspace name resolves to the stable workspace/akh ids; the akh row is
+    /// ensured first so the membership FK target exists. Requires Postgres.
+    async fn workspace_join(&self, name: &str) -> Result<serde_json::Value, String> {
+        let Some(pool) = self.pg_pool.as_ref() else {
+            return Err(membership_needs_pg("join"));
+        };
+        let akh_id = akh_medu::wal::akh_id_for(name);
+        let workspace_id = akh_medu::wal::workspace_id_for(name);
+        akhomed_store::ensure_akh(pool, akh_id, name, None)
+            .await
+            .map_err(|e| e.to_string())?;
+        akhomed_store::join_workspace(
+            pool,
+            workspace_id,
+            akh_id,
+            "member",
+            akhomed_store::chrono::Utc::now(),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+        Ok(serde_json::json!({
+            "workspace": name,
+            "akh_id": akh_id.to_string(),
+            "role": "member",
+            "joined": true,
+        }))
+    }
+
+    /// Leave: delete this workspace's akh membership row (38f). Requires Postgres.
+    async fn workspace_leave(&self, name: &str) -> Result<serde_json::Value, String> {
+        let Some(pool) = self.pg_pool.as_ref() else {
+            return Err(membership_needs_pg("leave"));
+        };
+        let akh_id = akh_medu::wal::akh_id_for(name);
+        let workspace_id = akh_medu::wal::workspace_id_for(name);
+        let removed = akhomed_store::leave_workspace(pool, workspace_id, akh_id)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(serde_json::json!({
+            "workspace": name,
+            "akh_id": akh_id.to_string(),
+            "left": removed,
+        }))
+    }
+
+    /// List members: all membership rows for a workspace as a JSON array of
+    /// `{akh_id, role, joined_at}` (38f). Requires Postgres.
+    async fn workspace_list_members(&self, name: &str) -> Result<serde_json::Value, String> {
+        let Some(pool) = self.pg_pool.as_ref() else {
+            return Err(membership_needs_pg("list-members"));
+        };
+        let workspace_id = akh_medu::wal::workspace_id_for(name);
+        let rows = akhomed_store::list_members(pool, workspace_id)
+            .await
+            .map_err(|e| e.to_string())?;
+        let members: Vec<serde_json::Value> = rows
+            .into_iter()
+            .map(|m| {
+                serde_json::json!({
+                    "akh_id": m.akh_id.to_string(),
+                    "role": m.role,
+                    "joined_at": m.joined_at.to_rfc3339(),
+                })
+            })
+            .collect();
+        Ok(serde_json::json!({
+            "workspace": name,
+            "members": members,
+        }))
+    }
+
+    /// Run the akhomed-store migrations on demand (control-plane `_akh/migrate`).
+    /// Exposes the same runner the daemon calls on start when `migrate_on_start`
+    /// is set; requires Postgres.
+    async fn run_migrations_op(&self) -> Result<serde_json::Value, String> {
+        let Some(pool) = self.pg_pool.as_ref() else {
+            return Err(
+                "migrations require a Postgres backing store (no [postgres] section configured). \
+                 Add a [postgres] section to akhomed's config.toml (or set DATABASE_URL) and retry."
+                    .into(),
+            );
+        };
+        akhomed_store::run_migrations(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+        tracing::info!("akhomed-store migrations run via ACP control-plane");
+        Ok(serde_json::json!({ "migrated": true }))
     }
 
     /// Phase 38b/38c: stop background Postgres tasks on graceful shutdown.
@@ -894,6 +1205,16 @@ impl ServerState {
     }
 }
 
+/// Operator-facing error for a membership op attempted without Postgres (38f).
+/// `op` is the verb (`join` / `leave` / `list-members`).
+fn membership_needs_pg(op: &str) -> String {
+    format!(
+        "workspace {op} requires a Postgres backing store (no [postgres] section configured). \
+         Membership rows live in the shared store; add a [postgres] section to akhomed's \
+         config.toml (or set DATABASE_URL) so multiple akhs can join the workspace."
+    )
+}
+
 /// Background daemon task: delegates to [`AgentDaemon`] for the full set of
 /// background learning tasks (goal generation, OODA cycles, equivalence
 /// learning, reflection, consolidation, schema discovery, rule inference,
@@ -1195,6 +1516,55 @@ impl akh_medu::acp::ServerControl for ServerState {
                         .ok_or_else(|| "missing required param: workspace".to_string())?;
                     self.wake_workspace(ws).await
                 }
+                "akh/sleep" => {
+                    let ws = params
+                        .get("workspace")
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or_else(|| "missing required param: workspace".to_string())?;
+                    self.sleep_workspace(ws).await
+                }
+                "akh/relocate" => {
+                    let ws = params
+                        .get("workspace")
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or_else(|| "missing required param: workspace".to_string())?;
+                    self.relocate_workspace(ws).await
+                }
+
+                // ── workspace membership group (38f, Postgres-backed) ─────
+                "workspace/join" => {
+                    let ws = params
+                        .get("id")
+                        .or_else(|| params.get("workspace"))
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or_else(|| "missing required param: id".to_string())?;
+                    self.workspace_join(ws).await
+                }
+                "workspace/leave" => {
+                    let ws = params
+                        .get("id")
+                        .or_else(|| params.get("workspace"))
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or_else(|| "missing required param: id".to_string())?;
+                    self.workspace_leave(ws).await
+                }
+                "workspace/list-members" => {
+                    let ws = params
+                        .get("id")
+                        .or_else(|| params.get("workspace"))
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or_else(|| "missing required param: id".to_string())?;
+                    self.workspace_list_members(ws).await
+                }
+
+                // ── projection group (38d AGE read-model: deferred stub) ──
+                "projection/refresh" => Ok(serde_json::json!({
+                    "refreshed": false,
+                    "note": "AGE projection deferred to Phase 38d",
+                })),
+
+                // ── migrate (run akhomed-store migrations on demand) ──────
+                "migrate" => self.run_migrations_op().await,
 
                 other => Err(format!("unknown control-plane method: _akh/{other}")),
             }
@@ -1904,6 +2274,106 @@ mod control_plane_tests {
         assert!(
             r.as_ref().is_err_and(|e| e.contains("Postgres")),
             "expected no-Postgres error, got {r:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn phase38_new_methods_are_registered_control_methods() {
+        for m in [
+            "_akh/akh/sleep",
+            "_akh/akh/relocate",
+            "_akh/workspace/join",
+            "_akh/workspace/leave",
+            "_akh/workspace/list-members",
+            "_akh/projection/refresh",
+            "_akh/migrate",
+        ] {
+            assert!(
+                akh_medu::acp::is_control_method(m),
+                "{m} must route to the control-plane",
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn relocate_and_membership_and_migrate_need_postgres() {
+        // No pg_pool → relocation/membership/migrate report the missing backing
+        // store cleanly (recognised ops, not unknown-method or panic).
+        let (_tmp, state) = temp_state();
+        for (method, params) in [
+            ("_akh/akh/relocate", json!({ "workspace": "alpha" })),
+            ("_akh/workspace/join", json!({ "id": "alpha" })),
+            ("_akh/workspace/leave", json!({ "id": "alpha" })),
+            ("_akh/workspace/list-members", json!({ "id": "alpha" })),
+            ("_akh/migrate", json!({})),
+        ] {
+            let r = state.dispatch(method, &params).await;
+            assert!(
+                r.as_ref().is_err_and(|e| e.contains("Postgres")),
+                "{method} expected no-Postgres error, got {r:?}",
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn membership_ops_need_id_param() {
+        let (_tmp, state) = temp_state();
+        for method in [
+            "_akh/workspace/join",
+            "_akh/workspace/leave",
+            "_akh/workspace/list-members",
+        ] {
+            let r = state.dispatch(method, &json!({})).await;
+            assert!(
+                r.as_ref().is_err_and(|e| e.contains("id")),
+                "{method} without id must error, got {r:?}",
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn projection_refresh_is_a_stub() {
+        // The AGE projection is deferred (Phase 38d); refresh returns an explicit
+        // stub result rather than erroring, and needs no Postgres.
+        let (_tmp, state) = temp_state();
+        let r = state
+            .dispatch("_akh/projection/refresh", &json!({ "workspace": "alpha" }))
+            .await
+            .expect("projection/refresh must succeed (stub)");
+        assert_eq!(r["refreshed"], false);
+        assert!(
+            r["note"].as_str().unwrap_or_default().contains("deferred"),
+            "stub should note deferral, got {r}",
+        );
+    }
+
+    #[tokio::test]
+    async fn sleep_without_postgres_evicts_and_notes_durability() {
+        // temp_state has no pg_pool → sleep still evicts (frees memory) but the
+        // result flags that durable relocation needs Postgres.
+        let (_tmp, state) = temp_state();
+        state
+            .dispatch("_akh/workspace/create", &json!({ "name": "alpha" }))
+            .await
+            .expect("create");
+        let r = state
+            .dispatch("_akh/akh/sleep", &json!({ "workspace": "alpha" }))
+            .await
+            .expect("sleep must succeed (local-only evict)");
+        assert_eq!(r["slept"], true);
+        assert_eq!(r["level"], "deep");
+        assert!(
+            r["note"]
+                .as_str()
+                .unwrap_or_default()
+                .to_ascii_lowercase()
+                .contains("postgres"),
+            "local-only sleep should note Postgres durability gap, got {r}",
+        );
+        // The engine/agent caches are emptied after eviction.
+        assert!(
+            state.workspaces.read().await.is_empty() && state.agents.read().await.is_empty(),
+            "sleep must evict cached engine + agent",
         );
     }
 

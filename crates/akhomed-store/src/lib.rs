@@ -16,12 +16,17 @@
 
 pub mod entity;
 pub mod error;
+pub mod memberships;
 pub mod migration;
 pub mod mutations;
 pub mod snapshots;
 mod pool;
 
 pub use error::{StoreError, StoreResult};
+pub use memberships::{
+    join_workspace, leave_workspace, list_members, release_akh_lock, touch_last_seen,
+    try_acquire_akh_lock,
+};
 pub use migration::Migrator;
 pub use mutations::{MutationRow, append_mutations, ensure_akh};
 pub use pool::{PoolOptions, connect};
