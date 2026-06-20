@@ -28,6 +28,24 @@ pub struct PersonMemoryIndex {
     max_per_contact: usize,
 }
 
+/// JSON-safe projection of [`PersonMemoryIndex`] for snapshotting into the
+/// Phase 38c `akh_state.extra` bag.
+///
+/// `topic_index`'s `(String, SymbolId)` tuple key cannot be a JSON object key,
+/// so it is flattened to a sequence of `(key, value)` pairs; the other fields
+/// map directly. This projection exists *only* for the JSON snapshot path —
+/// `PersonMemoryIndex`'s own (bincode) `Serialize`/`Deserialize` is unchanged, so
+/// existing same-host `agent:person_memory` blobs keep deserialising.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PortablePersonMemory {
+    /// See [`PersonMemoryIndex::episodes_by_contact`] (String keys are JSON-safe).
+    pub episodes_by_contact: HashMap<String, Vec<SymbolId>>,
+    /// `topic_index` flattened to JSON-representable pairs.
+    pub topic_index: Vec<((String, SymbolId), Vec<SymbolId>)>,
+    /// See [`PersonMemoryIndex::max_per_contact`].
+    pub max_per_contact: usize,
+}
+
 impl PersonMemoryIndex {
     /// Create a new index with the given per-contact episode limit.
     pub fn new(max_per_contact: usize) -> Self {
@@ -182,6 +200,32 @@ impl PersonMemoryIndex {
                         .push(contact.symbol_id);
                 }
             }
+        }
+    }
+
+    /// Project into a JSON-safe [`PortablePersonMemory`] for snapshotting.
+    ///
+    /// Lossless: the `topic_index` map is flattened to a pair sequence so the
+    /// `(contact_id, topic)` tuple key survives JSON (unlike a KG rebuild, which
+    /// cannot recover which episode discussed which topic).
+    pub fn to_portable(&self) -> PortablePersonMemory {
+        PortablePersonMemory {
+            episodes_by_contact: self.episodes_by_contact.clone(),
+            topic_index: self
+                .topic_index
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+            max_per_contact: self.max_per_contact,
+        }
+    }
+
+    /// Rebuild a [`PersonMemoryIndex`] from its [`PortablePersonMemory`] projection.
+    pub fn from_portable(p: PortablePersonMemory) -> Self {
+        Self {
+            episodes_by_contact: p.episodes_by_contact,
+            topic_index: p.topic_index.into_iter().collect(),
+            max_per_contact: p.max_per_contact,
         }
     }
 }
@@ -393,5 +437,41 @@ mod tests {
         let topics = idx.topics_discussed_with(&cid);
         assert_eq!(topics[0].0, topic_rust);
         assert_eq!(topics[0].1, 2);
+    }
+
+    #[test]
+    fn portable_roundtrips_through_json() {
+        // The snapshot path serialises `to_portable()` as JSON. The tuple-keyed
+        // `topic_index` is the part JSON can't represent directly, so prove it
+        // survives a full to_value → from_value → from_portable round-trip.
+        let (engine, mut mgr, mut idx) = setup();
+        let cid = mgr
+            .create_contact(&engine, "Alice", &["alice@a.com".to_string()])
+            .unwrap();
+        let contact = mgr.get(&cid).unwrap();
+        let preds = mgr.preds();
+
+        let ep1 = engine.resolve_or_create_entity("episode:1").unwrap();
+        let ep2 = engine.resolve_or_create_entity("episode:2").unwrap();
+        let topic_rust = engine.resolve_or_create_entity("topic:rust").unwrap();
+        idx.tag_episode(&engine, ep1, &cid, contact.symbol_id, &[topic_rust], preds)
+            .unwrap();
+        idx.tag_episode(&engine, ep2, &cid, contact.symbol_id, &[], preds)
+            .unwrap();
+
+        let json = serde_json::to_value(idx.to_portable()).expect("to json");
+        let portable: PortablePersonMemory = serde_json::from_value(json).expect("from json");
+        let restored = PersonMemoryIndex::from_portable(portable);
+
+        assert_eq!(
+            restored.recall_with_person(&cid, 10),
+            idx.recall_with_person(&cid, 10),
+        );
+        assert_eq!(
+            restored.recall_with_person_about(&cid, topic_rust, 10),
+            idx.recall_with_person_about(&cid, topic_rust, 10),
+            "tuple-keyed topic_index must survive JSON",
+        );
+        assert_eq!(restored.total_episodes(), idx.total_episodes());
     }
 }

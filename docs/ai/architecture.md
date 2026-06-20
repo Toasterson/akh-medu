@@ -1,6 +1,6 @@
 # Akh-medu Architecture
 
-> Last updated: 2026-06-17 (Pure-ACP pivot **P8 COMPLETE**: the legacy inbound surfaces — REST API, WebSocket chat, bundled web UI, inbound MCP server — are retired; ACP is now akhomed's sole inbound transport. ADR 061. Then: TUI **streaming chat** — turns stream live over `session/update` (token-level via Ollama `stream:true`), with a progress spinner and Markdown rendering.)
+> Last updated: 2026-06-20 (Phase 38c: relational snapshot + wake/replay — Akh state lives in Postgres as typed rows (flat tables, SeaORM-portable for Turso; cognitive tables + `akh_state`; TimescaleDB graceful, AGE deferred), daemon snapshot ticker + `_akh/akh/{snapshot,wake}` control ops + `akh akh` CLI, ADR 049. Prior: 38a+38b `akhomed-store` crate + mutation WAL. Pure-ACP pivot **P8 COMPLETE** — legacy inbound surfaces retired, ACP is akhomed's sole inbound transport, ADR 061.)
 
 ## Overview
 
@@ -263,6 +263,85 @@ Cold (redb)        — ACID transactions, durable, slower writes
 Provenance (redb)  — multi-index ledger (derived/source/kind)
 SPARQL (oxigraph)  — persistent RDF store for structured queries
 ```
+
+### Postgres backing store (Phase 38, `crates/akhomed-store`)
+
+Phase 38 makes an Akh **relocatable**: the truth of its state lives in Postgres
+as **typed relational data** (no opaque blobs, no object store) while the daemon
+keeps the stores above as an in-process cache. 38a–38c are implemented.
+
+- New leaf crate `crates/akhomed-store/`: SeaORM entities + `sea-orm-migration`
+  migrations (schema-builder, not raw SQL), a pool builder, and the
+  `akhomed-migrate` CLI. The crate depends on nothing in `akh-medu`.
+- **Backend-portable schema** (Postgres now; SQLite / libSQL-**Turso** droppable
+  later): flat prefixed table names (`akhomed_*` / `workspaces_*`, **no** PG
+  schemas — SQLite has none), list-valued fields as SeaORM `Json` (no native
+  arrays), no DB-side defaults (UUIDs/timestamps generated in Rust). Postgres-only
+  optimizations are conditional add-ons: the `mutation_log` **TimescaleDB
+  hypertable** (probes `pg_available_extensions`; plain table where absent) and
+  an **AGE** read-projection over `facts` (deferred, 38d). ADR 049.
+- Tables: `akhomed_akh` (host-independent identity), `akhomed_facts` (KG triples,
+  content-addressed PK; AGE projects over this), `akhomed_symbols` (registry rows
+  — joins facts to labels), `akhomed_mutation_log` (the streaming WAL — 38b),
+  `akhomed_akh_state` (one runtime row/akh: watermark, allocator, cycle_count,
+  sleep phase, `psyche`/`extra` JSONB), the **cognitive tables** (`drives`,
+  `agenda`, `curiosity_config`, `goals`, `failure_cases`, `effort_cases`,
+  `learned_methods`, `competence_{tools,categories,calibration}`, `sleep_metrics`
+  — inspectable/queryable), plus `provenance` / `episodes` and the `workspaces_*`
+  membership tables (38f).
+- Gated behind the `postgres` cargo feature (folded into `server`); the lean
+  `akh` client never compiles SeaORM. Runtime-optional: with no `[postgres]`
+  config section the daemon logs a warning and runs in legacy local-only mode.
+- `[postgres]` config: `url`, `pool_size`, `connect_timeout_secs`,
+  `migrate_on_start` (`DATABASE_URL` overrides `url`).
+
+**Sub-phase 38b (implemented) — the mutation WAL.** Every successful
+assert/retract streams to `akhomed_mutation_log` within seconds; wake (38c)
+replays the tail. Bounded loss on crash, no loss while Postgres is down.
+
+- `src/mutation.rs` (core, ungated): a tiny `MutationSink` trait + `MutationKind`
+  taxonomy (assert/retract/microtheory_load/unload/compartment_create/destroy).
+  `Engine` holds `OnceLock<Arc<dyn MutationSink>>` and calls it after a
+  successful `add_triple` / `remove_triple`. The core carries **no** SeaORM
+  dependency — the lean `akh` client is unaffected.
+- `src/wal.rs` (postgres-gated): `MutationLog` implements `MutationSink`. A
+  synchronous, byte-capped `WalBuffer` (overflow drops oldest non-`assert`
+  first) feeds an async flusher that batches inserts every `flush_interval`.
+  Failed flushes re-insert the batch at the front and retry (at-least-once;
+  replay is idempotent). Stable per-workspace Akh/workspace UUIDs via UUIDv5.
+- Daemon: `ServerState::wire_wal` installs the WAL per workspace on first load
+  (ensuring the `akhomed_akh` row first); flushers drain on graceful shutdown.
+  WAL tuning in `[postgres]`: `wal_flush_interval_secs` (2), `wal_batch_size`
+  (64), `wal_max_buffer_mb` (16). WAL **retention/truncation** is deferred to a
+  later SleepCycle self-consolidation phase (38c does **not** truncate).
+
+**Sub-phase 38c (implemented) — relational snapshot + wake/replay.** The akh's
+DB is mechanical; an LLM facts-synthesis layer (off-time WAL→facts + a Curator
+Ennead-akh over Seshat) is deferred.
+
+- `src/snapshot.rs` (postgres-gated): `capture_snapshot` (sync — materialises the
+  live registry, KG, and cognitive subsystems into entity `Model`s; held under
+  the agent's `std::sync::Mutex` only for the fast in-memory copy) + the async
+  `persist_snapshot` (full-replaces the cognitive tables + upserts `akh_state`
+  with `watermark = MAX(mutation_log.seq)`). `wake(data_dir, akh_id,
+  workspace_id, db)` inverse-maps the rows back into a fresh host's redb meta
+  (`sym_meta:` registry + the `agent:*` bincode blobs the unchanged
+  `Agent::resume` reads), opens `Engine::new`, `restore_triples(facts)`, then
+  replays the WAL tail (`seq > watermark`) **before** the sink is wired (no
+  re-log). Goals are stored as full JSON in `goals.detail` (lossless across
+  data-bearing status variants); `session_summary`/`audience`/
+  `improvement_history`/`method_stats` ride in `akh_state.extra`. Managers
+  (PIM/calendar/causal/contact/…) and working memory rebuild from the KG /
+  defaults; a missing optional table degrades gracefully. The Phase 25c
+  `person_memory` index rides in `extra` as a JSON-safe `PortablePersonMemory`
+  projection (its `(contact, topic)` tuple key is flattened to a pair sequence).
+- Daemon: a per-workspace **snapshot ticker** (`spawn_snapshot_ticker`, alongside
+  `wire_wal`) snapshots every `snapshot_interval_secs` (default 300, `0`
+  disables); `shutdown_wals` stops tickers, takes a **final snapshot** per loaded
+  workspace, then drains the WAL. ACP control ops `_akh/akh/snapshot` /
+  `_akh/akh/wake` (CLI `akh akh snapshot|wake <ws>`) drive it manually; wake
+  routes a cold workspace through the normal lazy `get_agent` path so resume +
+  model-manager + WAL all apply.
 
 ## Provenance
 

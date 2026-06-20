@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/seshat", "crates/heka", "crates/anima-ai"]
+members = [".", "crates/seshat", "crates/heka", "crates/anima-ai", "crates/akhomed-store"]
 resolver = "3"
 
 [package]
@@ -125,6 +125,11 @@ safetensors = { version = "0.7", optional = true }
 # Deferred until Burn reaches stable release with decoupled dataset crate.
 # burn = { version = "0.21", optional = true, default-features = false, features = ["train", "ndarray", "std"] }
 
+# Phase 38: Postgres-backed durable store for relocatable Akhs (feature-gated).
+# Pulled in only under the `postgres` feature (folded into `server`), so the
+# lean `akh` client binary never compiles SeaORM/sqlx.
+akhomed-store = { path = "crates/akhomed-store", optional = true }
+
 # Calendar (feature-gated)
 icalendar = { version = "0.16", optional = true, features = ["parser"] }
 chrono = { version = "0.4", optional = true, features = ["serde"] }
@@ -148,8 +153,13 @@ default = ["nlu-candle", "acp"]
 daemon = ["tokio"]
 # `server` = the akhomed daemon feature set: workspace daemons + the ACP
 # inbound transport. (Pre-ADR-061 it pulled axum/tower-http for REST/WS;
-# those surfaces are gone, so it now just means daemon + acp.)
-server = ["daemon", "acp"]
+# those surfaces are gone, so it now just means daemon + acp.) Phase 38 folds
+# in the Postgres backing store.
+server = ["daemon", "acp", "postgres"]
+# Phase 38a/38b: Postgres backing store. Optional at runtime (no [postgres]
+# config = legacy local-only mode); this feature only controls whether the code
+# is built. Pulls in `tokio` because the WAL flusher (38b) is async.
+postgres = ["dep:akhomed-store", "tokio"]
 oxifed = ["daemon", "lapin", "deadpool-lapin", "futures-util"]
 email = ["mail-parser", "imap", "native-tls", "lettre"]
 calendar = ["icalendar", "chrono"]
