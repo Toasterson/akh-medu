@@ -6,6 +6,9 @@
 //! the `akhomed_*` tables (via `akhomed_store`); `wake` (38c.3) rebuilds an
 //! identical engine on a fresh host.
 
+use std::path::Path;
+use std::sync::Arc;
+
 use miette::Diagnostic;
 use thiserror::Error;
 
@@ -19,7 +22,11 @@ use akhomed_store::entity::{
 };
 
 use crate::agent::Agent;
-use crate::symbol::SymbolKind;
+use crate::engine::{Engine, EngineConfig};
+use crate::graph::Triple;
+use crate::registry::SymbolRegistry;
+use crate::store::TieredStore;
+use crate::symbol::{SymbolId, SymbolKind, SymbolMeta};
 
 /// Errors from the snapshot/wake path.
 #[derive(Debug, Error, Diagnostic)]
@@ -38,6 +45,25 @@ pub enum SnapshotError {
     #[error("engine error: {0}")]
     #[diagnostic(code(akh::snapshot::engine))]
     Engine(String),
+
+    /// No snapshot exists for the requested Akh — nothing to wake from.
+    #[error("no snapshot found for akh {0}")]
+    #[diagnostic(
+        code(akh::snapshot::not_found),
+        help("take a snapshot first, or boot the Akh fresh instead of waking it")
+    )]
+    NotFound(Uuid),
+
+    /// Opening the local redb store at the wake directory failed.
+    #[error("failed to open local store at {path}: {source}")]
+    #[diagnostic(code(akh::snapshot::store_open))]
+    StoreOpen {
+        /// The directory we tried to open.
+        path: String,
+        /// The underlying store error.
+        #[source]
+        source: crate::error::StoreError,
+    },
 }
 
 /// Convenience result alias.
@@ -266,6 +292,15 @@ pub async fn write_snapshot(
         .psyche
         .as_ref()
         .and_then(|p| serde_json::to_value(p).ok());
+    // `extra` carries the small, scalar-ish state that has no inspectable table
+    // of its own but is cheap to round-trip: the active audience, the per-goal
+    // improvement history, and the HTN method-usage stats. Each is restored to
+    // its `agent:*` meta key on wake.
+    let extra = serde_json::json!({
+        "audience": agent.audience,
+        "improvement_history": agent.improvement_history,
+        "method_stats": agent.method_registry_htn.export_stats(),
+    });
     let state = akh_state::Model {
         akh_id,
         watermark,
@@ -275,7 +310,7 @@ pub async fn write_snapshot(
         sleep_phase: format!("{:?}", agent.sleep_cycle.phase),
         last_sleep_cycle: agent.sleep_cycle.last_sleep_cycle as i64,
         psyche,
-        extra: None,
+        extra: Some(extra),
         updated_at: chrono::Utc::now(),
     };
     akhomed_store::snapshots::upsert_akh_state(db, state).await?;
@@ -332,13 +367,10 @@ fn goal_to_model(akh_id: Uuid, g: &crate::agent::Goal) -> goal::Model {
         .as_ref()
         .and_then(|s| serde_json::to_value(s).ok())
         .and_then(|v| json_variant(&v));
-    let detail = serde_json::json!({
-        "source": g.source,
-        "priority_rationale": g.priority_rationale,
-        "justification": g.justification,
-        "reformulated_from": g.reformulated_from.map(|s| s.get()),
-        "estimated_effort": g.estimated_effort,
-    });
+    // The flat columns above are for human/SQL inspection; `detail` carries the
+    // full, lossless `Goal` (including data-bearing status variants like
+    // `Failed { .. }` and nested optionals) so wake can reconstruct it exactly.
+    let detail = serde_json::to_value(g).ok();
     goal::Model {
         akh_id,
         id: g.symbol_id.get() as i64,
@@ -355,6 +387,491 @@ fn goal_to_model(akh_id: Uuid, g: &crate::agent::Goal) -> goal::Model {
             .unwrap_or_default(),
         blocked_by: serde_json::to_value(g.blocked_by.iter().map(|s| s.get()).collect::<Vec<_>>())
             .unwrap_or_default(),
-        detail: Some(detail),
+        detail,
+    }
+}
+
+// ===========================================================================
+// Wake (38c.3)
+// ===========================================================================
+
+/// Wake an Akh on a (possibly fresh) host from its Postgres snapshot.
+///
+/// Reconstructs the local redb meta the engine + agent expect from the
+/// relational tables, opens a fresh [`Engine`] over `data_dir`, restores the KG
+/// (+ item memory) from `facts`, then replays the mutation-log tail newer than
+/// the snapshot watermark. The caller resumes the agent with
+/// [`Agent::resume`](crate::agent::Agent::resume) and wires the WAL afterwards —
+/// replay here runs **before** any sink is installed, so it is not re-logged.
+///
+/// A missing optional cognitive table degrades gracefully: its `agent:*` meta is
+/// simply not written and `Agent::resume` falls back to defaults / KG rebuild.
+/// The only hard requirement is the `akh_state` row ([`SnapshotError::NotFound`]
+/// otherwise).
+pub async fn wake(
+    data_dir: &Path,
+    akh_id: Uuid,
+    workspace_id: Uuid,
+    db: &DatabaseConnection,
+) -> SnapshotResult<Arc<Engine>> {
+    use akhomed_store::snapshots as ops;
+
+    // 1. The runtime-state row is mandatory — without it there is nothing to wake.
+    let state = ops::load_akh_state(db, akh_id)
+        .await?
+        .ok_or(SnapshotError::NotFound(akh_id))?;
+
+    // 2. Load the relational truth. Each is best-effort: a missing/empty table
+    //    yields defaults downstream.
+    let symbol_rows = ops::load_symbols(db, akh_id).await?;
+    let fact_rows = ops::load_workspace_facts(db, workspace_id).await?;
+    let drive_rows = ops::load_drives(db, akh_id).await?;
+    let agenda_rows = ops::load_agenda(db, akh_id).await?;
+    let curiosity_rows = ops::load_curiosity(db, akh_id).await?;
+    let goal_rows = ops::load_goals(db, akh_id).await?;
+    let failure_rows = ops::load_failure_cases(db, akh_id).await?;
+    let effort_rows = ops::load_effort_cases(db, akh_id).await?;
+    let method_rows = ops::load_learned_methods(db, akh_id).await?;
+    let tool_rows = ops::load_competence_tools(db, akh_id).await?;
+    let category_rows = ops::load_competence_categories(db, akh_id).await?;
+    let calib_rows = ops::load_competence_calibration(db, akh_id).await?;
+    let sleep_rows = ops::load_sleep_metrics(db, akh_id).await?;
+
+    // 3. Reconstruct the local redb meta the engine + agent read on open. The
+    //    store must be dropped before `Engine::new` reopens the same redb file.
+    {
+        let store = TieredStore::with_persistence(data_dir, "symbols").map_err(|source| {
+            SnapshotError::StoreOpen {
+                path: data_dir.display().to_string(),
+                source,
+            }
+        })?;
+
+        write_registry(&store, &symbol_rows);
+        put_bincode(&store, b"sym_allocator_next", &(state.allocator_next as u64));
+        put_bincode(&store, b"agent:cycle_count", &(state.cycle_count as u64));
+
+        if let Some(d) = build_drive_system(&drive_rows) {
+            put_bincode(&store, b"agent:drive_system", &d);
+        }
+        put_bincode(&store, b"agent:agenda", &build_agenda(&agenda_rows));
+        if let Some(c) = build_curiosity(&curiosity_rows) {
+            put_bincode(&store, b"agent:curiosity_config", &c);
+        }
+        let goals = build_goals(&goal_rows);
+        if !goals.is_empty() {
+            put_bincode(&store, b"agent:goals", &goals);
+        }
+        put_bincode(
+            &store,
+            b"agent:failure_cases",
+            &build_failure_cases(&failure_rows),
+        );
+        if let Some(e) = build_effort_cases(&effort_rows) {
+            put_bincode(&store, b"agent:effort_cases", &e);
+        }
+        if let Some(m) = build_learned_methods(&method_rows) {
+            put_bincode(&store, b"agent:learned_methods", &m);
+        }
+        put_bincode(
+            &store,
+            b"agent:competence_model",
+            &build_competence(&tool_rows, &category_rows, &calib_rows),
+        );
+        put_bincode(
+            &store,
+            b"agent:sleep_cycle",
+            &build_sleep_cycle(&state, &sleep_rows),
+        );
+
+        // Psyche + the `extra` misc state.
+        if let Some(psyche) = state.psyche.as_ref().and_then(|v| {
+            serde_json::from_value::<crate::compartment::psyche::Psyche>(v.clone()).ok()
+        }) {
+            put_bincode(&store, b"agent:psyche", &psyche);
+        }
+        restore_extra(&store, state.extra.as_ref());
+    }
+
+    // 4. Open the engine over the reconstructed redb (registry + allocator come
+    //    back here; the KG is still empty).
+    let engine = Arc::new(
+        Engine::new(EngineConfig {
+            data_dir: Some(data_dir.to_path_buf()),
+            ..Default::default()
+        })
+        .map_err(|e| SnapshotError::Engine(e.to_string()))?,
+    );
+
+    // 5. Restore the KG (+ item memory) from the relational facts.
+    let triples: Vec<Triple> = fact_rows.iter().filter_map(fact_to_triple).collect();
+    engine
+        .restore_triples(&triples)
+        .map_err(|e| SnapshotError::Engine(e.to_string()))?;
+
+    // 6. Replay the WAL tail newer than the snapshot watermark. No sink is
+    //    installed yet, so these mutations are applied but not re-logged.
+    let tail = ops::load_mutation_tail(db, akh_id, state.watermark).await?;
+    let mut replayed = 0usize;
+    for m in &tail {
+        if apply_mutation(&engine, m) {
+            replayed += 1;
+        }
+    }
+    tracing::info!(
+        akh = %akh_id,
+        triples = triples.len(),
+        symbols = symbol_rows.len(),
+        tail = tail.len(),
+        replayed,
+        "woke akh from postgres snapshot"
+    );
+
+    // 7. Flush the reconstructed KG snapshot back to local redb so a plain
+    //    restart (without Postgres) recovers too.
+    engine
+        .persist()
+        .map_err(|e| SnapshotError::Engine(e.to_string()))?;
+
+    Ok(engine)
+}
+
+// --- wake helpers ---
+
+/// bincode-encode `value` and write it under `key` (best-effort: a failure to
+/// encode or persist a single optional meta value is logged, not fatal).
+fn put_bincode<T: serde::Serialize>(store: &TieredStore, key: &[u8], value: &T) {
+    match bincode::serialize(value) {
+        Ok(bytes) => {
+            if let Err(e) = store.put_meta(key, &bytes) {
+                tracing::warn!(key = %String::from_utf8_lossy(key), error = %e, "wake: meta write failed");
+            }
+        }
+        Err(e) => {
+            tracing::warn!(key = %String::from_utf8_lossy(key), error = %e, "wake: meta encode failed");
+        }
+    }
+}
+
+/// Rebuild the symbol registry from `symbols` rows and persist it as `sym_meta:`
+/// entries — the format [`Engine::new`] reads on open.
+fn write_registry(store: &TieredStore, rows: &[symbol::Model]) {
+    let registry = SymbolRegistry::new();
+    for row in rows {
+        let Some(id) = SymbolId::new(row.id as u64) else {
+            continue;
+        };
+        let kind = symbol_kind_from(&row.kind, row.glyph_codepoint);
+        if let Err(e) = registry.register(SymbolMeta::new(id, kind, row.label.clone())) {
+            tracing::warn!(label = %row.label, error = %e, "wake: skipping duplicate symbol");
+        }
+    }
+    if let Err(e) = registry.persist(store) {
+        tracing::warn!(error = %e, "wake: symbol registry persist failed");
+    }
+}
+
+/// Inverse of [`symbol_kind_parts`].
+fn symbol_kind_from(kind: &str, glyph: Option<i32>) -> SymbolKind {
+    match kind {
+        "Relation" => SymbolKind::Relation,
+        "Composite" => SymbolKind::Composite,
+        "Glyph" => SymbolKind::Glyph {
+            codepoint: char::from_u32(glyph.unwrap_or(0) as u32).unwrap_or('\u{FFFD}'),
+        },
+        _ => SymbolKind::Entity,
+    }
+}
+
+fn drive_kind_from(label: &str) -> Option<crate::agent::drives::DriveKind> {
+    use crate::agent::drives::DriveKind;
+    Some(match label {
+        "curiosity" => DriveKind::Curiosity,
+        "coherence" => DriveKind::Coherence,
+        "completeness" => DriveKind::Completeness,
+        "efficiency" => DriveKind::Efficiency,
+        _ => return None,
+    })
+}
+
+fn build_drive_system(rows: &[drive::Model]) -> Option<crate::agent::drives::DriveSystem> {
+    use crate::agent::drives::{Drive, DriveSnapshot, DriveSystem};
+    if rows.is_empty() {
+        return None;
+    }
+    let mut system = DriveSystem::new();
+    for row in rows {
+        let Some(kind) = drive_kind_from(&row.kind) else {
+            continue;
+        };
+        let idx = kind as usize;
+        system.drives[idx] = Drive {
+            kind,
+            strength: row.strength,
+            last_computed: row.last_computed as u64,
+            last_snapshot: DriveSnapshot {
+                triple_count: row.last_triple_count as usize,
+                symbol_count: row.last_symbol_count as usize,
+            },
+        };
+        system.thresholds[idx] = row.threshold;
+    }
+    Some(system)
+}
+
+fn build_agenda(rows: &[agenda::Model]) -> crate::agent::project::Agenda {
+    let mut agenda = crate::agent::project::Agenda::default();
+    for row in rows {
+        let Some(id) = SymbolId::new(row.project_id as u64) else {
+            continue;
+        };
+        agenda.projects.push((id, row.priority as u8));
+        if row.is_active {
+            agenda.active_project = Some(id);
+        }
+    }
+    agenda
+}
+
+fn build_curiosity(
+    rows: &[curiosity_config::Model],
+) -> Option<crate::agent::curiosity::DirectedCuriosityConfig> {
+    let row = rows.first()?;
+    Some(crate::agent::curiosity::DirectedCuriosityConfig {
+        max_targets: row.max_targets as usize,
+        proximal_low: row.proximal_low,
+        proximal_high: row.proximal_high,
+        peak_fill_ratio: row.peak_fill_ratio,
+        beyond_curiosity_factor: row.beyond_curiosity_factor,
+        known_curiosity_factor: row.known_curiosity_factor,
+    })
+}
+
+/// Reconstruct goals from the lossless `detail` JSON (the flat columns are for
+/// inspection only and drop data-bearing status variants).
+fn build_goals(rows: &[goal::Model]) -> Vec<crate::agent::Goal> {
+    rows.iter()
+        .filter_map(|row| {
+            row.detail
+                .as_ref()
+                .and_then(|v| serde_json::from_value::<crate::agent::Goal>(v.clone()).ok())
+        })
+        .collect()
+}
+
+fn build_failure_cases(rows: &[failure_case::Model]) -> Vec<crate::agent::metacognition::FailureCase> {
+    use crate::agent::metacognition::FailureCase;
+    let mut rows: Vec<_> = rows.iter().collect();
+    rows.sort_by_key(|r| r.seq);
+    rows.into_iter()
+        .map(|r| FailureCase {
+            goal_description: r.goal_description.clone(),
+            tool_name: r.tool_name.clone(),
+            error_message: r.error_message.clone(),
+            cycle: r.cycle as u64,
+            resolved: r.resolved,
+            resolution_tool: r.resolution_tool.clone(),
+            vector: r.vector.clone(),
+        })
+        .collect()
+}
+
+fn build_effort_cases(rows: &[effort_case::Model]) -> Option<Vec<crate::agent::resource::EffortCase>> {
+    use crate::agent::resource::EffortCase;
+    if rows.is_empty() {
+        return None;
+    }
+    let mut rows: Vec<_> = rows.iter().collect();
+    rows.sort_by_key(|r| r.seq);
+    Some(
+        rows.into_iter()
+            .map(|r| EffortCase {
+                description: r.description.clone(),
+                goal_vector: bincode::deserialize(&r.goal_vector).unwrap_or_default(),
+                cycles_consumed: r.cycles_consumed as u32,
+                succeeded: r.succeeded,
+                tool_usage: serde_json::from_value(r.tool_usage.clone()).unwrap_or_default(),
+                initial_coverage: r.initial_coverage as u32,
+            })
+            .collect(),
+    )
+}
+
+fn build_learned_methods(
+    rows: &[learned_method::Model],
+) -> Option<Vec<crate::agent::chunking::LearnedMethod>> {
+    use crate::agent::chunking::LearnedMethod;
+    if rows.is_empty() {
+        return None;
+    }
+    Some(
+        rows.iter()
+            .filter_map(|r| {
+                let id = SymbolId::new(r.id as u64)?;
+                Some(LearnedMethod {
+                    id,
+                    name: r.name.clone(),
+                    precondition_vector: r.precondition_vector.clone(),
+                    precondition_pattern: r.precondition_pattern.clone(),
+                    steps: serde_json::from_value(r.steps.clone()).unwrap_or_default(),
+                    confidence: r.confidence,
+                    usage_count: r.usage_count as u32,
+                    success_count: r.success_count as u32,
+                    failure_count: r.failure_count as u32,
+                    learned_at: r.learned_at as u64,
+                    last_used: r.last_used as u64,
+                    source_goal_description: r.source_goal_description.clone(),
+                })
+            })
+            .collect(),
+    )
+}
+
+fn build_competence(
+    tools: &[competence_tool::Model],
+    categories: &[competence_category::Model],
+    calib: &[competence_calibration::Model],
+) -> crate::agent::metacognition::CompetenceModel {
+    use crate::agent::metacognition::{CalibrationPoint, CategoryRecord, CompetenceModel, ToolRecord};
+    let mut model = CompetenceModel::default();
+    for t in tools {
+        model.tools.insert(
+            t.tool.clone(),
+            ToolRecord {
+                successes: t.successes as u32,
+                attempts: t.attempts as u32,
+            },
+        );
+    }
+    for c in categories {
+        model.categories.insert(
+            c.category.clone(),
+            CategoryRecord {
+                completed: c.completed as u32,
+                attempted: c.attempted as u32,
+            },
+        );
+    }
+    let mut calib: Vec<_> = calib.iter().collect();
+    calib.sort_by_key(|c| c.seq);
+    for c in calib {
+        model.calibration_history.push(CalibrationPoint {
+            predicted: c.predicted,
+            actual: c.actual,
+        });
+    }
+    model
+}
+
+fn build_sleep_cycle(
+    state: &akh_state::Model,
+    rows: &[sleep_metric::Model],
+) -> crate::agent::sleep::SleepCycle {
+    use crate::agent::sleep::{SleepConfig, SleepCycle, SleepMetrics};
+    // SleepConfig is `[config]`-driven, not per-Akh state (see ADR 049 / plan);
+    // start from defaults and overlay the persisted phase + metrics history.
+    let mut cycle = SleepCycle::new(SleepConfig::default());
+    cycle.phase = parse_consolidation_phase(&state.sleep_phase);
+    cycle.last_sleep_cycle = state.last_sleep_cycle as u64;
+    let mut rows: Vec<_> = rows.iter().collect();
+    rows.sort_by_key(|r| r.cycle);
+    cycle.metrics_history = rows
+        .into_iter()
+        .map(|r| {
+            (
+                r.cycle as u64,
+                SleepMetrics {
+                    episodes_replayed: r.episodes_replayed as usize,
+                    duplicates_merged: r.duplicates_merged as usize,
+                    orphans_pruned: r.orphans_pruned as usize,
+                    dream_connections_found: r.dream_connections_found as usize,
+                    equivalences_discovered: r.equivalences_discovered as usize,
+                    duration_cycles: r.duration_cycles as u64,
+                },
+            )
+        })
+        .collect();
+    cycle
+}
+
+/// Parse a `ConsolidationPhase` from its `Debug` rendering (how `write_snapshot`
+/// stores it). Unknown / absent → `Wake`.
+fn parse_consolidation_phase(s: &str) -> crate::agent::sleep::ConsolidationPhase {
+    use crate::agent::sleep::ConsolidationPhase;
+    match s {
+        "Consolidation" => ConsolidationPhase::Consolidation,
+        "Reorganization" => ConsolidationPhase::Reorganization,
+        "DreamState" => ConsolidationPhase::DreamState,
+        _ => ConsolidationPhase::Wake,
+    }
+}
+
+/// Restore the `akh_state.extra` JSONB bag into its individual `agent:*` meta keys.
+fn restore_extra(store: &TieredStore, extra: Option<&serde_json::Value>) {
+    let Some(extra) = extra else {
+        return;
+    };
+    if let Some(a) = extra.get("audience").and_then(|v| {
+        serde_json::from_value::<crate::agent::priority_reasoning::Audience>(v.clone()).ok()
+    }) {
+        put_bincode(store, b"agent:audience", &a);
+    }
+    if let Some(h) = extra.get("improvement_history").and_then(|v| {
+        serde_json::from_value::<crate::agent::resource::ImprovementHistory>(v.clone()).ok()
+    }) {
+        put_bincode(store, b"agent:improvement_history", &h);
+    }
+    if let Some(stats) = extra.get("method_stats").and_then(|v| {
+        serde_json::from_value::<Vec<crate::agent::decomposition::MethodStats>>(v.clone()).ok()
+    }) {
+        put_bincode(store, b"agent:method_stats", &stats);
+    }
+}
+
+/// Convert a persisted `facts` row into a KG [`Triple`].
+fn fact_to_triple(row: &fact::Model) -> Option<Triple> {
+    let s = SymbolId::new(row.subject as u64)?;
+    let p = SymbolId::new(row.predicate as u64)?;
+    let o = SymbolId::new(row.object as u64)?;
+    let mut t = Triple::new(s, p, o);
+    t.confidence = row.confidence;
+    t.timestamp = row.asserted_at.timestamp().max(0) as u64;
+    t.provenance_id = row.provenance_id.map(|v| v as u64);
+    t.compartment_id = row.compartment.clone();
+    Some(t)
+}
+
+/// Apply one replayed WAL mutation. Returns whether it was applied (unknown
+/// kinds and malformed payloads are skipped). Microtheory/compartment replay is
+/// deferred (38d).
+fn apply_mutation(engine: &Engine, m: &akhomed_store::TailMutation) -> bool {
+    let ids = |p: &serde_json::Value| -> Option<(SymbolId, SymbolId, SymbolId)> {
+        Some((
+            SymbolId::new(p.get("subject")?.as_u64()?)?,
+            SymbolId::new(p.get("predicate")?.as_u64()?)?,
+            SymbolId::new(p.get("object")?.as_u64()?)?,
+        ))
+    };
+    match m.kind.as_str() {
+        "assert" => {
+            let Some((s, p, o)) = ids(&m.payload) else {
+                return false;
+            };
+            let mut t = Triple::new(s, p, o);
+            if let Some(c) = m.payload.get("confidence").and_then(|v| v.as_f64()) {
+                t.confidence = c as f32;
+            }
+            if let Some(comp) = m.payload.get("compartment").and_then(|v| v.as_str()) {
+                t.compartment_id = Some(comp.to_string());
+            }
+            engine.add_triple(&t).is_ok()
+        }
+        "retract" => {
+            let Some((s, p, o)) = ids(&m.payload) else {
+                return false;
+            };
+            engine.remove_triple(s, p, o).is_ok()
+        }
+        _ => false,
     }
 }

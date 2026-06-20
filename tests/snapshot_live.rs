@@ -6,12 +6,13 @@
 //!     cargo test --features server --test snapshot_live -- --ignored
 #![cfg(feature = "postgres")]
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use akh_medu::agent::{Agent, AgentConfig};
 use akh_medu::engine::{Engine, EngineConfig};
 use akh_medu::graph::Triple;
-use akh_medu::snapshot::write_snapshot;
+use akh_medu::snapshot::{wake, write_snapshot};
 use akh_medu::symbol::SymbolKind;
 use akhomed_store::sea_orm::{self, ConnectionTrait, DbBackend, Statement};
 use akhomed_store::uuid::Uuid;
@@ -24,6 +25,26 @@ async fn count(db: &sea_orm::DatabaseConnection, sql: &str) -> i64 {
         .unwrap()
         .unwrap();
     row.try_get::<i64>("", "c").unwrap()
+}
+
+async fn exec(db: &sea_orm::DatabaseConnection, sql: &str) {
+    db.execute(Statement::from_string(DbBackend::Postgres, sql.to_owned()))
+        .await
+        .unwrap();
+}
+
+/// Sorted `(subject, predicate, object)` set of an engine's live triples.
+fn triple_set(engine: &Engine) -> BTreeSet<(u64, u64, u64)> {
+    engine
+        .all_triples()
+        .iter()
+        .map(|t| (t.subject.get(), t.predicate.get(), t.object.get()))
+        .collect()
+}
+
+/// Sorted label set of an engine's registry.
+fn label_set(engine: &Engine) -> BTreeSet<String> {
+    engine.dump_symbols().into_iter().map(|m| m.label).collect()
 }
 
 #[tokio::test]
@@ -100,4 +121,161 @@ async fn snapshot_populates_relational_tables() {
         1,
         "snapshot must not truncate the WAL",
     );
+}
+
+/// End-to-end relocation: snapshot on a source host, append a WAL tail newer
+/// than the watermark, then `wake` into a fresh data dir against the same
+/// Postgres. The woken engine must have identical symbol labels, the snapshot's
+/// triples with the tail applied (one assert + one retract), and the restored
+/// `cycle_count`.
+#[tokio::test]
+#[ignore = "requires AKH_TEST_PG_URL"]
+async fn wake_reconstructs_identical_akh() {
+    let Ok(url) = std::env::var("AKH_TEST_PG_URL") else {
+        eprintln!("skipping: set AKH_TEST_PG_URL");
+        return;
+    };
+    let db = connect(&akhomed_store::PoolOptions::new(url)).await.unwrap();
+    run_migrations(&db).await.unwrap();
+
+    let akh_id = Uuid::new_v4();
+    let workspace_id = Uuid::new_v4();
+
+    // --- Source host ---
+    let src = tempfile::tempdir().unwrap();
+    let engine = Arc::new(
+        Engine::new(EngineConfig {
+            data_dir: Some(src.path().join("kg")),
+            ..Default::default()
+        })
+        .unwrap(),
+    );
+    let sun = engine.create_symbol(SymbolKind::Entity, "Sun").unwrap();
+    let is_a = engine.create_symbol(SymbolKind::Relation, "is-a").unwrap();
+    let star = engine.create_symbol(SymbolKind::Entity, "Star").unwrap();
+    let planet = engine.create_symbol(SymbolKind::Entity, "Planet").unwrap();
+    engine.add_triple(&Triple::new(sun.id, is_a.id, star.id)).unwrap();
+
+    let agent = Agent::new(Arc::clone(&engine), AgentConfig::default()).expect("agent");
+    ensure_akh(&db, akh_id, "wake-test", None).await.unwrap();
+    write_snapshot(&agent, akh_id, workspace_id, &db).await.expect("snapshot");
+
+    let src_labels = label_set(&engine);
+
+    // Make cycle_count restoration observable (no DB default; set directly).
+    exec(
+        &db,
+        &format!("UPDATE akhomed_akh_state SET cycle_count = 42 WHERE akh_id = '{akh_id}'"),
+    )
+    .await;
+
+    // --- WAL tail (seq > watermark): assert (Sun is-a Planet), retract (Sun is-a Star) ---
+    append_mutations(
+        &db,
+        akh_id,
+        workspace_id,
+        &[
+            MutationRow {
+                kind: "assert".into(),
+                payload: serde_json::json!({
+                    "subject": sun.id.get(),
+                    "predicate": is_a.id.get(),
+                    "object": planet.id.get(),
+                    "confidence": 1.0,
+                    "compartment": null,
+                }),
+            },
+            MutationRow {
+                kind: "retract".into(),
+                payload: serde_json::json!({
+                    "subject": sun.id.get(),
+                    "predicate": is_a.id.get(),
+                    "object": star.id.get(),
+                }),
+            },
+        ],
+    )
+    .await
+    .unwrap();
+
+    // --- Wake on a fresh host/dir ---
+    let dst = tempfile::tempdir().unwrap();
+    let woken = wake(&dst.path().join("kg"), akh_id, workspace_id, &db)
+        .await
+        .expect("wake");
+
+    assert_eq!(
+        label_set(&woken),
+        src_labels,
+        "symbol labels must survive relocation",
+    );
+
+    let triples = triple_set(&woken);
+    assert!(
+        triples.contains(&(sun.id.get(), is_a.id.get(), planet.id.get())),
+        "asserted tail triple must be replayed: {triples:?}",
+    );
+    assert!(
+        !triples.contains(&(sun.id.get(), is_a.id.get(), star.id.get())),
+        "retracted tail triple must be absent: {triples:?}",
+    );
+
+    // cycle_count is restored via the agent:* meta the wake rebuilt.
+    let woken_agent = Agent::resume(Arc::clone(&woken), AgentConfig::default()).expect("resume");
+    assert_eq!(woken_agent.cycle_count(), 42, "cycle_count must be restored");
+}
+
+/// A missing optional cognitive table must not abort wake — the Akh still comes
+/// back with its KG and symbols, just with that subsystem at defaults.
+#[tokio::test]
+#[ignore = "requires AKH_TEST_PG_URL"]
+async fn degraded_wake_succeeds_with_missing_table() {
+    let Ok(url) = std::env::var("AKH_TEST_PG_URL") else {
+        eprintln!("skipping: set AKH_TEST_PG_URL");
+        return;
+    };
+    let db = connect(&akhomed_store::PoolOptions::new(url)).await.unwrap();
+    run_migrations(&db).await.unwrap();
+
+    let akh_id = Uuid::new_v4();
+    let workspace_id = Uuid::new_v4();
+
+    let src = tempfile::tempdir().unwrap();
+    let engine = Arc::new(
+        Engine::new(EngineConfig {
+            data_dir: Some(src.path().join("kg")),
+            ..Default::default()
+        })
+        .unwrap(),
+    );
+    let a = engine.create_symbol(SymbolKind::Entity, "Maat").unwrap();
+    let rel = engine.create_symbol(SymbolKind::Relation, "embodies").unwrap();
+    let b = engine.create_symbol(SymbolKind::Entity, "Order").unwrap();
+    engine.add_triple(&Triple::new(a.id, rel.id, b.id)).unwrap();
+
+    let agent = Agent::new(Arc::clone(&engine), AgentConfig::default()).expect("agent");
+    ensure_akh(&db, akh_id, "degraded-test", None).await.unwrap();
+    write_snapshot(&agent, akh_id, workspace_id, &db).await.expect("snapshot");
+
+    let src_labels = label_set(&engine);
+    let src_triples = triple_set(&engine);
+
+    // Simulate a partial/old snapshot: the drives table never got written.
+    exec(
+        &db,
+        &format!("DELETE FROM akhomed_drives WHERE akh_id = '{akh_id}'"),
+    )
+    .await;
+
+    let dst = tempfile::tempdir().unwrap();
+    let woken = wake(&dst.path().join("kg"), akh_id, workspace_id, &db)
+        .await
+        .expect("degraded wake must still succeed");
+
+    assert_eq!(label_set(&woken), src_labels, "labels intact despite missing table");
+    assert_eq!(triple_set(&woken), src_triples, "KG intact despite missing table");
+
+    // Resume must still work; drives fall back to defaults (4 of them).
+    let woken_agent = Agent::resume(Arc::clone(&woken), AgentConfig::default()).expect("resume");
+    assert_eq!(woken_agent.drives().drives.len(), 4, "drives default-rebuilt");
 }
