@@ -1971,18 +1971,29 @@ async fn main() {
             .clone()
             .or_else(|| auto_start.first().cloned())
             .unwrap_or_else(|| "default".to_string());
-        // Only auto-create when the workspace is *truly* new — neither a data dir
-        // NOR a config file. Guarding on the data dir alone would overwrite an
-        // existing `akh.toml` (which carries akh-level fields like `backend`,
-        // `model`, `[ollama_endpoint]`) with a bare default WorkspaceConfig,
-        // silently dropping the chat-backing selection (ADR 070). When a config
-        // exists, the engine is built lazily from it on first ACP call.
+        // Ensure the workspace the ACP server will bind *exists* (data dir), but
+        // never clobber an existing `akh.toml`. `WorkspaceManager::create` persists
+        // only the `WorkspaceConfig` view, so calling it with a default would drop
+        // akh-level fields (`backend`, `model`, `[ollama_endpoint]`, ADR 070). When
+        // an `akh.toml` already exists, create from its embedded WorkspaceConfig and
+        // then restore the full AkhConfig so the chat-backing selection survives.
         let cfg_file = paths.workspace_config_file(&acp_ws);
-        if !paths.workspace(&acp_ws).exists() && !cfg_file.exists() {
+        if !paths.workspace(&acp_ws).exists() {
             let wsm = WorkspaceManager::new(paths.clone());
-            match wsm.create(akh_medu::workspace::WorkspaceConfig::with_name(&acp_ws)) {
+            let existing = cfg_file.exists().then(|| AkhConfig::load(&cfg_file).ok()).flatten();
+            let ws_cfg = existing
+                .as_ref()
+                .map(|c| c.workspace.clone())
+                .unwrap_or_else(|| akh_medu::workspace::WorkspaceConfig::with_name(&acp_ws));
+            match wsm.create(ws_cfg) {
                 Ok(_) => {
-                    tracing::info!(workspace = %acp_ws, "auto-created ACP workspace (self-bootstrap)")
+                    // Restore akh-level fields that `create` doesn't persist.
+                    if let Some(akh_cfg) = existing {
+                        if let Err(e) = akh_cfg.save(&cfg_file) {
+                            tracing::warn!(workspace = %acp_ws, error = %e, "failed to restore akh.toml after create");
+                        }
+                    }
+                    tracing::info!(workspace = %acp_ws, "ensured ACP workspace exists (self-bootstrap)")
                 }
                 Err(e) => {
                     tracing::warn!(workspace = %acp_ws, error = %e, "failed to auto-create ACP workspace")

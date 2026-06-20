@@ -11,12 +11,13 @@ is_main = true
 # explicitly here for clarity (ADR 070).
 backend = "ollama"
 
-# GLM over ollama.com cloud. The user runs GLM 5.2; cloud model tags are
-# published as `<name>:cloud` (or `<name>:<size>-cloud`). Confirm the exact tag
-# for your account with `ollama list` or https://ollama.com/library, then pin it
-# here. `glm-4.6:cloud` is the last known-published GLM cloud tag — update to the
-# 5.2 tag once confirmed.
-model = "glm-4.6:cloud"
+# GLM over ollama.com cloud. When akhomed talks to ollama.com directly
+# (kind=cloud + API key), use the bare published tag — NOT a `:cloud`-suffixed
+# one (that suffix is for a local ollama proxying cloud). Verified live against
+# ollama.com on 2026-06-20: `glm-5.2` works (`glm-4.6` was retired 2026-06-16).
+# List the live catalog: `curl -s https://ollama.com/api/tags -H "Authorization:
+# Bearer $OLLAMA_API_KEY"`.
+model = "glm-5.2"
 
 system_prompt = """
 You are Tecton, an akh focused on structure and engineering: systems, schemas,

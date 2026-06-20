@@ -89,7 +89,20 @@ impl Agent {
         // Refresh per-akh state (e.g. the Ollama system-prompt cache) from psyche.
         backend.prepare(agent_id, self.psyche.as_ref());
 
-        let tools = ollama_tool_catalog(&self.tool_registry);
+        let mut tools = ollama_tool_catalog(&self.tool_registry);
+        // Optional cap on the tool catalog (AKH_AGENT_MAX_TOOLS). The full catalog
+        // is several thousand tokens — too large for a small-context in-process
+        // model (e.g. Candle Gemma on a constrained host), where it dominates
+        // prefill cost. `0` runs the akh tool-free (pure chat). A precursor to the
+        // Phase 44 budget-driven tool selection.
+        if let Some(cap) = std::env::var("AKH_AGENT_MAX_TOOLS")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            && cap < tools.len()
+        {
+            tracing::debug!(cap, from = tools.len(), "capping tool catalog (AKH_AGENT_MAX_TOOLS)");
+            tools.truncate(cap);
+        }
 
         // Phase 44a (ADR 065): assemble the working context through the akh's
         // `ContextManager` instead of building the prompt ad hoc. The default

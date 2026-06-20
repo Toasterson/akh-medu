@@ -7,14 +7,13 @@ name = "thoth"
 is_main = true
 backend = "ollama"
 
-# "Best reasoning model available in ollama cloud." `gpt-oss:120b-cloud` is the
-# project's standard high-reasoning cloud model (it honours `reasoning_effort` /
-# the `think` flag). Strong alternatives on ollama.com cloud, swap as you like:
-#   - deepseek-v3.1:671b-cloud   (thinking)
-#   - qwen3-coder:480b-cloud
-#   - kimi-k2:1t-cloud
-# Confirm availability with `ollama list`.
-model = "gpt-oss:120b-cloud"
+# "Best reasoning model available in ollama cloud." Use the bare published tag
+# (not `:cloud`-suffixed) when akhomed hits ollama.com directly. Verified live
+# 2026-06-20: `gpt-oss:120b` works and honours `reasoning_effort`/`think`. Strong
+# alternatives in the live catalog: `deepseek-v4-pro`, `nemotron-3-ultra`,
+# `minimax-m3`, `qwen3.5:397b`. List: `curl -s https://ollama.com/api/tags
+# -H "Authorization: Bearer $OLLAMA_API_KEY"`.
+model = "gpt-oss:120b"
 
 # Crank the model's own reasoning budget for this akh ("low" | "medium" | "high").
 reasoning_effort = "high"

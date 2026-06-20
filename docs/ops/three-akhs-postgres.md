@@ -147,3 +147,34 @@ on whichever host has the GGUF + GPU.
 > Concurrent `migrate_on_start` across these hosts is safe — the advisory-locked
 > migration runner serializes them. If you prefer, run `akh migrate` once from a
 > single host before starting the rest.
+
+## 9. Tuning + known limitations (live findings, RX 7900 XTX, 2026-06-20)
+
+Env knobs (set in the daemon's environment):
+
+- **`AKH_GPU_MATMUL=1`** + **`AKH_GPU_QUANT=1`** — route the Candle akh's linear
+  GEMMs through the AMD GPU (rocBLAS, int4-resident). Needs the `rocm` feature
+  build. Verified: gemma4-12B → ~7 GB VRAM resident, GPU active during decode.
+- **`AKH_LLM_MODEL=gemma4`** — pick which GGUF the Candle paths load.
+- **`AKH_NLU_LLM=0`** — skip the NLU tier-3 LLM load. **Required on a
+  memory-constrained host running a Candle chat akh**: otherwise the daemon loads
+  the large model *twice* (NLU + chat backing — they don't yet share one instance)
+  and can OOM (two gemma4-12B ≈ 30 GB RSS).
+- **`AKH_AGENT_MAX_TOOLS=N`** — cap the agentic tool catalog. The full catalog is
+  several thousand prompt tokens; for a small-context in-process model it dominates
+  prefill and makes turns very slow. `0` runs the akh tool-free (pure chat). Cloud
+  akhs (Tecton/Thoth) don't need this — the cloud handles the full prompt fast.
+
+Limitations as of this writing:
+
+- **One daemon binds one akh's data-plane.** `akh -w <name> chat` / `acp status`
+  go to the daemon's `[acp].workspace`, not `<name>` — only the *control-plane*
+  (`akh -w <name> akh snapshot/sleep/wake/relocate`, `migrate`) honours `-w`. To
+  use several akhs today, bind one per daemon (`[acp].workspace`) — or run one
+  daemon per akh. Per-request data-plane workspace routing is a planned fix.
+- **Candle GPU offload is partial** (linear GEMMs only; attention/lm_head still
+  CPU), so gemma4-12B agentic turns are slow — pair it with `AKH_AGENT_MAX_TOOLS`
+  to keep prompts short. Cloud akhs are unaffected.
+- **Same-host `wake` after `sleep`** of the *bound* akh can hit a redb lock (the
+  ACP server pins the engine). Cross-host relocation (fresh data dir) is the
+  supported path and is covered by `tests/relocation.rs`.
