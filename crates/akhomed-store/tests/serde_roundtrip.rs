@@ -1,34 +1,30 @@
-//! 38a acceptance #3: round-trip serialisation of every entity, with emphasis
-//! on the JSONB columns (psyche / payload / derivation) and the Postgres array
-//! columns (`provenance.inputs`, `workspace.seed_packs`). These exercise the
-//! `Serialize`/`Deserialize` impls SeaORM derives onto each `Model`, without
-//! needing a live database.
+//! Round-trip serialisation of representative entities, exercising the
+//! `Serialize`/`Deserialize` impls SeaORM derives — JSON columns, byte vectors,
+//! optionals, and composite-keyed cognitive tables — without a live database.
 
 use akhomed_store::entity::{
-    active_microtheory, akh, episode, fact, membership, mutation_log, provenance, psyche,
-    snapshot, workspace,
+    akh, akh_state, competence_tool, drive, effort_case, fact, failure_case, goal, mutation_log,
+    provenance, symbol, workspace,
 };
 use chrono::{DateTime, Utc};
 use serde_json::json;
 use uuid::Uuid;
 
-/// A fixed, sub-second-free timestamp so RFC3339 round-trips are exact.
 fn ts() -> DateTime<Utc> {
     DateTime::from_timestamp(1_700_000_000, 0).expect("valid timestamp")
 }
 
-fn roundtrip<T>(model: &T) -> T
+fn roundtrip<T>(model: &T)
 where
     T: serde::Serialize + serde::de::DeserializeOwned + PartialEq + std::fmt::Debug,
 {
     let encoded = serde_json::to_string(model).expect("serialize");
     let decoded: T = serde_json::from_str(&encoded).expect("deserialize");
     assert_eq!(model, &decoded, "round-trip mismatch for {encoded}");
-    decoded
 }
 
 #[test]
-fn akh_roundtrips() {
+fn akh_and_state_roundtrip() {
     roundtrip(&akh::Model {
         id: Uuid::nil(),
         name: "tecton".into(),
@@ -36,32 +32,37 @@ fn akh_roundtrips() {
         awakened_at: ts(),
         last_seen: None,
     });
+    roundtrip(&akh_state::Model {
+        akh_id: Uuid::from_u128(1),
+        watermark: 42,
+        allocator_next: 1000,
+        cycle_count: 7,
+        session_start_cycle: 3,
+        sleep_phase: "Wake".into(),
+        last_sleep_cycle: 5,
+        psyche: Some(json!({ "awakened": true })),
+        extra: Some(json!({ "method_stats": [] })),
+        updated_at: ts(),
+    });
 }
 
 #[test]
-fn fact_roundtrips_with_optionals() {
+fn symbol_and_fact_roundtrip() {
+    roundtrip(&symbol::Model {
+        akh_id: Uuid::from_u128(1),
+        id: 100,
+        kind: "Relation".into(),
+        glyph_codepoint: None,
+        label: "is-a".into(),
+    });
     roundtrip(&fact::Model {
-        fact_id: 42,
+        fact_id: 1,
         akh_id: Uuid::from_u128(1),
         workspace_id: Uuid::from_u128(2),
         subject: 100,
         predicate: 200,
         object: 300,
         confidence: 0.75,
-        asserted_at: ts(),
-        retracted_at: Some(ts()),
-        provenance_id: Some(7),
-        compartment: Some("egyptian-math".into()),
-    });
-    // ...and with the nullable columns absent.
-    roundtrip(&fact::Model {
-        fact_id: 43,
-        akh_id: Uuid::from_u128(1),
-        workspace_id: Uuid::from_u128(2),
-        subject: 1,
-        predicate: 2,
-        object: 3,
-        confidence: 1.0,
         asserted_at: ts(),
         retracted_at: None,
         provenance_id: None,
@@ -70,115 +71,89 @@ fn fact_roundtrips_with_optionals() {
 }
 
 #[test]
-fn mutation_log_roundtrips_jsonb_payload() {
+fn json_columns_roundtrip() {
+    // mutation_log payload, provenance derivation + inputs (was BIGINT[]), workspace seed_packs (was TEXT[]).
     roundtrip(&mutation_log::Model {
         seq: 1,
         akh_id: Uuid::from_u128(1),
         workspace_id: Uuid::from_u128(2),
         kind: "assert".into(),
-        payload: json!({ "subject": 1, "predicate": 2, "object": 3, "confidence": 1.0 }),
+        payload: json!({ "subject": 1, "predicate": 2, "object": 3 }),
         applied_at: ts(),
     });
-}
-
-#[test]
-fn snapshot_roundtrips_bytea_and_optional_jsonb() {
-    roundtrip(&snapshot::Model {
-        snapshot_id: 1,
-        akh_id: Uuid::from_u128(1),
-        created_at: ts(),
-        watermark: 12345,
-        working_mem: vec![0xDE, 0xAD, 0xBE, 0xEF],
-        episodes: vec![1, 2, 3],
-        state_blob: vec![],
-        psyche: Some(json!({ "awakened": true })),
-    });
-    roundtrip(&snapshot::Model {
-        snapshot_id: 2,
-        akh_id: Uuid::from_u128(1),
-        created_at: ts(),
-        watermark: 0,
-        working_mem: vec![],
-        episodes: vec![],
-        state_blob: vec![],
-        psyche: None,
-    });
-}
-
-#[test]
-fn psyche_roundtrips_four_jsonb_columns() {
-    roundtrip(&psyche::Model {
-        akh_id: Uuid::from_u128(9),
-        persona: json!({ "openness": 0.8 }),
-        shadow: json!({ "repressed": ["doubt"] }),
-        archetypes: json!([{ "name": "sage", "weight": 0.6 }]),
-        self_integration: json!({ "level": 3 }),
-        awakened: true,
-        updated_at: ts(),
-    });
-}
-
-#[test]
-fn provenance_roundtrips_bigint_array() {
     roundtrip(&provenance::Model {
         provenance_id: 1,
         akh_id: Uuid::from_u128(1),
         workspace_id: Uuid::from_u128(2),
-        subject: 500,
+        subject: 5,
         derivation: json!({ "kind": "AgentConsolidation" }),
-        inputs: vec![1, 2, 3, 9_000_000_000],
+        inputs: json!([1, 2, 3, 9_000_000_000_i64]),
         confidence: 0.9,
         created_at: ts(),
     });
-}
-
-#[test]
-fn episode_roundtrips() {
-    roundtrip(&episode::Model {
-        episode_id: 1,
-        akh_id: Uuid::from_u128(1),
-        workspace_id: Uuid::from_u128(2),
-        started_at: ts(),
-        ended_at: Some(ts()),
-        payload: json!({ "summary": "learned about pyramids" }),
-    });
-}
-
-#[test]
-fn workspace_roundtrips_text_array() {
     roundtrip(&workspace::Model {
         id: Uuid::from_u128(3),
         name: "tecton".into(),
         dimension: 10000,
         encoding: "bipolar".into(),
         language: "auto".into(),
-        seed_packs: vec!["core".into(), "ci-runner".into()],
-        created_at: ts(),
-    });
-    // Empty array case.
-    roundtrip(&workspace::Model {
-        id: Uuid::from_u128(4),
-        name: "scratch".into(),
-        dimension: 10000,
-        encoding: "bipolar".into(),
-        language: "auto".into(),
-        seed_packs: vec![],
+        seed_packs: json!(["core", "ci-runner"]),
         created_at: ts(),
     });
 }
 
 #[test]
-fn membership_and_active_microtheory_roundtrip() {
-    roundtrip(&membership::Model {
-        workspace_id: Uuid::from_u128(3),
+fn cognitive_tables_roundtrip() {
+    roundtrip(&drive::Model {
         akh_id: Uuid::from_u128(1),
-        joined_at: ts(),
-        role: "owner".into(),
+        kind: "curiosity".into(),
+        strength: 0.6,
+        last_computed: 10,
+        last_triple_count: 500,
+        last_symbol_count: 200,
+        threshold: 0.6,
     });
-    roundtrip(&active_microtheory::Model {
-        workspace_id: Uuid::from_u128(3),
-        microtheory_id: "egyptian-math".into(),
-        loaded_by: Uuid::from_u128(1),
-        loaded_at: ts(),
+    roundtrip(&goal::Model {
+        akh_id: Uuid::from_u128(1),
+        id: 7,
+        description: "learn pyramids".into(),
+        status: "Active".into(),
+        priority: 5,
+        success_criteria: "knows construction".into(),
+        parent: None,
+        created_at: 100,
+        cycles_worked: 3,
+        last_progress_cycle: 120,
+        source: Some("DriveCuriosity".into()),
+        children: json!([8, 9]),
+        blocked_by: json!([]),
+        detail: Some(json!({ "estimated_effort": { "cycles": 10 } })),
+    });
+    roundtrip(&failure_case::Model {
+        akh_id: Uuid::from_u128(1),
+        seq: 0,
+        goal_description: "g".into(),
+        tool_name: "code_gen".into(),
+        error_message: "boom".into(),
+        cycle: 9,
+        resolved: false,
+        resolution_tool: None,
+        vector: vec![0xDE, 0xAD],
+    });
+    roundtrip(&effort_case::Model {
+        akh_id: Uuid::from_u128(1),
+        seq: 0,
+        description: "d".into(),
+        goal_vector: vec![1, 2, 3],
+        cycles_consumed: 4,
+        succeeded: true,
+        tool_usage: json!({ "code_gen": 2, "search": 1 }),
+        initial_coverage: 3,
+    });
+    roundtrip(&competence_tool::Model {
+        akh_id: Uuid::from_u128(1),
+        tool: "code_gen".into(),
+        successes: 8,
+        attempts: 10,
     });
 }

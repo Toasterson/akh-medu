@@ -8,7 +8,7 @@ use sea_orm::entity::prelude::*;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize)]
-#[sea_orm(schema_name = "akhomed", table_name = "mutation_log")]
+#[sea_orm(table_name = "akhomed_mutation_log")]
 pub struct Model {
     /// Monotonic per-store sequence (BIGSERIAL); also the snapshot watermark unit.
     #[sea_orm(primary_key)]
@@ -22,7 +22,7 @@ pub struct Model {
     pub kind: String,
 
     /// Kind-specific payload.
-    #[sea_orm(column_type = "JsonBinary")]
+    #[sea_orm(column_type = "Json")]
     pub payload: Json,
 
     pub applied_at: DateTimeUtc,

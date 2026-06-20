@@ -18,12 +18,14 @@ pub mod entity;
 pub mod error;
 pub mod migration;
 pub mod mutations;
+pub mod snapshots;
 mod pool;
 
 pub use error::{StoreError, StoreResult};
 pub use migration::Migrator;
 pub use mutations::{MutationRow, append_mutations, ensure_akh};
 pub use pool::{PoolOptions, connect};
+pub use snapshots::TailMutation;
 
 // Re-export the connection type, the `sea_orm` crate, and `uuid` so downstream
 // crates (the `akhomed` daemon, its tests) can name the pool, run raw queries,

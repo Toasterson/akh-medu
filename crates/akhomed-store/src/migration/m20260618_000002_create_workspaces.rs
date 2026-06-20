@@ -1,67 +1,105 @@
-//! Migration: create the `workspaces` schema and its tables.
-//!
-//! Depends on `akhomed.akh` existing (membership + active_microtheories
-//! reference it), which the prior migration guarantees.
+//! Migration: workspace metadata + membership (flat `workspaces_*` tables, builder-only).
 
 use sea_orm_migration::prelude::*;
 
 #[derive(DeriveMigrationName)]
 pub struct Migration;
 
+#[derive(DeriveIden)]
+enum Workspace {
+    #[sea_orm(iden = "workspaces_workspace")]
+    Table,
+    Id,
+    Name,
+    Dimension,
+    Encoding,
+    Language,
+    SeedPacks,
+    CreatedAt,
+}
+
+#[derive(DeriveIden)]
+enum Membership {
+    #[sea_orm(iden = "workspaces_membership")]
+    Table,
+    WorkspaceId,
+    AkhId,
+    JoinedAt,
+    Role,
+}
+
+#[derive(DeriveIden)]
+enum ActiveMicrotheories {
+    #[sea_orm(iden = "workspaces_active_microtheories")]
+    Table,
+    WorkspaceId,
+    MicrotheoryId,
+    LoadedBy,
+    LoadedAt,
+}
+
 #[async_trait::async_trait]
 impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        let db = manager.get_connection();
-
-        db.execute_unprepared("CREATE SCHEMA IF NOT EXISTS workspaces")
+        manager
+            .create_table(
+                Table::create()
+                    .table(Workspace::Table)
+                    .if_not_exists()
+                    .col(ColumnDef::new(Workspace::Id).uuid().not_null().primary_key())
+                    .col(ColumnDef::new(Workspace::Name).text().not_null().unique_key())
+                    .col(ColumnDef::new(Workspace::Dimension).integer().not_null())
+                    .col(ColumnDef::new(Workspace::Encoding).text().not_null())
+                    .col(ColumnDef::new(Workspace::Language).text().not_null())
+                    .col(ColumnDef::new(Workspace::SeedPacks).json().not_null())
+                    .col(ColumnDef::new(Workspace::CreatedAt).timestamp_with_time_zone().not_null())
+                    .to_owned(),
+            )
             .await?;
 
-        // --- workspaces.workspace — workspace metadata ---
-        db.execute_unprepared(
-            "CREATE TABLE IF NOT EXISTS workspaces.workspace (
-                id            UUID PRIMARY KEY,
-                name          TEXT NOT NULL UNIQUE,
-                dimension     INTEGER NOT NULL DEFAULT 10000,
-                encoding      TEXT NOT NULL DEFAULT 'bipolar',
-                language      TEXT NOT NULL DEFAULT 'auto',
-                seed_packs    TEXT[] NOT NULL DEFAULT '{}',
-                created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
-            )",
-        )
-        .await?;
+        manager
+            .create_table(
+                Table::create()
+                    .table(Membership::Table)
+                    .if_not_exists()
+                    .col(ColumnDef::new(Membership::WorkspaceId).uuid().not_null())
+                    .col(ColumnDef::new(Membership::AkhId).uuid().not_null())
+                    .col(ColumnDef::new(Membership::JoinedAt).timestamp_with_time_zone().not_null())
+                    .col(ColumnDef::new(Membership::Role).text().not_null())
+                    .primary_key(Index::create().col(Membership::WorkspaceId).col(Membership::AkhId))
+                    .to_owned(),
+            )
+            .await?;
 
-        // --- workspaces.membership — which Akhs are in which workspaces ---
-        db.execute_unprepared(
-            "CREATE TABLE IF NOT EXISTS workspaces.membership (
-                workspace_id  UUID NOT NULL REFERENCES workspaces.workspace(id),
-                akh_id        UUID NOT NULL REFERENCES akhomed.akh(id),
-                joined_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
-                role          TEXT NOT NULL DEFAULT 'member',
-                PRIMARY KEY (workspace_id, akh_id)
-            )",
-        )
-        .await?;
-
-        // --- workspaces.active_microtheories — activated microtheories ---
-        db.execute_unprepared(
-            "CREATE TABLE IF NOT EXISTS workspaces.active_microtheories (
-                workspace_id   UUID NOT NULL REFERENCES workspaces.workspace(id),
-                microtheory_id TEXT NOT NULL,
-                loaded_by      UUID NOT NULL REFERENCES akhomed.akh(id),
-                loaded_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-                PRIMARY KEY (workspace_id, microtheory_id)
-            )",
-        )
-        .await?;
+        manager
+            .create_table(
+                Table::create()
+                    .table(ActiveMicrotheories::Table)
+                    .if_not_exists()
+                    .col(ColumnDef::new(ActiveMicrotheories::WorkspaceId).uuid().not_null())
+                    .col(ColumnDef::new(ActiveMicrotheories::MicrotheoryId).text().not_null())
+                    .col(ColumnDef::new(ActiveMicrotheories::LoadedBy).uuid().not_null())
+                    .col(ColumnDef::new(ActiveMicrotheories::LoadedAt).timestamp_with_time_zone().not_null())
+                    .primary_key(
+                        Index::create()
+                            .col(ActiveMicrotheories::WorkspaceId)
+                            .col(ActiveMicrotheories::MicrotheoryId),
+                    )
+                    .to_owned(),
+            )
+            .await?;
 
         Ok(())
     }
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        manager
-            .get_connection()
-            .execute_unprepared("DROP SCHEMA IF EXISTS workspaces CASCADE")
-            .await?;
+        for table in [
+            ActiveMicrotheories::Table.into_table_ref(),
+            Membership::Table.into_table_ref(),
+            Workspace::Table.into_table_ref(),
+        ] {
+            manager.drop_table(Table::drop().table(table).if_exists().to_owned()).await?;
+        }
         Ok(())
     }
 }

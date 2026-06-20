@@ -7,7 +7,7 @@ use sea_orm::entity::prelude::*;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize)]
-#[sea_orm(schema_name = "workspaces", table_name = "membership")]
+#[sea_orm(table_name = "workspaces_membership")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub workspace_id: Uuid,

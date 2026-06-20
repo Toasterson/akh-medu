@@ -8,7 +8,7 @@ use sea_orm::entity::prelude::*;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize)]
-#[sea_orm(schema_name = "akhomed", table_name = "provenance")]
+#[sea_orm(table_name = "akhomed_provenance")]
 pub struct Model {
     #[sea_orm(primary_key)]
     pub provenance_id: i64,
@@ -20,11 +20,13 @@ pub struct Model {
     pub subject: i64,
 
     /// Serialised `DerivationKind`.
-    #[sea_orm(column_type = "JsonBinary")]
+    #[sea_orm(column_type = "Json")]
     pub derivation: Json,
 
-    /// Input `SymbolId`s (as `i64`) that produced this fact.
-    pub inputs: Vec<i64>,
+    /// Input `SymbolId`s as a JSON array of integers. Stored as JSON (not a
+    /// native `BIGINT[]`) so the schema stays portable to SQLite/libSQL-Turso.
+    #[sea_orm(column_type = "Json")]
+    pub inputs: Json,
 
     pub confidence: f32,
     pub created_at: DateTimeUtc,

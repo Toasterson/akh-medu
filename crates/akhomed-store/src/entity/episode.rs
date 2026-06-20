@@ -7,7 +7,7 @@ use sea_orm::entity::prelude::*;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize)]
-#[sea_orm(schema_name = "akhomed", table_name = "episodes")]
+#[sea_orm(table_name = "akhomed_episodes")]
 pub struct Model {
     #[sea_orm(primary_key)]
     pub episode_id: i64,
@@ -19,7 +19,7 @@ pub struct Model {
     pub ended_at: Option<DateTimeUtc>,
 
     /// Serialised episode struct.
-    #[sea_orm(column_type = "JsonBinary")]
+    #[sea_orm(column_type = "Json")]
     pub payload: Json,
 }
 

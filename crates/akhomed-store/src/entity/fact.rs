@@ -8,7 +8,7 @@ use sea_orm::entity::prelude::*;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize)]
-#[sea_orm(schema_name = "akhomed", table_name = "facts")]
+#[sea_orm(table_name = "akhomed_facts")]
 pub struct Model {
     /// Surrogate key (BIGSERIAL).
     #[sea_orm(primary_key)]

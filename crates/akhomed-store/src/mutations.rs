@@ -22,11 +22,10 @@ pub struct MutationRow {
     pub payload: serde_json::Value,
 }
 
-/// Ensure an `akhomed.akh` identity row exists (idempotent).
+/// Ensure an `akhomed_akh` identity row exists (idempotent).
 ///
-/// Required before appending mutations: `mutation_log.akh_id` has a foreign key
-/// to `akh.id`. Uses `INSERT ... ON CONFLICT (id) DO NOTHING`; an existing row
-/// is treated as success.
+/// Recorded before appending mutations so the Akh identity is known. Uses
+/// `INSERT ... ON CONFLICT (id) DO NOTHING`; an existing row is treated as success.
 pub async fn ensure_akh(
     db: &DatabaseConnection,
     akh_id: Uuid,
@@ -37,7 +36,8 @@ pub async fn ensure_akh(
         id: Set(akh_id),
         name: Set(name.to_owned()),
         home_host: Set(home_host.map(str::to_owned)),
-        awakened_at: NotSet, // DB default now()
+        // Timestamps set app-side (no DB defaults) for backend portability.
+        awakened_at: Set(chrono::Utc::now()),
         last_seen: NotSet,
     };
     let result = akh::Entity::insert(model)
@@ -68,6 +68,7 @@ pub async fn append_mutations(
     if rows.is_empty() {
         return Ok(0);
     }
+    let now = chrono::Utc::now();
     let models: Vec<mutation_log::ActiveModel> = rows
         .iter()
         .map(|r| mutation_log::ActiveModel {
@@ -76,7 +77,7 @@ pub async fn append_mutations(
             workspace_id: Set(workspace_id),
             kind: Set(r.kind.clone()),
             payload: Set(r.payload.clone()),
-            applied_at: NotSet,
+            applied_at: Set(now),
         })
         .collect();
     mutation_log::Entity::insert_many(models).exec(db).await?;

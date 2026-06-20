@@ -8,7 +8,7 @@ use sea_orm::entity::prelude::*;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize)]
-#[sea_orm(schema_name = "akhomed", table_name = "akh")]
+#[sea_orm(table_name = "akhomed_akh")]
 pub struct Model {
     /// Stable Akh identity (host-independent).
     #[sea_orm(primary_key, auto_increment = false)]

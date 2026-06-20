@@ -8,7 +8,7 @@ use sea_orm::entity::prelude::*;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize)]
-#[sea_orm(schema_name = "workspaces", table_name = "workspace")]
+#[sea_orm(table_name = "workspaces_workspace")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub id: Uuid,
@@ -20,8 +20,10 @@ pub struct Model {
     pub encoding: String,
     pub language: String,
 
-    /// Seed packs to apply on first activation.
-    pub seed_packs: Vec<String>,
+    /// Seed packs to apply on first activation. JSON array of strings (not a
+    /// native `TEXT[]`) so the schema stays portable to SQLite/libSQL-Turso.
+    #[sea_orm(column_type = "Json")]
+    pub seed_packs: Json,
 
     pub created_at: DateTimeUtc,
 }

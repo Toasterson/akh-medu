@@ -18,7 +18,7 @@ async fn count(db: &sea_orm::DatabaseConnection, akh: Uuid) -> i64 {
     let row = db
         .query_one(Statement::from_string(
             DbBackend::Postgres,
-            format!("SELECT count(*)::bigint AS c FROM akhomed.mutation_log WHERE akh_id = '{akh}'"),
+            format!("SELECT count(*)::bigint AS c FROM akhomed_mutation_log WHERE akh_id = '{akh}'"),
         ))
         .await
         .unwrap()
