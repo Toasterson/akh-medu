@@ -1095,6 +1095,7 @@ dependencies = [
  "float8",
  "gemm 0.19.0",
  "half",
+ "libloading 0.8.9",
  "libm",
  "memmap2",
  "num-traits",
