@@ -44,6 +44,11 @@ Do this:
 2. Pull the image: `docker pull code.aopc.cloud/toasterson/akhomed:cloud`.
 3. Create the config tree under ~/akh-thoth/config/akh-medu/ :
    - copy ~/akh-certs/* into ~/akh-thoth/config/akh-medu/certs/
+   - IMPORTANT: `chmod 0644 ~/akh-thoth/config/akh-medu/certs/*.key` — the
+     container runs as a non-root user whose uid won't match yours, so a 0600 key
+     is unreadable inside the container and the akh silently falls back to
+     local-only (no Postgres). 0644 is fine (the server's mTLS requirement is the
+     real boundary; sqlx doesn't enforce key perms).
    - config.toml:
        [postgres]
        url = "postgres://akhomed@akh-pg.wegmueller.it:5432/akhomed?sslmode=verify-full&sslrootcert=/config/akh-medu/certs/ca.crt&sslcert=/config/akh-medu/certs/archibald-client.crt&sslkey=/config/akh-medu/certs/archibald-client.key"

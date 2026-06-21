@@ -57,6 +57,20 @@ system_prompt = "You are Thoth, a reasoning akh. Set up and test the OpenIndiana
 The Ollama cloud key is passed as an env var, not baked into the image
 (`OLLAMA_CLOUD_KEY`).
 
+**Cert permissions (gotcha):** the container runs as its own non-root user, which
+won't match the host uid that owns the mounted cert files. The client key is
+`0600` by default → unreadable inside the container → the akh silently falls back
+to local-only (no Postgres). Make the bundle readable to the container user:
+
+```bash
+chmod 0644 config/akh-medu/certs/akhomed-client.key   # readable to the container's akh user
+```
+
+(sqlx/rustls doesn't enforce key-file perms the way libpq does, so `0644` is fine.
+The security boundary is the server's mTLS requirement, not the local key mode.)
+Alternatively run with `--user "$(id -u):$(id -g)"` and keep `0600`, but then the
+`/data` volume must be writable by that uid.
+
 ## Run (docker / podman)
 
 ```bash
