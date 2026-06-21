@@ -193,4 +193,60 @@ mod hip_backend_tests {
         let zv: Vec<f32> = z.flatten_all().unwrap().to_vec1().unwrap();
         assert_eq!(zv, vec![0.0f32; 6], "device zeros must read back as zero");
     }
+
+    /// Phase 45d: rocBLAS `matmul` on the gfx1100 must match the CPU result for both
+    /// a plain 2-D product and a batched 3-D product (catches m/n-swap, leading-dim
+    /// and batch-stride bugs).
+    #[test]
+    fn hip_matmul_matches_cpu() {
+        use candle_core::{Device, Tensor};
+        let dev = Device::new_cuda(0).expect("HIP device");
+
+        // 2-D: (2x3) @ (3x4) = (2x4)
+        let a: Vec<f32> = (0..6).map(|i| i as f32 * 0.5 - 1.0).collect();
+        let b: Vec<f32> = (0..12).map(|i| i as f32 * 0.25).collect();
+        let c_cpu: Vec<f32> = Tensor::from_vec(a.clone(), (2, 3), &Device::Cpu)
+            .unwrap()
+            .matmul(&Tensor::from_vec(b.clone(), (3, 4), &Device::Cpu).unwrap())
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1()
+            .unwrap();
+        let c_gpu: Vec<f32> = Tensor::from_vec(a, (2, 3), &dev)
+            .unwrap()
+            .matmul(&Tensor::from_vec(b, (3, 4), &dev).unwrap())
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1()
+            .unwrap();
+        assert_eq!(c_cpu.len(), c_gpu.len());
+        for (x, y) in c_cpu.iter().zip(&c_gpu) {
+            assert!((x - y).abs() < 1e-3, "2D matmul mismatch: cpu={x} gpu={y}");
+        }
+
+        // 3-D batched: (2x2x3) @ (2x3x4) = (2x2x4)
+        let a2: Vec<f32> = (0..12).map(|i| i as f32 * 0.3 - 1.0).collect();
+        let b2: Vec<f32> = (0..24).map(|i| i as f32 * 0.1).collect();
+        let c2_cpu: Vec<f32> = Tensor::from_vec(a2.clone(), (2, 2, 3), &Device::Cpu)
+            .unwrap()
+            .matmul(&Tensor::from_vec(b2.clone(), (2, 3, 4), &Device::Cpu).unwrap())
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1()
+            .unwrap();
+        let c2_gpu: Vec<f32> = Tensor::from_vec(a2, (2, 2, 3), &dev)
+            .unwrap()
+            .matmul(&Tensor::from_vec(b2, (2, 3, 4), &dev).unwrap())
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1()
+            .unwrap();
+        for (x, y) in c2_cpu.iter().zip(&c2_gpu) {
+            assert!((x - y).abs() < 1e-3, "batched matmul mismatch: cpu={x} gpu={y}");
+        }
+    }
 }

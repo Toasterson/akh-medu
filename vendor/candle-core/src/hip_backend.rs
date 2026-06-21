@@ -18,6 +18,7 @@
 use crate::op::{BinaryOpT, CmpOp, ReduceOp, UnaryOpT};
 use crate::{CpuStorage, DType, Error, Layout, Result, Shape};
 use std::ffi::c_void;
+use std::os::raw::c_int;
 
 /// Minimal dlopen'd HIP runtime (device mgmt + memory). Kept inside candle-core
 /// because candle cannot depend on the akh-medu crate; Phase 45d migrates the
@@ -191,11 +192,161 @@ mod runtime {
     pub fn hip() -> std::result::Result<&'static Hip, String> {
         HIP.get_or_init(Hip::load).as_ref().map_err(|e| e.clone())
     }
+
+    // ---- rocBLAS (matmul; Phase 45d) ----
+
+    /// `rocblas_operation`: no transpose / transpose.
+    pub const OP_N: c_int = 111;
+    pub const OP_T: c_int = 112;
+
+    const ROCBLAS_LIB_CANDIDATES: &[&str] = &[
+        "/opt/rocm/lib/librocblas.so",
+        "/opt/rocm/lib/librocblas.so.4",
+        "librocblas.so",
+        "librocblas.so.4",
+    ];
+
+    type CreateHandle = unsafe extern "C" fn(*mut *mut c_void) -> c_int;
+    #[allow(clippy::type_complexity)]
+    type SgemmStridedBatched = unsafe extern "C" fn(
+        *mut c_void, // handle
+        c_int,
+        c_int, // transa, transb
+        c_int,
+        c_int,
+        c_int, // m, n, k
+        *const f32,
+        *const f32,
+        c_int,
+        i64, // alpha, A, lda, stride_a
+        *const f32,
+        c_int,
+        i64, // B, ldb, stride_b
+        *const f32,
+        *mut f32,
+        c_int,
+        i64,   // beta, C, ldc, stride_c
+        c_int, // batch_count
+    ) -> c_int;
+
+    /// rocBLAS handle + the one GEMM entry point we need. The handle is created once
+    /// (binds to the device current at first use) and reused, mirroring the persistent
+    /// handle in `akh_medu::nlu::hip`.
+    pub struct Rocblas {
+        _lib: Library,
+        handle: *mut c_void,
+        sgemm_strided_batched: SgemmStridedBatched,
+    }
+    unsafe impl Send for Rocblas {}
+    unsafe impl Sync for Rocblas {}
+
+    impl Rocblas {
+        fn load() -> std::result::Result<Self, String> {
+            let lib = ROCBLAS_LIB_CANDIDATES
+                .iter()
+                .find_map(|p| unsafe { Library::new(p).ok() })
+                .ok_or_else(|| {
+                    format!("could not dlopen librocblas (tried {ROCBLAS_LIB_CANDIDATES:?})")
+                })?;
+            unsafe {
+                let create: CreateHandle = *lib
+                    .get(b"rocblas_create_handle\0")
+                    .map_err(|e| format!("missing rocblas_create_handle: {e}"))?;
+                let sgemm: SgemmStridedBatched = *lib
+                    .get(b"rocblas_sgemm_strided_batched\0")
+                    .map_err(|e| format!("missing rocblas_sgemm_strided_batched: {e}"))?;
+                let mut handle: *mut c_void = std::ptr::null_mut();
+                let rc = create(&mut handle);
+                if rc != 0 || handle.is_null() {
+                    return Err(format!("rocblas_create_handle failed (rc={rc})"));
+                }
+                Ok(Rocblas {
+                    _lib: lib,
+                    handle,
+                    sgemm_strided_batched: sgemm,
+                })
+            }
+        }
+
+        /// `C = A·B` (column-major) batched, with `alpha=1, beta=0`. Pointers are
+        /// device pointers; the caller maps candle's row-major (b,m,n,k) onto this.
+        #[allow(clippy::too_many_arguments)]
+        pub fn sgemm_strided_batched(
+            &self,
+            transa: c_int,
+            transb: c_int,
+            m: c_int,
+            n: c_int,
+            k: c_int,
+            a: *const f32,
+            lda: c_int,
+            stride_a: i64,
+            b: *const f32,
+            ldb: c_int,
+            stride_b: i64,
+            c: *mut f32,
+            ldc: c_int,
+            stride_c: i64,
+            batch: c_int,
+        ) -> std::result::Result<(), String> {
+            let alpha = 1.0f32;
+            let beta = 0.0f32;
+            let rc = unsafe {
+                (self.sgemm_strided_batched)(
+                    self.handle,
+                    transa,
+                    transb,
+                    m,
+                    n,
+                    k,
+                    &alpha,
+                    a,
+                    lda,
+                    stride_a,
+                    b,
+                    ldb,
+                    stride_b,
+                    &beta,
+                    c,
+                    ldc,
+                    stride_c,
+                    batch,
+                )
+            };
+            if rc != 0 {
+                return Err(format!("rocblas_sgemm_strided_batched failed (rc={rc})"));
+            }
+            Ok(())
+        }
+    }
+
+    static ROCBLAS: OnceLock<std::result::Result<Rocblas, String>> = OnceLock::new();
+
+    /// The process-wide rocBLAS handle, created on first matmul (after a device is
+    /// selected). Separate from [`hip`] so device + memory (45c) work without rocBLAS.
+    pub fn rocblas() -> std::result::Result<&'static Rocblas, String> {
+        ROCBLAS.get_or_init(Rocblas::load).as_ref().map_err(|e| e.clone())
+    }
 }
 
 /// Fetch the HIP runtime, mapping a load failure to a candle error.
 fn hip() -> Result<&'static runtime::Hip> {
     runtime::hip().map_err(Error::Msg)
+}
+
+/// Port of the batch-stride computation in candle's `cuda_backend::gemm_config`:
+/// the element stride between consecutive matrices in a batched GEMM.
+fn batch_stride(stride: &[usize], dims: &[usize], default: usize) -> Result<usize> {
+    match stride[..stride.len() - 2] {
+        [s1, s] if s1 == s * dims[1] => Ok(s),
+        [_, s] if dims[0] == 1 => Ok(s),
+        [s, _] if dims[1] == 1 => Ok(s),
+        [s] => Ok(s),
+        [] => Ok(default),
+        _ => Err(Error::Msg(format!(
+            "HIP matmul: unsupported batched stride {stride:?}"
+        ))),
+    }
 }
 
 /// "Implemented in a later Phase 45 step" error for compute ops the HIP backend
@@ -488,14 +639,88 @@ impl crate::backend::BackendStorage for HipStorage {
         hip_todo!("index_add")
     }
 
+    /// Batched f32 matmul via rocBLAS (Phase 45d). Maps candle's row-major
+    /// `(b, m, n, k)` + operand layouts onto a column-major strided-batched GEMM
+    /// exactly as candle's `cuda_backend::gemm_config` does (rhs = "A", lhs = "B",
+    /// `m`/`n` swapped, transposes derived from strides). f16/bf16 follow later.
     fn matmul(
         &self,
-        _: &Self,
-        _: (usize, usize, usize, usize),
-        _: &Layout,
-        _: &Layout,
+        rhs: &Self,
+        (b, m, n, k): (usize, usize, usize, usize),
+        lhs_l: &Layout,
+        rhs_l: &Layout,
     ) -> Result<Self> {
-        hip_todo!("matmul")
+        if self.dtype != DType::F32 || rhs.dtype != DType::F32 {
+            return Err(Error::Msg(format!(
+                "HIP matmul: only f32 supported (Phase 45d); got lhs={:?} rhs={:?}",
+                self.dtype, rhs.dtype
+            )));
+        }
+        let rb = runtime::rocblas().map_err(Error::Msg)?;
+        let h = hip()?;
+
+        let lhs_stride = lhs_l.stride();
+        let rhs_stride = rhs_l.stride();
+        let rhs_m1 = rhs_stride[rhs_stride.len() - 1];
+        let rhs_m2 = rhs_stride[rhs_stride.len() - 2];
+        let lhs_m1 = lhs_stride[lhs_stride.len() - 1];
+        let lhs_m2 = lhs_stride[lhs_stride.len() - 2];
+        let (lda, transa) = if (rhs_m1 == 1 || n == 1) && (rhs_m2 == n || k == 1) {
+            (n as c_int, runtime::OP_N)
+        } else if (rhs_m1 == k || n == 1) && (rhs_m2 == 1 || k == 1) {
+            (k as c_int, runtime::OP_T)
+        } else {
+            return Err(Error::Msg(format!(
+                "HIP matmul: rhs layout not row/col-contiguous (strides {rhs_stride:?}, mnk=({m},{n},{k}))"
+            )));
+        };
+        let (ldb, transb) = if (lhs_m1 == 1 || k == 1) && (lhs_m2 == k || m == 1) {
+            (k as c_int, runtime::OP_N)
+        } else if (lhs_m1 == m || k == 1) && (lhs_m2 == 1 || m == 1) {
+            (m as c_int, runtime::OP_T)
+        } else {
+            return Err(Error::Msg(format!(
+                "HIP matmul: lhs layout not row/col-contiguous (strides {lhs_stride:?}, mnk=({m},{n},{k}))"
+            )));
+        };
+        let stride_b = batch_stride(lhs_stride, lhs_l.dims(), m * k)?;
+        let stride_a = batch_stride(rhs_stride, rhs_l.dims(), n * k)?;
+
+        // Device pointers, offset to each operand's start (in f32 elements).
+        let a_ptr = unsafe { (rhs.ptr as *const f32).add(rhs_l.start_offset()) };
+        let b_ptr = unsafe { (self.ptr as *const f32).add(lhs_l.start_offset()) };
+
+        let out_len = b * m * n;
+        let out = h
+            .malloc(out_len * std::mem::size_of::<f32>())
+            .map_err(Error::Msg)?;
+        if let Err(e) = rb.sgemm_strided_batched(
+            transa,
+            transb,
+            n as c_int,
+            m as c_int,
+            k as c_int,
+            a_ptr,
+            lda,
+            stride_a as i64,
+            b_ptr,
+            ldb,
+            stride_b as i64,
+            out as *mut f32,
+            n as c_int,
+            (m * n) as i64,
+            b as c_int,
+        ) {
+            h.free(out);
+            return Err(Error::Msg(e));
+        }
+        h.synchronize().map_err(Error::Msg)?;
+        Ok(HipStorage {
+            device: self.device.clone(),
+            ptr: out,
+            dtype: DType::F32,
+            len: out_len,
+        })
     }
 
     fn copy_strided_src(&self, _: &mut Self, _: usize, _: &Layout) -> Result<()> {
