@@ -327,6 +327,99 @@ mod runtime {
     pub fn rocblas() -> std::result::Result<&'static Rocblas, String> {
         ROCBLAS.get_or_init(Rocblas::load).as_ref().map_err(|e| e.clone())
     }
+
+    // ---- elementwise kernels (build.rs → libcandle_hip_kernels.so; Phase 45d) ----
+
+    type AffineF32 = unsafe extern "C" fn(*const f32, *mut f32, usize, f32, f32) -> c_int;
+    type UnaryF32 = unsafe extern "C" fn(*const f32, *mut f32, usize, c_int) -> c_int;
+    type BinaryF32 = unsafe extern "C" fn(*const f32, *const f32, *mut f32, usize, c_int) -> c_int;
+
+    /// The AOT-compiled elementwise kernel library (built by `build.rs`).
+    pub struct Kernels {
+        _lib: Library,
+        affine_f32: AffineF32,
+        unary_f32: UnaryF32,
+        binary_f32: BinaryF32,
+    }
+    unsafe impl Send for Kernels {}
+    unsafe impl Sync for Kernels {}
+
+    impl Kernels {
+        fn load() -> std::result::Result<Self, String> {
+            let path = concat!(env!("OUT_DIR"), "/libcandle_hip_kernels.so");
+            let lib = unsafe { Library::new(path) }.map_err(|e| {
+                format!("could not dlopen {path}: {e} (was the HIP toolchain present at build time?)")
+            })?;
+            unsafe {
+                let affine_f32: AffineF32 = *lib
+                    .get(b"akh_affine_f32\0")
+                    .map_err(|e| format!("missing akh_affine_f32: {e}"))?;
+                let unary_f32: UnaryF32 = *lib
+                    .get(b"akh_unary_f32\0")
+                    .map_err(|e| format!("missing akh_unary_f32: {e}"))?;
+                let binary_f32: BinaryF32 = *lib
+                    .get(b"akh_binary_f32\0")
+                    .map_err(|e| format!("missing akh_binary_f32: {e}"))?;
+                Ok(Kernels {
+                    _lib: lib,
+                    affine_f32,
+                    unary_f32,
+                    binary_f32,
+                })
+            }
+        }
+
+        pub fn affine_f32(
+            &self,
+            x: *const f32,
+            y: *mut f32,
+            n: usize,
+            mul: f32,
+            add: f32,
+        ) -> std::result::Result<(), String> {
+            let rc = unsafe { (self.affine_f32)(x, y, n, mul, add) };
+            if rc != 0 {
+                return Err(format!("akh_affine_f32 failed (rc={rc})"));
+            }
+            Ok(())
+        }
+
+        pub fn unary_f32(
+            &self,
+            x: *const f32,
+            y: *mut f32,
+            n: usize,
+            op: c_int,
+        ) -> std::result::Result<(), String> {
+            let rc = unsafe { (self.unary_f32)(x, y, n, op) };
+            if rc != 0 {
+                return Err(format!("akh_unary_f32 failed (rc={rc})"));
+            }
+            Ok(())
+        }
+
+        pub fn binary_f32(
+            &self,
+            a: *const f32,
+            b: *const f32,
+            c: *mut f32,
+            n: usize,
+            op: c_int,
+        ) -> std::result::Result<(), String> {
+            let rc = unsafe { (self.binary_f32)(a, b, c, n, op) };
+            if rc != 0 {
+                return Err(format!("akh_binary_f32 failed (rc={rc})"));
+            }
+            Ok(())
+        }
+    }
+
+    static KERNELS: OnceLock<std::result::Result<Kernels, String>> = OnceLock::new();
+
+    /// The process-wide elementwise kernel library, dlopen'd on first use.
+    pub fn kernels() -> std::result::Result<&'static Kernels, String> {
+        KERNELS.get_or_init(Kernels::load).as_ref().map_err(|e| e.clone())
+    }
 }
 
 /// Fetch the HIP runtime, mapping a load failure to a candle error.
@@ -432,6 +525,38 @@ impl HipStorage {
             len: self.len,
         })
     }
+
+    /// Common setup for a contiguous-f32 elementwise op producing a new buffer of the
+    /// same element count. Returns `(src_ptr_at_offset, out_storage, n)`.
+    fn elementwise_setup(&self, layout: &Layout, op: &str) -> Result<(*const f32, HipStorage, usize)> {
+        if self.dtype != DType::F32 {
+            return Err(Error::Msg(format!(
+                "HIP {op}: only f32 supported (Phase 45d), got {:?}",
+                self.dtype
+            )));
+        }
+        if !layout.is_contiguous() {
+            return Err(Error::Msg(format!(
+                "HIP {op}: only contiguous layouts supported (Phase 45d)"
+            )));
+        }
+        let h = hip()?;
+        let n = layout.shape().elem_count();
+        let src = unsafe { (self.ptr as *const f32).add(layout.start_offset()) };
+        let out = h
+            .malloc(n * std::mem::size_of::<f32>())
+            .map_err(Error::Msg)?;
+        Ok((
+            src,
+            HipStorage {
+                device: self.device.clone(),
+                ptr: out,
+                dtype: DType::F32,
+                len: n,
+            },
+            n,
+        ))
+    }
 }
 
 impl HipDevice {
@@ -519,8 +644,13 @@ impl crate::backend::BackendStorage for HipStorage {
         }
     }
 
-    fn affine(&self, _: &Layout, _: f64, _: f64) -> Result<Self> {
-        hip_todo!("affine")
+    /// `y = x * mul + add`, contiguous f32 (Phase 45d).
+    fn affine(&self, layout: &Layout, mul: f64, add: f64) -> Result<Self> {
+        let k = runtime::kernels().map_err(Error::Msg)?;
+        let (src, out, n) = self.elementwise_setup(layout, "affine")?;
+        k.affine_f32(src, out.ptr as *mut f32, n, mul as f32, add as f32)
+            .map_err(Error::Msg)?;
+        Ok(out)
     }
 
     fn powf(&self, _: &Layout, _: f64) -> Result<Self> {
@@ -543,12 +673,74 @@ impl crate::backend::BackendStorage for HipStorage {
         hip_todo!("to_dtype")
     }
 
-    fn unary_impl<B: UnaryOpT>(&self, _: &Layout) -> Result<Self> {
-        hip_todo!("unary_impl")
+    /// Contiguous-f32 unary op, dispatched on `B::NAME` (Phase 45d).
+    fn unary_impl<B: UnaryOpT>(&self, layout: &Layout) -> Result<Self> {
+        let op: c_int = match B::NAME {
+            "neg" => 0,
+            "exp" => 1,
+            "silu" => 2,
+            "gelu" => 3,
+            "sqr" => 4,
+            "sqrt" => 5,
+            "recip" => 6,
+            "relu" => 7,
+            "tanh" => 8,
+            "abs" => 9,
+            other => {
+                return Err(Error::Msg(format!(
+                    "HIP unary `{other}` not yet implemented (Phase 45d)"
+                )));
+            }
+        };
+        let k = runtime::kernels().map_err(Error::Msg)?;
+        let (src, out, n) = self.elementwise_setup(layout, B::NAME)?;
+        k.unary_f32(src, out.ptr as *mut f32, n, op).map_err(Error::Msg)?;
+        Ok(out)
     }
 
-    fn binary_impl<B: BinaryOpT>(&self, _: &Self, _: &Layout, _: &Layout) -> Result<Self> {
-        hip_todo!("binary_impl")
+    /// Contiguous-f32 same-shape binary op, dispatched on `B::NAME` (Phase 45d).
+    fn binary_impl<B: BinaryOpT>(&self, rhs: &Self, l1: &Layout, l2: &Layout) -> Result<Self> {
+        if self.dtype != DType::F32 || rhs.dtype != DType::F32 {
+            return Err(Error::Msg(format!(
+                "HIP binary `{}`: only f32 supported (Phase 45d)",
+                B::NAME
+            )));
+        }
+        if !l1.is_contiguous() || !l2.is_contiguous() {
+            return Err(Error::Msg(format!(
+                "HIP binary `{}`: only contiguous layouts supported (Phase 45d)",
+                B::NAME
+            )));
+        }
+        let op: c_int = match B::NAME {
+            "add" => 0,
+            "sub" => 1,
+            "mul" => 2,
+            "div" => 3,
+            other => {
+                return Err(Error::Msg(format!(
+                    "HIP binary `{other}` not yet implemented (Phase 45d)"
+                )));
+            }
+        };
+        let k = runtime::kernels().map_err(Error::Msg)?;
+        let h = hip()?;
+        let n = l1.shape().elem_count();
+        let a = unsafe { (self.ptr as *const f32).add(l1.start_offset()) };
+        let b = unsafe { (rhs.ptr as *const f32).add(l2.start_offset()) };
+        let out = h
+            .malloc(n * std::mem::size_of::<f32>())
+            .map_err(Error::Msg)?;
+        if let Err(e) = k.binary_f32(a, b, out as *mut f32, n, op) {
+            h.free(out);
+            return Err(Error::Msg(e));
+        }
+        Ok(HipStorage {
+            device: self.device.clone(),
+            ptr: out,
+            dtype: DType::F32,
+            len: n,
+        })
     }
 
     fn where_cond(&self, _: &Layout, _: &Self, _: &Layout, _: &Self, _: &Layout) -> Result<Self> {

@@ -13,7 +13,7 @@
 edition = "2021"
 name = "candle-core"
 version = "0.10.2"
-build = false
+build = "build.rs"
 autolib = false
 autobins = false
 autoexamples = false

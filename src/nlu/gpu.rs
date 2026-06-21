@@ -249,4 +249,52 @@ mod hip_backend_tests {
             assert!((x - y).abs() < 1e-3, "batched matmul mismatch: cpu={x} gpu={y}");
         }
     }
+
+    /// Phase 45d: AOT HIP elementwise kernels (affine / unary / binary) must match the
+    /// CPU result on the gfx1100. Exercises the build.rs → .hip → dlopen → launch path.
+    #[test]
+    fn hip_elementwise_matches_cpu() {
+        use candle_core::{Device, Tensor};
+        let dev = Device::new_cuda(0).expect("HIP device");
+
+        let xs: Vec<f32> = (0..16).map(|i| i as f32 * 0.37 - 3.0).collect();
+        let ys: Vec<f32> = (0..16).map(|i| i as f32 * 0.11 + 0.5).collect();
+        let xc = Tensor::from_vec(xs.clone(), (16,), &Device::Cpu).unwrap();
+        let yc = Tensor::from_vec(ys.clone(), (16,), &Device::Cpu).unwrap();
+        let xg = Tensor::from_vec(xs, (16,), &dev).unwrap();
+        let yg = Tensor::from_vec(ys, (16,), &dev).unwrap();
+
+        let close = |a: Vec<f32>, b: Vec<f32>, what: &str| {
+            assert_eq!(a.len(), b.len(), "{what} len");
+            for (p, q) in a.iter().zip(&b) {
+                assert!((p - q).abs() < 1e-3, "{what} mismatch: cpu={p} gpu={q}");
+            }
+        };
+
+        close(
+            xc.affine(2.5, -1.0).unwrap().to_vec1::<f32>().unwrap(),
+            xg.affine(2.5, -1.0).unwrap().to_vec1::<f32>().unwrap(),
+            "affine",
+        );
+        close(
+            xc.gelu().unwrap().to_vec1::<f32>().unwrap(),
+            xg.gelu().unwrap().to_vec1::<f32>().unwrap(),
+            "gelu",
+        );
+        close(
+            xc.silu().unwrap().to_vec1::<f32>().unwrap(),
+            xg.silu().unwrap().to_vec1::<f32>().unwrap(),
+            "silu",
+        );
+        close(
+            (&xc + &yc).unwrap().to_vec1::<f32>().unwrap(),
+            (&xg + &yg).unwrap().to_vec1::<f32>().unwrap(),
+            "add",
+        );
+        close(
+            (&xc * &yc).unwrap().to_vec1::<f32>().unwrap(),
+            (&xg * &yg).unwrap().to_vec1::<f32>().unwrap(),
+            "mul",
+        );
+    }
 }
