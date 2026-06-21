@@ -176,4 +176,21 @@ mod hip_backend_tests {
             "HIP device should report a Cuda-slot location"
         );
     }
+
+    /// Phase 45c: `HipStorage` owns a real device allocation; host→device→host and
+    /// device-side `zeros` round-trips must be exact. Exercises `storage_from_*`,
+    /// `to_cpu_storage`, `zeros_impl` + `memset` on the gfx1100.
+    #[test]
+    fn hip_storage_host_device_roundtrip() {
+        let dev = candle_core::Device::new_cuda(0).expect("HIP device");
+        let data = [1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let t = candle_core::Tensor::new(&data, &dev).expect("upload f32 tensor to GPU");
+        let back: Vec<f32> = t.to_vec1().expect("download f32 tensor from GPU");
+        assert_eq!(back, data, "host->device->host round-trip must be exact");
+
+        let z = candle_core::Tensor::zeros((2, 3), candle_core::DType::F32, &dev)
+            .expect("device zeros");
+        let zv: Vec<f32> = z.flatten_all().unwrap().to_vec1().unwrap();
+        assert_eq!(zv, vec![0.0f32; 6], "device zeros must read back as zero");
+    }
 }
