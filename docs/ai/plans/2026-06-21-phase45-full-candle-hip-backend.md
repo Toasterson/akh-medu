@@ -27,10 +27,14 @@
 >   dlopen'd by `runtime::Kernels`. `affine`, `unary_impl` (neg/exp/silu/gelu/sqr/sqrt/recip/relu/tanh/abs
 >   on `B::NAME`), `binary_impl` (add/sub/mul/div), contiguous f32. Gate: `hip_elementwise_matches_cpu`
 >   (affine/gelu/silu/add/mul) matches CPU on the gfx1100. (commit `5f85eba`) — **4/4 HIP tests green.**
-> - **Next** — remaining decode-path ops on `Device::Hip`: `reduce_op` (sum/max → softmax/rmsnorm),
->   `to_dtype` (cast), `index_select` (embedding), `where_cond` (mask), `copy_strided_src` (contiguous),
->   then f16/bf16 matmul, **45e** `QHipStorage` (reuse `akh_dequant_q4k`), **45f** resident model,
->   **45g** hidden-state parity, **45h** fused kernels → roofline.
+> - **45d decode ops ✅** (parallel subagents, integrated + re-verified) — `reduce_op` (sum multi-dim /
+>   max,min single-dim), `to_dtype` (F32↔F16/BF16/U32/I64, F16↔BF16), `index_select` (U32/I64, embedding
+>   gather), `where_cond` (U8/U32 mask), `copy_strided_src` (D2D fast path + rank-generic f32 unravel →
+>   powers `.contiguous()`). Gate: `op_tests` 5/5 match CPU; candle-core + akh `--features hip` green.
+>   (commit `c17cbde`) — **the core decode-path `BackendStorage` op surface is now on the GPU.**
+> - **Next** — f16/bf16 `matmul` (rocBLAS hgemm) + a few residual ops (`const_set`, `gather`/`scatter`),
+>   then **45e** `QHipStorage` (GGUF Q4_K dequant+matmul, reuse `akh_dequant_q4k`) → **45f** run a stock
+>   model fully resident → **45g** hidden-state parity → **45h** fused kernels → roofline.
 - **Target box:** AMD Radeon RX 7900 XTX (`gfx1100`, 24 GB, ~960 GB/s), ROCm 6.3.4 userspace installed.
 - **Supersedes the perf ceiling of:** [plan 2026-06-04-gpu-rocm-candle.md](2026-06-04-gpu-rocm-candle.md)
   (op-offload — *complete*, but PCIe-round-trip-bound).
