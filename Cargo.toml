@@ -181,6 +181,11 @@ nlu-candle = ["candle-backend"]
 # ROCm toolchain to build the HIP kernel (build.rs degrades gracefully if absent)
 # and an AMD GPU at runtime. Off by default — Candle runs CPU-only without it.
 rocm = ["candle-backend", "dep:libloading"]
+# Apple Metal GPU acceleration for the Candle backend (Apple Silicon — e.g. the
+# Mac mini). Enables candle's Metal device; the backend selects it at runtime via
+# the `#[cfg(feature = "metal")]` path in candle_backend.rs. macOS/arm64 only —
+# do not enable on Linux (candle's Metal backend won't compile there).
+metal = ["candle-backend", "candle-core/metal", "candle-nn/metal", "candle-transformers/metal"]
 burn-training = ["candle-backend"]  # will add "burn" when sqlite3 conflict resolved
 training-data = []
 wiki = ["dep:comrak", "dep:syntect", "dep:minijinja", "dep:tantivy", "dep:blake3"]
