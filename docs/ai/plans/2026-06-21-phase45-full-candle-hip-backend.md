@@ -14,8 +14,13 @@
 >   feature; HIP backend fills the **cuda module slot** (zero match-arm changes). `cargo build
 >   --features hip` OK; full lib suite under `--features hip` **2628 passed / 0 failed** incl. the
 >   `hip_device_constructs_via_cuda_slot` test. (commit `b84e5a6`)
-> - **Next: 45c** — real `HipDevice` init (dlopen `libamdhip64` in `hip_backend`) + on-device memory
->   (`HipStorage` owns a device alloc) + `synchronize`, then **45d** the first parity-gated ops.
+> - **45c ✅** — real `HipDevice` init (dlopen `libamdhip64`: device count / `hipSetDevice`) + on-device
+>   memory: `HipStorage` owns a real allocation with working H2D/D2H/D2D transfers, `zeros`+`memset`,
+>   `synchronize`. Gate: `hip_storage_host_device_roundtrip` — `Tensor::new(data,&gpu)` lives in VRAM and
+>   reads back exact on the gfx1100. (commit `ec06b23`)
+> - **Next: 45d** — first parity-gated **compute** ops: rocBLAS `matmul` (add rocBLAS to the
+>   `hip_backend` runtime) + elementwise `unary_impl`/`binary_impl`/`affine`/`to_dtype` (AOT HIP kernels
+>   via a `build.rs`, mirroring `akh_medu/src/nlu/hip_kernels`), each with a GPU-vs-CPU parity test.
 - **Target box:** AMD Radeon RX 7900 XTX (`gfx1100`, 24 GB, ~960 GB/s), ROCm 6.3.4 userspace installed.
 - **Supersedes the perf ceiling of:** [plan 2026-06-04-gpu-rocm-candle.md](2026-06-04-gpu-rocm-candle.md)
   (op-offload — *complete*, but PCIe-round-trip-bound).
