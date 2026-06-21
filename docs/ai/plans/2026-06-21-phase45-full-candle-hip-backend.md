@@ -22,10 +22,15 @@
 >   `BackendStorage::matmul` is batched f32 GEMM mapping candle's `(b,m,n,k)`+layouts onto
 >   `rocblas_sgemm_strided_batched` (per `cuda_backend::gemm_config`). Gate: `hip_matmul_matches_cpu`
 >   (2D + batched 3D) matches CPU on the gfx1100. (commit `434515a`)
-> - **Next: 45d elementwise** — `unary_impl`/`binary_impl`/`affine`/`to_dtype`/`copy_strided_src` via a
->   new AOT HIP-kernel `vendor/candle-core/build.rs` (hipcc/amdclang++ `--offload-arch=gfx1100`, mirroring
->   `akh_medu/src/nlu/hip_kernels/dequant.hip`) + launch wiring, each parity-gated. Then f16/bf16 matmul,
->   `45e` `QHipStorage`, `45f` resident model, `45g` hidden parity, `45h` fused → roofline.
+> - **45d elementwise ✅** — new AOT HIP-kernel pipeline: `vendor/candle-core/build.rs` compiles
+>   `src/hip_kernels/elementwise.hip` (amdclang++ `--offload-arch=gfx1100`) → `libcandle_hip_kernels.so`,
+>   dlopen'd by `runtime::Kernels`. `affine`, `unary_impl` (neg/exp/silu/gelu/sqr/sqrt/recip/relu/tanh/abs
+>   on `B::NAME`), `binary_impl` (add/sub/mul/div), contiguous f32. Gate: `hip_elementwise_matches_cpu`
+>   (affine/gelu/silu/add/mul) matches CPU on the gfx1100. (commit `5f85eba`) — **4/4 HIP tests green.**
+> - **Next** — remaining decode-path ops on `Device::Hip`: `reduce_op` (sum/max → softmax/rmsnorm),
+>   `to_dtype` (cast), `index_select` (embedding), `where_cond` (mask), `copy_strided_src` (contiguous),
+>   then f16/bf16 matmul, **45e** `QHipStorage` (reuse `akh_dequant_q4k`), **45f** resident model,
+>   **45g** hidden-state parity, **45h** fused kernels → roofline.
 - **Target box:** AMD Radeon RX 7900 XTX (`gfx1100`, 24 GB, ~960 GB/s), ROCm 6.3.4 userspace installed.
 - **Supersedes the perf ceiling of:** [plan 2026-06-04-gpu-rocm-candle.md](2026-06-04-gpu-rocm-candle.md)
   (op-offload — *complete*, but PCIe-round-trip-bound).
