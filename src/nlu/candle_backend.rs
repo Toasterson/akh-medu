@@ -130,6 +130,34 @@ pub struct CandleInferenceResult {
     pub final_hidden: Option<Vec<f32>>,
 }
 
+/// Decode-throughput statistics for the Phase 45a benchmark harness (ADR 073).
+///
+/// Exposes the raw token count and decode wall-time so callers can compute tok/s
+/// and compare against the memory-bandwidth roofline — the metric by which the
+/// HIP backend's speed is judged. Prefill is excluded so the number reflects
+/// steady-state decode throughput, which is what the bus-bound op-offload path
+/// (and the device-resident successor) actually differ on.
+#[derive(Debug, Clone)]
+pub struct GenBenchStats {
+    /// Generated text (uncleaned).
+    pub text: String,
+    /// Tokens decoded (prefill excluded).
+    pub tokens_generated: u32,
+    /// Wall-clock in the decode loop, seconds (prefill excluded).
+    pub decode_secs: f32,
+}
+
+impl GenBenchStats {
+    /// Decode throughput in tokens/second (0 when nothing was decoded).
+    pub fn tok_per_s(&self) -> f32 {
+        if self.decode_secs > 0.0 {
+            self.tokens_generated as f32 / self.decode_secs
+        } else {
+            0.0
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Expected model paths
 // ---------------------------------------------------------------------------
@@ -500,6 +528,23 @@ impl CandleBackend {
             "Candle text generation complete"
         );
         Ok(text)
+    }
+
+    /// Generate and return decode-throughput stats (Phase 45a / ADR 073).
+    ///
+    /// Like [`generate`](Self::generate) (greedy/temperature per config,
+    /// [`StopMode::Text`]) but surfaces the token count and decode wall-time so the
+    /// `candle_bench` example can report tok/s and % of the bandwidth roofline.
+    /// Pair with [`super::hip::reset_pcie_counts`] / [`super::hip::pcie_counts`] to
+    /// also measure PCIe crossings per token.
+    #[cfg(feature = "candle-backend")]
+    pub fn generate_bench(&mut self, prompt: &str, max_tokens: u32) -> NluResult<GenBenchStats> {
+        let result = self.generate_inner(prompt, max_tokens, StopMode::Fixed)?;
+        Ok(GenBenchStats {
+            text: result.text,
+            tokens_generated: result.tokens_generated,
+            decode_secs: result.decode_secs,
+        })
     }
 
     /// Generate and return the **typed channel stream** — the model's reasoning
@@ -1090,6 +1135,8 @@ impl CandleBackend {
 
         let eos_token = self.find_eos_token();
 
+        // Phase 45a: time the autoregressive decode (prefill excluded) for tok/s.
+        let decode_start = std::time::Instant::now();
         while n_generated < max_tokens {
             // Sample next token. Both quantized_qwen2 and quantized_gemma3
             // `forward` already reduce to the last position internally, so
@@ -1139,8 +1186,9 @@ impl CandleBackend {
                 sample_from_probs(&probs_vec)
             };
 
-            // Check EOS
-            if Some(next_token) == eos_token {
+            // Check EOS (ignored in Fixed mode: a throughput probe decodes the
+            // full token budget regardless of content).
+            if !matches!(stop, StopMode::Fixed) && Some(next_token) == eos_token {
                 break;
             }
 
@@ -1185,6 +1233,7 @@ impl CandleBackend {
                         break;
                     }
                 }
+                StopMode::Fixed => {}
             }
 
             // Prepare next forward pass (single token).
@@ -1205,11 +1254,23 @@ impl CandleBackend {
                 })?;
         }
 
-        tracing::debug!(tokens_generated = n_generated, "Candle generation complete");
+        let decode_secs = decode_start.elapsed().as_secs_f32();
+        let tok_s = if decode_secs > 0.0 {
+            n_generated as f32 / decode_secs
+        } else {
+            0.0
+        };
+        tracing::debug!(
+            tokens_generated = n_generated,
+            decode_secs,
+            tok_s,
+            "Candle generation complete"
+        );
 
         Ok(GenerationResult {
             text: generated_text,
             tokens_generated: n_generated,
+            decode_secs,
         })
     }
 
@@ -1442,12 +1503,19 @@ enum StopMode {
     Json,
     /// Stop on EOS, double-newline, or chat template end marker.
     Text,
+    /// Decode exactly `max_tokens`, ignoring EOS and stop markers — a pure
+    /// throughput probe for the Phase 45 benchmark (steady-state decode tok/s,
+    /// independent of generated content).
+    Fixed,
 }
 
 /// Internal generation result.
 struct GenerationResult {
     text: String,
     tokens_generated: u32,
+    /// Wall-clock spent in the autoregressive decode loop (prefill excluded), in
+    /// seconds. Drives the Phase 45a tok/s baseline. Zero when no token was decoded.
+    decode_secs: f32,
 }
 
 // ---------------------------------------------------------------------------

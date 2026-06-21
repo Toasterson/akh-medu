@@ -32,6 +32,27 @@ const HIP_MEMCPY_DEVICE_TO_HOST: c_int = 2;
 const ROCBLAS_OPERATION_NONE: c_int = 111;
 const ROCBLAS_STATUS_SUCCESS: c_int = 0;
 
+/// Host↔device transfer counters (Phase 45a / ADR 073). Incremented on every
+/// `hipMemcpy`. The bench [`reset_pcie_counts`] after model load, then divides by
+/// generated tokens to report **PCIe crossings/token** — the metric the op-offload
+/// path is bottlenecked on (~216/token for a 27-layer 12B). Cheap relaxed atomics,
+/// always live (the cost is negligible vs a PCIe copy); only *read* when asked.
+pub static PCIE_H2D: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static PCIE_D2H: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// `(host→device, device→host)` `hipMemcpy` counts since the last [`reset_pcie_counts`].
+pub fn pcie_counts() -> (u64, u64) {
+    use std::sync::atomic::Ordering::Relaxed;
+    (PCIE_H2D.load(Relaxed), PCIE_D2H.load(Relaxed))
+}
+
+/// Zero the PCIe transfer counters (call after model load, before a timed generation).
+pub fn reset_pcie_counts() {
+    use std::sync::atomic::Ordering::Relaxed;
+    PCIE_H2D.store(0, Relaxed);
+    PCIE_D2H.store(0, Relaxed);
+}
+
 // --- FFI function signatures (HIP runtime API + rocBLAS are plain C ABI) ---------------------
 type HipMalloc = unsafe extern "C" fn(*mut *mut c_void, usize) -> c_int;
 type HipFree = unsafe extern "C" fn(*mut c_void) -> c_int;
@@ -283,6 +304,7 @@ impl RocmBlas {
                 return Err(NluError::ModelLoadFailed { reason: "hipMemcpy D2H failed".into() });
             }
         }
+        PCIE_D2H.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(out)
     }
 
@@ -489,6 +511,7 @@ impl RocmBlas {
                     reason: "hipMemcpy H2D (resident weight) failed".into(),
                 });
             }
+            PCIE_H2D.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             Ok(DeviceBuffer {
                 ptr,
                 bytes,
@@ -515,6 +538,7 @@ impl RocmBlas {
                 hip_free(ptr);
                 return Err(NluError::ModelLoadFailed { reason: "hipMemcpy H2D (u8) failed".into() });
             }
+            PCIE_H2D.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             Ok(DeviceBuffer { ptr, bytes, blas: Arc::clone(self) })
         }
     }
@@ -585,6 +609,7 @@ impl RocmBlas {
                     reason: "hipMemcpy H2D (activation) failed".into(),
                 });
             }
+            PCIE_H2D.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let alpha = 1.0f32;
             let beta = 0.0f32;
             let status = rb_sgemm(
@@ -623,6 +648,7 @@ impl RocmBlas {
                 });
             }
         }
+        PCIE_D2H.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(out)
     }
 }

@@ -48,6 +48,24 @@ honest "fast" metric is **% of the bandwidth roofline**, not raw tok/s.
 | **q8_0** | ~12.5 GB | ✅ ~11 GB headroom | ~77 tok/s | **≥45 tok/s** |
 | q4_K_M | ~7.3 GB | ✅ ~16 GB headroom | ~131 tok/s | ≥78 tok/s |
 
+### Measured baseline (45a — 2026-06-21, hephaistos gfx1100, `gemma3-12b` Q4_K)
+
+`examples/candle_bench`, 128-token `Fixed`-mode decode (prefill excluded):
+
+| path | tok/s | s/token | PCIe crossings/token | % of q4_K roofline |
+|---|---|---|---|---|
+| **op-offload GPU** (`AKH_GPU_MATMUL=1 AKH_GPU_QUANT=1`) | **0.17** | 5.95 | **419** | **0.1 %** |
+| pure CPU (no GPU flags) | 1.16 | 0.86 | 0 | 0.9 % |
+| roofline (q4_K) | 131.5 | — | 0 | 100 % |
+
+**The op-offload "GPU" path is ~7× *slower* than plain CPU for 12B** — each token does 419
+device-synced PCIe round-trips (~8.7/layer × 48 layers), which costs far more than the single-token
+GEMM offload saves. (The path was previously validated as *working*, never *measured*.) The
+device-resident `Device::Hip` target (≥78 tok/s, q4_K) is therefore a **~460× speedup over op-offload**
+and **~67× over CPU**. Output is coherent and byte-identical across both paths, so correctness holds —
+this is purely a transport problem, exactly what the full backend removes. **This 0.17 tok/s is the
+number Phase 45 must beat.**
+
 **Implication of "12B doesn't need compression":** true for *VRAM* — but compression *reduces decode
 bandwidth*, so it makes generation **faster**, not slower. Recommended 12B default is **q8_0**
 (near-lossless hidden states for the VSA bridge, fits with headroom). f16 is supported in the backend for
