@@ -49,6 +49,17 @@ Chosen over the narrower "device-resident forward only" because a real device al
 (a) retires the vendored op-offload model forks, and (b) **unlocks on-GPU training**
 for Phase 26/27 (Neural→VSA bridge, Burn/LoRA), which op-offload cannot.
 
+> **Implementation update (45b, 2026-06-21).** Adding a parallel `Device::Hip`
+> enum arm would have meant a `Hip` arm at ~130 candle-core match sites. Because HIP
+> is source-compatible with the CUDA runtime API, the backend instead **fills
+> candle's `cuda` module slot** under the `hip` feature (`pub use hip_backend as
+> cuda` when `hip && !cuda`), so every `Storage::Cuda`/`Device::Cuda` dispatch routes
+> to AMD with **zero match-arm changes** — the "hipify the cuda backend" approach
+> (ADR 068 step 3). `HipDevice`/`HipStorage`/`QHipStorage` re-export as the `Cuda*`
+> slot types; `DeviceLocation::Cuda` labels the AMD GPU; construction is
+> `Device::new_cuda(0)`. Same first-class-device outcome, ~10× less fork surface and
+> rebase burden. Landed in `vendor/candle-core` + the `hip` feature (suite green).
+
 ### Acceptance metric: % of the memory-bandwidth roofline
 
 Decode is **memory-bandwidth-bound** — each token streams every weight once across

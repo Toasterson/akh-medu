@@ -1,9 +1,21 @@
 # Plan: Phase 45 — Full Candle `Device::Hip` Backend (fast on-host 12B GPU akh)
 
 - **Date:** 2026-06-21
-- **Status:** Draft (agent-ready)
+- **Status:** In progress — **45a + 45b landed** (2026-06-21); 45c next.
 - **ADR:** extends [068](../decisions/068-rocm-candle-gpu-backend.md); a new **ADR 073** records the
   general-backend decision (op-offload → first-class device).
+
+> **Progress (2026-06-21, hephaistos).**
+> - **45a ✅** — tok/s + PCIe-crossing harness (`examples/candle_bench`, `StopMode::Fixed`,
+>   `nlu::hip` counters). **Measured 12B Q4_K baseline: op-offload GPU 0.17 tok/s (419 PCIe
+>   crossings/token, 0.1% of roofline) — ~7× slower than CPU's 1.16 tok/s.** The number to beat.
+>   (commit `010a878`)
+> - **45b ✅** — vendored candle-core fork (`vendor/candle-core`, `[patch.crates-io]`) + `hip`
+>   feature; HIP backend fills the **cuda module slot** (zero match-arm changes). `cargo build
+>   --features hip` OK; full lib suite under `--features hip` **2628 passed / 0 failed** incl. the
+>   `hip_device_constructs_via_cuda_slot` test. (commit `b84e5a6`)
+> - **Next: 45c** — real `HipDevice` init (dlopen `libamdhip64` in `hip_backend`) + on-device memory
+>   (`HipStorage` owns a device alloc) + `synchronize`, then **45d** the first parity-gated ops.
 - **Target box:** AMD Radeon RX 7900 XTX (`gfx1100`, 24 GB, ~960 GB/s), ROCm 6.3.4 userspace installed.
 - **Supersedes the perf ceiling of:** [plan 2026-06-04-gpu-rocm-candle.md](2026-06-04-gpu-rocm-candle.md)
   (op-offload — *complete*, but PCIe-round-trip-bound).
@@ -89,9 +101,20 @@ GPU vs CPU ≥ 0.999 (f16) — protects the Phase 26 bridge.**
 
 ## Architecture
 
-Candle's `Device`/`Storage`/`DType` are closed enums → **vendor candle-core + candle-nn (pinned 0.10.2)**
-into the workspace, add a `Hip` variant, and `[patch.crates-io]` so `candle-transformers` binds to the
-fork. The backend implements two traits:
+> **Implementation note (45b landed, 2026-06-21).** The original "add a `Hip` enum variant" plan would
+> have required a `Hip` arm at **~130 match sites** in candle-core. Instead — since HIP is
+> source-compatible with the CUDA runtime API — the HIP backend **fills candle's `cuda` *module slot***
+> (`#[cfg(all(not(feature="cuda"), feature="hip"))] pub use hip_backend as cuda;` in `lib.rs` +
+> `quantized/mod.rs`). Every existing `Storage::Cuda` / `Device::Cuda` / `QStorage::Cuda` dispatch then
+> routes to AMD with **zero match-arm changes** — the "hipify the cuda backend" approach (ADR 068 step 3).
+> `HipDevice`/`HipStorage`/`QHipStorage` are re-exported as `CudaDevice`/`CudaStorage`/`QCudaStorage`;
+> `DeviceLocation::Cuda` labels the AMD GPU; the device is built with `Device::new_cuda(0)` (a
+> `Device::new_hip` alias can be added for ergonomics). This is ~10× less code and the same full-device
+> result. The text below reflects the original framing; the slot approach supersedes the per-variant arms.
+
+Candle's `Device`/`Storage`/`DType` are closed enums → **vendor candle-core (pinned 0.10.2)** into the
+workspace (`vendor/candle-core`, own `[workspace]` root) and `[patch.crates-io]` so `candle-nn` /
+`candle-transformers` bind to the fork. The backend implements two traits:
 
 - `BackendDevice` for `HipDevice` — alloc/free, H2D/D2H, streams, events, RNG, `synchronize`. This is the
   existing `nlu::hip` runtime layer (dlopen `libamdhip64`/`librocblas`, persistent handle, `DeviceBuffer`)
