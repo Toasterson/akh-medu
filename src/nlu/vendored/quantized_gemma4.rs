@@ -77,7 +77,7 @@ impl QMatMul {
 /// The GPU path deliberately does **not** use [`crate::nlu::hip::GpuMlp`] — that
 /// type fuses a hardcoded SiLU activation which is wrong for Gemma 4. Instead it
 /// routes gate/up/down through individual [`crate::nlu::hip::GpuLinear`] matmuls
-/// and does `gelu(gate) * up` in Candle (option (a) from ADR 053).
+/// and does `gelu(gate) * up` in Candle (option (a) from ADR 068).
 #[derive(Debug, Clone)]
 struct Mlp {
     feed_forward_gate: QMatMul, // ffn_gate in GGUF
@@ -470,7 +470,7 @@ impl ModelWeights {
 
         let neg_inf = Tensor::new(f32::NEG_INFINITY, device)?;
 
-        // Optional AMD GPU path (ADR 053): AKH_GPU_MATMUL=1 uploads linear weights to the GPU
+        // Optional AMD GPU path (ADR 068): AKH_GPU_MATMUL=1 uploads linear weights to the GPU
         // and runs their GEMMs via rocBLAS; AKH_GPU_QUANT=1 keeps them int4 (fits 12B/27B).
         #[cfg(feature = "rocm")]
         let gpu_blas: Option<std::sync::Arc<crate::nlu::hip::RocmBlas>> =

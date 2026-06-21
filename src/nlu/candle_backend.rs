@@ -1355,7 +1355,7 @@ impl CandleBackend {
             }
         }
         // AMD ROCm/HIP: Candle 0.10 has no upstream HIP device, so we cannot construct one
-        // here yet (the backend is a fork gated behind `feature = "rocm"`, ADR 053). Probe
+        // here yet (the backend is a fork gated behind `feature = "rocm"`, ADR 068). Probe
         // the host so the log tells the user *why* we are on CPU and what to do about it.
         Self::report_rocm_status();
         tracing::info!("using CPU device for Candle inference");
@@ -1376,7 +1376,7 @@ impl CandleBackend {
                 tracing::warn!(
                     runtime = %runtime,
                     "ROCm runtime present but the Candle HIP backend is not built \
-                     (feature `rocm`, ADR 053) — running on CPU. See \
+                     (feature `rocm`, ADR 068) — running on CPU. See \
                      docs/ai/plans/2026-06-04-gpu-rocm-candle.md"
                 );
             }
@@ -1385,7 +1385,7 @@ impl CandleBackend {
                     "AMD GPU compute node /dev/kfd present but ROCm userspace missing — \
                      install it to enable GPU inference (no reboot needed): \
                      `sudo apt-get install -y rocminfo rocm-hip-runtime rocblas hipblas` \
-                     after adding the ROCm 6.x repo. See ADR 053."
+                     after adding the ROCm 6.x repo. See ADR 068."
                 );
             }
             RocmStatus::Unavailable { reason } => {

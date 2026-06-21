@@ -359,7 +359,7 @@ impl ModelWeights {
 
         let neg_inf = Tensor::new(f32::NEG_INFINITY, device)?;
 
-        // Optional AMD GPU path (ADR 053): AKH_GPU_MATMUL=1 uploads linear weights to the GPU
+        // Optional AMD GPU path (ADR 068): AKH_GPU_MATMUL=1 uploads linear weights to the GPU
         // and runs their GEMMs via rocBLAS; AKH_GPU_QUANT=1 keeps them int4 (fits 12B/27B).
         #[cfg(feature = "rocm")]
         let gpu_blas: Option<std::sync::Arc<crate::nlu::hip::RocmBlas>> =

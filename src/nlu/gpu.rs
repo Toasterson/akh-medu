@@ -2,7 +2,7 @@
 //!
 //! Candle 0.10 ships `Device::{Cpu, Cuda, Metal}` only — there is **no upstream AMD
 //! backend**. On the target box (AMD RX 7900 XTX, `gfx1100`) the path to running quantized
-//! Gemma on the GPU is ROCm/HIP (see [ADR 053](../../docs/ai/decisions/053-rocm-candle-gpu-backend.md)).
+//! Gemma on the GPU is ROCm/HIP (see [ADR 068](../../docs/ai/decisions/068-rocm-candle-gpu-backend.md)).
 //!
 //! This module is the always-compiled *detection* layer: it probes the host for the ROCm
 //! compute stack and reports, with rich [`miette`] diagnostics, exactly what the user must
@@ -114,7 +114,7 @@ pub enum GpuDiagnostic {
             "Rebuild with the GPU backend enabled, e.g.\n  \
              cargo build --release --bin akh --features candle-backend,rocm\n\n\
              Until then the LLM runs on the CPU. (The `rocm` Candle backend is a fork — see \
-             ADR 053.)"
+             ADR 068.)"
         )
     )]
     RocmFeatureDisabled { runtime: String },
