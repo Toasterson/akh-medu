@@ -160,3 +160,20 @@ mod tests {
         assert!(help.contains("rocm-hip-runtime"), "help must name the package");
     }
 }
+
+/// Phase 45b (ADR 073): the vendored candle-core HIP backend fills the `cuda`
+/// module slot under the `hip` feature, so a HIP device constructs via the standard
+/// candle `Device::new_cuda` constructor and reports a `Cuda`-slot location. Real
+/// on-device init + op kernels follow in Phase 45c/45d; this guards the wiring.
+#[cfg(all(test, feature = "hip"))]
+mod hip_backend_tests {
+    #[test]
+    fn hip_device_constructs_via_cuda_slot() {
+        let dev = candle_core::Device::new_cuda(0)
+            .expect("HIP device should construct (cuda slot filled by hip_backend)");
+        assert!(
+            matches!(dev.location(), candle_core::DeviceLocation::Cuda { .. }),
+            "HIP device should report a Cuda-slot location"
+        );
+    }
+}

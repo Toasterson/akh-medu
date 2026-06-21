@@ -181,6 +181,10 @@ nlu-candle = ["candle-backend"]
 # ROCm toolchain to build the HIP kernel (build.rs degrades gracefully if absent)
 # and an AMD GPU at runtime. Off by default — Candle runs CPU-only without it.
 rocm = ["candle-backend", "dep:libloading"]
+# Phase 45 / ADR 073: full Candle Device::Hip backend. Enables the vendored
+# candle-core HIP backend (fills the cuda module slot — see vendor/candle-core)
+# on top of the `rocm` dlopen runtime (nlu::hip). Off by default; superset of rocm.
+hip = ["rocm", "candle-core/hip"]
 burn-training = ["candle-backend"]  # will add "burn" when sqlite3 conflict resolved
 training-data = []
 wiki = ["dep:comrak", "dep:syntect", "dep:minijinja", "dep:tantivy", "dep:blake3"]
@@ -233,3 +237,10 @@ harness = false
 [[bench]]
 name = "vsa_decide"
 harness = false
+
+# Phase 45 / ADR 073: vendored candle-core fork that adds the ROCm/HIP backend
+# (gated behind candle-core's `hip` feature; no effect on the default build, which
+# binds the byte-identical 0.10.2 source). candle-nn / candle-transformers from the
+# registry consume this patched candle-core transparently.
+[patch.crates-io]
+candle-core = { path = "vendor/candle-core" }
