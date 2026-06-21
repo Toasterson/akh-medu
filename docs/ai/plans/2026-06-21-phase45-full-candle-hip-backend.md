@@ -18,9 +18,14 @@
 >   memory: `HipStorage` owns a real allocation with working H2D/D2H/D2D transfers, `zeros`+`memset`,
 >   `synchronize`. Gate: `hip_storage_host_device_roundtrip` — `Tensor::new(data,&gpu)` lives in VRAM and
 >   reads back exact on the gfx1100. (commit `ec06b23`)
-> - **Next: 45d** — first parity-gated **compute** ops: rocBLAS `matmul` (add rocBLAS to the
->   `hip_backend` runtime) + elementwise `unary_impl`/`binary_impl`/`affine`/`to_dtype` (AOT HIP kernels
->   via a `build.rs`, mirroring `akh_medu/src/nlu/hip_kernels`), each with a GPU-vs-CPU parity test.
+> - **45d matmul ✅** — rocBLAS added to the `hip_backend` runtime (persistent handle);
+>   `BackendStorage::matmul` is batched f32 GEMM mapping candle's `(b,m,n,k)`+layouts onto
+>   `rocblas_sgemm_strided_batched` (per `cuda_backend::gemm_config`). Gate: `hip_matmul_matches_cpu`
+>   (2D + batched 3D) matches CPU on the gfx1100. (commit `434515a`)
+> - **Next: 45d elementwise** — `unary_impl`/`binary_impl`/`affine`/`to_dtype`/`copy_strided_src` via a
+>   new AOT HIP-kernel `vendor/candle-core/build.rs` (hipcc/amdclang++ `--offload-arch=gfx1100`, mirroring
+>   `akh_medu/src/nlu/hip_kernels/dequant.hip`) + launch wiring, each parity-gated. Then f16/bf16 matmul,
+>   `45e` `QHipStorage`, `45f` resident model, `45g` hidden parity, `45h` fused → roofline.
 - **Target box:** AMD Radeon RX 7900 XTX (`gfx1100`, 24 GB, ~960 GB/s), ROCm 6.3.4 userspace installed.
 - **Supersedes the perf ceiling of:** [plan 2026-06-04-gpu-rocm-candle.md](2026-06-04-gpu-rocm-candle.md)
   (op-offload — *complete*, but PCIe-round-trip-bound).
