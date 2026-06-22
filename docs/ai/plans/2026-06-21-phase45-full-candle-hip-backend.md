@@ -147,11 +147,21 @@
 >   9.80.** Bit-exact (24/24), coherent, VRAM unchanged. uint4 qs loads assessed but don't fit (each lane's 8
 >   positions hit 4 *non-contiguous* qs bytes) and ROI is low now that GEMV is no longer the wall.
 > - **CUMULATIVE Phase 45: 0.17 (op-offload) → 11.5 tok/s = ~68× over baseline, ~9.9× over CPU (1.16),
->   ~8.8% of roofline.** New decode map (gemma3 short ctx): attention 45% (whole-op window = host-enqueue
->   gap, A/B-proven not addressable) · other 27.7% (untimed: rms_norm_fused/copy2d/rope/sampling) · GEMV
->   16.8% · eltwise 7.2% · copy 3.2% · malloc 1.4%. The next *real* lever would be the "other" 27.7% (time
->   the untimed kernels to see what's in it) — but the model is now **fast and usable (11.5 tok/s)**. The
->   profiler (committed) made every step measured: 3 GEMV guesses, 1 won, the reliable instrument confirmed it.
+>   ~8.8% of roofline.** The profiler (committed) made every step measured: 3 GEMV guesses, 1 won.
+> - **45h instrumented the "other" bucket + fused-softmax (no-gain, reverted) — decode is DISPATCH-BOUND
+>   outside GEMV** (`dc373cb`). Split "other" into NORM (rms_norm) + REDUCE (softmax max/sum) + folded copy2d
+>   into COPY; `op_profile` is a 5-tuple, all clean kernel-launch windows. **Finding: reduce ~2.56s +
+>   matmul ~2.06s, Σ categories = 123% of wall.** The >100% + the huge windows for *tiny* decode kernels mean
+>   they're dominated by **GPU idle-gap: the GPU waits on the CPU to dispatch the next kernel.** Tested the
+>   implied fix — a fused single-kernel softmax (5 launches → 1), built + bit-exact parity (incl. −inf mask) —
+>   **ZERO decode gain (11.3 vs 11.5)**, because removing kernels just redistributes the idle. Reverted. Same
+>   root cause as the custom-attention no-gain: **GEMV was the one genuinely compute-heavy op; everything else
+>   is launch/dispatch-bound, so per-op fusion can't help.**
+> - **The real remaining lever = HIP graphs** (hipGraph: capture the decode forward once, replay with ONE
+>   host dispatch/token instead of hundreds — kills the per-kernel CPU-enqueue overhead that is the idle-gap).
+>   Substantial separate undertaking (capture/replay + changing KV-cache pointers/seq_kv each token). The
+>   model is **fast and usable now (11.5 tok/s, ~68× baseline)**; this is the honest ceiling for op-by-op
+>   candle execution on this GPU.
 >
 > _(historical) Next: 45g/45h (the speed work). In priority order: **(1)** stop the per-op `malloc/free` +
 >   metadata H2D — pass strided-op dims/strides **by value** (kills the 3710 crossings → ~2/token, the
