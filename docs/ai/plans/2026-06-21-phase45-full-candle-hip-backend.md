@@ -115,13 +115,24 @@
 >   it's launch/queue/drain latency the bracketing sync attributes to whichever op it wraps. **Per-category
 >   sync-profiling is unreliable for finding the real bottleneck in an async pipeline.** The 37.5% was never
 >   addressable by a faster attention kernel.
-> - **Next — needs a RELIABLE profiler before more kernels.** At 6.7 tok/s / ~5% roofline, the honest
->   blocker is *measurement*: the serializing profiler can't localize the true cost. Real next step =
->   event-based GPU timing (hipEvent stream markers, or `rocprof` if installed) to find where decode wall
->   actually goes, **then** optimize. Candidate still-unfalsified levers: GEMV cooperative-superblock dequant
->   (44%), and the per-token `hipMalloc`-sync from growing attention scratch (`[B,1,seq_kv]` changes size each
->   token → caching allocator misses → device-synchronizing `hipMalloc`). The model is **usable now
->   (6.75 tok/s)**; don't add kernels on profiler guesses — measure with real GPU timers first.
+> - **45h event-based GPU profiler ✅ — the reliable instrument; GEMV is the real wall** (`0b45cb5`). Built
+>   `AKH_HIP_PROFILE=event`: hipEvent stream markers around each op → `elapsed(start,stop)` is the **pure GPU
+>   time** of that op, no device drain, no mis-attribution. Pooled events (recycled, flush one sync/4096
+>   pairs); GEMV timed at the kernel launch (clean window); + `hipMalloc` instrumentation (calls/misses/wall).
+>   **Honest decode map (gemma3-12b, gfx1100):**
+>   - **short ctx:** GEMV **46.5%** (218 µs/call) · attention 27% · eltwise 4.7% · copy 2.2% · malloc 0.8% · gap 19%
+>   - **long ctx (~3500 seq_kv):** attention 36% · GEMV 21% · copy 7.8% · malloc 6.9% · gap 29%
+> - **Findings (data, not guesses):** (1) **malloc-sync REFUTED** as the bottleneck (0.8% short ctx; this
+>   ROCm `hipMalloc` is ~3 µs, not a device sync — my own theory, killed by measurement). (2) **The #1 general
+>   lever is GEMV:** it streams all 7.3 GB of weights/token in 73 ms = **~99 GB/s — only ~10% of the 960 GB/s
+>   roofline.** Context-independent (weight-streaming), so it helps every prompt. (3) Attention's share is a
+>   *whole-op* window (includes host enqueue gap) — consistent with the custom-kernel A/B showing zero gain
+>   (its real GEMM time is small). Long-ctx attention/copy/malloc growth is real KV-cache work.
+> - **Next focused pass — GEMV → bandwidth roofline.** Cooperative-superblock dequant (stop recomputing
+>   d/dmin/scales per thread; one superblock per warp, vectorized byte loads), higher occupancy (rows/block).
+>   At ~10% of BW there's ~1.7× of decode to recover. Long-ctx: a flash-attention-style fused KV kernel
+>   (reads KV once) only if long prompts matter. The model is **usable now (6.75 tok/s)** and the profiler now
+>   makes every further step *measured*, not guessed.
 >
 > _(historical) Next: 45g/45h (the speed work). In priority order: **(1)** stop the per-op `malloc/free` +
 >   metadata H2D — pass strided-op dims/strides **by value** (kills the 3710 crossings → ~2/token, the
