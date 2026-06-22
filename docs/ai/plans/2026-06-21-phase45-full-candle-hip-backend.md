@@ -85,11 +85,23 @@
 >     didn't move tok/s → not bandwidth; removing 4000 H2D (by-value) barely moved it → not the crossings;
 >     removing 1900 syncs (async) barely moved it → not sync. The actual wall was **GEMV memory-access
 >     coalescing**. Measure, don't guess.
-> - **Cumulative Phase 45: 0.17 (op-offload) → 2.96 tok/s = ~17× over baseline, ~2.5× over CPU (1.16).**
->   VRAM 19–20 GB, coherent output, both 12B akhs.
-> - **Next (still 2% roofline):** further GEMV tuning (cooperative superblock dequant — stop recomputing
->   d/dmin/scales per position; vectorized `uint4` loads), fused rms_norm/rope/softmax (fewer kernels), then
->   45g hidden-cosine ≥ 0.999. Roofline (≥45 tok/s q8) is still a multi-step climb.
+> - **45h (profile-driven) ✅ — GEMV profiler then fused RMSNorm: → 6.75 (gemma3) / 6.23 (gemma4) tok/s.**
+>   **(a) GEMV profiler** (`a8d37f1`, `AKH_HIP_PROFILE=1`): timed the fused GEMV — **only 22.6% of decode**.
+>   So the quantized matmuls were *not* the wall; the other 77% was ~2880 small elementwise kernels/token,
+>   dominated by `rms_norm_slow`'s ~7-kernel decomposition (~2000 launches/token). This **redirected** the
+>   work away from GEMV micro-opt. **(b) Fused RMSNorm** (`d92c429`): one `akh_rms_norm_f32` kernel (block/
+>   row: reduce Σx², normalize, scale) as a candle `CustomOp2` (`candle_core::cuda::rms_norm_fused`); akh's
+>   `GemmaRmsNorm` routes to it on the HIP device (gemma3 + gemma4), CPU byte-identical. **2.96 → 6.75 tok/s
+>   (2.3×)**, decode 377 → ~160 ms/token, VRAM ~20 GB, coherent. Parity `fused_rms_norm_matches` (rel<1e-4);
+>   candle-core `--features hip` **18/18**.
+> - **Cumulative Phase 45: 0.17 (op-offload) → 6.75 tok/s = ~40× over baseline, ~5.8× over CPU (1.16).**
+>   Both 12B akhs, VRAM 19–20 GB, coherent. ~5% roofline.
+> - **Next (profile first — the lesson):** post-RMSNorm the GEMV is back to 47% of decode; the rest (~53%)
+>   is rope/softmax (many tiny kernels — likely low individual value), attention rocBLAS, KV-cache copy2d,
+>   residuals. **Add per-category timers before fusing more** (softmax/rope are tiny per call). Candidate
+>   levers: cooperative-superblock-dequant GEMV (now 47%), fused rope (CustomOp3, ~576 launches/token),
+>   fused softmax. Then 45g hidden-cosine ≥ 0.999. Roofline (≥45 tok/s q8) is still a climb but the model
+>   is now usable.
 >
 > _(historical) Next: 45g/45h (the speed work). In priority order: **(1)** stop the per-op `malloc/free` +
 >   metadata H2D — pass strided-op dims/strides **by value** (kills the 3710 crossings → ~2/token, the
