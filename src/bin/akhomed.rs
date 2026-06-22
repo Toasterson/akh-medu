@@ -1279,6 +1279,36 @@ impl ServerState {
             }
         }
     }
+
+    /// The akhs this daemon currently owns + has awake, as JSON
+    /// `[{ name, awake, owned_here, model }]`.
+    ///
+    /// The live in-memory agent set IS this host's owned+awake set: `wake` loads
+    /// an akh's agent here and takes its Postgres advisory lock; `sleep`/
+    /// `relocate` evict the agent and release the lock (so `last_seen` +
+    /// `pg_try_advisory_lock` keep ownership single-writer, 38g). A dynamic akh
+    /// gateway mirrors exactly this set to advertise routing — it must reflect
+    /// what is *awake here*, not what is merely configured on disk. Side-effect
+    /// free: reads caches only, never lazily loads a workspace. The pinned model
+    /// comes from the cached `akh.toml` when known (`null` otherwise).
+    async fn owned_awake_akhs(&self) -> Vec<serde_json::Value> {
+        let names: Vec<String> = self.agents.read().await.keys().cloned().collect();
+        let configs = self.akh_configs.read().await;
+        let mut out: Vec<serde_json::Value> = names
+            .into_iter()
+            .map(|name| {
+                let model = configs.get(&name).and_then(|c| c.model.clone());
+                serde_json::json!({
+                    "name": name,
+                    "awake": true,
+                    "owned_here": true,
+                    "model": model,
+                })
+            })
+            .collect();
+        out.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+        out
+    }
 }
 
 /// Operator-facing error for a membership op attempted without Postgres (38f).
@@ -1452,6 +1482,12 @@ impl akh_medu::acp::ServerControl for ServerState {
                     let st = self.daemon_status_snapshot(ws).await;
                     serde_json::to_value(st).map_err(|e| e.to_string())
                 }
+                // The akhs this daemon currently owns + has awake — the live set
+                // an akh gateway mirrors to advertise routing (ADR-061: akhomed is
+                // the only inbound surface; the gateway never reads akh-pg).
+                "daemon/akhs" => Ok(serde_json::json!({
+                    "akhs": self.owned_awake_akhs().await,
+                })),
 
                 // ── config group (global AkhomedConfig) ──────────────────
                 "config/get" => {
@@ -2336,6 +2372,24 @@ mod control_plane_tests {
         // daemon ops require an explicit workspace.
         let bad = state.dispatch("_akh/daemon/status", &json!({})).await;
         assert!(bad.is_err(), "daemon/status without workspace must error");
+    }
+
+    #[tokio::test]
+    async fn control_daemon_akhs_reports_live_set() {
+        let (_tmp, state) = temp_state();
+        // It is a control method (routed to ServerControl, not the data-plane).
+        assert!(akh_medu::acp::is_control_method("_akh/daemon/akhs"));
+
+        // No agent loaded → empty owned+awake set (no lazy load, no workspace arg).
+        let res = state
+            .dispatch("_akh/daemon/akhs", &json!({}))
+            .await
+            .expect("daemon/akhs ok");
+        assert_eq!(
+            res["akhs"].as_array().expect("akhs is an array").len(),
+            0,
+            "a daemon with no awake agents reports an empty set: {res}"
+        );
     }
 
     #[tokio::test]

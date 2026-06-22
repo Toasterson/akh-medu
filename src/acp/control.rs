@@ -99,6 +99,7 @@ pub const CONTROL_METHODS: &[&str] = &[
     "_akh/daemon/start",
     "_akh/daemon/stop",
     "_akh/daemon/status",
+    "_akh/daemon/akhs",
     "_akh/config/get",
     "_akh/config/set",
     "_akh/model/list",
