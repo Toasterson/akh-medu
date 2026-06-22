@@ -54,17 +54,24 @@ fn main() -> miette::Result<()> {
     let gpu_on = std::env::var("AKH_GPU_MATMUL").as_deref() == Ok("1");
     let quant_on = std::env::var("AKH_GPU_QUANT").as_deref() == Ok("1");
 
-    let load_start = Instant::now();
-    let mut backend = match CandleBackend::try_load(&models) {
-        Some(b) => b,
-        None => {
-            eprintln!(
-                "No Candle model found under {}/llm/. Place a .gguf + tokenizer.json.",
-                models.display()
-            );
-            std::process::exit(1);
-        }
+    let Some(model_path) = gguf.clone() else {
+        eprintln!(
+            "No Candle model found under {}/llm/. Place a .gguf + tokenizer.json.",
+            models.display()
+        );
+        std::process::exit(1);
     };
+    // Tokenizer beside the model: `<stem>.tokenizer.json`, else `tokenizer.json`.
+    let stem_tok = model_path.with_extension("tokenizer.json");
+    let tokenizer_path = if stem_tok.exists() {
+        stem_tok
+    } else {
+        model_path.with_file_name("tokenizer.json")
+    };
+    // Load directly (not `try_load`, which swallows load errors into a trace line the
+    // bench can't see) so any HIP/op failure surfaces with its full miette diagnostic.
+    let load_start = Instant::now();
+    let mut backend = CandleBackend::load(&model_path, &tokenizer_path)?;
     let load_secs = load_start.elapsed().as_secs_f32();
     println!(
         "model: {model_name}  family: {:?}  weights: {:.2} GB  load: {:.1}s  \
@@ -77,9 +84,13 @@ fn main() -> miette::Result<()> {
     );
 
     // Reset PCIe counters AFTER load so one-time resident-weight uploads do not
-    // count toward per-token crossings.
+    // count toward per-token crossings. Two sources: akh's op-offload DeviceBuffer
+    // (`nlu::hip`) and — for the resident Device::Hip path (Phase 45f) — candle-core's
+    // own HIP runtime, where the resident forward's H2D/D2H actually happen.
     #[cfg(feature = "rocm")]
     akh_medu::nlu::hip::reset_pcie_counts();
+    #[cfg(feature = "hip")]
+    candle_core::cuda::reset_pcie_counts();
 
     let vram_before = vram_used_bytes();
 
@@ -89,7 +100,15 @@ fn main() -> miette::Result<()> {
     let vram_after = vram_used_bytes();
 
     #[cfg(feature = "rocm")]
-    let (h2d, d2h) = akh_medu::nlu::hip::pcie_counts();
+    let (h2d, d2h) = {
+        let (h, d) = akh_medu::nlu::hip::pcie_counts();
+        // Add the resident-path crossings from candle-core's HIP runtime (the cuda slot).
+        #[cfg(feature = "hip")]
+        let (rh, rd) = candle_core::cuda::pcie_counts();
+        #[cfg(not(feature = "hip"))]
+        let (rh, rd) = (0u64, 0u64);
+        (h + rh, d + rd)
+    };
     #[cfg(not(feature = "rocm"))]
     let (h2d, d2h) = (0u64, 0u64);
     let crossings = h2d + d2h;

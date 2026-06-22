@@ -37,6 +37,13 @@ pub(crate) mod runtime {
     pub const MEMCPY_D2H: c_int = 2;
     pub const MEMCPY_D2D: c_int = 3;
 
+    // PCIe-crossing counters (Phase 45f): every non-empty H2D/D2H `memcpy` bumps one.
+    // The bench resets them after model load, then divides by tokens decoded to prove
+    // the resident forward crosses the bus ~twice/token (input id up, logits down) vs
+    // the op-offload baseline's hundreds. D2D (on-device) copies are not counted.
+    pub static PCIE_H2D: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    pub static PCIE_D2H: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
     const HIP_LIB_CANDIDATES: &[&str] = &[
         "/opt/rocm/lib/libamdhip64.so",
         "/opt/rocm/lib/libamdhip64.so.6",
@@ -50,6 +57,16 @@ pub(crate) mod runtime {
     type Malloc = unsafe extern "C" fn(*mut *mut c_void, usize) -> c_int;
     type Free = unsafe extern "C" fn(*mut c_void) -> c_int;
     type Memcpy = unsafe extern "C" fn(*mut c_void, *const c_void, usize, c_int) -> c_int;
+    // hipMemcpy2D(dst, dpitch, src, spitch, width_bytes, height, kind) — Phase 45f copy2d.
+    type Memcpy2D = unsafe extern "C" fn(
+        *mut c_void,
+        usize,
+        *const c_void,
+        usize,
+        usize,
+        usize,
+        c_int,
+    ) -> c_int;
     type Memset = unsafe extern "C" fn(*mut c_void, c_int, usize) -> c_int;
     type Synchronize = unsafe extern "C" fn() -> c_int;
 
@@ -63,6 +80,7 @@ pub(crate) mod runtime {
         malloc: Malloc,
         free: Free,
         memcpy: Memcpy,
+        memcpy2d: Memcpy2D,
         memset: Memset,
         synchronize: Synchronize,
     }
@@ -95,6 +113,7 @@ pub(crate) mod runtime {
                 let malloc: Malloc = sym!(b"hipMalloc\0", Malloc);
                 let free: Free = sym!(b"hipFree\0", Free);
                 let memcpy: Memcpy = sym!(b"hipMemcpy\0", Memcpy);
+                let memcpy2d: Memcpy2D = sym!(b"hipMemcpy2D\0", Memcpy2D);
                 let memset: Memset = sym!(b"hipMemset\0", Memset);
                 let synchronize: Synchronize = sym!(b"hipDeviceSynchronize\0", Synchronize);
                 Ok(Hip {
@@ -104,6 +123,7 @@ pub(crate) mod runtime {
                     malloc,
                     free,
                     memcpy,
+                    memcpy2d,
                     memset,
                     synchronize,
                 })
@@ -160,6 +180,52 @@ pub(crate) mod runtime {
             let rc = unsafe { (self.memcpy)(dst, src, bytes, kind) };
             if rc != 0 {
                 return Err(format!("hipMemcpy(kind={kind}, {bytes}B) failed (rc={rc})"));
+            }
+            use std::sync::atomic::Ordering::Relaxed;
+            match kind {
+                MEMCPY_H2D => {
+                    PCIE_H2D.fetch_add(1, Relaxed);
+                }
+                MEMCPY_D2H => {
+                    PCIE_D2H.fetch_add(1, Relaxed);
+                }
+                _ => {}
+            }
+            Ok(())
+        }
+
+        /// 2D strided copy: `height` rows of `width` bytes, src/dst row pitches in bytes.
+        /// Used by candle's `cat` fast path (`copy2d`). Counts as a PCIe crossing only for
+        /// H2D/D2H kinds (cat is D2D — on-device — so it does not).
+        #[allow(clippy::too_many_arguments)]
+        pub fn memcpy2d(
+            &self,
+            dst: *mut c_void,
+            dpitch: usize,
+            src: *const c_void,
+            spitch: usize,
+            width: usize,
+            height: usize,
+            kind: c_int,
+        ) -> std::result::Result<(), String> {
+            if width == 0 || height == 0 {
+                return Ok(());
+            }
+            let rc = unsafe { (self.memcpy2d)(dst, dpitch, src, spitch, width, height, kind) };
+            if rc != 0 {
+                return Err(format!(
+                    "hipMemcpy2D(kind={kind}, {width}x{height}B) failed (rc={rc})"
+                ));
+            }
+            use std::sync::atomic::Ordering::Relaxed;
+            match kind {
+                MEMCPY_H2D => {
+                    PCIE_H2D.fetch_add(1, Relaxed);
+                }
+                MEMCPY_D2H => {
+                    PCIE_D2H.fetch_add(1, Relaxed);
+                }
+                _ => {}
             }
             Ok(())
         }
@@ -553,6 +619,19 @@ pub(crate) mod runtime {
         usize,
         c_int,
     ) -> c_int;
+    // Phase 45f: argmin/argmax reduce -> u32 index (same metadata as ReduceF32).
+    #[allow(clippy::type_complexity)]
+    type ReduceArgF32 = unsafe extern "C" fn(
+        *const f32,
+        *mut u32,
+        usize,
+        c_int,
+        *const c_int,
+        *const i64,
+        *const c_int,
+        usize,
+        c_int,
+    ) -> c_int;
     type CastFn = unsafe extern "C" fn(*const c_void, *mut c_void, usize) -> c_int;
     type IndexSelectF32 = unsafe extern "C" fn(
         *const f32,
@@ -567,6 +646,33 @@ pub(crate) mod runtime {
         unsafe extern "C" fn(*const u8, *const f32, *const f32, *mut f32, usize) -> c_int;
     type WhereCondU32F32 =
         unsafe extern "C" fn(*const u32, *const f32, *const f32, *mut f32, usize) -> c_int;
+    // Phase 45f: strided where_cond (cond/t/f own strides) — `t`=neg_inf is broadcast.
+    #[allow(clippy::type_complexity)]
+    type WhereCondStridedU8F32 = unsafe extern "C" fn(
+        *const u8,
+        *const f32,
+        *const f32,
+        *mut f32,
+        usize,
+        usize,
+        *const i64,
+        *const i64,
+        *const i64,
+        *const i64,
+    ) -> c_int;
+    #[allow(clippy::type_complexity)]
+    type WhereCondStridedU32F32 = unsafe extern "C" fn(
+        *const u32,
+        *const f32,
+        *const f32,
+        *mut f32,
+        usize,
+        usize,
+        *const i64,
+        *const i64,
+        *const i64,
+        *const i64,
+    ) -> c_int;
     type UcopyF32 = unsafe extern "C" fn(*const f32, *mut f32, usize, usize, *const usize) -> c_int;
     // Phase 45f: strided elementwise compare -> u8 (powers `mask.eq(0)` in prefill).
     #[allow(clippy::type_complexity)]
@@ -581,6 +687,44 @@ pub(crate) mod runtime {
         *const i64,
         c_int,
     ) -> c_int;
+    // Phase 45f: U32 variant of the strided compare (the attention mask is u32).
+    #[allow(clippy::type_complexity)]
+    type CmpU32 = unsafe extern "C" fn(
+        *const u32,
+        *const u32,
+        *mut u8,
+        usize,
+        usize,
+        *const i64,
+        *const i64,
+        *const i64,
+        c_int,
+    ) -> c_int;
+    // Phase 45f: strided broadcasting binary (add/sub/mul/div) -> f32. Powers the
+    // broadcast_div/mul/sub inside rms_norm/softmax/rope on non-contiguous layouts.
+    #[allow(clippy::type_complexity)]
+    type BinaryStridedF32 = unsafe extern "C" fn(
+        *const f32,
+        *const f32,
+        *mut f32,
+        usize,
+        usize,
+        *const i64,
+        *const i64,
+        *const i64,
+        c_int,
+    ) -> c_int;
+    // Phase 45f: strided unary -> f32. Powers `neg` (and friends) on non-contiguous
+    // narrow views, e.g. rotate_half inside rope_slow.
+    type UnaryStridedF32 = unsafe extern "C" fn(
+        *const f32,
+        *mut f32,
+        usize,
+        usize,
+        *const i64,
+        *const i64,
+        c_int,
+    ) -> c_int;
 
     /// The AOT-compiled elementwise kernel library (built by `build.rs`).
     pub struct Kernels {
@@ -589,6 +733,7 @@ pub(crate) mod runtime {
         unary_f32: UnaryF32,
         binary_f32: BinaryF32,
         reduce_f32: ReduceF32,
+        reduce_arg_f32: ReduceArgF32,
         cast_f32_f16: CastFn,
         cast_f16_f32: CastFn,
         cast_f32_bf16: CastFn,
@@ -605,6 +750,11 @@ pub(crate) mod runtime {
         where_cond_u32_f32: WhereCondU32F32,
         ucopy_f32: UcopyF32,
         cmp_f32: CmpF32,
+        cmp_u32: CmpU32,
+        binary_strided_f32: BinaryStridedF32,
+        unary_strided_f32: UnaryStridedF32,
+        where_cond_strided_u8_f32: WhereCondStridedU8F32,
+        where_cond_strided_u32_f32: WhereCondStridedU32F32,
     }
     unsafe impl Send for Kernels {}
     unsafe impl Sync for Kernels {}
@@ -628,6 +778,9 @@ pub(crate) mod runtime {
                 let reduce_f32: ReduceF32 = *lib
                     .get(b"akh_reduce_f32\0")
                     .map_err(|e| format!("missing akh_reduce_f32: {e}"))?;
+                let reduce_arg_f32: ReduceArgF32 = *lib
+                    .get(b"akh_reduce_arg_f32\0")
+                    .map_err(|e| format!("missing akh_reduce_arg_f32: {e}"))?;
                 macro_rules! cast_sym {
                     ($n:literal) => {
                         *lib.get::<CastFn>($n)
@@ -662,12 +815,28 @@ pub(crate) mod runtime {
                 let cmp_f32: CmpF32 = *lib
                     .get(b"akh_cmp_f32\0")
                     .map_err(|e| format!("missing akh_cmp_f32: {e}"))?;
+                let cmp_u32: CmpU32 = *lib
+                    .get(b"akh_cmp_u32\0")
+                    .map_err(|e| format!("missing akh_cmp_u32: {e}"))?;
+                let binary_strided_f32: BinaryStridedF32 = *lib
+                    .get(b"akh_binary_strided_f32\0")
+                    .map_err(|e| format!("missing akh_binary_strided_f32: {e}"))?;
+                let unary_strided_f32: UnaryStridedF32 = *lib
+                    .get(b"akh_unary_strided_f32\0")
+                    .map_err(|e| format!("missing akh_unary_strided_f32: {e}"))?;
+                let where_cond_strided_u8_f32: WhereCondStridedU8F32 = *lib
+                    .get(b"akh_where_cond_strided_u8_f32\0")
+                    .map_err(|e| format!("missing akh_where_cond_strided_u8_f32: {e}"))?;
+                let where_cond_strided_u32_f32: WhereCondStridedU32F32 = *lib
+                    .get(b"akh_where_cond_strided_u32_f32\0")
+                    .map_err(|e| format!("missing akh_where_cond_strided_u32_f32: {e}"))?;
                 Ok(Kernels {
                     _lib: lib,
                     affine_f32,
                     unary_f32,
                     binary_f32,
                     reduce_f32,
+                    reduce_arg_f32,
                     cast_f32_f16,
                     cast_f16_f32,
                     cast_f32_bf16,
@@ -684,6 +853,11 @@ pub(crate) mod runtime {
                     where_cond_u32_f32,
                     ucopy_f32,
                     cmp_f32,
+                    cmp_u32,
+                    binary_strided_f32,
+                    unary_strided_f32,
+                    where_cond_strided_u8_f32,
+                    where_cond_strided_u32_f32,
                 })
             }
         }
@@ -763,6 +937,40 @@ pub(crate) mod runtime {
             };
             if rc != 0 {
                 return Err(format!("akh_reduce_f32 failed (rc={rc})"));
+            }
+            Ok(())
+        }
+
+        /// argmin/argmax reduce -> u32 index. Same metadata contract as [`reduce_f32`];
+        /// op 0 argmin, 1 argmax. `y` holds `out_numel` u32 indices.
+        #[allow(clippy::too_many_arguments)]
+        pub fn reduce_arg_f32(
+            &self,
+            x: *const f32,
+            y: *mut u32,
+            out_numel: usize,
+            num_dims: c_int,
+            dims: *const c_int,
+            strides: *const i64,
+            reduce_mask: *const c_int,
+            reduce_numel: usize,
+            op: c_int,
+        ) -> std::result::Result<(), String> {
+            let rc = unsafe {
+                (self.reduce_arg_f32)(
+                    x,
+                    y,
+                    out_numel,
+                    num_dims,
+                    dims,
+                    strides,
+                    reduce_mask,
+                    reduce_numel,
+                    op,
+                )
+            };
+            if rc != 0 {
+                return Err(format!("akh_reduce_arg_f32 failed (rc={rc})"));
             }
             Ok(())
         }
@@ -919,6 +1127,120 @@ pub(crate) mod runtime {
             }
             Ok(())
         }
+
+        /// U32 variant of [`cmp_f32`] (attention mask is u32).
+        #[allow(clippy::too_many_arguments)]
+        pub fn cmp_u32(
+            &self,
+            a: *const u32,
+            b: *const u32,
+            out: *mut u8,
+            n: usize,
+            rank: usize,
+            dims: *const i64,
+            a_str: *const i64,
+            b_str: *const i64,
+            op: c_int,
+        ) -> std::result::Result<(), String> {
+            let rc = unsafe { (self.cmp_u32)(a, b, out, n, rank, dims, a_str, b_str, op) };
+            if rc != 0 {
+                return Err(format!("akh_cmp_u32 failed (rc={rc})"));
+            }
+            Ok(())
+        }
+
+        /// Strided broadcasting binary -> f32. Same metadata contract as [`cmp_f32`];
+        /// op 0 add / 1 sub / 2 mul / 3 div.
+        #[allow(clippy::too_many_arguments)]
+        pub fn binary_strided_f32(
+            &self,
+            a: *const f32,
+            b: *const f32,
+            c: *mut f32,
+            n: usize,
+            rank: usize,
+            dims: *const i64,
+            a_str: *const i64,
+            b_str: *const i64,
+            op: c_int,
+        ) -> std::result::Result<(), String> {
+            let rc =
+                unsafe { (self.binary_strided_f32)(a, b, c, n, rank, dims, a_str, b_str, op) };
+            if rc != 0 {
+                return Err(format!("akh_binary_strided_f32 failed (rc={rc})"));
+            }
+            Ok(())
+        }
+
+        /// Strided unary -> f32. `dims`/`x_str` are DEVICE long arrays of length `rank`;
+        /// `x` already advanced to its start offset; `out` contiguous. Op codes match
+        /// [`unary_f32`].
+        #[allow(clippy::too_many_arguments)]
+        pub fn unary_strided_f32(
+            &self,
+            x: *const f32,
+            y: *mut f32,
+            n: usize,
+            rank: usize,
+            dims: *const i64,
+            x_str: *const i64,
+            op: c_int,
+        ) -> std::result::Result<(), String> {
+            let rc = unsafe { (self.unary_strided_f32)(x, y, n, rank, dims, x_str, op) };
+            if rc != 0 {
+                return Err(format!("akh_unary_strided_f32 failed (rc={rc})"));
+            }
+            Ok(())
+        }
+
+        /// Strided where_cond (u8 cond) -> f32. `dims`/`c_str`/`t_str`/`f_str` are
+        /// DEVICE long arrays of length `rank`; cond/t/f advanced to start offsets.
+        #[allow(clippy::too_many_arguments)]
+        pub fn where_cond_strided_u8_f32(
+            &self,
+            cond: *const u8,
+            t: *const f32,
+            f: *const f32,
+            out: *mut f32,
+            n: usize,
+            rank: usize,
+            dims: *const i64,
+            c_str: *const i64,
+            t_str: *const i64,
+            f_str: *const i64,
+        ) -> std::result::Result<(), String> {
+            let rc = unsafe {
+                (self.where_cond_strided_u8_f32)(cond, t, f, out, n, rank, dims, c_str, t_str, f_str)
+            };
+            if rc != 0 {
+                return Err(format!("akh_where_cond_strided_u8_f32 failed (rc={rc})"));
+            }
+            Ok(())
+        }
+
+        /// Strided where_cond (u32 cond) -> f32. See [`where_cond_strided_u8_f32`].
+        #[allow(clippy::too_many_arguments)]
+        pub fn where_cond_strided_u32_f32(
+            &self,
+            cond: *const u32,
+            t: *const f32,
+            f: *const f32,
+            out: *mut f32,
+            n: usize,
+            rank: usize,
+            dims: *const i64,
+            c_str: *const i64,
+            t_str: *const i64,
+            f_str: *const i64,
+        ) -> std::result::Result<(), String> {
+            let rc = unsafe {
+                (self.where_cond_strided_u32_f32)(cond, t, f, out, n, rank, dims, c_str, t_str, f_str)
+            };
+            if rc != 0 {
+                return Err(format!("akh_where_cond_strided_u32_f32 failed (rc={rc})"));
+            }
+            Ok(())
+        }
     }
 
     static KERNELS: OnceLock<std::result::Result<Kernels, String>> = OnceLock::new();
@@ -932,6 +1254,25 @@ pub(crate) mod runtime {
 /// Fetch the HIP runtime, mapping a load failure to a candle error.
 fn hip() -> Result<&'static runtime::Hip> {
     runtime::hip().map_err(Error::Msg)
+}
+
+/// `(host→device, device→host)` `hipMemcpy` counts since the last [`reset_pcie_counts`]
+/// (Phase 45f). Lets a harness prove the resident forward crosses PCIe ~twice/token
+/// (input id up, logits down) instead of the op-offload path's hundreds. Accessible as
+/// `candle_core::cuda::pcie_counts()` (the HIP backend fills the cuda slot).
+pub fn pcie_counts() -> (u64, u64) {
+    use std::sync::atomic::Ordering::Relaxed;
+    (
+        runtime::PCIE_H2D.load(Relaxed),
+        runtime::PCIE_D2H.load(Relaxed),
+    )
+}
+
+/// Reset the PCIe-crossing counters (call after model load, before decode).
+pub fn reset_pcie_counts() {
+    use std::sync::atomic::Ordering::Relaxed;
+    runtime::PCIE_H2D.store(0, Relaxed);
+    runtime::PCIE_D2H.store(0, Relaxed);
 }
 
 /// Port of the batch-stride computation in candle's `cuda_backend::gemm_config`:
@@ -1208,8 +1549,10 @@ impl crate::backend::BackendStorage for HipStorage {
                 "HIP reduce_op: only contiguous layouts supported (Phase 45d)".to_string(),
             ));
         }
-        let op_code: c_int = match op {
-            ReduceOp::Sum => 0,
+        // (op_code, is_arg): value reductions emit f32; arg reductions emit a u32 index
+        // and require a single reduced dim (parity with the CPU backend).
+        let (op_code, is_arg): (c_int, bool) = match op {
+            ReduceOp::Sum => (0, false),
             ReduceOp::Min => {
                 if reduce_dims.len() != 1 {
                     return Err(Error::Msg(format!(
@@ -1217,7 +1560,7 @@ impl crate::backend::BackendStorage for HipStorage {
                          implemented (Phase 45d); reduce one dim at a time"
                     )));
                 }
-                1
+                (1, false)
             }
             ReduceOp::Max => {
                 if reduce_dims.len() != 1 {
@@ -1226,14 +1569,16 @@ impl crate::backend::BackendStorage for HipStorage {
                          implemented (Phase 45d); reduce one dim at a time"
                     )));
                 }
-                2
+                (2, false)
             }
             ReduceOp::ArgMin | ReduceOp::ArgMax => {
-                return Err(Error::Msg(
-                    "HIP reduce_op: `argmin`/`argmax` (u32 index outputs) not yet implemented \
-                     (Phase 45d)"
-                        .to_string(),
-                ));
+                if reduce_dims.len() != 1 {
+                    return Err(Error::Msg(format!(
+                        "HIP reduce_op: `argmin`/`argmax` over multiple dims {reduce_dims:?} not \
+                         supported; reduce one dim at a time"
+                    )));
+                }
+                (if matches!(op, ReduceOp::ArgMax) { 1 } else { 0 }, true)
             }
         };
 
@@ -1302,24 +1647,43 @@ impl crate::backend::BackendStorage for HipStorage {
         }
 
         let src = unsafe { (self.ptr as *const f32).add(layout.start_offset()) };
-        let out = match h.malloc(out_numel * std::mem::size_of::<f32>()) {
+        let elem = if is_arg {
+            std::mem::size_of::<u32>()
+        } else {
+            std::mem::size_of::<f32>()
+        };
+        let out = match h.malloc(out_numel * elem) {
             Ok(p) => p,
             Err(e) => {
                 free_meta();
                 return Err(Error::Msg(e));
             }
         };
-        let launch = k.reduce_f32(
-            src,
-            out as *mut f32,
-            out_numel,
-            num_dims as c_int,
-            dims_dev as *const c_int,
-            strides_dev as *const i64,
-            mask_dev as *const c_int,
-            reduce_numel,
-            op_code,
-        );
+        let launch = if is_arg {
+            k.reduce_arg_f32(
+                src,
+                out as *mut u32,
+                out_numel,
+                num_dims as c_int,
+                dims_dev as *const c_int,
+                strides_dev as *const i64,
+                mask_dev as *const c_int,
+                reduce_numel,
+                op_code,
+            )
+        } else {
+            k.reduce_f32(
+                src,
+                out as *mut f32,
+                out_numel,
+                num_dims as c_int,
+                dims_dev as *const c_int,
+                strides_dev as *const i64,
+                mask_dev as *const c_int,
+                reduce_numel,
+                op_code,
+            )
+        };
         free_meta();
         if let Err(e) = launch {
             h.free(out);
@@ -1328,7 +1692,7 @@ impl crate::backend::BackendStorage for HipStorage {
         Ok(HipStorage {
             device: self.device.clone(),
             ptr: out,
-            dtype: DType::F32,
+            dtype: if is_arg { DType::U32 } else { DType::F32 },
             len: out_numel,
         })
     }
@@ -1337,9 +1701,9 @@ impl crate::backend::BackendStorage for HipStorage {
     /// broadcast/non-contiguous (e.g. prefill's `mask.eq(0)`), so we pass each
     /// side's own strides and reconstruct offsets per output element. f32 only.
     fn cmp(&self, op: CmpOp, rhs: &Self, lhs_l: &Layout, rhs_l: &Layout) -> Result<Self> {
-        if self.dtype != DType::F32 || rhs.dtype != DType::F32 {
+        if self.dtype != rhs.dtype || !matches!(self.dtype, DType::F32 | DType::U32) {
             return Err(Error::Msg(format!(
-                "HIP cmp: only f32 supported (Phase 45f), got lhs={:?} rhs={:?}",
+                "HIP cmp: only matching f32/u32 supported (Phase 45f), got lhs={:?} rhs={:?}",
                 self.dtype, rhs.dtype
             )));
         }
@@ -1392,8 +1756,6 @@ impl crate::backend::BackendStorage for HipStorage {
             }
         }
 
-        let a = unsafe { (self.ptr as *const f32).add(lhs_l.start_offset()) };
-        let b = unsafe { (rhs.ptr as *const f32).add(rhs_l.start_offset()) };
         let out = match h.malloc(n * std::mem::size_of::<u8>()) {
             Ok(p) => p,
             Err(e) => {
@@ -1401,17 +1763,39 @@ impl crate::backend::BackendStorage for HipStorage {
                 return Err(Error::Msg(e));
             }
         };
-        let launch = k.cmp_f32(
-            a,
-            b,
-            out as *mut u8,
-            n,
-            rank,
-            dims_dev as *const i64,
-            a_dev as *const i64,
-            b_dev as *const i64,
-            op_code,
-        );
+        let launch = match self.dtype {
+            DType::F32 => {
+                let a = unsafe { (self.ptr as *const f32).add(lhs_l.start_offset()) };
+                let b = unsafe { (rhs.ptr as *const f32).add(rhs_l.start_offset()) };
+                k.cmp_f32(
+                    a,
+                    b,
+                    out as *mut u8,
+                    n,
+                    rank,
+                    dims_dev as *const i64,
+                    a_dev as *const i64,
+                    b_dev as *const i64,
+                    op_code,
+                )
+            }
+            DType::U32 => {
+                let a = unsafe { (self.ptr as *const u32).add(lhs_l.start_offset()) };
+                let b = unsafe { (rhs.ptr as *const u32).add(rhs_l.start_offset()) };
+                k.cmp_u32(
+                    a,
+                    b,
+                    out as *mut u8,
+                    n,
+                    rank,
+                    dims_dev as *const i64,
+                    a_dev as *const i64,
+                    b_dev as *const i64,
+                    op_code,
+                )
+            }
+            _ => unreachable!("dtype gated above"),
+        };
         free_meta();
         if let Err(e) = launch {
             h.free(out);
@@ -1471,16 +1855,91 @@ impl crate::backend::BackendStorage for HipStorage {
             "relu" => 7,
             "tanh" => 8,
             "abs" => 9,
+            "cos" => 10,
+            "sin" => 11,
+            "log" => 12,
             other => {
                 return Err(Error::Msg(format!(
                     "HIP unary `{other}` not yet implemented (Phase 45d)"
                 )));
             }
         };
+        if self.dtype != DType::F32 {
+            return Err(Error::Msg(format!(
+                "HIP unary `{}`: only f32 supported (Phase 45d), got {:?}",
+                B::NAME,
+                self.dtype
+            )));
+        }
         let k = runtime::kernels().map_err(Error::Msg)?;
-        let (src, out, n) = self.elementwise_setup(layout, B::NAME)?;
-        k.unary_f32(src, out.ptr as *mut f32, n, op).map_err(Error::Msg)?;
-        Ok(out)
+        // Fast path: contiguous. Otherwise a strided kernel reads the input through its
+        // own strides (e.g. `neg` on a narrow view inside rotate_half / rope_slow).
+        if layout.is_contiguous() {
+            let (src, out, n) = self.elementwise_setup(layout, B::NAME)?;
+            k.unary_f32(src, out.ptr as *mut f32, n, op).map_err(Error::Msg)?;
+            return Ok(out);
+        }
+        let h = hip()?;
+        let dims = layout.dims();
+        let rank = dims.len();
+        let n = layout.shape().elem_count();
+        let dims_i64: Vec<i64> = dims.iter().map(|&d| d as i64).collect();
+        let strv: Vec<i64> = layout.stride().iter().map(|&s| s as i64).collect();
+        let bytes = rank.max(1) * std::mem::size_of::<i64>();
+        let out = h.malloc(n * std::mem::size_of::<f32>()).map_err(Error::Msg)?;
+        let dims_dev = match h.malloc(bytes) {
+            Ok(p) => p,
+            Err(e) => {
+                h.free(out);
+                return Err(Error::Msg(e));
+            }
+        };
+        let str_dev = match h.malloc(bytes) {
+            Ok(p) => p,
+            Err(e) => {
+                h.free(out);
+                h.free(dims_dev);
+                return Err(Error::Msg(e));
+            }
+        };
+        let cleanup = || {
+            h.free(dims_dev);
+            h.free(str_dev);
+        };
+        if rank > 0 {
+            let up = |dst: *mut c_void, src: *const c_void| {
+                h.memcpy(dst, src, rank * std::mem::size_of::<i64>(), runtime::MEMCPY_H2D)
+                    .map_err(Error::Msg)
+            };
+            if let Err(e) = up(dims_dev, dims_i64.as_ptr() as *const c_void)
+                .and_then(|_| up(str_dev, strv.as_ptr() as *const c_void))
+            {
+                cleanup();
+                h.free(out);
+                return Err(e);
+            }
+        }
+        let src = unsafe { (self.ptr as *const f32).add(layout.start_offset()) };
+        let launch = k.unary_strided_f32(
+            src,
+            out as *mut f32,
+            n,
+            rank,
+            dims_dev as *const i64,
+            str_dev as *const i64,
+            op,
+        );
+        cleanup();
+        if let Err(e) = launch {
+            h.free(out);
+            return Err(Error::Msg(e));
+        }
+        Ok(HipStorage {
+            device: self.device.clone(),
+            ptr: out,
+            dtype: DType::F32,
+            len: n,
+        })
     }
 
     /// Contiguous-f32 same-shape binary op, dispatched on `B::NAME` (Phase 45d).
@@ -1488,12 +1947,6 @@ impl crate::backend::BackendStorage for HipStorage {
         if self.dtype != DType::F32 || rhs.dtype != DType::F32 {
             return Err(Error::Msg(format!(
                 "HIP binary `{}`: only f32 supported (Phase 45d)",
-                B::NAME
-            )));
-        }
-        if !l1.is_contiguous() || !l2.is_contiguous() {
-            return Err(Error::Msg(format!(
-                "HIP binary `{}`: only contiguous layouts supported (Phase 45d)",
                 B::NAME
             )));
         }
@@ -1511,12 +1964,95 @@ impl crate::backend::BackendStorage for HipStorage {
         let k = runtime::kernels().map_err(Error::Msg)?;
         let h = hip()?;
         let n = l1.shape().elem_count();
-        let a = unsafe { (self.ptr as *const f32).add(l1.start_offset()) };
-        let b = unsafe { (rhs.ptr as *const f32).add(l2.start_offset()) };
         let out = h
             .malloc(n * std::mem::size_of::<f32>())
             .map_err(Error::Msg)?;
-        if let Err(e) = k.binary_f32(a, b, out as *mut f32, n, op) {
+
+        // Fast path: both contiguous (and same shape) -> dense kernel. Otherwise the
+        // strided kernel handles broadcast/non-contiguous layouts (the broadcast_mul/
+        // broadcast_div/broadcast_sub inside rms_norm_slow / softmax / rope_slow).
+        if l1.is_contiguous() && l2.is_contiguous() {
+            let a = unsafe { (self.ptr as *const f32).add(l1.start_offset()) };
+            let b = unsafe { (rhs.ptr as *const f32).add(l2.start_offset()) };
+            if let Err(e) = k.binary_f32(a, b, out as *mut f32, n, op) {
+                h.free(out);
+                return Err(Error::Msg(e));
+            }
+            return Ok(HipStorage {
+                device: self.device.clone(),
+                ptr: out,
+                dtype: DType::F32,
+                len: n,
+            });
+        }
+
+        // Strided path: candle broadcasts both operands to the common shape before
+        // calling binary_impl, so l1.dims() == l2.dims(); each side keeps its own
+        // (possibly stride-0) strides. Upload dims + both stride vectors to device.
+        let dims = l1.dims();
+        let rank = dims.len();
+        let dims_i64: Vec<i64> = dims.iter().map(|&d| d as i64).collect();
+        let a_strv: Vec<i64> = l1.stride().iter().map(|&s| s as i64).collect();
+        let b_strv: Vec<i64> = l2.stride().iter().map(|&s| s as i64).collect();
+        let bytes = rank.max(1) * std::mem::size_of::<i64>();
+        let dims_dev = match h.malloc(bytes) {
+            Ok(p) => p,
+            Err(e) => {
+                h.free(out);
+                return Err(Error::Msg(e));
+            }
+        };
+        let a_dev = match h.malloc(bytes) {
+            Ok(p) => p,
+            Err(e) => {
+                h.free(out);
+                h.free(dims_dev);
+                return Err(Error::Msg(e));
+            }
+        };
+        let b_dev = match h.malloc(bytes) {
+            Ok(p) => p,
+            Err(e) => {
+                h.free(out);
+                h.free(dims_dev);
+                h.free(a_dev);
+                return Err(Error::Msg(e));
+            }
+        };
+        let cleanup = || {
+            h.free(dims_dev);
+            h.free(a_dev);
+            h.free(b_dev);
+        };
+        if rank > 0 {
+            let up = |dst: *mut c_void, src: *const c_void| {
+                h.memcpy(dst, src, rank * std::mem::size_of::<i64>(), runtime::MEMCPY_H2D)
+                    .map_err(Error::Msg)
+            };
+            if let Err(e) = up(dims_dev, dims_i64.as_ptr() as *const c_void)
+                .and_then(|_| up(a_dev, a_strv.as_ptr() as *const c_void))
+                .and_then(|_| up(b_dev, b_strv.as_ptr() as *const c_void))
+            {
+                cleanup();
+                h.free(out);
+                return Err(e);
+            }
+        }
+        let a = unsafe { (self.ptr as *const f32).add(l1.start_offset()) };
+        let b = unsafe { (rhs.ptr as *const f32).add(l2.start_offset()) };
+        let launch = k.binary_strided_f32(
+            a,
+            b,
+            out as *mut f32,
+            n,
+            rank,
+            dims_dev as *const i64,
+            a_dev as *const i64,
+            b_dev as *const i64,
+            op,
+        );
+        cleanup();
+        if let Err(e) = launch {
             h.free(out);
             return Err(Error::Msg(e));
         }
@@ -1550,11 +2086,6 @@ impl crate::backend::BackendStorage for HipStorage {
                 t.dtype, f.dtype
             )));
         }
-        if !layout.is_contiguous() || !t_l.is_contiguous() || !f_l.is_contiguous() {
-            return Err(Error::Msg(
-                "HIP where_cond: only contiguous layouts supported (Phase 45d)".to_string(),
-            ));
-        }
         let k = runtime::kernels().map_err(Error::Msg)?;
         let h = hip()?;
         let n = layout.shape().elem_count();
@@ -1563,17 +2094,108 @@ impl crate::backend::BackendStorage for HipStorage {
         let out = h
             .malloc(n * std::mem::size_of::<f32>())
             .map_err(Error::Msg)?;
+
+        // Fast path: all three contiguous. Otherwise a strided kernel reads each
+        // operand through its own strides (the masked-attention `neg_inf` `t` operand
+        // is a broadcast view).
+        if layout.is_contiguous() && t_l.is_contiguous() && f_l.is_contiguous() {
+            let launch = match self.dtype {
+                DType::U8 => {
+                    let cond = unsafe { (self.ptr as *const u8).add(layout.start_offset()) };
+                    k.where_cond_u8_f32(cond, t_ptr, f_ptr, out as *mut f32, n)
+                }
+                DType::U32 => {
+                    let cond = unsafe { (self.ptr as *const u32).add(layout.start_offset()) };
+                    k.where_cond_u32_f32(cond, t_ptr, f_ptr, out as *mut f32, n)
+                }
+                _ => unreachable!("dtype gated above"),
+            };
+            if let Err(e) = launch {
+                h.free(out);
+                return Err(Error::Msg(e));
+            }
+            return Ok(HipStorage {
+                device: self.device.clone(),
+                ptr: out,
+                dtype: DType::F32,
+                len: n,
+            });
+        }
+
+        // Strided path. candle broadcasts cond/t/f to the common shape, so all share
+        // `layout.dims()`; each keeps its own (possibly stride-0) strides.
+        let dims = layout.dims();
+        let rank = dims.len();
+        let dims_i64: Vec<i64> = dims.iter().map(|&d| d as i64).collect();
+        let c_strv: Vec<i64> = layout.stride().iter().map(|&s| s as i64).collect();
+        let t_strv: Vec<i64> = t_l.stride().iter().map(|&s| s as i64).collect();
+        let f_strv: Vec<i64> = f_l.stride().iter().map(|&s| s as i64).collect();
+        let bytes = rank.max(1) * std::mem::size_of::<i64>();
+        // Allocate the four metadata buffers; on any failure free what we have + out.
+        let mut metas: [*mut c_void; 4] = [std::ptr::null_mut(); 4];
+        for slot in metas.iter_mut() {
+            match h.malloc(bytes) {
+                Ok(p) => *slot = p,
+                Err(e) => {
+                    for p in metas.iter() {
+                        h.free(*p);
+                    }
+                    h.free(out);
+                    return Err(Error::Msg(e));
+                }
+            }
+        }
+        let [dims_dev, c_dev, t_dev, f_dev] = metas;
+        let free_metas = || {
+            for p in metas.iter() {
+                h.free(*p);
+            }
+        };
+        if rank > 0 {
+            let up = |dst: *mut c_void, src: &[i64]| {
+                h.memcpy(dst, src.as_ptr() as *const c_void, rank * 8, runtime::MEMCPY_H2D)
+                    .map_err(Error::Msg)
+            };
+            if let Err(e) = up(dims_dev, &dims_i64)
+                .and_then(|_| up(c_dev, &c_strv))
+                .and_then(|_| up(t_dev, &t_strv))
+                .and_then(|_| up(f_dev, &f_strv))
+            {
+                free_metas();
+                h.free(out);
+                return Err(e);
+            }
+        }
+        let cond8 = unsafe { (self.ptr as *const u8).add(layout.start_offset()) };
+        let cond32 = unsafe { (self.ptr as *const u32).add(layout.start_offset()) };
         let launch = match self.dtype {
-            DType::U8 => {
-                let cond = unsafe { (self.ptr as *const u8).add(layout.start_offset()) };
-                k.where_cond_u8_f32(cond, t_ptr, f_ptr, out as *mut f32, n)
-            }
-            DType::U32 => {
-                let cond = unsafe { (self.ptr as *const u32).add(layout.start_offset()) };
-                k.where_cond_u32_f32(cond, t_ptr, f_ptr, out as *mut f32, n)
-            }
+            DType::U8 => k.where_cond_strided_u8_f32(
+                cond8,
+                t_ptr,
+                f_ptr,
+                out as *mut f32,
+                n,
+                rank,
+                dims_dev as *const i64,
+                c_dev as *const i64,
+                t_dev as *const i64,
+                f_dev as *const i64,
+            ),
+            DType::U32 => k.where_cond_strided_u32_f32(
+                cond32,
+                t_ptr,
+                f_ptr,
+                out as *mut f32,
+                n,
+                rank,
+                dims_dev as *const i64,
+                c_dev as *const i64,
+                t_dev as *const i64,
+                f_dev as *const i64,
+            ),
             _ => unreachable!("dtype gated above"),
         };
+        free_metas();
         if let Err(e) = launch {
             h.free(out);
             return Err(Error::Msg(e));
@@ -1941,17 +2563,44 @@ impl crate::backend::BackendStorage for HipStorage {
         res.map_err(Error::Msg)
     }
 
+    /// 2D block copy (Phase 45f): `d1` rows of `d2` elements, src/dst row strides
+    /// `src_s`/`dst_s` (in elements), into `dst` at element offsets `src_o`/`dst_o`.
+    /// Powers candle's `cat` fast path (KV-cache concat). On-device (D2D), one
+    /// `hipMemcpy2D`; dtype-agnostic via the element byte size.
     fn copy2d(
         &self,
-        _: &mut Self,
-        _: usize,
-        _: usize,
-        _: usize,
-        _: usize,
-        _: usize,
-        _: usize,
+        dst: &mut Self,
+        d1: usize,
+        d2: usize,
+        src_s: usize,
+        dst_s: usize,
+        src_o: usize,
+        dst_o: usize,
     ) -> Result<()> {
-        hip_todo!("copy2d")
+        if self.dtype != dst.dtype {
+            return Err(Error::Msg(format!(
+                "HIP copy2d: dtype mismatch src={:?} dst={:?}",
+                self.dtype, dst.dtype
+            )));
+        }
+        if d1 == 0 || d2 == 0 {
+            return Ok(());
+        }
+        let elem = self.dtype.size_in_bytes();
+        let h = hip()?;
+        let src = unsafe { (self.ptr as *const u8).add(src_o * elem) as *const c_void };
+        let dstp = unsafe { (dst.ptr as *mut u8).add(dst_o * elem) as *mut c_void };
+        h.memcpy2d(
+            dstp,
+            dst_s * elem, // dpitch
+            src,
+            src_s * elem, // spitch
+            d2 * elem,    // width (bytes per row)
+            d1,           // height (rows)
+            runtime::MEMCPY_D2D,
+        )
+        .map_err(Error::Msg)?;
+        h.synchronize().map_err(Error::Msg)
     }
 
     fn avg_pool2d(&self, _: &Layout, _: (usize, usize), _: (usize, usize)) -> Result<Self> {
@@ -2201,6 +2850,124 @@ mod op_tests {
     }
 
     #[test]
+    fn unary_on_noncontiguous() -> Result<()> {
+        let Some(dev) = gpu() else {
+            return Ok(());
+        };
+        // `neg` on a narrowed last-dim view — exactly rotate_half inside rope_slow.
+        let d: Vec<f32> = (0..2 * 6).map(|i| i as f32 - 3.0).collect();
+        let g = Tensor::from_vec(d.clone(), (2, 6), &dev)?
+            .narrow(1, 3, 3)?
+            .neg()?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        let c = Tensor::from_vec(d, (2, 6), &Device::Cpu)?
+            .narrow(1, 3, 3)?
+            .neg()?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        close(&g, &c, 0.0, "neg narrow");
+        Ok(())
+    }
+
+    #[test]
+    fn cat_on_seq_dim() -> Result<()> {
+        let Some(dev) = gpu() else {
+            return Ok(());
+        };
+        // KV-cache shape concat on dim 2: (b,h,t,d) ++ (b,h,1,d) -> exercises copy2d.
+        let a: Vec<f32> = (0..2 * 2 * 3 * 4).map(|i| i as f32).collect();
+        let b: Vec<f32> = (0..2 * 2 * 1 * 4).map(|i| (i as f32) + 100.0).collect();
+        let ga = Tensor::from_vec(a.clone(), (2, 2, 3, 4), &dev)?;
+        let gb = Tensor::from_vec(b.clone(), (2, 2, 1, 4), &dev)?;
+        let gc = Tensor::cat(&[&ga, &gb], 2)?.flatten_all()?.to_vec1::<f32>()?;
+        let ca = Tensor::from_vec(a, (2, 2, 3, 4), &Device::Cpu)?;
+        let cb = Tensor::from_vec(b, (2, 2, 1, 4), &Device::Cpu)?;
+        let cc = Tensor::cat(&[&ca, &cb], 2)?.flatten_all()?.to_vec1::<f32>()?;
+        close(&gc, &cc, 0.0, "cat dim2");
+        Ok(())
+    }
+
+    #[test]
+    fn broadcast_binary_ops() -> Result<()> {
+        let Some(dev) = gpu() else {
+            return Ok(());
+        };
+        // (2,3) op (3,) broadcast, and (2,3) op (2,1) broadcast — the rms_norm/softmax
+        // shapes (normalize a row by a per-row scalar). Exercises stride-0 dims on rhs.
+        let a: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let row: Vec<f32> = vec![10.0, 20.0, 30.0];
+        let colv: Vec<f32> = vec![2.0, 4.0];
+        for (label, run) in [
+            ("bcast_row_div", 0usize),
+            ("bcast_col_mul", 1usize),
+            ("bcast_row_sub", 2usize),
+        ] {
+            let ga = Tensor::from_vec(a.clone(), (2, 3), &dev)?;
+            let ca = Tensor::from_vec(a.clone(), (2, 3), &Device::Cpu)?;
+            let (g, c) = match run {
+                0 => {
+                    let gr = Tensor::from_vec(row.clone(), (3,), &dev)?;
+                    let cr = Tensor::from_vec(row.clone(), (3,), &Device::Cpu)?;
+                    (ga.broadcast_div(&gr)?, ca.broadcast_div(&cr)?)
+                }
+                1 => {
+                    let gc = Tensor::from_vec(colv.clone(), (2, 1), &dev)?;
+                    let cc = Tensor::from_vec(colv.clone(), (2, 1), &Device::Cpu)?;
+                    (ga.broadcast_mul(&gc)?, ca.broadcast_mul(&cc)?)
+                }
+                _ => {
+                    let gr = Tensor::from_vec(row.clone(), (3,), &dev)?;
+                    let cr = Tensor::from_vec(row.clone(), (3,), &Device::Cpu)?;
+                    (ga.broadcast_sub(&gr)?, ca.broadcast_sub(&cr)?)
+                }
+            };
+            close(
+                &g.flatten_all()?.to_vec1::<f32>()?,
+                &c.flatten_all()?.to_vec1::<f32>()?,
+                1e-5,
+                label,
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn argmax_last_dim() -> Result<()> {
+        let Some(dev) = gpu() else {
+            return Ok(());
+        };
+        // Greedy sampling: argmax over the vocab (last) dim of a logits row.
+        let d: Vec<f32> = vec![0.1, 0.9, 0.3, 0.2, 0.7, 0.4, 1.5, 0.0];
+        let g = Tensor::from_vec(d.clone(), (2, 4), &dev)?
+            .argmax(D::Minus1)?
+            .to_vec1::<u32>()?;
+        let c = Tensor::from_vec(d, (2, 4), &Device::Cpu)?
+            .argmax(D::Minus1)?
+            .to_vec1::<u32>()?;
+        assert_eq!(g, c, "argmax");
+        Ok(())
+    }
+
+    #[test]
+    fn where_cond_broadcast_t() -> Result<()> {
+        let Some(dev) = gpu() else {
+            return Ok(());
+        };
+        // Masked attention: where(mask.eq(0), neg_inf_scalar_broadcast, scores).
+        let cond = [1u8, 0, 0, 1, 1, 0];
+        let scores: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let run = |d: &Device| -> Result<Vec<f32>> {
+            let c = Tensor::from_vec(cond.to_vec(), (2, 3), d)?;
+            let neg = Tensor::new(-1e30f32, d)?.broadcast_as((2, 3))?;
+            let s = Tensor::from_vec(scores.clone(), (2, 3), d)?;
+            c.where_cond(&neg, &s)?.flatten_all()?.to_vec1::<f32>()
+        };
+        close(&run(&dev)?, &run(&Device::Cpu)?, 0.0, "where_cond bcast t");
+        Ok(())
+    }
+
+    #[test]
     fn cmp_eq_and_broadcast_mask() -> Result<()> {
         let Some(dev) = gpu() else {
             return Ok(());
@@ -2229,6 +2996,20 @@ mod op_tests {
             .flatten_all()?
             .to_vec1::<u8>()?;
         assert_eq!(gm, cm, "broadcast mask eq");
+
+        // U32 mask path (the attention mask is built as u32): broadcast eq 0.
+        let um: Vec<u32> = vec![1, 0, 1, 1];
+        let gu = Tensor::from_vec(um.clone(), (2, 2), &dev)?
+            .broadcast_as((3, 1, 2, 2))?
+            .eq(0u32)?
+            .flatten_all()?
+            .to_vec1::<u8>()?;
+        let cu = Tensor::from_vec(um, (2, 2), &Device::Cpu)?
+            .broadcast_as((3, 1, 2, 2))?
+            .eq(0u32)?
+            .flatten_all()?
+            .to_vec1::<u8>()?;
+        assert_eq!(gu, cu, "broadcast mask eq u32");
         Ok(())
     }
 
