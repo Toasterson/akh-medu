@@ -47,6 +47,11 @@
 >   **strided** binary/unary/where_cond/cmp(u32) (broadcast layouts in rms_norm/softmax/rope/mask);
 >   `copy2d` via `hipMemcpy2D` (cat/KV-cache); **argmin/argmax → u32** (greedy sampling). PCIe counters
 >   added to the candle-core HIP runtime. (commits `c3b9165`, `731199b`, `3315e60`)
+>   - **gemma4-12b too** (`894ba10`): same device-gated routing in `quantized_gemma4`; identical dtype mix
+>     (F32+Q4_K+Q6_K, no new kernels); its GELU MLP / weightless-V rmsnorm / final-logit tanh-softcap /
+>     per-block output-scale all route through ops already on the GPU. Resident on gfx1100 = **0.85 tok/s,
+>     23.46 GB**, coherent output. Both on-host 12B akhs (gemma3 **and** gemma4, the June-2026 release) now
+>     run their full forward on `Device::Hip`.
 >   - **NOT YET the ≤2-crossings/token target nor roofline.** Measured **3710 H2D/token** — but these are
 >     **tiny control-plane uploads** (the per-call dims/stride arrays of the strided ops, <40 B each), NOT
 >     weight streaming (weights stay resident). **Profiling verdict:** the 1.15 s/token is dominated by
