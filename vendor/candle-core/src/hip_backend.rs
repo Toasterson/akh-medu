@@ -2451,7 +2451,7 @@ impl crate::backend::BackendStorage for HipStorage {
             h.free(out);
             return Err(Error::Msg(e));
         }
-        h.synchronize().map_err(Error::Msg)?;
+        // No sync (Phase 45h): ordered on the null stream; the final D2H readback syncs.
         Ok(HipStorage {
             device: self.device.clone(),
             ptr: out,
@@ -2549,8 +2549,8 @@ impl crate::backend::BackendStorage for HipStorage {
             d1,           // height (rows)
             runtime::MEMCPY_D2D,
         )
-        .map_err(Error::Msg)?;
-        h.synchronize().map_err(Error::Msg)
+        .map_err(Error::Msg)
+        // No sync (Phase 45h): the D2D copy is ordered on the null stream.
     }
 
     fn avg_pool2d(&self, _: &Layout, _: (usize, usize), _: (usize, usize)) -> Result<Self> {

@@ -222,9 +222,8 @@ int akh_gemv_q4k_f32(const unsigned char* W, const float* x, float* out,
     unsigned long nblocks = ((unsigned long)n_rows + threads - 1) / threads;
     hipLaunchKernelGGL(akh_gemv_q4k_f32_kernel, dim3((unsigned)nblocks), dim3(threads), 0, 0,
                        W, x, out, (unsigned long)n_rows, (unsigned long)in_dim);
-    hipError_t e = hipGetLastError();
-    if (e != hipSuccess) return (int)e;
-    return (int)hipDeviceSynchronize();
+    // No per-kernel sync (Phase 45h) — ordered on the null stream.
+    return (int)hipGetLastError();
 }
 
 int akh_gemv_q6k_f32(const unsigned char* W, const float* x, float* out,
@@ -234,9 +233,8 @@ int akh_gemv_q6k_f32(const unsigned char* W, const float* x, float* out,
     unsigned long nblocks = ((unsigned long)n_rows + threads - 1) / threads;
     hipLaunchKernelGGL(akh_gemv_q6k_f32_kernel, dim3((unsigned)nblocks), dim3(threads), 0, 0,
                        W, x, out, (unsigned long)n_rows, (unsigned long)in_dim);
-    hipError_t e = hipGetLastError();
-    if (e != hipSuccess) return (int)e;
-    return (int)hipDeviceSynchronize();
+    // No per-kernel sync (Phase 45h) — ordered on the null stream.
+    return (int)hipGetLastError();
 }
 
 // Launch the row-major Q6_K dequant kernel; `out` must hold rows*in_dim floats.
@@ -246,9 +244,8 @@ int akh_dequant_q6k(const unsigned char* blocks, float* out, size_t rows, size_t
     unsigned long nblocks = (total + threads - 1) / threads;
     hipLaunchKernelGGL(akh_dequant_q6k_kernel, dim3((unsigned)nblocks), dim3(threads), 0, 0,
                        blocks, out, (unsigned long)rows, (unsigned long)in_dim);
-    hipError_t e = hipGetLastError();
-    if (e != hipSuccess) return (int)e;
-    return (int)hipDeviceSynchronize();
+    // No per-kernel sync (Phase 45h) — ordered on the null stream.
+    return (int)hipGetLastError();
 }
 
 // Launch the row-major Q4_K dequant kernel on the default stream and synchronize.
@@ -260,9 +257,8 @@ int akh_dequant_q4k(const unsigned char* blocks, float* out, size_t rows, size_t
     unsigned long nblocks = (total + threads - 1) / threads;
     hipLaunchKernelGGL(akh_dequant_q4k_kernel, dim3((unsigned)nblocks), dim3(threads), 0, 0,
                        blocks, out, (unsigned long)rows, (unsigned long)in_dim);
-    hipError_t e = hipGetLastError();
-    if (e != hipSuccess) return (int)e;
-    return (int)hipDeviceSynchronize();
+    // No per-kernel sync (Phase 45h) — ordered on the null stream.
+    return (int)hipGetLastError();
 }
 
 } // extern "C"

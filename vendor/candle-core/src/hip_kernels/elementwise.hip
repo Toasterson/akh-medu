@@ -379,8 +379,9 @@ int akh_affine_f32(const float* x, float* y, size_t n, float mul, float add) {
     int t = 256;
     size_t blocks = (n + t - 1) / t;
     hipLaunchKernelGGL(affine_f32, dim3(blocks), dim3(t), 0, 0, x, y, n, mul, add);
-    if (hipGetLastError() != hipSuccess) return 1;
-    return hipDeviceSynchronize() == hipSuccess ? 0 : 2;
+    // No per-kernel sync (Phase 45h): kernels are ordered on the null stream; the
+    // final D2H readback (to_cpu) synchronizes. Only launch errors checked here.
+    return hipGetLastError() == hipSuccess ? 0 : 1;
 }
 
 int akh_unary_f32(const float* x, float* y, size_t n, int op) {
@@ -388,8 +389,9 @@ int akh_unary_f32(const float* x, float* y, size_t n, int op) {
     int t = 256;
     size_t blocks = (n + t - 1) / t;
     hipLaunchKernelGGL(unary_f32, dim3(blocks), dim3(t), 0, 0, x, y, n, op);
-    if (hipGetLastError() != hipSuccess) return 1;
-    return hipDeviceSynchronize() == hipSuccess ? 0 : 2;
+    // No per-kernel sync (Phase 45h): kernels are ordered on the null stream; the
+    // final D2H readback (to_cpu) synchronizes. Only launch errors checked here.
+    return hipGetLastError() == hipSuccess ? 0 : 1;
 }
 
 int akh_binary_f32(const float* a, const float* b, float* c, size_t n, int op) {
@@ -397,8 +399,9 @@ int akh_binary_f32(const float* a, const float* b, float* c, size_t n, int op) {
     int t = 256;
     size_t blocks = (n + t - 1) / t;
     hipLaunchKernelGGL(binary_f32, dim3(blocks), dim3(t), 0, 0, a, b, c, n, op);
-    if (hipGetLastError() != hipSuccess) return 1;
-    return hipDeviceSynchronize() == hipSuccess ? 0 : 2;
+    // No per-kernel sync (Phase 45h): kernels are ordered on the null stream; the
+    // final D2H readback (to_cpu) synchronizes. Only launch errors checked here.
+    return hipGetLastError() == hipSuccess ? 0 : 1;
 }
 
 // reduce: dims/strides/reduce_mask are DEVICE pointers (caller uploads + frees).
@@ -410,8 +413,9 @@ int akh_reduce_f32(const float* x, float* y, size_t out_numel, int num_dims,
     size_t blocks = (out_numel + t - 1) / t;
     hipLaunchKernelGGL(reduce_f32, dim3(blocks), dim3(t), 0, 0, x, y, out_numel,
                        num_dims, dims, strides, reduce_mask, reduce_numel, op);
-    if (hipGetLastError() != hipSuccess) return 1;
-    return hipDeviceSynchronize() == hipSuccess ? 0 : 2;
+    // No per-kernel sync (Phase 45h): kernels are ordered on the null stream; the
+    // final D2H readback (to_cpu) synchronizes. Only launch errors checked here.
+    return hipGetLastError() == hipSuccess ? 0 : 1;
 }
 
 // argmin/argmax reduce -> u32 index. Same metadata as akh_reduce_f32; op 0 argmin, 1 argmax.
@@ -423,8 +427,9 @@ int akh_reduce_arg_f32(const float* x, unsigned int* y, size_t out_numel, int nu
     size_t blocks = (out_numel + t - 1) / t;
     hipLaunchKernelGGL(reduce_arg_f32, dim3(blocks), dim3(t), 0, 0, x, y, out_numel,
                        num_dims, dims, strides, reduce_mask, reduce_numel, op);
-    if (hipGetLastError() != hipSuccess) return 1;
-    return hipDeviceSynchronize() == hipSuccess ? 0 : 2;
+    // No per-kernel sync (Phase 45h): kernels are ordered on the null stream; the
+    // final D2H readback (to_cpu) synchronizes. Only launch errors checked here.
+    return hipGetLastError() == hipSuccess ? 0 : 1;
 }
 
 int akh_index_select_u32_f32(
@@ -436,8 +441,9 @@ int akh_index_select_u32_f32(
     size_t blocks = (total + t - 1) / t;
     hipLaunchKernelGGL(index_select_u32_f32, dim3(blocks), dim3(t), 0, 0,
                        src, ids, out, left, dim_size, n_idx, right);
-    if (hipGetLastError() != hipSuccess) return 1;
-    return hipDeviceSynchronize() == hipSuccess ? 0 : 2;
+    // No per-kernel sync (Phase 45h): kernels are ordered on the null stream; the
+    // final D2H readback (to_cpu) synchronizes. Only launch errors checked here.
+    return hipGetLastError() == hipSuccess ? 0 : 1;
 }
 int akh_index_select_i64_f32(
     const float* src, const long long* ids, float* out,
@@ -448,8 +454,9 @@ int akh_index_select_i64_f32(
     size_t blocks = (total + t - 1) / t;
     hipLaunchKernelGGL(index_select_i64_f32, dim3(blocks), dim3(t), 0, 0,
                        src, ids, out, left, dim_size, n_idx, right);
-    if (hipGetLastError() != hipSuccess) return 1;
-    return hipDeviceSynchronize() == hipSuccess ? 0 : 2;
+    // No per-kernel sync (Phase 45h): kernels are ordered on the null stream; the
+    // final D2H readback (to_cpu) synchronizes. Only launch errors checked here.
+    return hipGetLastError() == hipSuccess ? 0 : 1;
 }
 
 int akh_where_cond_u8_f32(const unsigned char* cond, const float* t, const float* f,
@@ -458,8 +465,9 @@ int akh_where_cond_u8_f32(const unsigned char* cond, const float* t, const float
     int tpb = 256;
     size_t blocks = (n + tpb - 1) / tpb;
     hipLaunchKernelGGL(where_cond_u8_f32, dim3(blocks), dim3(tpb), 0, 0, cond, t, f, out, n);
-    if (hipGetLastError() != hipSuccess) return 1;
-    return hipDeviceSynchronize() == hipSuccess ? 0 : 2;
+    // No per-kernel sync (Phase 45h): kernels are ordered on the null stream; the
+    // final D2H readback (to_cpu) synchronizes. Only launch errors checked here.
+    return hipGetLastError() == hipSuccess ? 0 : 1;
 }
 int akh_where_cond_u32_f32(const unsigned int* cond, const float* t, const float* f,
                            float* out, size_t n) {
@@ -467,8 +475,9 @@ int akh_where_cond_u32_f32(const unsigned int* cond, const float* t, const float
     int tpb = 256;
     size_t blocks = (n + tpb - 1) / tpb;
     hipLaunchKernelGGL(where_cond_u32_f32, dim3(blocks), dim3(tpb), 0, 0, cond, t, f, out, n);
-    if (hipGetLastError() != hipSuccess) return 1;
-    return hipDeviceSynchronize() == hipSuccess ? 0 : 2;
+    // No per-kernel sync (Phase 45h): kernels are ordered on the null stream; the
+    // final D2H readback (to_cpu) synchronizes. Only launch errors checked here.
+    return hipGetLastError() == hipSuccess ? 0 : 1;
 }
 
 // strided broadcasting binary; dims/a_str/b_str are device long arrays of length
@@ -481,8 +490,9 @@ int akh_binary_strided_f32(const float* a, const float* b, float* c, size_t n,
     size_t blocks = (n + t - 1) / t;
     hipLaunchKernelGGL(binary_strided_f32, dim3(blocks), dim3(t), 0, 0,
                        a, b, c, n, rank, dims, a_str, b_str, op);
-    if (hipGetLastError() != hipSuccess) return 1;
-    return hipDeviceSynchronize() == hipSuccess ? 0 : 2;
+    // No per-kernel sync (Phase 45h): kernels are ordered on the null stream; the
+    // final D2H readback (to_cpu) synchronizes. Only launch errors checked here.
+    return hipGetLastError() == hipSuccess ? 0 : 1;
 }
 
 // strided unary; dims/x_str passed by value, x advanced to its start offset, out
@@ -494,8 +504,9 @@ int akh_unary_strided_f32(const float* x, float* y, size_t n, size_t rank,
     size_t blocks = (n + t - 1) / t;
     hipLaunchKernelGGL(unary_strided_f32, dim3(blocks), dim3(t), 0, 0,
                        x, y, n, rank, dims, x_str, op);
-    if (hipGetLastError() != hipSuccess) return 1;
-    return hipDeviceSynchronize() == hipSuccess ? 0 : 2;
+    // No per-kernel sync (Phase 45h): kernels are ordered on the null stream; the
+    // final D2H readback (to_cpu) synchronizes. Only launch errors checked here.
+    return hipGetLastError() == hipSuccess ? 0 : 1;
 }
 
 // strided elementwise compare -> u8; dims/a_str/b_str are device long arrays of
@@ -506,8 +517,9 @@ int akh_cmp_f32(const float* a, const float* b, unsigned char* out, size_t n,
     int t = 256;
     size_t blocks = (n + t - 1) / t;
     hipLaunchKernelGGL(cmp_f32, dim3(blocks), dim3(t), 0, 0, a, b, out, n, rank, dims, a_str, b_str, op);
-    if (hipGetLastError() != hipSuccess) return 1;
-    return hipDeviceSynchronize() == hipSuccess ? 0 : 2;
+    // No per-kernel sync (Phase 45h): kernels are ordered on the null stream; the
+    // final D2H readback (to_cpu) synchronizes. Only launch errors checked here.
+    return hipGetLastError() == hipSuccess ? 0 : 1;
 }
 
 int akh_cmp_u32(const unsigned int* a, const unsigned int* b, unsigned char* out, size_t n,
@@ -516,8 +528,9 @@ int akh_cmp_u32(const unsigned int* a, const unsigned int* b, unsigned char* out
     int t = 256;
     size_t blocks = (n + t - 1) / t;
     hipLaunchKernelGGL(cmp_u32, dim3(blocks), dim3(t), 0, 0, a, b, out, n, rank, dims, a_str, b_str, op);
-    if (hipGetLastError() != hipSuccess) return 1;
-    return hipDeviceSynchronize() == hipSuccess ? 0 : 2;
+    // No per-kernel sync (Phase 45h): kernels are ordered on the null stream; the
+    // final D2H readback (to_cpu) synchronizes. Only launch errors checked here.
+    return hipGetLastError() == hipSuccess ? 0 : 1;
 }
 
 // strided where_cond (cond/t/f own strides; dims/c_str/t_str/f_str device long
@@ -530,8 +543,9 @@ int akh_where_cond_strided_u8_f32(const unsigned char* cond, const float* t, con
     size_t blocks = (n + tpb - 1) / tpb;
     hipLaunchKernelGGL(where_cond_strided_u8_f32, dim3(blocks), dim3(tpb), 0, 0,
                        cond, t, f, out, n, rank, dims, c_str, t_str, f_str);
-    if (hipGetLastError() != hipSuccess) return 1;
-    return hipDeviceSynchronize() == hipSuccess ? 0 : 2;
+    // No per-kernel sync (Phase 45h): kernels are ordered on the null stream; the
+    // final D2H readback (to_cpu) synchronizes. Only launch errors checked here.
+    return hipGetLastError() == hipSuccess ? 0 : 1;
 }
 int akh_where_cond_strided_u32_f32(const unsigned int* cond, const float* t, const float* f,
     float* out, size_t n, size_t rank, const long* dims, const long* c_str,
@@ -541,8 +555,9 @@ int akh_where_cond_strided_u32_f32(const unsigned int* cond, const float* t, con
     size_t blocks = (n + tpb - 1) / tpb;
     hipLaunchKernelGGL(where_cond_strided_u32_f32, dim3(blocks), dim3(tpb), 0, 0,
                        cond, t, f, out, n, rank, dims, c_str, t_str, f_str);
-    if (hipGetLastError() != hipSuccess) return 1;
-    return hipDeviceSynchronize() == hipSuccess ? 0 : 2;
+    // No per-kernel sync (Phase 45h): kernels are ordered on the null stream; the
+    // final D2H readback (to_cpu) synchronizes. Only launch errors checked here.
+    return hipGetLastError() == hipSuccess ? 0 : 1;
 }
 
 // strided gather-copy: src/dst already advanced to start offsets; dims/strides by value.
@@ -552,8 +567,9 @@ int akh_ucopy_f32(const float* src, float* dst, size_t n, size_t rank,
     int t = 256;
     size_t blocks = (n + t - 1) / t;
     hipLaunchKernelGGL(ucopy_f32, dim3(blocks), dim3(t), 0, 0, src, dst, n, rank, dims, strides);
-    if (hipGetLastError() != hipSuccess) return 1;
-    return hipDeviceSynchronize() == hipSuccess ? 0 : 2;
+    // No per-kernel sync (Phase 45h): kernels are ordered on the null stream; the
+    // final D2H readback (to_cpu) synchronizes. Only launch errors checked here.
+    return hipGetLastError() == hipSuccess ? 0 : 1;
 }
 
 } // extern "C"
@@ -579,8 +595,7 @@ __global__ void cast_kernel(const Src* x, Dst* y, size_t n) {
         size_t blocks = ((n) + t - 1) / t;                                     \
         hipLaunchKernelGGL((cast_kernel<SRC, DST>), dim3(blocks), dim3(t), 0,  \
                            0, (xptr), (yptr), (n));                            \
-        if (hipGetLastError() != hipSuccess) return 1;                         \
-        return hipDeviceSynchronize() == hipSuccess ? 0 : 2;                   \
+        return hipGetLastError() == hipSuccess ? 0 : 1;                        \
     } while (0)
 
 // f16 <-> bf16 route through f32 explicitly (no direct converting ctor).
@@ -606,16 +621,18 @@ int akh_cast_f16_bf16(const __half* x, hip_bfloat16* y, size_t n) {
     int t = 256;
     size_t blocks = (n + t - 1) / t;
     hipLaunchKernelGGL(cast_f16_bf16_kernel, dim3(blocks), dim3(t), 0, 0, x, y, n);
-    if (hipGetLastError() != hipSuccess) return 1;
-    return hipDeviceSynchronize() == hipSuccess ? 0 : 2;
+    // No per-kernel sync (Phase 45h): kernels are ordered on the null stream; the
+    // final D2H readback (to_cpu) synchronizes. Only launch errors checked here.
+    return hipGetLastError() == hipSuccess ? 0 : 1;
 }
 int akh_cast_bf16_f16(const hip_bfloat16* x, __half* y, size_t n) {
     if (n == 0) return 0;
     int t = 256;
     size_t blocks = (n + t - 1) / t;
     hipLaunchKernelGGL(cast_bf16_f16_kernel, dim3(blocks), dim3(t), 0, 0, x, y, n);
-    if (hipGetLastError() != hipSuccess) return 1;
-    return hipDeviceSynchronize() == hipSuccess ? 0 : 2;
+    // No per-kernel sync (Phase 45h): kernels are ordered on the null stream; the
+    // final D2H readback (to_cpu) synchronizes. Only launch errors checked here.
+    return hipGetLastError() == hipSuccess ? 0 : 1;
 }
 int akh_cast_f32_u32(const float* x, uint32_t* y, size_t n) { AKH_CAST_LAUNCH(float, uint32_t, x, y, n); }
 int akh_cast_u32_f32(const uint32_t* x, float* y, size_t n) { AKH_CAST_LAUNCH(uint32_t, float, x, y, n); }

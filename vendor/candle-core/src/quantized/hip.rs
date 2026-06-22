@@ -248,7 +248,8 @@ impl QCudaStorage {
             h.free(out);
             return Err(Error::Msg(e));
         }
-        h.synchronize().map_err(Error::Msg)?;
+        // No sync (Phase 45h): ordered on the null stream; consumed by the GEMM that
+        // follows on the same stream, read back to host only at the logits D2H.
         Ok(CudaStorage::from_raw(
             self.device.clone(),
             out,
@@ -275,7 +276,8 @@ impl QCudaStorage {
             h.free(out);
             return Err(Error::Msg(e));
         }
-        h.synchronize().map_err(Error::Msg)?;
+        // No sync (Phase 45h): ordered on the null stream; consumed by the GEMM that
+        // follows on the same stream, read back to host only at the logits D2H.
         Ok(CudaStorage::from_raw(
             self.device.clone(),
             out,
@@ -470,7 +472,8 @@ impl QCudaStorage {
                 h.free(out_ptr);
                 return Err(Error::Msg(e));
             }
-            h.synchronize().map_err(Error::Msg)?;
+            // No sync (Phase 45h): the GEMV is ordered on the null stream; the result
+            // is read to host only at the per-token logits D2H.
             let out = CudaStorage::from_raw(self.device.clone(), out_ptr, DType::F32, n);
             let mut out_shape = layout.shape().dims().to_vec();
             out_shape.pop();
