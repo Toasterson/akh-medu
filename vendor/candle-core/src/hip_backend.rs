@@ -568,6 +568,19 @@ pub(crate) mod runtime {
     type WhereCondU32F32 =
         unsafe extern "C" fn(*const u32, *const f32, *const f32, *mut f32, usize) -> c_int;
     type UcopyF32 = unsafe extern "C" fn(*const f32, *mut f32, usize, usize, *const usize) -> c_int;
+    // Phase 45f: strided elementwise compare -> u8 (powers `mask.eq(0)` in prefill).
+    #[allow(clippy::type_complexity)]
+    type CmpF32 = unsafe extern "C" fn(
+        *const f32,
+        *const f32,
+        *mut u8,
+        usize,
+        usize,
+        *const i64,
+        *const i64,
+        *const i64,
+        c_int,
+    ) -> c_int;
 
     /// The AOT-compiled elementwise kernel library (built by `build.rs`).
     pub struct Kernels {
@@ -591,6 +604,7 @@ pub(crate) mod runtime {
         where_cond_u8_f32: WhereCondU8F32,
         where_cond_u32_f32: WhereCondU32F32,
         ucopy_f32: UcopyF32,
+        cmp_f32: CmpF32,
     }
     unsafe impl Send for Kernels {}
     unsafe impl Sync for Kernels {}
@@ -645,6 +659,9 @@ pub(crate) mod runtime {
                 let ucopy_f32: UcopyF32 = *lib
                     .get(b"akh_ucopy_f32\0")
                     .map_err(|e| format!("missing akh_ucopy_f32: {e}"))?;
+                let cmp_f32: CmpF32 = *lib
+                    .get(b"akh_cmp_f32\0")
+                    .map_err(|e| format!("missing akh_cmp_f32: {e}"))?;
                 Ok(Kernels {
                     _lib: lib,
                     affine_f32,
@@ -666,6 +683,7 @@ pub(crate) mod runtime {
                     where_cond_u8_f32,
                     where_cond_u32_f32,
                     ucopy_f32,
+                    cmp_f32,
                 })
             }
         }
@@ -874,6 +892,30 @@ pub(crate) mod runtime {
             let rc = unsafe { (self.ucopy_f32)(src, dst, n, rank, info) };
             if rc != 0 {
                 return Err(format!("akh_ucopy_f32 failed (rc={rc})"));
+            }
+            Ok(())
+        }
+
+        /// Strided elementwise compare -> u8. `dims`/`a_str`/`b_str` are DEVICE
+        /// arrays of length `rank`; `a`/`b` already advanced to start offsets;
+        /// `out` is a contiguous u8 buffer of `n` elements. op: candle `CmpOp`
+        /// (0 eq 1 ne 2 le 3 ge 4 lt 5 gt).
+        #[allow(clippy::too_many_arguments)]
+        pub fn cmp_f32(
+            &self,
+            a: *const f32,
+            b: *const f32,
+            out: *mut u8,
+            n: usize,
+            rank: usize,
+            dims: *const i64,
+            a_str: *const i64,
+            b_str: *const i64,
+            op: c_int,
+        ) -> std::result::Result<(), String> {
+            let rc = unsafe { (self.cmp_f32)(a, b, out, n, rank, dims, a_str, b_str, op) };
+            if rc != 0 {
+                return Err(format!("akh_cmp_f32 failed (rc={rc})"));
             }
             Ok(())
         }
@@ -1291,8 +1333,96 @@ impl crate::backend::BackendStorage for HipStorage {
         })
     }
 
-    fn cmp(&self, _: CmpOp, _: &Self, _: &Layout, _: &Layout) -> Result<Self> {
-        hip_todo!("cmp")
+    /// Strided elementwise compare -> U8 (Phase 45f). Both operands may be
+    /// broadcast/non-contiguous (e.g. prefill's `mask.eq(0)`), so we pass each
+    /// side's own strides and reconstruct offsets per output element. f32 only.
+    fn cmp(&self, op: CmpOp, rhs: &Self, lhs_l: &Layout, rhs_l: &Layout) -> Result<Self> {
+        if self.dtype != DType::F32 || rhs.dtype != DType::F32 {
+            return Err(Error::Msg(format!(
+                "HIP cmp: only f32 supported (Phase 45f), got lhs={:?} rhs={:?}",
+                self.dtype, rhs.dtype
+            )));
+        }
+        let op_code: c_int = match op {
+            CmpOp::Eq => 0,
+            CmpOp::Ne => 1,
+            CmpOp::Le => 2,
+            CmpOp::Ge => 3,
+            CmpOp::Lt => 4,
+            CmpOp::Gt => 5,
+        };
+        let dims = lhs_l.dims();
+        let rank = dims.len();
+        let n = lhs_l.shape().elem_count();
+        let h = hip()?;
+        if n == 0 {
+            let ptr = h.malloc(0).map_err(Error::Msg)?;
+            return Ok(HipStorage {
+                device: self.device.clone(),
+                ptr,
+                dtype: DType::U8,
+                len: 0,
+            });
+        }
+        let dims_i64: Vec<i64> = dims.iter().map(|&d| d as i64).collect();
+        let a_str: Vec<i64> = lhs_l.stride().iter().map(|&s| s as i64).collect();
+        let b_str: Vec<i64> = rhs_l.stride().iter().map(|&s| s as i64).collect();
+        let k = runtime::kernels().map_err(Error::Msg)?;
+
+        let bytes = rank.max(1) * std::mem::size_of::<i64>();
+        let dims_dev = h.malloc(bytes).map_err(Error::Msg)?;
+        let a_dev = h.malloc(bytes).map_err(Error::Msg)?;
+        let b_dev = h.malloc(bytes).map_err(Error::Msg)?;
+        let free_meta = || {
+            h.free(dims_dev);
+            h.free(a_dev);
+            h.free(b_dev);
+        };
+        let upload = |dst: *mut c_void, src: *const c_void| -> Result<()> {
+            h.memcpy(dst, src, rank * std::mem::size_of::<i64>(), runtime::MEMCPY_H2D)
+                .map_err(Error::Msg)
+        };
+        if rank > 0 {
+            if let Err(e) = upload(dims_dev, dims_i64.as_ptr() as *const c_void)
+                .and_then(|_| upload(a_dev, a_str.as_ptr() as *const c_void))
+                .and_then(|_| upload(b_dev, b_str.as_ptr() as *const c_void))
+            {
+                free_meta();
+                return Err(e);
+            }
+        }
+
+        let a = unsafe { (self.ptr as *const f32).add(lhs_l.start_offset()) };
+        let b = unsafe { (rhs.ptr as *const f32).add(rhs_l.start_offset()) };
+        let out = match h.malloc(n * std::mem::size_of::<u8>()) {
+            Ok(p) => p,
+            Err(e) => {
+                free_meta();
+                return Err(Error::Msg(e));
+            }
+        };
+        let launch = k.cmp_f32(
+            a,
+            b,
+            out as *mut u8,
+            n,
+            rank,
+            dims_dev as *const i64,
+            a_dev as *const i64,
+            b_dev as *const i64,
+            op_code,
+        );
+        free_meta();
+        if let Err(e) = launch {
+            h.free(out);
+            return Err(Error::Msg(e));
+        }
+        Ok(HipStorage {
+            device: self.device.clone(),
+            ptr: out,
+            dtype: DType::U8,
+            len: n,
+        })
     }
 
     /// Contiguous dtype cast (Phase 45d). A no-op cast is a device clone; otherwise
@@ -2067,6 +2197,38 @@ mod op_tests {
             .where_cond(&Tensor::new(&tv, &Device::Cpu)?, &Tensor::new(&fv, &Device::Cpu)?)?
             .to_vec1::<f32>()?;
         close(&g, &c, 0.0, "where_cond");
+        Ok(())
+    }
+
+    #[test]
+    fn cmp_eq_and_broadcast_mask() -> Result<()> {
+        let Some(dev) = gpu() else {
+            return Ok(());
+        };
+        // Scalar eq (the `mask.eq(0)` shape): contiguous lhs, broadcast scalar rhs.
+        let d: Vec<f32> = vec![0.0, 1.0, 0.0, 2.0, 0.0, 0.0];
+        let g = Tensor::from_vec(d.clone(), (2, 3), &dev)?
+            .eq(0f32)?
+            .to_vec2::<u8>()?;
+        let c = Tensor::from_vec(d, (2, 3), &Device::Cpu)?
+            .eq(0f32)?
+            .to_vec2::<u8>()?;
+        assert_eq!(g, c, "scalar eq");
+
+        // Broadcast lhs (a causal mask broadcast over batch/head) eq 0 — exercises a
+        // non-contiguous (stride-0) lhs layout, exactly the prefill attention path.
+        let mask: Vec<f32> = vec![1.0, 0.0, 1.0, 1.0]; // (2,2)
+        let gm = Tensor::from_vec(mask.clone(), (2, 2), &dev)?
+            .broadcast_as((3, 1, 2, 2))?
+            .eq(0f32)?
+            .flatten_all()?
+            .to_vec1::<u8>()?;
+        let cm = Tensor::from_vec(mask, (2, 2), &Device::Cpu)?
+            .broadcast_as((3, 1, 2, 2))?
+            .eq(0f32)?
+            .flatten_all()?
+            .to_vec1::<u8>()?;
+        assert_eq!(gm, cm, "broadcast mask eq");
         Ok(())
     }
 

@@ -78,7 +78,78 @@ __global__ void akh_dequant_q4k_kernel(const unsigned char* __restrict__ blocks,
     out[row * in_dim + col] = val;
 }
 
+// ---- Q6_K (Phase 45f) ------------------------------------------------------
+// One Q6_K block holds 256 weights in 210 bytes (candle `#[repr(C)] BlockQ6K`):
+//   [0:128]   ql[128]     (low 4 bits, 2 weights/byte)
+//   [128:192] qh[64]      (high 2 bits, 4 weights/byte)
+//   [192:208] scales[16]  (i8, signed)
+//   [208:210] d           (f16 LE)
+// Mirrors candle CPU `BlockQ6K::to_float` bit-for-bit. Per 256-block, candle walks
+// idx in {0,1} (n=128*idx) and l in 0..32 emitting 4 quarters at l, l+32, l+64, l+96:
+//   q1 = (ql[l]&0xF    | (qh[l]&3)<<4) - 32   -> sc[is]
+//   q2 = (ql[l+32]&0xF | ((qh[l]>>2)&3)<<4)-32-> sc[is+2]
+//   q3 = (ql[l]>>4     | ((qh[l]>>4)&3)<<4)-32-> sc[is+4]
+//   q4 = (ql[l+32]>>4  | ((qh[l]>>6)&3)<<4)-32-> sc[is+6]
+// where is=l/16, ql/qh/sc bases offset by 64*idx/32*idx/8*idx. Inverting for an
+// arbitrary position p in [0,256): idx=p/128, within=p%128, quarter=within/32,
+// l=within%32, is=l/16, sc index = is + 2*quarter.
+#define AKH_Q6K_BLOCK_BYTES 210
+#define AKH_Q6K_QK 256
+
+__global__ void akh_dequant_q6k_kernel(const unsigned char* __restrict__ blocks,
+                                       float* __restrict__ out,
+                                       unsigned long rows, unsigned long in_dim) {
+    unsigned long gidx = (unsigned long)blockIdx.x * blockDim.x + threadIdx.x;
+    unsigned long total = rows * in_dim;
+    if (gidx >= total) return;
+    unsigned long row = gidx / in_dim;
+    unsigned long col = gidx % in_dim;
+    unsigned long blocks_per_row = in_dim / AKH_Q6K_QK;
+    unsigned long sb = col / AKH_Q6K_QK;
+    int p = (int)(col % AKH_Q6K_QK);
+
+    const unsigned char* b =
+        blocks + (row * blocks_per_row + sb) * AKH_Q6K_BLOCK_BYTES;
+    const unsigned char* ql = b + 0;
+    const unsigned char* qh = b + 128;
+    const signed char* sc = reinterpret_cast<const signed char*>(b + 192);
+    float d = __half2float(*reinterpret_cast<const __half*>(b + 208));
+
+    int idx = p / 128;          // 0 or 1
+    int within = p % 128;       // 0..127
+    int quarter = within / 32;  // 0..3
+    int l = within % 32;        // 0..31
+    int is = l / 16;            // 0 or 1
+
+    const unsigned char* qlb = ql + 64 * idx;
+    const unsigned char* qhb = qh + 32 * idx;
+    const signed char* scb = sc + 8 * idx;
+    unsigned char qhbyte = qhb[l];
+    int qval;
+    switch (quarter) {
+        case 0: qval = (qlb[l] & 0xF)      | ((qhbyte & 3) << 4); break;
+        case 1: qval = (qlb[l + 32] & 0xF) | (((qhbyte >> 2) & 3) << 4); break;
+        case 2: qval = (qlb[l] >> 4)       | (((qhbyte >> 4) & 3) << 4); break;
+        default: qval = (qlb[l + 32] >> 4) | (((qhbyte >> 6) & 3) << 4); break;
+    }
+    int q = qval - 32;
+    int sc_index = is + 2 * quarter;
+    out[row * in_dim + col] = d * (float)scb[sc_index] * (float)q;
+}
+
 extern "C" {
+
+// Launch the row-major Q6_K dequant kernel; `out` must hold rows*in_dim floats.
+int akh_dequant_q6k(const unsigned char* blocks, float* out, size_t rows, size_t in_dim) {
+    unsigned long total = (unsigned long)rows * (unsigned long)in_dim;
+    int threads = 256;
+    unsigned long nblocks = (total + threads - 1) / threads;
+    hipLaunchKernelGGL(akh_dequant_q6k_kernel, dim3((unsigned)nblocks), dim3(threads), 0, 0,
+                       blocks, out, (unsigned long)rows, (unsigned long)in_dim);
+    hipError_t e = hipGetLastError();
+    if (e != hipSuccess) return (int)e;
+    return (int)hipDeviceSynchronize();
+}
 
 // Launch the row-major Q4_K dequant kernel on the default stream and synchronize.
 // `blocks` is the raw GGUF Q4_K bytes for `rows` rows of `in_dim` weights (in_dim % 256 == 0);

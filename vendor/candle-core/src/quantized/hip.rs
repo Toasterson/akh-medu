@@ -29,10 +29,13 @@ use std::sync::OnceLock;
 
 type DequantQ4K =
     unsafe extern "C" fn(*const u8, *mut f32, usize, usize) -> c_int;
+type DequantQ6K =
+    unsafe extern "C" fn(*const u8, *mut f32, usize, usize) -> c_int;
 
 struct QuantKernels {
     _lib: libloading::Library,
     dequant_q4k: DequantQ4K,
+    dequant_q6k: DequantQ6K,
 }
 // The fn pointers live in a process-lifetime library; calls are externally synchronized
 // to the synchronous compute thread (same contract as `hip_backend::runtime::Kernels`).
@@ -49,9 +52,13 @@ impl QuantKernels {
             let dequant_q4k: DequantQ4K = *lib
                 .get(b"akh_dequant_q4k\0")
                 .map_err(|e| format!("missing akh_dequant_q4k: {e}"))?;
+            let dequant_q6k: DequantQ6K = *lib
+                .get(b"akh_dequant_q6k\0")
+                .map_err(|e| format!("missing akh_dequant_q6k: {e}"))?;
             Ok(QuantKernels {
                 _lib: lib,
                 dequant_q4k,
+                dequant_q6k,
             })
         }
     }
@@ -68,6 +75,21 @@ impl QuantKernels {
         let rc = unsafe { (self.dequant_q4k)(blocks, out, rows, in_dim) };
         if rc != 0 {
             return Err(format!("akh_dequant_q4k kernel failed (hipError={rc})"));
+        }
+        Ok(())
+    }
+
+    /// Row-major Q6_K dequant (Phase 45f): same calling convention as [`dequant_q4k`].
+    fn dequant_q6k(
+        &self,
+        blocks: *const u8,
+        out: *mut f32,
+        rows: usize,
+        in_dim: usize,
+    ) -> std::result::Result<(), String> {
+        let rc = unsafe { (self.dequant_q6k)(blocks, out, rows, in_dim) };
+        if rc != 0 {
+            return Err(format!("akh_dequant_q6k kernel failed (hipError={rc})"));
         }
         Ok(())
     }
@@ -169,6 +191,7 @@ impl QCudaStorage {
     pub fn dequantize(&self, elem_count: usize) -> Result<CudaStorage> {
         match self.dtype {
             GgmlDType::Q4K => self.dequantize_q4k(elem_count),
+            GgmlDType::Q6K => self.dequantize_q6k(elem_count),
             _ => self.dequantize_cpu(elem_count),
         }
     }
@@ -187,6 +210,33 @@ impl QCudaStorage {
             .map_err(Error::Msg)?;
         // The kernel writes row-major; one "row" of `elem_count` covers the whole tensor here.
         if let Err(e) = k.dequant_q4k(self.data as *const u8, out as *mut f32, 1, elem_count) {
+            h.free(out);
+            return Err(Error::Msg(e));
+        }
+        h.synchronize().map_err(Error::Msg)?;
+        Ok(CudaStorage::from_raw(
+            self.device.clone(),
+            out,
+            DType::F32,
+            elem_count,
+        ))
+    }
+
+    /// On-GPU Q6_K dequant (Phase 45f). Same shape contract as [`dequantize_q4k`]: writes a
+    /// fresh row-major f32 device buffer, bit-for-bit parity with CPU `BlockQ6K::to_float`.
+    fn dequantize_q6k(&self, elem_count: usize) -> Result<CudaStorage> {
+        if !elem_count.is_multiple_of(256) {
+            return Err(Error::Msg(format!(
+                "HIP Q6_K dequantize: elem_count {elem_count} not a multiple of the 256-weight \
+                 block size"
+            )));
+        }
+        let h = runtime::hip().map_err(Error::Msg)?;
+        let k = quant_kernels()?;
+        let out = h
+            .malloc(elem_count * std::mem::size_of::<f32>())
+            .map_err(Error::Msg)?;
+        if let Err(e) = k.dequant_q6k(self.data as *const u8, out as *mut f32, 1, elem_count) {
             h.free(out);
             return Err(Error::Msg(e));
         }
@@ -327,10 +377,14 @@ impl QCudaStorage {
         layout: &crate::Layout,
     ) -> Result<(CudaStorage, Shape)> {
         use crate::backend::BackendStorage;
-        if self.dtype != GgmlDType::Q4K {
+        // Q4_K (45e) + Q6_K (45f) dequant on the GPU; both feed the same rocBLAS f32 GEMM.
+        // gemma3-12b (Q4_K_M) carries both — Q6_K backs ffn_down/attn_v/output, touched every
+        // token, so resident decode requires it. Other dtypes still error (CPU-fallback dequant
+        // would round-trip every token, defeating residency — add their GPU kernels as needed).
+        if !matches!(self.dtype, GgmlDType::Q4K | GgmlDType::Q6K) {
             return Err(Error::Msg(format!(
-                "HIP quantized matmul (`fwd`): only Q4_K is implemented (Phase 45e); got {:?}. \
-                 Other GGUF dtypes land in a later step.",
+                "HIP quantized matmul (`fwd`): only Q4_K/Q6_K are implemented (Phase 45e/45f); \
+                 got {:?}. Other GGUF dtypes land in a later step.",
                 self.dtype
             )));
         }
@@ -521,6 +575,52 @@ mod test {
             dm_cpu / scale
         );
 
+        Ok(())
+    }
+
+    /// Q6_K (Phase 45f) dequant on the GPU matches CPU `BlockQ6K::to_float`, and a
+    /// `QMatMul::forward` over a Q6_K weight matches the dequantized-f32 reference.
+    /// gemma3-12b backs ffn_down/attn_v/output with Q6_K, so this gates resident decode.
+    #[test]
+    fn hip_q6k_dequant_and_matmul_parity() -> Result<()> {
+        let Some(dev) = gpu() else {
+            eprintln!("no HIP GPU visible; skipping hip_q6k_dequant_and_matmul_parity");
+            return Ok(());
+        };
+        let cpu = Device::Cpu;
+
+        let (n, k) = (8usize, 512usize); // k % 256 == 0
+        let w: Vec<f32> = (0..n * k)
+            .map(|i| ((i as f32) * 0.011).cos() * 0.6 - 0.03)
+            .collect();
+        let w_cpu = Tensor::from_vec(w.clone(), (n, k), &cpu)?;
+        let qt_cpu = QTensor::quantize(&w_cpu, GgmlDType::Q6K)?;
+        let qt_gpu = QTensor::quantize_onto(&w_cpu, GgmlDType::Q6K, &dev)?;
+
+        // (a) dequantize parity — must be bit-for-bit (the GPU kernel mirrors to_float).
+        let deq_cpu = qt_cpu.dequantize(&cpu)?.flatten_all()?.to_vec1::<f32>()?;
+        let deq_gpu = qt_gpu.dequantize(&dev)?.flatten_all()?.to_vec1::<f32>()?;
+        let d = max_abs_diff(&deq_cpu, &deq_gpu);
+        eprintln!("Q6_K dequantize max|gpu-cpu| = {d}");
+        assert!(d == 0.0, "Q6_K dequant must be bit-exact, got max abs diff {d}");
+
+        // (b) QMatMul::forward parity vs the dequantized-f32 reference matmul.
+        let m = 3usize;
+        let x: Vec<f32> = (0..m * k).map(|i| ((i as f32) * 0.009).sin() * 0.5).collect();
+        let x_cpu = Tensor::from_vec(x.clone(), (m, k), &cpu)?;
+        let x_gpu = Tensor::from_vec(x.clone(), (m, k), &dev)?;
+        let w_deq = qt_gpu.dequantize(&cpu)?;
+        let mm_gpu = QMatMul::from_qtensor(qt_gpu)?;
+        let y_gpu = mm_gpu.forward(&x_gpu)?.flatten_all()?.to_vec1::<f32>()?;
+        let y_ref = x_cpu.matmul(&w_deq.t()?)?.flatten_all()?.to_vec1::<f32>()?;
+        let scale = y_ref.iter().map(|v| v.abs()).fold(0.0f32, f32::max).max(1e-6);
+        let dm_ref = max_abs_diff(&y_gpu, &y_ref);
+        eprintln!("Q6_K QMatMul::forward rel(gpu-ref) = {}", dm_ref / scale);
+        assert!(
+            dm_ref / scale < 1e-2,
+            "Q6_K matmul vs dequant-ref: rel diff {} >= 1e-2",
+            dm_ref / scale
+        );
         Ok(())
     }
 }

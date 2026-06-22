@@ -137,6 +137,40 @@ __global__ void where_cond_u32_f32(const unsigned int* cond, const float* t,
     out[i] = cond[i] ? t[i] : f[i];
 }
 
+// ---- cmp (Phase 45f): strided elementwise compare -> u8 --------------------
+// Both inputs may be broadcast/non-contiguous (e.g. `mask.eq(0)` where the mask
+// is a broadcast view and the scalar rhs has all-zero strides), so each thread
+// reconstructs the output coords and forms each operand's offset from its own
+// strides. `dims`/`a_str`/`b_str` are DEVICE arrays of length `rank`; `a`/`b`
+// are already advanced to their layout start offsets. op: 0 eq 1 ne 2 le 3 ge
+// 4 lt 5 gt (matches candle's `CmpOp`). Output is contiguous u8 (1/0).
+__global__ void cmp_f32(const float* a, const float* b, unsigned char* out, size_t n,
+                        size_t rank, const long* dims, const long* a_str,
+                        const long* b_str, int op) {
+    size_t o = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (o >= n) return;
+    size_t a_off = 0, b_off = 0, rem = o;
+    for (size_t d = rank; d-- > 0;) {
+        size_t dim = (size_t)dims[d];
+        size_t coord = rem % dim;
+        rem /= dim;
+        a_off += coord * (size_t)a_str[d];
+        b_off += coord * (size_t)b_str[d];
+    }
+    float av = a[a_off], bv = b[b_off];
+    unsigned char r;
+    switch (op) {
+        case 0: r = av == bv; break;
+        case 1: r = av != bv; break;
+        case 2: r = av <= bv; break;
+        case 3: r = av >= bv; break;
+        case 4: r = av <  bv; break;
+        case 5: r = av >  bv; break;
+        default: r = 0;
+    }
+    out[o] = r;
+}
+
 // ---- strided copy (Phase 45d): powers .contiguous() ------------------------
 // dst[o] = src[strided_index(o)]; `info` is [dims[0..rank], strides[0..rank]]
 // uploaded to device; src/dst are already advanced to their start offsets.
@@ -240,6 +274,18 @@ int akh_where_cond_u32_f32(const unsigned int* cond, const float* t, const float
     int tpb = 256;
     size_t blocks = (n + tpb - 1) / tpb;
     hipLaunchKernelGGL(where_cond_u32_f32, dim3(blocks), dim3(tpb), 0, 0, cond, t, f, out, n);
+    if (hipGetLastError() != hipSuccess) return 1;
+    return hipDeviceSynchronize() == hipSuccess ? 0 : 2;
+}
+
+// strided elementwise compare -> u8; dims/a_str/b_str are device long arrays of
+// length rank, a/b already advanced to their start offsets, out contiguous u8.
+int akh_cmp_f32(const float* a, const float* b, unsigned char* out, size_t n,
+                size_t rank, const long* dims, const long* a_str, const long* b_str, int op) {
+    if (n == 0) return 0;
+    int t = 256;
+    size_t blocks = (n + t - 1) / t;
+    hipLaunchKernelGGL(cmp_f32, dim3(blocks), dim3(t), 0, 0, a, b, out, n, rank, dims, a_str, b_str, op);
     if (hipGetLastError() != hipSuccess) return 1;
     return hipDeviceSynchronize() == hipSuccess ? 0 : 2;
 }
