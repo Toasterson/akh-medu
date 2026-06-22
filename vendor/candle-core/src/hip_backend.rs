@@ -29,13 +29,36 @@ use std::os::raw::c_int;
 /// path without re-dlopen'ing the runtime (Phase 45e).
 pub(crate) mod runtime {
     use libloading::Library;
+    use std::collections::HashMap;
     use std::ffi::c_void;
     use std::os::raw::c_int;
-    use std::sync::OnceLock;
+    use std::sync::{Mutex, OnceLock};
 
     pub const MEMCPY_H2D: c_int = 1;
     pub const MEMCPY_D2H: c_int = 2;
     pub const MEMCPY_D2D: c_int = 3;
+
+    /// Upper bound on bytes the caching allocator keeps cached across `free`s
+    /// (Phase 45g). `hipFree` *synchronizes the whole device*, so freeing a temp
+    /// after every op serializes the ~1900 ops/token. The pool recycles freed
+    /// blocks by exact byte size instead (no `hipFree`, no sync, no re-`hipMalloc`
+    /// of the recurring per-token f32 dequant temps). Over the cap, `free` really
+    /// `hipFree`s. **VRAM tension:** the resident 12B already sits at ~23.5 GB on a
+    /// 24 GB card, so a large pool spills to GTT — measured (gemma4-12b): 2 GB pool
+    /// = 1.25 tok/s @ 25.7 GB (GTT spill) vs 512 MB = 0.96 tok/s @ 24.0 GB. The
+    /// default stays conservative; bump `AKH_HIP_POOL_MB` if you have headroom (or,
+    /// better, once the fused quantized GEMV removes the f32 temps that force this).
+    const DEFAULT_POOL_CAP_BYTES: usize = 512 * 1024 * 1024;
+
+    /// Caching device allocator: a free-list of recycled blocks keyed by exact
+    /// byte size + a `ptr -> size` map so size-less `free(ptr)` can still recycle.
+    #[derive(Default)]
+    struct Pool {
+        free: HashMap<usize, Vec<usize>>,
+        live: HashMap<usize, usize>,
+        cached_bytes: usize,
+        cap_bytes: usize,
+    }
 
     // PCIe-crossing counters (Phase 45f): every non-empty H2D/D2H `memcpy` bumps one.
     // The bench resets them after model load, then divides by tokens decoded to prove
@@ -83,6 +106,7 @@ pub(crate) mod runtime {
         memcpy2d: Memcpy2D,
         memset: Memset,
         synchronize: Synchronize,
+        pool: Mutex<Pool>,
     }
     unsafe impl Send for Hip {}
     unsafe impl Sync for Hip {}
@@ -116,6 +140,11 @@ pub(crate) mod runtime {
                 let memcpy2d: Memcpy2D = sym!(b"hipMemcpy2D\0", Memcpy2D);
                 let memset: Memset = sym!(b"hipMemset\0", Memset);
                 let synchronize: Synchronize = sym!(b"hipDeviceSynchronize\0", Synchronize);
+                let cap_bytes = std::env::var("AKH_HIP_POOL_MB")
+                    .ok()
+                    .and_then(|s| s.parse::<usize>().ok())
+                    .map(|mb| mb * 1024 * 1024)
+                    .unwrap_or(DEFAULT_POOL_CAP_BYTES);
                 Ok(Hip {
                     _lib: lib,
                     get_device_count,
@@ -126,6 +155,10 @@ pub(crate) mod runtime {
                     memcpy2d,
                     memset,
                     synchronize,
+                    pool: Mutex::new(Pool {
+                        cap_bytes,
+                        ..Pool::default()
+                    }),
                 })
             }
         }
@@ -151,18 +184,45 @@ pub(crate) mod runtime {
             if bytes == 0 {
                 return Ok(std::ptr::null_mut());
             }
+            // Reuse a recycled block of this exact size if one is cached.
+            {
+                let mut pool = self.pool.lock().unwrap();
+                if let Some(list) = pool.free.get_mut(&bytes) {
+                    if let Some(p) = list.pop() {
+                        pool.cached_bytes = pool.cached_bytes.saturating_sub(bytes);
+                        pool.live.insert(p, bytes);
+                        return Ok(p as *mut c_void);
+                    }
+                }
+            }
             let mut ptr: *mut c_void = std::ptr::null_mut();
             let rc = unsafe { (self.malloc)(&mut ptr, bytes) };
             if rc != 0 || ptr.is_null() {
                 return Err(format!("hipMalloc({bytes}) failed (rc={rc})"));
             }
+            self.pool.lock().unwrap().live.insert(ptr as usize, bytes);
             Ok(ptr)
         }
 
+        /// Recycle `ptr` into the pool instead of `hipFree`-ing it (which would
+        /// synchronize the device). Untracked or over-cap blocks are really freed.
         pub fn free(&self, ptr: *mut c_void) {
-            if !ptr.is_null() {
-                unsafe {
-                    (self.free)(ptr);
+            if ptr.is_null() {
+                return;
+            }
+            let key = ptr as usize;
+            let mut pool = self.pool.lock().unwrap();
+            match pool.live.remove(&key) {
+                Some(bytes) if pool.cached_bytes + bytes <= pool.cap_bytes => {
+                    pool.cached_bytes += bytes;
+                    pool.free.entry(bytes).or_default().push(key);
+                }
+                _ => {
+                    // Untracked, or pooling it would exceed the cap: free for real.
+                    drop(pool);
+                    unsafe {
+                        (self.free)(ptr);
+                    }
                 }
             }
         }
