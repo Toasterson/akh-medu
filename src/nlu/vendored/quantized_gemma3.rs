@@ -16,12 +16,67 @@
 
 use candle_core as candle;
 
-use candle_transformers::quantized_nn::RmsNorm;
 use candle::quantized::gguf_file;
 use candle::quantized::QTensor;
 use candle::D;
 use candle::{DType, Device, IndexOp, Result, Tensor};
 use candle_nn::{Embedding, Module};
+
+// --- HIP-device op routing (Phase 45f / ADR 073) ----------------------------
+// candle-nn's `rms_norm` / `softmax_last_dim` / `rope` are custom ops whose GPU path
+// is only compiled when candle-nn itself is built with its `cuda` feature. Here we
+// drive candle's cuda slot through `candle-core/hip` (a *fork*, candle-nn's cuda
+// feature is off), so on a HIP device those custom ops have no `cuda_fwd` and would
+// error. candle-nn ships public on-device "slow" decompositions built from primitive
+// ops (sqr/sum/exp/broadcast/narrow/cat/…) — every one already parity-gated in the
+// HIP backend — so we route to those when the tensor lives on the GPU. On CPU we keep
+// the fast custom ops byte-for-byte (zero change to the existing path).
+
+/// RMSNorm matching `candle_transformers::quantized_nn::RmsNorm` (weight applied
+/// directly, computed in f32), but device-aware: `rms_norm_slow` on the HIP device,
+/// the fast custom op on CPU.
+#[derive(Debug, Clone)]
+struct GemmaRmsNorm {
+    weight: Tensor,
+    eps: f64,
+}
+
+impl GemmaRmsNorm {
+    fn from_qtensor(weight: QTensor, eps: f64) -> Result<Self> {
+        let weight = weight.dequantize(&weight.device())?;
+        Ok(Self { weight, eps })
+    }
+}
+
+impl Module for GemmaRmsNorm {
+    fn forward(&self, x: &Tensor) -> Result<Tensor> {
+        let eps = self.eps as f32;
+        if x.device().is_cuda() {
+            candle_nn::ops::rms_norm_slow(x, &self.weight, eps)
+        } else {
+            candle_nn::ops::rms_norm(x, &self.weight, eps)
+        }
+    }
+}
+
+/// Last-dim softmax: generic on-device form on the HIP device, fast custom op on CPU.
+fn softmax_last_dim_dev(x: &Tensor) -> Result<Tensor> {
+    if x.device().is_cuda() {
+        candle_nn::ops::softmax(x, D::Minus1)
+    } else {
+        candle_nn::ops::softmax_last_dim(x)
+    }
+}
+
+/// Rotary embedding: `rope_slow` (narrow/cat/broadcast-mul) on the HIP device, fast
+/// custom op on CPU. Same interleaving as `candle_nn::rotary_emb::rope`.
+fn rope_dev(x: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor> {
+    if x.device().is_cuda() {
+        candle_nn::rotary_emb::rope_slow(x, cos, sin)
+    } else {
+        candle_nn::rotary_emb::rope(x, cos, sin)
+    }
+}
 
 pub const MAX_SEQ_LEN: usize = 131072; // Gemma 3 supports 128K context window
 pub const DEFAULT_SLIDING_WINDOW_TYPE: usize = 6;
@@ -105,8 +160,8 @@ impl RotaryEmbedding {
         let (_b_sz, _h, seq_len, _n_embd) = q.dims4()?;
         let cos = self.cos.narrow(0, index_pos, seq_len)?;
         let sin = self.sin.narrow(0, index_pos, seq_len)?;
-        let q_embed = candle_nn::rotary_emb::rope(&q.contiguous()?, &cos, &sin)?;
-        let k_embed = candle_nn::rotary_emb::rope(&k.contiguous()?, &cos, &sin)?;
+        let q_embed = rope_dev(&q.contiguous()?, &cos, &sin)?;
+        let k_embed = rope_dev(&k.contiguous()?, &cos, &sin)?;
         Ok((q_embed, k_embed))
     }
 }
@@ -123,14 +178,14 @@ struct LayerWeights {
     gpu_attn: Option<crate::nlu::hip::GpuAttnProj>,
 
     // Specialized normalization for Q and K
-    attention_q_norm: RmsNorm,
-    attention_k_norm: RmsNorm,
+    attention_q_norm: GemmaRmsNorm,
+    attention_k_norm: GemmaRmsNorm,
 
     // Layer normalization
-    attention_norm: RmsNorm,      // Applied before attention
-    post_attention_norm: RmsNorm, // Applied after attention
-    ffn_norm: RmsNorm,            // Applied before feedforward
-    post_ffn_norm: RmsNorm,       // Applied after feedforward
+    attention_norm: GemmaRmsNorm,      // Applied before attention
+    post_attention_norm: GemmaRmsNorm, // Applied after attention
+    ffn_norm: GemmaRmsNorm,            // Applied before feedforward
+    post_ffn_norm: GemmaRmsNorm,       // Applied after feedforward
 
     // Feed-forward network
     mlp: Mlp,
@@ -270,7 +325,7 @@ impl LayerWeights {
             attn_weights = mask.eq(0u32)?.where_cond(&neg_inf, &attn_weights)?;
         }
 
-        let attn_weights = candle_nn::ops::softmax_last_dim(&attn_weights)?;
+        let attn_weights = softmax_last_dim_dev(&attn_weights)?;
         let attn_output = attn_weights.matmul(&v)?;
 
         let attn_output = attn_output
@@ -293,7 +348,7 @@ pub struct ModelWeights {
     tok_embeddings: Embedding,
     embedding_length: usize,
     layers: Vec<LayerWeights>,
-    norm: RmsNorm,
+    norm: GemmaRmsNorm,
     output: QMatMul,
     /// When present (`AKH_GPU_MATMUL=1`), the lm_head projection runs on the AMD GPU.
     #[cfg(feature = "rocm")]
@@ -383,7 +438,7 @@ impl ModelWeights {
         // Load token embeddings and output projection
         let tok_embeddings = ct.tensor(reader, "token_embd.weight", device)?;
         let tok_embeddings = tok_embeddings.dequantize(device)?;
-        let norm = RmsNorm::from_qtensor(
+        let norm = GemmaRmsNorm::from_qtensor(
             ct.tensor(reader, "output_norm.weight", device)?,
             rms_norm_eps,
         )?;
@@ -410,22 +465,22 @@ impl ModelWeights {
             let attention_wo =
                 ct.tensor(reader, &format!("{prefix}.attn_output.weight"), device)?;
 
-            let attention_q_norm = RmsNorm::from_qtensor(
+            let attention_q_norm = GemmaRmsNorm::from_qtensor(
                 ct.tensor(reader, &format!("{prefix}.attn_q_norm.weight"), device)?,
                 rms_norm_eps,
             )?;
 
-            let attention_k_norm = RmsNorm::from_qtensor(
+            let attention_k_norm = GemmaRmsNorm::from_qtensor(
                 ct.tensor(reader, &format!("{prefix}.attn_k_norm.weight"), device)?,
                 rms_norm_eps,
             )?;
 
-            let attention_norm = RmsNorm::from_qtensor(
+            let attention_norm = GemmaRmsNorm::from_qtensor(
                 ct.tensor(reader, &format!("{prefix}.attn_norm.weight"), device)?,
                 rms_norm_eps,
             )?;
 
-            let post_attention_norm = RmsNorm::from_qtensor(
+            let post_attention_norm = GemmaRmsNorm::from_qtensor(
                 ct.tensor(
                     reader,
                     &format!("{prefix}.post_attention_norm.weight"),
@@ -434,12 +489,12 @@ impl ModelWeights {
                 rms_norm_eps,
             )?;
 
-            let ffn_norm = RmsNorm::from_qtensor(
+            let ffn_norm = GemmaRmsNorm::from_qtensor(
                 ct.tensor(reader, &format!("{prefix}.ffn_norm.weight"), device)?,
                 rms_norm_eps,
             )?;
 
-            let post_ffn_norm = RmsNorm::from_qtensor(
+            let post_ffn_norm = GemmaRmsNorm::from_qtensor(
                 ct.tensor(reader, &format!("{prefix}.post_ffw_norm.weight"), device)?,
                 rms_norm_eps,
             )?;

@@ -1415,9 +1415,33 @@ impl CandleBackend {
                 return device;
             }
         }
-        // AMD ROCm/HIP: Candle 0.10 has no upstream HIP device, so we cannot construct one
-        // here yet (the backend is a fork gated behind `feature = "rocm"`, ADR 068). Probe
-        // the host so the log tells the user *why* we are on CPU and what to do about it.
+        // AMD ROCm/HIP via the vendored candle-core HIP backend (Phase 45f / ADR 073).
+        // The `hip` feature fills candle's `cuda` module slot, so `new_cuda(0)` builds a
+        // real `HipDevice`. The whole forward then runs GPU-resident — quantized weights
+        // live as `QHipStorage` (Q4_K/Q6_K), matmuls go through rocBLAS, elementwise/
+        // reduce/rope/softmax/rms-norm stay on device — instead of the per-op PCIe offload
+        // path (`AKH_GPU_MATMUL`), which round-tripped every op across the bus.
+        #[cfg(feature = "hip")]
+        {
+            match Device::new_cuda(0) {
+                Ok(device) => {
+                    tracing::info!(
+                        "using AMD HIP device (Device::Hip via candle cuda slot) for Candle inference"
+                    );
+                    return device;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "HIP device construction failed; falling back to CPU. Verify the ROCm \
+                         runtime (ROCM_PATH, default /opt/rocm) and that the GPU is visible \
+                         (`rocminfo`)."
+                    );
+                }
+            }
+        }
+        // No GPU backend selected (or HIP construction failed): probe the host so the log
+        // tells the user *why* we are on CPU and what to do about it.
         Self::report_rocm_status();
         tracing::info!("using CPU device for Candle inference");
         Device::Cpu
