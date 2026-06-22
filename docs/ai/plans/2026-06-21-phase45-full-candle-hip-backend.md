@@ -128,11 +128,22 @@
 >   roofline.** Context-independent (weight-streaming), so it helps every prompt. (3) Attention's share is a
 >   *whole-op* window (includes host enqueue gap) — consistent with the custom-kernel A/B showing zero gain
 >   (its real GEMM time is small). Long-ctx attention/copy/malloc growth is real KV-cache work.
-> - **Next focused pass — GEMV → bandwidth roofline.** Cooperative-superblock dequant (stop recomputing
->   d/dmin/scales per thread; one superblock per warp, vectorized byte loads), higher occupancy (rows/block).
->   At ~10% of BW there's ~1.7× of decode to recover. Long-ctx: a flash-attention-style fused KV kernel
->   (reads KV once) only if long prompts matter. The model is **usable now (6.75 tok/s)** and the profiler now
->   makes every further step *measured*, not guessed.
+> - **45h GEMV cooperative-superblock dequant — BUILT, PARITY-PASSED, REGRESSED, REVERTED.** Rewrote both
+>   Q4_K+Q6_K GEMVs: 256 threads/block (one position/superblock), superblock metadata (d/dmin/scales) loaded
+>   ONCE into shared memory per superblock, per-thread decode indices hoisted out of the loop. Bit-exact
+>   (`hip_gemv_decode_parity` + q4k/q6k parity, 24/24). But **slower: 5.6 vs 6.7 tok/s; GEMV 307 vs 218
+>   µs/call.** The premise was wrong: the metadata re-reads were L1-cached (all 128 threads read the same
+>   d/dmin/scales → broadcast hit, ~free), so "loading once" saved nothing — while the rewrite ADDED 2
+>   block-wide `__syncthreads`/superblock (the original had none per-superblock) and halved per-thread work.
+>   Reverted. **5th measure-don't-guess in this phase.**
+> - **GEMV is at ~99 GB/s (10% of roofline) but NOT for the reason guessed** (not metadata traffic). Likely
+>   latency/occupancy bound (128-thread blocks, limited in-flight loads) or compute-bound on the dequant. A
+>   real win needs a structurally different kernel — warp-shuffle reduction, vectorized (uint4) qs loads,
+>   and/or split-K for more memory-level parallelism — a careful profiler-guided kernel pass, **not** a quick
+>   tweak. The model is **usable now (6.75 tok/s)**; the event profiler (committed) makes every further step
+>   measured. Two optimization guesses (custom attention, cooperative GEMV) both built, measured, reverted —
+>   the honest state is that the simple-structure decode kernels are near their local optimum and the next
+>   gains require real kernel engineering with uncertain payoff.
 >
 > _(historical) Next: 45g/45h (the speed work). In priority order: **(1)** stop the per-op `malloc/free` +
 >   metadata H2D — pass strided-op dims/strides **by value** (kills the 3710 crossings → ~2/token, the
