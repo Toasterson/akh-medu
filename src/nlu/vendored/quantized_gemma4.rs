@@ -269,7 +269,10 @@ struct LayerWeights {
     neg_inf: Tensor,
 
     // Cache
-    kv_cache: Option<(Tensor, Tensor)>,
+    kv_cache: Option<(Tensor, Tensor)>, // CPU path: dynamic grow-by-cat (byte-identical)
+    // Phase 46a: static pre-allocated KV cache for the HIP device (see quantized_gemma3).
+    kv_buf: Option<(Tensor, Tensor)>,
+    kv_ctx: usize,
 
     // Tracing
     span_attn: tracing::Span,
@@ -368,19 +371,45 @@ impl LayerWeights {
             .rotary_embedding
             .apply_rotary_emb_qkv(&q, &k, index_pos)?;
 
-        let (k, v) = match &self.kv_cache {
-            None => (k, v),
-            Some((k_cache, v_cache)) => {
-                if index_pos == 0 {
-                    (k, v)
-                } else {
-                    let k = Tensor::cat(&[k_cache, &k], 2)?; // concat on seq dim
-                    let v = Tensor::cat(&[v_cache, &v], 2)?;
-                    (k, v)
-                }
+        let (k, v) = if k.device().is_cuda() {
+            // Phase 46a: static pre-allocated KV cache (see quantized_gemma3 for detail).
+            let len = index_pos + seq_len;
+            if len > self.kv_ctx {
+                return Err(candle_core::Error::Msg(format!(
+                    "static KV cache overflow: position {len} > kv_ctx {} (raise AKH_KV_CTX)",
+                    self.kv_ctx
+                )));
             }
+            let k = k.contiguous()?;
+            let v = v.contiguous()?;
+            if self.kv_buf.is_none() {
+                let shape = (b_sz, self.n_kv_head, self.kv_ctx, self.head_dim);
+                self.kv_buf = Some((
+                    Tensor::zeros(shape, k.dtype(), k.device())?,
+                    Tensor::zeros(shape, v.dtype(), v.device())?,
+                ));
+            }
+            let (kbuf, vbuf) = self.kv_buf.as_ref().unwrap();
+            kbuf.slice_set(&k, 2, index_pos)?;
+            vbuf.slice_set(&v, 2, index_pos)?;
+            (kbuf.narrow(2, 0, len)?, vbuf.narrow(2, 0, len)?)
+        } else {
+            // CPU path: dynamic grow-by-cat (byte-identical to the original).
+            let (k, v) = match &self.kv_cache {
+                None => (k, v),
+                Some((k_cache, v_cache)) => {
+                    if index_pos == 0 {
+                        (k, v)
+                    } else {
+                        let k = Tensor::cat(&[k_cache, &k], 2)?; // concat on seq dim
+                        let v = Tensor::cat(&[v_cache, &v], 2)?;
+                        (k, v)
+                    }
+                }
+            };
+            self.kv_cache = Some((k.clone(), v.clone())); // update cache
+            (k, v)
         };
-        self.kv_cache = Some((k.clone(), v.clone())); // update cache
 
         // Repeat KV for GQA/MQA (n_kv -> n_head).
         let k = candle_transformers::utils::repeat_kv(k, self.n_head / self.n_kv_head)?;
@@ -759,6 +788,11 @@ impl ModelWeights {
                 rotary_embedding,
                 neg_inf: neg_inf.clone(),
                 kv_cache: None,
+                kv_buf: None,
+                kv_ctx: std::env::var("AKH_KV_CTX")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(4096),
                 span_attn,
                 span_mlp,
             })
