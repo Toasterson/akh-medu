@@ -1545,7 +1545,10 @@ impl crate::CustomOp2 for FusedRmsNorm {
         let x = unsafe { (s1.ptr as *const f32).add(l1.start_offset()) };
         let w = unsafe { (s2.ptr as *const f32).add(l2.start_offset()) };
         let out = h.malloc(n * std::mem::size_of::<f32>()).map_err(Error::Msg)?;
-        if let Err(e) = k.rms_norm_f32(x, w, out as *mut f32, n_rows, hidden, self.eps) {
+        let res = event_time(&NORM_NANOS, || {
+            k.rms_norm_f32(x, w, out as *mut f32, n_rows, hidden, self.eps)
+        });
+        if let Err(e) = res {
             h.free(out);
             return Err(Error::Msg(e));
         }
@@ -1605,6 +1608,10 @@ macro_rules! hip_todo {
 pub static MATMUL_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub static ELTWISE_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub static COPY_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+// 45h cont: split the former "other" bucket — NORM = fused RMSNorm (~288 launches/token),
+// REDUCE = reduce_op (softmax's max/sum, index_select, argmax).
+pub static NORM_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static REDUCE_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ProfMode {
@@ -1732,15 +1739,17 @@ pub(crate) fn event_time<R>(
     }
 }
 
-/// `(matmul_ns, eltwise_ns, copy_ns)` intrinsic GPU time since process start. Flushes
-/// any pending event samples first so the read is complete.
-pub fn op_profile() -> (u64, u64, u64) {
+/// `(matmul, eltwise, copy, norm, reduce)` intrinsic GPU ns since process start.
+/// Flushes any pending event samples first so the read is complete.
+pub fn op_profile() -> (u64, u64, u64, u64, u64) {
     flush_events();
     use std::sync::atomic::Ordering::Relaxed;
     (
         MATMUL_NANOS.load(Relaxed),
         ELTWISE_NANOS.load(Relaxed),
         COPY_NANOS.load(Relaxed),
+        NORM_NANOS.load(Relaxed),
+        REDUCE_NANOS.load(Relaxed),
     )
 }
 
@@ -2090,31 +2099,33 @@ impl crate::backend::BackendStorage for HipStorage {
             std::mem::size_of::<f32>()
         };
         let out = h.malloc(out_numel * elem).map_err(Error::Msg)?;
-        let launch = if is_arg {
-            k.reduce_arg_f32(
-                src,
-                out as *mut u32,
-                out_numel,
-                num_dims as c_int,
-                dims_m,
-                strides_m,
-                mask_m,
-                reduce_numel,
-                op_code,
-            )
-        } else {
-            k.reduce_f32(
-                src,
-                out as *mut f32,
-                out_numel,
-                num_dims as c_int,
-                dims_m,
-                strides_m,
-                mask_m,
-                reduce_numel,
-                op_code,
-            )
-        };
+        let launch = event_time(&REDUCE_NANOS, || {
+            if is_arg {
+                k.reduce_arg_f32(
+                    src,
+                    out as *mut u32,
+                    out_numel,
+                    num_dims as c_int,
+                    dims_m,
+                    strides_m,
+                    mask_m,
+                    reduce_numel,
+                    op_code,
+                )
+            } else {
+                k.reduce_f32(
+                    src,
+                    out as *mut f32,
+                    out_numel,
+                    num_dims as c_int,
+                    dims_m,
+                    strides_m,
+                    mask_m,
+                    reduce_numel,
+                    op_code,
+                )
+            }
+        });
         if let Err(e) = launch {
             h.free(out);
             return Err(Error::Msg(e));
@@ -2937,15 +2948,18 @@ impl crate::backend::BackendStorage for HipStorage {
         let h = hip()?;
         let src = unsafe { (self.ptr as *const u8).add(src_o * elem) as *const c_void };
         let dstp = unsafe { (dst.ptr as *mut u8).add(dst_o * elem) as *mut c_void };
-        h.memcpy2d(
-            dstp,
-            dst_s * elem, // dpitch
-            src,
-            src_s * elem, // spitch
-            d2 * elem,    // width (bytes per row)
-            d1,           // height (rows)
-            runtime::MEMCPY_D2D,
-        )
+        // KV-cache concat in decode — count under COPY (profiler).
+        event_time(&COPY_NANOS, || {
+            h.memcpy2d(
+                dstp,
+                dst_s * elem, // dpitch
+                src,
+                src_s * elem, // spitch
+                d2 * elem,    // width (bytes per row)
+                d1,           // height (rows)
+                runtime::MEMCPY_D2D,
+            )
+        })
         .map_err(Error::Msg)
         // No sync (Phase 45h): the D2D copy is ordered on the null stream.
     }

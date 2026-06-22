@@ -73,6 +73,7 @@ impl Module for GemmaRmsNorm {
 }
 
 /// Last-dim softmax: generic on-device form on HIP, fast custom op on CPU.
+/// (45h: fused-softmax built+parity-passed but no decode gain — reverted; see gemma3.)
 fn softmax_last_dim_dev(x: &Tensor) -> Result<Tensor> {
     if x.device().is_cuda() {
         candle_nn::ops::softmax(x, D::Minus1)

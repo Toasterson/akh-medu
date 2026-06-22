@@ -155,7 +155,7 @@ fn main() -> miette::Result<()> {
         let (gemv_ns, gemv_calls) = candle_core::quantized::gemv_profile();
         if gemv_calls > 0 {
             let wall = stats.decode_secs as f64;
-            let (mm_ns, elt_ns, cp_ns) = candle_core::cuda::op_profile();
+            let (mm_ns, elt_ns, cp_ns, norm_ns, red_ns) = candle_core::cuda::op_profile();
             let pct = |ns: u64| 100.0 * (ns as f64 / 1e9) / wall;
             let gemv_s = gemv_ns as f64 / 1e9;
             println!(
@@ -165,12 +165,21 @@ fn main() -> miette::Result<()> {
                 100.0 * gemv_s / wall,
                 gemv_ns as f64 / 1e3 / gemv_calls as f64,
             );
-            println!("matmul (attention) : {:.3} s = {:.1}%", mm_ns as f64 / 1e9, pct(mm_ns));
-            println!("elementwise        : {:.3} s = {:.1}%", elt_ns as f64 / 1e9, pct(elt_ns));
-            println!("strided copy       : {:.3} s = {:.1}%", cp_ns as f64 / 1e9, pct(cp_ns));
-            let measured = gemv_ns + mm_ns + elt_ns + cp_ns;
-            let other = 100.0 - 100.0 * (measured as f64 / 1e9) / wall;
-            println!("other/overhead     : ~{other:.1}% (reduce/copy2d/rms/rope-fused/sampling/launch)");
+            // NB: GEMV/rms_norm/reduce/copy windows are clean (just the kernel launch);
+            // matmul/elementwise use the whole-op-body window, so they INCLUDE the
+            // host-enqueue idle gap and over-count. The category sum can exceed wall —
+            // that gap reflects how launch/dispatch-bound (not compute-bound) decode is.
+            println!("matmul (attention)*: {:.3} s = {:.1}%", mm_ns as f64 / 1e9, pct(mm_ns));
+            println!("rms_norm (fused)   : {:.3} s = {:.1}%", norm_ns as f64 / 1e9, pct(norm_ns));
+            println!("reduce (softmax)   : {:.3} s = {:.1}%", red_ns as f64 / 1e9, pct(red_ns));
+            println!("elementwise*       : {:.3} s = {:.1}%", elt_ns as f64 / 1e9, pct(elt_ns));
+            println!("copy (KV-cat+strd) : {:.3} s = {:.1}%", cp_ns as f64 / 1e9, pct(cp_ns));
+            let measured = (gemv_ns + mm_ns + elt_ns + cp_ns + norm_ns + red_ns) as f64 / 1e9;
+            let ratio = 100.0 * measured / wall;
+            println!(
+                "Σ categories       : {:.1}% of wall  (* = whole-op window incl. host-enqueue gap)",
+                ratio
+            );
             // Allocator stall: how much wall time the per-op output `hipMalloc` (a
             // device sync on cache miss) cost, and the miss rate per token. A high
             // share here means the bottleneck is malloc-sync, not kernel compute.
