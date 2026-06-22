@@ -29,16 +29,18 @@ backward/LoRA pass. See ADR 074.
 
 ## Sequenced phases (forced by dependency: 46a → 46b → 46c → 46d)
 
-### 46a — Static KV cache
-Pre-allocate per-layer K/V device buffers to the akh's context length; write the new
-position in place each token; attention reads the `[0..pos+1]` prefix. Removes the
-per-token `Tensor::cat` (which copies the whole growing cache) and its malloc.
-- **Where:** `quantized_gemma3.rs` / `quantized_gemma4.rs` `forward_attn` (the
-  `kv_cache: Option<(Tensor, Tensor)>` + `Tensor::cat(..., 2)` path), backed by an owned
-  `QHipStorage`-style device region (below Candle's functional Tensor for the in-place
-  write — a small `copy2d`/scatter kernel writes `k[pos]`).
-- **Gate:** parity vs the cat path (identical logits); tok/s ≥ baseline (win grows with
-  context); VRAM bounded by max-ctx KV (pre-allocated, not growing).
+### 46a — Static KV cache ✅ (`0cae70d`)
+Pre-allocate per-layer K/V `[b, n_kv_head, kv_ctx, head_dim]` once; each token
+`slice_set`s the new position in place (one `copy2d` via the existing `hipMemcpy2D`)
+and attention reads the `[0..pos+seq]` prefix as a `narrow` view. No `cat`, no realloc.
+- **Implementation:** turned out **simpler than feared** — Candle's `Tensor::slice_set`
+  (in-place, `&self`, routes to backend `copy2d`) + `narrow` (view) handle it entirely;
+  no below-Candle device-buffer management needed. `index_pos==0` overwrites from offset
+  0 (stale tail never read). CPU keeps the dynamic `cat`, byte-identical. `kv_ctx` =
+  env `AKH_KV_CTX`, default 4096 (≈3.2 GB for the 12B).
+- **Result:** output **byte-identical** to the cat path (same greedy tokens). gemma3
+  11.5→11.9, gemma4 9.8→10.73 tok/s (short ctx); +3.2 GB VRAM (22.3 GB total). Standalone
+  gain modest (cat was cheap) — the value is the **stable-buffer foundation** for 46b/46c.
 
 ### 46b — Flash-attention decode kernel
 One HIP kernel per (batch, head): stream the static KV, accumulate q·kᵀ with online
