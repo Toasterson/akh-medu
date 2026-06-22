@@ -157,11 +157,20 @@
 >   **ZERO decode gain (11.3 vs 11.5)**, because removing kernels just redistributes the idle. Reverted. Same
 >   root cause as the custom-attention no-gain: **GEMV was the one genuinely compute-heavy op; everything else
 >   is launch/dispatch-bound, so per-op fusion can't help.**
-> - **The real remaining lever = HIP graphs** (hipGraph: capture the decode forward once, replay with ONE
->   host dispatch/token instead of hundreds — kills the per-kernel CPU-enqueue overhead that is the idle-gap).
->   Substantial separate undertaking (capture/replay + changing KV-cache pointers/seq_kv each token). The
->   model is **fast and usable now (11.5 tok/s, ~68× baseline)**; this is the honest ceiling for op-by-op
->   candle execution on this GPU.
+> - **45h HIP-graph feasibility spike ✅ — mechanism works, per-op malloc blocks the live forward**
+>   (`a969090`). Added `hipStream*`/`hipGraph*` runtime bindings + 2 gated tests: (1)
+>   `hip_graph_capture_replay_memset` **PASS** — capture a malloc-free op on a created stream → instantiate →
+>   **replay correctly**; the graph mechanism (collapse the dispatch storm into one `hipGraphLaunch`) works on
+>   this ROCm 6.3 / gfx1100. (2) `hip_graph_capture_aborts_on_malloc` **PASS** — a synchronous `hipMalloc`
+>   during capture **invalidates it** (`hipStreamEndCapture` errors). **The blocker, proven:** the candle
+>   forward does ~388 `hipMalloc`/token (pool misses on the growing attention/KV buffers), so the live forward
+>   can't be captured as-is. **Verdict: HIP graphs need (1) an allocation-free static-buffer decode path AND
+>   (2) fixed-shape (padded) attention so a captured graph survives the growing seq_kv across replays — a
+>   static-shape inference engine, a major multi-session rewrite, not a tweak.** Foundation (bindings + proven
+>   capture/replay) is committed for that future work.
+> - **Phase 45 perf ceiling: 11.5 tok/s** (~68× baseline, ~9.9× CPU, ~8.8% roofline) is the honest limit for
+>   **op-by-op candle execution** on this GPU. Beating it requires either the static-shape graph rewrite above
+>   or mega-kernel fusion (flash-attention + fused MLP) — both major. The model is fast and usable today.
 >
 > _(historical) Next: 45g/45h (the speed work). In priority order: **(1)** stop the per-op `malloc/free` +
 >   metadata H2D — pass strided-op dims/strides **by value** (kills the 3710 crossings → ~2/token, the
