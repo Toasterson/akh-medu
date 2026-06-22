@@ -32,9 +32,16 @@
 >   gather), `where_cond` (U8/U32 mask), `copy_strided_src` (D2D fast path + rank-generic f32 unravel →
 >   powers `.contiguous()`). Gate: `op_tests` 5/5 match CPU; candle-core + akh `--features hip` green.
 >   (commit `c17cbde`) — **the core decode-path `BackendStorage` op surface is now on the GPU.**
-> - **Next** — f16/bf16 `matmul` (rocBLAS hgemm) + a few residual ops (`const_set`, `gather`/`scatter`),
->   then **45e** `QHipStorage` (GGUF Q4_K dequant+matmul, reuse `akh_dequant_q4k`) → **45f** run a stock
->   model fully resident → **45g** hidden-state parity → **45h** fused kernels → roofline.
+> - **45e ✅** (two parallel subagents, integrated) — **`QHipStorage` (GGUF Q4_K)**: weights resident as
+>   raw 144B superblocks; HIP dequant kernel bit-for-bit matches `BlockQ4K::to_float`; `fwd` dequants →
+>   rocBLAS f32 GEMM. **f16/bf16 matmul** (rocBLAS hgemm + gemm_ex). Gate: candle-core `--features hip`
+>   **15/15** incl. `hip_q4k_dequant_and_matmul_parity` (dequant exact, fwd rel 3.7e-7) + f16/bf16 matmul;
+>   akh `--features hip` builds. (commit `2311a5a`)
+> - **Next: 45f** — load a stock candle-transformers Gemma GGUF **fully on `Device::Hip`** and run a
+>   forward; instrument to prove **≤2 PCIe crossings/token** (vs the 419 baseline) and measure tok/s.
+>   May need a few residual ops (`const_set`, `gather`/`scatter`, RoPE/softmax fast paths) as the model
+>   surfaces them. Then **45g** hidden-state parity → **45h** fused kernels → roofline. **This is where the
+>   0.17 tok/s baseline finally gets beaten.**
 - **Target box:** AMD Radeon RX 7900 XTX (`gfx1100`, 24 GB, ~960 GB/s), ROCm 6.3.4 userspace installed.
 - **Supersedes the perf ceiling of:** [plan 2026-06-04-gpu-rocm-candle.md](2026-06-04-gpu-rocm-candle.md)
   (op-offload — *complete*, but PCIe-round-trip-bound).
