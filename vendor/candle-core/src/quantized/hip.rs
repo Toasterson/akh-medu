@@ -31,11 +31,15 @@ type DequantQ4K =
     unsafe extern "C" fn(*const u8, *mut f32, usize, usize) -> c_int;
 type DequantQ6K =
     unsafe extern "C" fn(*const u8, *mut f32, usize, usize) -> c_int;
+// Fused GEMV: out[n_rows] = W[n_rows,in_dim] · x[in_dim], dequant inline.
+type GemvQK = unsafe extern "C" fn(*const u8, *const f32, *mut f32, usize, usize) -> c_int;
 
 struct QuantKernels {
     _lib: libloading::Library,
     dequant_q4k: DequantQ4K,
     dequant_q6k: DequantQ6K,
+    gemv_q4k: GemvQK,
+    gemv_q6k: GemvQK,
 }
 // The fn pointers live in a process-lifetime library; calls are externally synchronized
 // to the synchronous compute thread (same contract as `hip_backend::runtime::Kernels`).
@@ -55,10 +59,18 @@ impl QuantKernels {
             let dequant_q6k: DequantQ6K = *lib
                 .get(b"akh_dequant_q6k\0")
                 .map_err(|e| format!("missing akh_dequant_q6k: {e}"))?;
+            let gemv_q4k: GemvQK = *lib
+                .get(b"akh_gemv_q4k_f32\0")
+                .map_err(|e| format!("missing akh_gemv_q4k_f32: {e}"))?;
+            let gemv_q6k: GemvQK = *lib
+                .get(b"akh_gemv_q6k_f32\0")
+                .map_err(|e| format!("missing akh_gemv_q6k_f32: {e}"))?;
             Ok(QuantKernels {
                 _lib: lib,
                 dequant_q4k,
                 dequant_q6k,
+                gemv_q4k,
+                gemv_q6k,
             })
         }
     }
@@ -90,6 +102,29 @@ impl QuantKernels {
         let rc = unsafe { (self.dequant_q6k)(blocks, out, rows, in_dim) };
         if rc != 0 {
             return Err(format!("akh_dequant_q6k kernel failed (hipError={rc})"));
+        }
+        Ok(())
+    }
+
+    /// Fused GEMV (Phase 45g): `out[n_rows] = W[n_rows,in_dim] · x[in_dim]`, weights
+    /// dequantized inline. `dtype` selects the Q4_K / Q6_K kernel.
+    fn gemv(
+        &self,
+        dtype: GgmlDType,
+        w: *const u8,
+        x: *const f32,
+        out: *mut f32,
+        n_rows: usize,
+        in_dim: usize,
+    ) -> std::result::Result<(), String> {
+        let f = match dtype {
+            GgmlDType::Q4K => self.gemv_q4k,
+            GgmlDType::Q6K => self.gemv_q6k,
+            other => return Err(format!("HIP GEMV: dtype {other:?} not supported")),
+        };
+        let rc = unsafe { f(w, x, out, n_rows, in_dim) };
+        if rc != 0 {
+            return Err(format!("akh_gemv ({dtype:?}) kernel failed (hipError={rc})"));
         }
         Ok(())
     }
@@ -412,6 +447,37 @@ impl QCudaStorage {
             )));
         }
 
+        // Decode fast path (Phase 45g): a single-row activation (b·m == 1) is a GEMV.
+        // The fused kernel dequantizes each weight inline and accumulates the dot
+        // product — streaming only the quantized weights, never materializing the 4×
+        // f32 weight matrix (that temp was the per-token VRAM + bandwidth hog). Needs a
+        // contiguous f32 activation and in_dim % 256 == 0 (the K-quant block); else fall
+        // through to the dequant + GEMM path (prefill / batched).
+        if b * m == 1 && layout.is_contiguous() && k % 256 == 0 {
+            let h = runtime::hip().map_err(Error::Msg)?;
+            let kern = quant_kernels()?;
+            let x_ptr =
+                unsafe { (storage.device_ptr() as *const f32).add(layout.start_offset()) };
+            let out_ptr = h.malloc(n * std::mem::size_of::<f32>()).map_err(Error::Msg)?;
+            if let Err(e) = kern.gemv(
+                self.dtype,
+                self.data as *const u8,
+                x_ptr,
+                out_ptr as *mut f32,
+                n,
+                k,
+            ) {
+                h.free(out_ptr);
+                return Err(Error::Msg(e));
+            }
+            h.synchronize().map_err(Error::Msg)?;
+            let out = CudaStorage::from_raw(self.device.clone(), out_ptr, DType::F32, n);
+            let mut out_shape = layout.shape().dims().to_vec();
+            out_shape.pop();
+            out_shape.push(n);
+            return Ok((out, out_shape.into()));
+        }
+
         // Dequantize the weights to an f32 [n, k] device matrix (row-major).
         let data_f32 = self.dequantize(n * k)?;
         // Mirror `cuda.rs` dequantize_matmul: rhs = Wᵀ as a (b, k, n) broadcast view of the
@@ -621,6 +687,44 @@ mod test {
             "Q6_K matmul vs dequant-ref: rel diff {} >= 1e-2",
             dm_ref / scale
         );
+        Ok(())
+    }
+
+    /// The fused decode GEMV (m=1) path matches the dequant-f32 reference matmul for
+    /// both Q4_K and Q6_K. Exercises `fwd`'s `b·m == 1` branch (Phase 45g).
+    #[test]
+    fn hip_gemv_decode_parity() -> Result<()> {
+        let Some(dev) = gpu() else {
+            eprintln!("no HIP GPU visible; skipping hip_gemv_decode_parity");
+            return Ok(());
+        };
+        let cpu = Device::Cpu;
+        let (n, k) = (16usize, 512usize); // k % 256 == 0
+        for dtype in [GgmlDType::Q4K, GgmlDType::Q6K] {
+            let w: Vec<f32> = (0..n * k)
+                .map(|i| ((i as f32) * 0.017).sin() * 0.5 + 0.02)
+                .collect();
+            let w_cpu = Tensor::from_vec(w.clone(), (n, k), &cpu)?;
+            let qt_gpu = QTensor::quantize_onto(&w_cpu, dtype, &dev)?;
+            let w_deq = qt_gpu.dequantize(&cpu)?; // [n, k]
+
+            // x is a single row -> triggers the GEMV path.
+            let x: Vec<f32> = (0..k).map(|i| ((i as f32) * 0.013).cos() * 0.4).collect();
+            let x_gpu = Tensor::from_vec(x.clone(), (1, k), &dev)?;
+            let x_cpu = Tensor::from_vec(x, (1, k), &cpu)?;
+
+            let mm = QMatMul::from_qtensor(qt_gpu)?;
+            let y_gpu = mm.forward(&x_gpu)?.flatten_all()?.to_vec1::<f32>()?;
+            let y_ref = x_cpu.matmul(&w_deq.t()?)?.flatten_all()?.to_vec1::<f32>()?;
+            let scale = y_ref.iter().map(|v| v.abs()).fold(0.0f32, f32::max).max(1e-6);
+            let d = max_abs_diff(&y_gpu, &y_ref);
+            eprintln!("{dtype:?} GEMV rel(gpu-ref) = {}", d / scale);
+            assert!(
+                d / scale < 1e-2,
+                "{dtype:?} GEMV vs dequant-ref: rel diff {} >= 1e-2",
+                d / scale
+            );
+        }
         Ok(())
     }
 }
