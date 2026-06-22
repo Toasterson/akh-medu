@@ -71,13 +71,25 @@
 >     (same 1.25 with/without the big pool). Two serial-sync sources dominate now: (i) ~1900 explicit
 >     `hipDeviceSynchronize` (one per kernel wrapper); (ii) ~3998 **synchronous** metadata H2D/token (each
 >     strided op uploads its dims/strides — a stream-stalling `hipMemcpy`). Both must go for async.
-> - **Next: 45g/45h cont.** **(1)** by-value strided metadata (kills the 3998 synchronous H2D = the
->   crossing metric *and* 3998 stream stalls) — convert the decode-hot strided kernels (binary/unary/reduce/
->   reduce_arg) to pass dims/strides as by-value kernel params; **(2)** drop per-kernel
->   `hipDeviceSynchronize` (single ordered null stream → pool recycling stays safe), sync once/token at the
->   logits readback; **(3)** coalesced warp-cooperative GEMV (the current one-thread-per-row is correct but
->   non-coalesced); **(4)** fused rms_norm/rope/softmax; then 45g hidden-cosine ≥ 0.999. Roofline (≥45 tok/s
->   q8) is a multi-step climb from here — 1.25 is 0.9%.
+> - **45g/45h (perf, cont) ✅ — by-value metadata + async + coalesced GEMV: → 2.65 (gemma4) / 2.96 (gemma3) tok/s.**
+>   **(1) by-value strided metadata** (`f391979`): the strided kernels (binary/unary/reduce/reduce_arg/ucopy)
+>   uploaded dims/strides to a per-call device buffer via a *synchronous* `hipMemcpy` — ~4000 stream stalls/
+>   token. Now passed as by-value launch params (`AkhI64x8`, rank ≤ 8). **PCIe crossings 4052 → 11/token**
+>   (decode ~2; residual is one-time prefill) — the plan's metric. **(2) async** (`866686c`): rocBLAS shares
+>   the null stream, so the per-kernel `hipDeviceSynchronize` (23 wrappers + 5 Rust) was redundant — removed;
+>   decode syncs ~2×/token (input H2D, logits D2H). **(3) coalesced GEMV** (`4ea8933`): the naive
+>   one-thread-per-row GEMV was non-coalesced (~88× off peak) — *the* wall once sync/metadata were gone. Now
+>   one BLOCK/row, threads stride consecutive positions (coalesced) + shared-mem reduction → **1.49 → 2.65
+>   (1.78×)**. candle-core `--features hip` **17/17** throughout.
+>   - **The profiling story (each step disproved the prior hypothesis):** removing dequant traffic (GEMV)
+>     didn't move tok/s → not bandwidth; removing 4000 H2D (by-value) barely moved it → not the crossings;
+>     removing 1900 syncs (async) barely moved it → not sync. The actual wall was **GEMV memory-access
+>     coalescing**. Measure, don't guess.
+> - **Cumulative Phase 45: 0.17 (op-offload) → 2.96 tok/s = ~17× over baseline, ~2.5× over CPU (1.16).**
+>   VRAM 19–20 GB, coherent output, both 12B akhs.
+> - **Next (still 2% roofline):** further GEMV tuning (cooperative superblock dequant — stop recomputing
+>   d/dmin/scales per position; vectorized `uint4` loads), fused rms_norm/rope/softmax (fewer kernels), then
+>   45g hidden-cosine ≥ 0.999. Roofline (≥45 tok/s q8) is still a multi-step climb.
 >
 > _(historical) Next: 45g/45h (the speed work). In priority order: **(1)** stop the per-op `malloc/free` +
 >   metadata H2D — pass strided-op dims/strides **by value** (kills the 3710 crossings → ~2/token, the
