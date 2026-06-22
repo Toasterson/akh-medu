@@ -96,12 +96,17 @@
 >   candle-core `--features hip` **18/18**.
 > - **Cumulative Phase 45: 0.17 (op-offload) → 6.75 tok/s = ~40× over baseline, ~5.8× over CPU (1.16).**
 >   Both 12B akhs, VRAM 19–20 GB, coherent. ~5% roofline.
-> - **Next (profile first — the lesson):** post-RMSNorm the GEMV is back to 47% of decode; the rest (~53%)
->   is rope/softmax (many tiny kernels — likely low individual value), attention rocBLAS, KV-cache copy2d,
->   residuals. **Add per-category timers before fusing more** (softmax/rope are tiny per call). Candidate
->   levers: cooperative-superblock-dequant GEMV (now 47%), fused rope (CustomOp3, ~576 launches/token),
->   fused softmax. Then 45g hidden-cosine ≥ 0.999. Roofline (≥45 tok/s q8) is still a climb but the model
->   is now usable.
+> - **45h per-category profiler ✅** (`99b287e`, `candle_core::cuda::op_profile`): split decode (gemma3, 32 tok):
+>   **GEMV 43.5% · attention-matmul (rocBLAS) 37.5% · elementwise (rope/softmax) 10.5% · strided-copy 5% ·
+>   other ~3.5%.** The **surprise: the attention rocBLAS is 37.5%** — ~686 µs/call for *tiny* decode GEMMs
+>   (m=1, head-batched) = pure rocBLAS small-batch overhead, not compute. And rope/softmax are only 10.5%, so
+>   **fusing them is NOT worth it** (the profiler saved that work). 
+> - **Next — the two data-identified levers (≥45 tok/s roofline still a climb):**
+>   **(1) custom decode-attention kernel** (q·kᵀ / softmax / ·v fused per head, or just a dense m=1
+>   batched-GEMV to replace the rocBLAS attention GEMMs) — 37.5% that is almost all overhead, so a naive
+>   custom kernel should slash it to ~5%; **(2) GEMV cooperative-superblock dequant** + better occupancy
+>   (43.5%, currently ~7× off roofline per call). Then 45g hidden-cosine ≥ 0.999. The model is **usable now
+>   (6.75 tok/s)**; these two get it toward roofline.
 >
 > _(historical) Next: 45g/45h (the speed work). In priority order: **(1)** stop the per-op `malloc/free` +
 >   metadata H2D — pass strided-op dims/strides **by value** (kills the 3710 crossings → ~2/token, the
