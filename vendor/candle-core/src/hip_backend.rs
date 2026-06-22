@@ -663,6 +663,24 @@ pub(crate) mod runtime {
 
     // ---- elementwise kernels (build.rs → libcandle_hip_kernels.so; Phase 45d) ----
 
+    /// Fixed-rank metadata passed BY VALUE to the strided kernels (Phase 45g) —
+    /// matches the C `struct AkhI64x8 { long v[8]; }`. Rides in the kernel launch
+    /// params, so there is no per-op device dims/strides alloc + synchronous H2D +
+    /// free (those stalled the stream ~4000×/token). Rank ≤ 8 (decode peaks at 5).
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    pub(crate) struct I64x8 {
+        pub(crate) v: [i64; 8],
+    }
+    impl I64x8 {
+        pub(crate) fn pack(s: &[i64]) -> Self {
+            let mut v = [0i64; 8];
+            let n = s.len().min(8);
+            v[..n].copy_from_slice(&s[..n]);
+            I64x8 { v }
+        }
+    }
+
     type AffineF32 = unsafe extern "C" fn(*const f32, *mut f32, usize, f32, f32) -> c_int;
     type UnaryF32 = unsafe extern "C" fn(*const f32, *mut f32, usize, c_int) -> c_int;
     type BinaryF32 = unsafe extern "C" fn(*const f32, *const f32, *mut f32, usize, c_int) -> c_int;
@@ -673,9 +691,9 @@ pub(crate) mod runtime {
         *mut f32,
         usize,
         c_int,
-        *const c_int,
-        *const i64,
-        *const c_int,
+        I64x8,
+        I64x8,
+        I64x8,
         usize,
         c_int,
     ) -> c_int;
@@ -686,9 +704,9 @@ pub(crate) mod runtime {
         *mut u32,
         usize,
         c_int,
-        *const c_int,
-        *const i64,
-        *const c_int,
+        I64x8,
+        I64x8,
+        I64x8,
         usize,
         c_int,
     ) -> c_int;
@@ -733,7 +751,7 @@ pub(crate) mod runtime {
         *const i64,
         *const i64,
     ) -> c_int;
-    type UcopyF32 = unsafe extern "C" fn(*const f32, *mut f32, usize, usize, *const usize) -> c_int;
+    type UcopyF32 = unsafe extern "C" fn(*const f32, *mut f32, usize, usize, I64x8, I64x8) -> c_int;
     // Phase 45f: strided elementwise compare -> u8 (powers `mask.eq(0)` in prefill).
     #[allow(clippy::type_complexity)]
     type CmpF32 = unsafe extern "C" fn(
@@ -762,27 +780,27 @@ pub(crate) mod runtime {
     ) -> c_int;
     // Phase 45f: strided broadcasting binary (add/sub/mul/div) -> f32. Powers the
     // broadcast_div/mul/sub inside rms_norm/softmax/rope on non-contiguous layouts.
-    #[allow(clippy::type_complexity)]
+    // (45g) dims/strides passed by value.
     type BinaryStridedF32 = unsafe extern "C" fn(
         *const f32,
         *const f32,
         *mut f32,
         usize,
         usize,
-        *const i64,
-        *const i64,
-        *const i64,
+        I64x8,
+        I64x8,
+        I64x8,
         c_int,
     ) -> c_int;
     // Phase 45f: strided unary -> f32. Powers `neg` (and friends) on non-contiguous
-    // narrow views, e.g. rotate_half inside rope_slow.
+    // narrow views, e.g. rotate_half inside rope_slow. (45g) dims/stride by value.
     type UnaryStridedF32 = unsafe extern "C" fn(
         *const f32,
         *mut f32,
         usize,
         usize,
-        *const i64,
-        *const i64,
+        I64x8,
+        I64x8,
         c_int,
     ) -> c_int;
 
@@ -976,9 +994,9 @@ pub(crate) mod runtime {
             y: *mut f32,
             out_numel: usize,
             num_dims: c_int,
-            dims: *const c_int,
-            strides: *const i64,
-            reduce_mask: *const c_int,
+            dims: I64x8,
+            strides: I64x8,
+            reduce_mask: I64x8,
             reduce_numel: usize,
             op: c_int,
         ) -> std::result::Result<(), String> {
@@ -1010,9 +1028,9 @@ pub(crate) mod runtime {
             y: *mut u32,
             out_numel: usize,
             num_dims: c_int,
-            dims: *const c_int,
-            strides: *const i64,
-            reduce_mask: *const c_int,
+            dims: I64x8,
+            strides: I64x8,
+            reduce_mask: I64x8,
             reduce_numel: usize,
             op: c_int,
         ) -> std::result::Result<(), String> {
@@ -1155,9 +1173,10 @@ pub(crate) mod runtime {
             dst: *mut f32,
             n: usize,
             rank: usize,
-            info: *const usize,
+            dims: I64x8,
+            strides: I64x8,
         ) -> std::result::Result<(), String> {
-            let rc = unsafe { (self.ucopy_f32)(src, dst, n, rank, info) };
+            let rc = unsafe { (self.ucopy_f32)(src, dst, n, rank, dims, strides) };
             if rc != 0 {
                 return Err(format!("akh_ucopy_f32 failed (rc={rc})"));
             }
@@ -1219,9 +1238,9 @@ pub(crate) mod runtime {
             c: *mut f32,
             n: usize,
             rank: usize,
-            dims: *const i64,
-            a_str: *const i64,
-            b_str: *const i64,
+            dims: I64x8,
+            a_str: I64x8,
+            b_str: I64x8,
             op: c_int,
         ) -> std::result::Result<(), String> {
             let rc =
@@ -1232,18 +1251,17 @@ pub(crate) mod runtime {
             Ok(())
         }
 
-        /// Strided unary -> f32. `dims`/`x_str` are DEVICE long arrays of length `rank`;
-        /// `x` already advanced to its start offset; `out` contiguous. Op codes match
+        /// Strided unary -> f32. `dims`/`x_str` are by-value rank-≤8 metadata; `x`
+        /// already advanced to its start offset; `out` contiguous. Op codes match
         /// [`unary_f32`].
-        #[allow(clippy::too_many_arguments)]
         pub fn unary_strided_f32(
             &self,
             x: *const f32,
             y: *mut f32,
             n: usize,
             rank: usize,
-            dims: *const i64,
-            x_str: *const i64,
+            dims: I64x8,
+            x_str: I64x8,
             op: c_int,
         ) -> std::result::Result<(), String> {
             let rc = unsafe { (self.unary_strided_f32)(x, y, n, rank, dims, x_str, op) };
@@ -1644,13 +1662,18 @@ impl crate::backend::BackendStorage for HipStorage {
 
         let src_dims = layout.dims();
         let num_dims = src_dims.len();
+        if num_dims > 8 {
+            return Err(Error::Msg(format!(
+                "HIP reduce_op: rank {num_dims} > 8 unsupported (by-value metadata, Phase 45g)"
+            )));
+        }
         let mut strides = vec![0i64; num_dims];
         let mut acc = 1i64;
         for d in (0..num_dims).rev() {
             strides[d] = acc;
             acc *= src_dims[d] as i64;
         }
-        let mut reduce_mask = vec![0i32; num_dims];
+        let mut reduce_mask = vec![0i64; num_dims];
         let mut out_dims = src_dims.to_vec();
         let mut reduce_numel: usize = 1;
         for &d in reduce_dims {
@@ -1660,51 +1683,16 @@ impl crate::backend::BackendStorage for HipStorage {
         }
         let out_shape = Shape::from(out_dims);
         let out_numel = out_shape.elem_count();
-        let dims_i32: Vec<c_int> = src_dims.iter().map(|&d| d as c_int).collect();
+        let dims_i64: Vec<i64> = src_dims.iter().map(|&d| d as i64).collect();
 
         let h = hip()?;
         let k = runtime::kernels().map_err(Error::Msg)?;
 
-        let dims_dev = h
-            .malloc(num_dims * std::mem::size_of::<c_int>())
-            .map_err(Error::Msg)?;
-        let strides_dev = h
-            .malloc(num_dims * std::mem::size_of::<i64>())
-            .map_err(Error::Msg)?;
-        let mask_dev = h
-            .malloc(num_dims * std::mem::size_of::<c_int>())
-            .map_err(Error::Msg)?;
-        let free_meta = || {
-            h.free(dims_dev);
-            h.free(strides_dev);
-            h.free(mask_dev);
-        };
-        let upload = |dst: *mut c_void, bytes: usize, src: *const c_void| -> Result<()> {
-            h.memcpy(dst, src, bytes, runtime::MEMCPY_H2D)
-                .map_err(Error::Msg)
-        };
-        if let Err(e) = upload(
-            dims_dev,
-            num_dims * std::mem::size_of::<c_int>(),
-            dims_i32.as_ptr() as *const c_void,
-        )
-        .and_then(|_| {
-            upload(
-                strides_dev,
-                num_dims * std::mem::size_of::<i64>(),
-                strides.as_ptr() as *const c_void,
-            )
-        })
-        .and_then(|_| {
-            upload(
-                mask_dev,
-                num_dims * std::mem::size_of::<c_int>(),
-                reduce_mask.as_ptr() as *const c_void,
-            )
-        }) {
-            free_meta();
-            return Err(e);
-        }
+        // Metadata rides in the kernel launch params (by value) — no device alloc /
+        // synchronous H2D / free per reduce (Phase 45g).
+        let dims_m = runtime::I64x8::pack(&dims_i64);
+        let strides_m = runtime::I64x8::pack(&strides);
+        let mask_m = runtime::I64x8::pack(&reduce_mask);
 
         let src = unsafe { (self.ptr as *const f32).add(layout.start_offset()) };
         let elem = if is_arg {
@@ -1712,22 +1700,16 @@ impl crate::backend::BackendStorage for HipStorage {
         } else {
             std::mem::size_of::<f32>()
         };
-        let out = match h.malloc(out_numel * elem) {
-            Ok(p) => p,
-            Err(e) => {
-                free_meta();
-                return Err(Error::Msg(e));
-            }
-        };
+        let out = h.malloc(out_numel * elem).map_err(Error::Msg)?;
         let launch = if is_arg {
             k.reduce_arg_f32(
                 src,
                 out as *mut u32,
                 out_numel,
                 num_dims as c_int,
-                dims_dev as *const c_int,
-                strides_dev as *const i64,
-                mask_dev as *const c_int,
+                dims_m,
+                strides_m,
+                mask_m,
                 reduce_numel,
                 op_code,
             )
@@ -1737,14 +1719,13 @@ impl crate::backend::BackendStorage for HipStorage {
                 out as *mut f32,
                 out_numel,
                 num_dims as c_int,
-                dims_dev as *const c_int,
-                strides_dev as *const i64,
-                mask_dev as *const c_int,
+                dims_m,
+                strides_m,
+                mask_m,
                 reduce_numel,
                 op_code,
             )
         };
-        free_meta();
         if let Err(e) = launch {
             h.free(out);
             return Err(Error::Msg(e));
@@ -1942,55 +1923,21 @@ impl crate::backend::BackendStorage for HipStorage {
         let h = hip()?;
         let dims = layout.dims();
         let rank = dims.len();
+        if rank > 8 {
+            return Err(Error::Msg(format!(
+                "HIP unary `{}`: rank {rank} > 8 unsupported (by-value metadata, Phase 45g)",
+                B::NAME
+            )));
+        }
         let n = layout.shape().elem_count();
         let dims_i64: Vec<i64> = dims.iter().map(|&d| d as i64).collect();
         let strv: Vec<i64> = layout.stride().iter().map(|&s| s as i64).collect();
-        let bytes = rank.max(1) * std::mem::size_of::<i64>();
+        // Metadata by value — no device alloc / synchronous H2D / free (Phase 45g).
+        let dims_m = runtime::I64x8::pack(&dims_i64);
+        let str_m = runtime::I64x8::pack(&strv);
         let out = h.malloc(n * std::mem::size_of::<f32>()).map_err(Error::Msg)?;
-        let dims_dev = match h.malloc(bytes) {
-            Ok(p) => p,
-            Err(e) => {
-                h.free(out);
-                return Err(Error::Msg(e));
-            }
-        };
-        let str_dev = match h.malloc(bytes) {
-            Ok(p) => p,
-            Err(e) => {
-                h.free(out);
-                h.free(dims_dev);
-                return Err(Error::Msg(e));
-            }
-        };
-        let cleanup = || {
-            h.free(dims_dev);
-            h.free(str_dev);
-        };
-        if rank > 0 {
-            let up = |dst: *mut c_void, src: *const c_void| {
-                h.memcpy(dst, src, rank * std::mem::size_of::<i64>(), runtime::MEMCPY_H2D)
-                    .map_err(Error::Msg)
-            };
-            if let Err(e) = up(dims_dev, dims_i64.as_ptr() as *const c_void)
-                .and_then(|_| up(str_dev, strv.as_ptr() as *const c_void))
-            {
-                cleanup();
-                h.free(out);
-                return Err(e);
-            }
-        }
         let src = unsafe { (self.ptr as *const f32).add(layout.start_offset()) };
-        let launch = k.unary_strided_f32(
-            src,
-            out as *mut f32,
-            n,
-            rank,
-            dims_dev as *const i64,
-            str_dev as *const i64,
-            op,
-        );
-        cleanup();
-        if let Err(e) = launch {
+        if let Err(e) = k.unary_strided_f32(src, out as *mut f32, n, rank, dims_m, str_m, op) {
             h.free(out);
             return Err(Error::Msg(e));
         }
@@ -2048,71 +1995,26 @@ impl crate::backend::BackendStorage for HipStorage {
 
         // Strided path: candle broadcasts both operands to the common shape before
         // calling binary_impl, so l1.dims() == l2.dims(); each side keeps its own
-        // (possibly stride-0) strides. Upload dims + both stride vectors to device.
+        // (possibly stride-0) strides — passed by value in the launch (Phase 45g).
         let dims = l1.dims();
         let rank = dims.len();
+        if rank > 8 {
+            h.free(out);
+            return Err(Error::Msg(format!(
+                "HIP binary `{}`: rank {rank} > 8 unsupported (by-value metadata, Phase 45g)",
+                B::NAME
+            )));
+        }
         let dims_i64: Vec<i64> = dims.iter().map(|&d| d as i64).collect();
         let a_strv: Vec<i64> = l1.stride().iter().map(|&s| s as i64).collect();
         let b_strv: Vec<i64> = l2.stride().iter().map(|&s| s as i64).collect();
-        let bytes = rank.max(1) * std::mem::size_of::<i64>();
-        let dims_dev = match h.malloc(bytes) {
-            Ok(p) => p,
-            Err(e) => {
-                h.free(out);
-                return Err(Error::Msg(e));
-            }
-        };
-        let a_dev = match h.malloc(bytes) {
-            Ok(p) => p,
-            Err(e) => {
-                h.free(out);
-                h.free(dims_dev);
-                return Err(Error::Msg(e));
-            }
-        };
-        let b_dev = match h.malloc(bytes) {
-            Ok(p) => p,
-            Err(e) => {
-                h.free(out);
-                h.free(dims_dev);
-                h.free(a_dev);
-                return Err(Error::Msg(e));
-            }
-        };
-        let cleanup = || {
-            h.free(dims_dev);
-            h.free(a_dev);
-            h.free(b_dev);
-        };
-        if rank > 0 {
-            let up = |dst: *mut c_void, src: *const c_void| {
-                h.memcpy(dst, src, rank * std::mem::size_of::<i64>(), runtime::MEMCPY_H2D)
-                    .map_err(Error::Msg)
-            };
-            if let Err(e) = up(dims_dev, dims_i64.as_ptr() as *const c_void)
-                .and_then(|_| up(a_dev, a_strv.as_ptr() as *const c_void))
-                .and_then(|_| up(b_dev, b_strv.as_ptr() as *const c_void))
-            {
-                cleanup();
-                h.free(out);
-                return Err(e);
-            }
-        }
+        let dims_m = runtime::I64x8::pack(&dims_i64);
+        let a_m = runtime::I64x8::pack(&a_strv);
+        let b_m = runtime::I64x8::pack(&b_strv);
         let a = unsafe { (self.ptr as *const f32).add(l1.start_offset()) };
         let b = unsafe { (rhs.ptr as *const f32).add(l2.start_offset()) };
-        let launch = k.binary_strided_f32(
-            a,
-            b,
-            out as *mut f32,
-            n,
-            rank,
-            dims_dev as *const i64,
-            a_dev as *const i64,
-            b_dev as *const i64,
-            op,
-        );
-        cleanup();
-        if let Err(e) = launch {
+        if let Err(e) = k.binary_strided_f32(a, b, out as *mut f32, n, rank, dims_m, a_m, b_m, op)
+        {
             h.free(out);
             return Err(Error::Msg(e));
         }
@@ -2597,30 +2499,18 @@ impl crate::backend::BackendStorage for HipStorage {
             )));
         }
         let rank = dims.len();
-        let mut info: Vec<usize> = Vec::with_capacity(2 * rank);
-        info.extend_from_slice(dims);
-        info.extend_from_slice(src_l.stride());
-        let info_bytes = std::mem::size_of_val(info.as_slice());
-        let info_ptr = h.malloc(info_bytes).map_err(Error::Msg)?;
-        if let Err(e) = h.memcpy(
-            info_ptr,
-            info.as_ptr() as *const c_void,
-            info_bytes,
-            runtime::MEMCPY_H2D,
-        ) {
-            h.free(info_ptr);
-            return Err(Error::Msg(e));
+        if rank > 8 {
+            return Err(Error::Msg(format!(
+                "HIP copy_strided_src: rank {rank} > 8 unsupported (by-value metadata, Phase 45g)"
+            )));
         }
+        // dims/strides by value — no per-call info alloc / synchronous H2D / free.
+        let dims_m = runtime::I64x8::pack(&dims.iter().map(|&d| d as i64).collect::<Vec<_>>());
+        let str_m =
+            runtime::I64x8::pack(&src_l.stride().iter().map(|&s| s as i64).collect::<Vec<_>>());
         let k = runtime::kernels().map_err(Error::Msg)?;
-        let res = k.ucopy_f32(
-            src as *const f32,
-            dst_ptr as *mut f32,
-            n,
-            rank,
-            info_ptr as *const usize,
-        );
-        h.free(info_ptr);
-        res.map_err(Error::Msg)
+        k.ucopy_f32(src as *const f32, dst_ptr as *mut f32, n, rank, dims_m, str_m)
+            .map_err(Error::Msg)
     }
 
     /// 2D block copy (Phase 45f): `d1` rows of `d2` elements, src/dst row strides

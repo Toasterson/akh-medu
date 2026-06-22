@@ -10,6 +10,13 @@
 #include <math.h>
 #include <stdint.h>
 
+// Phase 45g: fixed-rank metadata passed BY VALUE in the kernel launch params (rides
+// along with the launch — no per-op hipMalloc + *synchronous* hipMemcpy + hipFree of
+// a device dims/strides array, which stalled the stream ~4000×/token). Rank ≤ 8 covers
+// every tensor the decode path produces (gemma's deepest is rank 5).
+#define AKH_MAXR 8
+struct AkhI64x8 { long v[AKH_MAXR]; };
+
 // candle's `Gelu` is the tanh approximation (its `gelu_erf` is the exact one).
 __device__ inline float gelu_tanh(float x) {
     const float c = 0.7978845608028654f; // sqrt(2/pi)
@@ -50,15 +57,15 @@ __global__ void unary_f32(const float* x, float* y, size_t n, int op) {
 // length `rank`; `x` already advanced to its start offset; out contiguous. Same op
 // codes as unary_f32.
 __global__ void unary_strided_f32(const float* x, float* y, size_t n, size_t rank,
-                                  const long* dims, const long* x_str, int op) {
+                                  AkhI64x8 dims, AkhI64x8 x_str, int op) {
     size_t o = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
     if (o >= n) return;
     size_t x_off = 0, rem = o;
     for (size_t d = rank; d-- > 0;) {
-        size_t dim = (size_t)dims[d];
+        size_t dim = (size_t)dims.v[d];
         size_t coord = rem % dim;
         rem /= dim;
-        x_off += coord * (size_t)x_str[d];
+        x_off += coord * (size_t)x_str.v[d];
     }
     float v = x[x_off];
     switch (op) {
@@ -99,17 +106,17 @@ __global__ void binary_f32(const float* a, const float* b, float* c, size_t n, i
 // arrays of length `rank`; `a`/`b` already advanced to start offsets; out contiguous.
 // op: 0 add, 1 sub, 2 mul, 3 div.
 __global__ void binary_strided_f32(const float* a, const float* b, float* c, size_t n,
-                                   size_t rank, const long* dims, const long* a_str,
-                                   const long* b_str, int op) {
+                                   size_t rank, AkhI64x8 dims, AkhI64x8 a_str,
+                                   AkhI64x8 b_str, int op) {
     size_t o = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
     if (o >= n) return;
     size_t a_off = 0, b_off = 0, rem = o;
     for (size_t d = rank; d-- > 0;) {
-        size_t dim = (size_t)dims[d];
+        size_t dim = (size_t)dims.v[d];
         size_t coord = rem % dim;
         rem /= dim;
-        a_off += coord * (size_t)a_str[d];
-        b_off += coord * (size_t)b_str[d];
+        a_off += coord * (size_t)a_str.v[d];
+        b_off += coord * (size_t)b_str.v[d];
     }
     float av = a[a_off], bv = b[b_off];
     switch (op) {
@@ -128,18 +135,18 @@ __global__ void binary_strided_f32(const float* a, const float* b, float* c, siz
 // output index, forms the base input offset, then loops over the cartesian
 // product of the reduced dims accumulating per `op`.
 __global__ void reduce_f32(const float* x, float* y, size_t out_numel,
-                           int num_dims, const int* dims, const long* strides,
-                           const int* reduce_mask, size_t reduce_numel, int op) {
+                           int num_dims, AkhI64x8 dims, AkhI64x8 strides,
+                           AkhI64x8 reduce_mask, size_t reduce_numel, int op) {
     size_t out_i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
     if (out_i >= out_numel) return;
     size_t base = 0;
     size_t rem = out_i;
     for (int d = num_dims - 1; d >= 0; --d) {
-        if (reduce_mask[d]) continue;
-        int sz = dims[d];
+        if (reduce_mask.v[d]) continue;
+        int sz = (int)dims.v[d];
         int coord = (int)(rem % (size_t)sz);
         rem /= (size_t)sz;
-        base += (size_t)coord * (size_t)strides[d];
+        base += (size_t)coord * (size_t)strides.v[d];
     }
     float acc = 0.0f;
     bool first = true;
@@ -147,11 +154,11 @@ __global__ void reduce_f32(const float* x, float* y, size_t out_numel,
         size_t off = base;
         size_t rr = r;
         for (int d = num_dims - 1; d >= 0; --d) {
-            if (!reduce_mask[d]) continue;
-            int sz = dims[d];
+            if (!reduce_mask.v[d]) continue;
+            int sz = (int)dims.v[d];
             int coord = (int)(rr % (size_t)sz);
             rr /= (size_t)sz;
-            off += (size_t)coord * (size_t)strides[d];
+            off += (size_t)coord * (size_t)strides.v[d];
         }
         float v = x[off];
         if (first) { acc = v; first = false; }
@@ -168,18 +175,18 @@ __global__ void reduce_f32(const float* x, float* y, size_t out_numel,
 // 1 argmax. Same dims/strides/reduce_mask metadata as reduce_f32. Ties resolve to
 // the first occurrence (matches candle's CPU `<`/`>` accumulation).
 __global__ void reduce_arg_f32(const float* x, unsigned int* y, size_t out_numel,
-                               int num_dims, const int* dims, const long* strides,
-                               const int* reduce_mask, size_t reduce_numel, int op) {
+                               int num_dims, AkhI64x8 dims, AkhI64x8 strides,
+                               AkhI64x8 reduce_mask, size_t reduce_numel, int op) {
     size_t out_i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
     if (out_i >= out_numel) return;
     size_t base = 0;
     size_t rem = out_i;
     for (int d = num_dims - 1; d >= 0; --d) {
-        if (reduce_mask[d]) continue;
-        int sz = dims[d];
+        if (reduce_mask.v[d]) continue;
+        int sz = (int)dims.v[d];
         int coord = (int)(rem % (size_t)sz);
         rem /= (size_t)sz;
-        base += (size_t)coord * (size_t)strides[d];
+        base += (size_t)coord * (size_t)strides.v[d];
     }
     float best = 0.0f;
     unsigned int best_idx = 0;
@@ -188,11 +195,11 @@ __global__ void reduce_arg_f32(const float* x, unsigned int* y, size_t out_numel
         size_t off = base;
         size_t rr = r;
         for (int d = num_dims - 1; d >= 0; --d) {
-            if (!reduce_mask[d]) continue;
-            int sz = dims[d];
+            if (!reduce_mask.v[d]) continue;
+            int sz = (int)dims.v[d];
             int coord = (int)(rr % (size_t)sz);
             rr /= (size_t)sz;
-            off += (size_t)coord * (size_t)strides[d];
+            off += (size_t)coord * (size_t)strides.v[d];
         }
         float v = x[off];
         bool better = first || (op == 1 ? (v > best) : (v < best));
@@ -347,24 +354,22 @@ __global__ void where_cond_strided_u32_f32(const unsigned int* cond, const float
 }
 
 // ---- strided copy (Phase 45d): powers .contiguous() ------------------------
-// dst[o] = src[strided_index(o)]; `info` is [dims[0..rank], strides[0..rank]]
-// uploaded to device; src/dst are already advanced to their start offsets.
-__device__ inline size_t strided_src_index(size_t o, size_t rank, const size_t* dims, const size_t* strides) {
-    size_t src = 0;
-    for (size_t d = rank; d-- > 0;) {
-        size_t dim = dims[d];
-        size_t coord = o % dim;
-        o /= dim;
-        src += coord * strides[d];
-    }
-    return src;
-}
-__global__ void ucopy_f32(const float* src, float* dst, size_t n, size_t rank, const size_t* info) {
+// dst[o] = src[strided_index(o)]; dims/strides passed by value (Phase 45g — was a
+// per-call device `info` upload, ~96/token from KV-cache cat + contiguous). src/dst
+// already advanced to their start offsets.
+__global__ void ucopy_f32(const float* src, float* dst, size_t n, size_t rank,
+                          AkhI64x8 dims, AkhI64x8 strides) {
     size_t o = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
     if (o >= n) return;
-    const size_t* dims = info;
-    const size_t* strides = info + rank;
-    dst[o] = src[strided_src_index(o, rank, dims, strides)];
+    size_t s = 0;
+    size_t rem = o;
+    for (size_t d = rank; d-- > 0;) {
+        size_t dim = (size_t)dims.v[d];
+        size_t coord = rem % dim;
+        rem /= dim;
+        s += coord * (size_t)strides.v[d];
+    }
+    dst[o] = src[s];
 }
 
 extern "C" {
@@ -398,7 +403,7 @@ int akh_binary_f32(const float* a, const float* b, float* c, size_t n, int op) {
 
 // reduce: dims/strides/reduce_mask are DEVICE pointers (caller uploads + frees).
 int akh_reduce_f32(const float* x, float* y, size_t out_numel, int num_dims,
-                   const int* dims, const long* strides, const int* reduce_mask,
+                   struct AkhI64x8 dims, struct AkhI64x8 strides, struct AkhI64x8 reduce_mask,
                    size_t reduce_numel, int op) {
     if (out_numel == 0) return 0;
     int t = 256;
@@ -411,7 +416,7 @@ int akh_reduce_f32(const float* x, float* y, size_t out_numel, int num_dims,
 
 // argmin/argmax reduce -> u32 index. Same metadata as akh_reduce_f32; op 0 argmin, 1 argmax.
 int akh_reduce_arg_f32(const float* x, unsigned int* y, size_t out_numel, int num_dims,
-                       const int* dims, const long* strides, const int* reduce_mask,
+                       struct AkhI64x8 dims, struct AkhI64x8 strides, struct AkhI64x8 reduce_mask,
                        size_t reduce_numel, int op) {
     if (out_numel == 0) return 0;
     int t = 256;
@@ -469,8 +474,8 @@ int akh_where_cond_u32_f32(const unsigned int* cond, const float* t, const float
 // strided broadcasting binary; dims/a_str/b_str are device long arrays of length
 // rank, a/b already advanced to start offsets, out contiguous f32. op 0..3.
 int akh_binary_strided_f32(const float* a, const float* b, float* c, size_t n,
-                           size_t rank, const long* dims, const long* a_str,
-                           const long* b_str, int op) {
+                           size_t rank, struct AkhI64x8 dims, struct AkhI64x8 a_str,
+                           struct AkhI64x8 b_str, int op) {
     if (n == 0) return 0;
     int t = 256;
     size_t blocks = (n + t - 1) / t;
@@ -480,10 +485,10 @@ int akh_binary_strided_f32(const float* a, const float* b, float* c, size_t n,
     return hipDeviceSynchronize() == hipSuccess ? 0 : 2;
 }
 
-// strided unary; dims/x_str device long arrays of length rank, x advanced to its
-// start offset, out contiguous f32. Same op codes as akh_unary_f32.
+// strided unary; dims/x_str passed by value, x advanced to its start offset, out
+// contiguous f32. Same op codes as akh_unary_f32.
 int akh_unary_strided_f32(const float* x, float* y, size_t n, size_t rank,
-                          const long* dims, const long* x_str, int op) {
+                          struct AkhI64x8 dims, struct AkhI64x8 x_str, int op) {
     if (n == 0) return 0;
     int t = 256;
     size_t blocks = (n + t - 1) / t;
@@ -540,13 +545,13 @@ int akh_where_cond_strided_u32_f32(const unsigned int* cond, const float* t, con
     return hipDeviceSynchronize() == hipSuccess ? 0 : 2;
 }
 
-// strided gather-copy: src/dst already advanced to start offsets; info is a device
-// buffer of 2*rank size_t [dims..., strides...].
-int akh_ucopy_f32(const float* src, float* dst, size_t n, size_t rank, const size_t* info) {
+// strided gather-copy: src/dst already advanced to start offsets; dims/strides by value.
+int akh_ucopy_f32(const float* src, float* dst, size_t n, size_t rank,
+                  struct AkhI64x8 dims, struct AkhI64x8 strides) {
     if (n == 0) return 0;
     int t = 256;
     size_t blocks = (n + t - 1) / t;
-    hipLaunchKernelGGL(ucopy_f32, dim3(blocks), dim3(t), 0, 0, src, dst, n, rank, info);
+    hipLaunchKernelGGL(ucopy_f32, dim3(blocks), dim3(t), 0, 0, src, dst, n, rank, dims, strides);
     if (hipGetLastError() != hipSuccess) return 1;
     return hipDeviceSynchronize() == hipSuccess ? 0 : 2;
 }
