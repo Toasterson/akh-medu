@@ -137,90 +137,106 @@ __global__ void akh_dequant_q6k_kernel(const unsigned char* __restrict__ blocks,
     out[row * in_dim + col] = d * (float)scb[sc_index] * (float)q;
 }
 
-// ---- fused quantized GEMV (Phase 45g) --------------------------------------
+// ---- fused quantized GEMV (Phase 45g/45h) ----------------------------------
 // Decode is a matrix-VECTOR product (m=1): out[row] = Σ_k dequant(W[row,k]) * x[k].
 // Dequantizing inline (never materializing the f32 weight) streams only the
 // quantized weights (7.3 GB) instead of writing+reading a 4× f32 temp (~48 GB)
-// per token. One thread per output row (simple, correct; warp-cooperative is a
-// later optimization). `W` is row-major Q4_K/Q6_K, `x` the f32 activation [in_dim].
+// per token. (45h) One BLOCK per output row, threads stride over the row's
+// weights so consecutive threads touch consecutive positions (coalesced x[] +
+// nearby quantized bytes), then a shared-memory tree reduction — vs the original
+// one-thread-per-row, which was non-coalesced (~88× off peak bandwidth).
+// Block-per-row (not warp-per-row) is independent of the gfx1100 wavefront size.
+#define AKH_GEMV_BLOCK 128
+
 __global__ void akh_gemv_q4k_f32_kernel(const unsigned char* __restrict__ W,
                                  const float* __restrict__ x, float* __restrict__ out,
                                  unsigned long n_rows, unsigned long in_dim) {
-    unsigned long row = (unsigned long)blockIdx.x * blockDim.x + threadIdx.x;
+    unsigned long row = blockIdx.x;
     if (row >= n_rows) return;
+    int tid = threadIdx.x;
     unsigned long bpr = in_dim / AKH_Q4K_QK;
     const unsigned char* base = W + row * bpr * AKH_Q4K_BLOCK_BYTES;
     float acc = 0.0f;
-    for (unsigned long sb = 0; sb < bpr; ++sb) {
-        const unsigned char* b = base + sb * AKH_Q4K_BLOCK_BYTES;
+    for (unsigned long p = tid; p < in_dim; p += AKH_GEMV_BLOCK) {
+        const unsigned char* b = base + (p / AKH_Q4K_QK) * AKH_Q4K_BLOCK_BYTES;
+        int pp = (int)(p % AKH_Q4K_QK);
         float d = __half2float(*reinterpret_cast<const __half*>(b + 0));
         float dmin = __half2float(*reinterpret_cast<const __half*>(b + 2));
         const unsigned char* scales = b + 4;
         const unsigned char* qs = b + 16;
-        const float* xb = x + sb * AKH_Q4K_QK;
-        for (int p = 0; p < AKH_Q4K_QK; ++p) {
-            int iter = p / 64;
-            int within = p % 64;
-            int qoff = iter * 32 + (within & 31);
-            int is = 2 * iter + (within < 32 ? 0 : 1);
-            unsigned char sc, mn;
-            akh_q4k_scale_min(is, scales, &sc, &mn);
-            int nib = (within < 32) ? (qs[qoff] & 0xF) : (qs[qoff] >> 4);
-            float w = d * (float)sc * (float)nib - dmin * (float)mn;
-            acc += w * xb[p];
-        }
+        int iter = pp / 64;
+        int within = pp % 64;
+        int qoff = iter * 32 + (within & 31);
+        int is = 2 * iter + (within < 32 ? 0 : 1);
+        unsigned char sc, mn;
+        akh_q4k_scale_min(is, scales, &sc, &mn);
+        int nib = (within < 32) ? (qs[qoff] & 0xF) : (qs[qoff] >> 4);
+        float w = d * (float)sc * (float)nib - dmin * (float)mn;
+        acc += w * x[p];
     }
-    out[row] = acc;
+    __shared__ float sdata[AKH_GEMV_BLOCK];
+    sdata[tid] = acc;
+    __syncthreads();
+    for (int s = AKH_GEMV_BLOCK / 2; s > 0; s >>= 1) {
+        if (tid < s) sdata[tid] += sdata[tid + s];
+        __syncthreads();
+    }
+    if (tid == 0) out[row] = sdata[0];
 }
 
 __global__ void akh_gemv_q6k_f32_kernel(const unsigned char* __restrict__ W,
                                  const float* __restrict__ x, float* __restrict__ out,
                                  unsigned long n_rows, unsigned long in_dim) {
-    unsigned long row = (unsigned long)blockIdx.x * blockDim.x + threadIdx.x;
+    unsigned long row = blockIdx.x;
     if (row >= n_rows) return;
+    int tid = threadIdx.x;
     unsigned long bpr = in_dim / AKH_Q6K_QK;
     const unsigned char* base = W + row * bpr * AKH_Q6K_BLOCK_BYTES;
     float acc = 0.0f;
-    for (unsigned long sb = 0; sb < bpr; ++sb) {
-        const unsigned char* b = base + sb * AKH_Q6K_BLOCK_BYTES;
+    for (unsigned long p = tid; p < in_dim; p += AKH_GEMV_BLOCK) {
+        const unsigned char* b = base + (p / AKH_Q6K_QK) * AKH_Q6K_BLOCK_BYTES;
+        int pp = (int)(p % AKH_Q6K_QK);
         const unsigned char* ql = b + 0;
         const unsigned char* qh = b + 128;
         const signed char* sc = reinterpret_cast<const signed char*>(b + 192);
         float d = __half2float(*reinterpret_cast<const __half*>(b + 208));
-        const float* xb = x + sb * AKH_Q6K_QK;
-        for (int p = 0; p < AKH_Q6K_QK; ++p) {
-            int idx = p / 128;
-            int within = p % 128;
-            int quarter = within / 32;
-            int l = within % 32;
-            int isub = l / 16;
-            const unsigned char* qlb = ql + 64 * idx;
-            const unsigned char* qhb = qh + 32 * idx;
-            const signed char* scb = sc + 8 * idx;
-            unsigned char qhbyte = qhb[l];
-            int qval;
-            switch (quarter) {
-                case 0: qval = (qlb[l] & 0xF)      | ((qhbyte & 3) << 4); break;
-                case 1: qval = (qlb[l + 32] & 0xF) | (((qhbyte >> 2) & 3) << 4); break;
-                case 2: qval = (qlb[l] >> 4)       | (((qhbyte >> 4) & 3) << 4); break;
-                default: qval = (qlb[l + 32] >> 4) | (((qhbyte >> 6) & 3) << 4); break;
-            }
-            float w = d * (float)scb[isub + 2 * quarter] * (float)(qval - 32);
-            acc += w * xb[p];
+        int idx = pp / 128;
+        int within = pp % 128;
+        int quarter = within / 32;
+        int l = within % 32;
+        int isub = l / 16;
+        const unsigned char* qlb = ql + 64 * idx;
+        const unsigned char* qhb = qh + 32 * idx;
+        const signed char* scb = sc + 8 * idx;
+        unsigned char qhbyte = qhb[l];
+        int qval;
+        switch (quarter) {
+            case 0: qval = (qlb[l] & 0xF)      | ((qhbyte & 3) << 4); break;
+            case 1: qval = (qlb[l + 32] & 0xF) | (((qhbyte >> 2) & 3) << 4); break;
+            case 2: qval = (qlb[l] >> 4)       | (((qhbyte >> 4) & 3) << 4); break;
+            default: qval = (qlb[l + 32] >> 4) | (((qhbyte >> 6) & 3) << 4); break;
         }
+        float w = d * (float)scb[isub + 2 * quarter] * (float)(qval - 32);
+        acc += w * x[p];
     }
-    out[row] = acc;
+    __shared__ float sdata[AKH_GEMV_BLOCK];
+    sdata[tid] = acc;
+    __syncthreads();
+    for (int s = AKH_GEMV_BLOCK / 2; s > 0; s >>= 1) {
+        if (tid < s) sdata[tid] += sdata[tid + s];
+        __syncthreads();
+    }
+    if (tid == 0) out[row] = sdata[0];
 }
 
 extern "C" {
 
 // Fused Q4_K/Q6_K GEMV: out[n_rows] = W[n_rows,in_dim] · x[in_dim], no f32 temp.
+// One block (AKH_GEMV_BLOCK threads) per output row.
 int akh_gemv_q4k_f32(const unsigned char* W, const float* x, float* out,
                      size_t n_rows, size_t in_dim) {
     if (n_rows == 0) return 0;
-    int threads = 256;
-    unsigned long nblocks = ((unsigned long)n_rows + threads - 1) / threads;
-    hipLaunchKernelGGL(akh_gemv_q4k_f32_kernel, dim3((unsigned)nblocks), dim3(threads), 0, 0,
+    hipLaunchKernelGGL(akh_gemv_q4k_f32_kernel, dim3((unsigned)n_rows), dim3(AKH_GEMV_BLOCK), 0, 0,
                        W, x, out, (unsigned long)n_rows, (unsigned long)in_dim);
     // No per-kernel sync (Phase 45h) — ordered on the null stream.
     return (int)hipGetLastError();
@@ -229,9 +245,7 @@ int akh_gemv_q4k_f32(const unsigned char* W, const float* x, float* out,
 int akh_gemv_q6k_f32(const unsigned char* W, const float* x, float* out,
                      size_t n_rows, size_t in_dim) {
     if (n_rows == 0) return 0;
-    int threads = 256;
-    unsigned long nblocks = ((unsigned long)n_rows + threads - 1) / threads;
-    hipLaunchKernelGGL(akh_gemv_q6k_f32_kernel, dim3((unsigned)nblocks), dim3(threads), 0, 0,
+    hipLaunchKernelGGL(akh_gemv_q6k_f32_kernel, dim3((unsigned)n_rows), dim3(AKH_GEMV_BLOCK), 0, 0,
                        W, x, out, (unsigned long)n_rows, (unsigned long)in_dim);
     // No per-kernel sync (Phase 45h) — ordered on the null stream.
     return (int)hipGetLastError();
