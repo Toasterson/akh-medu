@@ -91,6 +91,8 @@ fn main() -> miette::Result<()> {
     akh_medu::nlu::hip::reset_pcie_counts();
     #[cfg(feature = "hip")]
     candle_core::cuda::reset_pcie_counts();
+    #[cfg(feature = "hip")]
+    candle_core::cuda::reset_malloc_counts();
 
     let vram_before = vram_used_bytes();
 
@@ -169,6 +171,19 @@ fn main() -> miette::Result<()> {
             let measured = gemv_ns + mm_ns + elt_ns + cp_ns;
             let other = 100.0 - 100.0 * (measured as f64 / 1e9) / wall;
             println!("other/overhead     : ~{other:.1}% (reduce/copy2d/rms/rope-fused/sampling/launch)");
+            // Allocator stall: how much wall time the per-op output `hipMalloc` (a
+            // device sync on cache miss) cost, and the miss rate per token. A high
+            // share here means the bottleneck is malloc-sync, not kernel compute.
+            let (mcalls, mmiss, mns) = candle_core::cuda::malloc_profile();
+            let toks = stats.tokens_generated.max(1) as f64;
+            println!(
+                "malloc stall       : {:.3} s = {:.1}% ({} miss / {} calls, {:.1} miss/token)",
+                mns as f64 / 1e9,
+                100.0 * (mns as f64 / 1e9) / wall,
+                mmiss,
+                mcalls,
+                mmiss as f64 / toks,
+            );
         }
     }
     println!();

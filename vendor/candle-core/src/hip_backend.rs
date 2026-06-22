@@ -67,6 +67,17 @@ pub(crate) mod runtime {
     pub static PCIE_H2D: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     pub static PCIE_D2H: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+    // hipMalloc instrumentation (Phase 45h): the caching allocator recycles by EXACT
+    // size, so growing per-token buffers (e.g. attention scores `[B,1,seq_kv]`) miss and
+    // fall through to a real `hipMalloc` — which SYNCHRONIZES the device, stalling the
+    // null stream. `MALLOC_CALLS` = total malloc() calls, `MALLOC_MISS` = cache misses
+    // (real hipMalloc), `MALLOC_MISS_NANOS` = wall time in the hipMalloc call (incl. its
+    // device sync). The bench divides by tokens to expose malloc-stall as a wall fraction.
+    pub static MALLOC_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    pub static MALLOC_MISS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    pub static MALLOC_MISS_NANOS: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(0);
+
     const HIP_LIB_CANDIDATES: &[&str] = &[
         "/opt/rocm/lib/libamdhip64.so",
         "/opt/rocm/lib/libamdhip64.so.6",
@@ -92,6 +103,15 @@ pub(crate) mod runtime {
     ) -> c_int;
     type Memset = unsafe extern "C" fn(*mut c_void, c_int, usize) -> c_int;
     type Synchronize = unsafe extern "C" fn() -> c_int;
+    // hipEvent (Phase 45h event profiler): `hipEvent_t`/`hipStream_t` are opaque
+    // pointers (void*). Stream markers timestamp the GPU clock when the (ordered null)
+    // stream reaches them, so `elapsed(start,stop)` is the *pure GPU* time of the
+    // work between them — no device-drain mis-attribution like the sync-bracket mode.
+    type EventCreate = unsafe extern "C" fn(*mut *mut c_void) -> c_int;
+    type EventRecord = unsafe extern "C" fn(*mut c_void, *mut c_void) -> c_int;
+    type EventSynchronize = unsafe extern "C" fn(*mut c_void) -> c_int;
+    type EventElapsedTime = unsafe extern "C" fn(*mut f32, *mut c_void, *mut c_void) -> c_int;
+    type EventDestroy = unsafe extern "C" fn(*mut c_void) -> c_int;
 
     /// Loaded HIP runtime entry points. The symbols are plain C fn pointers into a
     /// library kept alive for the process lifetime (the `OnceLock` below); calls are
@@ -106,6 +126,11 @@ pub(crate) mod runtime {
         memcpy2d: Memcpy2D,
         memset: Memset,
         synchronize: Synchronize,
+        event_create: EventCreate,
+        event_record: EventRecord,
+        event_synchronize: EventSynchronize,
+        event_elapsed_time: EventElapsedTime,
+        event_destroy: EventDestroy,
         pool: Mutex<Pool>,
     }
     unsafe impl Send for Hip {}
@@ -140,6 +165,13 @@ pub(crate) mod runtime {
                 let memcpy2d: Memcpy2D = sym!(b"hipMemcpy2D\0", Memcpy2D);
                 let memset: Memset = sym!(b"hipMemset\0", Memset);
                 let synchronize: Synchronize = sym!(b"hipDeviceSynchronize\0", Synchronize);
+                let event_create: EventCreate = sym!(b"hipEventCreate\0", EventCreate);
+                let event_record: EventRecord = sym!(b"hipEventRecord\0", EventRecord);
+                let event_synchronize: EventSynchronize =
+                    sym!(b"hipEventSynchronize\0", EventSynchronize);
+                let event_elapsed_time: EventElapsedTime =
+                    sym!(b"hipEventElapsedTime\0", EventElapsedTime);
+                let event_destroy: EventDestroy = sym!(b"hipEventDestroy\0", EventDestroy);
                 let cap_bytes = std::env::var("AKH_HIP_POOL_MB")
                     .ok()
                     .and_then(|s| s.parse::<usize>().ok())
@@ -155,6 +187,11 @@ pub(crate) mod runtime {
                     memcpy2d,
                     memset,
                     synchronize,
+                    event_create,
+                    event_record,
+                    event_synchronize,
+                    event_elapsed_time,
+                    event_destroy,
                     pool: Mutex::new(Pool {
                         cap_bytes,
                         ..Pool::default()
@@ -184,6 +221,7 @@ pub(crate) mod runtime {
             if bytes == 0 {
                 return Ok(std::ptr::null_mut());
             }
+            MALLOC_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             // Reuse a recycled block of this exact size if one is cached.
             {
                 let mut pool = self.pool.lock().unwrap();
@@ -195,8 +233,15 @@ pub(crate) mod runtime {
                     }
                 }
             }
+            // Cache miss: a real hipMalloc, which synchronizes the device. Time it.
+            let t0 = std::time::Instant::now();
             let mut ptr: *mut c_void = std::ptr::null_mut();
             let rc = unsafe { (self.malloc)(&mut ptr, bytes) };
+            MALLOC_MISS_NANOS.fetch_add(
+                t0.elapsed().as_nanos() as u64,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            MALLOC_MISS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             if rc != 0 || ptr.is_null() {
                 return Err(format!("hipMalloc({bytes}) failed (rc={rc})"));
             }
@@ -312,6 +357,43 @@ pub(crate) mod runtime {
                 return Err(format!("hipDeviceSynchronize failed (rc={rc})"));
             }
             Ok(())
+        }
+
+        // ---- hipEvent (event profiler; Phase 45h) -----------------------------
+        /// Create a timing event (`hipEvent_t`). `None` on failure (profiler is
+        /// best-effort — a failed create just drops that sample, never the run).
+        pub fn event_create(&self) -> Option<*mut c_void> {
+            let mut ev: *mut c_void = std::ptr::null_mut();
+            let rc = unsafe { (self.event_create)(&mut ev) };
+            (rc == 0 && !ev.is_null()).then_some(ev)
+        }
+
+        /// Record `ev` into the default (null) stream — timestamps the GPU clock when
+        /// the ordered stream reaches this marker.
+        pub fn event_record(&self, ev: *mut c_void) {
+            unsafe {
+                let _ = (self.event_record)(ev, std::ptr::null_mut());
+            }
+        }
+
+        /// Block until `ev` has completed (its GPU timestamp is final).
+        pub fn event_synchronize(&self, ev: *mut c_void) {
+            unsafe {
+                let _ = (self.event_synchronize)(ev);
+            }
+        }
+
+        /// Elapsed GPU time `stop - start` in milliseconds (both must be complete).
+        pub fn event_elapsed_ms(&self, start: *mut c_void, stop: *mut c_void) -> Option<f32> {
+            let mut ms: f32 = 0.0;
+            let rc = unsafe { (self.event_elapsed_time)(&mut ms, start, stop) };
+            (rc == 0).then_some(ms)
+        }
+
+        pub fn event_destroy(&self, ev: *mut c_void) {
+            unsafe {
+                let _ = (self.event_destroy)(ev);
+            }
         }
     }
 
@@ -1379,6 +1461,26 @@ pub fn reset_pcie_counts() {
     runtime::PCIE_D2H.store(0, Relaxed);
 }
 
+/// `(calls, misses, miss_nanos)` for the caching allocator since the last reset:
+/// total `malloc()` calls, cache misses (a real device-synchronizing `hipMalloc`), and
+/// wall time spent inside those `hipMalloc` calls. Quantifies malloc-stall in decode.
+pub fn malloc_profile() -> (u64, u64, u64) {
+    use std::sync::atomic::Ordering::Relaxed;
+    (
+        runtime::MALLOC_CALLS.load(Relaxed),
+        runtime::MALLOC_MISS.load(Relaxed),
+        runtime::MALLOC_MISS_NANOS.load(Relaxed),
+    )
+}
+
+/// Reset the allocator counters (call after model load, before decode).
+pub fn reset_malloc_counts() {
+    use std::sync::atomic::Ordering::Relaxed;
+    runtime::MALLOC_CALLS.store(0, Relaxed);
+    runtime::MALLOC_MISS.store(0, Relaxed);
+    runtime::MALLOC_MISS_NANOS.store(0, Relaxed);
+}
+
 /// Fused RMSNorm as a single HIP kernel (Phase 45h): `x / sqrt(mean(x²)+eps) · w`,
 /// matching `candle_nn::ops::rms_norm_slow` but in one launch instead of ~7. Profiling
 /// showed rms_norm was the single biggest source of decode kernel launches
@@ -1486,23 +1588,154 @@ macro_rules! hip_todo {
     };
 }
 
-// ---- per-category op profiling (Phase 45h, AKH_HIP_PROFILE=1) ---------------
-// Intrinsic GPU time per category (sync'd around the op body), so the bench can
-// split decode time into matmul / elementwise / copy / GEMV / other and show
-// whether the next bottleneck is real compute or launch overhead. Off by default
-// (the syncs serialize decode). GEMV is timed separately in quantized/hip.rs.
+// ---- per-category op profiling (Phase 45h, AKH_HIP_PROFILE) -----------------
+// Per-category GPU time, so the bench can split decode into matmul/eltwise/copy/GEMV
+// and see whether the next bottleneck is real compute or host/launch overhead. Two
+// modes (env `AKH_HIP_PROFILE`):
+//   =1            sync-bracket: wall of (sync, op, sync). Simple, but on a single
+//                 ordered stream the LEADING sync drains all prior queued work, so it
+//                 OVER-attributes time to whichever op it wraps — unreliable for an
+//                 async pipeline (it billed attention 37.5% when removing it changed
+//                 nothing).
+//   =event (=2)   hipEvent stream markers around each op; `elapsed(start,stop)` is the
+//                 PURE GPU time of that op — no device drain, no mis-attribution.
+//                 Accumulated at flush (one sync per EVENT_FLUSH_CAP pairs). The honest
+//                 instrument: Σ(categories) vs decode wall reveals how much is GPU
+//                 compute vs host-side stalls (malloc/sync/launch latency).
 pub static MATMUL_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub static ELTWISE_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub static COPY_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-pub(crate) fn profiling() -> bool {
-    use std::sync::OnceLock;
-    static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| std::env::var("AKH_HIP_PROFILE").as_deref() == Ok("1"))
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProfMode {
+    Off,
+    Sync,
+    Event,
 }
 
-/// `(matmul_ns, eltwise_ns, copy_ns)` intrinsic GPU time since process start.
+pub(crate) fn profiling_mode() -> ProfMode {
+    use std::sync::OnceLock;
+    static M: OnceLock<ProfMode> = OnceLock::new();
+    *M.get_or_init(|| match std::env::var("AKH_HIP_PROFILE").as_deref() {
+        Ok("1") => ProfMode::Sync,
+        Ok("event") | Ok("2") => ProfMode::Event,
+        _ => ProfMode::Off,
+    })
+}
+
+/// True in the legacy sync-bracket mode (`=1`).
+pub(crate) fn profiling() -> bool {
+    profiling_mode() == ProfMode::Sync
+}
+/// True in the event-marker mode (`=event`).
+pub(crate) fn event_profiling() -> bool {
+    profiling_mode() == ProfMode::Event
+}
+
+/// A `hipEvent_t` handle. `Send` because it is only ever touched on the single HIP
+/// compute thread, additionally guarded by the [`event_prof`] mutex.
+#[derive(Clone, Copy)]
+struct Ev(*mut c_void);
+unsafe impl Send for Ev {}
+
+/// Event-profiler state: a recycled pool of event objects + the not-yet-drained
+/// `(counter, start, stop)` triples. Drained (one device sync) every
+/// `EVENT_FLUSH_CAP` pairs and at read time.
+struct EventProf {
+    free: Vec<Ev>,
+    pending: Vec<(&'static std::sync::atomic::AtomicU64, Ev, Ev)>,
+}
+const EVENT_FLUSH_CAP: usize = 4096;
+
+fn event_prof() -> &'static std::sync::Mutex<EventProf> {
+    static P: std::sync::OnceLock<std::sync::Mutex<EventProf>> = std::sync::OnceLock::new();
+    P.get_or_init(|| {
+        std::sync::Mutex::new(EventProf {
+            free: Vec::new(),
+            pending: Vec::new(),
+        })
+    })
+}
+
+/// Acquire a `(start, stop)` event pair (recycled or freshly created). `None` if event
+/// creation fails — the caller then runs the op untimed.
+fn event_prof_acquire() -> Option<(Ev, Ev)> {
+    let h = hip().ok()?;
+    let mut p = event_prof().lock().unwrap();
+    let a = p.free.pop().or_else(|| h.event_create().map(Ev))?;
+    match p.free.pop().or_else(|| h.event_create().map(Ev)) {
+        Some(b) => Some((a, b)),
+        None => {
+            p.free.push(a); // return the half-pair to the pool, give up this sample
+            None
+        }
+    }
+}
+
+/// Register a recorded pair against a category counter; flush if pending grew past cap.
+fn event_prof_register(counter: &'static std::sync::atomic::AtomicU64, a: Ev, b: Ev) {
+    let mut p = event_prof().lock().unwrap();
+    p.pending.push((counter, a, b));
+    if p.pending.len() >= EVENT_FLUSH_CAP {
+        drain_locked(&mut p);
+    }
+}
+
+/// Drain pending pairs: one device sync, read each elapsed time into its counter,
+/// recycle the events. Caller holds the lock.
+fn drain_locked(p: &mut EventProf) {
+    if p.pending.is_empty() {
+        return;
+    }
+    let Ok(h) = hip() else {
+        p.pending.clear();
+        return;
+    };
+    let _ = h.synchronize(); // every recorded event is now complete
+    let pairs: Vec<_> = p.pending.drain(..).collect();
+    for (counter, a, b) in pairs {
+        if let Some(ms) = h.event_elapsed_ms(a.0, b.0) {
+            counter.fetch_add(
+                (ms as f64 * 1.0e6) as u64,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+        }
+        p.free.push(a);
+        p.free.push(b);
+    }
+}
+
+/// Flush pending event samples into their counters (call before reading a profile).
+pub(crate) fn flush_events() {
+    if profiling_mode() != ProfMode::Event {
+        return;
+    }
+    let mut p = event_prof().lock().unwrap();
+    drain_locked(&mut p);
+}
+
+/// Time `f`'s GPU work into `counter` via event markers (event mode). The closure does
+/// the launch; the events bracket it on the stream. Returns `f`'s result unchanged.
+/// Used by both the `profiled!` macro and the GEMV path in `quantized::hip`.
+pub(crate) fn event_time<R>(
+    counter: &'static std::sync::atomic::AtomicU64,
+    f: impl FnOnce() -> R,
+) -> R {
+    if let (Ok(h), Some((a, b))) = (hip(), event_prof_acquire()) {
+        h.event_record(a.0);
+        let r = f();
+        h.event_record(b.0);
+        event_prof_register(counter, a, b);
+        r
+    } else {
+        f()
+    }
+}
+
+/// `(matmul_ns, eltwise_ns, copy_ns)` intrinsic GPU time since process start. Flushes
+/// any pending event samples first so the read is complete.
 pub fn op_profile() -> (u64, u64, u64) {
+    flush_events();
     use std::sync::atomic::Ordering::Relaxed;
     (
         MATMUL_NANOS.load(Relaxed),
@@ -1511,25 +1744,27 @@ pub fn op_profile() -> (u64, u64, u64) {
     )
 }
 
-/// Run an op body, accumulating its sync'd GPU time into `$counter` when profiling.
+/// Run an op body, accumulating its GPU time into `$counter` per the active profile mode.
 macro_rules! profiled {
     ($counter:expr, $body:block) => {{
-        if profiling() {
-            if let Ok(h) = hip() {
-                let _ = h.synchronize();
+        match profiling_mode() {
+            ProfMode::Off => (|| $body)(),
+            ProfMode::Sync => {
+                if let Ok(h) = hip() {
+                    let _ = h.synchronize();
+                }
+                let __t0 = std::time::Instant::now();
+                let __r = (|| $body)();
+                if let Ok(h) = hip() {
+                    let _ = h.synchronize();
+                }
+                $counter.fetch_add(
+                    __t0.elapsed().as_nanos() as u64,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+                __r
             }
-            let __t0 = std::time::Instant::now();
-            let __r = (|| $body)();
-            if let Ok(h) = hip() {
-                let _ = h.synchronize();
-            }
-            $counter.fetch_add(
-                __t0.elapsed().as_nanos() as u64,
-                std::sync::atomic::Ordering::Relaxed,
-            );
-            __r
-        } else {
-            (|| $body)()
+            ProfMode::Event => event_time(&$counter, || $body),
         }
     }};
 }

@@ -39,8 +39,10 @@ fn gemv_profiling() -> bool {
     *ON.get_or_init(|| std::env::var("AKH_HIP_PROFILE").as_deref() == Ok("1"))
 }
 
-/// `(total_nanos, calls)` spent in the fused GEMV since process start.
+/// `(total_nanos, calls)` spent in the fused GEMV since process start. Flushes any
+/// pending event-profiler samples first (event mode) so the read is complete.
 pub fn gemv_profile() -> (u64, u64) {
+    crate::hip_backend::flush_events();
     (GEMV_NANOS.load(Ordering::Relaxed), GEMV_CALLS.load(Ordering::Relaxed))
 }
 
@@ -480,28 +482,26 @@ impl QCudaStorage {
             let x_ptr =
                 unsafe { (storage.device_ptr() as *const f32).add(layout.start_offset()) };
             let out_ptr = h.malloc(n * std::mem::size_of::<f32>()).map_err(Error::Msg)?;
-            let profile = gemv_profiling();
-            let t0 = if profile {
+            let run = || kern.gemv(self.dtype, self.data as *const u8, x_ptr, out_ptr as *mut f32, n, k);
+            // Three profile modes (mirrors hip_backend::profiled!): event markers (pure
+            // GPU time, no drain), legacy sync-bracket, or off.
+            let res = if crate::hip_backend::event_profiling() {
+                GEMV_CALLS.fetch_add(1, Ordering::Relaxed);
+                crate::hip_backend::event_time(&GEMV_NANOS, run)
+            } else if gemv_profiling() {
                 let _ = h.synchronize();
-                Some(std::time::Instant::now())
-            } else {
-                None
-            };
-            if let Err(e) = kern.gemv(
-                self.dtype,
-                self.data as *const u8,
-                x_ptr,
-                out_ptr as *mut f32,
-                n,
-                k,
-            ) {
-                h.free(out_ptr);
-                return Err(Error::Msg(e));
-            }
-            if let Some(t0) = t0 {
+                let t0 = std::time::Instant::now();
+                let r = run();
                 let _ = h.synchronize();
                 GEMV_NANOS.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
                 GEMV_CALLS.fetch_add(1, Ordering::Relaxed);
+                r
+            } else {
+                run()
+            };
+            if let Err(e) = res {
+                h.free(out_ptr);
+                return Err(Error::Msg(e));
             }
             // No sync (Phase 45h): the GEMV is ordered on the null stream; the result
             // is read to host only at the per-token logits D2H.
