@@ -24,6 +24,25 @@ use crate::{CpuStorage, CudaDevice, CudaStorage, DType, Device, Error, Result, S
 use std::ffi::c_void;
 use std::os::raw::c_int;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+// ---- GEMV profiling (Phase 45h, AKH_HIP_PROFILE=1) -------------------------
+// Wall-time spent inside the fused decode GEMV (with a sync around it, so it is
+// the kernel's *intrinsic* time, not the async-overlapped time) + a call count.
+// Lets the bench split decode time into "quantized matmul" vs "everything else"
+// without rocprof. Off by default (the sync would otherwise serialize decode).
+pub static GEMV_NANOS: AtomicU64 = AtomicU64::new(0);
+pub static GEMV_CALLS: AtomicU64 = AtomicU64::new(0);
+
+fn gemv_profiling() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var("AKH_HIP_PROFILE").as_deref() == Ok("1"))
+}
+
+/// `(total_nanos, calls)` spent in the fused GEMV since process start.
+pub fn gemv_profile() -> (u64, u64) {
+    (GEMV_NANOS.load(Ordering::Relaxed), GEMV_CALLS.load(Ordering::Relaxed))
+}
 
 // ---- Q4_K dequant kernel library (built by build.rs → libcandle_hip_quant.so) ----
 
@@ -461,6 +480,13 @@ impl QCudaStorage {
             let x_ptr =
                 unsafe { (storage.device_ptr() as *const f32).add(layout.start_offset()) };
             let out_ptr = h.malloc(n * std::mem::size_of::<f32>()).map_err(Error::Msg)?;
+            let profile = gemv_profiling();
+            let t0 = if profile {
+                let _ = h.synchronize();
+                Some(std::time::Instant::now())
+            } else {
+                None
+            };
             if let Err(e) = kern.gemv(
                 self.dtype,
                 self.data as *const u8,
@@ -471,6 +497,11 @@ impl QCudaStorage {
             ) {
                 h.free(out_ptr);
                 return Err(Error::Msg(e));
+            }
+            if let Some(t0) = t0 {
+                let _ = h.synchronize();
+                GEMV_NANOS.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                GEMV_CALLS.fetch_add(1, Ordering::Relaxed);
             }
             // No sync (Phase 45h): the GEMV is ordered on the null stream; the result
             // is read to host only at the per-token logits D2H.

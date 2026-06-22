@@ -146,6 +146,22 @@ fn main() -> miette::Result<()> {
         weight_bytes as f64 / 1e9
     );
     println!("% of roofline      : {pct:.1}%");
+    // Fused-GEMV profile (AKH_HIP_PROFILE=1): the intrinsic time in quantized matmul
+    // vs everything else — shows whether the GEMV or the rest of the forward dominates.
+    #[cfg(feature = "hip")]
+    {
+        let (gemv_ns, gemv_calls) = candle_core::quantized::gemv_profile();
+        if gemv_calls > 0 {
+            let gemv_s = gemv_ns as f64 / 1e9;
+            println!(
+                "GEMV (quantized)   : {:.3} s in {} calls = {:.1}% of decode wall ({:.1} µs/call)",
+                gemv_s,
+                gemv_calls,
+                100.0 * gemv_s / stats.decode_secs as f64,
+                gemv_ns as f64 / 1e3 / gemv_calls as f64,
+            );
+        }
+    }
     println!();
     let sample: String = stats.text.chars().take(180).collect::<String>().replace('\n', " ");
     println!("sample: {sample}");

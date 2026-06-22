@@ -29,6 +29,9 @@ mod hip;
 mod cuda {
     pub use super::hip::*;
 }
+// Phase 45h: expose the fused-GEMV profiler (AKH_HIP_PROFILE=1) to harnesses.
+#[cfg(all(not(feature = "cuda"), feature = "hip"))]
+pub use hip::gemv_profile;
 #[cfg(all(not(feature = "cuda"), not(feature = "hip")))]
 mod cuda {
     pub use super::dummy_cuda::*;
