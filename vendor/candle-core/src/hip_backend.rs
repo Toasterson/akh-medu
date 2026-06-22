@@ -1486,6 +1486,54 @@ macro_rules! hip_todo {
     };
 }
 
+// ---- per-category op profiling (Phase 45h, AKH_HIP_PROFILE=1) ---------------
+// Intrinsic GPU time per category (sync'd around the op body), so the bench can
+// split decode time into matmul / elementwise / copy / GEMV / other and show
+// whether the next bottleneck is real compute or launch overhead. Off by default
+// (the syncs serialize decode). GEMV is timed separately in quantized/hip.rs.
+pub static MATMUL_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static ELTWISE_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static COPY_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub(crate) fn profiling() -> bool {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var("AKH_HIP_PROFILE").as_deref() == Ok("1"))
+}
+
+/// `(matmul_ns, eltwise_ns, copy_ns)` intrinsic GPU time since process start.
+pub fn op_profile() -> (u64, u64, u64) {
+    use std::sync::atomic::Ordering::Relaxed;
+    (
+        MATMUL_NANOS.load(Relaxed),
+        ELTWISE_NANOS.load(Relaxed),
+        COPY_NANOS.load(Relaxed),
+    )
+}
+
+/// Run an op body, accumulating its sync'd GPU time into `$counter` when profiling.
+macro_rules! profiled {
+    ($counter:expr, $body:block) => {{
+        if profiling() {
+            if let Ok(h) = hip() {
+                let _ = h.synchronize();
+            }
+            let __t0 = std::time::Instant::now();
+            let __r = (|| $body)();
+            if let Ok(h) = hip() {
+                let _ = h.synchronize();
+            }
+            $counter.fetch_add(
+                __t0.elapsed().as_nanos() as u64,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            __r
+        } else {
+            (|| $body)()
+        }
+    }};
+}
+
 /// An AMD GPU exposed through the HIP runtime. Re-exported as `CudaDevice` to fill
 /// the candle `cuda` module slot.
 #[derive(Debug, Clone)]
@@ -1991,6 +2039,7 @@ impl crate::backend::BackendStorage for HipStorage {
 
     /// Contiguous-f32 unary op, dispatched on `B::NAME` (Phase 45d).
     fn unary_impl<B: UnaryOpT>(&self, layout: &Layout) -> Result<Self> {
+        profiled!(ELTWISE_NANOS, {
         let op: c_int = match B::NAME {
             "neg" => 0,
             "exp" => 1,
@@ -2053,10 +2102,12 @@ impl crate::backend::BackendStorage for HipStorage {
             dtype: DType::F32,
             len: n,
         })
+        })
     }
 
     /// Contiguous-f32 same-shape binary op, dispatched on `B::NAME` (Phase 45d).
     fn binary_impl<B: BinaryOpT>(&self, rhs: &Self, l1: &Layout, l2: &Layout) -> Result<Self> {
+        profiled!(ELTWISE_NANOS, {
         if self.dtype != DType::F32 || rhs.dtype != DType::F32 {
             return Err(Error::Msg(format!(
                 "HIP binary `{}`: only f32 supported (Phase 45d)",
@@ -2129,6 +2180,7 @@ impl crate::backend::BackendStorage for HipStorage {
             ptr: out,
             dtype: DType::F32,
             len: n,
+        })
         })
     }
 
@@ -2441,6 +2493,7 @@ impl crate::backend::BackendStorage for HipStorage {
         lhs_l: &Layout,
         rhs_l: &Layout,
     ) -> Result<Self> {
+        profiled!(MATMUL_NANOS, {
         if self.dtype != rhs.dtype {
             return Err(Error::Msg(format!(
                 "HIP matmul: dtype mismatch lhs={:?} rhs={:?}",
@@ -2564,12 +2617,14 @@ impl crate::backend::BackendStorage for HipStorage {
             dtype: self.dtype,
             len: out_len,
         })
+        })
     }
 
     /// Copy `self` (read through the strided/offset `src_l`) into `dst` at element
     /// `dst_offset`, row-major over `src_l.shape()` — powers `.contiguous()` (Phase 45d).
     /// Contiguous source → one D2D memcpy (any dtype); strided → f32 unravel kernel.
     fn copy_strided_src(&self, dst: &mut Self, dst_offset: usize, src_l: &Layout) -> Result<()> {
+        profiled!(COPY_NANOS, {
         if self.dtype != dst.dtype {
             return Err(Error::Msg(format!(
                 "HIP copy_strided_src: dtype mismatch (src {:?} != dst {:?})",
@@ -2617,6 +2672,7 @@ impl crate::backend::BackendStorage for HipStorage {
         let k = runtime::kernels().map_err(Error::Msg)?;
         k.ucopy_f32(src as *const f32, dst_ptr as *mut f32, n, rank, dims_m, str_m)
             .map_err(Error::Msg)
+        })
     }
 
     /// 2D block copy (Phase 45f): `d1` rows of `d2` elements, src/dst row strides

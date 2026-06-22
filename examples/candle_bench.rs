@@ -152,14 +152,23 @@ fn main() -> miette::Result<()> {
     {
         let (gemv_ns, gemv_calls) = candle_core::quantized::gemv_profile();
         if gemv_calls > 0 {
+            let wall = stats.decode_secs as f64;
+            let (mm_ns, elt_ns, cp_ns) = candle_core::cuda::op_profile();
+            let pct = |ns: u64| 100.0 * (ns as f64 / 1e9) / wall;
             let gemv_s = gemv_ns as f64 / 1e9;
             println!(
-                "GEMV (quantized)   : {:.3} s in {} calls = {:.1}% of decode wall ({:.1} µs/call)",
+                "GEMV (quantized)   : {:.3} s in {} calls = {:.1}% ({:.1} µs/call)",
                 gemv_s,
                 gemv_calls,
-                100.0 * gemv_s / stats.decode_secs as f64,
+                100.0 * gemv_s / wall,
                 gemv_ns as f64 / 1e3 / gemv_calls as f64,
             );
+            println!("matmul (attention) : {:.3} s = {:.1}%", mm_ns as f64 / 1e9, pct(mm_ns));
+            println!("elementwise        : {:.3} s = {:.1}%", elt_ns as f64 / 1e9, pct(elt_ns));
+            println!("strided copy       : {:.3} s = {:.1}%", cp_ns as f64 / 1e9, pct(cp_ns));
+            let measured = gemv_ns + mm_ns + elt_ns + cp_ns;
+            let other = 100.0 - 100.0 * (measured as f64 / 1e9) / wall;
+            println!("other/overhead     : ~{other:.1}% (reduce/copy2d/rms/rope-fused/sampling/launch)");
         }
     }
     println!();
