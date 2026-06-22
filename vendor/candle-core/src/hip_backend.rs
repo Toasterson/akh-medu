@@ -112,6 +112,22 @@ pub(crate) mod runtime {
     type EventSynchronize = unsafe extern "C" fn(*mut c_void) -> c_int;
     type EventElapsedTime = unsafe extern "C" fn(*mut f32, *mut c_void, *mut c_void) -> c_int;
     type EventDestroy = unsafe extern "C" fn(*mut c_void) -> c_int;
+    // hipStream + hipGraph (Phase 45h graph-capture feasibility spike). All handles are
+    // opaque pointers (void*). Capture records the kernels launched on a created stream
+    // into a graph; instantiate + launch replays them with ONE host dispatch — the lever
+    // for the dispatch-bound decode. `hipMemsetAsync` is the malloc-free op used to prove
+    // capture/replay end-to-end without touching the model.
+    type StreamCreateWithFlags = unsafe extern "C" fn(*mut *mut c_void, u32) -> c_int;
+    type StreamDestroy = unsafe extern "C" fn(*mut c_void) -> c_int;
+    type StreamSynchronize = unsafe extern "C" fn(*mut c_void) -> c_int;
+    type StreamBeginCapture = unsafe extern "C" fn(*mut c_void, c_int) -> c_int;
+    type StreamEndCapture = unsafe extern "C" fn(*mut c_void, *mut *mut c_void) -> c_int;
+    type GraphInstantiateWithFlags =
+        unsafe extern "C" fn(*mut *mut c_void, *mut c_void, u64) -> c_int;
+    type GraphLaunch = unsafe extern "C" fn(*mut c_void, *mut c_void) -> c_int;
+    type GraphExecDestroy = unsafe extern "C" fn(*mut c_void) -> c_int;
+    type GraphDestroy = unsafe extern "C" fn(*mut c_void) -> c_int;
+    type MemsetAsync = unsafe extern "C" fn(*mut c_void, c_int, usize, *mut c_void) -> c_int;
 
     /// Loaded HIP runtime entry points. The symbols are plain C fn pointers into a
     /// library kept alive for the process lifetime (the `OnceLock` below); calls are
@@ -131,6 +147,16 @@ pub(crate) mod runtime {
         event_synchronize: EventSynchronize,
         event_elapsed_time: EventElapsedTime,
         event_destroy: EventDestroy,
+        stream_create_with_flags: StreamCreateWithFlags,
+        stream_destroy: StreamDestroy,
+        stream_synchronize: StreamSynchronize,
+        stream_begin_capture: StreamBeginCapture,
+        stream_end_capture: StreamEndCapture,
+        graph_instantiate_with_flags: GraphInstantiateWithFlags,
+        graph_launch: GraphLaunch,
+        graph_exec_destroy: GraphExecDestroy,
+        graph_destroy: GraphDestroy,
+        memset_async: MemsetAsync,
         pool: Mutex<Pool>,
     }
     unsafe impl Send for Hip {}
@@ -172,6 +198,22 @@ pub(crate) mod runtime {
                 let event_elapsed_time: EventElapsedTime =
                     sym!(b"hipEventElapsedTime\0", EventElapsedTime);
                 let event_destroy: EventDestroy = sym!(b"hipEventDestroy\0", EventDestroy);
+                let stream_create_with_flags: StreamCreateWithFlags =
+                    sym!(b"hipStreamCreateWithFlags\0", StreamCreateWithFlags);
+                let stream_destroy: StreamDestroy = sym!(b"hipStreamDestroy\0", StreamDestroy);
+                let stream_synchronize: StreamSynchronize =
+                    sym!(b"hipStreamSynchronize\0", StreamSynchronize);
+                let stream_begin_capture: StreamBeginCapture =
+                    sym!(b"hipStreamBeginCapture\0", StreamBeginCapture);
+                let stream_end_capture: StreamEndCapture =
+                    sym!(b"hipStreamEndCapture\0", StreamEndCapture);
+                let graph_instantiate_with_flags: GraphInstantiateWithFlags =
+                    sym!(b"hipGraphInstantiateWithFlags\0", GraphInstantiateWithFlags);
+                let graph_launch: GraphLaunch = sym!(b"hipGraphLaunch\0", GraphLaunch);
+                let graph_exec_destroy: GraphExecDestroy =
+                    sym!(b"hipGraphExecDestroy\0", GraphExecDestroy);
+                let graph_destroy: GraphDestroy = sym!(b"hipGraphDestroy\0", GraphDestroy);
+                let memset_async: MemsetAsync = sym!(b"hipMemsetAsync\0", MemsetAsync);
                 let cap_bytes = std::env::var("AKH_HIP_POOL_MB")
                     .ok()
                     .and_then(|s| s.parse::<usize>().ok())
@@ -192,6 +234,16 @@ pub(crate) mod runtime {
                     event_synchronize,
                     event_elapsed_time,
                     event_destroy,
+                    stream_create_with_flags,
+                    stream_destroy,
+                    stream_synchronize,
+                    stream_begin_capture,
+                    stream_end_capture,
+                    graph_instantiate_with_flags,
+                    graph_launch,
+                    graph_exec_destroy,
+                    graph_destroy,
+                    memset_async,
                     pool: Mutex::new(Pool {
                         cap_bytes,
                         ..Pool::default()
@@ -394,6 +446,97 @@ pub(crate) mod runtime {
             unsafe {
                 let _ = (self.event_destroy)(ev);
             }
+        }
+
+        // ---- hipStream + hipGraph (graph-capture spike; Phase 45h) ------------
+        /// Create a non-blocking stream (capturable; the null stream is not).
+        /// `hipStreamNonBlocking = 0x1`.
+        pub fn stream_create(&self) -> Option<*mut c_void> {
+            let mut s: *mut c_void = std::ptr::null_mut();
+            let rc = unsafe { (self.stream_create_with_flags)(&mut s, 0x1) };
+            (rc == 0 && !s.is_null()).then_some(s)
+        }
+
+        pub fn stream_destroy(&self, s: *mut c_void) {
+            unsafe {
+                let _ = (self.stream_destroy)(s);
+            }
+        }
+
+        pub fn stream_synchronize(&self, s: *mut c_void) -> std::result::Result<(), String> {
+            let rc = unsafe { (self.stream_synchronize)(s) };
+            if rc != 0 {
+                return Err(format!("hipStreamSynchronize failed (rc={rc})"));
+            }
+            Ok(())
+        }
+
+        /// Begin capturing work submitted to `s` into a graph. Mode 0 = `Global`.
+        /// While capturing, any synchronous op (hipMalloc/hipMemcpy/sync) on the
+        /// device aborts the capture — the key constraint this spike measures.
+        pub fn stream_begin_capture(&self, s: *mut c_void) -> std::result::Result<(), String> {
+            let rc = unsafe { (self.stream_begin_capture)(s, 0) };
+            if rc != 0 {
+                return Err(format!("hipStreamBeginCapture failed (rc={rc})"));
+            }
+            Ok(())
+        }
+
+        /// End capture; returns the captured `hipGraph_t` (or an error rc — e.g. the
+        /// capture was invalidated by a synchronous op).
+        pub fn stream_end_capture(&self, s: *mut c_void) -> std::result::Result<*mut c_void, String> {
+            let mut g: *mut c_void = std::ptr::null_mut();
+            let rc = unsafe { (self.stream_end_capture)(s, &mut g) };
+            if rc != 0 || g.is_null() {
+                return Err(format!("hipStreamEndCapture failed (rc={rc})"));
+            }
+            Ok(g)
+        }
+
+        /// Instantiate an executable graph from a captured graph.
+        pub fn graph_instantiate(&self, g: *mut c_void) -> std::result::Result<*mut c_void, String> {
+            let mut exec: *mut c_void = std::ptr::null_mut();
+            let rc = unsafe { (self.graph_instantiate_with_flags)(&mut exec, g, 0) };
+            if rc != 0 || exec.is_null() {
+                return Err(format!("hipGraphInstantiateWithFlags failed (rc={rc})"));
+            }
+            Ok(exec)
+        }
+
+        /// Launch (replay) an executable graph on stream `s` — one host dispatch.
+        pub fn graph_launch(&self, exec: *mut c_void, s: *mut c_void) -> std::result::Result<(), String> {
+            let rc = unsafe { (self.graph_launch)(exec, s) };
+            if rc != 0 {
+                return Err(format!("hipGraphLaunch failed (rc={rc})"));
+            }
+            Ok(())
+        }
+
+        pub fn graph_exec_destroy(&self, exec: *mut c_void) {
+            unsafe {
+                let _ = (self.graph_exec_destroy)(exec);
+            }
+        }
+
+        pub fn graph_destroy(&self, g: *mut c_void) {
+            unsafe {
+                let _ = (self.graph_destroy)(g);
+            }
+        }
+
+        /// Async memset on stream `s` (malloc-free; used to prove capture/replay).
+        pub fn memset_async(
+            &self,
+            ptr: *mut c_void,
+            value: i32,
+            bytes: usize,
+            s: *mut c_void,
+        ) -> std::result::Result<(), String> {
+            let rc = unsafe { (self.memset_async)(ptr, value as c_int, bytes, s) };
+            if rc != 0 {
+                return Err(format!("hipMemsetAsync failed (rc={rc})"));
+            }
+            Ok(())
         }
     }
 
@@ -3126,6 +3269,75 @@ mod op_tests {
         for (x, y) in a.iter().zip(b) {
             assert!((x - y).abs() <= tol, "{what}: gpu={x} cpu={y}");
         }
+    }
+
+    /// Phase 45h HIP-graph spike #1: capture a malloc-free op (memset on a created
+    /// stream) into a graph, instantiate, and *replay* it — proves capture/replay works
+    /// end-to-end on this ROCm/gfx1100 (the foundation for collapsing the per-token
+    /// dispatch storm into one `hipGraphLaunch`).
+    #[test]
+    fn hip_graph_capture_replay_memset() -> Result<()> {
+        use crate::Error;
+        use std::ffi::c_void;
+        let Some(_dev) = gpu() else {
+            return Ok(());
+        };
+        let h = super::runtime::hip().map_err(Error::Msg)?;
+        let Some(stream) = h.stream_create() else {
+            return Ok(()); // hipStreamCreateWithFlags unavailable — skip
+        };
+        let bytes = 256usize;
+        let buf = h.malloc(bytes).map_err(Error::Msg)?; // allocate BEFORE capture
+        h.stream_begin_capture(stream).map_err(Error::Msg)?;
+        h.memset_async(buf, 0xAB, bytes, stream).map_err(Error::Msg)?; // captured
+        let graph = h.stream_end_capture(stream).map_err(Error::Msg)?;
+        let exec = h.graph_instantiate(graph).map_err(Error::Msg)?;
+        h.graph_launch(exec, stream).map_err(Error::Msg)?; // replay = one dispatch
+        h.stream_synchronize(stream).map_err(Error::Msg)?;
+        let mut host = vec![0u8; bytes];
+        h.memcpy(
+            host.as_mut_ptr() as *mut c_void,
+            buf as *const c_void,
+            bytes,
+            super::runtime::MEMCPY_D2H,
+        )
+        .map_err(Error::Msg)?;
+        h.graph_exec_destroy(exec);
+        h.graph_destroy(graph);
+        h.free(buf);
+        h.stream_destroy(stream);
+        assert!(host.iter().all(|&b| b == 0xAB), "graph replay did not memset");
+        Ok(())
+    }
+
+    /// Phase 45h HIP-graph spike #2: the KEY blocker — a synchronous `hipMalloc` during
+    /// capture (which the candle forward does ~388×/token on pool misses) invalidates the
+    /// capture. Documents *why* capturing the live forward needs an allocation-free
+    /// (static-buffer) decode path first.
+    #[test]
+    fn hip_graph_capture_aborts_on_malloc() -> Result<()> {
+        use crate::Error;
+        let Some(_dev) = gpu() else {
+            return Ok(());
+        };
+        let h = super::runtime::hip().map_err(Error::Msg)?;
+        let Some(stream) = h.stream_create() else {
+            return Ok(());
+        };
+        h.stream_begin_capture(stream).map_err(Error::Msg)?;
+        // An odd size guarantees a pool miss → real hipMalloc → capture invalidated.
+        let buf = h.malloc(7777);
+        let ended = h.stream_end_capture(stream);
+        if let Ok(b) = buf {
+            h.free(b);
+        }
+        h.stream_destroy(stream);
+        assert!(
+            ended.is_err(),
+            "expected capture to abort on a synchronous hipMalloc, but it succeeded — \
+             revisit the static-buffer assumption"
+        );
+        Ok(())
     }
 
     #[test]
