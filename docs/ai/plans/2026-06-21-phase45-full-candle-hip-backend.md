@@ -101,12 +101,27 @@
 >   other ~3.5%.** The **surprise: the attention rocBLAS is 37.5%** — ~686 µs/call for *tiny* decode GEMMs
 >   (m=1, head-batched) = pure rocBLAS small-batch overhead, not compute. And rope/softmax are only 10.5%, so
 >   **fusing them is NOT worth it** (the profiler saved that work). 
-> - **Next — the two data-identified levers (≥45 tok/s roofline still a climb):**
->   **(1) custom decode-attention kernel** (q·kᵀ / softmax / ·v fused per head, or just a dense m=1
->   batched-GEMV to replace the rocBLAS attention GEMMs) — 37.5% that is almost all overhead, so a naive
->   custom kernel should slash it to ~5%; **(2) GEMV cooperative-superblock dequant** + better occupancy
->   (43.5%, currently ~7× off roofline per call). Then 45g hidden-cosine ≥ 0.999. The model is **usable now
->   (6.75 tok/s)**; these two get it toward roofline.
+> - **45h custom decode-attention kernel — BUILT, PARITY-PASSED, MEASURED ZERO GAIN, REVERTED.** Followed
+>   lever (1): added a custom `m==1` f32 batched-GEMV (`akh_attn_m1_f32`, block-per-output, reduce over k
+>   on candle's *logical* strides) inside `HipStorage::matmul`, bypassing rocBLAS for the two decode
+>   attention GEMMs. Bit-exact vs CPU (new `matmul_decode_attention_parity` covered q·kᵀ *transposed-rhs* and
+>   scores·v *contiguous-rhs*; 16/16). A/B with a runtime toggle (`AKH_HIP_ATTN_KERNEL`): **short ctx
+>   custom 6.63 vs rocBLAS 6.66; long ctx (~3500 seq_kv) custom 3.28 vs rocBLAS 3.27 — within noise both
+>   directions.** So replacing rocBLAS changes **nothing**. Reverted (git keeps it: a kernel that does
+>   nothing in the default build doesn't earn tree space).
+> - **THE LESSON, sharpened (4th time a profiler-named bottleneck was a mirage):** under `AKH_HIP_PROFILE=1`
+>   the custom kernel *still* measured ~671 µs/call — identical to rocBLAS. On a single ordered (null) stream
+>   the sync-bracketed per-category split is **not GEMM compute** (the attention compute is microseconds);
+>   it's launch/queue/drain latency the bracketing sync attributes to whichever op it wraps. **Per-category
+>   sync-profiling is unreliable for finding the real bottleneck in an async pipeline.** The 37.5% was never
+>   addressable by a faster attention kernel.
+> - **Next — needs a RELIABLE profiler before more kernels.** At 6.7 tok/s / ~5% roofline, the honest
+>   blocker is *measurement*: the serializing profiler can't localize the true cost. Real next step =
+>   event-based GPU timing (hipEvent stream markers, or `rocprof` if installed) to find where decode wall
+>   actually goes, **then** optimize. Candidate still-unfalsified levers: GEMV cooperative-superblock dequant
+>   (44%), and the per-token `hipMalloc`-sync from growing attention scratch (`[B,1,seq_kv]` changes size each
+>   token → caching allocator misses → device-synchronizing `hipMalloc`). The model is **usable now
+>   (6.75 tok/s)**; don't add kernels on profiler guesses — measure with real GPU timers first.
 >
 > _(historical) Next: 45g/45h (the speed work). In priority order: **(1)** stop the per-op `malloc/free` +
 >   metadata H2D — pass strided-op dims/strides **by value** (kills the 3710 crossings → ~2/token, the
