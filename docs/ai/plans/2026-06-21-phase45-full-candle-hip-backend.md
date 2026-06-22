@@ -37,11 +37,29 @@
 >   rocBLAS f32 GEMM. **f16/bf16 matmul** (rocBLAS hgemm + gemm_ex). Gate: candle-core `--features hip`
 >   **15/15** incl. `hip_q4k_dequant_and_matmul_parity` (dequant exact, fwd rel 3.7e-7) + f16/bf16 matmul;
 >   akh `--features hip` builds. (commit `2311a5a`)
-> - **Next: 45f** — load a stock candle-transformers Gemma GGUF **fully on `Device::Hip`** and run a
->   forward; instrument to prove **≤2 PCIe crossings/token** (vs the 419 baseline) and measure tok/s.
->   May need a few residual ops (`const_set`, `gather`/`scatter`, RoPE/softmax fast paths) as the model
->   surfaces them. Then **45g** hidden-state parity → **45h** fused kernels → roofline. **This is where the
->   0.17 tok/s baseline finally gets beaten.**
+> - **45f ✅ — the 12B runs FULLY RESIDENT on `Device::Hip`.** `gemma3-12b.gguf` loads + runs end-to-end
+>   on the HIP device with **coherent output** ("Okay, let's break down photosynthesis, step by step…"
+>   over 48 tokens). **0.17 → 0.87 tok/s (5× the op-offload baseline)**; **22.6 GB weights resident**
+>   (Q4_K + Q6_K + f32 norms), zero weight re-upload. `select_device()` returns `new_cuda(0)` under `hip`;
+>   `quantized_gemma3` routes rms_norm/softmax/rope to candle-nn's on-device *slow* variants when
+>   `device.is_cuda()` (CPU path byte-identical). Residual ops the real forward surfaced, **all added +
+>   parity-gated on gfx1100** (candle-core `--features hip` **16/16** op_tests + quant): unary cos/sin/log;
+>   **strided** binary/unary/where_cond/cmp(u32) (broadcast layouts in rms_norm/softmax/rope/mask);
+>   `copy2d` via `hipMemcpy2D` (cat/KV-cache); **argmin/argmax → u32** (greedy sampling). PCIe counters
+>   added to the candle-core HIP runtime. (commits `c3b9165`, `731199b`, `3315e60`)
+>   - **NOT YET the ≤2-crossings/token target nor roofline.** Measured **3710 H2D/token** — but these are
+>     **tiny control-plane uploads** (the per-call dims/stride arrays of the strided ops, <40 B each), NOT
+>     weight streaming (weights stay resident). **Profiling verdict:** the 1.15 s/token is dominated by
+>     **per-op `hipMalloc`/`hipFree` + `hipDeviceSynchronize`** (~1900 ops/token, each synchronous, each
+>     with its own scratch alloc) — *not* residency, *not* dequant (~10%). The architecture is proven; the
+>     speed is an execution-model problem.
+> - **Next: 45g/45h (the speed work).** In priority order: **(1)** stop the per-op `malloc/free` +
+>   metadata H2D — pass strided-op dims/strides **by value** (kills the 3710 crossings → ~2/token, the
+>   plan's metric) and pool scratch buffers; **(2)** **streamed execution** — drop per-kernel
+>   `hipDeviceSynchronize`, sync once per token (the default stream is ordered) — removes ~1900 serial
+>   syncs/token; **(3)** **fused quantized GEMV** for decode (m=1): dequant-on-the-fly inside the matmul so
+>   only the 7.3 GB Q-weights stream (no per-token f32 materialization); **(4)** fused rms_norm/rope/softmax.
+>   Then **45g** hidden-state cosine ≥ 0.999. This is what turns 0.87 → roofline.
 - **Target box:** AMD Radeon RX 7900 XTX (`gfx1100`, 24 GB, ~960 GB/s), ROCm 6.3.4 userspace installed.
 - **Supersedes the perf ceiling of:** [plan 2026-06-04-gpu-rocm-candle.md](2026-06-04-gpu-rocm-candle.md)
   (op-offload — *complete*, but PCIe-round-trip-bound).
@@ -94,7 +112,14 @@ honest "fast" metric is **% of the bandwidth roofline**, not raw tok/s.
 |---|---|---|---|---|
 | **op-offload GPU** (`AKH_GPU_MATMUL=1 AKH_GPU_QUANT=1`) | **0.17** | 5.95 | **419** | **0.1 %** |
 | pure CPU (no GPU flags) | 1.16 | 0.86 | 0 | 0.9 % |
+| **resident `Device::Hip`** (45f, `--features hip`, 48 tok) | **0.87** | 1.15 | 3710¹ | **0.7 %** |
 | roofline (q4_K) | 131.5 | — | 0 | 100 % |
+
+¹ The 3710 H2D/token are **control-plane** stride-array uploads from the strided ops (<40 B each), **not
+weight streaming** — weights are resident (22.6 GB VRAM, never re-uploaded). 45g item (1) (by-value
+strides) drops this to ~2/token. The 0.87 tok/s is bottlenecked on **per-op `malloc`/`free`/`sync`**
+(~1900 synchronous ops/token), not residency or dequant — see the Progress block. The architecture is
+proven correct (coherent 48-token output); 45g/45h is the execution-model speed work.
 
 **The op-offload "GPU" path is ~7× *slower* than plain CPU for 12B** — each token does 419
 device-synced PCIe round-trips (~8.7/layer × 48 layers), which costs far more than the single-token
