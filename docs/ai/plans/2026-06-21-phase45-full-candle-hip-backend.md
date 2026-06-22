@@ -58,7 +58,28 @@
 >     **per-op `hipMalloc`/`hipFree` + `hipDeviceSynchronize`** (~1900 ops/token, each synchronous, each
 >     with its own scratch alloc) — *not* residency, *not* dequant (~10%). The architecture is proven; the
 >     speed is an execution-model problem.
-> - **Next: 45g/45h (the speed work).** In priority order: **(1)** stop the per-op `malloc/free` +
+> - **45g (perf, partial) ✅ — pool + fused GEMV: 0.87 → ~1.26 tok/s (7.4× over op-offload baseline).**
+>   **(a) Caching device allocator** (`35fa751`): `hipFree` *synchronizes the whole device*, so freeing a
+>   temp after every op serialized the ~1900 ops/token. The HIP runtime now recycles freed blocks by exact
+>   size (no `hipFree`, no sync). 1.47× alone, but the resident 12B already sits at ~23.5 GB so a big pool
+>   spills to GTT → default cap a conservative 512 MB (`AKH_HIP_POOL_MB`). **(b) Fused quantized GEMV**
+>   (`8d7ffcd`): decode is `b·m == 1`, yet `fwd` dequantized each weight to a 4×-larger f32 temp every
+>   token. New `akh_gemv_q4k/q6k_f32` kernels dequant inline + accumulate the dot product — **VRAM 22.6 →
+>   19–20 GB, per-gen Δ +5.5 → +0.5 GB** (f32 temps eliminated), headroom restored, both 12B akhs ~1.25
+>   tok/s. Parity `hip_gemv_decode_parity` (Q4_K+Q6_K); candle-core `--features hip` **17/17**.
+>   - **Remaining wall = per-op synchronization.** The GEMV proved dequant traffic was *not* the tok/s wall
+>     (same 1.25 with/without the big pool). Two serial-sync sources dominate now: (i) ~1900 explicit
+>     `hipDeviceSynchronize` (one per kernel wrapper); (ii) ~3998 **synchronous** metadata H2D/token (each
+>     strided op uploads its dims/strides — a stream-stalling `hipMemcpy`). Both must go for async.
+> - **Next: 45g/45h cont.** **(1)** by-value strided metadata (kills the 3998 synchronous H2D = the
+>   crossing metric *and* 3998 stream stalls) — convert the decode-hot strided kernels (binary/unary/reduce/
+>   reduce_arg) to pass dims/strides as by-value kernel params; **(2)** drop per-kernel
+>   `hipDeviceSynchronize` (single ordered null stream → pool recycling stays safe), sync once/token at the
+>   logits readback; **(3)** coalesced warp-cooperative GEMV (the current one-thread-per-row is correct but
+>   non-coalesced); **(4)** fused rms_norm/rope/softmax; then 45g hidden-cosine ≥ 0.999. Roofline (≥45 tok/s
+>   q8) is a multi-step climb from here — 1.25 is 0.9%.
+>
+> _(historical) Next: 45g/45h (the speed work). In priority order: **(1)** stop the per-op `malloc/free` +
 >   metadata H2D — pass strided-op dims/strides **by value** (kills the 3710 crossings → ~2/token, the
 >   plan's metric) and pool scratch buffers; **(2)** **streamed execution** — drop per-kernel
 >   `hipDeviceSynchronize`, sync once per token (the default stream is ordered) — removes ~1900 serial
