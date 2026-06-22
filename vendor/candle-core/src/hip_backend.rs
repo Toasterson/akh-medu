@@ -23,7 +23,11 @@ use std::os::raw::c_int;
 /// Minimal dlopen'd HIP runtime (device mgmt + memory). Kept inside candle-core
 /// because candle cannot depend on the akh-medu crate; Phase 45d migrates the
 /// rocBLAS / kernel primitives from `akh_medu::nlu::hip` alongside this.
-mod runtime {
+///
+/// `pub(crate)` so the quantized backend (`quantized/hip.rs`) can reuse `hip()`
+/// (malloc/free/memcpy/synchronize) and `rocblas()` for the Q4_K dequant + GEMM
+/// path without re-dlopen'ing the runtime (Phase 45e).
+pub(crate) mod runtime {
     use libloading::Library;
     use std::ffi::c_void;
     use std::os::raw::c_int;
@@ -229,6 +233,81 @@ mod runtime {
         c_int, // batch_count
     ) -> c_int;
 
+    // `rocblas_hgemm_strided_batched` (f16). Identical shape to sgemm but the matrix
+    // and alpha/beta pointers are `rocblas_half*` — a 2-byte value (see rocblas-types.h:
+    // `typedef struct rocblas_half { uint16_t data; }`). We pass them as `*const u16` /
+    // `*mut u16`, matching the bit layout of `half::f16`.
+    #[allow(clippy::type_complexity)]
+    type HgemmStridedBatched = unsafe extern "C" fn(
+        *mut c_void, // handle
+        c_int,
+        c_int, // transa, transb
+        c_int,
+        c_int,
+        c_int, // m, n, k
+        *const u16,
+        *const u16,
+        c_int,
+        i64, // alpha, A, lda, stride_a
+        *const u16,
+        c_int,
+        i64, // B, ldb, stride_b
+        *const u16,
+        *mut u16,
+        c_int,
+        i64,   // beta, C, ldc, stride_c
+        c_int, // batch_count
+    ) -> c_int;
+
+    // `rocblas_gemm_strided_batched_ex` — the type-erased GEMM (we use it for bf16).
+    // Matrices are `void*`; alpha/beta are `void*` (f32 here, per `compute_type`);
+    // a/b/c/d dtypes + compute_type are `rocblas_datatype` enum ints; the last three
+    // args are algo + solution_index + flags. NB: the exported symbol takes exactly
+    // these 30 args — the header `#define` only strips obsolete workspace params, which
+    // never reach the real entry point we dlopen.
+    #[allow(clippy::type_complexity)]
+    type GemmStridedBatchedEx = unsafe extern "C" fn(
+        *mut c_void, // handle
+        c_int,
+        c_int, // transa, transb
+        c_int,
+        c_int,
+        c_int,       // m, n, k
+        *const c_void, // alpha (f32)
+        *const c_void, // A
+        c_int,         // a_type
+        c_int,
+        i64, // lda, stride_a
+        *const c_void, // B
+        c_int,         // b_type
+        c_int,
+        i64,           // ldb, stride_b
+        *const c_void, // beta (f32)
+        *const c_void, // C
+        c_int,         // c_type
+        c_int,
+        i64,         // ldc, stride_c
+        *mut c_void, // D
+        c_int,       // d_type
+        c_int,
+        i64,   // ldd, stride_d
+        c_int, // batch_count
+        c_int, // compute_type
+        c_int, // algo
+        i32,   // solution_index
+        u32,   // flags
+    ) -> c_int;
+
+    // rocBLAS `rocblas_datatype` enum values (verified against
+    // /opt/rocm/include/rocblas/internal/rocblas-types.h on this host):
+    //   rocblas_datatype_f16_r  = 150
+    //   rocblas_datatype_f32_r  = 151
+    //   rocblas_datatype_bf16_r = 168   (NB: NOT 151 — the 152/16x range is f64/int)
+    //   rocblas_gemm_algo_standard = 0
+    pub const ROCBLAS_DATATYPE_F32_R: c_int = 151;
+    pub const ROCBLAS_DATATYPE_BF16_R: c_int = 168;
+    pub const ROCBLAS_GEMM_ALGO_STANDARD: c_int = 0;
+
     /// rocBLAS handle + the one GEMM entry point we need. The handle is created once
     /// (binds to the device current at first use) and reused, mirroring the persistent
     /// handle in `akh_medu::nlu::hip`.
@@ -236,6 +315,8 @@ mod runtime {
         _lib: Library,
         handle: *mut c_void,
         sgemm_strided_batched: SgemmStridedBatched,
+        hgemm_strided_batched: HgemmStridedBatched,
+        gemm_strided_batched_ex: GemmStridedBatchedEx,
     }
     unsafe impl Send for Rocblas {}
     unsafe impl Sync for Rocblas {}
@@ -255,6 +336,12 @@ mod runtime {
                 let sgemm: SgemmStridedBatched = *lib
                     .get(b"rocblas_sgemm_strided_batched\0")
                     .map_err(|e| format!("missing rocblas_sgemm_strided_batched: {e}"))?;
+                let hgemm: HgemmStridedBatched = *lib
+                    .get(b"rocblas_hgemm_strided_batched\0")
+                    .map_err(|e| format!("missing rocblas_hgemm_strided_batched: {e}"))?;
+                let gemm_ex: GemmStridedBatchedEx = *lib
+                    .get(b"rocblas_gemm_strided_batched_ex\0")
+                    .map_err(|e| format!("missing rocblas_gemm_strided_batched_ex: {e}"))?;
                 let mut handle: *mut c_void = std::ptr::null_mut();
                 let rc = create(&mut handle);
                 if rc != 0 || handle.is_null() {
@@ -264,6 +351,8 @@ mod runtime {
                     _lib: lib,
                     handle,
                     sgemm_strided_batched: sgemm,
+                    hgemm_strided_batched: hgemm,
+                    gemm_strided_batched_ex: gemm_ex,
                 })
             }
         }
@@ -315,6 +404,124 @@ mod runtime {
             };
             if rc != 0 {
                 return Err(format!("rocblas_sgemm_strided_batched failed (rc={rc})"));
+            }
+            Ok(())
+        }
+
+        /// f16 `C = A·B` (column-major) batched, `alpha=1, beta=0`. Pointers are device
+        /// pointers to `half::f16` data (passed as `*const u16` — same 2-byte layout as
+        /// `rocblas_half`). Mirrors [`Rocblas::sgemm_strided_batched`].
+        #[allow(clippy::too_many_arguments)]
+        pub fn hgemm_strided_batched(
+            &self,
+            transa: c_int,
+            transb: c_int,
+            m: c_int,
+            n: c_int,
+            k: c_int,
+            a: *const u16,
+            lda: c_int,
+            stride_a: i64,
+            b: *const u16,
+            ldb: c_int,
+            stride_b: i64,
+            c: *mut u16,
+            ldc: c_int,
+            stride_c: i64,
+            batch: c_int,
+        ) -> std::result::Result<(), String> {
+            // f16 bit patterns of 1.0 and 0.0 (half::f16::{ONE,ZERO}.to_bits()).
+            let alpha: u16 = 0x3C00; // 1.0
+            let beta: u16 = 0x0000; // 0.0
+            let rc = unsafe {
+                (self.hgemm_strided_batched)(
+                    self.handle,
+                    transa,
+                    transb,
+                    m,
+                    n,
+                    k,
+                    &alpha,
+                    a,
+                    lda,
+                    stride_a,
+                    b,
+                    ldb,
+                    stride_b,
+                    &beta,
+                    c,
+                    ldc,
+                    stride_c,
+                    batch,
+                )
+            };
+            if rc != 0 {
+                return Err(format!("rocblas_hgemm_strided_batched failed (rc={rc})"));
+            }
+            Ok(())
+        }
+
+        /// bf16 `C = A·B` (column-major) batched via `rocblas_gemm_strided_batched_ex`
+        /// with `a/b/c/d_type = bf16_r`, `compute_type = f32_r`, `algo = standard`.
+        /// alpha/beta are f32 (per `compute_type`). Data pointers are device pointers
+        /// to `half::bf16` data, passed as `*const c_void`.
+        #[allow(clippy::too_many_arguments)]
+        pub fn bf16gemm_strided_batched_ex(
+            &self,
+            transa: c_int,
+            transb: c_int,
+            m: c_int,
+            n: c_int,
+            k: c_int,
+            a: *const c_void,
+            lda: c_int,
+            stride_a: i64,
+            b: *const c_void,
+            ldb: c_int,
+            stride_b: i64,
+            c: *mut c_void,
+            ldc: c_int,
+            stride_c: i64,
+            batch: c_int,
+        ) -> std::result::Result<(), String> {
+            let alpha: f32 = 1.0;
+            let beta: f32 = 0.0;
+            let rc = unsafe {
+                (self.gemm_strided_batched_ex)(
+                    self.handle,
+                    transa,
+                    transb,
+                    m,
+                    n,
+                    k,
+                    &alpha as *const f32 as *const c_void,
+                    a,
+                    ROCBLAS_DATATYPE_BF16_R,
+                    lda,
+                    stride_a,
+                    b,
+                    ROCBLAS_DATATYPE_BF16_R,
+                    ldb,
+                    stride_b,
+                    &beta as *const f32 as *const c_void,
+                    // C and D alias (in-place): standard candle/cublas pattern.
+                    c as *const c_void,
+                    ROCBLAS_DATATYPE_BF16_R,
+                    ldc,
+                    stride_c,
+                    c,
+                    ROCBLAS_DATATYPE_BF16_R,
+                    ldc,
+                    stride_c,
+                    batch,
+                    ROCBLAS_DATATYPE_F32_R,
+                    ROCBLAS_GEMM_ALGO_STANDARD,
+                    0, // solution_index
+                    0, // flags
+                )
+            };
+            if rc != 0 {
+                return Err(format!("rocblas_gemm_strided_batched_ex (bf16) failed (rc={rc})"));
             }
             Ok(())
         }
@@ -767,6 +974,29 @@ impl HipStorage {
     pub fn transfer_to_device(&self, _dst: &HipDevice) -> Result<Self> {
         // Single-GPU for now; a real P2P/host-staged copy lands with multi-device.
         self.try_clone_full()
+    }
+
+    /// Wrap an already-allocated device pointer as a `HipStorage` that owns it (freed
+    /// on drop). Used by the quantized backend (`quantized/hip.rs`) to return
+    /// dequantized f32 buffers as `CudaStorage` (Phase 45e).
+    pub(crate) fn from_raw(device: HipDevice, ptr: *mut c_void, dtype: DType, len: usize) -> Self {
+        HipStorage {
+            device,
+            ptr,
+            dtype,
+            len,
+        }
+    }
+
+    /// The raw device pointer backing this storage (HIP global memory). Exposed for the
+    /// quantized backend's rocBLAS calls (Phase 45e).
+    pub(crate) fn device_ptr(&self) -> *mut c_void {
+        self.ptr
+    }
+
+    /// Element count of this storage (bytes = `len * dtype.size_in_bytes()`).
+    pub(crate) fn elem_count(&self) -> usize {
+        self.len
     }
 
     /// Duplicate the full device allocation (device-to-device copy).
@@ -1391,10 +1621,16 @@ impl crate::backend::BackendStorage for HipStorage {
         lhs_l: &Layout,
         rhs_l: &Layout,
     ) -> Result<Self> {
-        if self.dtype != DType::F32 || rhs.dtype != DType::F32 {
+        if self.dtype != rhs.dtype {
             return Err(Error::Msg(format!(
-                "HIP matmul: only f32 supported (Phase 45d); got lhs={:?} rhs={:?}",
+                "HIP matmul: dtype mismatch lhs={:?} rhs={:?}",
                 self.dtype, rhs.dtype
+            )));
+        }
+        if !matches!(self.dtype, DType::F32 | DType::F16 | DType::BF16) {
+            return Err(Error::Msg(format!(
+                "HIP matmul: only f32/f16/bf16 supported (Phase 45d/45e); got {:?}",
+                self.dtype
             )));
         }
         let rb = runtime::rocblas().map_err(Error::Msg)?;
@@ -1427,31 +1663,77 @@ impl crate::backend::BackendStorage for HipStorage {
         let stride_b = batch_stride(lhs_stride, lhs_l.dims(), m * k)?;
         let stride_a = batch_stride(rhs_stride, rhs_l.dims(), n * k)?;
 
-        // Device pointers, offset to each operand's start (in f32 elements).
-        let a_ptr = unsafe { (rhs.ptr as *const f32).add(rhs_l.start_offset()) };
-        let b_ptr = unsafe { (self.ptr as *const f32).add(lhs_l.start_offset()) };
+        // Device byte pointers, offset to each operand's start. The gemm-config above
+        // (lda/transa/ldb/transb/stride_*) is dtype-agnostic; only the element type and
+        // rocBLAS entry point change. C is column-major (ldc = n, stride_c = m*n).
+        let esz = self.dtype.size_in_bytes();
+        let a_ptr = unsafe { (rhs.ptr as *const u8).add(rhs_l.start_offset() * esz) };
+        let b_ptr = unsafe { (self.ptr as *const u8).add(lhs_l.start_offset() * esz) };
 
         let out_len = b * m * n;
-        let out = h
-            .malloc(out_len * std::mem::size_of::<f32>())
-            .map_err(Error::Msg)?;
-        if let Err(e) = rb.sgemm_strided_batched(
-            transa,
-            transb,
-            n as c_int,
-            m as c_int,
-            k as c_int,
-            a_ptr,
-            lda,
-            stride_a as i64,
-            b_ptr,
-            ldb,
-            stride_b as i64,
-            out as *mut f32,
-            n as c_int,
-            (m * n) as i64,
-            b as c_int,
-        ) {
+        let out = h.malloc(out_len * esz).map_err(Error::Msg)?;
+        let ldc = n as c_int;
+        let stride_c = (m * n) as i64;
+
+        let res = match self.dtype {
+            DType::F32 => rb.sgemm_strided_batched(
+                transa,
+                transb,
+                n as c_int,
+                m as c_int,
+                k as c_int,
+                a_ptr as *const f32,
+                lda,
+                stride_a as i64,
+                b_ptr as *const f32,
+                ldb,
+                stride_b as i64,
+                out as *mut f32,
+                ldc,
+                stride_c,
+                b as c_int,
+            ),
+            DType::F16 => rb.hgemm_strided_batched(
+                transa,
+                transb,
+                n as c_int,
+                m as c_int,
+                k as c_int,
+                a_ptr as *const u16,
+                lda,
+                stride_a as i64,
+                b_ptr as *const u16,
+                ldb,
+                stride_b as i64,
+                out as *mut u16,
+                ldc,
+                stride_c,
+                b as c_int,
+            ),
+            DType::BF16 => rb.bf16gemm_strided_batched_ex(
+                transa,
+                transb,
+                n as c_int,
+                m as c_int,
+                k as c_int,
+                a_ptr as *const c_void,
+                lda,
+                stride_a as i64,
+                b_ptr as *const c_void,
+                ldb,
+                stride_b as i64,
+                out,
+                ldc,
+                stride_c,
+                b as c_int,
+            ),
+            // Guarded above; unreachable.
+            other => {
+                h.free(out);
+                return Err(Error::Msg(format!("HIP matmul: unsupported dtype {other:?}")));
+            }
+        };
+        if let Err(e) = res {
             h.free(out);
             return Err(Error::Msg(e));
         }
@@ -1459,7 +1741,7 @@ impl crate::backend::BackendStorage for HipStorage {
         Ok(HipStorage {
             device: self.device.clone(),
             ptr: out,
-            dtype: DType::F32,
+            dtype: self.dtype,
             len: out_len,
         })
     }
@@ -1805,6 +2087,74 @@ mod op_tests {
             .flatten_all()?
             .to_vec1::<f32>()?;
         close(&g, &c, 0.0, "copy_strided");
+        Ok(())
+    }
+
+    /// Non-square f16 matmul (2,3)@(3,4) on GPU (rocBLAS hgemm) vs CPU reference.
+    /// f16 has ~10 bits mantissa, so ~1e-2 tolerance after the f32->f16 cast + accumulate.
+    #[test]
+    fn matmul_f16_nonsquare() -> Result<()> {
+        let Some(dev) = gpu() else {
+            return Ok(());
+        };
+        let a: Vec<f32> = (0..6).map(|i| (i as f32 - 3.0) * 0.5).collect(); // (2,3)
+        let b: Vec<f32> = (0..12).map(|i| (i as f32 - 6.0) * 0.25).collect(); // (3,4)
+        let ga = Tensor::from_vec(a.clone(), (2, 3), &dev)?.to_dtype(DType::F16)?;
+        let gb = Tensor::from_vec(b.clone(), (3, 4), &dev)?.to_dtype(DType::F16)?;
+        let g = ga
+            .matmul(&gb)?
+            .to_dtype(DType::F32)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        let ca = Tensor::from_vec(a, (2, 3), &Device::Cpu)?;
+        let cb = Tensor::from_vec(b, (3, 4), &Device::Cpu)?;
+        let c = ca.matmul(&cb)?.flatten_all()?.to_vec1::<f32>()?;
+        close(&g, &c, 5e-2, "matmul_f16");
+        Ok(())
+    }
+
+    /// Batched f16 matmul (2,2,3)@(2,3,4) — exercises the strided-batched path.
+    #[test]
+    fn matmul_f16_batched() -> Result<()> {
+        let Some(dev) = gpu() else {
+            return Ok(());
+        };
+        let a: Vec<f32> = (0..12).map(|i| (i as f32 - 6.0) * 0.2).collect(); // (2,2,3)
+        let b: Vec<f32> = (0..24).map(|i| (i as f32 - 12.0) * 0.1).collect(); // (2,3,4)
+        let ga = Tensor::from_vec(a.clone(), (2, 2, 3), &dev)?.to_dtype(DType::F16)?;
+        let gb = Tensor::from_vec(b.clone(), (2, 3, 4), &dev)?.to_dtype(DType::F16)?;
+        let g = ga
+            .matmul(&gb)?
+            .to_dtype(DType::F32)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        let ca = Tensor::from_vec(a, (2, 2, 3), &Device::Cpu)?;
+        let cb = Tensor::from_vec(b, (2, 3, 4), &Device::Cpu)?;
+        let c = ca.matmul(&cb)?.flatten_all()?.to_vec1::<f32>()?;
+        close(&g, &c, 5e-2, "matmul_f16_batched");
+        Ok(())
+    }
+
+    /// Non-square bf16 matmul (2,3)@(3,4) via rocblas_gemm_strided_batched_ex.
+    /// bf16 has only 7 mantissa bits, so a looser ~1e-1 tolerance.
+    #[test]
+    fn matmul_bf16_nonsquare() -> Result<()> {
+        let Some(dev) = gpu() else {
+            return Ok(());
+        };
+        let a: Vec<f32> = (0..6).map(|i| (i as f32 - 3.0) * 0.5).collect();
+        let b: Vec<f32> = (0..12).map(|i| (i as f32 - 6.0) * 0.25).collect();
+        let ga = Tensor::from_vec(a.clone(), (2, 3), &dev)?.to_dtype(DType::BF16)?;
+        let gb = Tensor::from_vec(b.clone(), (3, 4), &dev)?.to_dtype(DType::BF16)?;
+        let g = ga
+            .matmul(&gb)?
+            .to_dtype(DType::F32)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        let ca = Tensor::from_vec(a, (2, 3), &Device::Cpu)?;
+        let cb = Tensor::from_vec(b, (3, 4), &Device::Cpu)?;
+        let c = ca.matmul(&cb)?.flatten_all()?.to_vec1::<f32>()?;
+        close(&g, &c, 2e-1, "matmul_bf16");
         Ok(())
     }
 }
