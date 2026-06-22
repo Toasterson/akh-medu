@@ -28,6 +28,38 @@ __global__ void affine_f32(const float* x, float* y, size_t n, float mul, float 
     if (i < n) y[i] = x[i] * mul + add;
 }
 
+// Fused RMSNorm (Phase 45h): out[row,i] = x[row,i] / sqrt(mean_i(x^2) + eps) * w[i].
+// One pass per row replaces the ~7 kernels of the rms_norm_slow decomposition
+// (sqr, sum, /hidden, +eps, sqrt, broadcast_div, broadcast_mul) — the single
+// biggest source of decode kernel launches (~2000/token). One block per row.
+#define AKH_RMSNORM_BLOCK 256
+__global__ void rms_norm_f32(const float* __restrict__ x, const float* __restrict__ w,
+                             float* __restrict__ out, unsigned long n_rows,
+                             unsigned long hidden, float eps) {
+    unsigned long row = blockIdx.x;
+    if (row >= n_rows) return;
+    int tid = threadIdx.x;
+    const float* xr = x + row * hidden;
+    float* outr = out + row * hidden;
+    float ss = 0.0f;
+    for (unsigned long i = tid; i < hidden; i += AKH_RMSNORM_BLOCK) {
+        float v = xr[i];
+        ss += v * v;
+    }
+    __shared__ float sdata[AKH_RMSNORM_BLOCK];
+    sdata[tid] = ss;
+    __syncthreads();
+    for (int s = AKH_RMSNORM_BLOCK / 2; s > 0; s >>= 1) {
+        if (tid < s) sdata[tid] += sdata[tid + s];
+        __syncthreads();
+    }
+    // Matches candle's rms_norm_slow: x / sqrt(mean(x^2) + eps), then * weight.
+    float inv = 1.0f / sqrtf(sdata[0] / (float)hidden + eps);
+    for (unsigned long i = tid; i < hidden; i += AKH_RMSNORM_BLOCK) {
+        outr[i] = xr[i] * inv * w[i];
+    }
+}
+
 // op: 0 neg, 1 exp, 2 silu, 3 gelu, 4 sqr, 5 sqrt, 6 recip, 7 relu, 8 tanh, 9 abs,
 //     10 cos, 11 sin, 12 log
 __global__ void unary_f32(const float* x, float* y, size_t n, int op) {
@@ -381,6 +413,15 @@ int akh_affine_f32(const float* x, float* y, size_t n, float mul, float add) {
     hipLaunchKernelGGL(affine_f32, dim3(blocks), dim3(t), 0, 0, x, y, n, mul, add);
     // No per-kernel sync (Phase 45h): kernels are ordered on the null stream; the
     // final D2H readback (to_cpu) synchronizes. Only launch errors checked here.
+    return hipGetLastError() == hipSuccess ? 0 : 1;
+}
+
+// Fused RMSNorm; one block (AKH_RMSNORM_BLOCK threads) per row. No sync (45h).
+int akh_rms_norm_f32(const float* x, const float* w, float* out,
+                     size_t n_rows, size_t hidden, float eps) {
+    if (n_rows == 0) return 0;
+    hipLaunchKernelGGL(rms_norm_f32, dim3((unsigned)n_rows), dim3(AKH_RMSNORM_BLOCK), 0, 0,
+                       x, w, out, (unsigned long)n_rows, (unsigned long)hidden, eps);
     return hipGetLastError() == hipSuccess ? 0 : 1;
 }
 

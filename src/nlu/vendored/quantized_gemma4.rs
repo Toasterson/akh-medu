@@ -62,10 +62,13 @@ impl Module for GemmaRmsNorm {
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
         let eps = self.eps as f32;
         if x.device().is_cuda() {
-            candle_nn::ops::rms_norm_slow(x, &self.weight, eps)
-        } else {
-            candle_nn::ops::rms_norm(x, &self.weight, eps)
+            // Fused single-kernel RMSNorm on the HIP device (Phase 45h).
+            #[cfg(feature = "hip")]
+            return candle::cuda::rms_norm_fused(x, &self.weight, eps);
+            #[cfg(not(feature = "hip"))]
+            return candle_nn::ops::rms_norm_slow(x, &self.weight, eps);
         }
+        candle_nn::ops::rms_norm(x, &self.weight, eps)
     }
 }
 

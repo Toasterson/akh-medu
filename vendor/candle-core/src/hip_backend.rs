@@ -16,7 +16,7 @@
 //! dequant kernels already validated in `akh_medu::nlu::hip`.
 #![allow(dead_code)]
 use crate::op::{BinaryOpT, CmpOp, ReduceOp, UnaryOpT};
-use crate::{CpuStorage, DType, Error, Layout, Result, Shape};
+use crate::{CpuStorage, DType, Error, Layout, Result, Shape, Tensor};
 use std::ffi::c_void;
 use std::os::raw::c_int;
 
@@ -682,6 +682,9 @@ pub(crate) mod runtime {
     }
 
     type AffineF32 = unsafe extern "C" fn(*const f32, *mut f32, usize, f32, f32) -> c_int;
+    // Phase 45h: fused RMSNorm (x, weight) -> out; one kernel replaces ~7.
+    type RmsNormF32 =
+        unsafe extern "C" fn(*const f32, *const f32, *mut f32, usize, usize, f32) -> c_int;
     type UnaryF32 = unsafe extern "C" fn(*const f32, *mut f32, usize, c_int) -> c_int;
     type BinaryF32 = unsafe extern "C" fn(*const f32, *const f32, *mut f32, usize, c_int) -> c_int;
     // Phase 45d (subagent ops): reduce / cast / index_select / where_cond / strided-copy.
@@ -808,6 +811,7 @@ pub(crate) mod runtime {
     pub struct Kernels {
         _lib: Library,
         affine_f32: AffineF32,
+        rms_norm_f32: RmsNormF32,
         unary_f32: UnaryF32,
         binary_f32: BinaryF32,
         reduce_f32: ReduceF32,
@@ -847,6 +851,9 @@ pub(crate) mod runtime {
                 let affine_f32: AffineF32 = *lib
                     .get(b"akh_affine_f32\0")
                     .map_err(|e| format!("missing akh_affine_f32: {e}"))?;
+                let rms_norm_f32: RmsNormF32 = *lib
+                    .get(b"akh_rms_norm_f32\0")
+                    .map_err(|e| format!("missing akh_rms_norm_f32: {e}"))?;
                 let unary_f32: UnaryF32 = *lib
                     .get(b"akh_unary_f32\0")
                     .map_err(|e| format!("missing akh_unary_f32: {e}"))?;
@@ -911,6 +918,7 @@ pub(crate) mod runtime {
                 Ok(Kernels {
                     _lib: lib,
                     affine_f32,
+                    rms_norm_f32,
                     unary_f32,
                     binary_f32,
                     reduce_f32,
@@ -951,6 +959,24 @@ pub(crate) mod runtime {
             let rc = unsafe { (self.affine_f32)(x, y, n, mul, add) };
             if rc != 0 {
                 return Err(format!("akh_affine_f32 failed (rc={rc})"));
+            }
+            Ok(())
+        }
+
+        /// Fused RMSNorm: one block per row over `hidden`. `x`/`out` are
+        /// `n_rows * hidden` f32 (row-major); `w` is `hidden` f32.
+        pub fn rms_norm_f32(
+            &self,
+            x: *const f32,
+            w: *const f32,
+            out: *mut f32,
+            n_rows: usize,
+            hidden: usize,
+            eps: f32,
+        ) -> std::result::Result<(), String> {
+            let rc = unsafe { (self.rms_norm_f32)(x, w, out, n_rows, hidden, eps) };
+            if rc != 0 {
+                return Err(format!("akh_rms_norm_f32 failed (rc={rc})"));
             }
             Ok(())
         }
@@ -1351,6 +1377,86 @@ pub fn reset_pcie_counts() {
     use std::sync::atomic::Ordering::Relaxed;
     runtime::PCIE_H2D.store(0, Relaxed);
     runtime::PCIE_D2H.store(0, Relaxed);
+}
+
+/// Fused RMSNorm as a single HIP kernel (Phase 45h): `x / sqrt(mean(x²)+eps) · w`,
+/// matching `candle_nn::ops::rms_norm_slow` but in one launch instead of ~7. Profiling
+/// showed rms_norm was the single biggest source of decode kernel launches
+/// (~2000/token). `x` is `[…, hidden]`, `w` is `[hidden]`, both contiguous f32 on the
+/// HIP device. Accessible as `candle_core::cuda::rms_norm_fused`.
+pub fn rms_norm_fused(x: &Tensor, w: &Tensor, eps: f32) -> Result<Tensor> {
+    x.apply_op2_no_bwd(w, &FusedRmsNorm { eps })
+}
+
+struct FusedRmsNorm {
+    eps: f32,
+}
+
+impl crate::CustomOp2 for FusedRmsNorm {
+    fn name(&self) -> &'static str {
+        "fused-rms-norm"
+    }
+
+    fn cpu_fwd(
+        &self,
+        _: &CpuStorage,
+        _: &Layout,
+        _: &CpuStorage,
+        _: &Layout,
+    ) -> Result<(CpuStorage, Shape)> {
+        // GPU-only: the model routes here solely for cuda tensors (CPU keeps the
+        // candle-nn fast op). Never reached in practice.
+        Err(Error::Msg(
+            "fused-rms-norm is GPU-only; use candle_nn::ops::rms_norm on CPU".to_string(),
+        ))
+    }
+
+    fn cuda_fwd(
+        &self,
+        s1: &HipStorage,
+        l1: &Layout,
+        s2: &HipStorage,
+        l2: &Layout,
+    ) -> Result<(HipStorage, Shape)> {
+        if s1.dtype != DType::F32 || s2.dtype != DType::F32 {
+            return Err(Error::Msg(format!(
+                "HIP fused rms_norm: f32 only, got x={:?} w={:?}",
+                s1.dtype, s2.dtype
+            )));
+        }
+        if !l1.is_contiguous() || !l2.is_contiguous() {
+            return Err(Error::Msg(
+                "HIP fused rms_norm: contiguous x/weight only".to_string(),
+            ));
+        }
+        let dims = l1.dims();
+        let hidden = *dims.last().ok_or_else(|| Error::Msg("rms_norm: scalar x".into()))?;
+        let n = l1.shape().elem_count();
+        if hidden == 0 || n % hidden != 0 {
+            return Err(Error::Msg(format!(
+                "HIP fused rms_norm: bad shape {dims:?} (hidden {hidden})"
+            )));
+        }
+        let n_rows = n / hidden;
+        let h = hip()?;
+        let k = runtime::kernels().map_err(Error::Msg)?;
+        let x = unsafe { (s1.ptr as *const f32).add(l1.start_offset()) };
+        let w = unsafe { (s2.ptr as *const f32).add(l2.start_offset()) };
+        let out = h.malloc(n * std::mem::size_of::<f32>()).map_err(Error::Msg)?;
+        if let Err(e) = k.rms_norm_f32(x, w, out as *mut f32, n_rows, hidden, self.eps) {
+            h.free(out);
+            return Err(Error::Msg(e));
+        }
+        Ok((
+            HipStorage {
+                device: s1.device.clone(),
+                ptr: out,
+                dtype: DType::F32,
+                len: n,
+            },
+            l1.shape().clone(),
+        ))
+    }
 }
 
 /// Port of the batch-stride computation in candle's `cuda_backend::gemm_config`:
@@ -2914,6 +3020,33 @@ mod op_tests {
             c.where_cond(&neg, &s)?.flatten_all()?.to_vec1::<f32>()
         };
         close(&run(&dev)?, &run(&Device::Cpu)?, 0.0, "where_cond bcast t");
+        Ok(())
+    }
+
+    #[test]
+    fn fused_rms_norm_matches() -> Result<()> {
+        let Some(dev) = gpu() else {
+            return Ok(());
+        };
+        let (rows, hidden) = (3usize, 384usize);
+        let x: Vec<f32> = (0..rows * hidden).map(|i| ((i as f32) * 0.013).sin() * 2.0).collect();
+        let w: Vec<f32> = (0..hidden).map(|i| 1.0 + (i as f32) * 0.001).collect();
+        let eps = 1e-6f32;
+        let gx = Tensor::from_vec(x.clone(), (rows, hidden), &dev)?;
+        let gw = Tensor::from_vec(w.clone(), hidden, &dev)?;
+        let g = super::rms_norm_fused(&gx, &gw, eps)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        // Reference: candle-core ops mirroring rms_norm_slow (candle-nn isn't a dep here).
+        let cx = Tensor::from_vec(x, (rows, hidden), &Device::Cpu)?;
+        let cw = Tensor::from_vec(w, hidden, &Device::Cpu)?;
+        let var = cx.sqr()?.mean_keepdim(D::Minus1)?;
+        let c = cx
+            .broadcast_div(&(var + eps as f64)?.sqrt()?)?
+            .broadcast_mul(&cw)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        close(&g, &c, 1e-4, "fused rms_norm");
         Ok(())
     }
 
