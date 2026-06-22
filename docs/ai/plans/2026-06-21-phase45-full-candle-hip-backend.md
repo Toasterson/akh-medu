@@ -136,14 +136,22 @@
 >   d/dmin/scales → broadcast hit, ~free), so "loading once" saved nothing — while the rewrite ADDED 2
 >   block-wide `__syncthreads`/superblock (the original had none per-superblock) and halved per-thread work.
 >   Reverted. **5th measure-don't-guess in this phase.**
-> - **GEMV is at ~99 GB/s (10% of roofline) but NOT for the reason guessed** (not metadata traffic). Likely
->   latency/occupancy bound (128-thread blocks, limited in-flight loads) or compute-bound on the dequant. A
->   real win needs a structurally different kernel — warp-shuffle reduction, vectorized (uint4) qs loads,
->   and/or split-K for more memory-level parallelism — a careful profiler-guided kernel pass, **not** a quick
->   tweak. The model is **usable now (6.75 tok/s)**; the event profiler (committed) makes every further step
->   measured. Two optimization guesses (custom attention, cooperative GEMV) both built, measured, reverted —
->   the honest state is that the simple-structure decode kernels are near their local optimum and the next
->   gains require real kernel engineering with uncertain payoff.
+> - **45h warp-per-row GEMV + once-per-superblock dequant ✅ — 6.75 → 11.5 tok/s (1.72×)** (`4cdf492`). The
+>   GEMV's 99 GB/s was **compute-bound on redundant dequant**, not metadata traffic (1st guess) nor the
+>   reduction (warp-shuffle alone was neutral). The two failed guesses *isolated* the real cost: the
+>   per-weight `__half2float(d)`/`__half2float(dmin)` conversions. New kernel: **one warp per output row**
+>   (32 lanes, 8 rows/256-block) with a barrier-free `__shfl_down` reduction + a **superblock-outer loop** so
+>   each lane owns 8 positions per 256-weight superblock and converts d/dmin **once per superblock** instead
+>   of per weight (8× fewer half→float ops). gfx1100 = wave32. **Measured: GEMV 218 → 49 µs/call (4.4×) =
+>   ~440 GB/s (46% of roofline, was 10%); decode 6.75 → 11.52 (short) / 3.27 → 3.88 (long); gemma4 6.23 →
+>   9.80.** Bit-exact (24/24), coherent, VRAM unchanged. uint4 qs loads assessed but don't fit (each lane's 8
+>   positions hit 4 *non-contiguous* qs bytes) and ROI is low now that GEMV is no longer the wall.
+> - **CUMULATIVE Phase 45: 0.17 (op-offload) → 11.5 tok/s = ~68× over baseline, ~9.9× over CPU (1.16),
+>   ~8.8% of roofline.** New decode map (gemma3 short ctx): attention 45% (whole-op window = host-enqueue
+>   gap, A/B-proven not addressable) · other 27.7% (untimed: rms_norm_fused/copy2d/rope/sampling) · GEMV
+>   16.8% · eltwise 7.2% · copy 3.2% · malloc 1.4%. The next *real* lever would be the "other" 27.7% (time
+>   the untimed kernels to see what's in it) — but the model is now **fast and usable (11.5 tok/s)**. The
+>   profiler (committed) made every step measured: 3 GEMV guesses, 1 won, the reliable instrument confirmed it.
 >
 > _(historical) Next: 45g/45h (the speed work). In priority order: **(1)** stop the per-op `malloc/free` +
 >   metadata H2D — pass strided-op dims/strides **by value** (kills the 3710 crossings → ~2/token, the
