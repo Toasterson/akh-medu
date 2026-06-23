@@ -62,7 +62,16 @@ impl Default for OllamaConfig {
 
 fn default_base_url() -> String { "http://localhost:11434".into() }
 fn default_model() -> String { "gemma4:e4b".into() }
-fn default_timeout() -> u64 { 120 }
+/// Per-request timeout. `AKH_OLLAMA_TIMEOUT_SECS` overrides the 120s default so
+/// long reasoning / agentic-coding generations (which the model *does* answer,
+/// just slowly) aren't cut off mid-response.
+fn default_timeout() -> u64 {
+    std::env::var("AKH_OLLAMA_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(120)
+}
 fn default_keep_alive() -> String { "5m".into() }
 
 impl OllamaConfig {

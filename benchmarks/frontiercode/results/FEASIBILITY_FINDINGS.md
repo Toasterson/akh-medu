@@ -80,3 +80,19 @@ working). A genuine Tecton-vs-Diamond score awaits a stable ollama.com window;
 re-run `python3 harness/runner.py` then (no code changes needed). Observed Tecton
 failure modes so far: (a) tool-spiral on permissive prompts — fixed by the v2
 prompt; (b) cloud-backend timeouts — infra, surfaced as `failure_kind:backend_error`.
+
+## 2026-06-23 — timeout escalation (4 attempts), score stands at 0/1
+
+Tecton over ollama.com cloud GLM cannot complete a Diamond-style patch generation:
+- 150s adapter timeout → model `timeout` (no answer).
+- 300s → `backend_error`: "Ollama server unreachable … timed out reading response"
+  (per-call ollama read timeout, default 120s, exceeded).
+- Added `AKH_OLLAMA_TIMEOUT_SECS` (env knob) = 600 → no backend error, but the
+  **agentic turn ran to the 580s adapter wall-clock still generating** (model
+  `timed_out`, 0 chars). The coding generation takes >10 min over this link.
+
+Conclusion: harness is correct (gold patch validates 1/1); Tecton's effective
+FrontierCode-Diamond score is **0/1 (no usable patch produced)**. A real number
+needs a faster/local code model or a stable, fast cloud window — not a harness
+change. Note: the RoundBudget 300s wall-clock can't preempt a single in-flight
+model call, so one slow generation can exceed it.
