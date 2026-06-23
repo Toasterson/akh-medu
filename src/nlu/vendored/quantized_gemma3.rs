@@ -174,13 +174,107 @@ impl RotaryEmbedding {
         q: &Tensor,
         k: &Tensor,
         index_pos: usize,
+        graph_ctx: Option<&GraphDecodeCtx>,
     ) -> Result<(Tensor, Tensor)> {
         let (_b_sz, _h, seq_len, _n_embd) = q.dims4()?;
-        let cos = self.cos.narrow(0, index_pos, seq_len)?;
-        let sin = self.sin.narrow(0, index_pos, seq_len)?;
+        // Decode-graph mode (Phase 46d-2) reads the cos/sin rows for the current position
+        // with a device-side `index_select(&d_pos)` — byte-identical to `narrow(0, pos, 1)`
+        // but it follows the advancing position on each graph replay instead of baking the
+        // offset host-side.
+        let (cos, sin) = match graph_ctx {
+            Some(g) => (g.rope_row(&self.cos)?, g.rope_row(&self.sin)?),
+            None => (
+                self.cos.narrow(0, index_pos, seq_len)?,
+                self.sin.narrow(0, index_pos, seq_len)?,
+            ),
+        };
         let q_embed = rope_dev(&q.contiguous()?, &cos, &sin)?;
         let k_embed = rope_dev(&k.contiguous()?, &cos, &sin)?;
         Ok((q_embed, k_embed))
+    }
+}
+
+/// Device-resident decode state for a HIP-graph-capturable per-token forward (Phase 46d-2).
+///
+/// A captured graph bakes in buffer *addresses*, not values, so every position-dependent
+/// input to the decode forward must be read from the device at replay time rather than from
+/// a host integer. This bundles the three such inputs behind one in-place-updatable `d_pos`
+/// (a single `u32` on the device with a STABLE address):
+///
+/// * **rope** — the cos/sin rows for the current position via `index_select(&d_pos)`
+///   ([`rope_row`](Self::rope_row); byte-identical to `narrow(0, pos, 1)`),
+/// * **KV write** — the new K/V are scattered into the static cache at column `*d_pos`
+///   (`candle_core::cuda::kv_scatter_at`, hip only) instead of a host-offset `slice_set`,
+/// * **causal mask** — a *fixed-shape* keep-mask `positions <= pos` over the block-padded
+///   `read_len` ([`keep_mask`](Self::keep_mask)), so the captured attention reads the same
+///   `[0, read_len)` KV slice at every replay and the `> pos` tail is masked to `-inf`
+///   (softmax over the padded slice is bit-identical to softmax over the valid `[0, pos]`).
+///
+/// [`set_pos`](Self::set_pos) advances the position with a 4-byte H2D — call it OUTSIDE a
+/// captured region so the recorded kernels read the updated value on replay.
+#[derive(Debug, Clone)]
+pub struct GraphDecodeCtx {
+    /// Single `u32` on the device (shape `[1]`) — the current decode position. Its storage
+    /// address is stable across [`set_pos`](Self::set_pos) (an in-place write), which is what
+    /// lets a captured graph bind to it once and read the updated value on each replay.
+    d_pos: Tensor,
+    /// `arange(0, read_len)` `u32` reshaped `[1, 1, 1, read_len]` — the key column indices
+    /// compared against `d_pos` to build the causal keep-mask.
+    positions: Tensor,
+    /// Fixed (block-padded) KV read length the captured attention narrows to: `>= pos + 1`
+    /// for every position in the block and `<= kv_ctx`.
+    read_len: usize,
+}
+
+impl GraphDecodeCtx {
+    /// Allocate the decode state for a block whose attention reads a fixed `read_len`
+    /// columns of the KV cache. `read_len` must cover the highest position the block replays
+    /// at (`max_pos + 1`) and fit the static cache (`<= kv_ctx`).
+    pub fn new(device: &Device, read_len: usize) -> Result<Self> {
+        let d_pos = Tensor::zeros((1,), DType::U32, device)?;
+        let positions =
+            Tensor::arange(0u32, read_len as u32, device)?.reshape((1, 1, 1, read_len))?;
+        Ok(Self {
+            d_pos,
+            positions,
+            read_len,
+        })
+    }
+
+    /// The fixed (block-padded) KV read length the captured attention narrows to.
+    pub fn read_len(&self) -> usize {
+        self.read_len
+    }
+
+    /// Advance the decode position with a 4-byte H2D into the stable `d_pos` buffer (the
+    /// `slice_set` keeps `d_pos`'s storage in place). Call OUTSIDE a captured region; the
+    /// captured graph reads the new value on replay.
+    pub fn set_pos(&self, pos: usize) -> Result<()> {
+        let src = Tensor::new(&[pos as u32], self.d_pos.device())?;
+        self.d_pos.slice_set(&src, 0, 0)
+    }
+
+    /// The cos/sin row for the current position (`index_select(&d_pos)`) — byte-identical to
+    /// `tbl.narrow(0, pos, 1)` but device-indexed so a captured graph follows `d_pos`.
+    fn rope_row(&self, tbl: &Tensor) -> Result<Tensor> {
+        tbl.index_select(&self.d_pos, 0)
+    }
+
+    /// The fixed-shape **additive** causal mask `[1, 1, 1, read_len]` (`f32`, `0` where the
+    /// key column `<= pos`, a large negative `≈ -inf` where `> pos`) for the current
+    /// position. Added to the attention scores, it drives the block-padding tail to exactly
+    /// `0` in the softmax (`exp(-1e30) == 0` in f32) — bit-identical to attending only the
+    /// valid `[0, pos]` prefix (what the normal decode path does with no mask). Built from
+    /// `relu(positions − pos) · (-1e30)` so it stays in f32 (no U8 comparison mask, which the
+    /// HIP device cannot cast to U32). Applied with `broadcast_add` in
+    /// [`LayerWeights::forward_attn`], not the prefill `where_cond` path.
+    fn additive_mask(&self) -> Result<Tensor> {
+        let pos_f = self.d_pos.to_dtype(DType::F32)?;
+        let positions_f = self.positions.to_dtype(DType::F32)?;
+        // relu(j − pos): 0 for keep (j <= pos), j−pos > 0 for the padded tail (j > pos).
+        let over = positions_f.broadcast_sub(&pos_f)?.relu()?;
+        // · (-1e30): keep → -0.0 (a no-op add), tail → ≈ -inf (softmax underflows to 0).
+        over.affine(-1.0e30, 0.0)
     }
 }
 
@@ -275,6 +369,7 @@ impl LayerWeights {
         x: &Tensor,
         mask: Option<&Tensor>,
         index_pos: usize,
+        graph_ctx: Option<&GraphDecodeCtx>,
     ) -> Result<Tensor> {
         let _enter = self.span_attn.enter();
         let (b_sz, seq_len, _) = x.dims3()?;
@@ -319,7 +414,7 @@ impl LayerWeights {
 
         let (q, k) = self
             .rotary_embedding
-            .apply_rotary_emb_qkv(&q, &k, index_pos)?;
+            .apply_rotary_emb_qkv(&q, &k, index_pos, graph_ctx)?;
 
         let (k, v) = if k.device().is_cuda() {
             // Phase 46a: static pre-allocated KV cache. Allocate `[b, n_kv_head, kv_ctx,
@@ -349,11 +444,37 @@ impl LayerWeights {
                 ));
             }
             let (kbuf, vbuf) = self.kv_buf.as_ref().unwrap();
-            kbuf.slice_set(&k.to_dtype(DType::F16)?, 2, index_pos)?;
-            vbuf.slice_set(&v.to_dtype(DType::F16)?, 2, index_pos)?;
+            let k_f16 = k.to_dtype(DType::F16)?;
+            let v_f16 = v.to_dtype(DType::F16)?;
+            // Write the new token's K/V into the static cache. Decode-graph mode (Phase
+            // 46d-2) writes at the DEVICE column `*d_pos` (`kv_scatter_at`, hip only) so a
+            // captured graph follows the advancing position; it is byte-identical to the
+            // host-offset `slice_set` (validated in 46d-2b). Every other path keeps the
+            // host-offset write.
+            match graph_ctx {
+                #[cfg(feature = "hip")]
+                Some(g) => {
+                    let dpos = candle_core::cuda::u32_device_ptr(&g.d_pos)?;
+                    candle_core::cuda::kv_scatter_at(kbuf, &k_f16, dpos)?;
+                    candle_core::cuda::kv_scatter_at(vbuf, &v_f16, dpos)?;
+                }
+                _ => {
+                    kbuf.slice_set(&k_f16, 2, index_pos)?;
+                    vbuf.slice_set(&v_f16, 2, index_pos)?;
+                }
+            }
+            // Decode-graph mode reads a FIXED (block-padded) prefix so the captured
+            // attention shape is constant across replays; the `> pos` tail is masked to
+            // `-inf` by the caller's keep-mask (softmax over the padded slice is
+            // bit-identical to softmax over the valid `[0, pos]`). Every other path reads
+            // exactly the valid `[0, len)`.
+            let read_len = match graph_ctx {
+                Some(g) => g.read_len(),
+                None => len,
+            };
             (
-                kbuf.narrow(2, 0, len)?.contiguous()?.to_dtype(DType::F32)?,
-                vbuf.narrow(2, 0, len)?.contiguous()?.to_dtype(DType::F32)?,
+                kbuf.narrow(2, 0, read_len)?.contiguous()?.to_dtype(DType::F32)?,
+                vbuf.narrow(2, 0, read_len)?.contiguous()?.to_dtype(DType::F32)?,
             )
         } else {
             // CPU path: dynamic grow-by-cat (byte-identical to the original).
@@ -382,9 +503,19 @@ impl LayerWeights {
         let mut attn_weights = (q.matmul(&k.transpose(2, 3)?)? * scale)?;
 
         if let Some(mask) = mask {
-            let mask = mask.broadcast_as(attn_weights.shape())?;
-            let neg_inf = self.neg_inf.broadcast_as(attn_weights.dims())?;
-            attn_weights = mask.eq(0u32)?.where_cond(&neg_inf, &attn_weights)?;
+            if graph_ctx.is_some() {
+                // Decode-graph mode (Phase 46d-2): `mask` is the precomputed ADDITIVE mask
+                // (0 where the key column <= pos, ≈ -inf where > pos). Adding it makes the
+                // padded-tail weights underflow to exactly 0 in the softmax — bit-identical
+                // to attending only the valid [0, pos] prefix (what the normal decode path
+                // does with no mask) — and it sidesteps the U8 `where_cond` mask (the HIP
+                // device has no U8 cast).
+                attn_weights = attn_weights.broadcast_add(mask)?;
+            } else {
+                let mask = mask.broadcast_as(attn_weights.shape())?;
+                let neg_inf = self.neg_inf.broadcast_as(attn_weights.dims())?;
+                attn_weights = mask.eq(0u32)?.where_cond(&neg_inf, &attn_weights)?;
+            }
         }
 
         let attn_weights = softmax_last_dim_dev(&attn_weights)?;
@@ -705,6 +836,13 @@ impl ModelWeights {
         layer_in * (self.embedding_length as f64).sqrt()
     }
 
+    /// Static KV-cache capacity (env `AKH_KV_CTX`, default 4096) — the upper bound for a
+    /// [`GraphDecodeCtx`]'s block-padded `read_len` (Phase 46d-2). `0` before any layer is
+    /// built.
+    pub fn kv_ctx(&self) -> usize {
+        self.layers.first().map(|l| l.kv_ctx).unwrap_or(0)
+    }
+
     /// Transformer stack + final norm over a precomputed embedding `layer_in`
     /// (`[batch, seq, hidden]`, from [`embed`](Self::embed)). Byte-identical to the body
     /// of [`hidden_states`](Self::hidden_states) after the embedding lookup. The decode
@@ -714,22 +852,38 @@ impl ModelWeights {
         &mut self,
         layer_in: &Tensor,
         index_pos: usize,
+        graph_ctx: Option<&GraphDecodeCtx>,
     ) -> Result<Tensor> {
         let (b_sz, seq_len, _) = layer_in.dims3()?;
+        if graph_ctx.is_some() && seq_len != 1 {
+            candle::bail!("GraphDecodeCtx is decode-only: seq_len must be 1, got {seq_len}");
+        }
         let _enter = self.span.enter();
         let mut layer_in = layer_in.clone();
 
+        // Decode-graph mode (Phase 46d-2) builds ONE fixed-shape additive causal mask for the
+        // whole stack — it depends only on the position, not the layer — so a captured graph
+        // records it once and every replay re-reads the device-side `d_pos`. The normal
+        // decode path passes `None` (it attends the whole `[0, pos]` read prefix unmasked);
+        // the additive mask reproduces exactly that set while masking only the padding tail.
+        let decode_mask = match graph_ctx {
+            Some(g) => Some(g.additive_mask()?),
+            None => None,
+        };
+
         for layer in self.layers.iter_mut() {
-            let attention_mask = if seq_len == 1 {
-                None
-            } else {
-                Some(layer.mask(b_sz, seq_len, index_pos, DType::U32, layer_in.device())?)
+            let attention_mask = match (&decode_mask, seq_len) {
+                (Some(m), _) => Some(m.clone()),
+                (None, 1) => None,
+                (None, _) => {
+                    Some(layer.mask(b_sz, seq_len, index_pos, DType::U32, layer_in.device())?)
+                }
             };
 
             // Attention block
             let residual = &layer_in;
             let x = layer.attention_norm.forward(&layer_in)?;
-            let x = layer.forward_attn(&x, attention_mask.as_ref(), index_pos)?;
+            let x = layer.forward_attn(&x, attention_mask.as_ref(), index_pos, graph_ctx)?;
             let x = layer.post_attention_norm.forward(&x)?;
             let x = (x + residual)?;
 
@@ -754,7 +908,7 @@ impl ModelWeights {
     /// projection — for the Neural→VSA bridge. (akh-medu vendored extension.)
     pub fn hidden_states(&mut self, x: &Tensor, index_pos: usize) -> Result<Tensor> {
         let layer_in = self.embed(x)?;
-        self.hidden_states_from_embed(&layer_in, index_pos)
+        self.hidden_states_from_embed(&layer_in, index_pos, None)
     }
 
     pub fn forward(&mut self, x: &Tensor, index_pos: usize) -> Result<Tensor> {
@@ -775,8 +929,13 @@ impl ModelWeights {
     /// embedding lookup (a host-synchronizing op) runs outside; everything from here
     /// (attention / MLP / norm / output projection) is pure device work a captured graph
     /// can replay in a single dispatch. Byte-identical to `forward` for the same token.
-    pub fn forward_from_embed(&mut self, layer_in: &Tensor, index_pos: usize) -> Result<Tensor> {
-        let h = self.hidden_states_from_embed(layer_in, index_pos)?;
+    pub fn forward_from_embed(
+        &mut self,
+        layer_in: &Tensor,
+        index_pos: usize,
+        graph_ctx: Option<&GraphDecodeCtx>,
+    ) -> Result<Tensor> {
+        let h = self.hidden_states_from_embed(layer_in, index_pos, graph_ctx)?;
         let _enter = self.span_output.enter();
         #[cfg(feature = "rocm")]
         if let Some(gpu) = &self.gpu_output {

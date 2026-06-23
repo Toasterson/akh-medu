@@ -208,6 +208,32 @@ pub struct GraphBenchStats {
     pub stream_eager_diff: f32,
 }
 
+/// Byte-exactness of the Phase 46d-2c **graph-ready** decode forward — the
+/// [`GraphDecodeCtx`](super::vendored::quantized_gemma3::GraphDecodeCtx)-driven path
+/// (device-pos rope `index_select`, `kv_scatter_at`, fixed block-padded `read_len` + a
+/// device-built keep-mask) run **eagerly** at a fixed position — against the normal decode
+/// forward at the same position. The 46d-2c gate: both diffs must be `0` before adding
+/// capture/replay (46d-2d). If they are not, the graph-ready math diverged and capturing it
+/// would replay a wrong forward.
+#[derive(Debug, Clone)]
+pub struct GraphDecodeParity {
+    /// Fixed decode position the forwards ran at (= prompt length).
+    pub position: usize,
+    /// max|Δlogits| between normal decode and the graph-ready forward reading the EXACT
+    /// `read_len = pos + 1` (no padding) — isolates the device-pos rope + scatter from the
+    /// padding/mask path. Expected `0`.
+    pub exact_diff: f32,
+    /// max|Δlogits| between normal decode and the graph-ready forward reading a PADDED
+    /// `read_len > pos + 1` with the block tail masked — proves the fixed-shape + masked-
+    /// tail attention is bit-identical to attention over the valid prefix. Expected `0`.
+    pub padded_diff: f32,
+    /// The block-padded `read_len` used for [`padded_diff`](Self::padded_diff).
+    pub padded_read_len: usize,
+    /// Whether the device-pos `kv_scatter_at` write path (hip) was exercised (vs the
+    /// `slice_set` fallback). Always true in a `hip` build reaching the cuda KV path.
+    pub used_device_scatter: bool,
+}
+
 // ---------------------------------------------------------------------------
 // Expected model paths
 // ---------------------------------------------------------------------------
@@ -660,9 +686,9 @@ impl CandleBackend {
         let hidden_only = std::env::var("AKH_BENCH_GRAPH_HIDDEN").as_deref() == Ok("1");
         let run = |m: &mut super::vendored::quantized_gemma3::ModelWeights| -> candle_core::Result<Tensor> {
             if hidden_only {
-                m.hidden_states_from_embed(&embed, position)
+                m.hidden_states_from_embed(&embed, position, None)
             } else {
-                m.forward_from_embed(&embed, position)
+                m.forward_from_embed(&embed, position, None)
             }
         };
 
@@ -765,6 +791,117 @@ impl CandleBackend {
             max_abs_diff,
             replay_determinism,
             stream_eager_diff,
+        })
+    }
+
+    /// Phase 46d-2c gate: byte-exact A/B of the **graph-ready** decode forward against the
+    /// normal decode forward at a fixed position (see [`GraphDecodeParity`]). The graph-ready
+    /// path (device-pos rope `index_select`, `kv_scatter_at`, fixed block-padded `read_len` +
+    /// a device-built keep-mask) is run EAGERLY here — no capture — so any divergence is
+    /// attributed to the new math, not to graph machinery. Both diffs must be `0` before
+    /// 46d-2d wraps this forward in a captured/replayed graph. gemma3 only.
+    #[cfg(all(feature = "candle-backend", feature = "hip"))]
+    pub fn bench_graph_decode_parity(&mut self, prompt: &str) -> NluResult<GraphDecodeParity> {
+        use super::vendored::quantized_gemma3::GraphDecodeCtx;
+        let fail = |reason: String| NluError::LlmGenerationFailed { reason };
+
+        // --- Prefill to a realistic position P (mirrors bench_graph_replay) ---------
+        let encoding = self
+            .tokenizer
+            .encode(prompt, true)
+            .map_err(|e| fail(format!("tokenization: {e}")))?;
+        let mut prompt_tokens: Vec<u32> = encoding.get_ids().to_vec();
+        if matches!(self.family, ModelFamily::Gemma | ModelFamily::Gemma4) {
+            if let Some(bos) = self.tokenizer.token_to_id("<bos>") {
+                if prompt_tokens.first() != Some(&bos) {
+                    prompt_tokens.insert(0, bos);
+                }
+            }
+        }
+        let position = prompt_tokens.len();
+        let input = Tensor::new(prompt_tokens.as_slice(), &self.device)
+            .and_then(|t| t.unsqueeze(0))
+            .map_err(|e| fail(format!("prompt tensor: {e}")))?;
+        let prefill = self
+            .model
+            .forward(&input, 0)
+            .map_err(|e| fail(format!("prefill: {e}")))?;
+        let next_token = prefill
+            .i((0, ..))
+            .and_then(|l| l.argmax(0))
+            .and_then(|t| t.to_scalar::<u32>())
+            .map_err(|e| fail(format!("prefill argmax: {e}")))?;
+        let tok_input = Tensor::new(&[next_token], &self.device)
+            .and_then(|t| t.unsqueeze(0))
+            .map_err(|e| fail(format!("token tensor: {e}")))?;
+
+        // Clone the device handle before the mutable model borrow (GraphDecodeCtx::new needs it).
+        let device = self.device.clone();
+        let model = match &mut self.model {
+            LoadedModel::Gemma(m) => m,
+            _ => {
+                return Err(fail(
+                    "graph decode parity probe supports gemma3 only".to_string(),
+                ))
+            }
+        };
+        // The embedding lookup is a host-sync op; the graph-ready forward starts from it.
+        let embed = model.embed(&tok_input).map_err(|e| fail(format!("embed: {e}")))?;
+
+        let to_vec = |t: &Tensor| -> NluResult<Vec<f32>> {
+            t.i((0, ..))
+                .and_then(|t| t.to_vec1::<f32>())
+                .map_err(|e| fail(format!("logits: {e}")))
+        };
+        let max_diff = |a: &[f32], b: &[f32]| -> f32 {
+            a.iter()
+                .zip(b.iter())
+                .map(|(x, y)| (x - y).abs())
+                .fold(0.0f32, f32::max)
+        };
+
+        // Normal decode forward at P (writes K/V col P via slice_set, reads [0, P+1)).
+        let normal = to_vec(
+            &model
+                .forward_from_embed(&embed, position, None)
+                .map_err(|e| fail(format!("normal forward: {e}")))?,
+        )?;
+
+        // Graph-ready, EXACT read_len = P + 1: re-writes col P via the device-pos
+        // kv_scatter_at and reads the same [0, P+1) — isolates device-pos rope + scatter
+        // from the padding/mask path.
+        let g_exact = GraphDecodeCtx::new(&device, position + 1)
+            .map_err(|e| fail(format!("graph ctx (exact): {e}")))?;
+        g_exact
+            .set_pos(position)
+            .map_err(|e| fail(format!("set_pos (exact): {e}")))?;
+        let exact = to_vec(
+            &model
+                .forward_from_embed(&embed, position, Some(&g_exact))
+                .map_err(|e| fail(format!("graph-ready forward (exact): {e}")))?,
+        )?;
+
+        // Graph-ready, PADDED read_len > P + 1: reads a fixed padded slice; the > P tail is
+        // masked by the keep-mask — proves the block-padding + masked-tail attention is
+        // bit-identical to attention over the valid prefix.
+        let padded_read_len = (position + 1 + 8).min(model.kv_ctx().max(position + 1));
+        let g_pad = GraphDecodeCtx::new(&device, padded_read_len)
+            .map_err(|e| fail(format!("graph ctx (padded): {e}")))?;
+        g_pad
+            .set_pos(position)
+            .map_err(|e| fail(format!("set_pos (padded): {e}")))?;
+        let padded = to_vec(
+            &model
+                .forward_from_embed(&embed, position, Some(&g_pad))
+                .map_err(|e| fail(format!("graph-ready forward (padded): {e}")))?,
+        )?;
+
+        Ok(GraphDecodeParity {
+            position,
+            exact_diff: max_diff(&normal, &exact),
+            padded_diff: max_diff(&normal, &padded),
+            padded_read_len,
+            used_device_scatter: true,
         })
     }
 

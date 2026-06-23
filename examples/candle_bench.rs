@@ -103,6 +103,39 @@ fn main() -> miette::Result<()> {
     #[cfg(feature = "hip")]
     candle_core::cuda::reset_malloc_counts();
 
+    // Phase 46d-2c: byte-exact A/B of the graph-ready decode forward (device-pos rope +
+    // kv_scatter_at + block-padded read_len + device-built keep-mask, run EAGERLY) vs the
+    // normal decode forward at a fixed position. The gate for the per-token graph decode:
+    // both diffs must be 0 before 46d-2d wraps the forward in a captured graph.
+    #[cfg(feature = "hip")]
+    if std::env::var("AKH_BENCH_GRAPH_PARITY").as_deref() == Ok("1") {
+        let p = backend.bench_graph_decode_parity(&prompt)?;
+        let verdict = |d: f32| if d == 0.0 { "BYTE-EXACT" } else { "DIVERGED" };
+        println!();
+        println!("=== Phase 46d-2c graph-ready decode parity (eager A/B) ===");
+        println!("position (P)        : {} tokens", p.position);
+        println!(
+            "device KV write     : {}",
+            if p.used_device_scatter {
+                "kv_scatter_at (device *d_pos)"
+            } else {
+                "slice_set (host offset)"
+            }
+        );
+        println!(
+            "exact  read_len=P+1 : max|Δlogits| {:.3e}  ({})",
+            p.exact_diff,
+            verdict(p.exact_diff)
+        );
+        println!(
+            "padded read_len={:<5}: max|Δlogits| {:.3e}  ({})",
+            p.padded_read_len,
+            p.padded_diff,
+            verdict(p.padded_diff)
+        );
+        return Ok(());
+    }
+
     // Phase 46c: fixed-position HIP-graph capture/replay probe (AKH_BENCH_GRAPH=1). The
     // decisive measurement — eager forward vs single-dispatch graph replay at one fixed
     // decode position — for whether graph replay can close the dispatch-bound decode gap.
