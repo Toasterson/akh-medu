@@ -78,3 +78,34 @@ for the Neural→VSA bridge. (Scoped in detail in the Phase 27 plan once 46a–4
 - Anima WI: Akh-Medu project `019d9844-ce74-7993-a9f0-c953b8f04a4e` (create a Phase 46
   work item; promote to agent-ready once 46a lands).
 - Seshat: ingest this plan + ADR 074 so the corpus stays searchable.
+
+## 46c status (2026-06-23) — HIP-graph capture VALIDATED, byte-exact
+
+The full gemma3 decode forward now captures into a `hipGraph` and replays in one
+`hipGraphLaunch`, **bit-identical to eager** (fixed-position probe `AKH_BENCH_GRAPH=1`:
+parity max|Δlogits|=0, deterministic). Speedup: **1.33× @ P=22** (replay 41.6 vs eager
+31.3 tok/s), **1.26× @ P=362** (27.6 vs 22.0, 3 GB pool). Confirms the dispatch-idle
+hypothesis with correct output.
+
+Three capture-enabling fixes (commit `d80d632`), found by bisecting capture failures
+through fast candle-core op_tests (single → batched → chain → attn_block):
+1. **The correctness bug**: the f16↔f32 cast (`AKH_CAST_LAUNCH`) launched on stream `0`
+   instead of `g_akh_stream`. The KV cache's per-layer read-cast ran un-captured on the
+   null stream → missing from replay → stale K/V → wrong output (compounded to max|Δ|=43.5).
+   Byte-identical for normal execution (g_akh_stream is null there).
+2. `event_time`'s `hipEventRecord` (null stream) invalidated Global-mode capture → skip
+   while a launch stream is set.
+3. rocBLAS automatic-mode per-call workspace hipMalloc aborted capture → fixed 64 MB
+   `rocblas_set_workspace`.
+
+API: `candle_core::cuda::HipGraph` + `device_synchronize` + `run_on_private_stream`;
+gemma3 `embed`/`hidden_states_from_embed`/`forward_from_embed` split.
+
+**Reframing for 46d (measured):** at P=362 the default 512 MB pool misses 241
+hipMalloc/token (growing attention transients overflow the cap) → eager only 12.4 tok/s; a
+3 GB pool is 0-miss → 22.0 tok/s (**1.77×**). So the growing-shape malloc-thrash, not the
+0.5% seen at P=22, is the dominant large-P cost. The 46d static-buffer rewrite (pre-alloc
+attention scratch at MAX size + len-extent views) eliminates BOTH the thrash AND enables
+capture at all P → combined **~2× at P=362** (12.4 → 27.6). Remaining 46d work: the moving
+KV-write (device-pointer write offset + attention len read from device, updated outside the
+captured region — not per-token recapture); the flash-attn stash is groundwork.
