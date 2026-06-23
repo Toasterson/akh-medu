@@ -104,7 +104,7 @@ def build_prompt(task: dict, repo_dir: Path, max_context=24000) -> tuple[str, li
 
 # ── per-task run ────────────────────────────────────────────────────────────
 def run_task(task: dict, *, dry_run_gold=False, no_tests=False, workspace="tecton",
-             timeout=600, keep=False, max_context=24000) -> dict:
+             timeout=600, keep=False, max_context=24000, judge_workspace=None) -> dict:
     iid = task["instance_id"]
     print(f"\n{'='*70}\n[{iid}] {task['repo']} @ {task['base_commit'][:10]} "
           f"({task['difficulty']})")
@@ -179,9 +179,11 @@ def run_task(task: dict, *, dry_run_gold=False, no_tests=False, workspace="tecto
         rc_py = rc_env.get("FC_PY", py)
 
         lint_targets = stats.files_list
+        # Dim-6 idiomaticity judge (non-blocker): a separate akh, if requested.
+        judge = grader.make_akh_judge(judge_workspace) if judge_workspace else None
         g = grader.grade(iid, repo_dir, task["repo"], patch, task["test_patch"],
                          task["FAIL_TO_PASS"], task["PASS_TO_PASS"], py,
-                         lint_targets=lint_targets, judge=None)
+                         lint_targets=lint_targets, judge=judge)
         # overwrite Dim 4 placeholder with the real reverse-classical verdict
         rc = grader.reverse_classical(rc_dir, task["repo"], task["test_patch"],
                                       task["FAIL_TO_PASS"], rc_py)
@@ -255,6 +257,9 @@ def main(argv=None) -> int:
     ap.add_argument("--max-context", type=int, default=24000,
                     help="max chars of source context in the prompt; shrink this "
                          "(e.g. 6000) if the cloud LLM backend times out on large prompts")
+    ap.add_argument("--judge-workspace", default=None,
+                    help="akh to score Dim-6 idiomaticity (non-blocker); use a "
+                         "different akh than --workspace to avoid self-grading")
     args = ap.parse_args(argv)
 
     tdir = Path(args.tasks)
@@ -269,7 +274,8 @@ def main(argv=None) -> int:
     for t in tasks:
         rec = run_task(t, dry_run_gold=args.dry_run_gold, no_tests=args.no_tests,
                        workspace=args.workspace, timeout=int(args.timeout),
-                       keep=args.keep, max_context=args.max_context)
+                       keep=args.keep, max_context=args.max_context,
+                       judge_workspace=args.judge_workspace)
         summary.append({"instance_id": rec["instance_id"],
                         "score": rec.get("score", 0),
                         "error": rec.get("error")})

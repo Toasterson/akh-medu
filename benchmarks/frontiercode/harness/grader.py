@@ -254,7 +254,39 @@ def _tail(c: Cmd, n=240) -> str:
 
 
 def judge_stub(patch: str) -> dict:
-    """Placeholder Dim-6 judge. Wire an LLM here (e.g. drive a second akh, or a
-    rubric prompt to Tecton) to score idiomaticity/design 1-5 and map ≥3 to pass.
-    TODO: implement; currently always returns evaluable=False upstream."""
+    """Placeholder Dim-6 judge (used when no --judge-workspace is given)."""
     return {"pass": None, "detail": "stub"}
+
+
+def make_akh_judge(workspace: str, timeout: float = 120.0):
+    """Dim-6 (code quality / idiomaticity) judge — drive an akh to score the
+    patch's idiomaticity & design 1-5 via a rubric prompt, mapping >=3 to pass.
+    FrontierCode's dim 6 is a non-blocker, so any judge failure (timeout, parse)
+    returns pass=None (a missing signal), never a hard fail. Prefer a *different*
+    akh than the one under test to avoid self-grading."""
+    import os, re, sys
+    sys.path.insert(0, os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "scripts"))
+    from acp_adapter import AkhClient
+
+    def judge(patch: str) -> dict:
+        prompt = (
+            "You are a senior code reviewer. Rate ONLY the idiomaticity and design "
+            "quality of the following unified-diff patch on a 1-5 scale (5 = clean, "
+            "idiomatic, well-designed; 1 = poor). Judge style/design, not whether it "
+            "fixes the bug. Reply with EXACTLY one line: 'SCORE: <n> - <short reason>'.\n\n"
+            + patch[:8000]
+        )
+        try:
+            with AkhClient(workspace, timeout=timeout) as c:
+                turn = c.prompt(prompt)
+            m = re.search(r"SCORE:\s*([1-5])", turn.answer)
+            if not m:
+                return {"pass": None,
+                        "detail": f"judge[{workspace}]: unparseable ({turn.answer.strip()[:60]})"}
+            score = int(m.group(1))
+            return {"pass": score >= 3, "detail": f"idiomaticity {score}/5 (judge={workspace})"}
+        except Exception as e:  # noqa: BLE001 — non-blocker, degrade gracefully
+            return {"pass": None, "detail": f"judge[{workspace}] error: {str(e)[:60]}"}
+
+    return judge
