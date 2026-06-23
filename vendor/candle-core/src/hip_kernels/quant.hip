@@ -137,6 +137,84 @@ __global__ void akh_dequant_q6k_kernel(const unsigned char* __restrict__ blocks,
     out[row * in_dim + col] = d * (float)scb[sc_index] * (float)q;
 }
 
+// ---- quantized get_rows (Phase 46 VRAM) ------------------------------------
+// Embedding lookup straight off the quantized table: dequantize only the rows named
+// in `indices` (one f32 row per index), so the huge token_embd stays Q4_K/Q6_K resident
+// (~0.83 GB) instead of a 4 GB f32 expansion. Each thread emits one output element;
+// the source row is `indices[output_row]`. Dequant bodies mirror the row-major dequant
+// kernels above bit-for-bit (kept separate to avoid touching the proven weight path).
+__global__ void akh_get_rows_q4k_f32_kernel(const unsigned char* __restrict__ blocks,
+                                            const unsigned int* __restrict__ indices,
+                                            float* __restrict__ out,
+                                            unsigned long n_rows, unsigned long in_dim) {
+    unsigned long gidx = (unsigned long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (gidx >= n_rows * in_dim) return;
+    unsigned long orow = gidx / in_dim;             // output row
+    unsigned long col = gidx % in_dim;
+    unsigned long srow = (unsigned long)indices[orow]; // source row in the table
+    unsigned long blocks_per_row = in_dim / AKH_Q4K_QK;
+    unsigned long sb = col / AKH_Q4K_QK;
+    int p = (int)(col % AKH_Q4K_QK);
+
+    const unsigned char* b =
+        blocks + (srow * blocks_per_row + sb) * AKH_Q4K_BLOCK_BYTES;
+    float d = __half2float(*reinterpret_cast<const __half*>(b + 0));
+    float dmin = __half2float(*reinterpret_cast<const __half*>(b + 2));
+    const unsigned char* scales = b + 4;
+    const unsigned char* qs = b + 16;
+
+    int iter = p / 64;
+    int within = p % 64;
+    int qoff = iter * 32 + (within & 31);
+    int is = 2 * iter + (within < 32 ? 0 : 1);
+    unsigned char sc, mn;
+    akh_q4k_scale_min(is, scales, &sc, &mn);
+    int nib = (within < 32) ? (qs[qoff] & 0xF) : (qs[qoff] >> 4);
+    out[orow * in_dim + col] = d * (float)sc * (float)nib - dmin * (float)mn;
+}
+
+__global__ void akh_get_rows_q6k_f32_kernel(const unsigned char* __restrict__ blocks,
+                                            const unsigned int* __restrict__ indices,
+                                            float* __restrict__ out,
+                                            unsigned long n_rows, unsigned long in_dim) {
+    unsigned long gidx = (unsigned long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (gidx >= n_rows * in_dim) return;
+    unsigned long orow = gidx / in_dim;
+    unsigned long col = gidx % in_dim;
+    unsigned long srow = (unsigned long)indices[orow];
+    unsigned long blocks_per_row = in_dim / AKH_Q6K_QK;
+    unsigned long sb = col / AKH_Q6K_QK;
+    int p = (int)(col % AKH_Q6K_QK);
+
+    const unsigned char* b =
+        blocks + (srow * blocks_per_row + sb) * AKH_Q6K_BLOCK_BYTES;
+    const unsigned char* ql = b + 0;
+    const unsigned char* qh = b + 128;
+    const signed char* sc = reinterpret_cast<const signed char*>(b + 192);
+    float d = __half2float(*reinterpret_cast<const __half*>(b + 208));
+
+    int idx = p / 128;
+    int within = p % 128;
+    int quarter = within / 32;
+    int l = within % 32;
+    int is = l / 16;
+
+    const unsigned char* qlb = ql + 64 * idx;
+    const unsigned char* qhb = qh + 32 * idx;
+    const signed char* scb = sc + 8 * idx;
+    unsigned char qhbyte = qhb[l];
+    int qval;
+    switch (quarter) {
+        case 0: qval = (qlb[l] & 0xF)      | ((qhbyte & 3) << 4); break;
+        case 1: qval = (qlb[l + 32] & 0xF) | (((qhbyte >> 2) & 3) << 4); break;
+        case 2: qval = (qlb[l] >> 4)       | (((qhbyte >> 4) & 3) << 4); break;
+        default: qval = (qlb[l + 32] >> 4) | (((qhbyte >> 6) & 3) << 4); break;
+    }
+    int q = qval - 32;
+    int sc_index = is + 2 * quarter;
+    out[orow * in_dim + col] = d * (float)scb[sc_index] * (float)q;
+}
+
 // ---- fused quantized GEMV (Phase 45g/45h) ----------------------------------
 // Decode is a matrix-VECTOR product (m=1): out[row] = Σ_k dequant(W[row,k]) * x[k].
 // Dequantizing inline (never materializing the f32 weight) streams only the
@@ -284,6 +362,30 @@ int akh_dequant_q4k(const unsigned char* blocks, float* out, size_t rows, size_t
     hipLaunchKernelGGL(akh_dequant_q4k_kernel, dim3((unsigned)nblocks), dim3(threads), 0, 0,
                        blocks, out, (unsigned long)rows, (unsigned long)in_dim);
     // No per-kernel sync (Phase 45h) — ordered on the null stream.
+    return (int)hipGetLastError();
+}
+
+// Quantized get_rows (Phase 46): `out[n_rows * in_dim]` f32, row i = dequant(table[indices[i]]).
+// `blocks` is the raw quantized table (n_rows_table x in_dim); `indices` is a device u32 array.
+int akh_get_rows_q4k_f32(const unsigned char* blocks, const unsigned int* indices, float* out,
+                         size_t n_rows, size_t in_dim) {
+    unsigned long total = (unsigned long)n_rows * (unsigned long)in_dim;
+    if (total == 0) return 0;
+    int threads = 256;
+    unsigned long nblocks = (total + threads - 1) / threads;
+    hipLaunchKernelGGL(akh_get_rows_q4k_f32_kernel, dim3((unsigned)nblocks), dim3(threads), 0, 0,
+                       blocks, indices, out, (unsigned long)n_rows, (unsigned long)in_dim);
+    return (int)hipGetLastError();
+}
+
+int akh_get_rows_q6k_f32(const unsigned char* blocks, const unsigned int* indices, float* out,
+                         size_t n_rows, size_t in_dim) {
+    unsigned long total = (unsigned long)n_rows * (unsigned long)in_dim;
+    if (total == 0) return 0;
+    int threads = 256;
+    unsigned long nblocks = (total + threads - 1) / threads;
+    hipLaunchKernelGGL(akh_get_rows_q6k_f32_kernel, dim3((unsigned)nblocks), dim3(threads), 0, 0,
+                       blocks, indices, out, (unsigned long)n_rows, (unsigned long)in_dim);
     return (int)hipGetLastError();
 }
 

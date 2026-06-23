@@ -32,7 +32,7 @@ use std::sync::Arc;
 use candle::quantized::QTensor;
 use candle::quantized::gguf_file;
 use candle::{DType, Device, IndexOp, Result, Tensor, D};
-use candle_nn::{Embedding, Module};
+use candle_nn::Module;
 
 pub const MAX_SEQ_LEN: usize = 131072; // Gemma 4 long-context window.
 
@@ -120,6 +120,14 @@ struct QMatMul {
 impl QMatMul {
     fn from_qtensor(qtensor: QTensor) -> Result<Self> {
         let inner = candle::quantized::QMatMul::from_qtensor(qtensor)?;
+        let span = tracing::span!(tracing::Level::TRACE, "qmatmul");
+        Ok(Self { inner, span })
+    }
+
+    /// Build from a shared `Arc<QTensor>` so the tied lm_head reuses the one resident
+    /// copy of `token_embd` (Phase 46 VRAM) instead of a second load.
+    fn from_arc(qtensor: Arc<QTensor>) -> Result<Self> {
+        let inner = candle::quantized::QMatMul::from_arc(qtensor)?;
         let span = tracing::span!(tracing::Level::TRACE, "qmatmul");
         Ok(Self { inner, span })
     }
@@ -447,7 +455,9 @@ impl LayerWeights {
 
 #[derive(Debug, Clone)]
 pub struct ModelWeights {
-    tok_embeddings: Embedding,
+    /// Token embedding table kept QUANTIZED (Phase 46 VRAM) — `get_rows` dequantizes
+    /// only looked-up rows (Q6_K ~0.83 GB vs 4 GB f32). `Arc`-shared with the tied lm_head.
+    tok_embeddings: Arc<QTensor>,
     embedding_length: usize,
     layers: Vec<LayerWeights>,
     norm: GemmaRmsNorm,
@@ -580,17 +590,18 @@ impl ModelWeights {
         #[cfg(feature = "rocm")]
         let gpu_quant = std::env::var("AKH_GPU_QUANT").ok().as_deref() == Some("1");
 
-        // Load token embeddings; tied lm_head (no output.weight in Gemma 4).
-        let tok_embeddings_q = ct.tensor(reader, "token_embd.weight", device)?;
-        let tok_embeddings = tok_embeddings_q.dequantize(device)?;
+        // Token embeddings kept QUANTIZED (Phase 46 VRAM): `get_rows` dequantizes only
+        // the looked-up rows, skipping the ~4 GB f32 expansion of the whole table.
+        let tok_embeddings = Arc::new(ct.tensor(reader, "token_embd.weight", device)?);
         let norm = GemmaRmsNorm::from_qtensor(
             ct.tensor(reader, "output_norm.weight", device)?,
             rms_norm_eps,
         )?;
-        // Tied weights: use token_embd as the output projection (no output.weight).
+        // Tied lm_head (no output.weight in Gemma 4): share the one resident quantized
+        // copy of token_embd via `Arc` (saves a 2nd ~0.83 GB load).
         let output = match ct.tensor(reader, "output.weight", device) {
-            Ok(tensor) => tensor,
-            Err(_) => ct.tensor(reader, "token_embd.weight", device)?,
+            Ok(tensor) => Arc::new(tensor),
+            Err(_) => tok_embeddings.clone(),
         };
         #[cfg(feature = "rocm")]
         let gpu_output: Option<crate::nlu::hip::GpuLinear> = match &gpu_blas {
@@ -822,13 +833,13 @@ impl ModelWeights {
         let span_output = tracing::span!(tracing::Level::TRACE, "output");
 
         Ok(Self {
-            tok_embeddings: Embedding::new(tok_embeddings, embedding_length),
+            tok_embeddings,
             #[cfg(feature = "rocm")]
             gpu_output,
             embedding_length,
             layers,
             norm,
-            output: QMatMul::from_qtensor(output)?,
+            output: QMatMul::from_arc(output)?,
             final_logit_softcap,
             span,
             span_output,
@@ -849,7 +860,7 @@ impl ModelWeights {
     /// build the base sequence for multimodal splicing (e.g. native audio).
     /// (akh-medu vendored extension.)
     pub fn embed_tokens(&self, ids: &Tensor) -> Result<Tensor> {
-        self.tok_embeddings.forward(ids)
+        self.tok_embeddings.get_rows(ids)
     }
 
     /// `sqrt(embedding_length)` — the scale Gemma 4 applies to *text*-token
@@ -863,7 +874,7 @@ impl ModelWeights {
     /// **last position** (shape `[batch, hidden_dim]`), before the output
     /// projection — for the Neural→VSA bridge. (akh-medu vendored extension.)
     pub fn hidden_states(&mut self, x: &Tensor, index_pos: usize) -> Result<Tensor> {
-        let mut layer_in = self.tok_embeddings.forward(x)?;
+        let mut layer_in = self.tok_embeddings.get_rows(x)?;
         // Scale embeddings by sqrt(embedding_length) (≈61.9677 for 3840).
         layer_in = (layer_in * (self.embedding_length as f64).sqrt())?;
         let (b_sz, seq_len) = x.dims2()?;

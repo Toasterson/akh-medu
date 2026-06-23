@@ -22,7 +22,7 @@ use candle::quantized::gguf_file;
 use candle::quantized::QTensor;
 use candle::D;
 use candle::{DType, Device, IndexOp, Result, Tensor};
-use candle_nn::{Embedding, Module};
+use candle_nn::Module;
 
 // --- HIP-device op routing (Phase 45f / ADR 073) ----------------------------
 // candle-nn's `rms_norm` / `softmax_last_dim` / `rope` are custom ops whose GPU path
@@ -103,6 +103,14 @@ struct QMatMul {
 impl QMatMul {
     fn from_qtensor(qtensor: QTensor) -> Result<Self> {
         let inner = candle::quantized::QMatMul::from_qtensor(qtensor)?;
+        let span = tracing::span!(tracing::Level::TRACE, "qmatmul");
+        Ok(Self { inner, span })
+    }
+
+    /// Build from a shared `Arc<QTensor>` so a tied lm_head can reuse the one resident
+    /// copy of `token_embd` (Phase 46 VRAM) instead of a second load.
+    fn from_arc(qtensor: Arc<QTensor>) -> Result<Self> {
+        let inner = candle::quantized::QMatMul::from_arc(qtensor)?;
         let span = tracing::span!(tracing::Level::TRACE, "qmatmul");
         Ok(Self { inner, span })
     }
@@ -391,7 +399,11 @@ impl LayerWeights {
 
 #[derive(Debug, Clone)]
 pub struct ModelWeights {
-    tok_embeddings: Embedding,
+    /// Token embedding table, kept QUANTIZED (Phase 46 VRAM): the lookup dequantizes
+    /// only the rows it needs via `QTensor::get_rows`, so the ~1 B-row table stays
+    /// Q6_K (~0.83 GB) instead of a 4 GB f32 expansion. Shared (`Arc`) with the tied
+    /// lm_head `output` when there is no separate `output.weight`.
+    tok_embeddings: Arc<QTensor>,
     embedding_length: usize,
     layers: Vec<LayerWeights>,
     norm: GemmaRmsNorm,
@@ -481,16 +493,18 @@ impl ModelWeights {
         #[cfg(feature = "rocm")]
         let gpu_quant = std::env::var("AKH_GPU_QUANT").ok().as_deref() == Some("1");
 
-        // Load token embeddings and output projection
-        let tok_embeddings = ct.tensor(reader, "token_embd.weight", device)?;
-        let tok_embeddings = tok_embeddings.dequantize(device)?;
+        // Token embeddings kept QUANTIZED (Phase 46 VRAM): `get_rows` dequantizes only
+        // the looked-up rows, so we skip the ~4 GB f32 expansion of the whole table.
+        let tok_embeddings = Arc::new(ct.tensor(reader, "token_embd.weight", device)?);
         let norm = GemmaRmsNorm::from_qtensor(
             ct.tensor(reader, "output_norm.weight", device)?,
             rms_norm_eps,
         )?;
+        // lm_head: a distinct `output.weight` if present, else tied to token_embd —
+        // share the single resident quantized copy via `Arc` (saves a 2nd ~0.83 GB load).
         let output = match ct.tensor(reader, "output.weight", device) {
-            Ok(tensor) => tensor,
-            Err(_) => ct.tensor(reader, "token_embd.weight", device)?, // Use tied weights if output.weight doesn't exist
+            Ok(tensor) => Arc::new(tensor),
+            Err(_) => tok_embeddings.clone(),
         };
         #[cfg(feature = "rocm")]
         let gpu_output: Option<crate::nlu::hip::GpuLinear> = match &gpu_blas {
@@ -658,13 +672,13 @@ impl ModelWeights {
         let span_output = tracing::span!(tracing::Level::TRACE, "output");
 
         Ok(Self {
-            tok_embeddings: Embedding::new(tok_embeddings, embedding_length),
+            tok_embeddings,
             #[cfg(feature = "rocm")]
             gpu_output,
             embedding_length,
             layers,
             norm,
-            output: QMatMul::from_qtensor(output)?,
+            output: QMatMul::from_arc(output)?,
             span,
             span_output,
         })
@@ -677,7 +691,7 @@ impl ModelWeights {
         let (b_sz, seq_len) = x.dims2()?;
         let _enter = self.span.enter();
 
-        let mut layer_in = self.tok_embeddings.forward(x)?;
+        let mut layer_in = self.tok_embeddings.get_rows(x)?;
         layer_in = (layer_in * (self.embedding_length as f64).sqrt())?;
 
         for layer in self.layers.iter_mut() {

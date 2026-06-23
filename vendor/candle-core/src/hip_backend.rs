@@ -3320,6 +3320,36 @@ mod op_tests {
         }
     }
 
+    /// Phase 46 quantized embedding get_rows: dequantizing only the looked-up rows off
+    /// the Q4_K/Q6_K table is bit-identical to a full `dequantize` + `index_select`
+    /// (same quantized bytes, same dequant body) — so the table can stay quantized.
+    #[test]
+    fn get_rows_q4k_q6k_matches() -> Result<()> {
+        use crate::quantized::{GgmlDType, QTensor};
+        let Some(dev) = gpu() else {
+            return Ok(());
+        };
+        let (vocab, hidden) = (10usize, 512usize); // hidden % 256 == 0
+        let data: Vec<f32> = (0..vocab * hidden)
+            .map(|i| ((i as f32) * 0.0007).sin() * 0.5)
+            .collect();
+        let cpu = Tensor::from_vec(data, (vocab, hidden), &Device::Cpu)?;
+        let idx = Tensor::new(&[3u32, 0, 9, 1, 5, 9], &dev)?;
+        for dtype in [GgmlDType::Q6K, GgmlDType::Q4K] {
+            let qt = QTensor::quantize_onto(&cpu, dtype, &dev)?;
+            let got = qt.get_rows(&idx)?;
+            assert_eq!(got.dims(), [6, hidden]);
+            let want = qt.dequantize(&dev)?.index_select(&idx, 0)?;
+            close(
+                &got.flatten_all()?.to_vec1::<f32>()?,
+                &want.flatten_all()?.to_vec1::<f32>()?,
+                1e-6,
+                &format!("get_rows {dtype:?}"),
+            );
+        }
+        Ok(())
+    }
+
     /// Phase 45h HIP-graph spike #1: capture a malloc-free op (memset on a created
     /// stream) into a graph, instantiate, and *replay* it — proves capture/replay works
     /// end-to-end on this ROCm/gfx1100 (the foundation for collapsing the per-token

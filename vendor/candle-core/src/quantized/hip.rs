@@ -54,6 +54,10 @@ type DequantQ6K =
     unsafe extern "C" fn(*const u8, *mut f32, usize, usize) -> c_int;
 // Fused GEMV: out[n_rows] = W[n_rows,in_dim] · x[in_dim], dequant inline.
 type GemvQK = unsafe extern "C" fn(*const u8, *const f32, *mut f32, usize, usize) -> c_int;
+// get_rows: out[n_rows*in_dim] = dequant(table[indices[i]]) — embedding lookup off the
+// quantized table (Phase 46). `indices` is a device u32 array of length `n_rows`.
+type GetRowsQK =
+    unsafe extern "C" fn(*const u8, *const u32, *mut f32, usize, usize) -> c_int;
 
 struct QuantKernels {
     _lib: libloading::Library,
@@ -61,6 +65,8 @@ struct QuantKernels {
     dequant_q6k: DequantQ6K,
     gemv_q4k: GemvQK,
     gemv_q6k: GemvQK,
+    get_rows_q4k: GetRowsQK,
+    get_rows_q6k: GetRowsQK,
 }
 // The fn pointers live in a process-lifetime library; calls are externally synchronized
 // to the synchronous compute thread (same contract as `hip_backend::runtime::Kernels`).
@@ -86,12 +92,20 @@ impl QuantKernels {
             let gemv_q6k: GemvQK = *lib
                 .get(b"akh_gemv_q6k_f32\0")
                 .map_err(|e| format!("missing akh_gemv_q6k_f32: {e}"))?;
+            let get_rows_q4k: GetRowsQK = *lib
+                .get(b"akh_get_rows_q4k_f32\0")
+                .map_err(|e| format!("missing akh_get_rows_q4k_f32: {e}"))?;
+            let get_rows_q6k: GetRowsQK = *lib
+                .get(b"akh_get_rows_q6k_f32\0")
+                .map_err(|e| format!("missing akh_get_rows_q6k_f32: {e}"))?;
             Ok(QuantKernels {
                 _lib: lib,
                 dequant_q4k,
                 dequant_q6k,
                 gemv_q4k,
                 gemv_q6k,
+                get_rows_q4k,
+                get_rows_q6k,
             })
         }
     }
@@ -146,6 +160,30 @@ impl QuantKernels {
         let rc = unsafe { f(w, x, out, n_rows, in_dim) };
         if rc != 0 {
             return Err(format!("akh_gemv ({dtype:?}) kernel failed (hipError={rc})"));
+        }
+        Ok(())
+    }
+
+    /// Quantized embedding lookup (Phase 46): `out[n_rows*in_dim]` f32, row `i` =
+    /// dequant(`table[indices[i]]`). `blocks` is the quantized table, `indices` a device
+    /// u32 array of length `n_rows`. `dtype` selects the Q4_K / Q6_K kernel.
+    fn get_rows(
+        &self,
+        dtype: GgmlDType,
+        blocks: *const u8,
+        indices: *const u32,
+        out: *mut f32,
+        n_rows: usize,
+        in_dim: usize,
+    ) -> std::result::Result<(), String> {
+        let f = match dtype {
+            GgmlDType::Q4K => self.get_rows_q4k,
+            GgmlDType::Q6K => self.get_rows_q6k,
+            other => return Err(format!("HIP get_rows: dtype {other:?} not supported")),
+        };
+        let rc = unsafe { f(blocks, indices, out, n_rows, in_dim) };
+        if rc != 0 {
+            return Err(format!("akh_get_rows ({dtype:?}) kernel failed (hipError={rc})"));
         }
         Ok(())
     }
@@ -304,6 +342,66 @@ impl QCudaStorage {
             out,
             DType::F32,
             elem_count,
+        ))
+    }
+
+    /// Quantized embedding lookup (Phase 46 VRAM): dequantize only the rows named in
+    /// `indices` (host u32), returning a fresh row-major f32 `[n_rows, in_dim]` device
+    /// buffer — so the token_embd table stays Q4_K/Q6_K resident (~0.83 GB) instead of a
+    /// 4 GB f32 expansion. Q4_K/Q6_K only (the embedding dtypes); other dtypes return an
+    /// error so the caller can fall back to dequantize+index_select.
+    pub fn get_rows(&self, indices: &[u32], in_dim: usize) -> Result<CudaStorage> {
+        if !in_dim.is_multiple_of(self.dtype.block_size()) {
+            return Err(Error::Msg(format!(
+                "HIP get_rows: row width {in_dim} not a multiple of the {:?} block size",
+                self.dtype
+            )));
+        }
+        let h = runtime::hip().map_err(Error::Msg)?;
+        let k = quant_kernels()?;
+        let n = indices.len();
+        let out = h
+            .malloc(n * in_dim * std::mem::size_of::<f32>())
+            .map_err(Error::Msg)?;
+        // Upload the (small) index list H2D for the kernel.
+        let idx_bytes = n * std::mem::size_of::<u32>();
+        let idx_dev = match h.malloc(idx_bytes) {
+            Ok(p) => p,
+            Err(e) => {
+                h.free(out);
+                return Err(Error::Msg(e));
+            }
+        };
+        if let Err(e) = h.memcpy(
+            idx_dev,
+            indices.as_ptr() as *const c_void,
+            idx_bytes,
+            runtime::MEMCPY_H2D,
+        ) {
+            h.free(out);
+            h.free(idx_dev);
+            return Err(Error::Msg(e));
+        }
+        let res = k.get_rows(
+            self.dtype,
+            self.data as *const u8,
+            idx_dev as *const u32,
+            out as *mut f32,
+            n,
+            in_dim,
+        );
+        // Index upload is a synchronous hipMemcpy and the kernel is queued after it on the
+        // null stream, so recycling idx_dev now is safe (same contract as other transients).
+        h.free(idx_dev);
+        if let Err(e) = res {
+            h.free(out);
+            return Err(Error::Msg(e));
+        }
+        Ok(CudaStorage::from_raw(
+            self.device.clone(),
+            out,
+            DType::F32,
+            n * in_dim,
         ))
     }
 

@@ -656,6 +656,47 @@ impl QTensor {
         }
     }
 
+    /// Embedding lookup straight off the quantized table (Phase 46 VRAM): returns the
+    /// rows named by `indices` as f32, shape `[*indices.dims(), in_dim]`. On the HIP GPU
+    /// for Q4_K/Q6_K only the looked-up rows are dequantized, so the table stays
+    /// quantized (~0.83 GB) instead of a 4 GB f32 expansion. Every other case (CPU,
+    /// Metal, other dtypes) falls back to a full `dequantize` + `index_select`.
+    pub fn get_rows(&self, indices: &Tensor) -> Result<Tensor> {
+        let dims = self.shape.dims();
+        if dims.len() != 2 {
+            crate::bail!("QTensor::get_rows expects a 2D table, got {:?}", self.shape);
+        }
+        let in_dim = dims[1];
+        let mut out_dims = indices.dims().to_vec();
+        out_dims.push(in_dim);
+        match &self.storage {
+            QStorage::Cuda(s) if matches!(self.dtype(), GgmlDType::Q4K | GgmlDType::Q6K) => {
+                let flat = indices.flatten_all()?;
+                // Pull the (small) index list to host as u32 — D2H of U32/I64 is supported
+                // and avoids a device-side cast that the HIP backend may not implement.
+                let idx: Vec<u32> = match flat.dtype() {
+                    crate::DType::U32 => flat.to_vec1::<u32>()?,
+                    crate::DType::I64 => {
+                        flat.to_vec1::<i64>()?.into_iter().map(|v| v as u32).collect()
+                    }
+                    other => crate::bail!("QTensor::get_rows indices must be U32/I64, got {other:?}"),
+                };
+                let storage = s.get_rows(&idx, in_dim)?;
+                let none = crate::op::BackpropOp::none();
+                Ok(crate::tensor::from_storage(
+                    Storage::Cuda(storage),
+                    Shape::from(out_dims),
+                    none,
+                    false,
+                ))
+            }
+            _ => {
+                let table = self.dequantize(&indices.device())?;
+                table.index_select(&indices.flatten_all()?, 0)?.reshape(out_dims)
+            }
+        }
+    }
+
     pub fn storage_size_in_bytes(&self) -> usize {
         self.storage.size_in_bytes()
     }
