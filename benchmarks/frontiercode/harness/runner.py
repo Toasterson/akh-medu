@@ -1,0 +1,288 @@
+#!/usr/bin/env python3
+"""FrontierCode-style runner: drive akh `tecton` on hard repo-edit tasks.
+
+Per task:
+  1. checkout repo@base_commit into a temp dir
+  2. build a context-bearing prompt (problem + the source files the fix touches)
+  3. drive Tecton over ACP to get a unified diff (Tecton is a "model", not a
+     repo-editing agent — its sandbox cannot touch the target repo, so it
+     returns a patch which THIS harness applies and verifies)
+  4. apply the patch to the checkout
+  5. run the 6-dimension grader; blocker-gated score (all blockers → 1 else 0)
+
+Usage:
+    python3 harness/runner.py --tasks ../tasks                 # all tasks
+    python3 harness/runner.py --ids sympy__sympy-17630         # a slice
+    python3 harness/runner.py --ids sympy__sympy-17630 --dry-run-gold
+        ^ replay the GOLD patch instead of asking Tecton — sanity-checks the
+          grader + test env independently of the model.
+    python3 harness/runner.py --ids ... --no-tests
+        ^ skip env build + test execution (scope+patch-applies only); fast smoke.
+
+Outputs JSON per task into ../results/ and a roll-up results/summary.json.
+"""
+from __future__ import annotations
+import argparse, json, os, sys, tempfile, time, shutil
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import util, grader
+
+# import the ACP adapter from the repo's scripts/
+REPO_ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(REPO_ROOT / "scripts"))
+
+HERE = Path(__file__).resolve().parent
+TASKS_DIR = HERE.parent / "tasks"
+RESULTS_DIR = HERE.parent / "results"
+
+
+# ── prompt construction ─────────────────────────────────────────────────────
+PROMPT_TEMPLATE = """\
+You are an expert software engineer fixing a real issue in the `{repo}` repository.
+Everything you need is in THIS message — do NOT call any tools, do NOT run shell
+commands, do NOT fetch URLs, do NOT search files. Reason internally, then answer.
+
+# Issue
+{problem}
+
+# Relevant source files (current contents at the affected paths)
+{context}
+
+# Your task
+Produce a fix as a single unified diff (git format) that resolves the issue.
+Rules:
+- Edit ONLY the source files needed; do not modify or add tests.
+- Your ENTIRE reply must be exactly one fenced ```diff block — the complete patch
+  and nothing before or after it. Paths must be relative to the repo root, using
+  the `a/<path>` and `b/<path>` prefixes and `@@` hunk headers.
+- Keep the change minimal and idiomatic for this codebase.
+
+Output the ```diff block now and nothing else."""
+
+
+def gold_touched_files(gold_patch: str) -> list[str]:
+    """Files the gold solution edits — these are the relevant source files to
+    show Tecton (we never show the patch itself)."""
+    files = []
+    for line in gold_patch.splitlines():
+        if line.startswith("diff --git "):
+            parts = line.split()
+            if len(parts) >= 4:
+                b = parts[3]
+                files.append(b[2:] if b.startswith("b/") else b)
+    return files
+
+
+def build_context(repo_dir: Path, files: list[str], max_chars=24000) -> str:
+    blocks = []
+    budget = max_chars
+    for f in files:
+        p = repo_dir / f
+        if not p.exists():
+            continue
+        text = p.read_text(errors="replace")
+        if len(text) > budget:
+            text = text[:budget] + "\n# … (truncated for context budget) …\n"
+        blocks.append(f"## {f}\n```python\n{text}\n```")
+        budget -= len(text)
+        if budget <= 0:
+            break
+    return "\n\n".join(blocks) if blocks else "(no source files could be loaded)"
+
+
+def build_prompt(task: dict, repo_dir: Path, max_context=24000) -> tuple[str, list[str]]:
+    files = gold_touched_files(task["gold_patch"])
+    ctx = build_context(repo_dir, files, max_chars=max_context)
+    prompt = PROMPT_TEMPLATE.format(
+        repo=task["repo"],
+        problem=task["problem_statement"].strip()[:8000],
+        context=ctx,
+    )
+    return prompt, files
+
+
+# ── per-task run ────────────────────────────────────────────────────────────
+def run_task(task: dict, *, dry_run_gold=False, no_tests=False, workspace="tecton",
+             timeout=600, keep=False, max_context=24000) -> dict:
+    iid = task["instance_id"]
+    print(f"\n{'='*70}\n[{iid}] {task['repo']} @ {task['base_commit'][:10]} "
+          f"({task['difficulty']})")
+    rec: dict = {"instance_id": iid, "repo": task["repo"],
+                 "difficulty": task["difficulty"], "stages": {}}
+    workdir = Path(tempfile.mkdtemp(prefix=f"fc_{iid}_"))
+    rec["workdir"] = str(workdir)
+    try:
+        repo_dir = workdir / "repo"
+        # 1. checkout
+        t0 = time.time()
+        co = util.checkout(task["repo"], task["base_commit"], repo_dir)
+        rec["stages"]["checkout"] = {"ok": co.ok, "secs": round(time.time()-t0, 1),
+                                     "detail": "" if co.ok else co.stderr[-300:]}
+        if not co.ok:
+            rec["error"] = "checkout failed (network? bad sha?)"
+            print(f"  checkout FAILED: {co.stderr[-200:]}")
+            return rec
+        print(f"  checkout ok ({rec['stages']['checkout']['secs']}s)")
+
+        # 2/3. get a patch — gold (oracle) or Tecton
+        if dry_run_gold:
+            patch = task["gold_patch"]
+            rec["stages"]["model"] = {"mode": "gold-oracle", "patch_chars": len(patch)}
+            print("  using GOLD patch (oracle mode)")
+        else:
+            prompt, files = build_prompt(task, repo_dir, max_context=max_context)
+            rec["stages"]["prompt"] = {"chars": len(prompt), "context_files": files}
+            patch, mrec = drive_tecton(prompt, workspace, timeout)
+            rec["stages"]["model"] = mrec
+            if patch is None:
+                rec["error"] = "no patch extracted from Tecton answer"
+                print("  Tecton produced NO usable patch")
+                _save(rec)
+                return rec
+
+        (workdir / "candidate.patch").write_text(patch)
+        stats = util.diff_stats(patch)
+        rec["patch_stats"] = {"files": stats.files, "added": stats.added,
+                              "removed": stats.removed, "files_list": stats.files_list}
+
+        # 4. apply
+        applied, detail = util.apply_patch(patch, repo_dir)
+        rec["stages"]["apply"] = {"ok": applied, "detail": detail}
+        print(f"  apply: {'ok' if applied else 'FAILED'} — {detail[:140]}")
+        if not applied:
+            rec["score"] = 0
+            rec["error"] = "patch did not apply"
+            _save(rec)
+            return rec
+
+        if no_tests:
+            rec["note"] = "--no-tests: scope+apply only; not graded"
+            _save(rec)
+            return rec
+
+        # 5a. reverse-classical (Dim 4) needs a SEPARATE clean checkout at base
+        rc_dir = workdir / "repo_rc"
+        util.checkout(task["repo"], task["base_commit"], rc_dir)
+
+        # build env once in the patched repo
+        print("  building test env (venv + editable install)…")
+        t1 = time.time()
+        env_ok, env_detail, env_over = grader.make_env(repo_dir, task["repo"])
+        py = env_over.get("FC_PY", "python3")
+        rec["stages"]["env"] = {"ok": env_ok, "secs": round(time.time()-t1, 1),
+                                "detail": env_detail}
+        print(f"  env: {env_detail} ({rec['stages']['env']['secs']}s)")
+
+        # reuse the same venv python for the rc checkout (install editable there too)
+        rc_env_ok, _, rc_env = grader.make_env(rc_dir, task["repo"])
+        rc_py = rc_env.get("FC_PY", py)
+
+        lint_targets = stats.files_list
+        g = grader.grade(iid, repo_dir, task["repo"], patch, task["test_patch"],
+                         task["FAIL_TO_PASS"], task["PASS_TO_PASS"], py,
+                         lint_targets=lint_targets, judge=None)
+        # overwrite Dim 4 placeholder with the real reverse-classical verdict
+        rc = grader.reverse_classical(rc_dir, task["repo"], task["test_patch"],
+                                      task["FAIL_TO_PASS"], rc_py)
+        for i, d in enumerate(g.dims):
+            if d.name == "test_correctness_reverse_classical":
+                g.dims[i] = rc
+        g.finalize()
+        rec["grade"] = g.to_dict()
+        rec["score"] = g.score
+        _print_grade(g)
+        _save(rec)
+        return rec
+    finally:
+        if not keep:
+            shutil.rmtree(workdir, ignore_errors=True)
+
+
+def drive_tecton(prompt: str, workspace: str, timeout: int) -> tuple[str | None, dict]:
+    from acp_adapter import AkhClient
+    rec: dict = {"mode": "tecton"}
+    try:
+        with AkhClient(workspace, timeout=timeout) as c:
+            turn = c.prompt(prompt)
+    except Exception as e:
+        rec["error"] = f"{type(e).__name__}: {e}"
+        return None, rec
+    rec.update({"stop_reason": turn.stop_reason, "elapsed_s": round(turn.elapsed_s, 1),
+                "timed_out": turn.timed_out, "answer_chars": len(turn.answer),
+                "tools": sorted(set(turn.tools_used))})
+    # distinguish a backend/infra error (surfaced as the answer) from a genuine
+    # "model answered but produced no diff" so the report's failure-stage is precise
+    head = turn.answer.lstrip()[:80].lower()
+    if head.startswith("error[") or "backend" in head and "failed" in head:
+        rec["failure_kind"] = "backend_error"
+    elif turn.timed_out:
+        rec["failure_kind"] = "timeout"
+    patch = util.extract_patch(turn.answer)
+    rec["patch_extracted"] = patch is not None
+    if patch is None:
+        rec["answer_head"] = turn.answer[:400]
+        rec.setdefault("failure_kind", "no_diff_in_answer")
+    return patch, rec
+
+
+# ── output ──────────────────────────────────────────────────────────────────
+def _print_grade(g: grader.Grade):
+    print(f"  SCORE: {g.score}  {('— ' + g.note) if g.note else ''}")
+    for d in g.dims:
+        mark = {True: "PASS", False: "FAIL", None: "----"}[d.passed]
+        kind = "B" if d.blocker else " "
+        ev = "" if d.evaluable else " (not-evaluable)"
+        print(f"    [{kind}] {mark:4} {d.name}{ev}: {d.detail[:120]}")
+
+
+def _save(rec: dict):
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    (RESULTS_DIR / f"{rec['instance_id']}.json").write_text(json.dumps(rec, indent=2))
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--tasks", default=str(TASKS_DIR))
+    ap.add_argument("--ids", nargs="*", help="subset of instance ids")
+    ap.add_argument("--dry-run-gold", action="store_true",
+                    help="replay gold patch to validate grader+env")
+    ap.add_argument("--no-tests", action="store_true",
+                    help="scope+apply only; no env build / test exec")
+    ap.add_argument("--workspace", default="tecton")
+    ap.add_argument("--timeout", type=float, default=600)
+    ap.add_argument("--keep", action="store_true", help="keep temp workdirs")
+    ap.add_argument("--max-context", type=int, default=24000,
+                    help="max chars of source context in the prompt; shrink this "
+                         "(e.g. 6000) if the cloud LLM backend times out on large prompts")
+    args = ap.parse_args(argv)
+
+    tdir = Path(args.tasks)
+    files = sorted(tdir.glob("*.json"))
+    tasks = [json.loads(f.read_text()) for f in files]
+    if args.ids:
+        tasks = [t for t in tasks if t["instance_id"] in args.ids]
+    if not tasks:
+        sys.exit("no tasks selected")
+
+    summary = []
+    for t in tasks:
+        rec = run_task(t, dry_run_gold=args.dry_run_gold, no_tests=args.no_tests,
+                       workspace=args.workspace, timeout=int(args.timeout),
+                       keep=args.keep, max_context=args.max_context)
+        summary.append({"instance_id": rec["instance_id"],
+                        "score": rec.get("score", 0),
+                        "error": rec.get("error")})
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    total = sum(s["score"] or 0 for s in summary)
+    roll = {"n": len(summary), "passed": total,
+            "pass_rate": round(total / len(summary), 3) if summary else 0,
+            "tasks": summary}
+    (RESULTS_DIR / "summary.json").write_text(json.dumps(roll, indent=2))
+    print(f"\n{'='*70}\nDIAMOND-STYLE RESULT: {total}/{len(summary)} "
+          f"({roll['pass_rate']*100:.1f}%) — see results/summary.json")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

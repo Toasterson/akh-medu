@@ -1,0 +1,7 @@
+# Downloaded datasets (fetch per MEMORY_BENCHMARKS.md / frontiercode README)
+locomo/*.json
+longmemeval/*.json
+# Regenerable task sets + run outputs
+frontiercode/tasks/*.json
+frontiercode/results/*.json
+results_*.json

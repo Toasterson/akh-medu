@@ -1,0 +1,126 @@
+{
+  "strategy": "passive-r20",
+  "n": 8,
+  "accuracy": 4,
+  "retrieval": 8,
+  "wal_delta": 0,
+  "episode_delta": 0,
+  "results": [
+    {
+      "id": "cluster-nodes",
+      "retrieved": true,
+      "correct": false,
+      "tools": [
+        "glob",
+        "kg_query",
+        "library_search",
+        "memory_recall",
+        "similarity_search"
+      ],
+      "elapsed": 60.2,
+      "answer": "Let me recall both of those from memory.The recall surfaced relevant episodes. Let me pull the actual stored facts from the knowledge graph to get the specifics.Good \u2014 I can see a switch outage on that date. Let me get the details on the cluster topology and that outage.Interesti"
+    },
+    {
+      "id": "alert-routing",
+      "retrieved": true,
+      "correct": false,
+      "tools": [
+        "glob",
+        "grep",
+        "kg_query",
+        "library_search",
+        "memory_recall",
+        "similarity_search"
+      ],
+      "elapsed": 50.7,
+      "answer": "Let me recall what I know about the Anima observability alert routing.Let me dig deeper into the most relevant episodes for observability alert routing.Good \u2014 I found the episode tagged as the observability design. Let me recall it directly, and also search for routing-specific s"
+    },
+    {
+      "id": "similarity-bug",
+      "retrieved": true,
+      "correct": true,
+      "tools": [
+        "glob",
+        "kg_query",
+        "library_search",
+        "memory_recall"
+      ],
+      "elapsed": 47.6,
+      "answer": "Let me recall memories related to VSA similarity issues.Let me dig into those diagnosis episodes and the KG for more detail on the VSA similarity bug.Let me search the workspace memory files directly \u2014 the diagnosis episodes are from the akh-medu-diagnosis workspace on 2026-05-14"
+    },
+    {
+      "id": "utf8-panic",
+      "retrieved": true,
+      "correct": true,
+      "tools": [
+        "glob",
+        "grep",
+        "kg_query",
+        "memory_recall",
+        "openclaw_discover",
+        "similarity_search"
+      ],
+      "elapsed": 16.8,
+      "answer": "Let me dig deeper into the diagnosis episodes \u2014 they're the most likely to contain bug details.My KG doesn't have an indexed symbol for the panic bug. Let me try my workspace memory files directly \u2014 the episodes point to markdown files in my workspace memory directory.Found it. F"
+    },
+    {
+      "id": "merge-loop",
+      "retrieved": true,
+      "correct": true,
+      "tools": [
+        "kg_query",
+        "memory_recall"
+      ],
+      "elapsed": 13.9,
+      "answer": "Let me pull the relevant memories for a precise answer.The knowledge graph already gave me some of the key facts, and the memory recall confirms the episodes. Let me also check the May 9 episode specifically, since that's the one about the infrastructure failure.The knowledge gra"
+    },
+    {
+      "id": "archibald-disk",
+      "retrieved": true,
+      "correct": true,
+      "tools": [
+        "file_io",
+        "glob",
+        "kg_query",
+        "library_search",
+        "memory_recall",
+        "openclaw_discover",
+        "similarity_search"
+      ],
+      "elapsed": 30.5,
+      "answer": "The design doc is clear. The two big sources of wasted disk on Archibald were:\n\n## Two Big Sources of Wasted Disk\n\n1. **Stale worktrees** \u2014 **153 G in `/home/toasty/anima-agent-worktrees/`**\n   - Left behind from completed agent sessions. The orchestrator reaps them normally, but"
+    },
+    {
+      "id": "redb-path",
+      "retrieved": true,
+      "correct": false,
+      "tools": [
+        "file_io",
+        "glob",
+        "grep",
+        "kg_query",
+        "memory_recall",
+        "openclaw_discover",
+        "shell_exec",
+        "similarity_search"
+      ],
+      "elapsed": 49.1,
+      "answer": "Let me recall the relevant episodes about the redb discovery.Let me dig deeper into those episodes for the specific file path.Let me search the KG for file-path related symbols and also look at the raw memory episodes.Let me search the workspace memory files directly for the redb"
+    },
+    {
+      "id": "hephaistos",
+      "retrieved": true,
+      "correct": false,
+      "tools": [
+        "glob",
+        "grep",
+        "kg_query",
+        "memory_recall",
+        "openclaw_discover",
+        "similarity_search"
+      ],
+      "elapsed": 106.3,
+      "answer": "Two questions \u2014 let me pull from memory for both.Good, I have the Hephaistos facts already in the KG context. Let me also query for more detail on both topics.Let me get more detail on the redb file path from those diagnosis episodes.Let me search the workspace memory files direc"
+    }
+  ]
+}
