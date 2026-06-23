@@ -187,13 +187,38 @@ captured shape constant within a block.
   in-place-updated u32 candle tensor so ONE `d_pos` tensor serves both the candle-op readers
   (rope `index_select`, mask) and the raw-ptr scatter. Tested.
 
-### Remaining (next session — integration, hard unknowns resolved)
-- **46d-2c forward:** thread a `GraphDecodeCtx { d_pos, positions(arange), read_len }` through
-  the gemma3 decode forward (hip-gated): rope via `cos/sin.index_select(d_pos)`; KV via
-  `kv_scatter_at` + block-padded fixed `read_len` narrow; additive causal mask built device-side
-  from `positions < d_pos+1` (0/-inf, `broadcast_add`, bit-exact to the unpadded softmax). Gate:
-  fixed-position A/B — graph-ready forward (run eagerly) byte-exact vs the normal decode forward.
-- **46d-2d loop:** per-block graph cache; per token (outside capture) update `d_pos` (in-place
-  slice_set), copy the new embedding into a fixed `embed_buf`, replay, D2H logits → sample;
-  recapture at block boundaries. Gate: byte-exact full generation vs eager + measure tok/s
-  (target ~1.3× over the 10.4 pool-tuned baseline; revert + record if it doesn't beat eager).
+## 46d-2 COMPLETE (2026-06-23) — real per-token graph decode works; +1.10× net
+
+Both remaining steps landed and are byte-exact. The per-token HIP-graph decode runs
+end-to-end and beats eager, so per measure-or-revert it stays.
+
+- **46d-2c graph-ready forward (`478bc65`).** `GraphDecodeCtx { d_pos: u32[1], positions:
+  arange u32[read_len], read_len }` (akh-medu `quantized_gemma3`); `Option<&GraphDecodeCtx>`
+  threaded through `forward_from_embed → hidden_states_from_embed → forward_attn +
+  apply_rotary_emb_qkv`. When `Some` (decode only): rope rows via `index_select(&d_pos)`; KV
+  write via `kv_scatter_at(*d_pos)` (hip; `slice_set` fallback elsewhere); KV read a FIXED
+  block-padded `narrow(0, read_len)`; mask = ONE **additive** f32 mask `relu(positions − pos)
+  · (-1e30)`, `broadcast_add` — drives the padded tail to exactly 0 in softmax. Additive, NOT
+  the U8 `where_cond` keep-mask: the HIP device has no U8 cast (`to_dtype U8→U32`
+  unimplemented). All other callers pass `None` → byte-identical to the existing path. Gate
+  (`AKH_BENCH_GRAPH_PARITY=1`, gemma3-12b @ P=231, run **eagerly**): exact read_len=P+1 AND
+  padded read_len=240 both **max|Δlogits| 0.000e0 BYTE-EXACT**.
+- **46d-2d real decode loop (`194f4d0`).** Key realization: because every position-dependent
+  read now comes from `d_pos`, ONE graph (captured at `read_len = P + max_new`, padded)
+  follows the whole generation — no per-block recapture needed. Per token (outside capture):
+  refresh a fixed `embed_buf` in place + `set_pos(d_pos)` (4-byte H2D), then one
+  `hipGraphLaunch`. `bench_graph_decode_loop` (`AKH_BENCH_GRAPH_LOOP=1`) A/Bs graph-replay vs
+  eager generation. gemma3-12b @ P=231: **0 warm-miss → clean capture; tokens MATCH (graph ==
+  eager); eager 10.5 / graph 11.5 tok/s = 1.09–1.10× (stable 64/128-tok runs).**
+
+### Finding — net win is modest (1.10×), and why
+The forward-only ceiling is 1.26–1.33× (46c). The loop realizes only ~1.10× because the
+per-token **embed (host-sync quantized `get_rows`) + sampling** are identical in both paths
+and don't speed up — they dilute the dispatch win. The masked-attention overhead of the
+single padded graph is small (the dominant per-token cost is the fixed MLP/projection work).
+**Next lever is NOT more graph machinery** — it's removing per-token host-sync: device-side
+sampling (argmax stays on device, only the chosen id D2H) and a capturable embedding path.
+Block recapture would only trim the small masked-attention overhead; not worth it yet.
+
+The 46d-2 foundations stand: working-set pinning (`c0709e4`), device-pos KV-scatter
+(`edc2605`), `u32_device_ptr` (`7f80e76`) — all candle-core, all separately tested.
