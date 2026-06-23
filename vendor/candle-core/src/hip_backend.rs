@@ -96,6 +96,10 @@ pub(crate) mod runtime {
     type Malloc = unsafe extern "C" fn(*mut *mut c_void, usize) -> c_int;
     type Free = unsafe extern "C" fn(*mut c_void) -> c_int;
     type Memcpy = unsafe extern "C" fn(*mut c_void, *const c_void, usize, c_int) -> c_int;
+    // hipMemcpyAsync(dst, src, bytes, kind, stream) — Phase 46c: async D2D on the capture
+    // stream (synchronous hipMemcpy would abort an in-progress graph capture).
+    type MemcpyAsync =
+        unsafe extern "C" fn(*mut c_void, *const c_void, usize, c_int, *mut c_void) -> c_int;
     // hipMemcpy2D(dst, dpitch, src, spitch, width_bytes, height, kind) — Phase 45f copy2d.
     type Memcpy2D = unsafe extern "C" fn(
         *mut c_void,
@@ -105,6 +109,17 @@ pub(crate) mod runtime {
         usize,
         usize,
         c_int,
+    ) -> c_int;
+    // hipMemcpy2DAsync — Phase 46c: the KV-cache copy2d on the capture stream.
+    type Memcpy2DAsync = unsafe extern "C" fn(
+        *mut c_void,
+        usize,
+        *const c_void,
+        usize,
+        usize,
+        usize,
+        c_int,
+        *mut c_void,
     ) -> c_int;
     type Memset = unsafe extern "C" fn(*mut c_void, c_int, usize) -> c_int;
     type Synchronize = unsafe extern "C" fn() -> c_int;
@@ -148,7 +163,9 @@ pub(crate) mod runtime {
         free: Free,
         mem_get_info: MemGetInfo,
         memcpy: Memcpy,
+        memcpy_async: MemcpyAsync,
         memcpy2d: Memcpy2D,
+        memcpy2d_async: Memcpy2DAsync,
         memset: Memset,
         synchronize: Synchronize,
         event_create: EventCreate,
@@ -198,7 +215,9 @@ pub(crate) mod runtime {
                 let free: Free = sym!(b"hipFree\0", Free);
                 let mem_get_info: MemGetInfo = sym!(b"hipMemGetInfo\0", MemGetInfo);
                 let memcpy: Memcpy = sym!(b"hipMemcpy\0", Memcpy);
+                let memcpy_async: MemcpyAsync = sym!(b"hipMemcpyAsync\0", MemcpyAsync);
                 let memcpy2d: Memcpy2D = sym!(b"hipMemcpy2D\0", Memcpy2D);
+                let memcpy2d_async: Memcpy2DAsync = sym!(b"hipMemcpy2DAsync\0", Memcpy2DAsync);
                 let memset: Memset = sym!(b"hipMemset\0", Memset);
                 let synchronize: Synchronize = sym!(b"hipDeviceSynchronize\0", Synchronize);
                 let event_create: EventCreate = sym!(b"hipEventCreate\0", EventCreate);
@@ -248,7 +267,9 @@ pub(crate) mod runtime {
                     free,
                     mem_get_info,
                     memcpy,
+                    memcpy_async,
                     memcpy2d,
+                    memcpy2d_async,
                     memset,
                     synchronize,
                     event_create,
@@ -383,7 +404,16 @@ pub(crate) mod runtime {
             if bytes == 0 {
                 return Ok(());
             }
-            let rc = unsafe { (self.memcpy)(dst, src, bytes, kind) };
+            // During graph capture (Phase 46c), on-device (D2D) copies must be async on
+            // the capture stream — a synchronous hipMemcpy would abort the capture. H2D/D2H
+            // stay synchronous: they run outside the captured region (input upload / logits
+            // readback between replays), and the stream is null in normal execution.
+            let stream = current_stream();
+            let rc = if !stream.is_null() && kind == MEMCPY_D2D {
+                unsafe { (self.memcpy_async)(dst, src, bytes, kind, stream) }
+            } else {
+                unsafe { (self.memcpy)(dst, src, bytes, kind) }
+            };
             if rc != 0 {
                 return Err(format!("hipMemcpy(kind={kind}, {bytes}B) failed (rc={rc})"));
             }
@@ -417,7 +447,16 @@ pub(crate) mod runtime {
             if width == 0 || height == 0 {
                 return Ok(());
             }
-            let rc = unsafe { (self.memcpy2d)(dst, dpitch, src, spitch, width, height, kind) };
+            // Async on the capture stream during graph capture (Phase 46c) — the KV-cache
+            // slice_set copy2d is on-device (D2D); a sync hipMemcpy2D would abort capture.
+            let stream = current_stream();
+            let rc = if !stream.is_null() {
+                unsafe {
+                    (self.memcpy2d_async)(dst, dpitch, src, spitch, width, height, kind, stream)
+                }
+            } else {
+                unsafe { (self.memcpy2d)(dst, dpitch, src, spitch, width, height, kind) }
+            };
             if rc != 0 {
                 return Err(format!(
                     "hipMemcpy2D(kind={kind}, {width}x{height}B) failed (rc={rc})"
@@ -611,6 +650,8 @@ pub(crate) mod runtime {
     ];
 
     type CreateHandle = unsafe extern "C" fn(*mut *mut c_void) -> c_int;
+    // rocblas_set_stream(handle, stream) — Phase 46c: route GEMMs onto the capture stream.
+    type RocblasSetStream = unsafe extern "C" fn(*mut c_void, *mut c_void) -> c_int;
     #[allow(clippy::type_complexity)]
     type SgemmStridedBatched = unsafe extern "C" fn(
         *mut c_void, // handle
@@ -717,6 +758,7 @@ pub(crate) mod runtime {
         sgemm_strided_batched: SgemmStridedBatched,
         hgemm_strided_batched: HgemmStridedBatched,
         gemm_strided_batched_ex: GemmStridedBatchedEx,
+        set_stream: RocblasSetStream,
     }
     unsafe impl Send for Rocblas {}
     unsafe impl Sync for Rocblas {}
@@ -742,6 +784,9 @@ pub(crate) mod runtime {
                 let gemm_ex: GemmStridedBatchedEx = *lib
                     .get(b"rocblas_gemm_strided_batched_ex\0")
                     .map_err(|e| format!("missing rocblas_gemm_strided_batched_ex: {e}"))?;
+                let set_stream: RocblasSetStream = *lib
+                    .get(b"rocblas_set_stream\0")
+                    .map_err(|e| format!("missing rocblas_set_stream: {e}"))?;
                 let mut handle: *mut c_void = std::ptr::null_mut();
                 let rc = create(&mut handle);
                 if rc != 0 || handle.is_null() {
@@ -753,8 +798,19 @@ pub(crate) mod runtime {
                     sgemm_strided_batched: sgemm,
                     hgemm_strided_batched: hgemm,
                     gemm_strided_batched_ex: gemm_ex,
+                    set_stream,
                 })
             }
+        }
+
+        /// Route subsequent GEMMs onto stream `s` (null = default stream). Phase 46c:
+        /// set to the capture stream so the attention matmuls record into the graph.
+        pub fn set_stream(&self, s: *mut c_void) -> std::result::Result<(), String> {
+            let rc = unsafe { (self.set_stream)(self.handle, s) };
+            if rc != 0 {
+                return Err(format!("rocblas_set_stream failed (rc={rc})"));
+            }
+            Ok(())
         }
 
         /// `C = A·B` (column-major) batched, with `alpha=1, beta=0`. Pointers are
@@ -1688,6 +1744,9 @@ pub(crate) mod runtime {
             k.set_stream(s);
         }
         crate::quantized::hip::set_stream(s);
+        if let Ok(rb) = rocblas() {
+            let _ = rb.set_stream(s);
+        }
     }
 }
 
@@ -3523,6 +3582,57 @@ mod op_tests {
         h.stream_destroy(stream);
         h.free(x);
         h.free(out);
+        Ok(())
+    }
+
+    /// Phase 46c: capture a candle `matmul` (which dispatches to rocBLAS) on the capture
+    /// stream and replay it — validates that the rocBLAS path (`rocblas_set_stream`) and
+    /// the pool allocations a real op makes are graph-capturable, not just bare kernels.
+    /// The attention GEMMs are the one rocBLAS user in the decode forward.
+    #[test]
+    fn hip_graph_capture_replay_matmul() -> Result<()> {
+        use crate::Error;
+        let Some(dev) = gpu() else {
+            return Ok(());
+        };
+        let h = super::runtime::hip().map_err(Error::Msg)?;
+        let Some(stream) = h.stream_create() else {
+            return Ok(());
+        };
+        let n = 64usize;
+        let adata: Vec<f32> = (0..n * n).map(|i| ((i as f32) * 0.01).sin()).collect();
+        let bdata: Vec<f32> = (0..n * n).map(|i| ((i as f32) * 0.013).cos()).collect();
+        let a = Tensor::from_vec(adata, (n, n), &dev)?;
+        let b = Tensor::from_vec(bdata, (n, n), &dev)?;
+        // Eager reference — also warms the pool sizes + loads rocBLAS so the capture
+        // window does no hipMalloc (which would abort it).
+        let want = a.matmul(&b)?.to_vec2::<f32>()?;
+
+        super::runtime::set_current_stream(stream);
+        h.stream_begin_capture(stream).map_err(Error::Msg)?;
+        let c = a.matmul(&b); // rocBLAS GEMM recorded onto the capture stream
+        let cap = h.stream_end_capture(stream);
+        super::runtime::set_current_stream(std::ptr::null_mut());
+        let c = c?;
+        let graph = cap.map_err(Error::Msg)?;
+        let exec = h.graph_instantiate(graph).map_err(Error::Msg)?;
+
+        // Replay computes c's (uncomputed during capture) storage in one dispatch.
+        h.graph_launch(exec, stream).map_err(Error::Msg)?;
+        h.stream_synchronize(stream).map_err(Error::Msg)?;
+        let got = c.to_vec2::<f32>()?;
+        for i in 0..n {
+            for j in 0..n {
+                assert!(
+                    (got[i][j] - want[i][j]).abs() < 1e-2,
+                    "matmul replay [{i},{j}]: {} != {}",
+                    got[i][j],
+                    want[i][j]
+                );
+            }
+        }
+        h.graph_exec_destroy(exec);
+        h.stream_destroy(stream);
         Ok(())
     }
 
