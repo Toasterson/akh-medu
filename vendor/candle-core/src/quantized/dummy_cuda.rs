@@ -28,6 +28,12 @@ impl QCudaStorage {
         Err(Error::NotCompiledWithCudaSupport)
     }
 
+    // Phase 46: quantized embedding get_rows (real impl in the cuda/hip backend). Stubbed
+    // here so `QTensor::get_rows` compiles when built without cuda/hip support.
+    pub fn get_rows(&self, _indices: &[u32], _in_dim: usize) -> Result<CudaStorage> {
+        Err(Error::NotCompiledWithCudaSupport)
+    }
+
     pub fn quantize(&mut self, _src: &CudaStorage) -> Result<()> {
         Err(Error::NotCompiledWithCudaSupport)
     }
