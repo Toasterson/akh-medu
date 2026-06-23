@@ -607,6 +607,7 @@ fn dispatch_akh(
                 "_akh/triples/from",
                 "_akh/symbols/create",
                 "_akh/triples/add",
+                "_akh/triples/remove",
                 "_akh/query/sparql",
                 "_akh/memory/recall",
                 "_akh/infer/activate",
@@ -755,6 +756,55 @@ fn dispatch_akh(
                 "confidence": confidence,
                 "symbols_added": symbols_added,
                 "triples_added": triples_added,
+            }))
+        }
+
+        "triples/remove" => {
+            let subject = params
+                .get("subject")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "missing required param: subject".to_string())?;
+            let predicate = params
+                .get("predicate")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "missing required param: predicate".to_string())?;
+            let object = params
+                .get("object")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "missing required param: object".to_string())?;
+            // Resolve labels to *existing* symbols; an unknown label means there
+            // is nothing to remove (report removed=false rather than erroring, so
+            // cleanup scripts are idempotent).
+            let resolve = |label: &str| engine.resolve_symbol(label).ok();
+            let (Some(s), Some(p), Some(o)) =
+                (resolve(subject), resolve(predicate), resolve(object))
+            else {
+                return Ok(serde_json::json!({
+                    "subject": subject,
+                    "predicate": predicate,
+                    "object": object,
+                    "removed": false,
+                    "retracted_count": 0,
+                    "note": "one or more labels not present; nothing to remove",
+                }));
+            };
+            // Pre-check existence: RetractionResult only reflects TMS cascade, so
+            // a plain removal with no cascade would otherwise look like a no-op.
+            let existed = engine
+                .triples_from(s)
+                .iter()
+                .any(|t| t.predicate == p && t.object == o);
+            let result = engine
+                .remove_triple(s, p, o)
+                .map_err(|e| format!("remove failed: {e}"))?;
+            engine.persist().map_err(|e| format!("persist failed: {e}"))?;
+            Ok(serde_json::json!({
+                "subject": subject,
+                "predicate": predicate,
+                "object": object,
+                "removed": existed,
+                "cascade_retracted": result.retracted.len(),
+                "cascade_depth": result.cascade_depth,
             }))
         }
 
