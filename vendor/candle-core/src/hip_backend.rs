@@ -955,7 +955,8 @@ pub(crate) mod runtime {
         }
     }
 
-    type AffineF32 = unsafe extern "C" fn(*const f32, *mut f32, usize, f32, f32) -> c_int;
+    type AffineF32 =
+        unsafe extern "C" fn(*const f32, *mut f32, usize, f32, f32, *mut c_void) -> c_int;
     // Phase 45h: fused RMSNorm (x, weight) -> out; one kernel replaces ~7.
     type RmsNormF32 =
         unsafe extern "C" fn(*const f32, *const f32, *mut f32, usize, usize, f32) -> c_int;
@@ -1236,7 +1237,7 @@ pub(crate) mod runtime {
             mul: f32,
             add: f32,
         ) -> std::result::Result<(), String> {
-            let rc = unsafe { (self.affine_f32)(x, y, n, mul, add) };
+            let rc = unsafe { (self.affine_f32)(x, y, n, mul, add, current_stream()) };
             if rc != 0 {
                 return Err(format!("akh_affine_f32 failed (rc={rc})"));
             }
@@ -1650,6 +1651,23 @@ pub(crate) mod runtime {
     /// The process-wide elementwise kernel library, dlopen'd on first use.
     pub fn kernels() -> std::result::Result<&'static Kernels, String> {
         KERNELS.get_or_init(Kernels::load).as_ref().map_err(|e| e.clone())
+    }
+
+    /// Process-wide launch stream (Phase 46c). Null = the default stream (normal
+    /// execution, unchanged). During HIP-graph capture it is set to the capture stream
+    /// so kernel launches are recorded into the graph instead of run eagerly. The decode
+    /// forward is single-threaded, so a process-global is sufficient.
+    static CURRENT_STREAM: std::sync::atomic::AtomicPtr<c_void> =
+        std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+
+    /// The stream kernels should launch on (null = default stream).
+    pub fn current_stream() -> *mut c_void {
+        CURRENT_STREAM.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Set the launch stream (Phase 46c capture); pass null to restore the default.
+    pub fn set_current_stream(s: *mut c_void) {
+        CURRENT_STREAM.store(s, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -3379,6 +3397,112 @@ mod op_tests {
                 &format!("get_rows {dtype:?}"),
             );
         }
+        Ok(())
+    }
+
+    /// Phase 46c de-risk spike: capture a REAL compute kernel (affine) launched on the
+    /// capture stream, writing to a POOL-allocated buffer, into a graph and REPLAY it —
+    /// and prove the pool returns a STABLE pointer for repeated same-size alloc/free.
+    /// This is the make-or-break assumption for capturing the decode forward: identical
+    /// per-token allocations must land at identical addresses so a captured graph stays
+    /// valid across replays, and updating an input buffer between replays must flow
+    /// through (the per-token "new token / KV position" update model).
+    #[test]
+    fn hip_graph_capture_replay_real_kernel() -> Result<()> {
+        use crate::Error;
+        use std::ffi::c_void;
+        let Some(_dev) = gpu() else {
+            return Ok(());
+        };
+        let h = super::runtime::hip().map_err(Error::Msg)?;
+        let Some(stream) = h.stream_create() else {
+            return Ok(()); // hipStreamCreateWithFlags unavailable — skip
+        };
+        let k = super::runtime::kernels().map_err(Error::Msg)?;
+        let n = 1024usize;
+        let bytes = n * std::mem::size_of::<f32>();
+
+        // (1) Pool pointer stability: same-size malloc → free → malloc returns the SAME
+        //     block (LIFO free-list). This is what lets a captured graph's baked-in
+        //     pointers stay valid when the next token re-runs the same allocations.
+        let p1 = h.malloc(bytes).map_err(Error::Msg)?;
+        h.free(p1);
+        let out = h.malloc(bytes).map_err(Error::Msg)?;
+        assert_eq!(p1, out, "pool must reuse the same block for repeated same-size alloc");
+
+        // Input buffer x, filled with known values.
+        let x = h.malloc(bytes).map_err(Error::Msg)?;
+        let host_x: Vec<f32> = (0..n).map(|i| i as f32).collect();
+        h.memcpy(
+            x,
+            host_x.as_ptr() as *const c_void,
+            bytes,
+            super::runtime::MEMCPY_H2D,
+        )
+        .map_err(Error::Msg)?;
+
+        // (2) Capture: affine (out = x*mul + add) launched on the capture stream. Sizes
+        //     are already warm, so the pool does no hipMalloc inside the capture window.
+        let (mul, add) = (2.0f32, 1.0f32);
+        super::runtime::set_current_stream(stream);
+        h.stream_begin_capture(stream).map_err(Error::Msg)?;
+        let launch = k.affine_f32(x as *const f32, out as *mut f32, n, mul, add);
+        let cap = h.stream_end_capture(stream);
+        super::runtime::set_current_stream(std::ptr::null_mut()); // restore default stream
+        launch.map_err(Error::Msg)?;
+        let graph = cap.map_err(Error::Msg)?;
+        let exec = h.graph_instantiate(graph).map_err(Error::Msg)?;
+
+        // (3) Replay #1 → out == x*mul + add.
+        let read = |buf: *mut c_void| -> Result<Vec<f32>> {
+            let mut got = vec![0f32; n];
+            h.memcpy(
+                got.as_mut_ptr() as *mut c_void,
+                buf,
+                bytes,
+                super::runtime::MEMCPY_D2H,
+            )
+            .map_err(Error::Msg)?;
+            Ok(got)
+        };
+        h.graph_launch(exec, stream).map_err(Error::Msg)?;
+        h.stream_synchronize(stream).map_err(Error::Msg)?;
+        let got = read(out)?;
+        for i in 0..n {
+            assert!(
+                (got[i] - (host_x[i] * mul + add)).abs() < 1e-4,
+                "replay#1 [{i}]: {} != {}",
+                got[i],
+                host_x[i] * mul + add
+            );
+        }
+
+        // (4) Update the INPUT buffer in place, replay #2 → output tracks the new input,
+        //     proving the graph reads from the fixed x buffer (the per-token update model).
+        let host_x2: Vec<f32> = (0..n).map(|i| (i as f32) * 0.5 - 3.0).collect();
+        h.memcpy(
+            x,
+            host_x2.as_ptr() as *const c_void,
+            bytes,
+            super::runtime::MEMCPY_H2D,
+        )
+        .map_err(Error::Msg)?;
+        h.graph_launch(exec, stream).map_err(Error::Msg)?;
+        h.stream_synchronize(stream).map_err(Error::Msg)?;
+        let got = read(out)?;
+        for i in 0..n {
+            assert!(
+                (got[i] - (host_x2[i] * mul + add)).abs() < 1e-4,
+                "replay#2 [{i}]: {} != {}",
+                got[i],
+                host_x2[i] * mul + add
+            );
+        }
+
+        h.graph_exec_destroy(exec);
+        h.stream_destroy(stream);
+        h.free(x);
+        h.free(out);
         Ok(())
     }
 

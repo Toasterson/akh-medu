@@ -423,12 +423,14 @@ __global__ void ucopy_f16(const unsigned short* src, unsigned short* dst, size_t
 
 extern "C" {
 
-int akh_affine_f32(const float* x, float* y, size_t n, float mul, float add) {
+int akh_affine_f32(const float* x, float* y, size_t n, float mul, float add, void* stream) {
     if (n == 0) return 0;
     int t = 256;
     size_t blocks = (n + t - 1) / t;
-    hipLaunchKernelGGL(affine_f32, dim3(blocks), dim3(t), 0, 0, x, y, n, mul, add);
-    // No per-kernel sync (Phase 45h): kernels are ordered on the null stream; the
+    // `stream` is null (the default stream) in normal execution; a real stream during
+    // HIP-graph capture (Phase 46c) so the launch is recorded into the graph.
+    hipLaunchKernelGGL(affine_f32, dim3(blocks), dim3(t), 0, (hipStream_t)stream, x, y, n, mul, add);
+    // No per-kernel sync (Phase 45h): kernels are ordered on the (null) stream; the
     // final D2H readback (to_cpu) synchronizes. Only launch errors checked here.
     return hipGetLastError() == hipSuccess ? 0 : 1;
 }
