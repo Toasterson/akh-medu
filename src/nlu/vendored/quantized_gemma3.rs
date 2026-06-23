@@ -692,21 +692,38 @@ impl ModelWeights {
         })
     }
 
-    /// Run the transformer stack and return the post-norm hidden state of the
-    /// **last position** (shape `[batch, hidden_dim]`), before the output
-    /// projection — for the Neural→VSA bridge. (akh-medu vendored extension.)
-    pub fn hidden_states(&mut self, x: &Tensor, index_pos: usize) -> Result<Tensor> {
-        let (b_sz, seq_len) = x.dims2()?;
-        let _enter = self.span.enter();
+    /// Embedding lookup for token ids `x` (`[batch, seq]`) → scaled hidden state
+    /// `[batch, seq, hidden]`. Split out of [`hidden_states`](Self::hidden_states) for
+    /// Phase 46c (HIP-graph decode capture): the quantized `get_rows` does a synchronous
+    /// index D2H+H2D (it pulls the ids to host, then uploads them for the dequant kernel)
+    /// — host-synchronizing copies that would abort a HIP-graph capture. The capturable
+    /// decode forward therefore starts from this embedding buffer
+    /// ([`forward_from_embed`](Self::forward_from_embed)); the new token's embedding is
+    /// refreshed outside the captured region between replays.
+    pub fn embed(&self, x: &Tensor) -> Result<Tensor> {
+        let layer_in = self.tok_embeddings.get_rows(x)?;
+        layer_in * (self.embedding_length as f64).sqrt()
+    }
 
-        let mut layer_in = self.tok_embeddings.get_rows(x)?;
-        layer_in = (layer_in * (self.embedding_length as f64).sqrt())?;
+    /// Transformer stack + final norm over a precomputed embedding `layer_in`
+    /// (`[batch, seq, hidden]`, from [`embed`](Self::embed)). Byte-identical to the body
+    /// of [`hidden_states`](Self::hidden_states) after the embedding lookup. The decode
+    /// mask is `None` (`seq_len == 1`) so no token-id tensor is needed; the prefill mask
+    /// is built as `U32` — the token-id dtype the original passed via `x.dtype()`.
+    pub fn hidden_states_from_embed(
+        &mut self,
+        layer_in: &Tensor,
+        index_pos: usize,
+    ) -> Result<Tensor> {
+        let (b_sz, seq_len, _) = layer_in.dims3()?;
+        let _enter = self.span.enter();
+        let mut layer_in = layer_in.clone();
 
         for layer in self.layers.iter_mut() {
             let attention_mask = if seq_len == 1 {
                 None
             } else {
-                Some(layer.mask(b_sz, seq_len, index_pos, x.dtype(), x.device())?)
+                Some(layer.mask(b_sz, seq_len, index_pos, DType::U32, layer_in.device())?)
             };
 
             // Attention block
@@ -732,8 +749,34 @@ impl ModelWeights {
         self.norm.forward(&x)
     }
 
+    /// Run the transformer stack and return the post-norm hidden state of the
+    /// **last position** (shape `[batch, hidden_dim]`), before the output
+    /// projection — for the Neural→VSA bridge. (akh-medu vendored extension.)
+    pub fn hidden_states(&mut self, x: &Tensor, index_pos: usize) -> Result<Tensor> {
+        let layer_in = self.embed(x)?;
+        self.hidden_states_from_embed(&layer_in, index_pos)
+    }
+
     pub fn forward(&mut self, x: &Tensor, index_pos: usize) -> Result<Tensor> {
         let h = self.hidden_states(x, index_pos)?;
+        let _enter = self.span_output.enter();
+        #[cfg(feature = "rocm")]
+        if let Some(gpu) = &self.gpu_output {
+            return gpu
+                .forward(&h)
+                .map_err(|e| candle_core::Error::Msg(format!("gpu lm_head: {e}")));
+        }
+        self.output.forward(&h)
+    }
+
+    /// Like [`forward`](Self::forward) but starting from a precomputed embedding
+    /// `layer_in` ([`embed`](Self::embed)) instead of token ids — the
+    /// HIP-graph-capturable region of the decode forward (Phase 46c). The per-token
+    /// embedding lookup (a host-synchronizing op) runs outside; everything from here
+    /// (attention / MLP / norm / output projection) is pure device work a captured graph
+    /// can replay in a single dispatch. Byte-identical to `forward` for the same token.
+    pub fn forward_from_embed(&mut self, layer_in: &Tensor, index_pos: usize) -> Result<Tensor> {
+        let h = self.hidden_states_from_embed(layer_in, index_pos)?;
         let _enter = self.span_output.enter();
         #[cfg(feature = "rocm")]
         if let Some(gpu) = &self.gpu_output {
