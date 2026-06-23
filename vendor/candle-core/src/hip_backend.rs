@@ -652,6 +652,14 @@ pub(crate) mod runtime {
     type CreateHandle = unsafe extern "C" fn(*mut *mut c_void) -> c_int;
     // rocblas_set_stream(handle, stream) — Phase 46c: route GEMMs onto the capture stream.
     type RocblasSetStream = unsafe extern "C" fn(*mut c_void, *mut c_void) -> c_int;
+    // rocblas_set_workspace(handle, addr, size) — Phase 46c: hand rocBLAS a fixed,
+    // pre-allocated device workspace so it does NOT hipMalloc/hipFree per GEMM call. In
+    // its default "automatic" device-memory mode rocBLAS allocates workspace on demand,
+    // and a hipMalloc during HIP-graph capture invalidates the capture (the diagnosed
+    // root cause of the decode-forward capture failure — our pool showed 0 misses, so the
+    // alloc was rocBLAS-internal). A user-owned workspace removes it. Reverts to automatic
+    // if `addr` is null / `size` is 0.
+    type RocblasSetWorkspace = unsafe extern "C" fn(*mut c_void, *mut c_void, usize) -> c_int;
     #[allow(clippy::type_complexity)]
     type SgemmStridedBatched = unsafe extern "C" fn(
         *mut c_void, // handle
@@ -759,6 +767,9 @@ pub(crate) mod runtime {
         hgemm_strided_batched: HgemmStridedBatched,
         gemm_strided_batched_ex: GemmStridedBatchedEx,
         set_stream: RocblasSetStream,
+        // Pre-allocated user workspace (raw device ptr; kept for the process lifetime so
+        // rocBLAS never allocates per call — see `RocblasSetWorkspace`). 0 if set failed.
+        workspace: usize,
     }
     unsafe impl Send for Rocblas {}
     unsafe impl Sync for Rocblas {}
@@ -787,11 +798,36 @@ pub(crate) mod runtime {
                 let set_stream: RocblasSetStream = *lib
                     .get(b"rocblas_set_stream\0")
                     .map_err(|e| format!("missing rocblas_set_stream: {e}"))?;
+                let set_workspace: RocblasSetWorkspace = *lib
+                    .get(b"rocblas_set_workspace\0")
+                    .map_err(|e| format!("missing rocblas_set_workspace: {e}"))?;
                 let mut handle: *mut c_void = std::ptr::null_mut();
                 let rc = create(&mut handle);
                 if rc != 0 || handle.is_null() {
                     return Err(format!("rocblas_create_handle failed (rc={rc})"));
                 }
+                // Hand rocBLAS a fixed pre-allocated workspace so it never hipMallocs per
+                // GEMM (the cause of HIP-graph capture aborts; Phase 46c). 64 MB easily
+                // covers the decode/prefill strided-batched GEMMs (tiny: attention only).
+                // Allocated via the caching pool (tracked live, never freed → permanent).
+                const WORKSPACE_BYTES: usize = 64 * 1024 * 1024;
+                let workspace = match hip() {
+                    Ok(h) => match h.malloc(WORKSPACE_BYTES) {
+                        Ok(p) => {
+                            let rc = (set_workspace)(handle, p, WORKSPACE_BYTES);
+                            if rc != 0 {
+                                // Non-fatal: fall back to automatic mode (capture will fail,
+                                // but normal execution still works).
+                                h.free(p);
+                                0
+                            } else {
+                                p as usize
+                            }
+                        }
+                        Err(_) => 0,
+                    },
+                    Err(_) => 0,
+                };
                 Ok(Rocblas {
                     _lib: lib,
                     handle,
@@ -799,6 +835,7 @@ pub(crate) mod runtime {
                     hgemm_strided_batched: hgemm,
                     gemm_strided_batched_ex: gemm_ex,
                     set_stream,
+                    workspace,
                 })
             }
         }
@@ -1794,6 +1831,153 @@ pub fn reset_malloc_counts() {
     runtime::MALLOC_MISS_NANOS.store(0, Relaxed);
 }
 
+/// Block until all work on the default (null) stream has completed
+/// (`hipDeviceSynchronize`). Accessible as `candle_core::cuda::device_synchronize`. The
+/// Phase 46c graph probe uses it to drain eager forwards per iteration for a fair
+/// per-iteration timing against `HipGraph::replay` (which drains its capture stream).
+pub fn device_synchronize() -> Result<()> {
+    hip()?.synchronize().map_err(Error::Msg)
+}
+
+/// Run `f` with all device work issued on a private non-default stream (NO graph
+/// capture), drain the device, and return f's result. Phase 46c diagnostic: a captured
+/// graph that replays differently from eager means an op did not get recorded onto the
+/// capture stream. This isolates *why* — if the private-stream result matches the
+/// default-stream result, every op honors the launch stream (so the fault is in the graph
+/// machinery / allocator-during-capture); if it differs, some op ignored the stream and
+/// raced. Accessible as `candle_core::cuda::run_on_private_stream`.
+pub fn run_on_private_stream<R, F: FnOnce() -> Result<R>>(f: F) -> Result<R> {
+    let h = hip()?;
+    let stream = h
+        .stream_create()
+        .ok_or_else(|| Error::Msg("hipStreamCreateWithFlags failed (private stream)".into()))?;
+    struct StreamGuard;
+    impl Drop for StreamGuard {
+        fn drop(&mut self) {
+            runtime::set_current_stream(std::ptr::null_mut());
+        }
+    }
+    runtime::set_current_stream(stream);
+    let guard = StreamGuard;
+    let r = f();
+    // Drain the whole device (not just the stream) so any op that ignored the launch
+    // stream — running on the null stream — also completes before we read the result.
+    let _ = h.synchronize();
+    drop(guard);
+    h.stream_destroy(stream);
+    r
+}
+
+/// A captured, replayable HIP graph (Phase 46c). [`capture`](HipGraph::capture) records
+/// the device work a closure issues into a `hipGraph`, instantiates it, and returns the
+/// closure's result alongside the executable graph; [`replay`](HipGraph::replay) re-runs
+/// that recorded work in a SINGLE host dispatch (`hipGraphLaunch`). This is the lever for
+/// dispatch-bound decode, where the per-token kernel storm otherwise host-enqueue-gaps the
+/// GPU (the decode bottleneck is launch latency, not compute). Accessible as
+/// `candle_core::cuda::HipGraph` (the HIP backend fills the cuda slot).
+///
+/// **Capture contract** (enforced by HIP, surfaced as an `Err` from `capture`): the
+/// closure must issue NO host-synchronizing op — no `hipMalloc` (a caching-pool miss), no
+/// synchronous `hipMemcpy`, no device sync — or the capture aborts. Pre-warm by running
+/// the same closure eagerly once so the pool satisfies every allocation from its free-list
+/// (repeated same-size alloc/free returns the SAME block — LIFO), and keep per-token host
+/// work (the new token's embedding lookup, logits readback) outside the captured region.
+/// A replay reads from / writes to the SAME device buffers the captured run used (stable
+/// pool addresses), so updating an input buffer in place between replays flows through —
+/// the per-token update model proven by the `hip_graph_capture_replay_*` tests.
+pub struct HipGraph {
+    stream: *mut c_void,
+    graph: *mut c_void,
+    exec: *mut c_void,
+}
+
+// Raw HIP handles; the captured graph is only ever launched from the single synchronous
+// compute thread (same contract as the rest of this backend).
+unsafe impl Send for HipGraph {}
+unsafe impl Sync for HipGraph {}
+
+impl HipGraph {
+    /// Capture the device work issued by `f` into a replayable graph, returning
+    /// `(graph, f's result)`. The result's storage is allocated during capture but only
+    /// *computed* on [`replay`](HipGraph::replay). See the type docs for the capture
+    /// contract (pre-warm the pool; no host-synchronizing ops inside `f`).
+    pub fn capture<R, F: FnOnce() -> Result<R>>(f: F) -> Result<(Self, R)> {
+        let h = hip()?;
+        let stream = h
+            .stream_create()
+            .ok_or_else(|| Error::Msg("hipStreamCreateWithFlags failed (graph capture)".into()))?;
+
+        // Route every kernel / rocBLAS / D2D-memcpy launch onto the capture stream, and
+        // restore the default (null) stream no matter how we leave — a guard, so a closure
+        // panic-free error path or an aborted capture cannot strand the process on the
+        // capture stream (which would silently mis-route all later eager ops).
+        struct StreamGuard;
+        impl Drop for StreamGuard {
+            fn drop(&mut self) {
+                runtime::set_current_stream(std::ptr::null_mut());
+            }
+        }
+        runtime::set_current_stream(stream);
+        let guard = StreamGuard;
+
+        if let Err(e) = h.stream_begin_capture(stream) {
+            drop(guard);
+            h.stream_destroy(stream);
+            return Err(Error::Msg(e));
+        }
+        // Record the closure's work onto the stream. Even if it errors we must still end
+        // the capture to return the stream to a clean (non-capturing) state.
+        let r = f();
+        let cap = h.stream_end_capture(stream);
+        drop(guard); // stream restored to null here
+
+        let r = match r {
+            Ok(r) => r,
+            Err(e) => {
+                if let Ok(g) = cap {
+                    h.graph_destroy(g);
+                }
+                h.stream_destroy(stream);
+                return Err(e);
+            }
+        };
+        let graph = cap.map_err(|e| {
+            h.stream_destroy(stream);
+            Error::Msg(format!(
+                "HIP graph capture aborted ({e}): the closure issued a host-synchronizing op \
+                 (a hipMalloc on a caching-pool miss, or a synchronous hipMemcpy). Pre-warm the \
+                 pool by running it once eagerly and keep host work outside the captured region."
+            ))
+        })?;
+        let exec = match h.graph_instantiate(graph) {
+            Ok(e) => e,
+            Err(e) => {
+                h.graph_destroy(graph);
+                h.stream_destroy(stream);
+                return Err(Error::Msg(e));
+            }
+        };
+        Ok((HipGraph { stream, graph, exec }, r))
+    }
+
+    /// Replay the captured work in one host dispatch and block until it completes.
+    pub fn replay(&self) -> Result<()> {
+        let h = hip()?;
+        h.graph_launch(self.exec, self.stream).map_err(Error::Msg)?;
+        h.stream_synchronize(self.stream).map_err(Error::Msg)
+    }
+}
+
+impl Drop for HipGraph {
+    fn drop(&mut self) {
+        if let Ok(h) = runtime::hip() {
+            h.graph_exec_destroy(self.exec);
+            h.graph_destroy(self.graph);
+            h.stream_destroy(self.stream);
+        }
+    }
+}
+
 /// Fused RMSNorm as a single HIP kernel (Phase 45h): `x / sqrt(mean(x²)+eps) · w`,
 /// matching `candle_nn::ops::rms_norm_slow` but in one launch instead of ~7. Profiling
 /// showed rms_norm was the single biggest source of decode kernel launches
@@ -2041,15 +2225,21 @@ pub(crate) fn event_time<R>(
     counter: &'static std::sync::atomic::AtomicU64,
     f: impl FnOnce() -> R,
 ) -> R {
-    if let (Ok(h), Some((a, b))) = (hip(), event_prof_acquire()) {
-        h.event_record(a.0);
-        let r = f();
-        h.event_record(b.0);
-        event_prof_register(counter, a, b);
-        r
-    } else {
-        f()
+    // hipEventRecord targets the null stream. During a HIP-graph capture (Phase 46c) the
+    // kernels run on a non-null capture stream, so recording an event on the null stream
+    // is a cross-stream op that invalidates the capture (Global mode) — the first such
+    // op (rms_norm/reduce/copy, which call this unconditionally) aborted decode-forward
+    // capture. While a launch stream is set, run the op untimed.
+    if runtime::current_stream().is_null() {
+        if let (Ok(h), Some((a, b))) = (hip(), event_prof_acquire()) {
+            h.event_record(a.0);
+            let r = f();
+            h.event_record(b.0);
+            event_prof_register(counter, a, b);
+            return r;
+        }
     }
+    f()
 }
 
 /// `(matmul, eltwise, copy, norm, reduce)` intrinsic GPU ns since process start.
@@ -3633,6 +3823,180 @@ mod op_tests {
         }
         h.graph_exec_destroy(exec);
         h.stream_destroy(stream);
+        Ok(())
+    }
+
+    /// Phase 46c: the public `HipGraph` wrapper captures a candle computation and replays
+    /// it — the same capture/replay the raw-runtime spikes prove, but through the API the
+    /// model decode path uses. The eager warm-up frees the matmul output back to the pool
+    /// so the captured run reuses the same block (no hipMalloc → capture is not aborted).
+    #[test]
+    fn hip_graph_struct_capture_replay() -> Result<()> {
+        let Some(dev) = gpu() else {
+            return Ok(());
+        };
+        let n = 96usize;
+        let adata: Vec<f32> = (0..n * n).map(|i| ((i as f32) * 0.007).sin()).collect();
+        let bdata: Vec<f32> = (0..n * n).map(|i| ((i as f32) * 0.011).cos()).collect();
+        let a = Tensor::from_vec(adata, (n, n), &dev)?;
+        let b = Tensor::from_vec(bdata, (n, n), &dev)?;
+        // Eager reference; also warms rocBLAS + the pool sizes.
+        let want = a.matmul(&b)?.to_vec2::<f32>()?;
+        // Free the warm-up output back to the pool so the captured matmul reuses that exact
+        // block (LIFO) instead of a fresh hipMalloc that would abort capture.
+        drop(a.matmul(&b)?);
+
+        let (graph, c) = super::HipGraph::capture(|| a.matmul(&b))?;
+        // c's storage was allocated during capture but only *computed* on replay.
+        graph.replay()?;
+        let got = c.to_vec2::<f32>()?;
+        for i in 0..n {
+            for j in 0..n {
+                assert!(
+                    (got[i][j] - want[i][j]).abs() < 1e-2,
+                    "HipGraph replay [{i},{j}]: {} != {}",
+                    got[i][j],
+                    want[i][j]
+                );
+            }
+        }
+        // A second replay recomputes the same result (idempotent for fixed inputs).
+        graph.replay()?;
+        let got2 = c.to_vec2::<f32>()?;
+        assert!(
+            (got2[0][0] - want[0][0]).abs() < 1e-2,
+            "HipGraph 2nd replay diverged"
+        );
+        Ok(())
+    }
+
+    /// Phase 46c: capture/replay a full decode ATTENTION block over a persistent f16 KV
+    /// buffer — slice_set (copy2d write), strided f16 gather (`contiguous` on a narrowed
+    /// f16 view), f16→f32 cast, repeat_kv (expand+reshape, stride-0), transpose + batched
+    /// rocBLAS matmul, manual softmax (reduce/exp/div), matmul. The op cluster the simpler
+    /// tests omit. **Regression guard:** this caught the f16↔f32 cast launching on stream 0
+    /// (`AKH_CAST_LAUNCH`) instead of `g_akh_stream` — un-captured during graph capture, so
+    /// the replayed attention read stale K/V (the full-forward decode replay mismatch).
+    #[test]
+    fn hip_graph_capture_replay_attn_block() -> Result<()> {
+        use crate::D;
+        let Some(dev) = gpu() else {
+            return Ok(());
+        };
+        let (nkv, rep, hd, ctx, len) = (2usize, 2usize, 64usize, 8usize, 6usize);
+        let nh = nkv * rep;
+        let mk = |seed: f32| -> Result<Tensor> {
+            let v: Vec<half::f16> = (0..nkv * ctx * hd)
+                .map(|i| half::f16::from_f32(((i as f32) * seed).sin() * 0.3))
+                .collect();
+            Tensor::from_vec(v, (1, nkv, ctx, hd), &dev)
+        };
+        let kbuf = mk(0.013)?;
+        let vbuf = mk(0.017)?;
+        let q = Tensor::from_vec(
+            (0..nh * hd).map(|i| ((i as f32) * 0.02).cos()).collect::<Vec<f32>>(),
+            (1, nh, 1, hd),
+            &dev,
+        )?;
+        let newk = Tensor::from_vec(
+            (0..nkv * hd).map(|i| ((i as f32) * 0.03).sin() * 0.2).collect::<Vec<f32>>(),
+            (1, nkv, 1, hd),
+            &dev,
+        )?;
+        let f = || -> Result<Tensor> {
+            kbuf.slice_set(&newk.to_dtype(DType::F16)?, 2, len - 1)?; // copy2d write
+            let k = kbuf.narrow(2, 0, len)?.contiguous()?.to_dtype(DType::F32)?;
+            let v = vbuf.narrow(2, 0, len)?.contiguous()?.to_dtype(DType::F32)?;
+            let k = k.unsqueeze(2)?.expand((1, nkv, rep, len, hd))?.reshape((1, nh, len, hd))?;
+            let v = v.unsqueeze(2)?.expand((1, nkv, rep, len, hd))?.reshape((1, nh, len, hd))?;
+            let scores = (q.matmul(&k.transpose(2, 3)?)? * 0.125)?;
+            let m = scores.max_keepdim(D::Minus1)?;
+            let e = scores.broadcast_sub(&m)?.exp()?;
+            let s = e.sum_keepdim(D::Minus1)?;
+            let sm = e.broadcast_div(&s)?;
+            sm.matmul(&v)
+        };
+        let want = f()?.flatten_all()?.to_vec1::<f32>()?;
+        drop(f()?); // warm + free
+        let (graph, out) = super::HipGraph::capture(f)?;
+        graph.replay()?;
+        let got = out.flatten_all()?.to_vec1::<f32>()?;
+        close(&got, &want, 1e-2, "attn block graph replay");
+        Ok(())
+    }
+
+    /// Phase 46c: capture/replay a long CHAIN of ops that allocate + free transients
+    /// (heavy caching-pool reuse, like the decode forward's ~2250 ops). Single ops capture
+    /// fine; this stresses whether freed-then-reused blocks during capture stay correct on
+    /// replay — the suspected source of the full-forward replay mismatch.
+    #[test]
+    fn hip_graph_capture_replay_chain() -> Result<()> {
+        let Some(dev) = gpu() else {
+            return Ok(());
+        };
+        let n = 256usize;
+        let w = Tensor::from_vec(
+            (0..n).map(|i| 1.0 + 0.001 * (i as f32)).collect::<Vec<f32>>(),
+            (n,),
+            &dev,
+        )?;
+        let x0 = Tensor::from_vec(
+            (0..n).map(|i| ((i as f32) * 0.01).sin()).collect::<Vec<f32>>(),
+            (1, n),
+            &dev,
+        )?;
+        // Each step allocates several transients then frees them (the prior ones drop),
+        // forcing the pool to recycle blocks — mirroring residual+norm+elementwise layers.
+        let chain = || -> Result<Tensor> {
+            let mut x = x0.clone();
+            for _ in 0..24 {
+                let a = super::rms_norm_fused(&x, &w, 1e-6)?;
+                let b = a.affine(1.5, 0.25)?;
+                let c = b.exp()?;
+                let d = (&c * 0.5)?;
+                x = (&x + &d)?;
+            }
+            Ok(x)
+        };
+        let want = chain()?.flatten_all()?.to_vec1::<f32>()?;
+        drop(chain()?); // warm the pool + free every transient back to the free-list
+        let (graph, out) = super::HipGraph::capture(chain)?;
+        graph.replay()?;
+        let got = out.flatten_all()?.to_vec1::<f32>()?;
+        close(&got, &want, 1e-2, "chain graph replay");
+        Ok(())
+    }
+
+    /// Phase 46c: capture/replay a BATCHED (3D) rocBLAS GEMM — the decode attention uses
+    /// strided-batched GEMMs, unlike the simple 2D `hip_graph_capture_replay_matmul`. If
+    /// this replays correctly, batched rocBLAS is graph-safe; if it diverges, the
+    /// strided-batched path is the source of the decode-forward replay mismatch.
+    #[test]
+    fn hip_graph_capture_replay_batched_matmul() -> Result<()> {
+        let Some(dev) = gpu() else {
+            return Ok(());
+        };
+        // Mimic an attention-scores GEMM batch: [bh, m, k] · [bh, k, n].
+        let (bh, m, kd, n) = (8usize, 1usize, 64usize, 12usize);
+        let adata: Vec<f32> = (0..bh * m * kd).map(|i| ((i as f32) * 0.01).sin()).collect();
+        let bdata: Vec<f32> = (0..bh * kd * n).map(|i| ((i as f32) * 0.013).cos()).collect();
+        let a = Tensor::from_vec(adata, (bh, m, kd), &dev)?;
+        let b = Tensor::from_vec(bdata, (bh, kd, n), &dev)?;
+        let want = a.matmul(&b)?.to_vec3::<f32>()?;
+        drop(a.matmul(&b)?); // warm rocBLAS for this shape + free the output to the pool
+
+        let (graph, c) = super::HipGraph::capture(|| a.matmul(&b))?;
+        graph.replay()?;
+        let got = c.to_vec3::<f32>()?;
+        let mut maxd = 0f32;
+        for i in 0..bh {
+            for j in 0..m {
+                for l in 0..n {
+                    maxd = maxd.max((got[i][j][l] - want[i][j][l]).abs());
+                }
+            }
+        }
+        assert!(maxd < 1e-2, "batched matmul replay max diff {maxd} (rocBLAS batched not graph-safe)");
         Ok(())
     }
 

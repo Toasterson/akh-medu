@@ -667,8 +667,13 @@ __global__ void cast_kernel(const Src* x, Dst* y, size_t n) {
         if ((n) == 0) return 0;                                                \
         int t = 256;                                                           \
         size_t blocks = ((n) + t - 1) / t;                                     \
+        /* Phase 46c: launch on g_akh_stream, NOT stream 0. Hardcoding the null   \
+           stream made the f16<->f32 cast (the KV cache's per-layer read cast)    \
+           run UN-captured during HIP-graph capture — missing from the replay, so \
+           the attention read stale K/V (~0.05/layer, compounding to a wrong      \
+           full-forward replay). Every other launcher already uses g_akh_stream. */\
         hipLaunchKernelGGL((cast_kernel<SRC, DST>), dim3(blocks), dim3(t), 0,  \
-                           0, (xptr), (yptr), (n));                            \
+                           g_akh_stream, (xptr), (yptr), (n));                 \
         return hipGetLastError() == hipSuccess ? 0 : 1;                        \
     } while (0)
 
