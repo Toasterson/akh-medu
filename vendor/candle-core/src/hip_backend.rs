@@ -1205,6 +1205,9 @@ pub(crate) mod runtime {
     ) -> c_int;
     type UcopyF32 = unsafe extern "C" fn(*const f32, *mut f32, usize, usize, I64x8, I64x8) -> c_int;
     type UcopyF16 = unsafe extern "C" fn(*const u16, *mut u16, usize, usize, I64x8, I64x8) -> c_int;
+    // Phase 46d-2: device-indexed KV scatter — src[n_kv,hd] → kbuf[n_kv,kv_ctx,hd] at *d_pos.
+    type KvScatterF16 =
+        unsafe extern "C" fn(*const u16, *mut u16, *const u32, usize, usize, usize) -> c_int;
     // Phase 45f: strided elementwise compare -> u8 (powers `mask.eq(0)` in prefill).
     #[allow(clippy::type_complexity)]
     type CmpF32 = unsafe extern "C" fn(
@@ -1283,6 +1286,7 @@ pub(crate) mod runtime {
         where_cond_u32_f32: WhereCondU32F32,
         ucopy_f32: UcopyF32,
         ucopy_f16: UcopyF16,
+        kv_scatter_f16: KvScatterF16,
         cmp_f32: CmpF32,
         cmp_u32: CmpU32,
         binary_strided_f32: BinaryStridedF32,
@@ -1355,6 +1359,9 @@ pub(crate) mod runtime {
                 let ucopy_f16: UcopyF16 = *lib
                     .get(b"akh_ucopy_f16\0")
                     .map_err(|e| format!("missing akh_ucopy_f16: {e}"))?;
+                let kv_scatter_f16: KvScatterF16 = *lib
+                    .get(b"akh_kv_scatter_f16\0")
+                    .map_err(|e| format!("missing akh_kv_scatter_f16: {e}"))?;
                 let cmp_f32: CmpF32 = *lib
                     .get(b"akh_cmp_f32\0")
                     .map_err(|e| format!("missing akh_cmp_f32: {e}"))?;
@@ -1398,6 +1405,7 @@ pub(crate) mod runtime {
                     where_cond_u32_f32,
                     ucopy_f32,
                     ucopy_f16,
+                    kv_scatter_f16,
                     cmp_f32,
                     cmp_u32,
                     binary_strided_f32,
@@ -1690,6 +1698,25 @@ pub(crate) mod runtime {
             let rc = unsafe { (self.ucopy_f16)(src, dst, n, rank, dims, strides) };
             if rc != 0 {
                 return Err(format!("akh_ucopy_f16 failed (rc={rc})"));
+            }
+            Ok(())
+        }
+
+        /// Phase 46d-2: device-indexed KV scatter — write `src` (`[n_kv, head_dim]`) into the
+        /// static cache `kbuf` (`[n_kv, kv_ctx, head_dim]`) at the column `*d_pos` (read on
+        /// the device). 2-byte (f16) elements. See `kv_scatter_f16_kernel`.
+        pub fn kv_scatter_f16(
+            &self,
+            src: *const u16,
+            kbuf: *mut u16,
+            d_pos: *const u32,
+            n_kv: usize,
+            head_dim: usize,
+            kv_ctx: usize,
+        ) -> std::result::Result<(), String> {
+            let rc = unsafe { (self.kv_scatter_f16)(src, kbuf, d_pos, n_kv, head_dim, kv_ctx) };
+            if rc != 0 {
+                return Err(format!("akh_kv_scatter_f16 failed (rc={rc})"));
             }
             Ok(())
         }
@@ -2087,6 +2114,133 @@ impl Drop for HipGraph {
 /// HIP device. Accessible as `candle_core::cuda::rms_norm_fused`.
 pub fn rms_norm_fused(x: &Tensor, w: &Tensor, eps: f32) -> Result<Tensor> {
     x.apply_op2_no_bwd(w, &FusedRmsNorm { eps })
+}
+
+/// Phase 46d-2: in-place device-indexed KV scatter. Writes `src` into `kbuf` at the column
+/// read from `*d_pos` on the device — so a captured HIP graph records the write ONCE and
+/// replays it as the position advances (no host offset baked in). See [`kv_scatter_at`].
+struct KvScatter {
+    d_pos: *const u32,
+    n_kv: usize,
+    head_dim: usize,
+    kv_ctx: usize,
+}
+
+impl crate::InplaceOp2 for KvScatter {
+    fn name(&self) -> &'static str {
+        "kv-scatter"
+    }
+
+    fn cpu_fwd(&self, _: &mut CpuStorage, _: &Layout, _: &CpuStorage, _: &Layout) -> Result<()> {
+        Err(Error::Msg(
+            "kv-scatter is GPU-only (the static KV cache lives on the HIP device)".to_string(),
+        ))
+    }
+
+    fn cuda_fwd(
+        &self,
+        kbuf: &mut HipStorage,
+        l1: &Layout,
+        src: &HipStorage,
+        l2: &Layout,
+    ) -> Result<()> {
+        if kbuf.dtype != DType::F16 || src.dtype != DType::F16 {
+            return Err(Error::Msg(format!(
+                "kv-scatter: f16 only, got kbuf={:?} src={:?}",
+                kbuf.dtype, src.dtype
+            )));
+        }
+        if !l2.is_contiguous() {
+            return Err(Error::Msg("kv-scatter: contiguous src only".to_string()));
+        }
+        let k = runtime::kernels().map_err(Error::Msg)?;
+        let kbuf_ptr = unsafe { (kbuf.ptr as *mut u16).add(l1.start_offset()) };
+        let src_ptr = unsafe { (src.ptr as *const u16).add(l2.start_offset()) };
+        k.kv_scatter_f16(
+            src_ptr,
+            kbuf_ptr,
+            self.d_pos,
+            self.n_kv,
+            self.head_dim,
+            self.kv_ctx,
+        )
+        .map_err(Error::Msg)
+    }
+}
+
+/// Scatter the new token's `src` (`[b, n_kv, 1, head_dim]` f16) into the static KV cache
+/// `kbuf` (`[b, n_kv, kv_ctx, head_dim]` f16) at the device-side column `*d_pos`, in place
+/// on `kbuf`. The device-indexed write is the moving-KV-write half of a real per-token
+/// HIP-graph decode (Phase 46d-2): capture the forward once per block, then advance `d_pos`
+/// (a 4-byte H2D outside the captured region) between replays. `b` is expected to be 1 on
+/// decode. Accessible as `candle_core::cuda::kv_scatter_at`.
+pub fn kv_scatter_at(kbuf: &Tensor, src: &Tensor, d_pos: *const u32) -> Result<()> {
+    let (_b, n_kv, kv_ctx, head_dim) = kbuf.dims4()?;
+    kbuf.inplace_op2(
+        src,
+        &KvScatter {
+            d_pos,
+            n_kv,
+            head_dim,
+            kv_ctx,
+        },
+    )
+}
+
+/// A persistent single-`u32` device buffer for the decode position, used as the device-side
+/// column index by [`kv_scatter_at`] and the decode mask (Phase 46d-2). Its address is
+/// STABLE for the buffer's lifetime, so a captured graph binds to it once and reads the
+/// updated value on each replay; [`set`](DevicePos::set) writes the new position via a
+/// 4-byte H2D (do this OUTSIDE any captured region).
+pub struct DevicePos {
+    ptr: *mut u32,
+}
+
+// Single-compute-thread backend (same contract as HipGraph).
+unsafe impl Send for DevicePos {}
+unsafe impl Sync for DevicePos {}
+
+impl DevicePos {
+    /// Allocate the device position buffer (initialized to 0).
+    pub fn new() -> Result<Self> {
+        let h = hip()?;
+        let ptr = h.malloc(std::mem::size_of::<u32>()).map_err(Error::Msg)? as *mut u32;
+        let zero: u32 = 0;
+        h.memcpy(
+            ptr as *mut c_void,
+            &zero as *const u32 as *const c_void,
+            std::mem::size_of::<u32>(),
+            runtime::MEMCPY_H2D,
+        )
+        .map_err(Error::Msg)?;
+        Ok(Self { ptr })
+    }
+
+    /// The raw device pointer to pass to [`kv_scatter_at`] / mask kernels.
+    pub fn ptr(&self) -> *const u32 {
+        self.ptr
+    }
+
+    /// Write a new position (4-byte H2D). Call OUTSIDE a captured region — the captured
+    /// graph reads the value on the device at replay time.
+    pub fn set(&self, pos: u32) -> Result<()> {
+        let h = hip()?;
+        h.memcpy(
+            self.ptr as *mut c_void,
+            &pos as *const u32 as *const c_void,
+            std::mem::size_of::<u32>(),
+            runtime::MEMCPY_H2D,
+        )
+        .map_err(Error::Msg)
+    }
+}
+
+impl Drop for DevicePos {
+    fn drop(&mut self) {
+        if let Ok(h) = runtime::hip() {
+            h.free(self.ptr as *mut c_void);
+        }
+    }
 }
 
 struct FusedRmsNorm {
@@ -4149,6 +4303,93 @@ mod op_tests {
         for (p, _) in victims {
             h.free(p);
         }
+        Ok(())
+    }
+
+    /// Phase 46d-2: the device-indexed KV scatter must write the SAME bytes as the existing
+    /// host-offset `slice_set` for every position — the parity guarantee that lets it replace
+    /// `slice_set` on the decode path.
+    #[test]
+    fn kv_scatter_at_matches_slice_set() -> Result<()> {
+        use crate::Error;
+        let Some(dev) = gpu() else {
+            return Ok(());
+        };
+        let (b, n_kv, kv_ctx, hd) = (1usize, 4usize, 16usize, 8usize);
+        let src = Tensor::from_vec(
+            (0..n_kv * hd).map(|i| (i as f32) * 0.5 - 3.0).collect::<Vec<f32>>(),
+            (b, n_kv, 1, hd),
+            &dev,
+        )?
+        .to_dtype(DType::F16)?;
+        let h = super::runtime::hip().map_err(Error::Msg)?;
+        for &pos in &[0usize, 1, 7, 15] {
+            let kbuf = Tensor::zeros((b, n_kv, kv_ctx, hd), DType::F16, &dev)?;
+            let dpos = h.malloc(4).map_err(Error::Msg)?;
+            let p = pos as u32;
+            h.memcpy(dpos, &p as *const u32 as *const std::ffi::c_void, 4, super::runtime::MEMCPY_H2D)
+                .map_err(Error::Msg)?;
+            super::kv_scatter_at(&kbuf, &src, dpos as *const u32)?;
+            h.free(dpos);
+
+            let kref = Tensor::zeros((b, n_kv, kv_ctx, hd), DType::F16, &dev)?;
+            kref.slice_set(&src, 2, pos)?;
+
+            let got = kbuf.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+            let want = kref.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+            close(&got, &want, 1e-3, &format!("kv_scatter device-pos {pos} vs slice_set"));
+        }
+        Ok(())
+    }
+
+    /// Phase 46d-2: capture the KV scatter into a graph, then CHANGE the device position and
+    /// replay — the replay must write the column the CURRENT `*d_pos` names, not the one bound
+    /// at capture time. This is the moving-KV-write mechanism for per-token graph decode.
+    #[test]
+    fn kv_scatter_graph_replay_follows_device_pos() -> Result<()> {
+        use crate::Error;
+        let Some(dev) = gpu() else {
+            return Ok(());
+        };
+        let (b, n_kv, kv_ctx, hd) = (1usize, 2usize, 8usize, 4usize);
+        let src = Tensor::from_vec(
+            (0..n_kv * hd).map(|i| 1.0 + i as f32).collect::<Vec<f32>>(),
+            (b, n_kv, 1, hd),
+            &dev,
+        )?
+        .to_dtype(DType::F16)?;
+        let want_row = src.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?; // [n_kv*hd]
+        let kbuf = Tensor::zeros((b, n_kv, kv_ctx, hd), DType::F16, &dev)?;
+        let h = super::runtime::hip().map_err(Error::Msg)?;
+        let dpos = h.malloc(4).map_err(Error::Msg)?;
+        let set = |p: u32| -> Result<()> {
+            h.memcpy(dpos, &p as *const u32 as *const std::ffi::c_void, 4, super::runtime::MEMCPY_H2D)
+                .map_err(Error::Msg)
+        };
+
+        set(2)?;
+        super::kv_scatter_at(&kbuf, &src, dpos as *const u32)?; // warm: EXECUTES → writes col 2
+        let (graph, ()) = super::HipGraph::capture(|| {
+            super::kv_scatter_at(&kbuf, &src, dpos as *const u32) // records only (capture pos = 2)
+        })?;
+        set(6)?; // advance the device position AFTER capture
+        graph.replay()?; // must write col 6, NOT re-write col 2
+
+        // Read the whole cache; verify cols 2 (warm) and 6 (replay) hold src, others are 0.
+        let all = kbuf.to_dtype(DType::F32)?; // [b, n_kv, kv_ctx, hd]
+        for col in 0..kv_ctx {
+            let got = all.narrow(2, col, 1)?.flatten_all()?.to_vec1::<f32>()?; // [n_kv*hd]
+            let expect_src = col == 2 || col == 6;
+            for (j, &g) in got.iter().enumerate() {
+                let w = if expect_src { want_row[j] } else { 0.0 };
+                assert!(
+                    (g - w).abs() < 1e-3,
+                    "kv_scatter graph replay: col {col} elem {j} = {g}, want {w} \
+                     (replay did not follow device pos)"
+                );
+            }
+        }
+        h.free(dpos);
         Ok(())
     }
 
