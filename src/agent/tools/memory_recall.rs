@@ -137,6 +137,9 @@ impl Tool for MemoryRecallTool {
         let mut rendered: Vec<Rendered> = episodes
             .drain(..)
             .map(|ep| {
+                // The episode's learned-subject concepts (full S-P-O rendering was
+                // tried and regressed 6/8 → 2/8: 24 statements × 5 episodes bloated
+                // the context and `triples_from` pulled in cross-episode noise).
                 let facts: Vec<String> = ep
                     .learnings
                     .iter()
