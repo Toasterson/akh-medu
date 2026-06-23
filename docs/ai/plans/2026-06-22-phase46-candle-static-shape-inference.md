@@ -160,3 +160,40 @@ replays), with a **per-block graph cache** (~16 graphs over a 4 K context) so th
 shape stays constant within a block. Ceiling ≈ 1.3× on top of the pool win (10.4 → ~13
 tok/s); cost = a multi-session custom-kernel effort with real integration risk. The flash-attn
 stash is groundwork. **Deferred pending go-ahead** — banking the pool win is a clean stop.
+
+## 46d-2 progress (2026-06-23) — real per-token graph decode: foundations DONE
+
+User chose "full 46d-2 now". The two genuinely-uncertain mechanisms are built, validated,
+and shipped; the rest is integration. Three position-dependent reads must follow the
+advancing decode position from ONE device variable (`d_pos`): the KV-write column, the rope
+cos/sin row, and the causal mask. Per-block graph cache (~16 graphs / 4 K ctx) keeps the
+captured shape constant within a block.
+
+- **46d-2a working-set pinning (`c0709e4`).** THE make-or-break. A captured graph's
+  intermediate buffers sit in the pool free-list after capture; the decode loop's own
+  embed/argmax/sample allocations between replays would draw those addresses and the next
+  replay would stomp live data. Fix: capture-scoped malloc tracking (`Pool.capture_track`)
+  + `HipGraph` pins the touched-then-freed working set out of the free-list for its lifetime
+  (the live result buffer, owned by its Tensor, is skipped); `Drop` unpins. Intra-capture
+  reuse preserved (only the small unique set is pinned, not 48×). Test
+  `hip_graph_pinning_survives_interleaved_allocs` — VERIFIED meaningful: fails ("victim block
+  stomped") with pinning disabled, byte-exact with it on.
+- **46d-2b device-pos KV-scatter (`edc2605`).** `kv_scatter_f16_kernel` writes the new K/V to
+  cache column `*d_pos` (read on the device) so one captured graph follows the position;
+  `KvScatter` InplaceOp2 + `kv_scatter_at` + `DevicePos`. Tests: byte-identical to `slice_set`
+  at every position; capture at pos 2 + advance d_pos to 6 + replay → writes col 6 (device-pos
+  indirection works inside a graph).
+- **46d-2c prep (`7f80e76`).** `u32_device_ptr` extracts the raw device ptr from an
+  in-place-updated u32 candle tensor so ONE `d_pos` tensor serves both the candle-op readers
+  (rope `index_select`, mask) and the raw-ptr scatter. Tested.
+
+### Remaining (next session — integration, hard unknowns resolved)
+- **46d-2c forward:** thread a `GraphDecodeCtx { d_pos, positions(arange), read_len }` through
+  the gemma3 decode forward (hip-gated): rope via `cos/sin.index_select(d_pos)`; KV via
+  `kv_scatter_at` + block-padded fixed `read_len` narrow; additive causal mask built device-side
+  from `positions < d_pos+1` (0/-inf, `broadcast_add`, bit-exact to the unpadded softmax). Gate:
+  fixed-position A/B — graph-ready forward (run eagerly) byte-exact vs the normal decode forward.
+- **46d-2d loop:** per-block graph cache; per token (outside capture) update `d_pos` (in-place
+  slice_set), copy the new embedding into a fixed `embed_buf`, replay, D2H logits → sample;
+  recapture at block boundaries. Gate: byte-exact full generation vs eager + measure tok/s
+  (target ~1.3× over the 10.4 pool-tuned baseline; revert + record if it doesn't beat eager).
