@@ -3,7 +3,7 @@
 - **Date:** 2026-06-04
 - **Status:** Complete (all checklist items done — 12B+27B validated; on-device activations,
   hidden-state parity, and native Q4_K landed)
-- **ADR:** [053](../decisions/068-rocm-candle-gpu-backend.md)
+- **ADR:** [068](../decisions/068-rocm-candle-gpu-backend.md)
 
 ## Goal
 

@@ -27,13 +27,71 @@
 
 use candle_core as candle;
 
+use std::sync::Arc;
+
 use candle::quantized::QTensor;
 use candle::quantized::gguf_file;
 use candle::{DType, Device, IndexOp, Result, Tensor, D};
-use candle_nn::{Embedding, Module};
-use candle_transformers::quantized_nn::RmsNorm;
+use candle_nn::Module;
 
 pub const MAX_SEQ_LEN: usize = 131072; // Gemma 4 long-context window.
+
+// --- HIP-device op routing (Phase 45f / ADR 073) ----------------------------
+// candle-nn's `rms_norm` / `softmax_last_dim` / `rope` are custom ops whose GPU path
+// is only compiled when candle-nn is built with its `cuda` feature. We drive candle's
+// cuda slot through `candle-core/hip` (a fork; candle-nn's cuda feature is off), so on
+// a HIP device those custom ops have no `cuda_fwd` and would error. Route to candle-nn's
+// public on-device "slow" decompositions (pure primitive ops, all HIP-parity-gated) when
+// the tensor lives on the GPU; keep the fast custom ops byte-for-byte on CPU. Mirrors
+// `quantized_gemma3`.
+
+/// RMSNorm matching `candle_transformers::quantized_nn::RmsNorm` (weight applied
+/// directly, computed in f32), device-aware: `rms_norm_slow` on HIP, fast op on CPU.
+#[derive(Debug, Clone)]
+struct GemmaRmsNorm {
+    weight: Tensor,
+    eps: f64,
+}
+
+impl GemmaRmsNorm {
+    fn from_qtensor(weight: QTensor, eps: f64) -> Result<Self> {
+        let weight = weight.dequantize(&weight.device())?;
+        Ok(Self { weight, eps })
+    }
+}
+
+impl Module for GemmaRmsNorm {
+    fn forward(&self, x: &Tensor) -> Result<Tensor> {
+        let eps = self.eps as f32;
+        if x.device().is_cuda() {
+            // Fused single-kernel RMSNorm on the HIP device (Phase 45h).
+            #[cfg(feature = "hip")]
+            return candle::cuda::rms_norm_fused(x, &self.weight, eps);
+            #[cfg(not(feature = "hip"))]
+            return candle_nn::ops::rms_norm_slow(x, &self.weight, eps);
+        }
+        candle_nn::ops::rms_norm(x, &self.weight, eps)
+    }
+}
+
+/// Last-dim softmax: generic on-device form on HIP, fast custom op on CPU.
+/// (45h: fused-softmax built+parity-passed but no decode gain — reverted; see gemma3.)
+fn softmax_last_dim_dev(x: &Tensor) -> Result<Tensor> {
+    if x.device().is_cuda() {
+        candle_nn::ops::softmax(x, D::Minus1)
+    } else {
+        candle_nn::ops::softmax_last_dim(x)
+    }
+}
+
+/// Rotary embedding: `rope_slow` on HIP, fast custom op on CPU.
+fn rope_dev(x: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor> {
+    if x.device().is_cuda() {
+        candle_nn::rotary_emb::rope_slow(x, cos, sin)
+    } else {
+        candle_nn::rotary_emb::rope(x, cos, sin)
+    }
+}
 
 // --- architecture constants (overridable from GGUF metadata) --------------------------------
 pub const DEFAULT_SLIDING_WINDOW_PATTERN: usize = 6; // every 6th layer is full-attention.
@@ -66,6 +124,14 @@ impl QMatMul {
         Ok(Self { inner, span })
     }
 
+    /// Build from a shared `Arc<QTensor>` so the tied lm_head reuses the one resident
+    /// copy of `token_embd` (Phase 46 VRAM) instead of a second load.
+    fn from_arc(qtensor: Arc<QTensor>) -> Result<Self> {
+        let inner = candle::quantized::QMatMul::from_arc(qtensor)?;
+        let span = tracing::span!(tracing::Level::TRACE, "qmatmul");
+        Ok(Self { inner, span })
+    }
+
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         let _enter = self.span.enter();
         self.inner.forward(xs)
@@ -77,7 +143,7 @@ impl QMatMul {
 /// The GPU path deliberately does **not** use [`crate::nlu::hip::GpuMlp`] — that
 /// type fuses a hardcoded SiLU activation which is wrong for Gemma 4. Instead it
 /// routes gate/up/down through individual [`crate::nlu::hip::GpuLinear`] matmuls
-/// and does `gelu(gate) * up` in Candle (option (a) from ADR 053).
+/// and does `gelu(gate) * up` in Candle (option (a) from ADR 068).
 #[derive(Debug, Clone)]
 struct Mlp {
     feed_forward_gate: QMatMul, // ffn_gate in GGUF
@@ -166,8 +232,8 @@ impl RotaryEmbedding {
         let (_b_sz, _h, seq_len, _n_embd) = q.dims4()?;
         let cos = self.cos.narrow(0, index_pos, seq_len)?;
         let sin = self.sin.narrow(0, index_pos, seq_len)?;
-        let q_embed = candle_nn::rotary_emb::rope(&q.contiguous()?, &cos, &sin)?;
-        let k_embed = candle_nn::rotary_emb::rope(&k.contiguous()?, &cos, &sin)?;
+        let q_embed = rope_dev(&q.contiguous()?, &cos, &sin)?;
+        let k_embed = rope_dev(&k.contiguous()?, &cos, &sin)?;
         Ok((q_embed, k_embed))
     }
 }
@@ -184,14 +250,14 @@ struct LayerWeights {
     gpu_attn: Option<crate::nlu::hip::GpuAttnProj>,
 
     // Specialized normalization for Q and K (per-head, over head_dim), plain (no +1).
-    attention_q_norm: RmsNorm,
-    attention_k_norm: RmsNorm,
+    attention_q_norm: GemmaRmsNorm,
+    attention_k_norm: GemmaRmsNorm,
 
     // Layer normalization (all plain RMSNorm, no +1)
-    attention_norm: RmsNorm,      // Applied before attention
-    post_attention_norm: RmsNorm, // Applied after attention
-    ffn_norm: RmsNorm,            // Applied before feedforward
-    post_ffn_norm: RmsNorm,       // Applied after feedforward
+    attention_norm: GemmaRmsNorm,      // Applied before attention
+    post_attention_norm: GemmaRmsNorm, // Applied after attention
+    ffn_norm: GemmaRmsNorm,            // Applied before feedforward
+    post_ffn_norm: GemmaRmsNorm,       // Applied after feedforward
 
     // Feed-forward network
     mlp: Mlp,
@@ -209,11 +275,14 @@ struct LayerWeights {
 
     sliding_window_size: Option<usize>,
 
-    rotary_embedding: RotaryEmbedding,
+    rotary_embedding: Arc<RotaryEmbedding>,
     neg_inf: Tensor,
 
     // Cache
-    kv_cache: Option<(Tensor, Tensor)>,
+    kv_cache: Option<(Tensor, Tensor)>, // CPU path: dynamic grow-by-cat (byte-identical)
+    // Phase 46a: static pre-allocated KV cache for the HIP device (see quantized_gemma3).
+    kv_buf: Option<(Tensor, Tensor)>,
+    kv_ctx: usize,
 
     // Tracing
     span_attn: tracing::Span,
@@ -312,19 +381,51 @@ impl LayerWeights {
             .rotary_embedding
             .apply_rotary_emb_qkv(&q, &k, index_pos)?;
 
-        let (k, v) = match &self.kv_cache {
-            None => (k, v),
-            Some((k_cache, v_cache)) => {
-                if index_pos == 0 {
-                    (k, v)
-                } else {
-                    let k = Tensor::cat(&[k_cache, &k], 2)?; // concat on seq dim
-                    let v = Tensor::cat(&[v_cache, &v], 2)?;
-                    (k, v)
-                }
+        let (k, v) = if k.device().is_cuda() {
+            // Phase 46a: static pre-allocated KV cache (see quantized_gemma3 for detail).
+            let len = index_pos + seq_len;
+            if len > self.kv_ctx {
+                return Err(candle_core::Error::Msg(format!(
+                    "static KV cache overflow: position {len} > kv_ctx {} (raise AKH_KV_CTX)",
+                    self.kv_ctx
+                )));
             }
+            let k = k.contiguous()?;
+            let v = v.contiguous()?;
+            if self.kv_buf.is_none() {
+                let shape = (b_sz, self.n_kv_head, self.kv_ctx, self.head_dim);
+                // f16 KV cache (Phase 46 VRAM): halves the static cache (~3.2 -> ~1.6 GB
+                // at kv_ctx=4096). K/V cast to f16 on store; read prefix back to f32 for
+                // the f32 attention matmul (prefix is `len` positions, transient is small).
+                self.kv_buf = Some((
+                    Tensor::zeros(shape, DType::F16, k.device())?,
+                    Tensor::zeros(shape, DType::F16, v.device())?,
+                ));
+            }
+            let (kbuf, vbuf) = self.kv_buf.as_ref().unwrap();
+            kbuf.slice_set(&k.to_dtype(DType::F16)?, 2, index_pos)?;
+            vbuf.slice_set(&v.to_dtype(DType::F16)?, 2, index_pos)?;
+            (
+                kbuf.narrow(2, 0, len)?.contiguous()?.to_dtype(DType::F32)?,
+                vbuf.narrow(2, 0, len)?.contiguous()?.to_dtype(DType::F32)?,
+            )
+        } else {
+            // CPU path: dynamic grow-by-cat (byte-identical to the original).
+            let (k, v) = match &self.kv_cache {
+                None => (k, v),
+                Some((k_cache, v_cache)) => {
+                    if index_pos == 0 {
+                        (k, v)
+                    } else {
+                        let k = Tensor::cat(&[k_cache, &k], 2)?; // concat on seq dim
+                        let v = Tensor::cat(&[v_cache, &v], 2)?;
+                        (k, v)
+                    }
+                }
+            };
+            self.kv_cache = Some((k.clone(), v.clone())); // update cache
+            (k, v)
         };
-        self.kv_cache = Some((k.clone(), v.clone())); // update cache
 
         // Repeat KV for GQA/MQA (n_kv -> n_head).
         let k = candle_transformers::utils::repeat_kv(k, self.n_head / self.n_kv_head)?;
@@ -340,7 +441,7 @@ impl LayerWeights {
         }
 
         // softmax in f32 (no attention softcapping).
-        let attn_weights = candle_nn::ops::softmax_last_dim(&attn_weights)?;
+        let attn_weights = softmax_last_dim_dev(&attn_weights)?;
         let attn_output = attn_weights.matmul(&v)?;
 
         let attn_output = attn_output
@@ -360,10 +461,12 @@ impl LayerWeights {
 
 #[derive(Debug, Clone)]
 pub struct ModelWeights {
-    tok_embeddings: Embedding,
+    /// Token embedding table kept QUANTIZED (Phase 46 VRAM) — `get_rows` dequantizes
+    /// only looked-up rows (Q6_K ~0.83 GB vs 4 GB f32). `Arc`-shared with the tied lm_head.
+    tok_embeddings: Arc<QTensor>,
     embedding_length: usize,
     layers: Vec<LayerWeights>,
-    norm: RmsNorm,
+    norm: GemmaRmsNorm,
     output: QMatMul,
     /// When present (`AKH_GPU_MATMUL=1`), the lm_head projection runs on the AMD GPU.
     #[cfg(feature = "rocm")]
@@ -470,7 +573,7 @@ impl ModelWeights {
 
         let neg_inf = Tensor::new(f32::NEG_INFINITY, device)?;
 
-        // Optional AMD GPU path (ADR 053): AKH_GPU_MATMUL=1 uploads linear weights to the GPU
+        // Optional AMD GPU path (ADR 068): AKH_GPU_MATMUL=1 uploads linear weights to the GPU
         // and runs their GEMMs via rocBLAS; AKH_GPU_QUANT=1 keeps them int4 (fits 12B/27B).
         #[cfg(feature = "rocm")]
         let gpu_blas: Option<std::sync::Arc<crate::nlu::hip::RocmBlas>> =
@@ -493,17 +596,18 @@ impl ModelWeights {
         #[cfg(feature = "rocm")]
         let gpu_quant = std::env::var("AKH_GPU_QUANT").ok().as_deref() == Some("1");
 
-        // Load token embeddings; tied lm_head (no output.weight in Gemma 4).
-        let tok_embeddings_q = ct.tensor(reader, "token_embd.weight", device)?;
-        let tok_embeddings = tok_embeddings_q.dequantize(device)?;
-        let norm = RmsNorm::from_qtensor(
+        // Token embeddings kept QUANTIZED (Phase 46 VRAM): `get_rows` dequantizes only
+        // the looked-up rows, skipping the ~4 GB f32 expansion of the whole table.
+        let tok_embeddings = Arc::new(ct.tensor(reader, "token_embd.weight", device)?);
+        let norm = GemmaRmsNorm::from_qtensor(
             ct.tensor(reader, "output_norm.weight", device)?,
             rms_norm_eps,
         )?;
-        // Tied weights: use token_embd as the output projection (no output.weight).
+        // Tied lm_head (no output.weight in Gemma 4): share the one resident quantized
+        // copy of token_embd via `Arc` (saves a 2nd ~0.83 GB load).
         let output = match ct.tensor(reader, "output.weight", device) {
-            Ok(tensor) => tensor,
-            Err(_) => ct.tensor(reader, "token_embd.weight", device)?,
+            Ok(tensor) => Arc::new(tensor),
+            Err(_) => tok_embeddings.clone(),
         };
         #[cfg(feature = "rocm")]
         let gpu_output: Option<crate::nlu::hip::GpuLinear> = match &gpu_blas {
@@ -515,6 +619,12 @@ impl ModelWeights {
         };
 
         let mut layers = Vec::with_capacity(block_count);
+        // Share one RotaryEmbedding per distinct (head_dim, rotary_pairs, freq) instead of
+        // rebuilding a full [MAX_SEQ_LEN x pairs] cos/sin cache per layer: gemma4 has 2
+        // layer types (SWA + full), so this drops ~46 duplicate caches (~6 GB VRAM),
+        // byte-identical (freq keyed by its f32 bit pattern).
+        let mut rope_cache: std::collections::HashMap<(usize, usize, u32), Arc<RotaryEmbedding>> =
+            std::collections::HashMap::new();
         for layer_idx in 0..block_count {
             let prefix = format!("blk.{layer_idx}");
 
@@ -555,19 +665,19 @@ impl ModelWeights {
             let attention_wo =
                 ct.tensor(reader, &format!("{prefix}.attn_output.weight"), device)?;
 
-            let attention_q_norm = RmsNorm::from_qtensor(
+            let attention_q_norm = GemmaRmsNorm::from_qtensor(
                 ct.tensor(reader, &format!("{prefix}.attn_q_norm.weight"), device)?,
                 rms_norm_eps,
             )?;
-            let attention_k_norm = RmsNorm::from_qtensor(
+            let attention_k_norm = GemmaRmsNorm::from_qtensor(
                 ct.tensor(reader, &format!("{prefix}.attn_k_norm.weight"), device)?,
                 rms_norm_eps,
             )?;
-            let attention_norm = RmsNorm::from_qtensor(
+            let attention_norm = GemmaRmsNorm::from_qtensor(
                 ct.tensor(reader, &format!("{prefix}.attn_norm.weight"), device)?,
                 rms_norm_eps,
             )?;
-            let post_attention_norm = RmsNorm::from_qtensor(
+            let post_attention_norm = GemmaRmsNorm::from_qtensor(
                 ct.tensor(
                     reader,
                     &format!("{prefix}.post_attention_norm.weight"),
@@ -575,11 +685,11 @@ impl ModelWeights {
                 )?,
                 rms_norm_eps,
             )?;
-            let ffn_norm = RmsNorm::from_qtensor(
+            let ffn_norm = GemmaRmsNorm::from_qtensor(
                 ct.tensor(reader, &format!("{prefix}.ffn_norm.weight"), device)?,
                 rms_norm_eps,
             )?;
-            let post_ffn_norm = RmsNorm::from_qtensor(
+            let post_ffn_norm = GemmaRmsNorm::from_qtensor(
                 ct.tensor(reader, &format!("{prefix}.post_ffw_norm.weight"), device)?,
                 rms_norm_eps,
             )?;
@@ -672,8 +782,20 @@ impl ModelWeights {
             };
             let _ = rope_dim_swa; // (consumed above)
 
-            let rotary_embedding =
-                RotaryEmbedding::new(head_dim, rotary_pairs, layer_rope_frequency, device)?;
+            let rope_key = (head_dim, rotary_pairs, layer_rope_frequency.to_bits());
+            let rotary_embedding = match rope_cache.get(&rope_key) {
+                Some(r) => r.clone(),
+                None => {
+                    let r = Arc::new(RotaryEmbedding::new(
+                        head_dim,
+                        rotary_pairs,
+                        layer_rope_frequency,
+                        device,
+                    )?);
+                    rope_cache.insert(rope_key, r.clone());
+                    r
+                }
+            };
 
             // Tracing spans
             let span_attn = tracing::span!(tracing::Level::TRACE, "attn");
@@ -703,6 +825,11 @@ impl ModelWeights {
                 rotary_embedding,
                 neg_inf: neg_inf.clone(),
                 kv_cache: None,
+                kv_buf: None,
+                kv_ctx: std::env::var("AKH_KV_CTX")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(4096),
                 span_attn,
                 span_mlp,
             })
@@ -712,13 +839,13 @@ impl ModelWeights {
         let span_output = tracing::span!(tracing::Level::TRACE, "output");
 
         Ok(Self {
-            tok_embeddings: Embedding::new(tok_embeddings, embedding_length),
+            tok_embeddings,
             #[cfg(feature = "rocm")]
             gpu_output,
             embedding_length,
             layers,
             norm,
-            output: QMatMul::from_qtensor(output)?,
+            output: QMatMul::from_arc(output)?,
             final_logit_softcap,
             span,
             span_output,
@@ -739,7 +866,7 @@ impl ModelWeights {
     /// build the base sequence for multimodal splicing (e.g. native audio).
     /// (akh-medu vendored extension.)
     pub fn embed_tokens(&self, ids: &Tensor) -> Result<Tensor> {
-        self.tok_embeddings.forward(ids)
+        self.tok_embeddings.get_rows(ids)
     }
 
     /// `sqrt(embedding_length)` — the scale Gemma 4 applies to *text*-token
@@ -753,7 +880,7 @@ impl ModelWeights {
     /// **last position** (shape `[batch, hidden_dim]`), before the output
     /// projection — for the Neural→VSA bridge. (akh-medu vendored extension.)
     pub fn hidden_states(&mut self, x: &Tensor, index_pos: usize) -> Result<Tensor> {
-        let mut layer_in = self.tok_embeddings.forward(x)?;
+        let mut layer_in = self.tok_embeddings.get_rows(x)?;
         // Scale embeddings by sqrt(embedding_length) (≈61.9677 for 3840).
         layer_in = (layer_in * (self.embedding_length as f64).sqrt())?;
         let (b_sz, seq_len) = x.dims2()?;

@@ -29,7 +29,7 @@ struct Mlp {
     feed_forward_w2: QMatMul,
     feed_forward_w3: QMatMul,
     /// When present (built at load with `AKH_GPU_MATMUL=1`), the three projections run on the
-    /// AMD GPU via rocBLAS (ADR 053) instead of the quantized CPU path.
+    /// AMD GPU via rocBLAS (ADR 068) instead of the quantized CPU path.
     #[cfg(feature = "rocm")]
     gpu: Option<crate::nlu::hip::GpuMlp>,
 }
@@ -250,7 +250,7 @@ impl ModelWeights {
 
         let neg_inf = Tensor::new(f32::NEG_INFINITY, device)?;
 
-        // Optional AMD GPU path (ADR 053): when `AKH_GPU_MATMUL=1`, linear-layer weights are
+        // Optional AMD GPU path (ADR 068): when `AKH_GPU_MATMUL=1`, linear-layer weights are
         // dequantized and uploaded to the GPU; their GEMMs run on the gfx1100 via rocBLAS.
         #[cfg(feature = "rocm")]
         let gpu_blas: Option<std::sync::Arc<crate::nlu::hip::RocmBlas>> =

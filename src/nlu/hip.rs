@@ -1,4 +1,4 @@
-//! ROCm/HIP GPU compute reachable from the Rust/Candle engine (feature `rocm`, ADR 053).
+//! ROCm/HIP GPU compute reachable from the Rust/Candle engine (feature `rocm`, ADR 068).
 //!
 //! This is the **first kernel** of the AMD GPU backend: a single-precision matrix multiply
 //! that executes on the gfx1100 via **rocBLAS**, exposed to Candle as a [`CustomOp2`] so an
@@ -10,7 +10,7 @@
 //! This op keeps tensors in **CPU storage** and round-trips H2D → sgemm → D2H per call. That
 //! is correctness-first and PCIe-bound — it is the building block, **not** a fast full-model
 //! path. Running quantized Gemma end-to-end on the GPU needs resident device storage and the
-//! quantized kernels (the multi-day fork in ADR 053). What is real here: the matmul math runs
+//! quantized kernels (the multi-day fork in ADR 068). What is real here: the matmul math runs
 //! on the GPU and matches Candle's CPU result.
 //!
 //! The HIP/rocBLAS libraries are loaded at runtime via `dlopen` (libloading), so a binary
@@ -31,6 +31,27 @@ const HIP_MEMCPY_HOST_TO_DEVICE: c_int = 1;
 const HIP_MEMCPY_DEVICE_TO_HOST: c_int = 2;
 const ROCBLAS_OPERATION_NONE: c_int = 111;
 const ROCBLAS_STATUS_SUCCESS: c_int = 0;
+
+/// Host↔device transfer counters (Phase 45a / ADR 073). Incremented on every
+/// `hipMemcpy`. The bench [`reset_pcie_counts`] after model load, then divides by
+/// generated tokens to report **PCIe crossings/token** — the metric the op-offload
+/// path is bottlenecked on (~216/token for a 27-layer 12B). Cheap relaxed atomics,
+/// always live (the cost is negligible vs a PCIe copy); only *read* when asked.
+pub static PCIE_H2D: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static PCIE_D2H: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// `(host→device, device→host)` `hipMemcpy` counts since the last [`reset_pcie_counts`].
+pub fn pcie_counts() -> (u64, u64) {
+    use std::sync::atomic::Ordering::Relaxed;
+    (PCIE_H2D.load(Relaxed), PCIE_D2H.load(Relaxed))
+}
+
+/// Zero the PCIe transfer counters (call after model load, before a timed generation).
+pub fn reset_pcie_counts() {
+    use std::sync::atomic::Ordering::Relaxed;
+    PCIE_H2D.store(0, Relaxed);
+    PCIE_D2H.store(0, Relaxed);
+}
 
 // --- FFI function signatures (HIP runtime API + rocBLAS are plain C ABI) ---------------------
 type HipMalloc = unsafe extern "C" fn(*mut *mut c_void, usize) -> c_int;
@@ -78,7 +99,7 @@ fn open_first(candidates: &[&str], what: &str) -> NluResult<Library> {
     Err(NluError::ModelLoadFailed {
         reason: format!(
             "could not dlopen {what} (tried {candidates:?}); install the ROCm userspace \
-             (see ADR 053 / scripts/rocm_smoke.sh)"
+             (see ADR 068 / scripts/rocm_smoke.sh)"
         ),
     })
 }
@@ -103,7 +124,7 @@ pub struct RocmBlas {
     /// handle allocates device workspace and queries the device — doing it per call (as the
     /// first cut did) dominates single-token decode, where the activation itself is only a
     /// few KB. A 27B forward issues ~420 GEMMs per token; one persistent handle removes ~420
-    /// create/destroy cycles. Destroyed in [`Drop`]. See ADR 053 (on-device-activations).
+    /// create/destroy cycles. Destroyed in [`Drop`]. See ADR 068 (on-device-activations).
     handle: *mut c_void,
 }
 
@@ -283,6 +304,7 @@ impl RocmBlas {
                 return Err(NluError::ModelLoadFailed { reason: "hipMemcpy D2H failed".into() });
             }
         }
+        PCIE_D2H.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(out)
     }
 
@@ -489,6 +511,7 @@ impl RocmBlas {
                     reason: "hipMemcpy H2D (resident weight) failed".into(),
                 });
             }
+            PCIE_H2D.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             Ok(DeviceBuffer {
                 ptr,
                 bytes,
@@ -515,6 +538,7 @@ impl RocmBlas {
                 hip_free(ptr);
                 return Err(NluError::ModelLoadFailed { reason: "hipMemcpy H2D (u8) failed".into() });
             }
+            PCIE_H2D.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             Ok(DeviceBuffer { ptr, bytes, blas: Arc::clone(self) })
         }
     }
@@ -585,6 +609,7 @@ impl RocmBlas {
                     reason: "hipMemcpy H2D (activation) failed".into(),
                 });
             }
+            PCIE_H2D.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let alpha = 1.0f32;
             let beta = 0.0f32;
             let status = rb_sgemm(
@@ -623,6 +648,7 @@ impl RocmBlas {
                 });
             }
         }
+        PCIE_D2H.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(out)
     }
 }
@@ -940,7 +966,7 @@ fn quantize_q4(weight: &[f32], out_dim: usize, in_dim: usize, group: usize) -> (
 /// A linear layer whose weight is **int4 group-quantized and resident on the GPU** —
 /// `y[.., out] = x[.., in] · Wᵀ`. This is the path that makes 12B/27B fit in 24 GB: the
 /// weight stays ~4-bit on-device; each matmul dequantizes chunks of output columns into a
-/// bounded f32 scratch (HIP kernel) and runs rocBLAS sgemm against the activation (ADR 053).
+/// bounded f32 scratch (HIP kernel) and runs rocBLAS sgemm against the activation (ADR 068).
 #[derive(Debug, Clone)]
 pub struct ResidentQuantLinear {
     blas: Arc<RocmBlas>,

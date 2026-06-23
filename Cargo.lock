@@ -1090,13 +1090,12 @@ dependencies = [
 [[package]]
 name = "candle-core"
 version = "0.10.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6bd9895436c1ba5dc1037a19935d084b838db066ff4e15ef7dded020b7c12a4a"
 dependencies = [
  "byteorder",
  "float8",
  "gemm 0.19.0",
  "half",
+ "libloading 0.8.9",
  "libm",
  "memmap2",
  "num-traits",

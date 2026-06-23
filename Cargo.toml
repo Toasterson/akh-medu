@@ -186,6 +186,10 @@ rocm = ["candle-backend", "dep:libloading"]
 # the `#[cfg(feature = "metal")]` path in candle_backend.rs. macOS/arm64 only —
 # do not enable on Linux (candle's Metal backend won't compile there).
 metal = ["candle-backend", "candle-core/metal", "candle-nn/metal", "candle-transformers/metal"]
+# Phase 45 / ADR 073: full Candle Device::Hip backend. Enables the vendored
+# candle-core HIP backend (fills the cuda module slot — see vendor/candle-core)
+# on top of the `rocm` dlopen runtime (nlu::hip). Off by default; superset of rocm.
+hip = ["rocm", "candle-core/hip"]
 burn-training = ["candle-backend"]  # will add "burn" when sqlite3 conflict resolved
 training-data = []
 wiki = ["dep:comrak", "dep:syntect", "dep:minijinja", "dep:tantivy", "dep:blake3"]
@@ -238,3 +242,10 @@ harness = false
 [[bench]]
 name = "vsa_decide"
 harness = false
+
+# Phase 45 / ADR 073: vendored candle-core fork that adds the ROCm/HIP backend
+# (gated behind candle-core's `hip` feature; no effect on the default build, which
+# binds the byte-identical 0.10.2 source). candle-nn / candle-transformers from the
+# registry consume this patched candle-core transparently.
+[patch.crates-io]
+candle-core = { path = "vendor/candle-core" }
