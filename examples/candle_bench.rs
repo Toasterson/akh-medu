@@ -101,6 +101,48 @@ fn main() -> miette::Result<()> {
     #[cfg(feature = "hip")]
     candle_core::cuda::reset_malloc_counts();
 
+    // Phase 46c: fixed-position HIP-graph capture/replay probe (AKH_BENCH_GRAPH=1). The
+    // decisive measurement — eager forward vs single-dispatch graph replay at one fixed
+    // decode position — for whether graph replay can close the dispatch-bound decode gap.
+    #[cfg(feature = "hip")]
+    if std::env::var("AKH_BENCH_GRAPH").as_deref() == Ok("1") {
+        let iters: u32 = env_parse("AKH_BENCH_TOKENS").unwrap_or(128);
+        let stats = backend.bench_graph_replay(&prompt, iters)?;
+        println!();
+        println!("=== Phase 46c fixed-position HIP-graph replay probe ===");
+        println!("position (P)       : {} tokens", stats.position);
+        println!("iters (each)       : {}", stats.iters);
+        println!(
+            "warm fwd allocs    : {} miss / {} calls  (0 miss ⇒ forward is capturable)",
+            stats.warm_malloc_miss, stats.warm_malloc_calls
+        );
+        println!("eager  (fwd @P)    : {:.2} tok/s", stats.eager_tok_s);
+        println!(
+            "stream-eager diff  : max|private−null| {:.3e}  (0 ⇒ all ops honor the stream)",
+            stats.stream_eager_diff
+        );
+        if stats.captured {
+            let speedup = stats.replay_tok_s / stats.eager_tok_s.max(1e-6);
+            println!("replay (graph @P)  : {:.2} tok/s", stats.replay_tok_s);
+            println!("speedup            : {speedup:.2}x  (replay / eager)");
+            println!(
+                "parity (replay≟fresh): argmax {} | max|Δlogits| {:.3e}",
+                if stats.argmax_matches { "MATCH" } else { "MISMATCH" },
+                stats.max_abs_diff
+            );
+            println!(
+                "replay determinism : max|first−last| {:.3e}  (0 ⇒ deterministic)",
+                stats.replay_determinism
+            );
+        } else {
+            println!(
+                "capture            : FAILED — {}",
+                stats.capture_error.as_deref().unwrap_or("unknown")
+            );
+        }
+        return Ok(());
+    }
+
     let vram_before = vram_used_bytes();
 
     let stats = backend.generate_bench(&prompt, max_tokens)?;

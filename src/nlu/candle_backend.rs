@@ -158,6 +158,56 @@ impl GenBenchStats {
     }
 }
 
+/// Stats from the Phase 46c fixed-position HIP-graph capture/replay probe.
+///
+/// The decisive, cheap measurement for whether HIP-graph replay can close the
+/// Candle↔Ollama decode gap. At a **fixed** decode position it compares eager
+/// `forward_from_embed` (the per-token kernel storm, host-enqueue-gapped) against a single
+/// `hipGraphLaunch` replay of the same forward. This is the *upper bound* on the graph win
+/// — no per-token KV write / growing shapes to update — so if replay does not clearly beat
+/// eager here, the dispatch-idle hypothesis is wrong and the full per-token graph decode is
+/// not worth building (revert + record). If it wins big, that headroom pays for the
+/// per-token update overhead the real integration needs.
+#[cfg(all(feature = "candle-backend", feature = "hip"))]
+#[derive(Debug, Clone)]
+pub struct GraphBenchStats {
+    /// Fixed decode position the forward was captured at (= prompt length).
+    pub position: usize,
+    /// Iterations timed for each of eager / replay (after warm-up).
+    pub iters: u32,
+    /// Eager `forward_from_embed` throughput at the fixed position (tok/s), drained
+    /// per iteration so it reflects real dispatch+execute cost.
+    pub eager_tok_s: f32,
+    /// Single-dispatch graph-replay throughput at the fixed position (tok/s); 0 if
+    /// capture failed (see [`captured`](Self::captured)).
+    pub replay_tok_s: f32,
+    /// hipMalloc cache *misses* on a *warm* eager forward (after warm-up) — diagnostic:
+    /// > 0 means the forward still issues a real (host-synchronizing) hipMalloc through
+    /// our caching pool even at a fixed position, which would abort graph capture.
+    pub warm_malloc_miss: u64,
+    /// Total caching-allocator calls on that warm forward (context for the miss count).
+    pub warm_malloc_calls: u64,
+    /// Whether the forward was successfully captured into a HIP graph.
+    pub captured: bool,
+    /// Capture failure reason, if any (e.g. a hipMalloc / rocBLAS-internal alloc that
+    /// invalidated the capture).
+    pub capture_error: Option<String>,
+    /// Whether the replayed logits' argmax (greedy token) matches a *fresh* eager
+    /// forward's at the same KV state (only meaningful when [`captured`](Self::captured)).
+    pub argmax_matches: bool,
+    /// Max absolute difference between the last replay and a fresh eager forward
+    /// (byte-coherence check; the correctness gate).
+    pub max_abs_diff: f32,
+    /// Max absolute difference between the first and last replay outputs — 0 ⇒ replay is
+    /// deterministic across launches; > 0 ⇒ a race (cross-stream / reused buffer).
+    pub replay_determinism: f32,
+    /// Max absolute difference between an eager forward run on a *private stream* (no
+    /// graph) and the default-stream forward — 0 ⇒ every op honors the launch stream (a
+    /// replay mismatch is then a graph-machinery/allocator fault); > 0 ⇒ some op ignored
+    /// the stream and raced (the cause of the replay mismatch).
+    pub stream_eager_diff: f32,
+}
+
 // ---------------------------------------------------------------------------
 // Expected model paths
 // ---------------------------------------------------------------------------
@@ -544,6 +594,177 @@ impl CandleBackend {
             text: result.text,
             tokens_generated: result.tokens_generated,
             decode_secs: result.decode_secs,
+        })
+    }
+
+    /// Phase 46c make-or-break probe: capture `forward_from_embed` at a **fixed** decode
+    /// position and replay it, comparing eager vs single-dispatch-graph throughput and
+    /// logits parity. gemma3 only (the model with the static-KV + embed/forward_from_embed
+    /// split). `iters` forwards/replays are timed after warm-up. See [`GraphBenchStats`].
+    ///
+    /// The flow mirrors the proven `hip_graph_capture_replay_*` spikes scaled to the whole
+    /// forward: prefill the prompt to reach a realistic position P, compute the next
+    /// token's embedding OUTSIDE the captured region (it does a host-synchronizing D2H+H2D),
+    /// warm the caching pool with eager forwards, then capture the forward at P (every
+    /// allocation now hits the warm pool → zero hipMalloc → capturable) and replay it.
+    #[cfg(all(feature = "candle-backend", feature = "hip"))]
+    pub fn bench_graph_replay(&mut self, prompt: &str, iters: u32) -> NluResult<GraphBenchStats> {
+        use candle_core::cuda;
+
+        let iters = iters.max(1);
+        let fail = |reason: String| NluError::LlmGenerationFailed { reason };
+
+        // --- Prefill to a realistic position P (mirrors generate_inner) -------------
+        let encoding = self
+            .tokenizer
+            .encode(prompt, true)
+            .map_err(|e| fail(format!("tokenization: {e}")))?;
+        let mut prompt_tokens: Vec<u32> = encoding.get_ids().to_vec();
+        if matches!(self.family, ModelFamily::Gemma | ModelFamily::Gemma4) {
+            if let Some(bos) = self.tokenizer.token_to_id("<bos>") {
+                if prompt_tokens.first() != Some(&bos) {
+                    prompt_tokens.insert(0, bos);
+                }
+            }
+        }
+        let position = prompt_tokens.len();
+        let input = Tensor::new(prompt_tokens.as_slice(), &self.device)
+            .and_then(|t| t.unsqueeze(0))
+            .map_err(|e| fail(format!("prompt tensor: {e}")))?;
+        let prefill = self
+            .model
+            .forward(&input, 0)
+            .map_err(|e| fail(format!("prefill: {e}")))?;
+        // Greedy next token = the token the decode loop would feed next.
+        let next_token = prefill
+            .i((0, ..))
+            .and_then(|l| l.argmax(0))
+            .and_then(|t| t.to_scalar::<u32>())
+            .map_err(|e| fail(format!("prefill argmax: {e}")))?;
+        let tok_input = Tensor::new(&[next_token], &self.device)
+            .and_then(|t| t.unsqueeze(0))
+            .map_err(|e| fail(format!("token tensor: {e}")))?;
+
+        // --- gemma3-only (the model with the static-KV + embed split) --------------
+        let model = match &mut self.model {
+            LoadedModel::Gemma(m) => m,
+            _ => return Err(fail("graph replay probe currently supports gemma3 only".to_string())),
+        };
+
+        // The embedding lookup stays OUTSIDE the captured region (host-sync D2H+H2D).
+        let embed = model.embed(&tok_input).map_err(|e| fail(format!("embed: {e}")))?;
+
+        // Bisection toggle (Phase 46c): capture only the transformer stack + final norm
+        // (`hidden_states_from_embed`, excluding the lm_head GEMV) when AKH_BENCH_GRAPH_HIDDEN
+        // is set, so a replay mismatch can be localized to the layers vs the output head.
+        let hidden_only = std::env::var("AKH_BENCH_GRAPH_HIDDEN").as_deref() == Ok("1");
+        let run = |m: &mut super::vendored::quantized_gemma3::ModelWeights| -> candle_core::Result<Tensor> {
+            if hidden_only {
+                m.hidden_states_from_embed(&embed, position)
+            } else {
+                m.forward_from_embed(&embed, position)
+            }
+        };
+
+        let to_vec0 = |t: &Tensor, what: &str| -> NluResult<Vec<f32>> {
+            t.i((0, ..))
+                .and_then(|t| t.to_vec1::<f32>())
+                .map_err(|e| fail(format!("{what} logits: {e}")))
+        };
+        let argmax = |v: &[f32]| -> usize {
+            v.iter()
+                .enumerate()
+                .fold((0usize, f32::NEG_INFINITY), |(bi, bv), (i, &x)| {
+                    if x > bv { (i, x) } else { (bi, bv) }
+                })
+                .0
+        };
+        let max_diff = |a: &[f32], b: &[f32]| -> f32 {
+            a.iter().zip(b.iter()).map(|(x, y)| (x - y).abs()).fold(0.0f32, f32::max)
+        };
+
+        // --- Eager baseline ---------------------------------------------------------
+        // Warm-ups so every transient allocation has a recycled pool block before capture
+        // (which aborts on any real hipMalloc). CRUCIAL: never hold a logits device tensor
+        // live across the capture — doing so drains the pool of that block so the capture
+        // forward's own logits alloc misses → a hipMalloc that aborts capture. So every
+        // reference forward is read to a host Vec and its device tensor dropped immediately.
+        for _ in 0..2 {
+            run(model).map_err(|e| fail(format!("eager warmup: {e}")))?;
+            cuda::device_synchronize().map_err(|e| fail(format!("sync: {e}")))?;
+        }
+        // Reference (warm) → host, device tensor dropped. Also the zero-miss check.
+        cuda::reset_malloc_counts();
+        let eager_vec = {
+            let l = run(model).map_err(|e| fail(format!("warm forward: {e}")))?;
+            cuda::device_synchronize().map_err(|e| fail(format!("sync: {e}")))?;
+            to_vec0(&l, "eager")?
+        };
+        let (warm_malloc_calls, warm_malloc_miss, _) = cuda::malloc_profile();
+
+        // Same forward on a PRIVATE stream (no graph) → host, device dropped. If this
+        // matches the default-stream result, every op honors the launch stream.
+        let stream_vec = {
+            let l = cuda::run_on_private_stream(|| run(model))
+                .map_err(|e| fail(format!("private-stream forward: {e}")))?;
+            to_vec0(&l, "stream")?
+        };
+        let stream_eager_diff = max_diff(&eager_vec, &stream_vec);
+
+        // Eager throughput (drained per iteration; results dropped each iter).
+        let eager_t0 = std::time::Instant::now();
+        for _ in 0..iters {
+            run(model).map_err(|e| fail(format!("eager forward: {e}")))?;
+            cuda::device_synchronize().map_err(|e| fail(format!("sync: {e}")))?;
+        }
+        let eager_secs = eager_t0.elapsed().as_secs_f32();
+        let eager_tok_s = if eager_secs > 0.0 { iters as f32 / eager_secs } else { 0.0 };
+
+        // --- Capture the forward at the fixed position (non-fatal on failure) -------
+        let capture = cuda::HipGraph::capture(|| run(model));
+
+        let mut replay_tok_s = 0.0;
+        let mut captured = false;
+        let mut capture_error = None;
+        let mut argmax_matches = false;
+        let mut max_abs_diff = f32::NAN;
+        let mut replay_determinism = f32::NAN;
+
+        match capture {
+            Err(e) => capture_error = Some(format!("{e}")),
+            Ok((graph, replay_logits)) => {
+                captured = true;
+                // First replay → its output (read before any further replays).
+                graph.replay().map_err(|e| fail(format!("replay warmup: {e}")))?;
+                let first_vec = to_vec0(&replay_logits, "replay-first")?;
+
+                let replay_t0 = std::time::Instant::now();
+                for _ in 0..iters {
+                    graph.replay().map_err(|e| fail(format!("replay: {e}")))?;
+                }
+                let replay_secs = replay_t0.elapsed().as_secs_f32();
+                replay_tok_s = if replay_secs > 0.0 { iters as f32 / replay_secs } else { 0.0 };
+                let last_vec = to_vec0(&replay_logits, "replay-last")?;
+
+                replay_determinism = max_diff(&first_vec, &last_vec);
+                argmax_matches = argmax(&eager_vec) == argmax(&last_vec);
+                max_abs_diff = max_diff(&eager_vec, &last_vec);
+            }
+        }
+
+        Ok(GraphBenchStats {
+            position,
+            iters,
+            eager_tok_s,
+            replay_tok_s,
+            warm_malloc_miss,
+            warm_malloc_calls,
+            captured,
+            capture_error,
+            argmax_matches,
+            max_abs_diff,
+            replay_determinism,
+            stream_eager_diff,
         })
     }
 
