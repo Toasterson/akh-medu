@@ -234,6 +234,38 @@ pub struct GraphDecodeParity {
     pub used_device_scatter: bool,
 }
 
+/// Result of the Phase 46d-2d **real per-token graph decode loop** — the payoff measurement
+/// for the whole 46d effort. One HIP graph is captured for the decode forward and replayed
+/// once per token (advancing the device position + refreshing the fixed embedding buffer
+/// between replays), generating a full sequence in single-dispatch steps instead of the
+/// per-token kernel storm. Compared against eager generation of the same sequence.
+///
+/// The gate: [`tokens_match`](Self::tokens_match) must be true (graph replay decodes the
+/// **same** greedy tokens as eager — correctness) and `graph_tok_s` should beat
+/// `eager_tok_s` (the speed payoff). Per the measure-or-revert discipline, if replay does
+/// not beat eager the integration is reverted and the finding recorded.
+#[derive(Debug, Clone)]
+pub struct GraphDecodeLoopStats {
+    /// Prompt length (the first decode position).
+    pub position: usize,
+    /// Tokens requested.
+    pub requested_new: usize,
+    /// Tokens actually decoded (≤ requested; capped by the static cache or an early EOS).
+    pub decoded: usize,
+    /// Eager generation throughput (`forward_from_embed` per token, exact KV prefix) — the
+    /// real baseline (tok/s).
+    pub eager_tok_s: f32,
+    /// Graph-replay generation throughput (one `hipGraphLaunch` per token) — the new path
+    /// (tok/s).
+    pub graph_tok_s: f32,
+    /// hipMalloc cache *misses* on the warm forward right before capture — `0` ⇒ the forward
+    /// is allocation-stable and the capture is clean.
+    pub capture_miss: u64,
+    /// Whether the graph-replayed greedy token sequence is identical to the eager one — the
+    /// correctness gate. A captured graph that decodes different tokens is wrong.
+    pub tokens_match: bool,
+}
+
 // ---------------------------------------------------------------------------
 // Expected model paths
 // ---------------------------------------------------------------------------
@@ -902,6 +934,191 @@ impl CandleBackend {
             padded_diff: max_diff(&normal, &padded),
             padded_read_len,
             used_device_scatter: true,
+        })
+    }
+
+    /// Phase 46d-2d: the real per-token graph decode loop (see [`GraphDecodeLoopStats`]).
+    /// Captures the decode forward ONCE at `read_len = position + max_new` (block-padded to
+    /// the longest position the run reaches) and replays it per token — because every
+    /// position-dependent read now comes from the device `d_pos` (rope `index_select`,
+    /// `kv_scatter_at` column, additive mask), one graph follows the whole generation: each
+    /// token only updates `d_pos` (4-byte H2D) and refreshes a fixed embedding buffer in
+    /// place, then a single `hipGraphLaunch` runs the forward. Generates the same sequence
+    /// eagerly first for an A/B (identical greedy tokens ⇒ correct; faster ⇒ the payoff).
+    /// gemma3 only.
+    #[cfg(all(feature = "candle-backend", feature = "hip"))]
+    pub fn bench_graph_decode_loop(
+        &mut self,
+        prompt: &str,
+        max_new: u32,
+    ) -> NluResult<GraphDecodeLoopStats> {
+        use super::vendored::quantized_gemma3::GraphDecodeCtx;
+        use candle_core::cuda;
+        let fail = |reason: String| NluError::LlmGenerationFailed { reason };
+        let max_new = max_new.max(1) as usize;
+
+        // --- tokenize + bos --------------------------------------------------------
+        let encoding = self
+            .tokenizer
+            .encode(prompt, true)
+            .map_err(|e| fail(format!("tokenization: {e}")))?;
+        let mut prompt_tokens: Vec<u32> = encoding.get_ids().to_vec();
+        if matches!(self.family, ModelFamily::Gemma | ModelFamily::Gemma4) {
+            if let Some(bos) = self.tokenizer.token_to_id("<bos>") {
+                if prompt_tokens.first() != Some(&bos) {
+                    prompt_tokens.insert(0, bos);
+                }
+            }
+        }
+        let position = prompt_tokens.len();
+        let input = Tensor::new(prompt_tokens.as_slice(), &self.device)
+            .and_then(|t| t.unsqueeze(0))
+            .map_err(|e| fail(format!("prompt tensor: {e}")))?;
+        let eos = self
+            .tokenizer
+            .token_to_id("<eos>")
+            .or_else(|| self.tokenizer.token_to_id("<end_of_turn>"));
+
+        let device = self.device.clone();
+        let model = match &mut self.model {
+            LoadedModel::Gemma(m) => m,
+            _ => {
+                return Err(fail(
+                    "graph decode loop probe supports gemma3 only".to_string(),
+                ))
+            }
+        };
+
+        // One graph spans the whole run: read_len covers the deepest position decoded
+        // (P + effective_new - 1 ⇒ read prefix length P + effective_new). Clamp to the cache.
+        let kv_ctx = model.kv_ctx();
+        let read_len = (position + max_new).min(kv_ctx);
+        let effective_new = read_len.saturating_sub(position);
+
+        let greedy = |logits: &Tensor| -> NluResult<u32> {
+            logits
+                .i((0, ..))
+                .and_then(|l| l.argmax(0))
+                .and_then(|t| t.to_scalar::<u32>())
+                .map_err(|e| fail(format!("argmax: {e}")))
+        };
+
+        // ===== EAGER reference run (forward_from_embed None — the real baseline) =====
+        let prefill = model
+            .forward(&input, 0)
+            .map_err(|e| fail(format!("prefill (eager): {e}")))?;
+        let mut tok = greedy(&prefill)?;
+        let mut eager_tokens: Vec<u32> = Vec::with_capacity(effective_new);
+        let eager_t0 = std::time::Instant::now();
+        for t in 0..effective_new {
+            let pos = position + t;
+            let tok_input = Tensor::new(&[tok], &device)
+                .and_then(|x| x.unsqueeze(0))
+                .map_err(|e| fail(format!("tok tensor: {e}")))?;
+            let embed = model
+                .embed(&tok_input)
+                .map_err(|e| fail(format!("embed (eager): {e}")))?;
+            let logits = model
+                .forward_from_embed(&embed, pos, None)
+                .map_err(|e| fail(format!("eager forward: {e}")))?;
+            tok = greedy(&logits)?;
+            eager_tokens.push(tok);
+            if Some(tok) == eos {
+                break;
+            }
+        }
+        cuda::device_synchronize().ok();
+        let eager_secs = eager_t0.elapsed().as_secs_f32();
+        let eager_tok_s = if eager_secs > 0.0 {
+            eager_tokens.len() as f32 / eager_secs
+        } else {
+            0.0
+        };
+
+        // ===== GRAPH run (single capture, replay per token) =========================
+        // Reset the KV base to [0, P) so both runs decode from the same state.
+        let prefill2 = model
+            .forward(&input, 0)
+            .map_err(|e| fail(format!("prefill (graph): {e}")))?;
+        let tok0 = greedy(&prefill2)?;
+
+        let gctx = GraphDecodeCtx::new(&device, read_len)
+            .map_err(|e| fail(format!("graph ctx: {e}")))?;
+
+        // Fixed embedding buffer the captured forward reads — overwritten in place each
+        // token (its address stays stable, so the graph reads the refreshed embedding).
+        let tok0_input = Tensor::new(&[tok0], &device)
+            .and_then(|x| x.unsqueeze(0))
+            .map_err(|e| fail(format!("tok0 tensor: {e}")))?;
+        let embed_buf = model
+            .embed(&tok0_input)
+            .and_then(|e| e.contiguous())
+            .map_err(|e| fail(format!("embed0: {e}")))?;
+        gctx.set_pos(position)
+            .map_err(|e| fail(format!("set_pos (capture): {e}")))?;
+
+        // Warm the pool with the EXACT captured shapes. The first passes prime the pool; the
+        // reported miss is from a final steady pass (0 ⇒ allocation-stable ⇒ a clean capture).
+        for _ in 0..2 {
+            model
+                .forward_from_embed(&embed_buf, position, Some(&gctx))
+                .map_err(|e| fail(format!("graph warmup: {e}")))?;
+            cuda::device_synchronize().map_err(|e| fail(format!("sync: {e}")))?;
+        }
+        cuda::reset_malloc_counts();
+        model
+            .forward_from_embed(&embed_buf, position, Some(&gctx))
+            .map_err(|e| fail(format!("graph warmup (measured): {e}")))?;
+        cuda::device_synchronize().map_err(|e| fail(format!("sync: {e}")))?;
+        let (_calls, capture_miss, _) = cuda::malloc_profile();
+
+        // Capture the decode forward once.
+        let (graph, logits_buf) =
+            cuda::HipGraph::capture(|| model.forward_from_embed(&embed_buf, position, Some(&gctx)))
+                .map_err(|e| fail(format!("graph capture: {e}")))?;
+
+        // Decode by replay: update embed_buf + d_pos (outside capture), then one dispatch.
+        let mut graph_tokens: Vec<u32> = Vec::with_capacity(effective_new);
+        let mut tok = tok0;
+        let graph_t0 = std::time::Instant::now();
+        for t in 0..effective_new {
+            let pos = position + t;
+            if t > 0 {
+                let tok_input = Tensor::new(&[tok], &device)
+                    .and_then(|x| x.unsqueeze(0))
+                    .map_err(|e| fail(format!("tok tensor: {e}")))?;
+                let new_embed = model
+                    .embed(&tok_input)
+                    .map_err(|e| fail(format!("embed: {e}")))?;
+                // In-place refresh — keeps embed_buf's address stable for the captured graph.
+                embed_buf
+                    .slice_set(&new_embed, 0, 0)
+                    .map_err(|e| fail(format!("embed refresh: {e}")))?;
+            }
+            gctx.set_pos(pos)
+                .map_err(|e| fail(format!("set_pos: {e}")))?;
+            graph.replay().map_err(|e| fail(format!("replay: {e}")))?;
+            tok = greedy(&logits_buf)?;
+            graph_tokens.push(tok);
+            if Some(tok) == eos {
+                break;
+            }
+        }
+        let graph_secs = graph_t0.elapsed().as_secs_f32();
+        let graph_tok_s = if graph_secs > 0.0 {
+            graph_tokens.len() as f32 / graph_secs
+        } else {
+            0.0
+        };
+
+        Ok(GraphDecodeLoopStats {
+            position,
+            requested_new: max_new,
+            decoded: graph_tokens.len(),
+            eager_tok_s,
+            graph_tok_s,
+            capture_miss,
+            tokens_match: eager_tokens == graph_tokens,
         })
     }
 

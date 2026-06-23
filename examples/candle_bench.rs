@@ -136,6 +136,34 @@ fn main() -> miette::Result<()> {
         return Ok(());
     }
 
+    // Phase 46d-2d: the real per-token graph decode loop (AKH_BENCH_GRAPH_LOOP=1). One graph
+    // captured for the decode forward, replayed once per token (advancing the device d_pos +
+    // refreshing the embedding in place between replays), generating a full sequence. A/B vs
+    // eager generation of the same sequence — identical greedy tokens ⇒ correct, faster ⇒ the
+    // 46d payoff.
+    #[cfg(feature = "hip")]
+    if std::env::var("AKH_BENCH_GRAPH_LOOP").as_deref() == Ok("1") {
+        let new: u32 = env_parse("AKH_BENCH_TOKENS").unwrap_or(64);
+        let s = backend.bench_graph_decode_loop(&prompt, new)?;
+        let speedup = s.graph_tok_s / s.eager_tok_s.max(1e-6);
+        println!();
+        println!("=== Phase 46d-2d real per-token graph decode loop ===");
+        println!("position (P)       : {} tokens", s.position);
+        println!("decoded            : {} / {} requested", s.decoded, s.requested_new);
+        println!(
+            "warm fwd allocs    : {} miss  (0 ⇒ forward is capturable)",
+            s.capture_miss
+        );
+        println!(
+            "tokens match (A/B) : {}",
+            if s.tokens_match { "YES (graph == eager)" } else { "NO — DIVERGED" }
+        );
+        println!("eager   (per token): {:.2} tok/s", s.eager_tok_s);
+        println!("graph   (per token): {:.2} tok/s", s.graph_tok_s);
+        println!("speedup            : {speedup:.2}x  (graph / eager)");
+        return Ok(());
+    }
+
     // Phase 46c: fixed-position HIP-graph capture/replay probe (AKH_BENCH_GRAPH=1). The
     // decisive measurement — eager forward vs single-dispatch graph replay at one fixed
     // decode position — for whether graph replay can close the dispatch-bound decode gap.
