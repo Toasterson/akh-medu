@@ -2187,6 +2187,26 @@ pub fn kv_scatter_at(kbuf: &Tensor, src: &Tensor, d_pos: *const u32) -> Result<(
     )
 }
 
+/// The raw device pointer backing a `u32` HIP tensor (incl. its layout start offset). Lets
+/// the decode driver use one in-place-updated `d_pos` tensor both as the device index for
+/// rope/mask (candle ops) AND as the raw `*const u32` for [`kv_scatter_at`] (Phase 46d-2).
+/// Errors if `t` is not a contiguous-enough U32 HIP tensor.
+pub fn u32_device_ptr(t: &Tensor) -> Result<*const u32> {
+    if t.dtype() != DType::U32 {
+        return Err(Error::Msg(format!(
+            "u32_device_ptr: expected U32 tensor, got {:?}",
+            t.dtype()
+        )));
+    }
+    let (storage, layout) = t.storage_and_layout();
+    match &*storage {
+        crate::Storage::Cuda(s) => {
+            Ok(unsafe { (s.device_ptr() as *const u32).add(layout.start_offset()) })
+        }
+        _ => Err(Error::Msg("u32_device_ptr: tensor is not on the HIP device".into())),
+    }
+}
+
 /// A persistent single-`u32` device buffer for the decode position, used as the device-side
 /// column index by [`kv_scatter_at`] and the decode mask (Phase 46d-2). Its address is
 /// STABLE for the buffer's lifetime, so a captured graph binds to it once and reads the
@@ -4390,6 +4410,38 @@ mod op_tests {
             }
         }
         h.free(dpos);
+        Ok(())
+    }
+
+    /// Phase 46d-2: `u32_device_ptr` must yield a pointer that drives `kv_scatter_at` to the
+    /// same result as a host-offset `slice_set` — proving one in-place-updated `d_pos` candle
+    /// tensor can serve BOTH the candle-op readers (rope/mask) and the raw-ptr scatter.
+    #[test]
+    fn u32_device_ptr_feeds_kv_scatter() -> Result<()> {
+        let Some(dev) = gpu() else {
+            return Ok(());
+        };
+        let (b, n_kv, kv_ctx, hd) = (1usize, 3usize, 12usize, 8usize);
+        let src = Tensor::from_vec(
+            (0..n_kv * hd).map(|i| (i as f32) * 0.25 + 1.0).collect::<Vec<f32>>(),
+            (b, n_kv, 1, hd),
+            &dev,
+        )?
+        .to_dtype(DType::F16)?;
+        let pos = 5usize;
+        // d_pos as a normal candle u32 tensor, updated in place (the decode-driver model).
+        let d_pos = Tensor::zeros((1,), DType::U32, &dev)?;
+        d_pos.slice_set(&Tensor::from_slice(&[pos as u32], (1,), &dev)?, 0, 0)?;
+
+        let kbuf = Tensor::zeros((b, n_kv, kv_ctx, hd), DType::F16, &dev)?;
+        super::kv_scatter_at(&kbuf, &src, super::u32_device_ptr(&d_pos)?)?;
+
+        let kref = Tensor::zeros((b, n_kv, kv_ctx, hd), DType::F16, &dev)?;
+        kref.slice_set(&src, 2, pos)?;
+
+        let got = kbuf.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+        let want = kref.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+        close(&got, &want, 1e-3, "u32_device_ptr-fed kv_scatter vs slice_set");
         Ok(())
     }
 
