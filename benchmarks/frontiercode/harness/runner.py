@@ -204,26 +204,44 @@ def run_task(task: dict, *, dry_run_gold=False, no_tests=False, workspace="tecto
 def drive_tecton(prompt: str, workspace: str, timeout: int) -> tuple[str | None, dict]:
     from acp_adapter import AkhClient
     rec: dict = {"mode": "tecton"}
+    turn = followup = None
     try:
         with AkhClient(workspace, timeout=timeout) as c:
             turn = c.prompt(prompt)
+            # glm-5.2 is a reasoning model: the diff may be in the final answer OR
+            # left in the reasoning ("thinking") stream — scan both.
+            patch = util.extract_patch(turn.answer) or util.extract_patch(turn.reasoning)
+            if patch is None:
+                # Elicitation follow-up in the SAME session (it now holds the
+                # explored context): a focused, tool-free "emit the diff now". A
+                # reasoning model often spends the first turn thinking + tool-using
+                # and never commits the patch to `content` without an explicit ask.
+                followup = c.prompt(
+                    "Output the COMPLETE unified diff for your fix NOW, as a single "
+                    "fenced ```diff block and nothing else — do not call any tools, "
+                    "do not explain.")
+                patch = (util.extract_patch(followup.answer)
+                         or util.extract_patch(followup.reasoning))
     except Exception as e:
         rec["error"] = f"{type(e).__name__}: {e}"
         return None, rec
     rec.update({"stop_reason": turn.stop_reason, "elapsed_s": round(turn.elapsed_s, 1),
                 "timed_out": turn.timed_out, "answer_chars": len(turn.answer),
-                "tools": sorted(set(turn.tools_used))})
+                "reasoning_chars": len(turn.reasoning), "tools": sorted(set(turn.tools_used))})
+    if followup is not None:
+        rec["followup"] = {"answer_chars": len(followup.answer),
+                           "reasoning_chars": len(followup.reasoning),
+                           "elapsed_s": round(followup.elapsed_s, 1)}
     # distinguish a backend/infra error (surfaced as the answer) from a genuine
     # "model answered but produced no diff" so the report's failure-stage is precise
-    head = turn.answer.lstrip()[:80].lower()
-    if head.startswith("error[") or "backend" in head and "failed" in head:
+    head = (turn.answer or "").lstrip()[:80].lower()
+    if head.startswith("error[") or ("backend" in head and "failed" in head):
         rec["failure_kind"] = "backend_error"
     elif turn.timed_out:
         rec["failure_kind"] = "timeout"
-    patch = util.extract_patch(turn.answer)
     rec["patch_extracted"] = patch is not None
     if patch is None:
-        rec["answer_head"] = turn.answer[:400]
+        rec["answer_head"] = (turn.answer or turn.reasoning)[:400]
         rec.setdefault("failure_kind", "no_diff_in_answer")
     return patch, rec
 
