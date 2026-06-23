@@ -76,6 +76,15 @@ pub(crate) mod runtime {
         cached_bytes: usize,
         cap_bytes: usize,
         margin_bytes: usize,
+        // Phase 46d-2: when `Some`, every `malloc` (pool hit OR `hipMalloc` miss) records its
+        // `(ptr, bytes)` here. `HipGraph::capture` sets this for the capture window so it can
+        // PIN the captured forward's working set — the intermediate buffers the recorded
+        // graph kernels write to. After capture those intermediates are back in `free`; left
+        // there, a later `malloc` (the decode loop's own embed/argmax between replays) would
+        // hand them out and a replay would stomp live data. Pinning removes them from `free`
+        // for the graph's lifetime so its addresses stay dedicated. The still-live result
+        // buffer is owned by its returned `Tensor` (not in `free`) and is left untouched.
+        capture_track: Option<Vec<(usize, usize)>>,
     }
 
     // PCIe-crossing counters (Phase 45f): every non-empty H2D/D2H `memcpy` bumps one.
@@ -339,6 +348,9 @@ pub(crate) mod runtime {
                     if let Some(p) = list.pop() {
                         pool.cached_bytes = pool.cached_bytes.saturating_sub(bytes);
                         pool.live.insert(p, bytes);
+                        if let Some(t) = pool.capture_track.as_mut() {
+                            t.push((p, bytes));
+                        }
                         return Ok(p as *mut c_void);
                     }
                 }
@@ -355,7 +367,13 @@ pub(crate) mod runtime {
             if rc != 0 || ptr.is_null() {
                 return Err(format!("hipMalloc({bytes}) failed (rc={rc})"));
             }
-            self.pool.lock().unwrap().live.insert(ptr as usize, bytes);
+            {
+                let mut pool = self.pool.lock().unwrap();
+                pool.live.insert(ptr as usize, bytes);
+                if let Some(t) = pool.capture_track.as_mut() {
+                    t.push((ptr as usize, bytes));
+                }
+            }
             Ok(ptr)
         }
 
@@ -406,6 +424,53 @@ pub(crate) mod runtime {
             } else {
                 drop(pool);
                 unsafe { (self.free)(ptr) };
+            }
+        }
+
+        /// Phase 46d-2 graph working-set pinning. Begin recording every `malloc` (ptr,bytes)
+        /// for the upcoming capture window. Idempotent-ish: overwrites any prior recording.
+        pub fn pool_capture_begin(&self) {
+            self.pool.lock().unwrap().capture_track = Some(Vec::new());
+        }
+
+        /// End recording and return the `(ptr, bytes)` touched during the capture window.
+        pub fn pool_capture_end(&self) -> Vec<(usize, usize)> {
+            self.pool.lock().unwrap().capture_track.take().unwrap_or_default()
+        }
+
+        /// Pin a captured graph's working set: for each touched `(ptr, bytes)` that is
+        /// currently sitting in the free-list (i.e. an intermediate the closure allocated and
+        /// then freed), remove it so no later `malloc` can hand it out for the graph's
+        /// lifetime. Touched blocks that are NOT in the free-list are still live — owned by a
+        /// returned `Tensor` (the result buffer) — and are left alone. Returns the pinned set
+        /// to hand back to the pool on graph drop. Duplicates (a block reused several times
+        /// within the capture) are pinned once.
+        pub fn pool_pin(&self, touched: &[(usize, usize)]) -> Vec<(usize, usize)> {
+            let mut pool = self.pool.lock().unwrap();
+            let mut pinned = Vec::new();
+            let mut seen = std::collections::HashSet::new();
+            for &(ptr, bytes) in touched {
+                if !seen.insert(ptr) {
+                    continue;
+                }
+                // Remove this ptr from the free-list bucket for its size, if present.
+                if let Some(list) = pool.free.get_mut(&bytes) {
+                    if let Some(idx) = list.iter().position(|&p| p == ptr) {
+                        list.swap_remove(idx);
+                        pool.cached_bytes = pool.cached_bytes.saturating_sub(bytes);
+                        pool.live.insert(ptr, bytes); // hold as live for the graph's lifetime
+                        pinned.push((ptr, bytes));
+                    }
+                }
+            }
+            pinned
+        }
+
+        /// Return a dropped graph's pinned working set to the pool (recycled under the normal
+        /// cap policy, else really freed). Mirrors [`pool_pin`](Self::pool_pin).
+        pub fn pool_unpin(&self, pinned: &[(usize, usize)]) {
+            for &(ptr, _bytes) in pinned {
+                self.free(ptr as *mut c_void);
             }
         }
 
@@ -1904,6 +1969,11 @@ pub struct HipGraph {
     stream: *mut c_void,
     graph: *mut c_void,
     exec: *mut c_void,
+    /// Phase 46d-2: the captured forward's intermediate buffers, pinned out of the pool
+    /// free-list for this graph's lifetime so the decode loop's own inter-replay allocations
+    /// cannot reuse (and stomp) them. Returned to the pool on [`Drop`]. The result buffer is
+    /// NOT here — it stays live, owned by the `Tensor` `capture` returned alongside the graph.
+    pinned: Vec<(usize, usize)>,
 }
 
 // Raw HIP handles; the captured graph is only ever launched from the single synchronous
@@ -1930,6 +2000,12 @@ impl HipGraph {
         impl Drop for StreamGuard {
             fn drop(&mut self) {
                 runtime::set_current_stream(std::ptr::null_mut());
+                // Defensively stop pool capture-tracking on every exit (incl. a closure
+                // panic / early error) so a stray `capture_track` can't keep appending to
+                // every later `malloc`. The success path already took it; this is a no-op then.
+                if let Ok(h) = runtime::hip() {
+                    let _ = h.pool_capture_end();
+                }
             }
         }
         runtime::set_current_stream(stream);
@@ -1940,10 +2016,16 @@ impl HipGraph {
             h.stream_destroy(stream);
             return Err(Error::Msg(e));
         }
+        // Record every device allocation the closure makes (Phase 46d-2 working-set pinning).
+        h.pool_capture_begin();
         // Record the closure's work onto the stream. Even if it errors we must still end
         // the capture to return the stream to a clean (non-capturing) state.
         let r = f();
         let cap = h.stream_end_capture(stream);
+        // Stop tracking and take the touched set BEFORE any later allocation could perturb
+        // the free-list. The closure's intermediates are already freed (their `Tensor`s
+        // dropped as the closure returned), so they sit in the free-list ready to be pinned.
+        let touched = h.pool_capture_end();
         drop(guard); // stream restored to null here
 
         let r = match r {
@@ -1972,7 +2054,10 @@ impl HipGraph {
                 return Err(Error::Msg(e));
             }
         };
-        Ok((HipGraph { stream, graph, exec }, r))
+        // Pin the captured forward's intermediate working set out of the pool free-list for
+        // this graph's lifetime (the result buffer in `r` stays live and is skipped).
+        let pinned = h.pool_pin(&touched);
+        Ok((HipGraph { stream, graph, exec, pinned }, r))
     }
 
     /// Replay the captured work in one host dispatch and block until it completes.
@@ -1989,6 +2074,8 @@ impl Drop for HipGraph {
             h.graph_exec_destroy(self.exec);
             h.graph_destroy(self.graph);
             h.stream_destroy(self.stream);
+            // Return the pinned working set to the pool now the graph can no longer replay.
+            h.pool_unpin(&self.pinned);
         }
     }
 }
@@ -3979,6 +4066,89 @@ mod op_tests {
         graph.replay()?;
         let got = out.flatten_all()?.to_vec1::<f32>()?;
         close(&got, &want, 1e-2, "chain graph replay");
+        Ok(())
+    }
+
+    /// Phase 46d-2: prove HipGraph working-set PINNING protects a replayed graph from the
+    /// decode loop's own inter-replay allocations. After capture, the chain's intermediate
+    /// buffers sit in the pool free-list; here we then allocate many live "victim" blocks of
+    /// the same size and KEEP them live across replays. Without pinning a victim would draw a
+    /// graph-intermediate address and the replay would stomp it (and/or read the victim's
+    /// bytes); with pinning those addresses are out of circulation, so both the graph output
+    /// AND every victim's known pattern survive. This is the make-or-break for a real
+    /// per-token decode graph (where embed/argmax/sample allocate between replays).
+    #[test]
+    fn hip_graph_pinning_survives_interleaved_allocs() -> Result<()> {
+        use crate::Error;
+        let Some(dev) = gpu() else {
+            return Ok(());
+        };
+        let h = super::runtime::hip().map_err(Error::Msg)?;
+        let n = 256usize;
+        let isize_bytes = n * 4; // (1,n) f32 intermediate
+        let w = Tensor::from_vec(
+            (0..n).map(|i| 1.0 + 0.001 * (i as f32)).collect::<Vec<f32>>(),
+            (n,),
+            &dev,
+        )?;
+        let x0 = Tensor::from_vec(
+            (0..n).map(|i| ((i as f32) * 0.01).sin()).collect::<Vec<f32>>(),
+            (1, n),
+            &dev,
+        )?;
+        let chain = || -> Result<Tensor> {
+            let mut x = x0.clone();
+            for _ in 0..12 {
+                let a = super::rms_norm_fused(&x, &w, 1e-6)?;
+                let b = a.affine(1.5, 0.25)?;
+                let c = b.exp()?;
+                let d = (&c * 0.5)?;
+                x = (&x + &d)?;
+            }
+            Ok(x)
+        };
+        let want = chain()?.flatten_all()?.to_vec1::<f32>()?;
+        drop(chain()?); // warm + free transients to the free-list
+        let (graph, out) = super::HipGraph::capture(chain)?; // pins its working set
+
+        // Allocate many LIVE victims of the intermediate size and stamp each with a distinct
+        // byte pattern. With pinning these cannot land on the graph's intermediate addresses.
+        let mut victims: Vec<(*mut std::ffi::c_void, u8)> = Vec::new();
+        for k in 0..32 {
+            let p = h.malloc(isize_bytes).map_err(Error::Msg)?;
+            let pat = (0x11u8).wrapping_add(k as u8);
+            h.memset(p, pat as i32, isize_bytes).map_err(Error::Msg)?;
+            victims.push((p, pat));
+        }
+
+        // Replay several times with the victims held live throughout.
+        for _ in 0..4 {
+            graph.replay()?;
+            let got = out.flatten_all()?.to_vec1::<f32>()?;
+            close(&got, &want, 1e-2, "pinned graph replay under live victim allocs");
+        }
+
+        // Every victim must still hold its stamped pattern (replay never wrote into them).
+        for (p, pat) in &victims {
+            let mut host = vec![0u8; isize_bytes];
+            h.memcpy(
+                host.as_mut_ptr() as *mut std::ffi::c_void,
+                *p,
+                isize_bytes,
+                super::runtime::MEMCPY_D2H,
+            )
+            .map_err(Error::Msg)?;
+            assert!(
+                host.iter().all(|&b| b == *pat),
+                "victim block at {:p} stomped by graph replay (pattern {:#x} corrupted) — \
+                 working-set pinning failed",
+                *p,
+                pat
+            );
+        }
+        for (p, _) in victims {
+            h.free(p);
+        }
         Ok(())
     }
 
