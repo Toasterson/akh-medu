@@ -59,6 +59,11 @@ pub struct EngineConfig {
     pub max_symbols: usize,
     /// Default language for parsing. `Auto` means detect from text.
     pub language: Language,
+    /// Additional read-only filesystem roots folded into the agent's `LocalFs`
+    /// **read** roots (writes stay confined to `scratch/`). Empty by default;
+    /// the OpenClaw self-import switch (ADR 076 §4) widens this to `~/.openclaw`
+    /// so the LLM can read its own OpenClaw past life.
+    pub extra_read_roots: Vec<PathBuf>,
 }
 
 impl Default for EngineConfig {
@@ -71,6 +76,7 @@ impl Default for EngineConfig {
             max_memory_mb: 1024,
             max_symbols: 1_000_000,
             language: Language::Auto,
+            extra_read_roots: Vec::new(),
         }
     }
 }

@@ -1199,6 +1199,9 @@ pub fn derivation_kind_prose(kind: &DerivationKind) -> String {
                 "relation enrichment: +{relations_added} predicates, +{triples_added} links, ratio {ratio_before:.2}→{ratio_after:.2}"
             )
         }
+        DerivationKind::OpenClawImport { source_path, kind } => {
+            format!("imported from OpenClaw ({kind}): {source_path}")
+        }
     }
 }
 

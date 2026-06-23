@@ -501,7 +501,7 @@ fn ollama_tool_catalog(registry: &ToolRegistry) -> Vec<Value> {
             let mut properties = serde_json::Map::new();
             let mut required = Vec::new();
             for p in &m.parameters {
-                // A parameter carrying an explicit JSON-Schema fragment (ADR 073
+                // A parameter carrying an explicit JSON-Schema fragment (ADR 076
                 // §2) is emitted verbatim, with `description` merged in so the
                 // model still sees the prose. Flat parameters keep the historical
                 // `{type, description}` rendering.

@@ -104,6 +104,13 @@ pub struct ToolParamSchema {
     pub required: bool,
     /// Type hint (default: "string").
     pub param_type: String,
+    /// Optional JSON-Schema fragment for a structured (nested) parameter — e.g.
+    /// an array of objects (ADR 076 §2). When present, `ollama_tool_catalog`
+    /// emits it verbatim (merging in `description`) instead of the flat
+    /// `{type: param_type}` rendering, so the LLM is handed precise nested types.
+    /// `None` → the historical flat rendering (existing tools are unaffected).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<serde_json::Value>,
 }
 
 impl ToolParamSchema {
@@ -114,6 +121,7 @@ impl ToolParamSchema {
             description: description.into(),
             required: true,
             param_type: "string".into(),
+            schema: None,
         }
     }
 
@@ -124,6 +132,39 @@ impl ToolParamSchema {
             description: description.into(),
             required: false,
             param_type: "string".into(),
+            schema: None,
+        }
+    }
+
+    /// Create a required parameter carrying an explicit JSON-Schema fragment for
+    /// a structured (nested) value.
+    pub fn required_schema(
+        name: impl Into<String>,
+        description: impl Into<String>,
+        schema: serde_json::Value,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            description: description.into(),
+            required: true,
+            param_type: "object".into(),
+            schema: Some(schema),
+        }
+    }
+
+    /// Create an optional parameter carrying an explicit JSON-Schema fragment for
+    /// a structured (nested) value.
+    pub fn optional_schema(
+        name: impl Into<String>,
+        description: impl Into<String>,
+        schema: serde_json::Value,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            description: description.into(),
+            required: false,
+            param_type: "object".into(),
+            schema: Some(schema),
         }
     }
 }

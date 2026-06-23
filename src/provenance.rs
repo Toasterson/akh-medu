@@ -801,6 +801,20 @@ pub enum DerivationKind {
         /// Entity:relation ratio after the pass.
         ratio_after: f32,
     },
+
+    // --- OpenClaw self-import (ADR 076) ---------------------------------------
+
+    /// Knowledge the akh imported from its *own* OpenClaw past life — persona,
+    /// memory journals, skills, or the SQLite/Lance stores. Distinct from the
+    /// generic `FileImport` so the akh can query exactly what it absorbed from
+    /// OpenClaw and dedupe on re-import.
+    OpenClawImport {
+        /// The OpenClaw source path the knowledge came from.
+        source_path: String,
+        /// What kind of artefact: `journal` | `skill` | `persona` |
+        /// `sqlite_memory` | `vector_export`.
+        kind: String,
+    },
 }
 
 impl DerivationKind {
@@ -911,6 +925,7 @@ impl DerivationKind {
             Self::AffectiveAppraisal { .. } => 101,
             Self::Perceived { .. } => 102,
             Self::RelationEnrichment { .. } => 103,
+            Self::OpenClawImport { .. } => 104,
         }
     }
 }

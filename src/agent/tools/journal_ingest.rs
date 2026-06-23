@@ -88,6 +88,13 @@ impl EpisodicPredicates {
 // ---------------------------------------------------------------------------
 
 impl Tool for JournalIngestTool {
+    /// Retired from the LLM catalog (ADR 076 §1): `memory_write` is the typed
+    /// replacement inside an LLM session. Still registered for the daemon's
+    /// batch journal-ingest path.
+    fn advertise_to_llm(&self) -> bool {
+        false
+    }
+
     fn signature(&self) -> ToolSignature {
         ToolSignature {
             name: "journal_ingest".into(),

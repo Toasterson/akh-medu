@@ -235,12 +235,27 @@ pub trait Tool: Send + Sync {
     /// Return structured manifest describing this tool's danger metadata,
     /// capabilities, and source.
     fn manifest(&self) -> ToolManifest;
+
+    /// Whether this tool is advertised in the LLM's agentic tool catalog
+    /// (ADR 076 §1). Defaults to `true`. Raw-text NLU ingesters
+    /// (`text_ingest`, `content_ingest`, `journal_ingest`) override this to
+    /// `false`: inside an LLM session the model reasons better than the
+    /// regex/NLU passes and emits typed structured data to the typed writer
+    /// tools instead. They stay registered (and dispatchable) for
+    /// operator/CLI/daemon-ingest contexts — only the catalog hides them.
+    fn advertise_to_llm(&self) -> bool {
+        true
+    }
 }
 
 /// Registry of available tools.
 pub struct ToolRegistry {
     tools: HashMap<String, Box<dyn Tool>>,
     manifests: HashMap<String, ToolManifest>,
+    /// Names of tools suppressed from the LLM catalog (`advertise_to_llm()` is
+    /// `false`). They stay registered and dispatchable; only the catalog hides
+    /// them. Recorded at registration so the catalog filter is a cheap lookup.
+    unadvertised: std::collections::HashSet<String>,
     audit_ledger: Option<Arc<AuditLedger>>,
     /// Permission policy consulted before every dispatch. Defaults to
     /// [`PermissionMode::Bypass`] (allow all) so a standalone akh is unaffected.
@@ -256,6 +271,7 @@ impl ToolRegistry {
         Self {
             tools: HashMap::new(),
             manifests: HashMap::new(),
+            unadvertised: std::collections::HashSet::new(),
             audit_ledger: None,
             policy: super::permission::PermissionPolicy::default(),
             asker: None,
@@ -293,6 +309,11 @@ impl ToolRegistry {
     pub fn register(&mut self, tool: Box<dyn Tool>) {
         let manifest = tool.manifest();
         let name = manifest.name.clone();
+        if tool.advertise_to_llm() {
+            self.unadvertised.remove(&name);
+        } else {
+            self.unadvertised.insert(name.clone());
+        }
         self.manifests.insert(name.clone(), manifest);
         self.tools.insert(name, tool);
     }
@@ -310,6 +331,21 @@ impl ToolRegistry {
     /// List all registered tool manifests.
     pub fn list_manifests(&self) -> Vec<&ToolManifest> {
         self.manifests.values().collect()
+    }
+
+    /// Whether a tool is advertised to the LLM catalog (ADR 076 §1). Unknown
+    /// names are treated as advertised (the default).
+    pub fn is_advertised(&self, name: &str) -> bool {
+        !self.unadvertised.contains(name)
+    }
+
+    /// List manifests for tools advertised to the LLM catalog — i.e. excluding
+    /// those whose `advertise_to_llm()` returned `false`.
+    pub fn list_advertised_manifests(&self) -> Vec<&ToolManifest> {
+        self.manifests
+            .values()
+            .filter(|m| !self.unadvertised.contains(&m.name))
+            .collect()
     }
 
     /// List all registered tool signatures.
