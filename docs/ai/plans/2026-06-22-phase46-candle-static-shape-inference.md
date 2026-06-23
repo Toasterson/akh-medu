@@ -109,3 +109,54 @@ attention scratch at MAX size + len-extent views) eliminates BOTH the thrash AND
 capture at all P → combined **~2× at P=362** (12.4 → 27.6). Remaining 46d work: the moving
 KV-write (device-pointer write offset + attention len read from device, updated outside the
 captured region — not per-token recapture); the flash-attn stash is groundwork.
+
+## 46d status (2026-06-23) — pool is the lever; adaptive default shipped (+44%/+35%)
+
+The 46d static-shape work was driven by measurement, and the measurement **corrected the
+46c reframing above**. The "241 miss/token = 1.77× from a 3 GB pool" was a *fixed-position*
+artifact: re-running the SAME P repeatedly, the 512 MB cap can't hold one forward's working
+set so it evicts + re-mallocs even same-size blocks. In **real generation** every position
+is a new size, so a bigger pool can't pre-cache a size you never re-see — block-padding (the
+planned 46d-1) is what would make consecutive tokens share a size.
+
+So 46d-1 (block-pad the decode KV read to a `kv_block` multiple, mask the tail to -inf,
+bit-identical) was implemented and **measured against the trivial alternative — and reverted**
+(measure-or-revert):
+
+| config (gemma3-12b, long prompt, P≈200-330) | pool | tok/s | h2d |
+|---|---|---|---|
+| baseline (no padding)        | 512 MB | 7.25  | 690    |
+| **pool-only (no padding)**   | **3 GB** | **10.42** | 690 |
+| block-pad BLK=256            | 512 MB | 6.21  | 49 585 |
+| block-pad BLK=256            | 3 GB   | 9.00  | 49 585 |
+
+Block-padding **net-loses**: its per-token tail mask adds ~49k host-sync crossings, and even
+zero-h2d it would only remove the ~240 *cheap* growing-buffer misses/token (~2-3% at a 3 GB
+pool). The real bottleneck is the **pool cap**, and a pool sweep confirms a ~3 GB plateau:
+
+  512 MB 7.25 | 2 GB 9.57 | 3 GB 10.39 | 4/6 GB 10.35/10.37 (13.50 GB peak / 24 GB card)
+
+**Shipped (commit `e3a0e60`):** the HIP caching allocator default is now **adaptive with a
+floor** — always recycle up to the 512 MB cap, then grow while ≥ 2.5 GB VRAM stays free
+(live `hipMemGetInfo`). Strictly ≥ the old fixed-512 behavior: a roomy single-12B GPU
+auto-reaches the plateau, multi-akh / op-offload / 27B pressure falls back to the floor (no
+OOM). Parity-exact (byte-identical sample), graph-compatible (46c probe: 0 malloc-miss,
+1.29× replay, max|Δ|=0).
+
+  gemma3-12b 7.25 → 10.43 tok/s (+44%), 13.50 GB peak
+  gemma4-12b 7.13 →  9.60 tok/s (+35%), 16.34 GB peak
+  escape hatch `AKH_HIP_POOL_MB=512` restores 7.24 exactly
+
+**The honest 46d conclusion:** the big, free, safe decode win was the pool default, not the
+static-shape rewrite. The decode is still only ~8% of the bandwidth roofline → deeply
+**dispatch-bound**, so the only remaining lever is the **HIP graph** (46c's 1.26-1.33×).
+
+### 46d-2 (open): real per-token graph decode — large, genuinely uncertain
+A real per-token decode graph needs stable shapes (block-padding, now cheap to land *inside*
+a graph since the mask goes in a fixed buffer updated outside the captured region) PLUS the
+moving KV-write handled by **device-pointer indirection** (a custom KV-scatter kernel + a
+masked attention that read the position/length from a device variable, updated between
+replays), with a **per-block graph cache** (~16 graphs over a 4 K context) so the captured
+shape stays constant within a block. Ceiling ≈ 1.3× on top of the pool win (10.4 → ~13
+tok/s); cost = a multi-session custom-kernel effort with real integration risk. The flash-attn
+stash is groundwork. **Deferred pending go-ahead** — banking the pool win is a clean stop.
