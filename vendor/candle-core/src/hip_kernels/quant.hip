@@ -20,6 +20,8 @@
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
 
+static hipStream_t g_akh_stream = 0; // Phase 46c: launch stream (0=default; set during graph capture)
+
 #define AKH_Q4K_BLOCK_BYTES 144
 #define AKH_Q4K_QK 256
 
@@ -319,13 +321,16 @@ __global__ void akh_gemv_q6k_f32_kernel(const unsigned char* __restrict__ W,
 
 extern "C" {
 
+// Phase 46c: set the launch stream for this kernel library (null = default stream).
+void akh_set_stream(void* s) { g_akh_stream = (hipStream_t)s; }
+
 // Fused Q4_K/Q6_K GEMV: out[n_rows] = W[n_rows,in_dim] · x[in_dim], no f32 temp.
 // One warp per output row, AKH_GEMV_WARPS rows per block.
 int akh_gemv_q4k_f32(const unsigned char* W, const float* x, float* out,
                      size_t n_rows, size_t in_dim) {
     if (n_rows == 0) return 0;
     unsigned grid = (unsigned)((n_rows + AKH_GEMV_WARPS - 1) / AKH_GEMV_WARPS);
-    hipLaunchKernelGGL(akh_gemv_q4k_f32_kernel, dim3(grid), dim3(AKH_GEMV_BLOCK), 0, 0,
+    hipLaunchKernelGGL(akh_gemv_q4k_f32_kernel, dim3(grid), dim3(AKH_GEMV_BLOCK), 0, g_akh_stream,
                        W, x, out, (unsigned long)n_rows, (unsigned long)in_dim);
     // No per-kernel sync (Phase 45h) — ordered on the null stream.
     return (int)hipGetLastError();
@@ -335,7 +340,7 @@ int akh_gemv_q6k_f32(const unsigned char* W, const float* x, float* out,
                      size_t n_rows, size_t in_dim) {
     if (n_rows == 0) return 0;
     unsigned grid = (unsigned)((n_rows + AKH_GEMV_WARPS - 1) / AKH_GEMV_WARPS);
-    hipLaunchKernelGGL(akh_gemv_q6k_f32_kernel, dim3(grid), dim3(AKH_GEMV_BLOCK), 0, 0,
+    hipLaunchKernelGGL(akh_gemv_q6k_f32_kernel, dim3(grid), dim3(AKH_GEMV_BLOCK), 0, g_akh_stream,
                        W, x, out, (unsigned long)n_rows, (unsigned long)in_dim);
     // No per-kernel sync (Phase 45h) — ordered on the null stream.
     return (int)hipGetLastError();
@@ -346,7 +351,7 @@ int akh_dequant_q6k(const unsigned char* blocks, float* out, size_t rows, size_t
     unsigned long total = (unsigned long)rows * (unsigned long)in_dim;
     int threads = 256;
     unsigned long nblocks = (total + threads - 1) / threads;
-    hipLaunchKernelGGL(akh_dequant_q6k_kernel, dim3((unsigned)nblocks), dim3(threads), 0, 0,
+    hipLaunchKernelGGL(akh_dequant_q6k_kernel, dim3((unsigned)nblocks), dim3(threads), 0, g_akh_stream,
                        blocks, out, (unsigned long)rows, (unsigned long)in_dim);
     // No per-kernel sync (Phase 45h) — ordered on the null stream.
     return (int)hipGetLastError();
@@ -359,7 +364,7 @@ int akh_dequant_q4k(const unsigned char* blocks, float* out, size_t rows, size_t
     unsigned long total = (unsigned long)rows * (unsigned long)in_dim;
     int threads = 256;
     unsigned long nblocks = (total + threads - 1) / threads;
-    hipLaunchKernelGGL(akh_dequant_q4k_kernel, dim3((unsigned)nblocks), dim3(threads), 0, 0,
+    hipLaunchKernelGGL(akh_dequant_q4k_kernel, dim3((unsigned)nblocks), dim3(threads), 0, g_akh_stream,
                        blocks, out, (unsigned long)rows, (unsigned long)in_dim);
     // No per-kernel sync (Phase 45h) — ordered on the null stream.
     return (int)hipGetLastError();
@@ -373,7 +378,7 @@ int akh_get_rows_q4k_f32(const unsigned char* blocks, const unsigned int* indice
     if (total == 0) return 0;
     int threads = 256;
     unsigned long nblocks = (total + threads - 1) / threads;
-    hipLaunchKernelGGL(akh_get_rows_q4k_f32_kernel, dim3((unsigned)nblocks), dim3(threads), 0, 0,
+    hipLaunchKernelGGL(akh_get_rows_q4k_f32_kernel, dim3((unsigned)nblocks), dim3(threads), 0, g_akh_stream,
                        blocks, indices, out, (unsigned long)n_rows, (unsigned long)in_dim);
     return (int)hipGetLastError();
 }
@@ -384,7 +389,7 @@ int akh_get_rows_q6k_f32(const unsigned char* blocks, const unsigned int* indice
     if (total == 0) return 0;
     int threads = 256;
     unsigned long nblocks = (total + threads - 1) / threads;
-    hipLaunchKernelGGL(akh_get_rows_q6k_f32_kernel, dim3((unsigned)nblocks), dim3(threads), 0, 0,
+    hipLaunchKernelGGL(akh_get_rows_q6k_f32_kernel, dim3((unsigned)nblocks), dim3(threads), 0, g_akh_stream,
                        blocks, indices, out, (unsigned long)n_rows, (unsigned long)in_dim);
     return (int)hipGetLastError();
 }

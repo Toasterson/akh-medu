@@ -23,8 +23,9 @@ mod metal {
 #[cfg(feature = "cuda")]
 pub mod cuda;
 // Phase 45 / ADR 073: hip fills the quantized cuda slot when enabled.
+// pub(crate) so the HIP backend's stream control (Phase 46c) can reach `set_stream`.
 #[cfg(all(not(feature = "cuda"), feature = "hip"))]
-mod hip;
+pub(crate) mod hip;
 #[cfg(all(not(feature = "cuda"), feature = "hip"))]
 mod cuda {
     pub use super::hip::*;

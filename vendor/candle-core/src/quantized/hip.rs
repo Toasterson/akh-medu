@@ -58,6 +58,8 @@ type GemvQK = unsafe extern "C" fn(*const u8, *const f32, *mut f32, usize, usize
 // quantized table (Phase 46). `indices` is a device u32 array of length `n_rows`.
 type GetRowsQK =
     unsafe extern "C" fn(*const u8, *const u32, *mut f32, usize, usize) -> c_int;
+// Phase 46c: set the launch stream for this kernel library (null = default stream).
+type SetStream = unsafe extern "C" fn(*mut c_void);
 
 struct QuantKernels {
     _lib: libloading::Library,
@@ -67,6 +69,7 @@ struct QuantKernels {
     gemv_q6k: GemvQK,
     get_rows_q4k: GetRowsQK,
     get_rows_q6k: GetRowsQK,
+    set_stream: SetStream,
 }
 // The fn pointers live in a process-lifetime library; calls are externally synchronized
 // to the synchronous compute thread (same contract as `hip_backend::runtime::Kernels`).
@@ -98,6 +101,9 @@ impl QuantKernels {
             let get_rows_q6k: GetRowsQK = *lib
                 .get(b"akh_get_rows_q6k_f32\0")
                 .map_err(|e| format!("missing akh_get_rows_q6k_f32: {e}"))?;
+            let set_stream: SetStream = *lib
+                .get(b"akh_set_stream\0")
+                .map_err(|e| format!("missing akh_set_stream: {e}"))?;
             Ok(QuantKernels {
                 _lib: lib,
                 dequant_q4k,
@@ -106,6 +112,7 @@ impl QuantKernels {
                 gemv_q6k,
                 get_rows_q4k,
                 get_rows_q6k,
+                set_stream,
             })
         }
     }
@@ -197,6 +204,14 @@ fn quant_kernels() -> Result<&'static QuantKernels> {
         .get_or_init(QuantKernels::load)
         .as_ref()
         .map_err(|e| Error::Msg(e.clone()))
+}
+
+/// Point the quantized kernel library's launches at `s` (Phase 46c graph capture; null =
+/// default stream). No-op if the library hasn't loaded yet (nothing to launch).
+pub fn set_stream(s: *mut c_void) {
+    if let Ok(k) = quant_kernels() {
+        unsafe { (k.set_stream)(s) }
+    }
 }
 
 /// Quantized weights resident on a [`CudaDevice`] (HIP GPU). `data` is the raw GGUF block

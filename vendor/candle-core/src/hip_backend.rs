@@ -955,8 +955,9 @@ pub(crate) mod runtime {
         }
     }
 
-    type AffineF32 =
-        unsafe extern "C" fn(*const f32, *mut f32, usize, f32, f32, *mut c_void) -> c_int;
+    type AffineF32 = unsafe extern "C" fn(*const f32, *mut f32, usize, f32, f32) -> c_int;
+    // Phase 46c: set the launch stream for a kernel library (null = default stream).
+    type SetStream = unsafe extern "C" fn(*mut c_void);
     // Phase 45h: fused RMSNorm (x, weight) -> out; one kernel replaces ~7.
     type RmsNormF32 =
         unsafe extern "C" fn(*const f32, *const f32, *mut f32, usize, usize, f32) -> c_int;
@@ -1087,6 +1088,7 @@ pub(crate) mod runtime {
     pub struct Kernels {
         _lib: Library,
         affine_f32: AffineF32,
+        set_stream: SetStream,
         rms_norm_f32: RmsNormF32,
         unary_f32: UnaryF32,
         binary_f32: BinaryF32,
@@ -1128,6 +1130,9 @@ pub(crate) mod runtime {
                 let affine_f32: AffineF32 = *lib
                     .get(b"akh_affine_f32\0")
                     .map_err(|e| format!("missing akh_affine_f32: {e}"))?;
+                let set_stream: SetStream = *lib
+                    .get(b"akh_set_stream\0")
+                    .map_err(|e| format!("missing akh_set_stream: {e}"))?;
                 let rms_norm_f32: RmsNormF32 = *lib
                     .get(b"akh_rms_norm_f32\0")
                     .map_err(|e| format!("missing akh_rms_norm_f32: {e}"))?;
@@ -1198,6 +1203,7 @@ pub(crate) mod runtime {
                 Ok(Kernels {
                     _lib: lib,
                     affine_f32,
+                    set_stream,
                     rms_norm_f32,
                     unary_f32,
                     binary_f32,
@@ -1237,11 +1243,18 @@ pub(crate) mod runtime {
             mul: f32,
             add: f32,
         ) -> std::result::Result<(), String> {
-            let rc = unsafe { (self.affine_f32)(x, y, n, mul, add, current_stream()) };
+            let rc = unsafe { (self.affine_f32)(x, y, n, mul, add) };
             if rc != 0 {
                 return Err(format!("akh_affine_f32 failed (rc={rc})"));
             }
             Ok(())
+        }
+
+        /// Point this kernel library's launches at `s` (null = default stream). Phase 46c:
+        /// during graph capture the launches are recorded into the graph instead of run
+        /// eagerly on the null stream.
+        pub fn set_stream(&self, s: *mut c_void) {
+            unsafe { (self.set_stream)(s) }
         }
 
         /// Fused RMSNorm: one block per row over `hidden`. `x`/`out` are
@@ -1666,8 +1679,15 @@ pub(crate) mod runtime {
     }
 
     /// Set the launch stream (Phase 46c capture); pass null to restore the default.
+    /// Pushes the stream into BOTH kernel libraries' C++ globals (elementwise + quant)
+    /// so every kernel launch records into the capture stream. (rocBLAS + memcpy are
+    /// wired separately by their own paths.)
     pub fn set_current_stream(s: *mut c_void) {
         CURRENT_STREAM.store(s, std::sync::atomic::Ordering::Relaxed);
+        if let Ok(k) = kernels() {
+            k.set_stream(s);
+        }
+        crate::quantized::hip::set_stream(s);
     }
 }
 

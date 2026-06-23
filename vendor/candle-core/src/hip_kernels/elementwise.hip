@@ -10,6 +10,8 @@
 #include <math.h>
 #include <stdint.h>
 
+static hipStream_t g_akh_stream = 0; // Phase 46c: launch stream (0=default; set during graph capture)
+
 // Phase 45g: fixed-rank metadata passed BY VALUE in the kernel launch params (rides
 // along with the launch — no per-op hipMalloc + *synchronous* hipMemcpy + hipFree of
 // a device dims/strides array, which stalled the stream ~4000×/token). Rank ≤ 8 covers
@@ -423,13 +425,16 @@ __global__ void ucopy_f16(const unsigned short* src, unsigned short* dst, size_t
 
 extern "C" {
 
-int akh_affine_f32(const float* x, float* y, size_t n, float mul, float add, void* stream) {
+// Phase 46c: set the launch stream for this kernel library (null = default stream).
+void akh_set_stream(void* s) { g_akh_stream = (hipStream_t)s; }
+
+int akh_affine_f32(const float* x, float* y, size_t n, float mul, float add) {
     if (n == 0) return 0;
     int t = 256;
     size_t blocks = (n + t - 1) / t;
     // `stream` is null (the default stream) in normal execution; a real stream during
     // HIP-graph capture (Phase 46c) so the launch is recorded into the graph.
-    hipLaunchKernelGGL(affine_f32, dim3(blocks), dim3(t), 0, (hipStream_t)stream, x, y, n, mul, add);
+    hipLaunchKernelGGL(affine_f32, dim3(blocks), dim3(t), 0, g_akh_stream, x, y, n, mul, add);
     // No per-kernel sync (Phase 45h): kernels are ordered on the (null) stream; the
     // final D2H readback (to_cpu) synchronizes. Only launch errors checked here.
     return hipGetLastError() == hipSuccess ? 0 : 1;
@@ -439,7 +444,7 @@ int akh_affine_f32(const float* x, float* y, size_t n, float mul, float add, voi
 int akh_rms_norm_f32(const float* x, const float* w, float* out,
                      size_t n_rows, size_t hidden, float eps) {
     if (n_rows == 0) return 0;
-    hipLaunchKernelGGL(rms_norm_f32, dim3((unsigned)n_rows), dim3(AKH_RMSNORM_BLOCK), 0, 0,
+    hipLaunchKernelGGL(rms_norm_f32, dim3((unsigned)n_rows), dim3(AKH_RMSNORM_BLOCK), 0, g_akh_stream,
                        x, w, out, (unsigned long)n_rows, (unsigned long)hidden, eps);
     return hipGetLastError() == hipSuccess ? 0 : 1;
 }
@@ -448,7 +453,7 @@ int akh_unary_f32(const float* x, float* y, size_t n, int op) {
     if (n == 0) return 0;
     int t = 256;
     size_t blocks = (n + t - 1) / t;
-    hipLaunchKernelGGL(unary_f32, dim3(blocks), dim3(t), 0, 0, x, y, n, op);
+    hipLaunchKernelGGL(unary_f32, dim3(blocks), dim3(t), 0, g_akh_stream, x, y, n, op);
     // No per-kernel sync (Phase 45h): kernels are ordered on the null stream; the
     // final D2H readback (to_cpu) synchronizes. Only launch errors checked here.
     return hipGetLastError() == hipSuccess ? 0 : 1;
@@ -458,7 +463,7 @@ int akh_binary_f32(const float* a, const float* b, float* c, size_t n, int op) {
     if (n == 0) return 0;
     int t = 256;
     size_t blocks = (n + t - 1) / t;
-    hipLaunchKernelGGL(binary_f32, dim3(blocks), dim3(t), 0, 0, a, b, c, n, op);
+    hipLaunchKernelGGL(binary_f32, dim3(blocks), dim3(t), 0, g_akh_stream, a, b, c, n, op);
     // No per-kernel sync (Phase 45h): kernels are ordered on the null stream; the
     // final D2H readback (to_cpu) synchronizes. Only launch errors checked here.
     return hipGetLastError() == hipSuccess ? 0 : 1;
@@ -471,7 +476,7 @@ int akh_reduce_f32(const float* x, float* y, size_t out_numel, int num_dims,
     if (out_numel == 0) return 0;
     int t = 256;
     size_t blocks = (out_numel + t - 1) / t;
-    hipLaunchKernelGGL(reduce_f32, dim3(blocks), dim3(t), 0, 0, x, y, out_numel,
+    hipLaunchKernelGGL(reduce_f32, dim3(blocks), dim3(t), 0, g_akh_stream, x, y, out_numel,
                        num_dims, dims, strides, reduce_mask, reduce_numel, op);
     // No per-kernel sync (Phase 45h): kernels are ordered on the null stream; the
     // final D2H readback (to_cpu) synchronizes. Only launch errors checked here.
@@ -485,7 +490,7 @@ int akh_reduce_arg_f32(const float* x, unsigned int* y, size_t out_numel, int nu
     if (out_numel == 0) return 0;
     int t = 256;
     size_t blocks = (out_numel + t - 1) / t;
-    hipLaunchKernelGGL(reduce_arg_f32, dim3(blocks), dim3(t), 0, 0, x, y, out_numel,
+    hipLaunchKernelGGL(reduce_arg_f32, dim3(blocks), dim3(t), 0, g_akh_stream, x, y, out_numel,
                        num_dims, dims, strides, reduce_mask, reduce_numel, op);
     // No per-kernel sync (Phase 45h): kernels are ordered on the null stream; the
     // final D2H readback (to_cpu) synchronizes. Only launch errors checked here.
@@ -499,7 +504,7 @@ int akh_index_select_u32_f32(
     if (total == 0) return 0;
     int t = 256;
     size_t blocks = (total + t - 1) / t;
-    hipLaunchKernelGGL(index_select_u32_f32, dim3(blocks), dim3(t), 0, 0,
+    hipLaunchKernelGGL(index_select_u32_f32, dim3(blocks), dim3(t), 0, g_akh_stream,
                        src, ids, out, left, dim_size, n_idx, right);
     // No per-kernel sync (Phase 45h): kernels are ordered on the null stream; the
     // final D2H readback (to_cpu) synchronizes. Only launch errors checked here.
@@ -512,7 +517,7 @@ int akh_index_select_i64_f32(
     if (total == 0) return 0;
     int t = 256;
     size_t blocks = (total + t - 1) / t;
-    hipLaunchKernelGGL(index_select_i64_f32, dim3(blocks), dim3(t), 0, 0,
+    hipLaunchKernelGGL(index_select_i64_f32, dim3(blocks), dim3(t), 0, g_akh_stream,
                        src, ids, out, left, dim_size, n_idx, right);
     // No per-kernel sync (Phase 45h): kernels are ordered on the null stream; the
     // final D2H readback (to_cpu) synchronizes. Only launch errors checked here.
@@ -524,7 +529,7 @@ int akh_where_cond_u8_f32(const unsigned char* cond, const float* t, const float
     if (n == 0) return 0;
     int tpb = 256;
     size_t blocks = (n + tpb - 1) / tpb;
-    hipLaunchKernelGGL(where_cond_u8_f32, dim3(blocks), dim3(tpb), 0, 0, cond, t, f, out, n);
+    hipLaunchKernelGGL(where_cond_u8_f32, dim3(blocks), dim3(tpb), 0, g_akh_stream, cond, t, f, out, n);
     // No per-kernel sync (Phase 45h): kernels are ordered on the null stream; the
     // final D2H readback (to_cpu) synchronizes. Only launch errors checked here.
     return hipGetLastError() == hipSuccess ? 0 : 1;
@@ -534,7 +539,7 @@ int akh_where_cond_u32_f32(const unsigned int* cond, const float* t, const float
     if (n == 0) return 0;
     int tpb = 256;
     size_t blocks = (n + tpb - 1) / tpb;
-    hipLaunchKernelGGL(where_cond_u32_f32, dim3(blocks), dim3(tpb), 0, 0, cond, t, f, out, n);
+    hipLaunchKernelGGL(where_cond_u32_f32, dim3(blocks), dim3(tpb), 0, g_akh_stream, cond, t, f, out, n);
     // No per-kernel sync (Phase 45h): kernels are ordered on the null stream; the
     // final D2H readback (to_cpu) synchronizes. Only launch errors checked here.
     return hipGetLastError() == hipSuccess ? 0 : 1;
@@ -548,7 +553,7 @@ int akh_binary_strided_f32(const float* a, const float* b, float* c, size_t n,
     if (n == 0) return 0;
     int t = 256;
     size_t blocks = (n + t - 1) / t;
-    hipLaunchKernelGGL(binary_strided_f32, dim3(blocks), dim3(t), 0, 0,
+    hipLaunchKernelGGL(binary_strided_f32, dim3(blocks), dim3(t), 0, g_akh_stream,
                        a, b, c, n, rank, dims, a_str, b_str, op);
     // No per-kernel sync (Phase 45h): kernels are ordered on the null stream; the
     // final D2H readback (to_cpu) synchronizes. Only launch errors checked here.
@@ -562,7 +567,7 @@ int akh_unary_strided_f32(const float* x, float* y, size_t n, size_t rank,
     if (n == 0) return 0;
     int t = 256;
     size_t blocks = (n + t - 1) / t;
-    hipLaunchKernelGGL(unary_strided_f32, dim3(blocks), dim3(t), 0, 0,
+    hipLaunchKernelGGL(unary_strided_f32, dim3(blocks), dim3(t), 0, g_akh_stream,
                        x, y, n, rank, dims, x_str, op);
     // No per-kernel sync (Phase 45h): kernels are ordered on the null stream; the
     // final D2H readback (to_cpu) synchronizes. Only launch errors checked here.
@@ -576,7 +581,7 @@ int akh_cmp_f32(const float* a, const float* b, unsigned char* out, size_t n,
     if (n == 0) return 0;
     int t = 256;
     size_t blocks = (n + t - 1) / t;
-    hipLaunchKernelGGL(cmp_f32, dim3(blocks), dim3(t), 0, 0, a, b, out, n, rank, dims, a_str, b_str, op);
+    hipLaunchKernelGGL(cmp_f32, dim3(blocks), dim3(t), 0, g_akh_stream, a, b, out, n, rank, dims, a_str, b_str, op);
     // No per-kernel sync (Phase 45h): kernels are ordered on the null stream; the
     // final D2H readback (to_cpu) synchronizes. Only launch errors checked here.
     return hipGetLastError() == hipSuccess ? 0 : 1;
@@ -587,7 +592,7 @@ int akh_cmp_u32(const unsigned int* a, const unsigned int* b, unsigned char* out
     if (n == 0) return 0;
     int t = 256;
     size_t blocks = (n + t - 1) / t;
-    hipLaunchKernelGGL(cmp_u32, dim3(blocks), dim3(t), 0, 0, a, b, out, n, rank, dims, a_str, b_str, op);
+    hipLaunchKernelGGL(cmp_u32, dim3(blocks), dim3(t), 0, g_akh_stream, a, b, out, n, rank, dims, a_str, b_str, op);
     // No per-kernel sync (Phase 45h): kernels are ordered on the null stream; the
     // final D2H readback (to_cpu) synchronizes. Only launch errors checked here.
     return hipGetLastError() == hipSuccess ? 0 : 1;
@@ -601,7 +606,7 @@ int akh_where_cond_strided_u8_f32(const unsigned char* cond, const float* t, con
     if (n == 0) return 0;
     int tpb = 256;
     size_t blocks = (n + tpb - 1) / tpb;
-    hipLaunchKernelGGL(where_cond_strided_u8_f32, dim3(blocks), dim3(tpb), 0, 0,
+    hipLaunchKernelGGL(where_cond_strided_u8_f32, dim3(blocks), dim3(tpb), 0, g_akh_stream,
                        cond, t, f, out, n, rank, dims, c_str, t_str, f_str);
     // No per-kernel sync (Phase 45h): kernels are ordered on the null stream; the
     // final D2H readback (to_cpu) synchronizes. Only launch errors checked here.
@@ -613,7 +618,7 @@ int akh_where_cond_strided_u32_f32(const unsigned int* cond, const float* t, con
     if (n == 0) return 0;
     int tpb = 256;
     size_t blocks = (n + tpb - 1) / tpb;
-    hipLaunchKernelGGL(where_cond_strided_u32_f32, dim3(blocks), dim3(tpb), 0, 0,
+    hipLaunchKernelGGL(where_cond_strided_u32_f32, dim3(blocks), dim3(tpb), 0, g_akh_stream,
                        cond, t, f, out, n, rank, dims, c_str, t_str, f_str);
     // No per-kernel sync (Phase 45h): kernels are ordered on the null stream; the
     // final D2H readback (to_cpu) synchronizes. Only launch errors checked here.
@@ -626,7 +631,7 @@ int akh_ucopy_f32(const float* src, float* dst, size_t n, size_t rank,
     if (n == 0) return 0;
     int t = 256;
     size_t blocks = (n + t - 1) / t;
-    hipLaunchKernelGGL(ucopy_f32, dim3(blocks), dim3(t), 0, 0, src, dst, n, rank, dims, strides);
+    hipLaunchKernelGGL(ucopy_f32, dim3(blocks), dim3(t), 0, g_akh_stream, src, dst, n, rank, dims, strides);
     // No per-kernel sync (Phase 45h): kernels are ordered on the null stream; the
     // final D2H readback (to_cpu) synchronizes. Only launch errors checked here.
     return hipGetLastError() == hipSuccess ? 0 : 1;
@@ -637,7 +642,7 @@ int akh_ucopy_f16(const unsigned short* src, unsigned short* dst, size_t n, size
     if (n == 0) return 0;
     int t = 256;
     size_t blocks = (n + t - 1) / t;
-    hipLaunchKernelGGL(ucopy_f16, dim3(blocks), dim3(t), 0, 0, src, dst, n, rank, dims, strides);
+    hipLaunchKernelGGL(ucopy_f16, dim3(blocks), dim3(t), 0, g_akh_stream, src, dst, n, rank, dims, strides);
     return hipGetLastError() == hipSuccess ? 0 : 1;
 }
 
@@ -689,7 +694,7 @@ int akh_cast_f16_bf16(const __half* x, hip_bfloat16* y, size_t n) {
     if (n == 0) return 0;
     int t = 256;
     size_t blocks = (n + t - 1) / t;
-    hipLaunchKernelGGL(cast_f16_bf16_kernel, dim3(blocks), dim3(t), 0, 0, x, y, n);
+    hipLaunchKernelGGL(cast_f16_bf16_kernel, dim3(blocks), dim3(t), 0, g_akh_stream, x, y, n);
     // No per-kernel sync (Phase 45h): kernels are ordered on the null stream; the
     // final D2H readback (to_cpu) synchronizes. Only launch errors checked here.
     return hipGetLastError() == hipSuccess ? 0 : 1;
@@ -698,7 +703,7 @@ int akh_cast_bf16_f16(const hip_bfloat16* x, __half* y, size_t n) {
     if (n == 0) return 0;
     int t = 256;
     size_t blocks = (n + t - 1) / t;
-    hipLaunchKernelGGL(cast_bf16_f16_kernel, dim3(blocks), dim3(t), 0, 0, x, y, n);
+    hipLaunchKernelGGL(cast_bf16_f16_kernel, dim3(blocks), dim3(t), 0, g_akh_stream, x, y, n);
     // No per-kernel sync (Phase 45h): kernels are ordered on the null stream; the
     // final D2H readback (to_cpu) synchronizes. Only launch errors checked here.
     return hipGetLastError() == hipSuccess ? 0 : 1;
