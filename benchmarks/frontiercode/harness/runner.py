@@ -60,6 +60,40 @@ Rules:
 
 Output the ```diff block now and nothing else."""
 
+# SEARCH/REPLACE edit format — the model emits CODE, not a diff (PewDiePie's
+# Qwen-coding insight; aider/opencode). `git diff` makes the patch afterwards.
+PROMPT_TEMPLATE_SR = """\
+You are an expert software engineer fixing a real issue in the `{repo}` repository.
+Everything you need is in THIS message — do NOT call any tools, do NOT run shell
+commands, do NOT search files. Reason internally, then answer.
+
+# Issue
+{problem}
+
+# Relevant source files (current contents at the affected paths)
+{context}
+
+# Your task
+Fix the issue by editing the source files. Do NOT write a diff. Express each edit
+as a SEARCH/REPLACE block: the file path on its own line, then the EXACT existing
+lines to find, then the replacement lines, like this:
+
+path/to/file.py
+<<<<<<< SEARCH
+<lines copied verbatim from the file contents above, including indentation>
+=======
+<the replacement lines>
+>>>>>>> REPLACE
+
+Rules:
+- Copy the SEARCH text EXACTLY from the file contents shown above — same
+  indentation and enough surrounding lines to be unique. This is critical.
+- Edit ONLY source files; do not modify or add tests.
+- Use one block per contiguous change; you may emit several.
+- Keep changes minimal and idiomatic.
+
+Output the SEARCH/REPLACE block(s) now and nothing else."""
+
 
 def gold_touched_files(gold_patch: str) -> list[str]:
     """Files the gold solution edits — these are the relevant source files to
@@ -91,10 +125,12 @@ def build_context(repo_dir: Path, files: list[str], max_chars=24000) -> str:
     return "\n\n".join(blocks) if blocks else "(no source files could be loaded)"
 
 
-def build_prompt(task: dict, repo_dir: Path, max_context=24000) -> tuple[str, list[str]]:
+def build_prompt(task: dict, repo_dir: Path, max_context=24000,
+                 edit_format="search-replace") -> tuple[str, list[str]]:
     files = gold_touched_files(task["gold_patch"])
     ctx = build_context(repo_dir, files, max_chars=max_context)
-    prompt = PROMPT_TEMPLATE.format(
+    tmpl = PROMPT_TEMPLATE_SR if edit_format == "search-replace" else PROMPT_TEMPLATE
+    prompt = tmpl.format(
         repo=task["repo"],
         problem=task["problem_statement"].strip()[:8000],
         context=ctx,
@@ -104,7 +140,8 @@ def build_prompt(task: dict, repo_dir: Path, max_context=24000) -> tuple[str, li
 
 # ── per-task run ────────────────────────────────────────────────────────────
 def run_task(task: dict, *, dry_run_gold=False, no_tests=False, workspace="tecton",
-             timeout=600, keep=False, max_context=24000, judge_workspace=None) -> dict:
+             timeout=600, keep=False, max_context=24000, judge_workspace=None,
+             edit_format="search-replace") -> dict:
     iid = task["instance_id"]
     print(f"\n{'='*70}\n[{iid}] {task['repo']} @ {task['base_commit'][:10]} "
           f"({task['difficulty']})")
@@ -131,12 +168,41 @@ def run_task(task: dict, *, dry_run_gold=False, no_tests=False, workspace="tecto
             rec["stages"]["model"] = {"mode": "gold-oracle", "patch_chars": len(patch)}
             print("  using GOLD patch (oracle mode)")
         else:
-            prompt, files = build_prompt(task, repo_dir, max_context=max_context)
-            rec["stages"]["prompt"] = {"chars": len(prompt), "context_files": files}
-            patch, mrec = drive_tecton(prompt, workspace, timeout)
+            prompt, files = build_prompt(task, repo_dir, max_context=max_context,
+                                         edit_format=edit_format)
+            rec["stages"]["prompt"] = {"chars": len(prompt), "context_files": files,
+                                       "edit_format": edit_format}
+            if edit_format == "search-replace":
+                followup = ("Output your edits NOW as SEARCH/REPLACE blocks (file path "
+                            "line, then <<<<<<< SEARCH / ======= / >>>>>>> REPLACE). "
+                            "No diff, no tools, no prose.")
+                target = lambda t: len(util.parse_search_replace(t)) > 0
+            else:
+                followup = ("Output the COMPLETE unified diff for your fix NOW, as a "
+                            "single fenced ```diff block and nothing else — no tools, "
+                            "no prose.")
+                target = lambda t: util.extract_patch(t) is not None
+            text, mrec = drive_tecton(prompt, workspace, timeout, followup, target)
             rec["stages"]["model"] = mrec
-            if patch is None:
-                rec["error"] = "no patch extracted from Tecton answer"
+            # Convert the model's CODE output into a clean unified diff via git
+            # (the "don't make the LLM generate patches" path).
+            patch = None
+            if text is not None and edit_format == "search-replace":
+                edits = util.parse_search_replace(text)
+                applied, failures = util.apply_search_replace(repo_dir, edits)
+                mrec.update({"edits_parsed": len(edits), "edits_applied": applied,
+                             "edit_failures": failures})
+                if applied:
+                    patch = util.git_diff(repo_dir) or None
+                    util.git_revert(repo_dir)  # grader re-applies the clean git diff
+            elif text is not None:
+                patch = util.extract_patch(text)
+            mrec["patch_extracted"] = bool(patch and patch.strip())
+            if not mrec["patch_extracted"]:
+                patch = None
+                mrec.setdefault("failure_kind", "no_usable_edit")
+                mrec["answer_head"] = (text or "")[:400]
+                rec["error"] = "no usable edit from Tecton"
                 print("  Tecton produced NO usable patch")
                 _save(rec)
                 return rec
@@ -201,27 +267,28 @@ def run_task(task: dict, *, dry_run_gold=False, no_tests=False, workspace="tecto
             shutil.rmtree(workdir, ignore_errors=True)
 
 
-def drive_tecton(prompt: str, workspace: str, timeout: int) -> tuple[str | None, dict]:
+def drive_tecton(prompt: str, workspace: str, timeout: int,
+                 followup_prompt: str, target_present) -> tuple[str | None, dict]:
+    """Run the akh and return (model_text, rec). `model_text` is the best output
+    (answer; reasoning appended as a fallback, since glm-5.2 is a reasoning model
+    that may leave the edit in the thinking stream). If `target_present(text)` is
+    false after the first turn, do ONE tool-free elicitation follow-up in the same
+    session. Format-agnostic — the caller turns the text into a patch."""
     from acp_adapter import AkhClient
+
+    def best(t):
+        return t.answer if target_present(t.answer) else \
+            (t.answer or "") + "\n" + (t.reasoning or "")
+
     rec: dict = {"mode": "tecton"}
     turn = followup = None
     try:
         with AkhClient(workspace, timeout=timeout) as c:
             turn = c.prompt(prompt)
-            # glm-5.2 is a reasoning model: the diff may be in the final answer OR
-            # left in the reasoning ("thinking") stream — scan both.
-            patch = util.extract_patch(turn.answer) or util.extract_patch(turn.reasoning)
-            if patch is None:
-                # Elicitation follow-up in the SAME session (it now holds the
-                # explored context): a focused, tool-free "emit the diff now". A
-                # reasoning model often spends the first turn thinking + tool-using
-                # and never commits the patch to `content` without an explicit ask.
-                followup = c.prompt(
-                    "Output the COMPLETE unified diff for your fix NOW, as a single "
-                    "fenced ```diff block and nothing else — do not call any tools, "
-                    "do not explain.")
-                patch = (util.extract_patch(followup.answer)
-                         or util.extract_patch(followup.reasoning))
+            text = best(turn)
+            if not target_present(text):
+                followup = c.prompt(followup_prompt)
+                text = best(followup)
     except Exception as e:
         rec["error"] = f"{type(e).__name__}: {e}"
         return None, rec
@@ -232,18 +299,12 @@ def drive_tecton(prompt: str, workspace: str, timeout: int) -> tuple[str | None,
         rec["followup"] = {"answer_chars": len(followup.answer),
                            "reasoning_chars": len(followup.reasoning),
                            "elapsed_s": round(followup.elapsed_s, 1)}
-    # distinguish a backend/infra error (surfaced as the answer) from a genuine
-    # "model answered but produced no diff" so the report's failure-stage is precise
     head = (turn.answer or "").lstrip()[:80].lower()
     if head.startswith("error[") or ("backend" in head and "failed" in head):
         rec["failure_kind"] = "backend_error"
     elif turn.timed_out:
         rec["failure_kind"] = "timeout"
-    rec["patch_extracted"] = patch is not None
-    if patch is None:
-        rec["answer_head"] = (turn.answer or turn.reasoning)[:400]
-        rec.setdefault("failure_kind", "no_diff_in_answer")
-    return patch, rec
+    return text, rec
 
 
 # ── output ──────────────────────────────────────────────────────────────────
@@ -278,6 +339,11 @@ def main(argv=None) -> int:
     ap.add_argument("--judge-workspace", default=None,
                     help="akh to score Dim-6 idiomaticity (non-blocker); use a "
                          "different akh than --workspace to avoid self-grading")
+    ap.add_argument("--edit-format", choices=["search-replace", "diff"],
+                    default="search-replace",
+                    help="how the model expresses its fix: search-replace (model "
+                         "emits code, git makes the diff — default) or diff (model "
+                         "writes the unified diff itself)")
     args = ap.parse_args(argv)
 
     tdir = Path(args.tasks)
@@ -293,7 +359,8 @@ def main(argv=None) -> int:
         rec = run_task(t, dry_run_gold=args.dry_run_gold, no_tests=args.no_tests,
                        workspace=args.workspace, timeout=int(args.timeout),
                        keep=args.keep, max_context=args.max_context,
-                       judge_workspace=args.judge_workspace)
+                       judge_workspace=args.judge_workspace,
+                       edit_format=args.edit_format)
         summary.append({"instance_id": rec["instance_id"],
                         "score": rec.get("score", 0),
                         "error": rec.get("error")})

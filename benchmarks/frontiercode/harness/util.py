@@ -155,3 +155,84 @@ def diff_stats(patch: str) -> DiffStats:
         # patch without diff --git headers (e.g. plain ---/+++): count file pairs
         s.files = patch.count("\n--- ")
     return s
+
+
+# ── SEARCH/REPLACE edit format ──────────────────────────────────────────────
+# "Don't make the LLM generate patches" (aider/opencode; PewDiePie's Qwen
+# coding insight). The model emits CODE (old→new snippets); we apply them with
+# plain string ops and let `git diff` produce the unified diff — no LLM-authored
+# line numbers, so no "corrupt patch".
+
+_SR_BLOCK = re.compile(
+    r'(?P<path>[^\n`]+?)[ \t]*\n+'
+    r'<{5,}[ \t]*SEARCH[ \t]*\n(?P<search>.*?)\n={5,}[ \t]*\n(?P<replace>.*?)\n>{5,}[ \t]*REPLACE',
+    re.DOTALL,
+)
+
+
+def parse_search_replace(text: str) -> list[dict]:
+    """Parse aider-style edit blocks:
+
+        path/to/file.py
+        <<<<<<< SEARCH
+        <exact existing lines>
+        =======
+        <replacement lines>
+        >>>>>>> REPLACE
+
+    Returns [{path, search, replace}]. The path is the last non-fence token on
+    the line preceding the SEARCH marker (tolerates a ```lang fence above it)."""
+    edits: list[dict] = []
+    for m in _SR_BLOCK.finditer(text):
+        raw = m.group("path").strip()
+        # take the last line, strip backticks/markdown noise
+        path = raw.splitlines()[-1].strip().strip("`").strip().lstrip("#").strip()
+        if path.startswith("```"):
+            continue
+        edits.append({"path": path, "search": m.group("search"),
+                      "replace": m.group("replace")})
+    return edits
+
+
+def _apply_one(content: str, search: str, replace: str) -> tuple[str, bool]:
+    """Exact match first; fall back to per-line trailing-whitespace-insensitive
+    window match (models often drift on trailing spaces)."""
+    if search in content:
+        return content.replace(search, replace, 1), True
+    clines = content.split("\n")
+    slines = [l.rstrip() for l in search.split("\n")]
+    n = len(slines)
+    if n == 0:
+        return content, False
+    for i in range(len(clines) - n + 1):
+        if [l.rstrip() for l in clines[i:i + n]] == slines:
+            new = clines[:i] + replace.split("\n") + clines[i + n:]
+            return "\n".join(new), True
+    return content, False
+
+
+def apply_search_replace(repo_dir: Path, edits: list[dict]) -> tuple[int, list[str]]:
+    """Apply edits to files under `repo_dir`. Returns (applied, failures)."""
+    applied, failures = 0, []
+    for e in edits:
+        f = repo_dir / e["path"]
+        if not f.exists():
+            failures.append(f"no such file: {e['path']}")
+            continue
+        new, ok = _apply_one(f.read_text(), e["search"], e["replace"])
+        if ok:
+            f.write_text(new)
+            applied += 1
+        else:
+            failures.append(f"SEARCH not found in {e['path']}")
+    return applied, failures
+
+
+def git_diff(repo_dir: Path) -> str:
+    """The working-tree diff (the patch git itself generates from our edits)."""
+    return run(["git", "diff"], cwd=repo_dir).stdout
+
+
+def git_revert(repo_dir: Path) -> None:
+    """Reset the working tree so the grader can re-apply the clean git diff."""
+    run(["git", "checkout", "--", "."], cwd=repo_dir)
