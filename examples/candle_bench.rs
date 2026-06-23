@@ -18,12 +18,14 @@
 //! `AKH_BENCH_BANDWIDTH_GBS` (default 960 = RX 7900 XTX). Set `AKH_HIP_TRACE=1` is
 //! not required — PCIe counters are always live; they are reset after load here.
 //!
-//! HIP caching-allocator pool (Phase 46 sweep): the default is a fixed 512 MB cap —
-//! the safe, near-optimal point for a 12B model on a 24 GB card (a bigger pool spills
-//! to GTT). On a *dedicated* GPU with headroom, `AKH_HIP_POOL_MB=2048` buys ~+10%
-//! decode (gemma4-12b 9.4 → 10.4 tok/s @ 24.65 GB, GTT spill). On roomier or
-//! multi-akh GPUs prefer `AKH_HIP_POOL_MARGIN_MB=2560` (adaptive: keeps ≥ that many MB
-//! free via live `hipMemGetInfo`, so it auto-sizes and never OOMs).
+//! HIP caching-allocator pool (Phase 46d sweep): the default is now ADAPTIVE — a 512 MB
+//! floor that grows while ≥ 2.5 GB VRAM stays free (live `hipMemGetInfo`). On the resident
+//! `Device::Hip` decode path the per-token transient working set is ~3 GB, so the old fixed
+//! 512 MB cap thrashed (7.25 tok/s); the adaptive default auto-reaches the plateau —
+//! gemma3-12b 10.4 tok/s (+44%), gemma4-12b 9.6 (+35%) — and falls back to the floor under
+//! VRAM pressure (multi-akh / op-offload / 27B), so it never OOMs. Override with
+//! `AKH_HIP_POOL_MB=<n>` (plain fixed cap; `=512` restores the old behavior) or
+//! `AKH_HIP_POOL_MARGIN_MB=<n>` (tune the headroom; `=0` ⇒ pure fixed floor).
 
 #[cfg(feature = "candle-backend")]
 fn main() -> miette::Result<()> {

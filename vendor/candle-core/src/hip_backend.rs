@@ -38,19 +38,32 @@ pub(crate) mod runtime {
     pub const MEMCPY_D2H: c_int = 2;
     pub const MEMCPY_D2D: c_int = 3;
 
-    /// Upper bound on bytes the caching allocator keeps cached across `free`s
-    /// (Phase 45g). `hipFree` *synchronizes the whole device*, so freeing a temp
-    /// after every op serializes the ~1900 ops/token. The pool recycles freed
-    /// blocks by exact byte size instead (no `hipFree`, no sync, no re-`hipMalloc`
-    /// of the recurring per-token f32 dequant temps). Over the cap, `free` really
-    /// `hipFree`s. **VRAM tension (Phase 46 pool sweep):** a resident 12B already sits
-    /// ~23 GB on a 24 GB card, so the only pool big enough to beat malloc-thrash spills
-    /// to GTT — gemma4-12b: 2 GB pool = 10.4 tok/s @ 24.65 GB (spill) vs 512 MB = 9.4
-    /// tok/s @ 23.15 GB. So **512 MB is the safe, near-optimal default for a 12B model
-    /// on a 24 GB card.** For the +10% spill-gain on a dedicated GPU set a bigger fixed
-    /// cap (`AKH_HIP_POOL_MB=2048`); on a roomier or multi-akh GPU prefer the adaptive
-    /// policy (`AKH_HIP_POOL_MARGIN_MB`, see `free`) which auto-sizes to real headroom.
+    /// Floor on bytes the caching allocator keeps cached across `free`s (Phase 45g).
+    /// `hipFree` *synchronizes the whole device*, so freeing a temp after every op
+    /// serializes the ~1900 ops/token. The pool recycles freed blocks by exact byte size
+    /// instead (no `hipFree`, no sync, no re-`hipMalloc` of the recurring per-token f32
+    /// dequant temps). This is the **floor**: the adaptive default (below) always keeps at
+    /// least this much cached, then grows beyond it while VRAM headroom allows.
+    ///
+    /// **Phase 46d decode sweep (pure `Device::Hip`, gemma3-12b, P≈200–330):** the per-token
+    /// transient working set is ~3 GB and a 512 MB cap thrashes badly — 7.25 tok/s @ 512 MB
+    /// vs 10.39 @ 3 GB (+43%), plateauing at 3 GB (4/6 GB identical, 13.50 GB peak on a 24 GB
+    /// card). The earlier "512 MB is near-optimal" finding was the *op-offload* config
+    /// (`AKH_GPU_MATMUL=1`, ~23 GB resident → any real pool spills to GTT); the resident
+    /// `Device::Hip` path sits ~10.5 GB so it has ~13 GB of headroom to spend. Hence the
+    /// default is now adaptive ([`DEFAULT_POOL_MARGIN_BYTES`]): on the roomy resident path
+    /// it auto-grows to the plateau (10.36 tok/s, matching fixed 3 GB), and under VRAM
+    /// pressure (multi-akh / op-offload / 27B) it falls back to this floor — strictly ≥ the
+    /// old fixed-512 behavior. `AKH_HIP_POOL_MB=<n>` forces a plain fixed cap (margin 0);
+    /// `AKH_HIP_POOL_MARGIN_MB=<n>` overrides the margin (`0` ⇒ pure fixed-floor).
     const DEFAULT_POOL_CAP_BYTES: usize = 512 * 1024 * 1024;
+
+    /// Default adaptive headroom: keep ≥ this many bytes of VRAM free (live `hipMemGetInfo`
+    /// per `free` once over the [`DEFAULT_POOL_CAP_BYTES`] floor). 2.5 GB lets a single 12B
+    /// on a 24 GB card grow the pool to the ~3 GB decode plateau while leaving comfortable
+    /// headroom; on a tighter card / under multi-akh pressure `free` drops below the margin
+    /// and the pool holds at the floor. Override with `AKH_HIP_POOL_MARGIN_MB`.
+    const DEFAULT_POOL_MARGIN_BYTES: usize = 2560 * 1024 * 1024;
 
     /// Caching device allocator: a free-list of recycled blocks keyed by exact
     /// byte size + a `ptr -> size` map so size-less `free(ptr)` can still recycle.
@@ -243,11 +256,12 @@ pub(crate) mod runtime {
                     sym!(b"hipGraphExecDestroy\0", GraphExecDestroy);
                 let graph_destroy: GraphDestroy = sym!(b"hipGraphDestroy\0", GraphDestroy);
                 let memset_async: MemsetAsync = sym!(b"hipMemsetAsync\0", MemsetAsync);
-                // Default is the fixed 512 MB cap (margin 0): safe + near-optimal for a
-                // 12B model on a 24 GB card (Phase 46 pool sweep — see DEFAULT_POOL_CAP).
-                // Opt into the adaptive policy with `AKH_HIP_POOL_MARGIN_MB=<n>` (keeps
-                // ≥ n MB free via live `hipMemGetInfo`; ~2560 fits a 12B/24 GB card and
-                // auto-scales elsewhere). `AKH_HIP_POOL_MB` always wins → plain fixed cap.
+                // Default is the ADAPTIVE policy (Phase 46d pool sweep — see DEFAULT_POOL_CAP):
+                // a 512 MB floor that grows while ≥ DEFAULT_POOL_MARGIN_BYTES stays free, so
+                // the resident Device::Hip decode path auto-reaches its ~3 GB working-set
+                // plateau (+43% tok/s) yet falls back to the floor under VRAM pressure.
+                // `AKH_HIP_POOL_MB=<n>` forces a plain fixed cap (margin 0);
+                // `AKH_HIP_POOL_MARGIN_MB=<n>` overrides the margin (`0` ⇒ pure fixed floor).
                 let mb = |v: &str| {
                     std::env::var(v)
                         .ok()
@@ -257,7 +271,7 @@ pub(crate) mod runtime {
                 let (cap_bytes, margin_bytes) = match (mb("AKH_HIP_POOL_MB"), mb("AKH_HIP_POOL_MARGIN_MB")) {
                     (Some(fixed), _) => (fixed, 0),
                     (None, Some(margin)) => (DEFAULT_POOL_CAP_BYTES, margin),
-                    (None, None) => (DEFAULT_POOL_CAP_BYTES, 0),
+                    (None, None) => (DEFAULT_POOL_CAP_BYTES, DEFAULT_POOL_MARGIN_BYTES),
                 };
                 Ok(Hip {
                     _lib: lib,
@@ -356,10 +370,13 @@ pub(crate) mod runtime {
         /// synchronize the device). The block being freed is still allocated (counted
         /// as device-used), so recycling it leaves `free` VRAM unchanged while a real
         /// `hipFree` raises it. Policy:
-        /// - **adaptive** (`margin_bytes > 0`): recycle only while ≥ `margin_bytes`
-        ///   stays free (queried live). The pool self-limits to actual headroom and
-        ///   never drives the device into a GTT spill / OOM, shrinking when other akhs
-        ///   are resident. Falls back to the fixed cap if `hipMemGetInfo` fails.
+        /// - **adaptive** (`margin_bytes > 0`): always recycle up to the `cap_bytes` floor,
+        ///   then keep growing while ≥ `margin_bytes` stays free (queried live). The floor
+        ///   guarantees the pool never collapses below the safe fixed cap on a momentary
+        ///   low-headroom reading (which would reintroduce per-op `hipFree` thrash), while
+        ///   the headroom check self-limits growth so it never drives the device into a GTT
+        ///   spill / OOM and shrinks when other akhs are resident. Strictly ≥ the fixed
+        ///   policy. Falls back to the floor if `hipMemGetInfo` fails.
         /// - **fixed** (`margin_bytes == 0`): recycle while under `cap_bytes`.
         /// Untracked blocks are always really freed.
         pub fn free(&self, ptr: *mut c_void) {
@@ -374,17 +391,15 @@ pub(crate) mod runtime {
                 unsafe { (self.free)(ptr) };
                 return;
             };
-            let recycle = if pool.margin_bytes > 0 {
-                // Live query each time: a real free RAISES free VRAM, so a stale sample
-                // would make the pool over-free and thrash (the self-balance needs the
-                // current value). Cheap enough — `hipMemGetInfo` is a userspace query.
-                match self.mem_info() {
-                    Some((free, _total)) => free >= pool.margin_bytes,
-                    None => pool.cached_bytes + bytes <= pool.cap_bytes,
-                }
-            } else {
-                pool.cached_bytes + bytes <= pool.cap_bytes
-            };
+            // Always recycle up to the floor; this also avoids a `hipMemGetInfo` query on
+            // the common under-floor path.
+            let under_floor = pool.cached_bytes + bytes <= pool.cap_bytes;
+            let recycle = under_floor
+                || (pool.margin_bytes > 0
+                    // Live query each time: a real free RAISES free VRAM, so a stale sample
+                    // would make the pool over-free and thrash (the self-balance needs the
+                    // current value). Cheap enough — `hipMemGetInfo` is a userspace query.
+                    && matches!(self.mem_info(), Some((free, _)) if free >= pool.margin_bytes));
             if recycle {
                 pool.cached_bytes += bytes;
                 pool.free.entry(bytes).or_default().push(key);
