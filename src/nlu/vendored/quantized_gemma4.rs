@@ -27,6 +27,8 @@
 
 use candle_core as candle;
 
+use std::sync::Arc;
+
 use candle::quantized::QTensor;
 use candle::quantized::gguf_file;
 use candle::{DType, Device, IndexOp, Result, Tensor, D};
@@ -265,7 +267,7 @@ struct LayerWeights {
 
     sliding_window_size: Option<usize>,
 
-    rotary_embedding: RotaryEmbedding,
+    rotary_embedding: Arc<RotaryEmbedding>,
     neg_inf: Tensor,
 
     // Cache
@@ -600,6 +602,12 @@ impl ModelWeights {
         };
 
         let mut layers = Vec::with_capacity(block_count);
+        // Share one RotaryEmbedding per distinct (head_dim, rotary_pairs, freq) instead of
+        // rebuilding a full [MAX_SEQ_LEN x pairs] cos/sin cache per layer: gemma4 has 2
+        // layer types (SWA + full), so this drops ~46 duplicate caches (~6 GB VRAM),
+        // byte-identical (freq keyed by its f32 bit pattern).
+        let mut rope_cache: std::collections::HashMap<(usize, usize, u32), Arc<RotaryEmbedding>> =
+            std::collections::HashMap::new();
         for layer_idx in 0..block_count {
             let prefix = format!("blk.{layer_idx}");
 
@@ -757,8 +765,20 @@ impl ModelWeights {
             };
             let _ = rope_dim_swa; // (consumed above)
 
-            let rotary_embedding =
-                RotaryEmbedding::new(head_dim, rotary_pairs, layer_rope_frequency, device)?;
+            let rope_key = (head_dim, rotary_pairs, layer_rope_frequency.to_bits());
+            let rotary_embedding = match rope_cache.get(&rope_key) {
+                Some(r) => r.clone(),
+                None => {
+                    let r = Arc::new(RotaryEmbedding::new(
+                        head_dim,
+                        rotary_pairs,
+                        layer_rope_frequency,
+                        device,
+                    )?);
+                    rope_cache.insert(rope_key, r.clone());
+                    r
+                }
+            };
 
             // Tracing spans
             let span_attn = tracing::span!(tracing::Level::TRACE, "attn");
