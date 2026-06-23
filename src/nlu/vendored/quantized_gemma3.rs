@@ -338,15 +338,23 @@ impl LayerWeights {
             let v = v.contiguous()?;
             if self.kv_buf.is_none() {
                 let shape = (b_sz, self.n_kv_head, self.kv_ctx, self.head_dim);
+                // f16 KV cache (Phase 46 VRAM): halves the static cache (kv_ctx=4096:
+                // ~3.2 -> ~1.6 GB). llama.cpp's default; the f16 round-trip is a small
+                // precision tradeoff. K/V are cast to f16 on store; the read prefix is
+                // cast back to f32 for the f32 attention matmul (the prefix is `len`
+                // positions, not the whole kv_ctx, so the transient stays small).
                 self.kv_buf = Some((
-                    Tensor::zeros(shape, k.dtype(), k.device())?,
-                    Tensor::zeros(shape, v.dtype(), v.device())?,
+                    Tensor::zeros(shape, DType::F16, k.device())?,
+                    Tensor::zeros(shape, DType::F16, v.device())?,
                 ));
             }
             let (kbuf, vbuf) = self.kv_buf.as_ref().unwrap();
-            kbuf.slice_set(&k, 2, index_pos)?;
-            vbuf.slice_set(&v, 2, index_pos)?;
-            (kbuf.narrow(2, 0, len)?, vbuf.narrow(2, 0, len)?)
+            kbuf.slice_set(&k.to_dtype(DType::F16)?, 2, index_pos)?;
+            vbuf.slice_set(&v.to_dtype(DType::F16)?, 2, index_pos)?;
+            (
+                kbuf.narrow(2, 0, len)?.contiguous()?.to_dtype(DType::F32)?,
+                vbuf.narrow(2, 0, len)?.contiguous()?.to_dtype(DType::F32)?,
+            )
         } else {
             // CPU path: dynamic grow-by-cat (byte-identical to the original).
             let (k, v) = match &self.kv_cache {

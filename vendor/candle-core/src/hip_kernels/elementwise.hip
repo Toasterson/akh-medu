@@ -404,6 +404,23 @@ __global__ void ucopy_f32(const float* src, float* dst, size_t n, size_t rank,
     dst[o] = src[s];
 }
 
+// 16-bit (f16) variant: identical strided gather, 2-byte elements (no arithmetic, so a
+// raw u16 copy is dtype-correct). Powers `.contiguous()` on f16 (Phase 46 f16 KV cache).
+__global__ void ucopy_f16(const unsigned short* src, unsigned short* dst, size_t n,
+                          size_t rank, AkhI64x8 dims, AkhI64x8 strides) {
+    size_t o = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (o >= n) return;
+    size_t s = 0;
+    size_t rem = o;
+    for (size_t d = rank; d-- > 0;) {
+        size_t dim = (size_t)dims.v[d];
+        size_t coord = rem % dim;
+        rem /= dim;
+        s += coord * (size_t)strides.v[d];
+    }
+    dst[o] = src[s];
+}
+
 extern "C" {
 
 int akh_affine_f32(const float* x, float* y, size_t n, float mul, float add) {
@@ -610,6 +627,15 @@ int akh_ucopy_f32(const float* src, float* dst, size_t n, size_t rank,
     hipLaunchKernelGGL(ucopy_f32, dim3(blocks), dim3(t), 0, 0, src, dst, n, rank, dims, strides);
     // No per-kernel sync (Phase 45h): kernels are ordered on the null stream; the
     // final D2H readback (to_cpu) synchronizes. Only launch errors checked here.
+    return hipGetLastError() == hipSuccess ? 0 : 1;
+}
+
+int akh_ucopy_f16(const unsigned short* src, unsigned short* dst, size_t n, size_t rank,
+                  struct AkhI64x8 dims, struct AkhI64x8 strides) {
+    if (n == 0) return 0;
+    int t = 256;
+    size_t blocks = (n + t - 1) / t;
+    hipLaunchKernelGGL(ucopy_f16, dim3(blocks), dim3(t), 0, 0, src, dst, n, rank, dims, strides);
     return hipGetLastError() == hipSuccess ? 0 : 1;
 }
 

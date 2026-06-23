@@ -1029,6 +1029,7 @@ pub(crate) mod runtime {
         *const i64,
     ) -> c_int;
     type UcopyF32 = unsafe extern "C" fn(*const f32, *mut f32, usize, usize, I64x8, I64x8) -> c_int;
+    type UcopyF16 = unsafe extern "C" fn(*const u16, *mut u16, usize, usize, I64x8, I64x8) -> c_int;
     // Phase 45f: strided elementwise compare -> u8 (powers `mask.eq(0)` in prefill).
     #[allow(clippy::type_complexity)]
     type CmpF32 = unsafe extern "C" fn(
@@ -1105,6 +1106,7 @@ pub(crate) mod runtime {
         where_cond_u8_f32: WhereCondU8F32,
         where_cond_u32_f32: WhereCondU32F32,
         ucopy_f32: UcopyF32,
+        ucopy_f16: UcopyF16,
         cmp_f32: CmpF32,
         cmp_u32: CmpU32,
         binary_strided_f32: BinaryStridedF32,
@@ -1171,6 +1173,9 @@ pub(crate) mod runtime {
                 let ucopy_f32: UcopyF32 = *lib
                     .get(b"akh_ucopy_f32\0")
                     .map_err(|e| format!("missing akh_ucopy_f32: {e}"))?;
+                let ucopy_f16: UcopyF16 = *lib
+                    .get(b"akh_ucopy_f16\0")
+                    .map_err(|e| format!("missing akh_ucopy_f16: {e}"))?;
                 let cmp_f32: CmpF32 = *lib
                     .get(b"akh_cmp_f32\0")
                     .map_err(|e| format!("missing akh_cmp_f32: {e}"))?;
@@ -1212,6 +1217,7 @@ pub(crate) mod runtime {
                     where_cond_u8_f32,
                     where_cond_u32_f32,
                     ucopy_f32,
+                    ucopy_f16,
                     cmp_f32,
                     cmp_u32,
                     binary_strided_f32,
@@ -1479,6 +1485,24 @@ pub(crate) mod runtime {
             let rc = unsafe { (self.ucopy_f32)(src, dst, n, rank, dims, strides) };
             if rc != 0 {
                 return Err(format!("akh_ucopy_f32 failed (rc={rc})"));
+            }
+            Ok(())
+        }
+
+        /// 16-bit (f16) strided gather-copy — same as [`ucopy_f32`] for 2-byte elements
+        /// (a raw u16 gather; correct for f16 since it's a copy, no arithmetic).
+        pub fn ucopy_f16(
+            &self,
+            src: *const u16,
+            dst: *mut u16,
+            n: usize,
+            rank: usize,
+            dims: I64x8,
+            strides: I64x8,
+        ) -> std::result::Result<(), String> {
+            let rc = unsafe { (self.ucopy_f16)(src, dst, n, rank, dims, strides) };
+            if rc != 0 {
+                return Err(format!("akh_ucopy_f16 failed (rc={rc})"));
             }
             Ok(())
         }
@@ -3090,10 +3114,12 @@ impl crate::backend::BackendStorage for HipStorage {
                 .map_err(Error::Msg);
         }
 
-        if self.dtype != DType::F32 {
+        // Strided gather supports f32 and f16 (the latter powers the f16 KV cache,
+        // Phase 46); f16 is a raw 2-byte gather since the copy does no arithmetic.
+        if !matches!(self.dtype, DType::F32 | DType::F16) {
             return Err(Error::Msg(format!(
-                "HIP copy_strided_src: strided (non-contiguous) copy only supports f32 \
-                 (Phase 45d), got {:?}; a contiguous copy of this dtype works",
+                "HIP copy_strided_src: strided (non-contiguous) copy supports f32/f16 \
+                 (Phase 45d/46), got {:?}; a contiguous copy of this dtype works",
                 self.dtype
             )));
         }
@@ -3108,8 +3134,14 @@ impl crate::backend::BackendStorage for HipStorage {
         let str_m =
             runtime::I64x8::pack(&src_l.stride().iter().map(|&s| s as i64).collect::<Vec<_>>());
         let k = runtime::kernels().map_err(Error::Msg)?;
-        k.ucopy_f32(src as *const f32, dst_ptr as *mut f32, n, rank, dims_m, str_m)
-            .map_err(Error::Msg)
+        match self.dtype {
+            DType::F16 => k
+                .ucopy_f16(src as *const u16, dst_ptr as *mut u16, n, rank, dims_m, str_m)
+                .map_err(Error::Msg),
+            _ => k
+                .ucopy_f32(src as *const f32, dst_ptr as *mut f32, n, rank, dims_m, str_m)
+                .map_err(Error::Msg),
+        }
         })
     }
 
