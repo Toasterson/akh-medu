@@ -39,6 +39,24 @@ fn gemv_profiling() -> bool {
     *ON.get_or_init(|| std::env::var("AKH_HIP_PROFILE").as_deref() == Ok("1"))
 }
 
+/// Largest activation-row count `m` the fused *batched* GEMV (Phase 47d) handles; must match
+/// `AKH_GEMV_BATCH_MAX` in `quant.hip` (one template instantiation per `m` up to this). Above
+/// it the dequant+GEMM path amortizes the dequant over enough rows to win, so `fwd` routes
+/// larger `m` there. `m == 1` keeps the proven 45h single-row GEMV.
+const AKH_GEMV_BATCH_MAX: usize = 16;
+
+/// Whether the fused batched GEMV (Phase 47d) is enabled for `2 ≤ m ≤ AKH_GEMV_BATCH_MAX`.
+///
+/// Defaults **off**: this kernel was authored off-GPU (no ROCm to compile/measure against), so
+/// it must be parity- and perf-validated on hardware before becoming the default. Set
+/// `AKH_GEMV_BATCH=1` to route small-`m` quantized matmuls (the spec-decode verify forward,
+/// short prefills) through it; when off, those keep the byte-identical dequant+GEMM path.
+/// Read fresh (not cached) — only consulted on the `m > 1` branch, never the m=1 decode hot
+/// path, so the env lookup never touches per-token decode latency.
+fn gemv_batch_enabled() -> bool {
+    std::env::var("AKH_GEMV_BATCH").as_deref() == Ok("1")
+}
+
 /// `(total_nanos, calls)` spent in the fused GEMV since process start. Flushes any
 /// pending event-profiler samples first (event mode) so the read is complete.
 pub fn gemv_profile() -> (u64, u64) {
@@ -54,6 +72,11 @@ type DequantQ6K =
     unsafe extern "C" fn(*const u8, *mut f32, usize, usize) -> c_int;
 // Fused GEMV: out[n_rows] = W[n_rows,in_dim] · x[in_dim], dequant inline.
 type GemvQK = unsafe extern "C" fn(*const u8, *const f32, *mut f32, usize, usize) -> c_int;
+// Fused *batched* GEMV (Phase 47d): out[m,n_rows] = X[m,in_dim] · W[n_rows,in_dim]ᵀ, dequant
+// inline and reused across the m rows. Trailing `m` selects the template instantiation;
+// returns -1 if `m` is outside `1..=AKH_GEMV_BATCH_MAX` (caller routes larger m to GEMM).
+type GemvBatchedQK =
+    unsafe extern "C" fn(*const u8, *const f32, *mut f32, usize, usize, usize) -> c_int;
 // get_rows: out[n_rows*in_dim] = dequant(table[indices[i]]) — embedding lookup off the
 // quantized table (Phase 46). `indices` is a device u32 array of length `n_rows`.
 type GetRowsQK =
@@ -67,6 +90,8 @@ struct QuantKernels {
     dequant_q6k: DequantQ6K,
     gemv_q4k: GemvQK,
     gemv_q6k: GemvQK,
+    gemv_batched_q4k: GemvBatchedQK,
+    gemv_batched_q6k: GemvBatchedQK,
     get_rows_q4k: GetRowsQK,
     get_rows_q6k: GetRowsQK,
     set_stream: SetStream,
@@ -95,6 +120,12 @@ impl QuantKernels {
             let gemv_q6k: GemvQK = *lib
                 .get(b"akh_gemv_q6k_f32\0")
                 .map_err(|e| format!("missing akh_gemv_q6k_f32: {e}"))?;
+            let gemv_batched_q4k: GemvBatchedQK = *lib
+                .get(b"akh_gemv_batched_q4k_f32\0")
+                .map_err(|e| format!("missing akh_gemv_batched_q4k_f32: {e}"))?;
+            let gemv_batched_q6k: GemvBatchedQK = *lib
+                .get(b"akh_gemv_batched_q6k_f32\0")
+                .map_err(|e| format!("missing akh_gemv_batched_q6k_f32: {e}"))?;
             let get_rows_q4k: GetRowsQK = *lib
                 .get(b"akh_get_rows_q4k_f32\0")
                 .map_err(|e| format!("missing akh_get_rows_q4k_f32: {e}"))?;
@@ -110,6 +141,8 @@ impl QuantKernels {
                 dequant_q6k,
                 gemv_q4k,
                 gemv_q6k,
+                gemv_batched_q4k,
+                gemv_batched_q6k,
                 get_rows_q4k,
                 get_rows_q6k,
                 set_stream,
@@ -167,6 +200,36 @@ impl QuantKernels {
         let rc = unsafe { f(w, x, out, n_rows, in_dim) };
         if rc != 0 {
             return Err(format!("akh_gemv ({dtype:?}) kernel failed (hipError={rc})"));
+        }
+        Ok(())
+    }
+
+    /// Fused *batched* GEMV (Phase 47d): `out[m, n_rows] = X[m, in_dim] · W[n_rows, in_dim]ᵀ`,
+    /// weights dequantized inline and reused across the `m` rows (no f32 weight temp). `x` is a
+    /// contiguous row-major `[m, in_dim]` f32 activation; `out` a `[m, n_rows]` f32 buffer.
+    /// `m` must be in `1..=AKH_GEMV_BATCH_MAX` (the kernel returns -1 otherwise — surfaced here
+    /// as an error so the caller can fall back to the GEMM path).
+    fn gemv_batched(
+        &self,
+        dtype: GgmlDType,
+        w: *const u8,
+        x: *const f32,
+        out: *mut f32,
+        n_rows: usize,
+        in_dim: usize,
+        m: usize,
+    ) -> std::result::Result<(), String> {
+        let f = match dtype {
+            GgmlDType::Q4K => self.gemv_batched_q4k,
+            GgmlDType::Q6K => self.gemv_batched_q6k,
+            other => return Err(format!("HIP batched GEMV: dtype {other:?} not supported")),
+        };
+        let rc = unsafe { f(w, x, out, n_rows, in_dim, m) };
+        if rc != 0 {
+            return Err(format!(
+                "akh_gemv_batched ({dtype:?}) kernel failed for m={m} (hipError/code={rc}); \
+                 m must be in 1..={AKH_GEMV_BATCH_MAX}"
+            ));
         }
         Ok(())
     }
@@ -625,6 +688,48 @@ impl QCudaStorage {
             return Ok((out, out_shape.into()));
         }
 
+        // Verify / small-batch fast path (Phase 47d, opt-in `AKH_GEMV_BATCH=1`): a few
+        // activation rows (`2 ≤ b·m ≤ AKH_GEMV_BATCH_MAX`) — the spec-decode verify forward,
+        // short prefills — over a contiguous f32 activation with `k % 256 == 0`. The fused
+        // *batched* GEMV dequantizes each weight superblock once and reuses it across all
+        // `b·m` rows in registers, so it never materializes the 4× f32 weight temp the GEMM
+        // path below writes+reads. For larger `m` the GEMM amortizes that dequant over enough
+        // rows to win, so we cap and fall through. Output is row-major `[b·m, n]`, matching the
+        // GEMM path's `[b, m, n]` flattened.
+        let rows_x = b * m;
+        if (2..=AKH_GEMV_BATCH_MAX).contains(&rows_x)
+            && layout.is_contiguous()
+            && k % 256 == 0
+            && gemv_batch_enabled()
+        {
+            let h = runtime::hip().map_err(Error::Msg)?;
+            let kern = quant_kernels()?;
+            let x_ptr =
+                unsafe { (storage.device_ptr() as *const f32).add(layout.start_offset()) };
+            let out_ptr = h
+                .malloc(rows_x * n * std::mem::size_of::<f32>())
+                .map_err(Error::Msg)?;
+            if let Err(e) = kern.gemv_batched(
+                self.dtype,
+                self.data as *const u8,
+                x_ptr,
+                out_ptr as *mut f32,
+                n,
+                k,
+                rows_x,
+            ) {
+                h.free(out_ptr);
+                return Err(Error::Msg(e));
+            }
+            // No sync (Phase 45h): ordered on the null stream; consumed downstream, read to
+            // host only at the per-token logits D2H.
+            let out = CudaStorage::from_raw(self.device.clone(), out_ptr, DType::F32, rows_x * n);
+            let mut out_shape = layout.shape().dims().to_vec();
+            out_shape.pop();
+            out_shape.push(n);
+            return Ok((out, out_shape.into()));
+        }
+
         // Dequantize the weights to an f32 [n, k] device matrix (row-major).
         let data_f32 = self.dequantize(n * k)?;
         // Mirror `cuda.rs` dequantize_matmul: rhs = Wᵀ as a (b, k, n) broadcast view of the
@@ -871,6 +976,52 @@ mod test {
                 "{dtype:?} GEMV vs dequant-ref: rel diff {} >= 1e-2",
                 d / scale
             );
+        }
+        Ok(())
+    }
+
+    /// The fused **batched** GEMV (Phase 47d, `m>1`) matches the dequant-f32 reference matmul
+    /// for both Q4_K and Q6_K across several small `m` — the spec-decode verify forward's path.
+    /// Forces the opt-in `AKH_GEMV_BATCH` route (default-off; this kernel is on-GPU-unvalidated
+    /// until this test passes) and uses an `n` whose last block is not warp-aligned to exercise
+    /// the `row >= n_rows` tail. Run the hip test suite with `--test-threads=1`: the flag is set
+    /// process-wide here.
+    #[test]
+    fn hip_gemv_batched_parity() -> Result<()> {
+        let Some(dev) = gpu() else {
+            eprintln!("no HIP GPU visible; skipping hip_gemv_batched_parity");
+            return Ok(());
+        };
+        // SAFETY: hardware-gated test; intended to run single-threaded (--test-threads=1).
+        unsafe { std::env::set_var("AKH_GEMV_BATCH", "1") };
+        let cpu = Device::Cpu;
+        let (n, k) = (20usize, 512usize); // n=20 → grid tail (20 = 2*8 + 4 active warps); k%256==0
+        for dtype in [GgmlDType::Q4K, GgmlDType::Q6K] {
+            let w: Vec<f32> = (0..n * k)
+                .map(|i| ((i as f32) * 0.017).sin() * 0.5 + 0.02)
+                .collect();
+            let w_cpu = Tensor::from_vec(w.clone(), (n, k), &cpu)?;
+            // Dequant reference (build a throwaway QTensor; quantize_onto consumes it).
+            let w_deq = QTensor::quantize_onto(&w_cpu, dtype, &dev)?.dequantize(&cpu)?; // [n, k]
+            for m in [2usize, 4, 7, 9] {
+                let x: Vec<f32> = (0..m * k).map(|i| ((i as f32) * 0.013).cos() * 0.4).collect();
+                let x_gpu = Tensor::from_vec(x.clone(), (m, k), &dev)?;
+                let x_cpu = Tensor::from_vec(x, (m, k), &cpu)?;
+                // Fresh QTensor per m (from_qtensor consumes it). Triggers the m>1 batched path.
+                let qt_gpu = QTensor::quantize_onto(&w_cpu, dtype, &dev)?;
+                let mm = QMatMul::from_qtensor(qt_gpu)?;
+                let y_gpu = mm.forward(&x_gpu)?.flatten_all()?.to_vec1::<f32>()?;
+                let y_ref = x_cpu.matmul(&w_deq.t()?)?.flatten_all()?.to_vec1::<f32>()?;
+                assert_eq!(y_gpu.len(), m * n, "batched GEMV output shape [m,n] = [{m},{n}]");
+                let scale = y_ref.iter().map(|v| v.abs()).fold(0.0f32, f32::max).max(1e-6);
+                let d = max_abs_diff(&y_gpu, &y_ref);
+                eprintln!("{dtype:?} batched GEMV m={m} rel(gpu-ref) = {}", d / scale);
+                assert!(
+                    d / scale < 1e-2,
+                    "{dtype:?} batched GEMV m={m} vs dequant-ref: rel diff {} >= 1e-2",
+                    d / scale
+                );
+            }
         }
         Ok(())
     }
