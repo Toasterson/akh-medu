@@ -136,6 +136,27 @@ fn main() -> miette::Result<()> {
         return Ok(());
     }
 
+    // Phase 47 productization probe (AKH_BENCH_GEN=1): exercise the *production* `generate`
+    // path (generate_inner → decode_loop or spec_decode_loop per AKH_SPEC_DECODE). Run twice
+    // across two processes — once with `AKH_SPEC_DECODE=1 AKH_GEMV_BATCH=1`, once without — and
+    // compare the printed text (must be identical: spec decode is greedy-lossless) and tok/s.
+    #[cfg(feature = "candle-backend")]
+    if std::env::var("AKH_BENCH_GEN").as_deref() == Ok("1") {
+        let new: u32 = env_parse("AKH_BENCH_TOKENS").unwrap_or(96);
+        let spec_on = std::env::var("AKH_SPEC_DECODE").as_deref() == Ok("1");
+        let t0 = Instant::now();
+        let text = backend.generate(&prompt, new)?;
+        let secs = t0.elapsed().as_secs_f32();
+        println!();
+        println!("=== Phase 47 production generate probe ===");
+        println!("spec decode        : {}", if spec_on { "ON (AKH_SPEC_DECODE=1)" } else { "off" });
+        println!("wall (incl prefill): {secs:.3}s");
+        println!("--- text ({} chars) ---", text.len());
+        println!("{text}");
+        println!("--- end text ---");
+        return Ok(());
+    }
+
     // Phase 47c: greedy speculative decode (AKH_BENCH_SPEC=1). A/B of plain greedy decode vs
     // prompt-lookup spec decode (n-gram drafter + one forward_verify per round). The win is
     // workload-conditional — high acceptance where the output echoes context.

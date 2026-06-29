@@ -2000,8 +2000,70 @@ impl CandleBackend {
             }
         })?;
 
-        // Continue token-by-token from the prefilled prompt.
-        self.decode_loop(logits, prompt_tokens.len(), max_tokens, stop)
+        // Continue token-by-token from the prefilled prompt. Greedy gemma4 turns with
+        // AKH_SPEC_DECODE=1 take the speculative (prompt-lookup) path (Phase 47 / ADR 075);
+        // every other case keeps the proven plain decode loop unchanged.
+        if self.spec_decode_eligible() {
+            self.spec_decode_loop(logits, prompt_tokens, max_tokens, stop)
+        } else {
+            self.decode_loop(logits, prompt_tokens.len(), max_tokens, stop)
+        }
+    }
+
+    /// Emit one freshly-chosen `token` into `st` and apply the `StopMode` stopping rules,
+    /// returning `true` when generation should stop. An EOS in any non-`Fixed` mode stops
+    /// *before* the token is counted or detokenized (so the marker never reaches the output),
+    /// matching plain greedy decode. Shared by [`decode_loop`](Self::decode_loop) and
+    /// [`spec_decode_loop`](Self::spec_decode_loop) so their detokenization and stop semantics
+    /// are byte-identical — the speculative loop just calls this once per accepted/bonus token.
+    #[cfg(feature = "candle-backend")]
+    fn process_token(
+        &self,
+        token: u32,
+        eos: Option<u32>,
+        stop: StopMode,
+        st: &mut DecodeState,
+    ) -> bool {
+        if !matches!(stop, StopMode::Fixed) && Some(token) == eos {
+            return true;
+        }
+        st.n_generated += 1;
+        let piece = self.tokenizer.decode(&[token], false).unwrap_or_default();
+        st.generated_text.push_str(&piece);
+        match stop {
+            StopMode::Json => {
+                for ch in piece.chars() {
+                    if ch == '{' {
+                        st.brace_depth += 1;
+                        st.saw_open_brace = true;
+                    } else if ch == '}' {
+                        st.brace_depth -= 1;
+                    }
+                }
+                if st.saw_open_brace && st.brace_depth <= 0 {
+                    return true;
+                }
+            }
+            StopMode::Text => {
+                if st.generated_text.contains("<|im_end|>")
+                    || st.generated_text.contains("<end_of_turn>")
+                {
+                    return true;
+                }
+                for ch in piece.chars() {
+                    if ch == '\n' {
+                        st.consecutive_newlines += 1;
+                    } else {
+                        st.consecutive_newlines = 0;
+                    }
+                }
+                if st.consecutive_newlines >= 2 {
+                    return true;
+                }
+            }
+            StopMode::Fixed => {}
+        }
+        false
     }
 
     /// Shared autoregressive decode loop: given the `logits` from a prefill of
@@ -2020,17 +2082,12 @@ impl CandleBackend {
         max_tokens: u32,
         stop: StopMode,
     ) -> NluResult<GenerationResult> {
-        let mut generated_text = String::new();
-        let mut n_generated = 0u32;
-        let mut brace_depth: i32 = 0;
-        let mut saw_open_brace = false;
-        let mut consecutive_newlines = 0u32;
-
+        let mut st = DecodeState::default();
         let eos_token = self.find_eos_token();
 
         // Phase 45a: time the autoregressive decode (prefill excluded) for tok/s.
         let decode_start = std::time::Instant::now();
-        while n_generated < max_tokens {
+        while st.n_generated < max_tokens {
             // Sample next token. Both quantized_qwen2 and quantized_gemma3
             // `forward` already reduce to the last position internally, so
             // `logits` is `[batch, vocab]` — take row 0 to get `[vocab]`.
@@ -2079,54 +2136,9 @@ impl CandleBackend {
                 sample_from_probs(&probs_vec)
             };
 
-            // Check EOS (ignored in Fixed mode: a throughput probe decodes the
-            // full token budget regardless of content).
-            if !matches!(stop, StopMode::Fixed) && Some(next_token) == eos_token {
+            // Emit the token + apply the StopMode rules (EOS / brace / newline / markers).
+            if self.process_token(next_token, eos_token, stop, &mut st) {
                 break;
-            }
-
-            n_generated += 1;
-
-            // Decode token to text
-            let piece = self
-                .tokenizer
-                .decode(&[next_token], false)
-                .unwrap_or_default();
-            generated_text.push_str(&piece);
-
-            // Check stop condition
-            match stop {
-                StopMode::Json => {
-                    for ch in piece.chars() {
-                        if ch == '{' {
-                            brace_depth += 1;
-                            saw_open_brace = true;
-                        } else if ch == '}' {
-                            brace_depth -= 1;
-                        }
-                    }
-                    if saw_open_brace && brace_depth <= 0 {
-                        break;
-                    }
-                }
-                StopMode::Text => {
-                    if generated_text.contains("<|im_end|>")
-                        || generated_text.contains("<end_of_turn>")
-                    {
-                        break;
-                    }
-                    for ch in piece.chars() {
-                        if ch == '\n' {
-                            consecutive_newlines += 1;
-                        } else {
-                            consecutive_newlines = 0;
-                        }
-                    }
-                    if consecutive_newlines >= 2 {
-                        break;
-                    }
-                }
-                StopMode::Fixed => {}
             }
 
             // Prepare next forward pass (single token).
@@ -2141,7 +2153,7 @@ impl CandleBackend {
 
             logits = self
                 .model
-                .forward(&next_input, prompt_len + n_generated as usize - 1)
+                .forward(&next_input, prompt_len + st.n_generated as usize - 1)
                 .map_err(|e| NluError::LlmGenerationFailed {
                     reason: format!("decode step: {e}"),
                 })?;
@@ -2149,20 +2161,169 @@ impl CandleBackend {
 
         let decode_secs = decode_start.elapsed().as_secs_f32();
         let tok_s = if decode_secs > 0.0 {
-            n_generated as f32 / decode_secs
+            st.n_generated as f32 / decode_secs
         } else {
             0.0
         };
         tracing::debug!(
-            tokens_generated = n_generated,
+            tokens_generated = st.n_generated,
             decode_secs,
             tok_s,
             "Candle generation complete"
         );
 
         Ok(GenerationResult {
-            text: generated_text,
-            tokens_generated: n_generated,
+            text: st.generated_text,
+            tokens_generated: st.n_generated,
+            decode_secs,
+        })
+    }
+
+    /// Whether this turn should use the speculative (prompt-lookup) decode path
+    /// ([`spec_decode_loop`](Self::spec_decode_loop)) instead of plain
+    /// [`decode_loop`](Self::decode_loop).
+    ///
+    /// Gated to the cases where it is **lossless and a potential win**:
+    /// - greedy only (`temperature == 0`) — spec decode matches plain *greedy* decode; under
+    ///   temperature the accept rule would distort the sampling distribution (that needs the
+    ///   sampling variant, Phase 47e);
+    /// - gemma4 only — the only loaded family exposing `forward_verify` + the batched verify GEMV;
+    /// - opt-in `AKH_SPEC_DECODE=1`.
+    ///
+    /// The win is additionally conditional on the batched verify GEMV (`AKH_GEMV_BATCH=1`,
+    /// Phase 47d); [`spec_decode_loop`] warns if that is unset (correct but slow without it).
+    #[cfg(feature = "candle-backend")]
+    fn spec_decode_eligible(&self) -> bool {
+        self.config.temperature == 0.0
+            && matches!(self.family, ModelFamily::Gemma4)
+            && std::env::var("AKH_SPEC_DECODE").as_deref() == Ok("1")
+    }
+
+    /// Speculative (prompt-lookup) **greedy** decode loop — gemma4 only (Phase 47 / ADR 075).
+    ///
+    /// Produces up to `γ+1` tokens per target forward: each round drafts a continuation from the
+    /// token history with an n-gram lookup (no draft model — works for gemma4, whose tokenizer
+    /// has no compatible small sibling), verifies the whole span in one `forward_verify`, and
+    /// greedily accepts the matching prefix plus one bonus/correction token. KV rollback is free
+    /// — the next round simply writes from the new position, overwriting any rejected tail
+    /// (device-pos static cache, Phase 46d-2). Every accepted/bonus token is emitted through the
+    /// shared [`process_token`](Self::process_token), so stop/detokenization match plain decode
+    /// exactly; the generated tokens match plain greedy decode in practice (validated
+    /// token-identical on the Phase 47c bench prompts).
+    ///
+    /// Wins where output echoes context (agentic / RAG / code / structured output) and is
+    /// near-neutral otherwise (an empty draft falls back to a cheap `m=1` verify). The throughput
+    /// win additionally requires the batched verify GEMV (`AKH_GEMV_BATCH=1`, Phase 47d) — without
+    /// it the verify is ~4× a decode and this *loses*; a warning is logged in that case.
+    #[cfg(feature = "candle-backend")]
+    fn spec_decode_loop(
+        &mut self,
+        logits: Tensor,
+        prompt_tokens: Vec<u32>,
+        max_tokens: u32,
+        stop: StopMode,
+    ) -> NluResult<GenerationResult> {
+        use super::spec_decode::{accept_run, DrafterConfig, NgramDrafter};
+        let fail = |reason: String| NluError::LlmGenerationFailed { reason };
+
+        if std::env::var("AKH_GEMV_BATCH").as_deref() != Ok("1") {
+            tracing::warn!(
+                "AKH_SPEC_DECODE=1 without AKH_GEMV_BATCH=1: speculative decode is correct but the \
+                 verify forward is ~4× a single decode (no batched GEMV), so this will be SLOWER \
+                 than plain decode. Set AKH_GEMV_BATCH=1 (Phase 47d) to make spec decode a win."
+            );
+        }
+
+        let device = self.device.clone();
+        let eos = self.find_eos_token();
+        // Echo-gate (min_ngram=2): only draft when at least a 2-token suffix recurs. Lone
+        // single-token matches are usually rejected on free-form text — requiring a longer
+        // match keeps the precision high so rejected γ-rounds stay rare.
+        let drafter = NgramDrafter::new(DrafterConfig {
+            min_ngram: 2,
+            ..DrafterConfig::default()
+        });
+        let kv_ctx = match &self.model {
+            LoadedModel::Gemma4(m) => m.kv_ctx(),
+            _ => return Err(fail("spec decode: gemma4 only".to_string())),
+        };
+        // On-device argmax → only the token id(s) cross PCIe (no full-logits D2H).
+        let argmax_ids = |t: &Tensor| -> NluResult<Vec<u32>> {
+            t.argmax(candle_core::D::Minus1)
+                .and_then(|a| a.flatten_all())
+                .and_then(|a| a.to_vec1::<u32>())
+                .map_err(|e| fail(format!("argmax: {e}")))
+        };
+
+        let mut st = DecodeState::default();
+        let mut all = prompt_tokens; // drafter context: prompt + everything generated
+        let mut pos = all.len();
+        let decode_start = std::time::Instant::now();
+
+        // First token = argmax(prefill) (last position).
+        let cur0 = *argmax_ids(&logits)?
+            .last()
+            .ok_or_else(|| fail("empty prefill argmax".to_string()))?;
+        all.push(cur0);
+        let mut cur = cur0;
+        let mut stop_now = self.process_token(cur0, eos, stop, &mut st);
+
+        while !stop_now && st.n_generated < max_tokens {
+            // Draft from the history, then verify [cur, drafts..] at [pos, ..] in ONE forward.
+            // Scope the &mut self.model borrow so process_token (&self) can run after it.
+            let (drafts, argmaxes) = {
+                let model = match &mut self.model {
+                    LoadedModel::Gemma4(m) => m,
+                    _ => return Err(fail("spec decode: gemma4 only".to_string())),
+                };
+                let mut drafts = drafter.propose(&all);
+                // Cap γ so the verify write [pos, pos+γ] fits the static KV cache.
+                let max_gamma = kv_ctx.saturating_sub(pos + 1);
+                if drafts.len() > max_gamma {
+                    drafts.truncate(max_gamma);
+                }
+                let feed: Vec<u32> = std::iter::once(cur).chain(drafts.iter().copied()).collect();
+                let feed_t = Tensor::new(feed.as_slice(), &device)
+                    .and_then(|t| t.unsqueeze(0))
+                    .map_err(|e| fail(format!("feed tensor: {e}")))?;
+                let verify = model
+                    .forward_verify(&feed_t, pos)
+                    .map_err(|e| fail(format!("verify forward: {e}")))?;
+                (drafts, argmax_ids(&verify)?) // argmaxes length = 1 + drafts.len()
+            };
+
+            let k = accept_run(&drafts, &argmaxes);
+            // Emit the k accepted drafts then the bonus/correction (argmaxes[k] always exists),
+            // each through the shared per-token path. Stop mid-run on EOS / a stop rule / budget.
+            for i in 0..=k {
+                let tok = if i < k { drafts[i] } else { argmaxes[k] };
+                all.push(tok);
+                if self.process_token(tok, eos, stop, &mut st) {
+                    stop_now = true;
+                    break;
+                }
+                if st.n_generated >= max_tokens {
+                    stop_now = true;
+                    break;
+                }
+            }
+            cur = argmaxes[k]; // bonus becomes the next round's current token
+            pos += k + 1;
+            if pos + 1 >= kv_ctx {
+                break;
+            }
+        }
+
+        let decode_secs = decode_start.elapsed().as_secs_f32();
+        tracing::debug!(
+            tokens_generated = st.n_generated,
+            decode_secs,
+            tok_s = st.n_generated as f32 / decode_secs.max(1e-6),
+            "Candle speculative generation complete"
+        );
+        Ok(GenerationResult {
+            text: st.generated_text,
+            tokens_generated: st.n_generated,
             decode_secs,
         })
     }
@@ -2433,6 +2594,21 @@ struct GenerationResult {
     /// Wall-clock spent in the autoregressive decode loop (prefill excluded), in
     /// seconds. Drives the Phase 45a tok/s baseline. Zero when no token was decoded.
     decode_secs: f32,
+}
+
+/// Running state shared by the plain [`CandleBackend::decode_loop`] and the speculative
+/// [`CandleBackend::spec_decode_loop`]: the accumulated text, the emitted-token count, and
+/// the [`StopMode`] bookkeeping (brace depth / newline run). Bundled so both loops drive
+/// [`CandleBackend::process_token`] identically — the speculative loop emits a *batch* of
+/// accepted tokens per forward but each goes through the same per-token path.
+#[cfg(feature = "candle-backend")]
+#[derive(Default)]
+struct DecodeState {
+    generated_text: String,
+    n_generated: u32,
+    brace_depth: i32,
+    saw_open_brace: bool,
+    consecutive_newlines: u32,
 }
 
 // ---------------------------------------------------------------------------
