@@ -1,6 +1,6 @@
 # Phase 47 — Speculative Decoding (Candle, gemma4-12b)
 
-- **Status:** Active (47a in progress)
+- **Status:** Active (47a–47d done + validated on gfx1100; productization + 47e remain)
 - **Anima work item:** Akh-Medu project `019d9844-ce74-7993-a9f0-c953b8f04a4e` (work-item id TBD — create + link)
 - **ADR:** [075-speculative-decoding](../decisions/075-speculative-decoding.md)
 - **Builds on:** Phase 46d-2 (HIP-graph per-token decode; device-pos static KV cache) — [plan](2026-06-22-phase46-candle-static-shape-inference.md), [ADR 074]
@@ -155,3 +155,44 @@ NB the foundation (verify forward, drafter, accept loop, free KV rollback) is co
 behind `AKH_BENCH_SPEC` — not wired into production decode. The win is gated on 47d.
 - **Verify compute at large γ / long context** could drift from "≈ one decode-time" toward
   compute-bound; keep γ small (≤ 8) and measure.
+
+## RESULTS (2026-06-29) — 47d DONE: the batched GEMV lifts spec throughput 1.68×
+
+**47d batched fused quantized GEMV (`7822d7f`).** Templated-on-`M` kernel
+(`akh_gemv_batched_q{4,6}k_f32`) in `quant.hip`: warp-per-weight-row, **dequant each superblock
+once**, carry `M` accumulators per lane (one per activation row) so each dequantized weight is
+reused across all `M` rows **in registers** — quantized weights streamed exactly once, no f32
+temp. A C dispatch macro picks the instantiation for runtime `m` (1..=16); larger `m` routes to
+GEMM. Rust: `gemv_batched` FFI + method + a routing branch in `QCudaStorage::fwd` for
+`2 ≤ b·m ≤ 16`, contiguous f32 activation, `k%256==0`, **opt-in `AKH_GEMV_BATCH=1`** (default off;
+never touches the m=1 decode hot path).
+
+Validated on gfx1100 (RX 7900 XTX) — **the box has the toolchain *and* the GPU** (the compiler is
+`amdclang++`, not `hipcc`; earlier "off-GPU" was a mis-probe):
+- `hip_gemv_batched_parity`: Q4_K/Q6_K, `m=2,4,7,9` match the dequant-f32 reference to **~1.5e-7
+  rel** (f32 rounding — *tighter* than the rocBLAS GEMM path, because the batched GEMV reuses the
+  m=1 per-row warp-dot accumulation; this also makes the verify track plain-greedy logits more
+  closely than 47a's GEMM verify). m=1 parity tests unchanged.
+- gemma4-12b end-to-end, **tokens MATCH plain greedy (lossless)**, apples-to-apples A/B (same
+  prompt → identical accepted-token counts; only verify cost differs):
+
+  | workload | accept | tok/fwd | spec tok/s 47c→47d | speedup 47c→47d |
+  |---|---|---|---|---|
+  | high-echo (JSON echo ×4) | 75% | 5.37 | 14.24 → **23.94** | 1.45× → **2.45×** |
+  | free-form (photosynthesis) | 3% | 1.09 | 7.08 (→) | 0.47× → **0.71×** |
+
+  Plain decode 9.79 tok/s in both arms (flag never touches m=1). Net: **batched GEMV lifts
+  spec-decode throughput 1.68×**, cutting the verify from ~4× a decode to **~1.5×** (the residual
+  is the non-quantized attention/norm/rope work that genuinely scales with `m`, not the weights).
+
+### Conclusion + remaining levers
+- **Spec decode is now a strong win on echo-heavy generation (2.45×)** and roughly half the penalty
+  on free-form (0.71×). PLD stays **workload-conditional** — it still costs <1× when acceptance is
+  near zero, so it is NOT safe to leave unconditionally on.
+- **Productization (next):** wire spec decode into production decode (`run_agentic_turn`) for
+  echo-heavy turns (agentic / RAG / structured / code), gated so low-echo turns fall back to plain
+  decode. Cheapest gate: only draft when the matched suffix is ≥2–3 tokens (more predictive →
+  fewer rejected verifies), and/or an adaptive-γ that backs off after consecutive misses. Then flip
+  `AKH_GEMV_BATCH` default → on (also speeds short prefills, m≤16).
+- **47e (opt) — sampling spec decode**: probabilistic accept + residual resample, now that the
+  greedy win is real.
