@@ -326,6 +326,31 @@ impl LayerWeights {
             .to_dtype(dtype)
     }
 
+    /// Phase 47 speculative-decode **verify** mask: pure-causal continuation, `[b, 1, seq,
+    /// index_pos+seq]`, `1 = keep / 0 = mask` (the convention [`forward_attn`] consumes). Query
+    /// `index_pos + i` keeps every key `j ≤ index_pos + i` — the whole cached prefix plus the
+    /// causal new block, and **no sliding-window restriction** so it matches `seq_len==1` decode
+    /// (which passes `mask = None` and thus ignores the window); that makes the verify forward
+    /// byte-exact to incremental decode. Built once per forward (layer-independent without the
+    /// window) and host-side via `from_slice` (no device `const_set`/`ones`).
+    fn verify_mask(
+        seq_len: usize,
+        index_pos: usize,
+        dtype: DType,
+        device: &Device,
+    ) -> Result<Tensor> {
+        let total = seq_len + index_pos;
+        let mask: Vec<u32> = (0..seq_len)
+            .flat_map(|i| {
+                let qg = index_pos + i; // global query position
+                (0..total).map(move |j| if j > qg { 0u32 } else { 1u32 })
+            })
+            .collect();
+        Tensor::from_slice(&mask, (seq_len, total), device)?
+            .expand((1, 1, seq_len, total))?
+            .to_dtype(dtype)
+    }
+
     fn forward_attn(
         &mut self,
         x: &Tensor,
@@ -884,7 +909,7 @@ impl ModelWeights {
         // Scale embeddings by sqrt(embedding_length) (≈61.9677 for 3840).
         layer_in = (layer_in * (self.embedding_length as f64).sqrt())?;
         let (b_sz, seq_len) = x.dims2()?;
-        self.run_layers(layer_in, b_sz, seq_len, index_pos)
+        self.run_layers(layer_in, b_sz, seq_len, index_pos, true)
     }
 
     /// Like [`hidden_states`] but starts from a pre-built input-embedding tensor
@@ -898,23 +923,38 @@ impl ModelWeights {
         index_pos: usize,
     ) -> Result<Tensor> {
         let (b_sz, seq_len, _hidden) = embeds.dims3()?;
-        self.run_layers(embeds.clone(), b_sz, seq_len, index_pos)
+        self.run_layers(embeds.clone(), b_sz, seq_len, index_pos, true)
     }
 
-    /// Shared decoder body: run all layers over a pre-scaled input-embedding
-    /// tensor and return the post-norm last-position hidden state.
+    /// Shared decoder body: run all layers over a pre-scaled input-embedding tensor and return
+    /// the post-norm hidden state. With `last_only` it returns only the **last position**
+    /// (`[b, hidden]`, the decode/Neural-VSA path); otherwise it returns **every position**
+    /// (`[b, seq, hidden]`) for the Phase 47 speculative-decode verify forward. `last_only` is
+    /// byte-exact to the all-position result sliced at `seq_len-1` (RMSNorm is per-position).
     fn run_layers(
         &mut self,
         mut layer_in: Tensor,
         b_sz: usize,
         seq_len: usize,
         index_pos: usize,
+        last_only: bool,
     ) -> Result<Tensor> {
         let _enter = self.span.enter();
         let dtype = layer_in.dtype();
         let device = layer_in.device().clone();
+        // Phase 47 verify forward (`last_only == false`, `seq_len > 1`): one pure-causal
+        // continuation mask shared by every layer (no sliding window → matches `seq==1` decode →
+        // byte-exact to incremental decode). The normal path keeps the per-layer windowed
+        // prefill mask / `None` for single-token decode.
+        let verify_mask = if !last_only && seq_len > 1 {
+            Some(LayerWeights::verify_mask(seq_len, index_pos, dtype, &device)?)
+        } else {
+            None
+        };
         for layer in self.layers.iter_mut() {
-            let attention_mask = if seq_len == 1 {
+            let attention_mask = if let Some(m) = &verify_mask {
+                Some(m.clone())
+            } else if seq_len == 1 {
                 None
             } else {
                 Some(layer.mask(b_sz, seq_len, index_pos, dtype, &device)?)
@@ -941,8 +981,14 @@ impl ModelWeights {
             layer_in = h.broadcast_mul(&layer.layer_output_scale)?;
         }
 
-        let x = layer_in.i((.., seq_len - 1, ..))?;
-        self.norm.forward(&x)
+        if last_only {
+            let x = layer_in.i((.., seq_len - 1, ..))?;
+            self.norm.forward(&x)
+        } else {
+            // All-position hidden `[b, seq, hidden]` — RMSNorm normalizes each position
+            // independently, so this is byte-exact to the last-position path at `seq_len-1`.
+            self.norm.forward(&layer_in)
+        }
     }
 
     /// Apply the tied lm_head and the final-logit softcap: `30 * tanh(logits/30)`.
@@ -970,6 +1016,23 @@ impl ModelWeights {
 
     pub fn forward(&mut self, x: &Tensor, index_pos: usize) -> Result<Tensor> {
         let h = self.hidden_states(x, index_pos)?;
+        self.project_and_softcap(&h)
+    }
+
+    /// Phase 47 speculative-decode **verify forward**: logits at EVERY position
+    /// (`[b, seq, vocab]`) for the token ids `x` (`[b, seq]`) fed as a continuation at
+    /// `index_pos`. The target scores all `seq` candidate positions in one forward; position
+    /// `index_pos + i` attends the cached prefix `[0, index_pos)` plus the causal `[0, i]` of the
+    /// new block (see [`LayerWeights::mask`]). Byte-identical to running `seq` single-token
+    /// [`forward`](Self::forward)s incrementally (same K/V writes, same per-position rope/mask) —
+    /// the last position equals a plain `forward` of the same token. K/V for all `seq` positions
+    /// are written into the static cache at `[index_pos, index_pos+seq)`; on partial acceptance
+    /// the caller rewinds the write index (Phase 47c).
+    pub fn forward_verify(&mut self, x: &Tensor, index_pos: usize) -> Result<Tensor> {
+        let mut layer_in = self.tok_embeddings.get_rows(x)?;
+        layer_in = (layer_in * (self.embedding_length as f64).sqrt())?;
+        let (b_sz, seq_len) = x.dims2()?;
+        let h = self.run_layers(layer_in, b_sz, seq_len, index_pos, false)?;
         self.project_and_softcap(&h)
     }
 

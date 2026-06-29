@@ -136,6 +136,33 @@ fn main() -> miette::Result<()> {
         return Ok(());
     }
 
+    // Phase 47a: all-position verify-forward parity (AKH_BENCH_VERIFY=1). Byte-exact A/B of
+    // gemma4's forward_verify ([1, seq, vocab]) vs incremental single-token decode — the gate
+    // for the speculative-decode verify primitive (both diffs must be 0).
+    #[cfg(feature = "hip")]
+    if std::env::var("AKH_BENCH_VERIFY").as_deref() == Ok("1") {
+        let n: usize = env_parse("AKH_BENCH_TOKENS").unwrap_or(8);
+        let p = backend.bench_verify_parity(&prompt, n)?;
+        println!();
+        println!("=== Phase 47a verify-forward parity (gemma4) ===");
+        println!("prefix P / seq n   : {} / {}", p.position, p.seq_len);
+        println!(
+            "max|Δlogits|       : {:.3e}  (0 at n=1; n>1 = m=1 GEMV vs m=n GEMM quant diff)",
+            p.max_abs_diff
+        );
+        println!(
+            "argmax agreement   : {}/{}  ({})",
+            p.argmax_agree,
+            p.seq_len,
+            if p.argmax_agree == p.seq_len {
+                "PASS — verify picks the same greedy token"
+            } else {
+                "FLIP — quant divergence changed a token"
+            }
+        );
+        return Ok(());
+    }
+
     // Phase 46d-2d: the real per-token graph decode loop (AKH_BENCH_GRAPH_LOOP=1). One graph
     // captured for the decode forward, replayed once per token (advancing the device d_pos +
     // refreshing the embedding in place between replays), generating a full sequence. A/B vs

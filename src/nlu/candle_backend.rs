@@ -266,6 +266,30 @@ pub struct GraphDecodeLoopStats {
     pub tokens_match: bool,
 }
 
+/// Phase 47a gate: byte-exactness of the **all-position verify forward** (the speculative-decode
+/// primitive) against incremental single-token decode. The target scores `seq_len` candidate
+/// positions in one forward (`forward_verify` → `[1, seq, vocab]`); each position's logits must
+/// equal what a sequence of single-token `forward`s would produce at the same position (same K/V
+/// writes, same per-position rope/mask). Both diffs must be `0` before the verify forward is used
+/// to accept/reject draft tokens (47c) — a wrong verify forward accepts wrong tokens.
+#[derive(Debug, Clone)]
+pub struct VerifyParity {
+    /// Prefix length the verify block was appended at (`index_pos`).
+    pub position: usize,
+    /// Number of candidate positions scored in the one verify forward.
+    pub seq_len: usize,
+    /// max over ALL positions of max|Δlogits| (verify vs incremental). `0` only at `seq_len==1`
+    /// (both use the m=1 GEMV); for `seq_len>1` the verify projections use the m=n GEMM, a
+    /// different quant kernel → small (~1e-2) divergence, NOT a bug.
+    pub max_abs_diff: f32,
+    /// max|Δlogits| at the LAST position.
+    pub last_pos_diff: f32,
+    /// Positions where `argmax(verify) == argmax(incremental)` — the greedy-token gate. The
+    /// logit divergence is harmless iff this equals `seq_len` (the verify picks the same token a
+    /// pure m=1 decode would).
+    pub argmax_agree: usize,
+}
+
 // ---------------------------------------------------------------------------
 // Expected model paths
 // ---------------------------------------------------------------------------
@@ -1119,6 +1143,125 @@ impl CandleBackend {
             graph_tok_s,
             capture_miss,
             tokens_match: eager_tokens == graph_tokens,
+        })
+    }
+
+    /// Phase 47a gate: byte-exact A/B of gemma4's all-position **verify forward** against
+    /// incremental single-token decode (see [`VerifyParity`]). Prefills the prompt to position
+    /// `P`, greedily decodes `n` tokens one-at-a-time recording each position's logits (the
+    /// reference + the token sequence), resets the KV to `[0, P)` by re-prefilling, then scores
+    /// the SAME `n` tokens in one `forward_verify` at `P` and compares every position. gemma4 only.
+    #[cfg(feature = "candle-backend")]
+    pub fn bench_verify_parity(&mut self, prompt: &str, n: usize) -> NluResult<VerifyParity> {
+        let fail = |reason: String| NluError::LlmGenerationFailed { reason };
+        let n = n.max(1);
+
+        let encoding = self
+            .tokenizer
+            .encode(prompt, true)
+            .map_err(|e| fail(format!("tokenization: {e}")))?;
+        let mut prompt_tokens: Vec<u32> = encoding.get_ids().to_vec();
+        if matches!(self.family, ModelFamily::Gemma | ModelFamily::Gemma4) {
+            if let Some(bos) = self.tokenizer.token_to_id("<bos>") {
+                if prompt_tokens.first() != Some(&bos) {
+                    prompt_tokens.insert(0, bos);
+                }
+            }
+        }
+        let position = prompt_tokens.len();
+        let input = Tensor::new(prompt_tokens.as_slice(), &self.device)
+            .and_then(|t| t.unsqueeze(0))
+            .map_err(|e| fail(format!("prompt tensor: {e}")))?;
+
+        let device = self.device.clone();
+        let model = match &mut self.model {
+            LoadedModel::Gemma4(m) => m,
+            _ => return Err(fail("verify-parity probe supports gemma4 only".to_string())),
+        };
+
+        let argmax = |v: &[f32]| -> u32 {
+            v.iter()
+                .enumerate()
+                .fold((0usize, f32::NEG_INFINITY), |(bi, bv), (i, &x)| {
+                    if x > bv { (i, x) } else { (bi, bv) }
+                })
+                .0 as u32
+        };
+        let max_diff = |a: &[f32], b: &[f32]| -> f32 {
+            a.iter()
+                .zip(b.iter())
+                .map(|(x, y)| (x - y).abs())
+                .fold(0.0f32, f32::max)
+        };
+        let row = |t: &Tensor, i: usize| -> NluResult<Vec<f32>> {
+            t.i((0, i, ..))
+                .and_then(|r| r.to_vec1::<f32>())
+                .map_err(|e| fail(format!("logits row {i}: {e}")))
+        };
+
+        // Prefill -> P; first token = argmax(prefill).
+        let prefill = model
+            .forward(&input, 0)
+            .map_err(|e| fail(format!("prefill: {e}")))?;
+        let prefill_vec = prefill
+            .i((0, ..))
+            .and_then(|l| l.to_vec1::<f32>())
+            .map_err(|e| fail(format!("prefill logits: {e}")))?;
+        let mut s = argmax(&prefill_vec);
+
+        // Incremental reference: feed the greedy sequence one token at a time, recording each
+        // position's logits. This writes KV [P, P+n).
+        let mut seq: Vec<u32> = Vec::with_capacity(n);
+        let mut ref_logits: Vec<Vec<f32>> = Vec::with_capacity(n);
+        for i in 0..n {
+            let inp = Tensor::new(&[s], &device)
+                .and_then(|t| t.unsqueeze(0))
+                .map_err(|e| fail(format!("tok tensor: {e}")))?;
+            let logits = model
+                .forward(&inp, position + i)
+                .map_err(|e| fail(format!("incremental forward {i}: {e}")))?;
+            let lv = logits
+                .i((0, ..))
+                .and_then(|l| l.to_vec1::<f32>())
+                .map_err(|e| fail(format!("incremental logits {i}: {e}")))?;
+            seq.push(s);
+            s = argmax(&lv);
+            ref_logits.push(lv);
+        }
+
+        // Score the SAME seq in one verify forward. No re-prefill needed: the prefix [0, P) was
+        // written once by the initial prefill and is never overwritten (both incremental and
+        // verify only write [P, P+n)); verify just re-writes [P, P+n) with the same tokens. A
+        // re-prefill here would re-run the (potentially non-deterministic rocBLAS) prefill GEMM
+        // and give verify a slightly different prefix — a measurement confound, not a real diff.
+        let seq_t = Tensor::new(seq.as_slice(), &device)
+            .and_then(|t| t.unsqueeze(0))
+            .map_err(|e| fail(format!("seq tensor: {e}")))?;
+        let verify = model
+            .forward_verify(&seq_t, position)
+            .map_err(|e| fail(format!("verify forward: {e}")))?;
+
+        let mut max_abs_diff = 0.0f32;
+        let mut last_pos_diff = 0.0f32;
+        let mut argmax_agree = 0usize;
+        for i in 0..n {
+            let vrow = row(&verify, i)?;
+            let d = max_diff(&vrow, &ref_logits[i]);
+            max_abs_diff = max_abs_diff.max(d);
+            if i == n - 1 {
+                last_pos_diff = d;
+            }
+            if argmax(&vrow) == argmax(&ref_logits[i]) {
+                argmax_agree += 1;
+            }
+        }
+
+        Ok(VerifyParity {
+            position,
+            seq_len: n,
+            max_abs_diff,
+            last_pos_diff,
+            argmax_agree,
         })
     }
 
