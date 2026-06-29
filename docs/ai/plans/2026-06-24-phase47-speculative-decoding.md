@@ -118,5 +118,40 @@ Dispatch-bound model: target verify of `γ+1` tokens ≈ one decode-time `T`. PL
 - **`α` is empirical** — 47c must measure it on representative agentic traffic before claiming a win.
 - **gemma4-mini draft** (for non-repetitive workloads) is an unmet external dependency; PLD is the
   only draft-free win and is workload-conditional. State this plainly to the user.
+
+## RESULTS (2026-06-24) — 47a/47b/47c done; the verify COST, not acceptance, is the wall
+
+- **47a verify forward (`73fb50a`)** — `gemma4 forward_verify -> [1,seq,vocab]`. Gate: n=1
+  byte-exact; n=8/16/32 ~1e-2 logit drift (inherent m=1 GEMV vs m=n GEMM quant diff) but **100%
+  argmax agreement** → greedy-lossless in practice. (The early "diverged at n=1" was a re-prefill
+  confound — non-deterministic rocBLAS prefill GEMM — removed.)
+- **47b drafter (`96f5b0a`)** — `NgramDrafter` + pure `accept_run`, 6 unit tests.
+- **47c loop (`402718e`)** — `bench_spec_decode`. Tokens MATCH plain on every prompt. Measured
+  gemma4-12b: free-form (photosynthesis) accept 6%, 1.23 tok/fwd → **0.47×**; high-echo (repeat
+  an API list) accept 44%, 4.57 tok/fwd → **1.07×**.
+
+### The premise was wrong: the verify is NOT ≈ one decode-time
+The "dispatch-bound → γ+1 verify ≈ one decode" rationale is **false for the quantized matmuls**.
+A verify over `m = γ+1` tokens routes EVERY quantized matmul (q/k/v/o + MLP + lm_head, ×48
+layers) through the **dequant + GEMM** path — there is no fused GEMV for `m>1`, so it materializes
+the full f32 weights (the exact 4× weight temp the 45h decode GEMV was built to avoid). **Measured
+verify ≈ 4× a single-token decode.** Consequences:
+- A round must reach `mean(accepted)+1 > ~4` just to break even.
+- A REJECTED draft round costs ~4× a plain step for nothing → **PLD HURTS on low-echo**
+  (0.47×). This corrects the earlier "PLD has no real downside" claim above — that only holds
+  once the verify is cheap.
+
+### Revised next step
+- **47d (was "HIP-graph the verify"; SUPERSEDED) — batched fused quantized GEMV (m=n).** The
+  verify's bottleneck is dequant **bandwidth**, not dispatch, so graphing it barely helps.
+  Implement a batched fused quantized GEMV (m=n output rows, dequant each weight superblock once
+  inline, accumulate n dot products, no f32 weight temp) in `vendor/candle-core/src/quantized/
+  hip.rs`, extending the 45h m=1 GEMV; route the `m>1` quantized matmul through it. Target: verify
+  → ~1× plain, at which point spec decode is a broad win (≈ tokens/forward ×) AND harmless on
+  misses. This kernel also benefits any future batched/training forward.
+- **47e (opt) — sampling spec decode** (unchanged): after the batched-GEMV win lands.
+
+NB the foundation (verify forward, drafter, accept loop, free KV rollback) is correct and lives
+behind `AKH_BENCH_SPEC` — not wired into production decode. The win is gated on 47d.
 - **Verify compute at large γ / long context** could drift from "≈ one decode-time" toward
   compute-bound; keep γ small (≤ 8) and measure.
