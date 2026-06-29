@@ -882,6 +882,12 @@ impl ModelWeights {
         self.embedding_length
     }
 
+    /// Static KV-cache capacity (env `AKH_KV_CTX`, default 4096) — the upper bound for a
+    /// speculative-decode verify span / decode position. `0` before any layer is built.
+    pub fn kv_ctx(&self) -> usize {
+        self.layers.first().map(|l| l.kv_ctx).unwrap_or(0)
+    }
+
     /// Look up the (un-scaled) token embeddings for `ids` (shape `[batch, seq]`),
     /// returning `[batch, seq, embedding_length]`. The caller is responsible for
     /// any `sqrt(embedding_length)` scaling (the decoder applies that to *text*

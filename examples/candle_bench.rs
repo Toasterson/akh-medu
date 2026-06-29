@@ -136,6 +136,42 @@ fn main() -> miette::Result<()> {
         return Ok(());
     }
 
+    // Phase 47c: greedy speculative decode (AKH_BENCH_SPEC=1). A/B of plain greedy decode vs
+    // prompt-lookup spec decode (n-gram drafter + one forward_verify per round). The win is
+    // workload-conditional — high acceptance where the output echoes context.
+    #[cfg(feature = "hip")]
+    if std::env::var("AKH_BENCH_SPEC").as_deref() == Ok("1") {
+        let new: u32 = env_parse("AKH_BENCH_TOKENS").unwrap_or(96);
+        let s = backend.bench_spec_decode(&prompt, new)?;
+        let speedup = s.spec_tok_s / s.plain_tok_s.max(1e-6);
+        let accept_rate = if s.drafted > 0 {
+            100.0 * s.accepted as f32 / s.drafted as f32
+        } else {
+            0.0
+        };
+        let toks_per_fwd = if s.rounds > 0 {
+            s.spec_tokens as f32 / s.rounds as f32
+        } else {
+            0.0
+        };
+        println!();
+        println!("=== Phase 47c greedy speculative decode (gemma4) ===");
+        println!("prefix P           : {} tokens", s.position);
+        println!("plain / spec toks  : {} / {}", s.plain_tokens, s.spec_tokens);
+        println!(
+            "tokens match (A/B) : {}",
+            if s.tokens_match { "YES (spec == plain)" } else { "NO — diverged" }
+        );
+        println!(
+            "acceptance         : {}/{} drafts = {:.0}%  ({:.2} tokens/forward)",
+            s.accepted, s.drafted, accept_rate, toks_per_fwd
+        );
+        println!("plain  decode      : {:.2} tok/s", s.plain_tok_s);
+        println!("spec   decode      : {:.2} tok/s", s.spec_tok_s);
+        println!("speedup            : {speedup:.2}x  (spec / plain)");
+        return Ok(());
+    }
+
     // Phase 47a: all-position verify-forward parity (AKH_BENCH_VERIFY=1). Byte-exact A/B of
     // gemma4's forward_verify ([1, seq, vocab]) vs incremental single-token decode — the gate
     // for the speculative-decode verify primitive (both diffs must be 0).
