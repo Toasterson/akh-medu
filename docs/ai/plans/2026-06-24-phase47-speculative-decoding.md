@@ -224,6 +224,20 @@ probe over the real `generate()` path:
 | high-echo (repeat a list) | 13.93s → **7.15s (1.95×)** | **byte-identical** (same md5) |
 | free-form | ~neutral (+1.7%, noise) | byte-identical |
 
-**Off by default** (env-gated) → zero change to existing decode behavior. Remaining: optionally
-flip `AKH_GEMV_BATCH` default → on (also speeds short prefills), per-akh config field instead of an
-env flag, and 47e (sampling spec decode) for non-greedy turns.
+**Off by default** → zero change to existing decode behavior.
+
+### Per-akh config + runtime tool (2026-06-29 cont., `e11115b`)
+Enablement moved from the `AKH_SPEC_DECODE` env flag to typed, per-akh config that a tool flips
+live:
+- **`AkhConfig.spec_decode`** (`akh.toml` scalar, default false) — persists the choice.
+- **`InferenceOptions`** (`src/inference_options.rs`): a lock-free `AtomicBool` bundle held behind
+  an `Arc` by the akh's `Engine` and **shared** with the Candle backend, so a flip is observed next
+  turn without locking the (busy) model mutex.
+- `akhomed` seeds the engine flag from `AkhConfig.spec_decode` and shares the `Arc` into the
+  `CandleBackend`; `spec_decode_eligible` reads it (env stays a fallback for standalone benches).
+- **`inference_config` agent tool** (`get` / `set spec_decode on|off`): flips the shared `Arc` via
+  `&Engine` — the bridge, since a `Tool` only sees `&Engine`, not the agent's `chat_backend`. Safe
+  (no KG writes; greedy-lossless). Tests cover the live toggle, bool parsing, and bad input.
+
+Remaining: optionally flip `AKH_GEMV_BATCH` default → on (also speeds short prefills); 47e
+(sampling spec decode) for non-greedy turns.

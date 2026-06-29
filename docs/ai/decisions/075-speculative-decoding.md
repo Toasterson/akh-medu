@@ -92,6 +92,14 @@ semantics are byte-identical; the production drafter uses **`min_ngram=2`** as a
 low-echo turns fall back to cheap `m=1` verifies and incur no penalty. Validated on gfx1100,
 gemma4-12b: high-echo `generate()` wall 13.93s → 7.15s (**1.95×**, incl prefill) with
 **byte-identical** output; free-form ~neutral (+1.7%), output byte-identical. Because spec decode is
-greedy-lossless, enabling it cannot change *what* is generated — only how fast. Sampling turns still
-need 47e; the `AKH_GEMV_BATCH` default-on flip (also speeding short prefills) is the remaining
-toggle.
+greedy-lossless, enabling it cannot change *what* is generated — only how fast.
+
+**Config + runtime tool (2026-06-29, `e11115b`).** Enablement is now typed, per-akh config rather
+than an env flag: `AkhConfig.spec_decode` (`akh.toml`, default off) seeds a lock-free
+`Arc<InferenceOptions>` the akh's `Engine` owns and shares with the Candle backend; the
+`inference_config` agent tool (`set spec_decode on|off`) flips that shared `Arc` via `&Engine` so
+the change takes effect on the next turn with no restart and no model-mutex contention. (The bridge
+is necessary because a `Tool` is handed only `&Engine`, not the agent's `chat_backend`; the shared
+`Arc` is the channel.) The `AKH_SPEC_DECODE` env flag remains a fallback for standalone
+benches/tests. Sampling turns still need 47e; the `AKH_GEMV_BATCH` default-on flip (also speeding
+short prefills) is the remaining toggle.
