@@ -336,32 +336,33 @@ impl LayerWeights {
         dtype: DType,
         device: &Device,
     ) -> Result<Tensor> {
-        let mask: Vec<_> = if let Some(sliding_window_size) = self.sliding_window_size {
-            (0..seq_len)
-                .flat_map(|i| {
-                    (0..seq_len).map(move |j| {
-                        if i < j || j + sliding_window_size < i {
-                            0u32
-                        } else {
-                            1u32
-                        }
-                    })
-                })
-                .collect()
-        } else {
-            (0..seq_len)
-                .flat_map(|i| (0..seq_len).map(move |j| if i < j { 0u32 } else { 1u32 }))
-                .collect()
-        };
-        let mask = Tensor::from_slice(&mask, (seq_len, seq_len), device)?;
-        let mask = if index_pos > 0 {
-            let mask0 = Tensor::zeros((seq_len, index_pos), DType::F32, device)?;
-            Tensor::cat(&[&mask0, &mask], D::Minus1)?
-        } else {
-            mask
-        };
-        mask.expand((b_sz, 1, seq_len, seq_len + index_pos))?
+        let total = seq_len + index_pos;
+        let rows = Self::causal_mask_rows(seq_len, index_pos, self.sliding_window_size);
+        Tensor::from_slice(&rows, (seq_len, total), device)?
+            .expand((b_sz, 1, seq_len, total))?
             .to_dtype(dtype)
+    }
+
+    /// Row-major causal attention-mask values `[seq_len * (index_pos + seq_len)]` (`1` = keep,
+    /// `0` = mask — the convention [`forward_attn`]'s `mask.eq(0)?.where_cond(neg_inf, …)`
+    /// consumes). Query `i` sits at GLOBAL position `index_pos + i` and keeps every key
+    /// `j ≤ index_pos + i` (the whole cached prefix `[0, index_pos)` plus the causal new block);
+    /// a sliding `window` (when `Some`) additionally drops keys older than the window
+    /// (`j + window < index_pos + i`). Built host-side so the device construction is one
+    /// `from_slice` — the HIP backend has no `ones`/`const_set`. For `index_pos == 0` this is
+    /// byte-identical to the original prefill mask (lower-triangular, windowed where applicable).
+    fn causal_mask_rows(seq_len: usize, index_pos: usize, window: Option<usize>) -> Vec<u32> {
+        let total = seq_len + index_pos;
+        (0..seq_len)
+            .flat_map(|i| {
+                let qg = index_pos + i; // global query position
+                (0..total).map(move |j| {
+                    let future = j > qg;
+                    let out_of_window = window.is_some_and(|w| j + w < qg);
+                    if future || out_of_window { 0u32 } else { 1u32 }
+                })
+            })
+            .collect()
     }
 
     fn forward_attn(
@@ -968,5 +969,50 @@ impl ModelWeights {
             l
         };
         Ok((logits, h))
+    }
+}
+
+#[cfg(test)]
+mod mask_tests {
+    use super::LayerWeights;
+
+    // index_pos == 0 is the live prefill path: must stay plain lower-triangular causal
+    // (byte-identical to the original mask before the continuation fix).
+    #[test]
+    fn causal_mask_rows_prefill_is_lower_triangular() {
+        assert_eq!(
+            LayerWeights::causal_mask_rows(3, 0, None),
+            vec![
+                1, 0, 0, //
+                1, 1, 0, //
+                1, 1, 1, //
+            ]
+        );
+    }
+
+    // Continuation (index_pos > 0): the previously dead+broken branch. Query `i` is at global
+    // position `index_pos + i` and must keep the WHOLE cached prefix plus the causal new block.
+    #[test]
+    fn causal_mask_rows_continuation_keeps_prefix() {
+        // seq_len=2 appended at index_pos=3 (global queries 3, 4); total = 5.
+        assert_eq!(
+            LayerWeights::causal_mask_rows(2, 3, None),
+            vec![
+                1, 1, 1, 1, 0, // q=3: keep keys 0..=3
+                1, 1, 1, 1, 1, // q=4: keep keys 0..=4
+            ]
+        );
+    }
+
+    // Sliding window applied in GLOBAL coordinates: drop keys older than the window.
+    #[test]
+    fn causal_mask_rows_continuation_sliding_window() {
+        assert_eq!(
+            LayerWeights::causal_mask_rows(2, 3, Some(2)),
+            vec![
+                0, 1, 1, 1, 0, // q=3: keep 1,2,3
+                0, 0, 1, 1, 1, // q=4: keep 2,3,4
+            ]
+        );
     }
 }
