@@ -58,6 +58,7 @@ pub mod glyph;
 pub mod grammar;
 pub mod graph;
 pub mod infer;
+pub mod inference_options;
 pub mod library;
 #[cfg(feature = "daemon")]
 pub mod upstream_client;

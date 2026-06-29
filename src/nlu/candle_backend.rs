@@ -357,6 +357,11 @@ pub struct CandleBackend {
     context_length: usize,
     config: CandleConfig,
     model_path: PathBuf,
+    /// Live, lock-free inference toggles shared (by `Arc`) with this akh's
+    /// [`Engine`](crate::engine::Engine) (Phase 47 / ADR 075). `None` when the backend runs
+    /// standalone (benches/tests) — eligibility then falls back to the `AKH_SPEC_DECODE` env
+    /// flag. Wired by `CandleChatBackend` construction so a runtime tool flip is seen next turn.
+    runtime_options: Option<std::sync::Arc<crate::inference_options::InferenceOptions>>,
 }
 
 impl std::fmt::Debug for CandleBackend {
@@ -489,7 +494,19 @@ impl CandleBackend {
             context_length,
             config,
             model_path: model_path.to_path_buf(),
+            runtime_options: None,
         })
+    }
+
+    /// Attach this akh's shared [`InferenceOptions`](crate::inference_options::InferenceOptions)
+    /// (Phase 47). Once set, [`spec_decode_eligible`](Self::spec_decode_eligible) reads the live
+    /// shared flag instead of the `AKH_SPEC_DECODE` env fallback — so the `inference_config` tool
+    /// can toggle speculative decode at runtime without a restart.
+    pub fn set_inference_options(
+        &mut self,
+        opts: std::sync::Arc<crate::inference_options::InferenceOptions>,
+    ) {
+        self.runtime_options = Some(opts);
     }
 
     /// The model's context window (tokens), read from the GGUF
@@ -2188,15 +2205,21 @@ impl CandleBackend {
     ///   temperature the accept rule would distort the sampling distribution (that needs the
     ///   sampling variant, Phase 47e);
     /// - gemma4 only — the only loaded family exposing `forward_verify` + the batched verify GEMV;
-    /// - opt-in `AKH_SPEC_DECODE=1`.
+    /// - enabled — the live per-akh flag (set from `AkhConfig.spec_decode`, toggled at runtime by
+    ///   the `inference_config` tool). When no shared options are wired (benches/tests), falls back
+    ///   to the `AKH_SPEC_DECODE=1` env flag.
     ///
     /// The win is additionally conditional on the batched verify GEMV (`AKH_GEMV_BATCH=1`,
     /// Phase 47d); [`spec_decode_loop`] warns if that is unset (correct but slow without it).
     #[cfg(feature = "candle-backend")]
     fn spec_decode_eligible(&self) -> bool {
-        self.config.temperature == 0.0
+        let enabled = match &self.runtime_options {
+            Some(opts) => opts.spec_decode(),
+            None => std::env::var("AKH_SPEC_DECODE").as_deref() == Ok("1"),
+        };
+        enabled
+            && self.config.temperature == 0.0
             && matches!(self.family, ModelFamily::Gemma4)
-            && std::env::var("AKH_SPEC_DECODE").as_deref() == Ok("1")
     }
 
     /// Speculative (prompt-lookup) **greedy** decode loop — gemma4 only (Phase 47 / ADR 075).
