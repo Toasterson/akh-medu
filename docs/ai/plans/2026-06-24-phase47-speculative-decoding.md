@@ -1,6 +1,6 @@
 # Phase 47 — Speculative Decoding (Candle, gemma4-12b)
 
-- **Status:** Active (47a–47d done + validated on gfx1100; productization + 47e remain)
+- **Status:** Active (47a–47d + productization done + validated on gfx1100; default-on toggle + 47e remain)
 - **Anima work item:** Akh-Medu project `019d9844-ce74-7993-a9f0-c953b8f04a4e` (work-item id TBD — create + link)
 - **ADR:** [075-speculative-decoding](../decisions/075-speculative-decoding.md)
 - **Builds on:** Phase 46d-2 (HIP-graph per-token decode; device-pos static KV cache) — [plan](2026-06-22-phase46-candle-static-shape-inference.md), [ADR 074]
@@ -196,3 +196,34 @@ Validated on gfx1100 (RX 7900 XTX) — **the box has the toolchain *and* the GPU
   `AKH_GEMV_BATCH` default → on (also speeds short prefills, m≤16).
 - **47e (opt) — sampling spec decode**: probabilistic accept + residual resample, now that the
   greedy win is real.
+
+## RESULTS (2026-06-29 cont.) — productized into the production generate path
+
+Spec decode is now wired into production text generation (`generate_inner`), not just the bench
+(`22b99e5`):
+
+- **Shared per-token path.** Extracted `DecodeState` + `process_token(token, eos, stop)` (detokenize
+  + `StopMode` EOS/brace/newline/chat-end bookkeeping). The proven `decode_loop` now calls it and
+  is byte-identical for every non-spec case; `spec_decode_loop` calls it once per accepted/bonus
+  token, so stop + detokenization semantics match exactly.
+- **`spec_decode_loop`** (gemma4, greedy only): n-gram draft → one `forward_verify` → greedy
+  accept-run → emit accepted + bonus, with the implicit free KV rollback (device-pos static cache).
+  Borrow-scoped so the `&mut model` verify releases before `process_token(&self)`.
+- **Echo-gate.** The production drafter uses **`min_ngram=2`** so low-echo text falls back to cheap
+  `m=1` verifies (== plain cost) instead of paying for rejected γ-rounds — this removes the
+  free-form penalty the 47c bench saw at `min_ngram=1` (0.71×).
+- **Eligibility** (`spec_decode_eligible`): greedy (`temperature==0`) **and** gemma4 **and**
+  `AKH_SPEC_DECODE=1`. Sampling / other families always take plain decode (greedy-lossless only;
+  sampling needs 47e). Warns if `AKH_GEMV_BATCH != 1` (correct but slow without the batched verify).
+
+Validated on gfx1100, gemma4-12b (`AKH_SPEC_DECODE=1 AKH_GEMV_BATCH=1`), via the `AKH_BENCH_GEN=1`
+probe over the real `generate()` path:
+
+| workload | wall plain → spec (incl prefill) | output |
+|---|---|---|
+| high-echo (repeat a list) | 13.93s → **7.15s (1.95×)** | **byte-identical** (same md5) |
+| free-form | ~neutral (+1.7%, noise) | byte-identical |
+
+**Off by default** (env-gated) → zero change to existing decode behavior. Remaining: optionally
+flip `AKH_GEMV_BATCH` default → on (also speeds short prefills), per-akh config field instead of an
+env flag, and 47e (sampling spec decode) for non-greedy turns.

@@ -1,6 +1,6 @@
 # ADR 075 — Speculative Decoding for the Candle gemma4 Boundary
 
-- **Status:** Accepted — 47a–47d implemented + validated on gfx1100 (2026-06-29); productization + 47e remain
+- **Status:** Accepted — 47a–47d + productization into the generate path, validated on gfx1100 (2026-06-29); default-on toggle + 47e (sampling) remain
 - **Date:** 2026-06-24 (updated 2026-06-29)
 - **Context plan:** [Phase 47](../plans/2026-06-24-phase47-speculative-decoding.md)
 - **Supersedes / relates:** builds on [ADR 074] (Phase 46d HIP-graph decode) and the device-pos
@@ -84,3 +84,14 @@ decode must be **echo-gated** in production rather than always-on — but where 
 (agentic / RAG / structured / code) it is now a clear win. The batched GEMV is opt-in
 (`AKH_GEMV_BATCH=1`, default off) until spec decode is wired into production decode; it also
 accelerates short prefills (m ≤ 16) and any future batched/training forward.
+
+**Productized (2026-06-29).** Spec decode is now wired into production text generation
+(`generate_inner` → `spec_decode_loop`), gated to **greedy + gemma4 + `AKH_SPEC_DECODE=1`** (off by
+default). The plain and speculative loops share a `process_token` helper so detokenization/stop
+semantics are byte-identical; the production drafter uses **`min_ngram=2`** as an echo-gate so
+low-echo turns fall back to cheap `m=1` verifies and incur no penalty. Validated on gfx1100,
+gemma4-12b: high-echo `generate()` wall 13.93s → 7.15s (**1.95×**, incl prefill) with
+**byte-identical** output; free-form ~neutral (+1.7%), output byte-identical. Because spec decode is
+greedy-lossless, enabling it cannot change *what* is generated — only how fast. Sampling turns still
+need 47e; the `AKH_GEMV_BATCH` default-on flip (also speeding short prefills) is the remaining
+toggle.
