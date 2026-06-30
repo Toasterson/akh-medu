@@ -47,14 +47,15 @@ const AKH_GEMV_BATCH_MAX: usize = 16;
 
 /// Whether the fused batched GEMV (Phase 47d) is enabled for `2 ≤ m ≤ AKH_GEMV_BATCH_MAX`.
 ///
-/// Defaults **off**: this kernel was authored off-GPU (no ROCm to compile/measure against), so
-/// it must be parity- and perf-validated on hardware before becoming the default. Set
-/// `AKH_GEMV_BATCH=1` to route small-`m` quantized matmuls (the spec-decode verify forward,
-/// short prefills) through it; when off, those keep the byte-identical dequant+GEMM path.
-/// Read fresh (not cached) — only consulted on the `m > 1` branch, never the m=1 decode hot
-/// path, so the env lookup never touches per-token decode latency.
+/// Defaults **on** (opt-out): validated on gfx1100 (Phase 47d) — parity ~1.5e-7 vs the
+/// dequant-f32 reference for Q4_K/Q6_K and gemma3/gemma4 prefill+decode coherent — so it is the
+/// default for small-`m` quantized matmuls (the spec-decode verify forward, short prefills),
+/// avoiding the 4× f32 weight temp the GEMM path materializes. Set `AKH_GEMV_BATCH=0` to fall
+/// back to the dequant+GEMM path (escape hatch). Read fresh (not cached) — only consulted on the
+/// `m > 1` branch, never the m=1 decode hot path, so the env lookup never touches per-token
+/// decode latency.
 fn gemv_batch_enabled() -> bool {
-    std::env::var("AKH_GEMV_BATCH").as_deref() == Ok("1")
+    std::env::var("AKH_GEMV_BATCH").as_deref() != Ok("0")
 }
 
 /// `(total_nanos, calls)` spent in the fused GEMV since process start. Flushes any

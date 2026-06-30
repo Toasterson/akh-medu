@@ -70,7 +70,7 @@ impl Tool for InferenceConfigTool {
                     "spec_decode" => {
                         let prev = opts.set_spec_decode(on);
                         let note = if on {
-                            "  (applies to greedy gemma4 turns; pair with AKH_GEMV_BATCH=1 for the speedup)"
+                            "  (applies to greedy gemma4 turns)"
                         } else {
                             ""
                         };

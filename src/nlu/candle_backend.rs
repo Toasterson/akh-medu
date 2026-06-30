@@ -2249,11 +2249,11 @@ impl CandleBackend {
         use super::spec_decode::{accept_run, DrafterConfig, NgramDrafter};
         let fail = |reason: String| NluError::LlmGenerationFailed { reason };
 
-        if std::env::var("AKH_GEMV_BATCH").as_deref() != Ok("1") {
+        if std::env::var("AKH_GEMV_BATCH").as_deref() == Ok("0") {
             tracing::warn!(
-                "AKH_SPEC_DECODE=1 without AKH_GEMV_BATCH=1: speculative decode is correct but the \
-                 verify forward is ~4× a single decode (no batched GEMV), so this will be SLOWER \
-                 than plain decode. Set AKH_GEMV_BATCH=1 (Phase 47d) to make spec decode a win."
+                "speculative decode is enabled but AKH_GEMV_BATCH=0 disables the batched verify \
+                 GEMV (Phase 47d): the verify forward is then ~4× a single decode, so spec decode \
+                 will be SLOWER than plain decode. Unset AKH_GEMV_BATCH to restore the fast path."
             );
         }
 

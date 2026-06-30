@@ -218,7 +218,7 @@ pub struct AkhConfig {
     /// gemma4 only; ~2× on echo-heavy output (agentic / RAG / structured), lossless vs plain
     /// greedy, near-neutral otherwise. Off by default. Seeds the live `InferenceOptions` flag at
     /// startup; toggle at runtime with the `inference_config` tool. No effect on the Ollama
-    /// backing. Pair with `AKH_GEMV_BATCH=1` (the batched verify GEMV) for the speedup.
+    /// backing. (The batched verify GEMV it relies on is on by default — Phase 47d.)
     #[serde(default)]
     pub spec_decode: bool,
 
