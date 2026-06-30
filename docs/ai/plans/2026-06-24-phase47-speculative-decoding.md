@@ -239,5 +239,14 @@ live:
   `&Engine` — the bridge, since a `Tool` only sees `&Engine`, not the agent's `chat_backend`. Safe
   (no KG writes; greedy-lossless). Tests cover the live toggle, bool parsing, and bad input.
 
-Remaining: optionally flip `AKH_GEMV_BATCH` default → on (also speeds short prefills); 47e
-(sampling spec decode) for non-greedy turns.
+### Batched GEMV default-on (2026-06-29 cont., `877dc5a`)
+`AKH_GEMV_BATCH` flipped from opt-in (`=1`) to **opt-out (`=0`)**: the validated batched fused
+GEMV is now the default for small-`m` quantized matmuls (spec-decode verify + short prefills), so
+`spec_decode=true` in `akh.toml` is fast with no second flag — removing the footgun where it was
+silently slow without `AKH_GEMV_BATCH=1`. Validated on gfx1100: the candle-core `quantized::hip`
+parity suite stays 4/4 (now default-routing `m>1` through the batched kernel), and gemma3-12b
+short-prefill `generate()` is **byte-identical** batched-on vs `AKH_GEMV_BATCH=0` (the only path the
+default change newly touches for non-gemma4 models; the m=1 decode kernel is separate and
+unaffected). `AKH_GEMV_BATCH=0` remains the escape hatch.
+
+Remaining: 47e (sampling spec decode) for non-greedy turns.

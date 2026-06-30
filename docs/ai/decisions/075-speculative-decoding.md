@@ -101,5 +101,10 @@ than an env flag: `AkhConfig.spec_decode` (`akh.toml`, default off) seeds a lock
 the change takes effect on the next turn with no restart and no model-mutex contention. (The bridge
 is necessary because a `Tool` is handed only `&Engine`, not the agent's `chat_backend`; the shared
 `Arc` is the channel.) The `AKH_SPEC_DECODE` env flag remains a fallback for standalone
-benches/tests. Sampling turns still need 47e; the `AKH_GEMV_BATCH` default-on flip (also speeding
-short prefills) is the remaining toggle.
+benches/tests.
+
+**Batched GEMV default-on (`877dc5a`).** `AKH_GEMV_BATCH` flipped to opt-out (`=0` disables): the
+validated batched verify GEMV is the default, so enabling `spec_decode` is fast with no second
+flag. Verified the candle-core parity suite stays green default-routing through the batched kernel
+and that gemma3 short-prefill output is byte-identical on/off. Sampling turns still need 47e
+(probabilistic accept + residual resample); that is the remaining work.
