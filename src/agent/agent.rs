@@ -298,15 +298,17 @@ impl Agent {
         registry.register(Box::new(tools::SimilaritySearchTool));
 
         // External world-interaction tools.
-        // Reads are sandboxed to the whole workspace data dir; writes stay
-        // confined to a `scratch/` subdir. With no data dir (in-memory engine)
-        // the filesystem fails closed.
+        // Reads are sandboxed to the whole workspace data dir plus any
+        // `extra_read_roots` (ADR 076 §4 — e.g. `~/.openclaw` when the import
+        // switch is on); writes stay confined to a `scratch/` subdir. With no
+        // data dir (in-memory engine) the filesystem fails closed.
         let fs: std::sync::Arc<dyn crate::fs::Filesystem> = match engine.config().data_dir.as_ref()
         {
-            Some(dir) => std::sync::Arc::new(crate::fs::LocalFs::new(
-                vec![dir.clone()],
-                vec![dir.join("scratch")],
-            )),
+            Some(dir) => {
+                let mut read_roots = vec![dir.clone()];
+                read_roots.extend(engine.config().extra_read_roots.iter().cloned());
+                std::sync::Arc::new(crate::fs::LocalFs::new(read_roots, vec![dir.join("scratch")]))
+            }
             None => std::sync::Arc::new(crate::fs::LocalFs::denied()),
         };
         registry.register(Box::new(tools::FileIoTool::new(fs.clone())));
@@ -336,6 +338,15 @@ impl Agent {
         registry.register(Box::new(tools::CodeIngestTool));
         registry.register(Box::new(tools::ContentIngestTool));
         registry.register(Box::new(tools::JournalIngestTool));
+
+        // Typed writer tools (ADR 076): the strongly-typed, LLM-facing
+        // replacements for raw-text ingestion. The model reads source itself and
+        // emits structured data these persist deterministically (no internal NLU
+        // pass). Always-on builtins; the OpenClaw-specific `openclaw_discover`
+        // tool is registered switch-gated by the daemon, not here.
+        registry.register(Box::new(tools::MemoryWriteTool::new(predicates.clone())));
+        registry.register(Box::new(tools::SkillAuthorTool));
+        registry.register(Box::new(tools::IdentityAwakenTool));
 
         // Library search.
         registry.register(Box::new(tools::LibrarySearchTool));

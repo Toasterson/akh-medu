@@ -1,0 +1,9 @@
+{
+  "id": "openclaw-import",
+  "name": "OpenClaw Workspace Self-Import",
+  "version": "1.0.0",
+  "description": "Import this akh's own OpenClaw workspace (persona, memory journals, skills, SQLite/Lance stores) into the knowledge graph using typed writer tools. Use when asked to import, absorb, or migrate your OpenClaw workspace / past life.",
+  "domains": ["self-import", "memory", "identity", "migration"],
+  "weight_size_bytes": 0,
+  "procedures_file": "procedures.md"
+}

@@ -9,7 +9,7 @@ use thiserror::Error;
 #[derive(Debug, Error, Diagnostic)]
 pub enum StoreError {
     /// The connection pool could not be opened.
-    #[error("failed to connect to PostgreSQL at {url}")]
+    #[error("failed to connect to PostgreSQL at {url}: {source}")]
     #[diagnostic(
         code(akhomed_store::connect),
         help(
@@ -25,7 +25,7 @@ pub enum StoreError {
     },
 
     /// A schema migration failed.
-    #[error("akhomed-store migration failed")]
+    #[error("akhomed-store migration failed: {source}")]
     #[diagnostic(
         code(akhomed_store::migrate),
         help(

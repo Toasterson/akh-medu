@@ -62,7 +62,16 @@ impl Default for OllamaConfig {
 
 fn default_base_url() -> String { "http://localhost:11434".into() }
 fn default_model() -> String { "gemma4:e4b".into() }
-fn default_timeout() -> u64 { 120 }
+/// Per-request timeout. `AKH_OLLAMA_TIMEOUT_SECS` overrides the 120s default so
+/// long reasoning / agentic-coding generations (which the model *does* answer,
+/// just slowly) aren't cut off mid-response.
+fn default_timeout() -> u64 {
+    std::env::var("AKH_OLLAMA_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(120)
+}
 fn default_keep_alive() -> String { "5m".into() }
 
 impl OllamaConfig {
@@ -234,6 +243,19 @@ impl OllamaClient {
         }
     }
 
+    /// HTTP agent for chat/generate requests: a short **connect** timeout (fail
+    /// fast when the host is unreachable) plus a **read/idle** timeout —
+    /// `timeout_secs` bounds the gap *between* response chunks, NOT the total
+    /// generation. A streaming turn that keeps producing tokens is never killed
+    /// for merely being long (the opencode/aider idle-timeout pattern; ureq's
+    /// request `.timeout()` is a *total* cap, which was aborting live sessions).
+    fn chat_agent(&self) -> ureq::Agent {
+        ureq::AgentBuilder::new()
+            .timeout_connect(std::time::Duration::from_secs(20))
+            .timeout_read(std::time::Duration::from_secs(self.config.timeout_secs.max(30)))
+            .build()
+    }
+
     /// Model capabilities (context window, thinking/tools support) via
     /// `POST /api/show`, fetched once and cached. Falls back to "unknown"
     /// ([`Default`]) on any failure (offline, older server) so callers degrade.
@@ -367,9 +389,10 @@ impl OllamaClient {
             "keep_alive": self.config.keep_alive,
         });
 
-        let mut req = ureq::post(&url)
-            .set("Content-Type", "application/json")
-            .timeout(std::time::Duration::from_secs(self.config.timeout_secs));
+        let mut req = self
+            .chat_agent()
+            .post(&url)
+            .set("Content-Type", "application/json");
         if let Some(key) = self.config.resolved_api_key() {
             req = req.set("Authorization", &format!("Bearer {key}"));
         }
@@ -442,9 +465,10 @@ impl OllamaClient {
             }
         }
 
-        let mut req = ureq::post(&url)
-            .set("Content-Type", "application/json")
-            .timeout(std::time::Duration::from_secs(self.config.timeout_secs));
+        let mut req = self
+            .chat_agent()
+            .post(&url)
+            .set("Content-Type", "application/json");
         if let Some(key) = self.config.resolved_api_key() {
             req = req.set("Authorization", &format!("Bearer {key}"));
         }
@@ -532,9 +556,10 @@ impl OllamaClient {
             }
         }
 
-        let mut req = ureq::post(&url)
-            .set("Content-Type", "application/json")
-            .timeout(std::time::Duration::from_secs(self.config.timeout_secs));
+        let mut req = self
+            .chat_agent()
+            .post(&url)
+            .set("Content-Type", "application/json");
         if let Some(key) = self.config.resolved_api_key() {
             req = req.set("Authorization", &format!("Bearer {key}"));
         }

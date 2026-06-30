@@ -21,6 +21,13 @@ use crate::paths::AkhPaths;
 pub struct ContentIngestTool;
 
 impl Tool for ContentIngestTool {
+    /// Retired from the LLM catalog (ADR 076 §1): the model reads content and
+    /// emits typed structured data to the writer tools instead of relying on
+    /// the internal NLU extraction. Still registered for operator/daemon use.
+    fn advertise_to_llm(&self) -> bool {
+        false
+    }
+
     fn signature(&self) -> ToolSignature {
         ToolSignature {
             name: "content_ingest".into(),

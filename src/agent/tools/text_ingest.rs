@@ -32,6 +32,14 @@ impl TextIngestTool {
 }
 
 impl Tool for TextIngestTool {
+    /// Retired from the LLM catalog (ADR 076 §1): inside an agentic session the
+    /// model reasons better than the internal NLU pass — it reads raw text and
+    /// emits typed episodes to `memory_write` instead. Still registered for
+    /// operator/CLI/daemon-ingest use.
+    fn advertise_to_llm(&self) -> bool {
+        false
+    }
+
     fn signature(&self) -> ToolSignature {
         ToolSignature {
             name: "text_ingest".into(),

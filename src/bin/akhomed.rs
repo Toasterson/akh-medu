@@ -54,9 +54,13 @@ struct ServerState {
     /// handles here; the daemon control-plane reads them for suspend/resume.
     daemon_pauses: RwLock<HashMap<String, DaemonPauseHandle>>,
     /// Phase 38: optional Postgres backing-store pool. `None` when no
-    /// `[postgres]` section is configured (legacy local-only mode). Consumed by
-    /// the mutation WAL flusher and snapshot writer in sub-phases 38b/38c.
-    pg_pool: Option<Arc<akhomed_store::DatabaseConnection>>,
+    /// `[postgres]` section is configured (legacy local-only mode) **or** when
+    /// the connection has not been established yet (boot-time race / PG down).
+    /// Wrapped in a `RwLock` so the background reconnector (ADR 077) can swap a
+    /// live pool in at runtime without restarting the daemon — recovering from
+    /// a startup that fell back to local-only. Consumed by the mutation WAL
+    /// flusher and snapshot writer (sub-phases 38b/38c).
+    pg_pool: std::sync::RwLock<Option<Arc<akhomed_store::DatabaseConnection>>>,
     /// Phase 38b: per-workspace WAL flusher tasks, keyed by workspace name.
     /// Drained on graceful shutdown so the final batch reaches Postgres.
     wal_flushers: RwLock<HashMap<String, WalFlusher>>,
@@ -216,7 +220,7 @@ impl ServerState {
             akh_configs: Arc::new(RwLock::new(HashMap::new())),
             audit_broadcast: audit_tx,
             daemon_pauses: RwLock::new(HashMap::new()),
-            pg_pool,
+            pg_pool: std::sync::RwLock::new(pg_pool),
             wal_flushers: RwLock::new(HashMap::new()),
             snapshot_tickers: RwLock::new(HashMap::new()),
             waking: Arc::new(Mutex::new(std::collections::HashSet::new())),
@@ -279,16 +283,103 @@ impl ServerState {
         Ok(Arc::clone(entry))
     }
 
-    /// The Postgres backing-store pool, if configured. `None` in local-only mode.
-    fn pg_pool(&self) -> Option<&Arc<akhomed_store::DatabaseConnection>> {
-        self.pg_pool.as_ref()
+    /// The Postgres backing-store pool, if connected. `None` in local-only mode
+    /// (not configured, or the reconnector hasn't established a pool yet). Reads
+    /// the swappable slot; a poisoned lock degrades to the inner value rather
+    /// than panicking the data-plane.
+    fn pg_pool(&self) -> Option<Arc<akhomed_store::DatabaseConnection>> {
+        self.pg_pool
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// ADR 077: spawn the background Postgres reconnector. When startup fell
+    /// back to local-only (boot-time network race, or PG transiently down),
+    /// this task keeps retrying the connection with capped backoff. On success
+    /// it swaps the live pool into `pg_pool` and re-enables durability for every
+    /// already-loaded akh — snapshotting each one's in-memory state (everything
+    /// accumulated while local-only) before wiring the WAL, so nothing is lost.
+    /// No-op (returns immediately) when no `[postgres]` section is configured.
+    /// Self-terminates once connected.
+    fn spawn_pg_reconnector(self: &Arc<Self>) {
+        let me = Arc::clone(self);
+        tokio::spawn(async move {
+            let mut backoff = Duration::from_secs(2);
+            loop {
+                // Already connected (startup or a concurrent path won)? Done.
+                if me.pg_pool().is_some() {
+                    return;
+                }
+                // Re-read config each attempt so a `config set` can correct a
+                // bad URL without a restart. No `[postgres]` → nothing to do.
+                let Some((opts, migrate)) = pg_pool_options(&*me.config.read().await) else {
+                    return;
+                };
+                tokio::time::sleep(backoff).await;
+                match try_connect_pg(&opts, migrate).await {
+                    Ok(pool) => {
+                        *me.pg_pool.write().unwrap_or_else(|e| e.into_inner()) = Some(pool);
+                        tracing::info!(
+                            "reconnected to PostgreSQL backing store — re-enabling durability"
+                        );
+                        me.rewire_after_reconnect().await;
+                        return;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            backoff_secs = backoff.as_secs(),
+                            error = %e,
+                            "PostgreSQL reconnect attempt failed — will retry"
+                        );
+                        backoff = (backoff * 2).min(Duration::from_secs(60));
+                    }
+                }
+            }
+        });
+    }
+
+    /// After a runtime reconnect, re-enable the WAL + periodic snapshot for
+    /// every already-loaded workspace and persist a full snapshot of each, so
+    /// the state accumulated during local-only mode reaches Postgres. New
+    /// workspaces loaded after this point wire normally via `get_engine`.
+    async fn rewire_after_reconnect(&self) {
+        // Capture names + engine handles under a short read lock, then release
+        // it before doing per-workspace work (wire_wal / snapshot take locks).
+        let loaded: Vec<(String, Arc<Engine>)> = {
+            let map = self.workspaces.read().await;
+            map.iter()
+                .map(|(n, e)| (n.clone(), Arc::clone(e)))
+                .collect()
+        };
+        if loaded.is_empty() {
+            return;
+        }
+        for (name, engine) in loaded {
+            // Wire the WAL first so mutations from here on are captured, then
+            // snapshot the full current state (idempotent; materialises into the
+            // relational tables what was accumulated while local-only).
+            self.wire_wal(&name, &engine).await;
+            match self.snapshot_workspace(&name).await {
+                Ok(()) => tracing::info!(
+                    workspace = %name,
+                    "re-enabled durability + snapshotted after reconnect"
+                ),
+                Err(e) => tracing::warn!(
+                    workspace = %name,
+                    error = %e,
+                    "post-reconnect snapshot failed; live mutations still flush via WAL"
+                ),
+            }
+        }
     }
 
     /// Phase 38b: install the mutation WAL on `engine` for workspace `name`,
     /// when a Postgres backing store is configured. Best-effort: any failure
     /// logs and leaves the workspace in local-only mode (no WAL).
     async fn wire_wal(&self, name: &str, engine: &Engine) {
-        let Some(pool) = self.pg_pool.as_ref() else {
+        let pool = self.pg_pool();
+        let Some(pool) = pool.as_ref() else {
             return;
         };
         let akh_id = akh_medu::wal::akh_id_for(name);
@@ -397,7 +488,8 @@ impl ServerState {
     /// Snapshot one workspace on demand (control-plane `_akh/akh/snapshot`).
     /// Loads the agent if needed, then captures + persists its state.
     async fn snapshot_workspace(&self, name: &str) -> Result<(), String> {
-        let Some(pool) = self.pg_pool.as_ref() else {
+        let pool = self.pg_pool();
+        let Some(pool) = pool.as_ref() else {
             return Err("no Postgres backing store configured (no [postgres] section)".into());
         };
         // Ensure the agent is live so there is state to capture.
@@ -411,7 +503,8 @@ impl ServerState {
     /// `_akh/akh/wake`). Populates the local redb, then routes through the normal
     /// lazy `get_agent` path so resume + model-manager + WAL wiring all apply.
     async fn wake_workspace(&self, name: &str) -> Result<serde_json::Value, String> {
-        let Some(pool) = self.pg_pool.as_ref() else {
+        let pool = self.pg_pool();
+        let Some(pool) = pool.as_ref() else {
             return Err("no Postgres backing store configured (no [postgres] section)".into());
         };
         // Single-flight: refuse a second concurrent wake of the same workspace
@@ -492,7 +585,8 @@ impl ServerState {
         akh_id: akhomed_store::uuid::Uuid,
         op: &str,
     ) -> Result<(), String> {
-        let Some(pool) = self.pg_pool.as_ref() else {
+        let pool = self.pg_pool();
+        let Some(pool) = pool.as_ref() else {
             return Ok(());
         };
         match akhomed_store::try_acquire_akh_lock(pool, akh_id).await {
@@ -513,7 +607,8 @@ impl ServerState {
     /// [`Self::acquire_akh_lock_or_refuse`] so a later wake on this host can
     /// re-acquire. No-op without a pool. Logs (does not error) on failure.
     async fn release_akh_lock(&self, name: &str, akh_id: akhomed_store::uuid::Uuid) {
-        let Some(pool) = self.pg_pool.as_ref() else {
+        let pool = self.pg_pool();
+        let Some(pool) = pool.as_ref() else {
             return;
         };
         if let Err(e) = akhomed_store::release_akh_lock(pool, akh_id).await {
@@ -574,7 +669,7 @@ impl ServerState {
     /// memory. Without a Postgres pool this still evicts (freeing RAM) but warns
     /// that durability requires Postgres — there is no relational copy to wake from.
     async fn sleep_workspace(&self, name: &str) -> Result<serde_json::Value, String> {
-        if self.pg_pool.is_some() {
+        if self.pg_pool().is_some() {
             // Snapshot first so the relational copy is current; snapshot_workspace
             // loads the agent if needed (so there is state to capture) and ensures
             // the akh row exists.
@@ -641,7 +736,8 @@ impl ServerState {
     /// without the shared backing store, so without a pool this returns a clear
     /// error telling the operator to configure `[postgres]`.
     async fn relocate_workspace(&self, name: &str) -> Result<serde_json::Value, String> {
-        let Some(pool) = self.pg_pool.as_ref() else {
+        let pool = self.pg_pool();
+        let Some(pool) = pool.as_ref() else {
             return Err(
                 "relocation requires a Postgres backing store (no [postgres] section configured). \
                  Add a [postgres] section to akhomed's config.toml (or set DATABASE_URL) so the \
@@ -682,7 +778,8 @@ impl ServerState {
     /// workspace name resolves to the stable workspace/akh ids; the akh row is
     /// ensured first so the membership FK target exists. Requires Postgres.
     async fn workspace_join(&self, name: &str) -> Result<serde_json::Value, String> {
-        let Some(pool) = self.pg_pool.as_ref() else {
+        let pool = self.pg_pool();
+        let Some(pool) = pool.as_ref() else {
             return Err(membership_needs_pg("join"));
         };
         let akh_id = akh_medu::wal::akh_id_for(name);
@@ -709,7 +806,8 @@ impl ServerState {
 
     /// Leave: delete this workspace's akh membership row (38f). Requires Postgres.
     async fn workspace_leave(&self, name: &str) -> Result<serde_json::Value, String> {
-        let Some(pool) = self.pg_pool.as_ref() else {
+        let pool = self.pg_pool();
+        let Some(pool) = pool.as_ref() else {
             return Err(membership_needs_pg("leave"));
         };
         let akh_id = akh_medu::wal::akh_id_for(name);
@@ -727,7 +825,8 @@ impl ServerState {
     /// List members: all membership rows for a workspace as a JSON array of
     /// `{akh_id, role, joined_at}` (38f). Requires Postgres.
     async fn workspace_list_members(&self, name: &str) -> Result<serde_json::Value, String> {
-        let Some(pool) = self.pg_pool.as_ref() else {
+        let pool = self.pg_pool();
+        let Some(pool) = pool.as_ref() else {
             return Err(membership_needs_pg("list-members"));
         };
         let workspace_id = akh_medu::wal::workspace_id_for(name);
@@ -754,7 +853,7 @@ impl ServerState {
     /// Exposes the same runner the daemon calls on start when `migrate_on_start`
     /// is set; requires Postgres.
     async fn run_migrations_op(&self) -> Result<serde_json::Value, String> {
-        if self.pg_pool.is_none() {
+        if self.pg_pool().is_none() {
             return Err(
                 "migrations require a Postgres backing store (no [postgres] section configured). \
                  Add a [postgres] section to akhomed's config.toml (or set DATABASE_URL) and retry."
@@ -806,7 +905,7 @@ impl ServerState {
         }
 
         // Final snapshot of every loaded workspace (best-effort).
-        if self.pg_pool.is_some() {
+        if self.pg_pool().is_some() {
             let names: Vec<String> = self.agents.read().await.keys().cloned().collect();
             for name in names {
                 match self.snapshot_workspace(&name).await {
@@ -885,10 +984,19 @@ impl ServerState {
             }
         }
 
+        // Honour the akh's read-root unlock (ADR 076 §4): when `openclaw_import`
+        // is on, `effective_read_roots()` adds `~/.openclaw` so the agent's
+        // `LocalFs` can read the akh's own OpenClaw past life (read-only; writes
+        // still stay confined to `scratch/`). No config / legacy TOML → empty.
+        let extra_read_roots = AkhConfig::load(&self.paths.workspace_config_file(name))
+            .map(|c| c.effective_read_roots())
+            .unwrap_or_default();
+
         let config = EngineConfig {
             dimension: Dimension::DEFAULT,
             data_dir: Some(ws_paths.kg_dir.clone()),
             compartments_dir: Some(ws_paths.compartments_dir.clone()),
+            extra_read_roots,
             ..Default::default()
         };
 
@@ -1002,6 +1110,18 @@ impl ServerState {
         let manager = Arc::new(AgentModelManager::new(akh_config.to_model_manager_config()));
         agent.set_model_manager(manager);
         agent.register_with_model_manager(name, name);
+
+        // ADR 076: inject the OpenClaw self-import surface for akhs that opted in
+        // (`openclaw_import = true`). The read-root unlock is already applied via
+        // `EngineConfig.extra_read_roots` in `get_engine`; here we add the
+        // discovery tool, scoped to this akh's id (= the workspace name). Off by
+        // default, so normal akhs never see it.
+        if akh_config.openclaw_import {
+            agent.register_tool(Box::new(
+                akh_medu::agent::tools::OpenClawDiscoverTool::new(name),
+            ));
+            tracing::info!(workspace = %name, "OpenClaw self-import surface enabled");
+        }
 
         // ADR 070: if this akh is Candle-backed, load a local GGUF model and
         // attach it as the chat/agentic backing (full, grammar-constrained tool
@@ -1813,10 +1933,54 @@ async fn start_acp_server(
 /// present, so the daemon degrades to legacy local-only mode. A connection or
 /// migration failure is also non-fatal: it logs an error and falls back to
 /// local-only rather than refusing to boot.
+/// Build the connection `PoolOptions` from the `[postgres]` config, honouring
+/// the `DATABASE_URL` override (K8s secret injection). Returns `None` when no
+/// `[postgres]` section is present (legacy local-only mode).
+fn pg_pool_options(config: &AkhomedConfig) -> Option<(akhomed_store::PoolOptions, bool)> {
+    let pg = config.postgres.as_ref()?;
+    let url = std::env::var("DATABASE_URL").unwrap_or_else(|_| pg.url.clone());
+    Some((
+        akhomed_store::PoolOptions {
+            url,
+            max_connections: pg.pool_size,
+            connect_timeout: std::time::Duration::from_secs(pg.connect_timeout_secs),
+        },
+        pg.migrate_on_start,
+    ))
+}
+
+/// One connect attempt + optional advisory-locked migration. Returns the live
+/// pool on success, or a human-readable error describing what failed.
+async fn try_connect_pg(
+    opts: &akhomed_store::PoolOptions,
+    migrate: bool,
+) -> Result<Arc<akhomed_store::DatabaseConnection>, String> {
+    let db = akhomed_store::connect(opts)
+        .await
+        .map_err(|e| format!("connect: {e}"))?;
+    if migrate {
+        // Advisory-locked so several hosts starting against one fresh cluster
+        // database don't race on creating `seaql_migrations`.
+        akhomed_store::run_migrations_locked(opts)
+            .await
+            .map_err(|e| format!("migrations: {e}"))?;
+    }
+    Ok(Arc::new(db))
+}
+
+/// Number of quick startup connect attempts before falling back to local-only
+/// (the background reconnector then keeps trying). Sized to ride out the common
+/// boot-time race where launchd starts akhomed before the LAN route is up.
+const PG_STARTUP_ATTEMPTS: u32 = 5;
+
+/// Open the Postgres backing store at startup, retrying briefly to absorb a
+/// boot-time network race. On exhaustion returns `None` (local-only); the
+/// caller is expected to spawn [`ServerState::spawn_pg_reconnector`] so the
+/// daemon recovers without a restart (ADR 077).
 async fn init_postgres(
     config: &AkhomedConfig,
 ) -> Option<Arc<akhomed_store::DatabaseConnection>> {
-    let Some(pg) = config.postgres.as_ref() else {
+    let Some((opts, migrate)) = pg_pool_options(config) else {
         tracing::warn!(
             "[postgres] not configured — running in legacy local-only mode \
              (no WAL, no cross-host relocation; Phase 38)"
@@ -1824,35 +1988,35 @@ async fn init_postgres(
         return None;
     };
 
-    // DATABASE_URL overrides the configured URL (K8s secret injection).
-    let url = std::env::var("DATABASE_URL").unwrap_or_else(|_| pg.url.clone());
-    let opts = akhomed_store::PoolOptions {
-        url,
-        max_connections: pg.pool_size,
-        connect_timeout: std::time::Duration::from_secs(pg.connect_timeout_secs),
-    };
-
-    match akhomed_store::connect(&opts).await {
-        Ok(db) => {
-            tracing::info!("connected to PostgreSQL backing store");
-            if pg.migrate_on_start {
-                // Advisory-locked so several hosts starting against one fresh
-                // cluster database don't race on creating `seaql_migrations`.
-                match akhomed_store::run_migrations_locked(&opts).await {
-                    Ok(()) => tracing::info!("akhomed-store migrations complete"),
-                    Err(e) => {
-                        tracing::error!(error = %e, "migrations failed — falling back to local-only mode");
-                        return None;
-                    }
+    let mut backoff = Duration::from_secs(1);
+    for attempt in 1..=PG_STARTUP_ATTEMPTS {
+        match try_connect_pg(&opts, migrate).await {
+            Ok(pool) => {
+                tracing::info!("connected to PostgreSQL backing store");
+                return Some(pool);
+            }
+            Err(e) => {
+                if attempt < PG_STARTUP_ATTEMPTS {
+                    tracing::warn!(
+                        attempt,
+                        max = PG_STARTUP_ATTEMPTS,
+                        backoff_secs = backoff.as_secs(),
+                        error = %e,
+                        "PostgreSQL not reachable yet — retrying"
+                    );
+                    tokio::time::sleep(backoff).await;
+                    backoff = (backoff * 2).min(Duration::from_secs(8));
+                } else {
+                    tracing::error!(
+                        error = %e,
+                        "PostgreSQL unavailable after {PG_STARTUP_ATTEMPTS} attempts — \
+                         falling back to local-only mode; background reconnector will keep trying"
+                    );
                 }
             }
-            Some(Arc::new(db))
-        }
-        Err(e) => {
-            tracing::error!(error = %e, "PostgreSQL unavailable — falling back to local-only mode");
-            None
         }
     }
+    None
 }
 
 #[tokio::main]
@@ -1986,6 +2150,14 @@ async fn main() {
         postgres = state.pg_pool().is_some(),
         "akhomed initialized"
     );
+
+    // ADR 077: if we started local-only but a [postgres] section is configured,
+    // keep trying to connect in the background and re-enable durability without
+    // a restart (recovers from the launchd boot-time network race). No-op when
+    // already connected or when no backing store is configured.
+    if state.pg_pool().is_none() {
+        state.spawn_pg_reconnector();
+    }
 
     // Write PID file so `akh` CLI can discover this server. ACP transport
     // details (socket/tcp) are filled in later, once those listeners bind.

@@ -192,6 +192,17 @@ enum AcpOp {
         #[arg(long, default_value_t = 1.0)]
         confidence: f64,
     },
+    /// Remove a triple from the akh's knowledge graph (idempotent — a triple or
+    /// label that isn't present reports `removed: false`). Records a WAL
+    /// `Retract` and cascades through the TMS like any other retraction.
+    RemoveTriple {
+        /// Subject label.
+        subject: String,
+        /// Predicate (relation) label.
+        predicate: String,
+        /// Object label.
+        object: String,
+    },
     /// Create (or resolve) a symbol by label.
     CreateSymbol {
         /// Symbol label.
@@ -296,6 +307,18 @@ fn run_acp_command(ws: &str, op: &AcpOp) -> Result<()> {
                 "predicate": predicate,
                 "object": object,
                 "confidence": confidence,
+            }),
+        ),
+        AcpOp::RemoveTriple {
+            subject,
+            predicate,
+            object,
+        } => (
+            "_akh/triples/remove",
+            serde_json::json!({
+                "subject": subject,
+                "predicate": predicate,
+                "object": object,
             }),
         ),
         AcpOp::CreateSymbol { label, kind } => (

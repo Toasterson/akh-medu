@@ -11,6 +11,7 @@ mod m20260618_000001_create_akhomed;
 mod m20260618_000002_create_workspaces;
 mod m20260620_000001_cognitive_tables;
 mod m20260620_000002_mutation_log_hypertable;
+mod m20260621_000001_akh_config;
 
 pub struct Migrator;
 
@@ -22,6 +23,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260618_000002_create_workspaces::Migration),
             Box::new(m20260620_000001_cognitive_tables::Migration),
             Box::new(m20260620_000002_mutation_log_hypertable::Migration),
+            Box::new(m20260621_000001_akh_config::Migration),
         ]
     }
 }

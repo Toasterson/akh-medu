@@ -18,6 +18,11 @@
 //! installed on the tool registry (`Agent::set_permission_asker`) so `Ask` tools
 //! can bridge to the ACP client.
 
+use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+use std::time::{Duration, Instant};
+
 use serde_json::{Value, json};
 
 use super::Agent;
@@ -26,12 +31,138 @@ use super::tool::{ToolInput, ToolRegistry};
 use crate::engine::Engine;
 use crate::message::{AkhMessage, MessageSink};
 
-/// Hard ceiling on tool-call rounds in one turn — a backstop against a model
-/// that loops calling tools without ever answering.
-const DEFAULT_MAX_ROUNDS: usize = 8;
+/// Iteration backstop for a small / unknown-context model (e.g. a constrained
+/// in-process Candle akh). Frontier agentic harnesses (OpenHands, SWE-agent) set
+/// the iteration cap *generously* — ~100 — as a pure backstop and rely on
+/// loop-detection + time/cost budgets to terminate normally; we scale ours to
+/// model capacity (see [`RoundBudget::new`]) and keep it env-overridable. A flat
+/// low cap (the prior `8`) is wrong in both directions: it strangles legitimate
+/// deep work (recall → drill into the KG → synthesize) while doing nothing about
+/// a genuine spin.
+const DEFAULT_MAX_ROUNDS: usize = 12;
+
+/// Per-turn wall-clock budget. Frontier harnesses pair the iteration cap with a
+/// time cap (~300s is the common production value); override with
+/// `AKH_AGENT_TURN_TIMEOUT_SECS`.
+const DEFAULT_TURN_TIMEOUT_SECS: u64 = 300;
+
+/// The same `(tool, arguments)` call issued this many times in one turn marks an
+/// unproductive loop and ends it — the "same call N times" heuristic frontier
+/// harnesses use to break a spinning agent. Override with `AKH_AGENT_REPEAT_LIMIT`.
+const DEFAULT_REPEAT_LIMIT: usize = 3;
 
 /// Characters of a tool-call argument blob surfaced in the "calling tool" line.
 const ARG_PREVIEW_LEN: usize = 160;
+
+/// Parse a positive-integer env var, ignoring absent/blank/zero/garbage values.
+fn env_usize(key: &str) -> Option<usize> {
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+}
+
+/// Why an agentic turn's tool loop ended without the model volunteering a final
+/// answer. Each maps to a short clause the forced-synthesis nudge explains.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TurnStop {
+    /// Hit the absolute iteration backstop.
+    IterationCap,
+    /// Exceeded the per-turn wall-clock budget.
+    Timeout,
+    /// Repeated an identical `(tool, args)` call past the repeat limit.
+    RepeatLoop,
+}
+
+impl TurnStop {
+    fn clause(self) -> &'static str {
+        match self {
+            TurnStop::IterationCap => "You have reached your tool-call limit",
+            TurnStop::Timeout => "You have reached your time budget",
+            TurnStop::RepeatLoop => "You are repeating the same tool call without progress",
+        }
+    }
+}
+
+/// Frontier-harness-style budget governing the agentic tool loop — *defense in
+/// depth* rather than one fixed round count. It combines:
+///   * an **iteration backstop** scaled to the model's context window
+///     (`AKH_AGENT_MAX_ROUNDS` overrides absolutely),
+///   * a **wall-clock budget** (`AKH_AGENT_TURN_TIMEOUT_SECS`), and
+///   * **repeat-loop detection** — the same `(tool, args)` signature issued
+///     `repeat_limit` times (`AKH_AGENT_REPEAT_LIMIT`) ends the turn.
+///
+/// On exhaustion the caller forces one final *tool-free* synthesis (a "reflect
+/// and answer" step) instead of emitting a bare cutoff, so a deep turn still
+/// answers with what it gathered.
+struct RoundBudget {
+    hard_max: usize,
+    timeout: Duration,
+    repeat_limit: usize,
+    started: Instant,
+    round: usize,
+    /// Count of each `(tool, args)` signature issued this turn, for spin detection.
+    counts: HashMap<u64, usize>,
+    looped: bool,
+}
+
+impl RoundBudget {
+    /// Scale the iteration backstop to the model's context window, then apply env
+    /// overrides. A roomy window (GLM ~1M, gemma4-12b 262k) earns more rounds to
+    /// drill through recalled episodes; a small/unknown one stays conservative.
+    fn new(context_window: Option<usize>) -> Self {
+        let scaled = match context_window {
+            Some(w) if w >= 200_000 => 30,
+            Some(w) if w >= 32_000 => 20,
+            _ => DEFAULT_MAX_ROUNDS,
+        };
+        let hard_max = env_usize("AKH_AGENT_MAX_ROUNDS").unwrap_or(scaled);
+        let timeout = Duration::from_secs(
+            env_usize("AKH_AGENT_TURN_TIMEOUT_SECS")
+                .map(|n| n as u64)
+                .unwrap_or(DEFAULT_TURN_TIMEOUT_SECS),
+        );
+        let repeat_limit = env_usize("AKH_AGENT_REPEAT_LIMIT").unwrap_or(DEFAULT_REPEAT_LIMIT);
+        Self {
+            hard_max,
+            timeout,
+            repeat_limit,
+            started: Instant::now(),
+            round: 0,
+            counts: HashMap::new(),
+            looped: false,
+        }
+    }
+
+    /// Whether the turn must end before issuing another model call.
+    fn exhausted(&self) -> Option<TurnStop> {
+        if self.round >= self.hard_max {
+            Some(TurnStop::IterationCap)
+        } else if self.started.elapsed() >= self.timeout {
+            Some(TurnStop::Timeout)
+        } else if self.looped {
+            Some(TurnStop::RepeatLoop)
+        } else {
+            None
+        }
+    }
+
+    /// Record one completed tool round (its `(name, args)` calls), advancing the
+    /// counter and flagging a spin once any signature repeats `repeat_limit` times.
+    fn note_round<'a>(&mut self, calls: impl IntoIterator<Item = (&'a str, &'a Value)>) {
+        self.round += 1;
+        for (name, args) in calls {
+            let mut h = DefaultHasher::new();
+            name.hash(&mut h);
+            args.to_string().hash(&mut h);
+            let n = self.counts.entry(h.finish()).or_insert(0);
+            *n += 1;
+            if *n >= self.repeat_limit {
+                self.looped = true;
+            }
+        }
+    }
+}
 
 impl Agent {
     /// Run one LLM-driven agentic turn, **streaming** its narration to `sink`.
@@ -179,7 +310,15 @@ impl Agent {
             }
         };
 
-        for _round in 0..DEFAULT_MAX_ROUNDS {
+        // Govern the tool loop with a frontier-style budget — a model-scaled
+        // iteration backstop + wall-clock cap + repeat-loop detection — instead of
+        // a flat round count. The loop yields *why* it stopped so the turn can end
+        // with a forced synthesis rather than a bare cutoff.
+        let mut budget = RoundBudget::new(backend.capabilities().context_window);
+        let stop: TurnStop = loop {
+            if let Some(stop) = budget.exhausted() {
+                break stop;
+            }
             // Stream this round. Content deltas become live answer text, thinking
             // deltas become live reasoning. `used_fallback` records whether the
             // streaming path failed and we silently retried non-streaming — in
@@ -251,6 +390,14 @@ impl Agent {
                 }
             }
 
+            // Record this round against the budget (advances the counter; flags a
+            // spin once a (tool, args) signature repeats past the limit).
+            budget.note_round(
+                turn.tool_calls
+                    .iter()
+                    .map(|tc| (tc.name.as_str(), &tc.arguments)),
+            );
+
             // Execute each requested tool; the call (args) and its result form one
             // collapsible step the TUI folds under "▸ N steps".
             for tc in &turn.tool_calls {
@@ -267,12 +414,76 @@ impl Agent {
                 ));
                 conversation.push(json!({"role": "tool", "content": result}));
             }
-        }
+        };
 
-        sink.emit(&AkhMessage::system(format!(
-            "(stopped after {DEFAULT_MAX_ROUNDS} tool-call rounds without a final answer)"
-        )));
+        // Budget exhausted — force one tool-free synthesis ("reflect and answer")
+        // so the turn returns the best answer it can from what it gathered, rather
+        // than the old bare "(stopped after N rounds)" cutoff.
+        self.force_final_answer(backend.as_ref(), agent_id, &mut conversation, sink, stop);
         Some(())
+    }
+
+    /// Final synthesis step when the [`RoundBudget`] is exhausted: nudge the model
+    /// to answer *now* with no tools, using what it already gathered, and emit the
+    /// result. Mirrors how frontier harnesses convert a hit budget into a
+    /// best-effort answer instead of a dead end.
+    fn force_final_answer(
+        &mut self,
+        backend: &dyn super::chat_backend::ChatBackend,
+        agent_id: &str,
+        conversation: &mut Vec<Value>,
+        sink: &dyn MessageSink,
+        stop: TurnStop,
+    ) {
+        conversation.push(json!({
+            "role": "user",
+            "content": format!(
+                "{} — stop calling tools and answer the original question now, \
+                 concisely, using what you have gathered so far.",
+                stop.clause()
+            ),
+        }));
+
+        // Empty catalog → the model must produce text, not another tool call.
+        let no_tools: [Value; 0] = [];
+        let mut used_fallback = false;
+        let turn = {
+            let mut on_event = |ev: StreamEvent| match ev {
+                StreamEvent::Content(delta) => sink.emit(&AkhMessage::narrative(delta, "acp")),
+                StreamEvent::Thinking(delta) => sink.emit(&AkhMessage::Reasoning {
+                    step: delta,
+                    expression: None,
+                }),
+            };
+            match backend.chat_with_tools_streaming(agent_id, conversation, &no_tools, &mut on_event)
+            {
+                Ok(t) => t,
+                Err(e) => {
+                    tracing::warn!(agent_id, "forced-answer streaming failed ({e}); non-streaming");
+                    used_fallback = true;
+                    match backend.chat_with_tools(agent_id, conversation, &no_tools) {
+                        Ok(t) => t,
+                        Err(e) => {
+                            sink.emit(&AkhMessage::error("llm", e.to_string()));
+                            return;
+                        }
+                    }
+                }
+            }
+        };
+
+        let answer = turn.content.trim();
+        if answer.is_empty() {
+            sink.emit(&AkhMessage::system(format!(
+                "(stopped: {})",
+                stop.clause().to_lowercase()
+            )));
+            return;
+        }
+        self.conversation_state_mut().record_agent_turn(answer);
+        if used_fallback {
+            sink.emit(&AkhMessage::narrative(answer, "acp"));
+        }
     }
 }
 
@@ -283,9 +494,10 @@ impl Agent {
 /// list. Execution is still gated by the permission policy, so exposing every
 /// tool here is safe — a dangerous one the model picks is denied at dispatch.
 fn ollama_tool_catalog(registry: &ToolRegistry) -> Vec<Value> {
-    let mut manifests = registry.list_manifests();
-    // `list_manifests` is HashMap-backed (nondeterministic order); sort by name so the catalog —
-    // and any `AKH_AGENT_MAX_TOOLS` truncation of it — is reproducible across runs.
+    // `list_advertised_manifests` (ADR 076: hides unadvertised tools) is HashMap-backed
+    // (nondeterministic order); sort by name so the catalog — and any `AKH_AGENT_MAX_TOOLS`
+    // truncation of it — is reproducible across runs.
+    let mut manifests = registry.list_advertised_manifests();
     manifests.sort_by(|a, b| a.name.cmp(&b.name));
     manifests
         .into_iter()
@@ -293,15 +505,29 @@ fn ollama_tool_catalog(registry: &ToolRegistry) -> Vec<Value> {
             let mut properties = serde_json::Map::new();
             let mut required = Vec::new();
             for p in &m.parameters {
-                let ty = if p.param_type.is_empty() {
-                    "string"
-                } else {
-                    p.param_type.as_str()
+                // A parameter carrying an explicit JSON-Schema fragment (ADR 076
+                // §2) is emitted verbatim, with `description` merged in so the
+                // model still sees the prose. Flat parameters keep the historical
+                // `{type, description}` rendering.
+                let prop = match &p.schema {
+                    Some(serde_json::Value::Object(schema_obj)) => {
+                        let mut merged = schema_obj.clone();
+                        merged
+                            .entry("description")
+                            .or_insert_with(|| Value::String(p.description.clone()));
+                        Value::Object(merged)
+                    }
+                    Some(other) => other.clone(),
+                    None => {
+                        let ty = if p.param_type.is_empty() {
+                            "string"
+                        } else {
+                            p.param_type.as_str()
+                        };
+                        json!({"type": ty, "description": p.description})
+                    }
                 };
-                properties.insert(
-                    p.name.clone(),
-                    json!({"type": ty, "description": p.description}),
-                );
+                properties.insert(p.name.clone(), prop);
                 if p.required {
                     required.push(Value::String(p.name.clone()));
                 }
@@ -355,6 +581,54 @@ mod tests {
         DangerInfo, DangerLevel, ToolManifest, ToolParamSchema, ToolSource,
     };
     use std::collections::HashSet;
+
+    fn call(name: &str, args: &str) -> (String, Value) {
+        (name.to_string(), json!({ "q": args }))
+    }
+
+    #[test]
+    fn round_budget_scales_cap_to_context_window() {
+        assert_eq!(RoundBudget::new(Some(1_000_000)).hard_max, 30); // GLM-class
+        assert_eq!(RoundBudget::new(Some(262_144)).hard_max, 30); // gemma4-12b
+        assert_eq!(RoundBudget::new(Some(128_000)).hard_max, 20);
+        assert_eq!(RoundBudget::new(Some(8_192)).hard_max, DEFAULT_MAX_ROUNDS);
+        assert_eq!(RoundBudget::new(None).hard_max, DEFAULT_MAX_ROUNDS);
+    }
+
+    #[test]
+    fn round_budget_stops_at_iteration_cap() {
+        let mut b = RoundBudget::new(None); // hard_max = DEFAULT_MAX_ROUNDS (12)
+        for i in 0..b.hard_max {
+            assert!(b.exhausted().is_none(), "should run at round {i}");
+            // distinct call each round → never trips the repeat detector
+            let c = call("kg_query", &i.to_string());
+            b.note_round([(c.0.as_str(), &c.1)]);
+        }
+        assert_eq!(b.exhausted(), Some(TurnStop::IterationCap));
+    }
+
+    #[test]
+    fn round_budget_detects_repeat_loop_before_the_cap() {
+        let mut b = RoundBudget::new(Some(1_000_000)); // roomy cap (30)
+        let c = call("memory_recall", "same"); // identical signature every round
+        for _ in 0..DEFAULT_REPEAT_LIMIT {
+            assert!(b.exhausted().is_none());
+            b.note_round([(c.0.as_str(), &c.1)]);
+        }
+        // Spun the same call `repeat_limit` times — stop well before round 30.
+        assert_eq!(b.exhausted(), Some(TurnStop::RepeatLoop));
+        assert!(b.round < b.hard_max);
+    }
+
+    #[test]
+    fn round_budget_distinct_calls_never_trip_repeat_detector() {
+        let mut b = RoundBudget::new(Some(1_000_000));
+        for i in 0..10 {
+            let c = call("kg_query", &i.to_string());
+            b.note_round([(c.0.as_str(), &c.1)]);
+        }
+        assert!(!b.looped);
+    }
 
     struct DummyTool;
     impl Tool for DummyTool {

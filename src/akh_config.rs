@@ -230,6 +230,19 @@ pub struct AkhConfig {
     #[serde(default)]
     pub path_mode: PathMode,
 
+    /// Opt-in: inject the OpenClaw self-import surface (ADR 076) into this akh's
+    /// sessions — the `openclaw_discover` tool plus read-only access to
+    /// `~/.openclaw`. Off by default, so normal akhs are unaffected. The single
+    /// source of truth is this per-akh switch (no env override).
+    #[serde(default)]
+    pub openclaw_import: bool,
+
+    /// Extra read-only filesystem roots to fold into the agent's `LocalFs` read
+    /// roots (ADR 076 §4). Writes always stay confined to `scratch/`. Used
+    /// alongside `openclaw_import`, which additionally implies `~/.openclaw`.
+    #[serde(default)]
+    pub extra_read_roots: Vec<std::path::PathBuf>,
+
     // ── tables (must be serialized after all values for TOML) ───────────────
     /// Where the pinned model runs (local Ollama or cloud).
     #[serde(default)]
@@ -257,11 +270,29 @@ impl Default for AkhConfig {
             spec_decode: false,
             related_workspaces: Vec::new(),
             path_mode: PathMode::default(),
+            openclaw_import: false,
+            extra_read_roots: Vec::new(),
             ollama_endpoint: OllamaEndpoint::default(),
             autonomy: AutonomyConfig::default(),
             delegation: None,
         }
     }
+}
+
+/// Expand a leading `~` / `~/` to `$HOME`. Paths without a leading tilde are
+/// returned unchanged.
+fn expand_home(path: &std::path::Path) -> std::path::PathBuf {
+    let raw = path.to_string_lossy();
+    if let Some(rest) = raw.strip_prefix("~/") {
+        if let Some(home) = std::env::var_os("HOME") {
+            return std::path::PathBuf::from(home).join(rest);
+        }
+    } else if raw == "~" {
+        if let Some(home) = std::env::var_os("HOME") {
+            return std::path::PathBuf::from(home);
+        }
+    }
+    path.to_path_buf()
 }
 
 impl AkhConfig {
@@ -284,6 +315,23 @@ impl AkhConfig {
     /// The akh's name (delegates to the embedded workspace name).
     pub fn name(&self) -> &str {
         &self.workspace.name
+    }
+
+    /// The read-only filesystem roots this akh's agent may additionally read
+    /// (ADR 076 §4): the explicit `extra_read_roots` (with `~` expanded), plus
+    /// `~/.openclaw` when `openclaw_import` is on. Writes are unaffected — they
+    /// always stay confined to `scratch/`. Empty when the switch is off and no
+    /// extra roots are configured (normal akhs are unaffected).
+    pub fn effective_read_roots(&self) -> Vec<std::path::PathBuf> {
+        let mut roots: Vec<std::path::PathBuf> =
+            self.extra_read_roots.iter().map(|p| expand_home(p)).collect();
+        if self.openclaw_import {
+            let openclaw = expand_home(std::path::Path::new("~/.openclaw"));
+            if !roots.contains(&openclaw) {
+                roots.push(openclaw);
+            }
+        }
+        roots
     }
 
     /// Load from a TOML file. A legacy workspace-only TOML loads cleanly with
