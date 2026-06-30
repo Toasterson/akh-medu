@@ -283,8 +283,11 @@ impl Agent {
 /// list. Execution is still gated by the permission policy, so exposing every
 /// tool here is safe — a dangerous one the model picks is denied at dispatch.
 fn ollama_tool_catalog(registry: &ToolRegistry) -> Vec<Value> {
-    registry
-        .list_manifests()
+    let mut manifests = registry.list_manifests();
+    // `list_manifests` is HashMap-backed (nondeterministic order); sort by name so the catalog —
+    // and any `AKH_AGENT_MAX_TOOLS` truncation of it — is reproducible across runs.
+    manifests.sort_by(|a, b| a.name.cmp(&b.name));
+    manifests
         .into_iter()
         .map(|m| {
             let mut properties = serde_json::Map::new();

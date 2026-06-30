@@ -715,6 +715,15 @@ impl CandleBackend {
         Ok(text)
     }
 
+    /// Like [`generate`](Self::generate) but returns the **raw** decoded text without
+    /// [`clean_generated_text`] (which keeps only the answer channel and strips markers). The
+    /// agentic tool path needs this: Gemma 4 emits its `<tool_call>` inside the *thought* channel,
+    /// so cleaning to the answer channel discards the call before it can be parsed.
+    #[cfg(feature = "candle-backend")]
+    pub fn generate_raw(&mut self, prompt: &str, max_tokens: u32) -> NluResult<String> {
+        Ok(self.generate_inner(prompt, max_tokens, StopMode::Text)?.text)
+    }
+
     /// Generate and return decode-throughput stats (Phase 45a / ADR 073).
     ///
     /// Like [`generate`](Self::generate) (greedy/temperature per config,

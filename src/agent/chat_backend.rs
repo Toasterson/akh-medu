@@ -234,16 +234,30 @@ impl ChatBackend for CandleChatBackend {
         let family = be.family();
         let prompt = render_tool_prompt(&self.system_prompt, conversation, tools, family);
 
-        // Free-form generation: the model emits either an answer or a native
-        // `<tool_call>` block (Qwen) / function call (Gemma).
+        // Free-form generation: the model emits either an answer or a `<tool_call>` block. Use
+        // the RAW (uncleaned) text — Gemma 4 puts its tool call in the thought channel, which the
+        // answer-channel cleaning would strip before we can parse it.
         let raw = be
-            .generate(&prompt, 512)
+            .generate_raw(&prompt, 512)
             .map_err(|e| ChatBackendError::TurnFailed {
                 backend: "candle".into(),
                 reason: e.to_string(),
             })?;
 
         let (content, mut tool_calls) = parse_tool_calls(&raw);
+        // When there is no tool call the content is the answer — clean it (answer channel only,
+        // markers stripped) for display, matching the non-agentic `generate` path.
+        let content = crate::nlu::channel::ChannelStream::parse(&content).answer();
+
+        // Opt-in trace of the raw agentic generation (AKH_AGENT_DEBUG=1): the exact text the
+        // model produced and how many tool calls were parsed from it. Invaluable for diagnosing
+        // tool-call format mismatches without a full tracing subscriber.
+        if std::env::var("AKH_AGENT_DEBUG").as_deref() == Ok("1") {
+            eprintln!(
+                "[candle agentic] parsed {} tool_call(s); raw generation =\n---\n{raw}\n---",
+                tool_calls.len()
+            );
+        }
 
         // If the model opened a tool call but the JSON didn't parse, regenerate
         // the arguments under the JSON grammar constraint — guaranteed valid.
