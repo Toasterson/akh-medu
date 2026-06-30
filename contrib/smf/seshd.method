@@ -1,0 +1,39 @@
+#!/bin/sh
+#
+# SMF start method for svc:/application/akh-medu/seshd.
+# Installed to /lib/svc/method/seshd (mode 0555).
+#
+# seshd takes its config file path as argv[1]. We resolve it from the
+# `config/file` SMF property (svccfg-tunable) and validate it exists before
+# exec, so a misconfigured service lands in maintenance with a clear reason.
+
+. /lib/svc/share/smf_include.sh
+
+BIN=/opt/akh-medu/bin/seshd
+
+cfg=$(svcprop -p config/file "$SMF_FMRI" 2>/dev/null)
+if [ -z "$cfg" ] || [ "$cfg" = '""' ]; then
+	cfg=/etc/akh-medu/seshat.toml
+fi
+
+if [ ! -x "$BIN" ]; then
+	echo "seshd binary not found or not executable at $BIN" >&2
+	exit "$SMF_EXIT_ERR_CONFIG"
+fi
+if [ ! -f "$cfg" ]; then
+	echo "seshd config not found at $cfg — set config/file or create the file" >&2
+	exit "$SMF_EXIT_ERR_CONFIG"
+fi
+
+SESHAT_CONFIG="$cfg"
+export SESHAT_CONFIG
+
+case "$1" in
+start)
+	exec "$BIN" "$cfg"
+	;;
+*)
+	echo "usage: $0 start" >&2
+	exit "$SMF_EXIT_ERR_CONFIG"
+	;;
+esac

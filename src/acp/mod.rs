@@ -2436,6 +2436,56 @@ mod tests {
         let _ = tokio::time::timeout(std::time::Duration::from_secs(30), server).await;
     }
 
+    /// The `_akh/*` data-plane over a real **TCP** socket — exactly the path
+    /// `akh --remote host:port acp ...` drives. Proves a remote client reaches a
+    /// daemon's data-plane across the network, and that a `remote_tcp` discovery
+    /// record routes to that endpoint. (`acp_ext_health_and_capabilities` covers
+    /// the same surface over a Unix socket.)
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn acp_ext_data_plane_over_tcp() {
+        let me = workspace();
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind tcp");
+        let addr = listener.local_addr().expect("local addr").to_string();
+
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let server = tokio::spawn(async move { serve_tcp_loop(me, listener, shutdown_rx).await });
+
+        // A remote ServerInfo points the client at this TCP endpoint (no socket).
+        let info = crate::client::ServerInfo::remote_tcp(&addr);
+        assert_eq!(info.acp_tcp.as_deref(), Some(addr.as_str()));
+        assert!(
+            info.acp_socket.is_none(),
+            "remote_tcp must not advertise a socket"
+        );
+
+        // _akh/meta/capabilities reaches the dispatch handler over TCP.
+        let caps = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            ext_request_tcp(
+                info.acp_tcp.as_deref().unwrap(),
+                "_akh/meta/capabilities",
+                serde_json::json!({}),
+            ),
+        )
+        .await
+        .expect("ext caps over tcp timed out")
+        .expect("ext caps over tcp ok");
+        assert_eq!(caps["protocol"], "acp");
+        assert!(caps["methods"].as_array().unwrap().iter().any(|m| m == "_akh/health"));
+
+        // An unknown method is a clean error over TCP too — no hang/panic.
+        let unknown = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            ext_request_tcp(&addr, "_akh/does/not/exist", serde_json::json!({})),
+        )
+        .await
+        .expect("ext unknown over tcp timed out");
+        assert!(unknown.is_err(), "unknown _akh method over tcp must error");
+
+        shutdown_tx.send(true).expect("send shutdown");
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(30), server).await;
+    }
+
     /// The accept loop serves more than one connection against the same shared
     /// agent, then exits cleanly when the shutdown watch flips.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -1345,7 +1345,8 @@ mod tests {
             condition_summary: "delta".into(),
         }];
 
-        let proposals = collect_signals(&engine, &[], &drives, &[], None, None, &firings);
+        let predicates = super::AgentPredicates::init(&engine).unwrap();
+        let proposals = collect_signals(&engine, &[], &drives, &[], &predicates, None, None, &firings);
         assert!(proposals.iter().any(|p| p.description.contains("Watch-generated")));
     }
 }

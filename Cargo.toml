@@ -14,6 +14,19 @@ readme = "README.md"
 keywords = ["ai", "knowledge-graph", "vsa", "reasoning", "neuro-symbolic"]
 categories = ["science", "algorithms", "command-line-utilities"]
 
+# cargo-binstall: fetch the prebuilt lean `akh` client from Forgejo releases
+# instead of compiling. Only `akh` is binstalled — `akhomed` is excluded by its
+# `required-features = ["server"]` and `generate_qa_dataset` by
+# `required-features = ["training-data"]`, so neither is in the default bin set.
+# The release workflow uploads `akh-{version}-{target}.tar.gz` (the binary at the
+# archive root) per target. The tag is `v{version}`, hence `v{ version }` below.
+[package.metadata.binstall]
+# Literal `.tar.gz` (not `{ archive-suffix }`, which is `.tgz` for pkg-fmt=tgz)
+# to match the asset name produced by packaging/build-binstall-archive.sh.
+pkg-url = "https://code.aopc.cloud/toasterson/akh-medu/releases/download/v{ version }/akh-{ version }-{ target }.tar.gz"
+pkg-fmt = "tgz"
+bin-dir = "{ bin }{ binary-ext }"
+
 [dependencies]
 # Error handling
 miette = { version = "7", features = ["fancy"] }
@@ -205,6 +218,12 @@ agent-client-protocol = ["dep:agent-client-protocol"]
 # for one in-process workspace. Additive and OFF by default — does not touch
 # REST/WS/MCP transports. See src/acp/mod.rs and ADR-027 (concurrency invariant).
 acp = ["dep:agent-client-protocol", "dep:tokio-util", "dep:futures", "tokio"]
+# Lean TUI/CLI client: ACP transport only, no in-process LLM/candle. `akh` is a
+# pure ACP client (all engine work happens in the daemon), so it needs none of
+# the nlu-candle stack. This is what ships as the binstall `akh` binary and the
+# `akh` docker image:
+#   cargo build --release --no-default-features --features client --bin akh
+client = ["acp"]
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
@@ -222,6 +241,10 @@ required-features = ["server"]
 [[bin]]
 name = "generate_qa_dataset"
 path = "src/bin/generate_qa_dataset.rs"
+# Training-data tooling, not a shipped binary. Gating it keeps it out of the
+# default bin set so `cargo binstall akh-medu` resolves only `akh`. Build it
+# with `cargo build --features training-data --bin generate_qa_dataset`.
+required-features = ["training-data"]
 
 [[bench]]
 name = "vsa_ops"

@@ -1,0 +1,35 @@
+# System-level unit for Seshat's Archive (seshd), installed by `install.sh` to
+# /etc/systemd/system/seshd.service and run as the dedicated `seshat` user.
+#
+# Requires a reachable PostgreSQL with pgvector (configured in seshat.toml).
+# Enable with: systemctl enable --now seshd
+[Unit]
+Description=Seshat's Archive — shared corpus MCP service (pgvector RAG)
+Documentation=https://akh-medu.dev
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=seshat
+Group=seshat
+ExecStart=/usr/local/bin/seshd /etc/akh-medu/seshat.toml
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=10
+
+Environment=RUST_LOG=seshat=info,info
+Environment=SESHAT_CONFIG=/etc/akh-medu/seshat.toml
+Environment=SESHAT_MODEL_DIR=/var/lib/akh-medu/seshat/models
+# Path assumes install.sh's default prefix (/usr/local); adjust for --prefix.
+Environment=ORT_DYLIB_PATH=/usr/local/lib/akh-medu/libonnxruntime.so
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/akh-medu/seshat
+
+[Install]
+WantedBy=multi-user.target

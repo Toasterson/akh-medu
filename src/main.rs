@@ -13,6 +13,12 @@ struct Cli {
     #[arg(short = 'w', long, global = true, default_value = "default")]
     workspace: String,
 
+    /// Target a remote akhomed over ACP/TCP (`host:port`), bypassing local
+    /// daemon discovery. Defaults to the `AKH_REMOTE` env var. The remote daemon
+    /// must serve ACP/TCP (start it with `AKH_ACP_TCP_PORT` / `AKH_ACP_TCP_BIND`).
+    #[arg(long, global = true, value_name = "HOST:PORT")]
+    remote: Option<String>,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -250,6 +256,27 @@ enum AcpOp {
     },
 }
 
+/// The remote ACP/TCP endpoint chosen by `--remote` (or `AKH_REMOTE`), captured
+/// once at startup. `Some(None)`/unset means "discover the local daemon".
+static REMOTE_ENDPOINT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+
+/// Resolve which akhomed to talk to: an explicit `--remote host:port` (or
+/// `AKH_REMOTE`) targets a remote daemon over ACP/TCP; otherwise discover the
+/// local daemon via its PID file. Shared by every ACP client path so `--remote`
+/// works uniformly across the data-plane, control-plane, and chat.
+#[cfg(feature = "acp")]
+fn resolve_server(paths: &akh_medu::paths::AkhPaths) -> Result<akh_medu::client::ServerInfo> {
+    if let Some(Some(addr)) = REMOTE_ENDPOINT.get() {
+        return Ok(akh_medu::client::ServerInfo::remote_tcp(addr));
+    }
+    akh_medu::client::discover_server(paths).ok_or_else(|| {
+        miette::miette!(
+            "No running akhomed daemon found. Start one (`akh service start`, or run \
+             `akhomed`), or pass `--remote host:port` to reach a remote daemon over ACP/TCP."
+        )
+    })
+}
+
 /// Discover the running daemon and send one `_akh/*` request over ACP, returning
 /// the JSON result. Shared by the data-plane (`akh acp`) and control-plane
 /// (`akh daemon`/`akh config`) command dispatchers.
@@ -257,8 +284,7 @@ enum AcpOp {
 fn acp_call(method: &str, params: serde_json::Value) -> Result<serde_json::Value> {
     let paths = akh_medu::paths::AkhPaths::resolve()
         .map_err(|e| miette::miette!("cannot resolve XDG paths: {e}"))?;
-    let info = akh_medu::client::discover_server(&paths)
-        .ok_or_else(|| miette::miette!("No running akhomed server found."))?;
+    let info = resolve_server(&paths)?;
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -505,12 +531,7 @@ fn run_migrate_acp() -> Result<()> {
 fn run_chat_acp(ws_name: &str, headless: bool) -> Result<()> {
     let paths = akh_medu::paths::AkhPaths::resolve()
         .map_err(|e| miette::miette!("cannot resolve XDG paths: {e}"))?;
-    let info = akh_medu::client::discover_server(&paths).ok_or_else(|| {
-        miette::miette!(
-            "No running akhomed daemon found. Start one first (`akh service start`, \
-             or run `akhomed`) and retry — `akh` is a pure ACP client with no local engine."
-        )
-    })?;
+    let info = resolve_server(&paths)?;
 
     if !headless {
         eprintln!("Connecting to akh '{ws_name}' over ACP...");
@@ -667,6 +688,14 @@ fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
+
+    // Capture the remote endpoint (flag wins over the AKH_REMOTE env) before any
+    // ACP path resolves the daemon. Set once; ignore a redundant re-set.
+    let remote = cli
+        .remote
+        .clone()
+        .or_else(|| std::env::var("AKH_REMOTE").ok());
+    let _ = REMOTE_ENDPOINT.set(remote);
 
     {
     match cli.command {

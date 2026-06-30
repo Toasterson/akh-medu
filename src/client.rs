@@ -47,6 +47,29 @@ impl ServerInfo {
         };
         format!("http://{host}:{}", self.port)
     }
+
+    /// Build a `ServerInfo` that targets a **remote** daemon's ACP TCP endpoint
+    /// directly, bypassing local PID-file discovery.
+    ///
+    /// Used by `akh --remote host:port` (or `AKH_REMOTE`) so a client on one
+    /// host can drive an `akhomed` on another over the network. `addr` is the
+    /// `host:port` the remote daemon advertises (it must be started with
+    /// `AKH_ACP_TCP_PORT`/`AKH_ACP_TCP_BIND`). The `pid`/`bind`/`port` fields are
+    /// best-effort metadata — the transport only consults `acp_tcp`.
+    pub fn remote_tcp(addr: &str) -> Self {
+        let (host, port) = addr
+            .rsplit_once(':')
+            .and_then(|(h, p)| p.parse::<u16>().ok().map(|p| (h.to_string(), p)))
+            .unwrap_or_else(|| (addr.to_string(), 0));
+        ServerInfo {
+            pid: 0,
+            port,
+            bind: host,
+            acp_socket: None,
+            acp_tcp: Some(addr.to_string()),
+            acp_version: Some(ACP_PROTOCOL_VERSION.to_string()),
+        }
+    }
 }
 
 /// Discover a running akhomed server via its PID file.
@@ -218,6 +241,27 @@ pub struct DaemonStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remote_tcp_targets_tcp_endpoint_without_socket() {
+        let info = ServerInfo::remote_tcp("example.internal:8201");
+        assert_eq!(info.acp_tcp.as_deref(), Some("example.internal:8201"));
+        assert!(
+            info.acp_socket.is_none(),
+            "remote_tcp must not advertise a socket"
+        );
+        assert_eq!(info.bind, "example.internal");
+        assert_eq!(info.port, 8201);
+        assert_eq!(info.acp_version.as_deref(), Some(ACP_PROTOCOL_VERSION));
+    }
+
+    #[test]
+    fn remote_tcp_tolerates_unparseable_addr() {
+        // No port / garbage still yields a usable acp_tcp the transport can try.
+        let info = ServerInfo::remote_tcp("host-only");
+        assert_eq!(info.acp_tcp.as_deref(), Some("host-only"));
+        assert_eq!(info.port, 0);
+    }
 
     #[test]
     fn legacy_server_info_without_acp_fields_parses() {
