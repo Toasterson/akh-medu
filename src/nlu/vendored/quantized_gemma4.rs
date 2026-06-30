@@ -298,31 +298,54 @@ impl LayerWeights {
         dtype: DType,
         device: &Device,
     ) -> Result<Tensor> {
-        let mask: Vec<_> = if let Some(sliding_window_size) = self.sliding_window_size {
-            (0..seq_len)
-                .flat_map(|i| {
-                    (0..seq_len).map(move |j| {
-                        if i < j || j + sliding_window_size < i {
-                            0u32
-                        } else {
-                            1u32
-                        }
-                    })
+        let total = seq_len + index_pos;
+        let rows = Self::causal_mask_rows(seq_len, index_pos, self.sliding_window_size);
+        Tensor::from_slice(&rows, (seq_len, total), device)?
+            .expand((b_sz, 1, seq_len, total))?
+            .to_dtype(dtype)
+    }
+
+    /// Row-major causal attention-mask values `[seq_len * (index_pos + seq_len)]` (`1` = keep,
+    /// `0` = mask — the convention [`forward_attn`]'s `mask.eq(0)?.where_cond(neg_inf, …)`
+    /// consumes). Query `i` sits at GLOBAL position `index_pos + i` and keeps every key
+    /// `j ≤ index_pos + i` (the whole cached prefix `[0, index_pos)` plus the causal new block);
+    /// a sliding `window` (when `Some`) additionally drops keys older than the window
+    /// (`j + window < index_pos + i`). Built host-side so the device construction is one
+    /// `from_slice` — the HIP backend has no `ones`/`const_set`. For `index_pos == 0` this is
+    /// byte-identical to the original prefill mask (lower-triangular, windowed where applicable).
+    fn causal_mask_rows(seq_len: usize, index_pos: usize, window: Option<usize>) -> Vec<u32> {
+        let total = seq_len + index_pos;
+        (0..seq_len)
+            .flat_map(|i| {
+                let qg = index_pos + i; // global query position
+                (0..total).map(move |j| {
+                    let future = j > qg;
+                    let out_of_window = window.is_some_and(|w| j + w < qg);
+                    if future || out_of_window { 0u32 } else { 1u32 }
                 })
-                .collect()
-        } else {
-            (0..seq_len)
-                .flat_map(|i| (0..seq_len).map(move |j| if i < j { 0u32 } else { 1u32 }))
-                .collect()
-        };
-        let mask = Tensor::from_slice(&mask, (seq_len, seq_len), device)?;
-        let mask = if index_pos > 0 {
-            let mask0 = Tensor::zeros((seq_len, index_pos), DType::F32, device)?;
-            Tensor::cat(&[&mask0, &mask], D::Minus1)?
-        } else {
-            mask
-        };
-        mask.expand((b_sz, 1, seq_len, seq_len + index_pos))?
+            })
+            .collect()
+    }
+
+    /// Phase 47 speculative-decode **verify** mask: pure-causal continuation, `[b, 1, seq,
+    /// index_pos+seq]`, `1 = keep / 0 = mask` (the convention [`forward_attn`] consumes). Query
+    /// `index_pos + i` keeps every key `j ≤ index_pos + i` — the whole cached prefix plus the
+    /// causal new block, and **no sliding-window restriction** so it matches `seq_len==1` decode
+    /// (which passes `mask = None` and thus ignores the window); that makes the verify forward
+    /// byte-exact to incremental decode. Built once per forward (layer-independent without the
+    /// window) and host-side via `from_slice` (no device `const_set`/`ones`).
+    fn verify_mask(
+        seq_len: usize,
+        index_pos: usize,
+        dtype: DType,
+        device: &Device,
+    ) -> Result<Tensor> {
+        let total = seq_len + index_pos;
+        // The no-window continuation case of `causal_mask_rows` — explicitly `None` so a
+        // sliding-window layer is NOT windowed here (matching `seq==1` decode's `mask=None`).
+        let rows = Self::causal_mask_rows(seq_len, index_pos, None);
+        Tensor::from_slice(&rows, (seq_len, total), device)?
+            .expand((1, 1, seq_len, total))?
             .to_dtype(dtype)
     }
 
@@ -436,9 +459,11 @@ impl LayerWeights {
         let attn_output = if flash {
             #[cfg(feature = "hip")]
             {
+                // `k`/`v` are the f32 static-KV prefix (already narrowed to `len` and cast
+                // from the f16 store above) — the flash kernel is f32-only and does GQA +
+                // the [0..len) read itself, so feed it the cast prefix, not the raw f16 buffer.
                 let len = index_pos + seq_len;
-                let (kbuf, vbuf) = self.kv_buf.as_ref().unwrap();
-                candle::cuda::flash_attn_decode(&q.contiguous()?, kbuf, vbuf, len, 1.0f32)?
+                candle::cuda::flash_attn_decode(&q.contiguous()?, &k, &v, len, 1.0f32)?
             }
             #[cfg(not(feature = "hip"))]
             unreachable!()
@@ -872,6 +897,12 @@ impl ModelWeights {
         self.embedding_length
     }
 
+    /// Static KV-cache capacity (env `AKH_KV_CTX`, default 4096) — the upper bound for a
+    /// speculative-decode verify span / decode position. `0` before any layer is built.
+    pub fn kv_ctx(&self) -> usize {
+        self.layers.first().map(|l| l.kv_ctx).unwrap_or(0)
+    }
+
     /// Look up the (un-scaled) token embeddings for `ids` (shape `[batch, seq]`),
     /// returning `[batch, seq, embedding_length]`. The caller is responsible for
     /// any `sqrt(embedding_length)` scaling (the decoder applies that to *text*
@@ -897,7 +928,7 @@ impl ModelWeights {
         // Scale embeddings by sqrt(embedding_length) (≈61.9677 for 3840).
         layer_in = (layer_in * (self.embedding_length as f64).sqrt())?;
         let (b_sz, seq_len) = x.dims2()?;
-        self.run_layers(layer_in, b_sz, seq_len, index_pos)
+        self.run_layers(layer_in, b_sz, seq_len, index_pos, true)
     }
 
     /// Like [`hidden_states`] but starts from a pre-built input-embedding tensor
@@ -911,23 +942,38 @@ impl ModelWeights {
         index_pos: usize,
     ) -> Result<Tensor> {
         let (b_sz, seq_len, _hidden) = embeds.dims3()?;
-        self.run_layers(embeds.clone(), b_sz, seq_len, index_pos)
+        self.run_layers(embeds.clone(), b_sz, seq_len, index_pos, true)
     }
 
-    /// Shared decoder body: run all layers over a pre-scaled input-embedding
-    /// tensor and return the post-norm last-position hidden state.
+    /// Shared decoder body: run all layers over a pre-scaled input-embedding tensor and return
+    /// the post-norm hidden state. With `last_only` it returns only the **last position**
+    /// (`[b, hidden]`, the decode/Neural-VSA path); otherwise it returns **every position**
+    /// (`[b, seq, hidden]`) for the Phase 47 speculative-decode verify forward. `last_only` is
+    /// byte-exact to the all-position result sliced at `seq_len-1` (RMSNorm is per-position).
     fn run_layers(
         &mut self,
         mut layer_in: Tensor,
         b_sz: usize,
         seq_len: usize,
         index_pos: usize,
+        last_only: bool,
     ) -> Result<Tensor> {
         let _enter = self.span.enter();
         let dtype = layer_in.dtype();
         let device = layer_in.device().clone();
+        // Phase 47 verify forward (`last_only == false`, `seq_len > 1`): one pure-causal
+        // continuation mask shared by every layer (no sliding window → matches `seq==1` decode →
+        // byte-exact to incremental decode). The normal path keeps the per-layer windowed
+        // prefill mask / `None` for single-token decode.
+        let verify_mask = if !last_only && seq_len > 1 {
+            Some(LayerWeights::verify_mask(seq_len, index_pos, dtype, &device)?)
+        } else {
+            None
+        };
         for layer in self.layers.iter_mut() {
-            let attention_mask = if seq_len == 1 {
+            let attention_mask = if let Some(m) = &verify_mask {
+                Some(m.clone())
+            } else if seq_len == 1 {
                 None
             } else {
                 Some(layer.mask(b_sz, seq_len, index_pos, dtype, &device)?)
@@ -954,8 +1000,14 @@ impl ModelWeights {
             layer_in = h.broadcast_mul(&layer.layer_output_scale)?;
         }
 
-        let x = layer_in.i((.., seq_len - 1, ..))?;
-        self.norm.forward(&x)
+        if last_only {
+            let x = layer_in.i((.., seq_len - 1, ..))?;
+            self.norm.forward(&x)
+        } else {
+            // All-position hidden `[b, seq, hidden]` — RMSNorm normalizes each position
+            // independently, so this is byte-exact to the last-position path at `seq_len-1`.
+            self.norm.forward(&layer_in)
+        }
     }
 
     /// Apply the tied lm_head and the final-logit softcap: `30 * tanh(logits/30)`.
@@ -986,6 +1038,23 @@ impl ModelWeights {
         self.project_and_softcap(&h)
     }
 
+    /// Phase 47 speculative-decode **verify forward**: logits at EVERY position
+    /// (`[b, seq, vocab]`) for the token ids `x` (`[b, seq]`) fed as a continuation at
+    /// `index_pos`. The target scores all `seq` candidate positions in one forward; position
+    /// `index_pos + i` attends the cached prefix `[0, index_pos)` plus the causal `[0, i]` of the
+    /// new block (see [`LayerWeights::mask`]). Byte-identical to running `seq` single-token
+    /// [`forward`](Self::forward)s incrementally (same K/V writes, same per-position rope/mask) —
+    /// the last position equals a plain `forward` of the same token. K/V for all `seq` positions
+    /// are written into the static cache at `[index_pos, index_pos+seq)`; on partial acceptance
+    /// the caller rewinds the write index (Phase 47c).
+    pub fn forward_verify(&mut self, x: &Tensor, index_pos: usize) -> Result<Tensor> {
+        let mut layer_in = self.tok_embeddings.get_rows(x)?;
+        layer_in = (layer_in * (self.embedding_length as f64).sqrt())?;
+        let (b_sz, seq_len) = x.dims2()?;
+        let h = self.run_layers(layer_in, b_sz, seq_len, index_pos, false)?;
+        self.project_and_softcap(&h)
+    }
+
     /// Like [`forward`](Self::forward) but also returns the last-position hidden
     /// state. Returns `(logits, hidden)`. (akh-medu vendored extension.)
     pub fn forward_with_hidden(
@@ -1007,5 +1076,51 @@ impl ModelWeights {
     pub fn forward_embeds(&mut self, embeds: &Tensor, index_pos: usize) -> Result<Tensor> {
         let h = self.hidden_states_from_embeds(embeds, index_pos)?;
         self.project_and_softcap(&h)
+    }
+}
+
+#[cfg(test)]
+mod mask_tests {
+    use super::LayerWeights;
+
+    // index_pos == 0 is the live prefill path: must stay plain lower-triangular causal
+    // (byte-identical to the original mask before the continuation fix).
+    #[test]
+    fn causal_mask_rows_prefill_is_lower_triangular() {
+        assert_eq!(
+            LayerWeights::causal_mask_rows(3, 0, None),
+            vec![
+                1, 0, 0, //
+                1, 1, 0, //
+                1, 1, 1, //
+            ]
+        );
+    }
+
+    // Continuation (index_pos > 0): the previously dead+broken branch. Query `i` is at global
+    // position `index_pos + i` and must keep the WHOLE cached prefix plus the causal new block.
+    // This is also exactly what `verify_mask` (the Phase 47a forward) builds.
+    #[test]
+    fn causal_mask_rows_continuation_keeps_prefix() {
+        // seq_len=2 appended at index_pos=3 (global queries 3, 4); total = 5.
+        assert_eq!(
+            LayerWeights::causal_mask_rows(2, 3, None),
+            vec![
+                1, 1, 1, 1, 0, // q=3: keep keys 0..=3
+                1, 1, 1, 1, 1, // q=4: keep keys 0..=4
+            ]
+        );
+    }
+
+    // Sliding window applied in GLOBAL coordinates: drop keys older than the window.
+    #[test]
+    fn causal_mask_rows_continuation_sliding_window() {
+        assert_eq!(
+            LayerWeights::causal_mask_rows(2, 3, Some(2)),
+            vec![
+                0, 1, 1, 1, 0, // q=3: keep 1,2,3
+                0, 0, 1, 1, 1, // q=4: keep 2,3,4
+            ]
+        );
     }
 }

@@ -38,19 +38,32 @@ pub(crate) mod runtime {
     pub const MEMCPY_D2H: c_int = 2;
     pub const MEMCPY_D2D: c_int = 3;
 
-    /// Upper bound on bytes the caching allocator keeps cached across `free`s
-    /// (Phase 45g). `hipFree` *synchronizes the whole device*, so freeing a temp
-    /// after every op serializes the ~1900 ops/token. The pool recycles freed
-    /// blocks by exact byte size instead (no `hipFree`, no sync, no re-`hipMalloc`
-    /// of the recurring per-token f32 dequant temps). Over the cap, `free` really
-    /// `hipFree`s. **VRAM tension (Phase 46 pool sweep):** a resident 12B already sits
-    /// ~23 GB on a 24 GB card, so the only pool big enough to beat malloc-thrash spills
-    /// to GTT — gemma4-12b: 2 GB pool = 10.4 tok/s @ 24.65 GB (spill) vs 512 MB = 9.4
-    /// tok/s @ 23.15 GB. So **512 MB is the safe, near-optimal default for a 12B model
-    /// on a 24 GB card.** For the +10% spill-gain on a dedicated GPU set a bigger fixed
-    /// cap (`AKH_HIP_POOL_MB=2048`); on a roomier or multi-akh GPU prefer the adaptive
-    /// policy (`AKH_HIP_POOL_MARGIN_MB`, see `free`) which auto-sizes to real headroom.
+    /// Floor on bytes the caching allocator keeps cached across `free`s (Phase 45g).
+    /// `hipFree` *synchronizes the whole device*, so freeing a temp after every op
+    /// serializes the ~1900 ops/token. The pool recycles freed blocks by exact byte size
+    /// instead (no `hipFree`, no sync, no re-`hipMalloc` of the recurring per-token f32
+    /// dequant temps). This is the **floor**: the adaptive default (below) always keeps at
+    /// least this much cached, then grows beyond it while VRAM headroom allows.
+    ///
+    /// **Phase 46d decode sweep (pure `Device::Hip`, gemma3-12b, P≈200–330):** the per-token
+    /// transient working set is ~3 GB and a 512 MB cap thrashes badly — 7.25 tok/s @ 512 MB
+    /// vs 10.39 @ 3 GB (+43%), plateauing at 3 GB (4/6 GB identical, 13.50 GB peak on a 24 GB
+    /// card). The earlier "512 MB is near-optimal" finding was the *op-offload* config
+    /// (`AKH_GPU_MATMUL=1`, ~23 GB resident → any real pool spills to GTT); the resident
+    /// `Device::Hip` path sits ~10.5 GB so it has ~13 GB of headroom to spend. Hence the
+    /// default is now adaptive ([`DEFAULT_POOL_MARGIN_BYTES`]): on the roomy resident path
+    /// it auto-grows to the plateau (10.36 tok/s, matching fixed 3 GB), and under VRAM
+    /// pressure (multi-akh / op-offload / 27B) it falls back to this floor — strictly ≥ the
+    /// old fixed-512 behavior. `AKH_HIP_POOL_MB=<n>` forces a plain fixed cap (margin 0);
+    /// `AKH_HIP_POOL_MARGIN_MB=<n>` overrides the margin (`0` ⇒ pure fixed-floor).
     const DEFAULT_POOL_CAP_BYTES: usize = 512 * 1024 * 1024;
+
+    /// Default adaptive headroom: keep ≥ this many bytes of VRAM free (live `hipMemGetInfo`
+    /// per `free` once over the [`DEFAULT_POOL_CAP_BYTES`] floor). 2.5 GB lets a single 12B
+    /// on a 24 GB card grow the pool to the ~3 GB decode plateau while leaving comfortable
+    /// headroom; on a tighter card / under multi-akh pressure `free` drops below the margin
+    /// and the pool holds at the floor. Override with `AKH_HIP_POOL_MARGIN_MB`.
+    const DEFAULT_POOL_MARGIN_BYTES: usize = 2560 * 1024 * 1024;
 
     /// Caching device allocator: a free-list of recycled blocks keyed by exact
     /// byte size + a `ptr -> size` map so size-less `free(ptr)` can still recycle.
@@ -63,6 +76,15 @@ pub(crate) mod runtime {
         cached_bytes: usize,
         cap_bytes: usize,
         margin_bytes: usize,
+        // Phase 46d-2: when `Some`, every `malloc` (pool hit OR `hipMalloc` miss) records its
+        // `(ptr, bytes)` here. `HipGraph::capture` sets this for the capture window so it can
+        // PIN the captured forward's working set — the intermediate buffers the recorded
+        // graph kernels write to. After capture those intermediates are back in `free`; left
+        // there, a later `malloc` (the decode loop's own embed/argmax between replays) would
+        // hand them out and a replay would stomp live data. Pinning removes them from `free`
+        // for the graph's lifetime so its addresses stay dedicated. The still-live result
+        // buffer is owned by its returned `Tensor` (not in `free`) and is left untouched.
+        capture_track: Option<Vec<(usize, usize)>>,
     }
 
     /// Persistent split-K scratch for flash-attention decode (Phase 46b): a grow-only
@@ -263,11 +285,12 @@ pub(crate) mod runtime {
                     sym!(b"hipGraphExecDestroy\0", GraphExecDestroy);
                 let graph_destroy: GraphDestroy = sym!(b"hipGraphDestroy\0", GraphDestroy);
                 let memset_async: MemsetAsync = sym!(b"hipMemsetAsync\0", MemsetAsync);
-                // Default is the fixed 512 MB cap (margin 0): safe + near-optimal for a
-                // 12B model on a 24 GB card (Phase 46 pool sweep — see DEFAULT_POOL_CAP).
-                // Opt into the adaptive policy with `AKH_HIP_POOL_MARGIN_MB=<n>` (keeps
-                // ≥ n MB free via live `hipMemGetInfo`; ~2560 fits a 12B/24 GB card and
-                // auto-scales elsewhere). `AKH_HIP_POOL_MB` always wins → plain fixed cap.
+                // Default is the ADAPTIVE policy (Phase 46d pool sweep — see DEFAULT_POOL_CAP):
+                // a 512 MB floor that grows while ≥ DEFAULT_POOL_MARGIN_BYTES stays free, so
+                // the resident Device::Hip decode path auto-reaches its ~3 GB working-set
+                // plateau (+43% tok/s) yet falls back to the floor under VRAM pressure.
+                // `AKH_HIP_POOL_MB=<n>` forces a plain fixed cap (margin 0);
+                // `AKH_HIP_POOL_MARGIN_MB=<n>` overrides the margin (`0` ⇒ pure fixed floor).
                 let mb = |v: &str| {
                     std::env::var(v)
                         .ok()
@@ -277,7 +300,7 @@ pub(crate) mod runtime {
                 let (cap_bytes, margin_bytes) = match (mb("AKH_HIP_POOL_MB"), mb("AKH_HIP_POOL_MARGIN_MB")) {
                     (Some(fixed), _) => (fixed, 0),
                     (None, Some(margin)) => (DEFAULT_POOL_CAP_BYTES, margin),
-                    (None, None) => (DEFAULT_POOL_CAP_BYTES, 0),
+                    (None, None) => (DEFAULT_POOL_CAP_BYTES, DEFAULT_POOL_MARGIN_BYTES),
                 };
                 Ok(Hip {
                     _lib: lib,
@@ -346,6 +369,9 @@ pub(crate) mod runtime {
                     if let Some(p) = list.pop() {
                         pool.cached_bytes = pool.cached_bytes.saturating_sub(bytes);
                         pool.live.insert(p, bytes);
+                        if let Some(t) = pool.capture_track.as_mut() {
+                            t.push((p, bytes));
+                        }
                         return Ok(p as *mut c_void);
                     }
                 }
@@ -362,7 +388,13 @@ pub(crate) mod runtime {
             if rc != 0 || ptr.is_null() {
                 return Err(format!("hipMalloc({bytes}) failed (rc={rc})"));
             }
-            self.pool.lock().unwrap().live.insert(ptr as usize, bytes);
+            {
+                let mut pool = self.pool.lock().unwrap();
+                pool.live.insert(ptr as usize, bytes);
+                if let Some(t) = pool.capture_track.as_mut() {
+                    t.push((ptr as usize, bytes));
+                }
+            }
             Ok(ptr)
         }
 
@@ -377,10 +409,13 @@ pub(crate) mod runtime {
         /// synchronize the device). The block being freed is still allocated (counted
         /// as device-used), so recycling it leaves `free` VRAM unchanged while a real
         /// `hipFree` raises it. Policy:
-        /// - **adaptive** (`margin_bytes > 0`): recycle only while ≥ `margin_bytes`
-        ///   stays free (queried live). The pool self-limits to actual headroom and
-        ///   never drives the device into a GTT spill / OOM, shrinking when other akhs
-        ///   are resident. Falls back to the fixed cap if `hipMemGetInfo` fails.
+        /// - **adaptive** (`margin_bytes > 0`): always recycle up to the `cap_bytes` floor,
+        ///   then keep growing while ≥ `margin_bytes` stays free (queried live). The floor
+        ///   guarantees the pool never collapses below the safe fixed cap on a momentary
+        ///   low-headroom reading (which would reintroduce per-op `hipFree` thrash), while
+        ///   the headroom check self-limits growth so it never drives the device into a GTT
+        ///   spill / OOM and shrinks when other akhs are resident. Strictly ≥ the fixed
+        ///   policy. Falls back to the floor if `hipMemGetInfo` fails.
         /// - **fixed** (`margin_bytes == 0`): recycle while under `cap_bytes`.
         /// Untracked blocks are always really freed.
         pub fn free(&self, ptr: *mut c_void) {
@@ -395,17 +430,15 @@ pub(crate) mod runtime {
                 unsafe { (self.free)(ptr) };
                 return;
             };
-            let recycle = if pool.margin_bytes > 0 {
-                // Live query each time: a real free RAISES free VRAM, so a stale sample
-                // would make the pool over-free and thrash (the self-balance needs the
-                // current value). Cheap enough — `hipMemGetInfo` is a userspace query.
-                match self.mem_info() {
-                    Some((free, _total)) => free >= pool.margin_bytes,
-                    None => pool.cached_bytes + bytes <= pool.cap_bytes,
-                }
-            } else {
-                pool.cached_bytes + bytes <= pool.cap_bytes
-            };
+            // Always recycle up to the floor; this also avoids a `hipMemGetInfo` query on
+            // the common under-floor path.
+            let under_floor = pool.cached_bytes + bytes <= pool.cap_bytes;
+            let recycle = under_floor
+                || (pool.margin_bytes > 0
+                    // Live query each time: a real free RAISES free VRAM, so a stale sample
+                    // would make the pool over-free and thrash (the self-balance needs the
+                    // current value). Cheap enough — `hipMemGetInfo` is a userspace query.
+                    && matches!(self.mem_info(), Some((free, _)) if free >= pool.margin_bytes));
             if recycle {
                 pool.cached_bytes += bytes;
                 pool.free.entry(bytes).or_default().push(key);
@@ -458,6 +491,53 @@ pub(crate) mod runtime {
                 s.ml_bytes = ml_bytes;
             }
             Ok((s.acc as *mut f32, s.ml as *mut f32))
+        }
+
+        /// Phase 46d-2 graph working-set pinning. Begin recording every `malloc` (ptr,bytes)
+        /// for the upcoming capture window. Idempotent-ish: overwrites any prior recording.
+        pub fn pool_capture_begin(&self) {
+            self.pool.lock().unwrap().capture_track = Some(Vec::new());
+        }
+
+        /// End recording and return the `(ptr, bytes)` touched during the capture window.
+        pub fn pool_capture_end(&self) -> Vec<(usize, usize)> {
+            self.pool.lock().unwrap().capture_track.take().unwrap_or_default()
+        }
+
+        /// Pin a captured graph's working set: for each touched `(ptr, bytes)` that is
+        /// currently sitting in the free-list (i.e. an intermediate the closure allocated and
+        /// then freed), remove it so no later `malloc` can hand it out for the graph's
+        /// lifetime. Touched blocks that are NOT in the free-list are still live — owned by a
+        /// returned `Tensor` (the result buffer) — and are left alone. Returns the pinned set
+        /// to hand back to the pool on graph drop. Duplicates (a block reused several times
+        /// within the capture) are pinned once.
+        pub fn pool_pin(&self, touched: &[(usize, usize)]) -> Vec<(usize, usize)> {
+            let mut pool = self.pool.lock().unwrap();
+            let mut pinned = Vec::new();
+            let mut seen = std::collections::HashSet::new();
+            for &(ptr, bytes) in touched {
+                if !seen.insert(ptr) {
+                    continue;
+                }
+                // Remove this ptr from the free-list bucket for its size, if present.
+                if let Some(list) = pool.free.get_mut(&bytes) {
+                    if let Some(idx) = list.iter().position(|&p| p == ptr) {
+                        list.swap_remove(idx);
+                        pool.cached_bytes = pool.cached_bytes.saturating_sub(bytes);
+                        pool.live.insert(ptr, bytes); // hold as live for the graph's lifetime
+                        pinned.push((ptr, bytes));
+                    }
+                }
+            }
+            pinned
+        }
+
+        /// Return a dropped graph's pinned working set to the pool (recycled under the normal
+        /// cap policy, else really freed). Mirrors [`pool_pin`](Self::pool_pin).
+        pub fn pool_unpin(&self, pinned: &[(usize, usize)]) {
+            for &(ptr, _bytes) in pinned {
+                self.free(ptr as *mut c_void);
+            }
         }
 
         pub fn memcpy(
@@ -718,6 +798,14 @@ pub(crate) mod runtime {
     type CreateHandle = unsafe extern "C" fn(*mut *mut c_void) -> c_int;
     // rocblas_set_stream(handle, stream) — Phase 46c: route GEMMs onto the capture stream.
     type RocblasSetStream = unsafe extern "C" fn(*mut c_void, *mut c_void) -> c_int;
+    // rocblas_set_workspace(handle, addr, size) — Phase 46c: hand rocBLAS a fixed,
+    // pre-allocated device workspace so it does NOT hipMalloc/hipFree per GEMM call. In
+    // its default "automatic" device-memory mode rocBLAS allocates workspace on demand,
+    // and a hipMalloc during HIP-graph capture invalidates the capture (the diagnosed
+    // root cause of the decode-forward capture failure — our pool showed 0 misses, so the
+    // alloc was rocBLAS-internal). A user-owned workspace removes it. Reverts to automatic
+    // if `addr` is null / `size` is 0.
+    type RocblasSetWorkspace = unsafe extern "C" fn(*mut c_void, *mut c_void, usize) -> c_int;
     #[allow(clippy::type_complexity)]
     type SgemmStridedBatched = unsafe extern "C" fn(
         *mut c_void, // handle
@@ -825,6 +913,9 @@ pub(crate) mod runtime {
         hgemm_strided_batched: HgemmStridedBatched,
         gemm_strided_batched_ex: GemmStridedBatchedEx,
         set_stream: RocblasSetStream,
+        // Pre-allocated user workspace (raw device ptr; kept for the process lifetime so
+        // rocBLAS never allocates per call — see `RocblasSetWorkspace`). 0 if set failed.
+        workspace: usize,
     }
     unsafe impl Send for Rocblas {}
     unsafe impl Sync for Rocblas {}
@@ -853,11 +944,36 @@ pub(crate) mod runtime {
                 let set_stream: RocblasSetStream = *lib
                     .get(b"rocblas_set_stream\0")
                     .map_err(|e| format!("missing rocblas_set_stream: {e}"))?;
+                let set_workspace: RocblasSetWorkspace = *lib
+                    .get(b"rocblas_set_workspace\0")
+                    .map_err(|e| format!("missing rocblas_set_workspace: {e}"))?;
                 let mut handle: *mut c_void = std::ptr::null_mut();
                 let rc = create(&mut handle);
                 if rc != 0 || handle.is_null() {
                     return Err(format!("rocblas_create_handle failed (rc={rc})"));
                 }
+                // Hand rocBLAS a fixed pre-allocated workspace so it never hipMallocs per
+                // GEMM (the cause of HIP-graph capture aborts; Phase 46c). 64 MB easily
+                // covers the decode/prefill strided-batched GEMMs (tiny: attention only).
+                // Allocated via the caching pool (tracked live, never freed → permanent).
+                const WORKSPACE_BYTES: usize = 64 * 1024 * 1024;
+                let workspace = match hip() {
+                    Ok(h) => match h.malloc(WORKSPACE_BYTES) {
+                        Ok(p) => {
+                            let rc = (set_workspace)(handle, p, WORKSPACE_BYTES);
+                            if rc != 0 {
+                                // Non-fatal: fall back to automatic mode (capture will fail,
+                                // but normal execution still works).
+                                h.free(p);
+                                0
+                            } else {
+                                p as usize
+                            }
+                        }
+                        Err(_) => 0,
+                    },
+                    Err(_) => 0,
+                };
                 Ok(Rocblas {
                     _lib: lib,
                     handle,
@@ -865,6 +981,7 @@ pub(crate) mod runtime {
                     hgemm_strided_batched: hgemm,
                     gemm_strided_batched_ex: gemm_ex,
                     set_stream,
+                    workspace,
                 })
             }
         }
@@ -1173,6 +1290,9 @@ pub(crate) mod runtime {
     ) -> c_int;
     type UcopyF32 = unsafe extern "C" fn(*const f32, *mut f32, usize, usize, I64x8, I64x8) -> c_int;
     type UcopyF16 = unsafe extern "C" fn(*const u16, *mut u16, usize, usize, I64x8, I64x8) -> c_int;
+    // Phase 46d-2: device-indexed KV scatter — src[n_kv,hd] → kbuf[n_kv,kv_ctx,hd] at *d_pos.
+    type KvScatterF16 =
+        unsafe extern "C" fn(*const u16, *mut u16, *const u32, usize, usize, usize) -> c_int;
     // Phase 45f: strided elementwise compare -> u8 (powers `mask.eq(0)` in prefill).
     #[allow(clippy::type_complexity)]
     type CmpF32 = unsafe extern "C" fn(
@@ -1252,6 +1372,7 @@ pub(crate) mod runtime {
         where_cond_u32_f32: WhereCondU32F32,
         ucopy_f32: UcopyF32,
         ucopy_f16: UcopyF16,
+        kv_scatter_f16: KvScatterF16,
         cmp_f32: CmpF32,
         cmp_u32: CmpU32,
         binary_strided_f32: BinaryStridedF32,
@@ -1327,6 +1448,9 @@ pub(crate) mod runtime {
                 let ucopy_f16: UcopyF16 = *lib
                     .get(b"akh_ucopy_f16\0")
                     .map_err(|e| format!("missing akh_ucopy_f16: {e}"))?;
+                let kv_scatter_f16: KvScatterF16 = *lib
+                    .get(b"akh_kv_scatter_f16\0")
+                    .map_err(|e| format!("missing akh_kv_scatter_f16: {e}"))?;
                 let cmp_f32: CmpF32 = *lib
                     .get(b"akh_cmp_f32\0")
                     .map_err(|e| format!("missing akh_cmp_f32: {e}"))?;
@@ -1371,6 +1495,7 @@ pub(crate) mod runtime {
                     where_cond_u32_f32,
                     ucopy_f32,
                     ucopy_f16,
+                    kv_scatter_f16,
                     cmp_f32,
                     cmp_u32,
                     binary_strided_f32,
@@ -1700,6 +1825,25 @@ pub(crate) mod runtime {
             Ok(())
         }
 
+        /// Phase 46d-2: device-indexed KV scatter — write `src` (`[n_kv, head_dim]`) into the
+        /// static cache `kbuf` (`[n_kv, kv_ctx, head_dim]`) at the column `*d_pos` (read on
+        /// the device). 2-byte (f16) elements. See `kv_scatter_f16_kernel`.
+        pub fn kv_scatter_f16(
+            &self,
+            src: *const u16,
+            kbuf: *mut u16,
+            d_pos: *const u32,
+            n_kv: usize,
+            head_dim: usize,
+            kv_ctx: usize,
+        ) -> std::result::Result<(), String> {
+            let rc = unsafe { (self.kv_scatter_f16)(src, kbuf, d_pos, n_kv, head_dim, kv_ctx) };
+            if rc != 0 {
+                return Err(format!("akh_kv_scatter_f16 failed (rc={rc})"));
+            }
+            Ok(())
+        }
+
         /// Strided elementwise compare -> u8. `dims`/`a_str`/`b_str` are DEVICE
         /// arrays of length `rank`; `a`/`b` already advanced to start offsets;
         /// `out` is a contiguous u8 buffer of `n` elements. op: candle `CmpOp`
@@ -1917,6 +2061,175 @@ pub fn reset_malloc_counts() {
     runtime::MALLOC_MISS_NANOS.store(0, Relaxed);
 }
 
+/// Block until all work on the default (null) stream has completed
+/// (`hipDeviceSynchronize`). Accessible as `candle_core::cuda::device_synchronize`. The
+/// Phase 46c graph probe uses it to drain eager forwards per iteration for a fair
+/// per-iteration timing against `HipGraph::replay` (which drains its capture stream).
+pub fn device_synchronize() -> Result<()> {
+    hip()?.synchronize().map_err(Error::Msg)
+}
+
+/// Run `f` with all device work issued on a private non-default stream (NO graph
+/// capture), drain the device, and return f's result. Phase 46c diagnostic: a captured
+/// graph that replays differently from eager means an op did not get recorded onto the
+/// capture stream. This isolates *why* — if the private-stream result matches the
+/// default-stream result, every op honors the launch stream (so the fault is in the graph
+/// machinery / allocator-during-capture); if it differs, some op ignored the stream and
+/// raced. Accessible as `candle_core::cuda::run_on_private_stream`.
+pub fn run_on_private_stream<R, F: FnOnce() -> Result<R>>(f: F) -> Result<R> {
+    let h = hip()?;
+    let stream = h
+        .stream_create()
+        .ok_or_else(|| Error::Msg("hipStreamCreateWithFlags failed (private stream)".into()))?;
+    struct StreamGuard;
+    impl Drop for StreamGuard {
+        fn drop(&mut self) {
+            runtime::set_current_stream(std::ptr::null_mut());
+        }
+    }
+    runtime::set_current_stream(stream);
+    let guard = StreamGuard;
+    let r = f();
+    // Drain the whole device (not just the stream) so any op that ignored the launch
+    // stream — running on the null stream — also completes before we read the result.
+    let _ = h.synchronize();
+    drop(guard);
+    h.stream_destroy(stream);
+    r
+}
+
+/// A captured, replayable HIP graph (Phase 46c). [`capture`](HipGraph::capture) records
+/// the device work a closure issues into a `hipGraph`, instantiates it, and returns the
+/// closure's result alongside the executable graph; [`replay`](HipGraph::replay) re-runs
+/// that recorded work in a SINGLE host dispatch (`hipGraphLaunch`). This is the lever for
+/// dispatch-bound decode, where the per-token kernel storm otherwise host-enqueue-gaps the
+/// GPU (the decode bottleneck is launch latency, not compute). Accessible as
+/// `candle_core::cuda::HipGraph` (the HIP backend fills the cuda slot).
+///
+/// **Capture contract** (enforced by HIP, surfaced as an `Err` from `capture`): the
+/// closure must issue NO host-synchronizing op — no `hipMalloc` (a caching-pool miss), no
+/// synchronous `hipMemcpy`, no device sync — or the capture aborts. Pre-warm by running
+/// the same closure eagerly once so the pool satisfies every allocation from its free-list
+/// (repeated same-size alloc/free returns the SAME block — LIFO), and keep per-token host
+/// work (the new token's embedding lookup, logits readback) outside the captured region.
+/// A replay reads from / writes to the SAME device buffers the captured run used (stable
+/// pool addresses), so updating an input buffer in place between replays flows through —
+/// the per-token update model proven by the `hip_graph_capture_replay_*` tests.
+pub struct HipGraph {
+    stream: *mut c_void,
+    graph: *mut c_void,
+    exec: *mut c_void,
+    /// Phase 46d-2: the captured forward's intermediate buffers, pinned out of the pool
+    /// free-list for this graph's lifetime so the decode loop's own inter-replay allocations
+    /// cannot reuse (and stomp) them. Returned to the pool on [`Drop`]. The result buffer is
+    /// NOT here — it stays live, owned by the `Tensor` `capture` returned alongside the graph.
+    pinned: Vec<(usize, usize)>,
+}
+
+// Raw HIP handles; the captured graph is only ever launched from the single synchronous
+// compute thread (same contract as the rest of this backend).
+unsafe impl Send for HipGraph {}
+unsafe impl Sync for HipGraph {}
+
+impl HipGraph {
+    /// Capture the device work issued by `f` into a replayable graph, returning
+    /// `(graph, f's result)`. The result's storage is allocated during capture but only
+    /// *computed* on [`replay`](HipGraph::replay). See the type docs for the capture
+    /// contract (pre-warm the pool; no host-synchronizing ops inside `f`).
+    pub fn capture<R, F: FnOnce() -> Result<R>>(f: F) -> Result<(Self, R)> {
+        let h = hip()?;
+        let stream = h
+            .stream_create()
+            .ok_or_else(|| Error::Msg("hipStreamCreateWithFlags failed (graph capture)".into()))?;
+
+        // Route every kernel / rocBLAS / D2D-memcpy launch onto the capture stream, and
+        // restore the default (null) stream no matter how we leave — a guard, so a closure
+        // panic-free error path or an aborted capture cannot strand the process on the
+        // capture stream (which would silently mis-route all later eager ops).
+        struct StreamGuard;
+        impl Drop for StreamGuard {
+            fn drop(&mut self) {
+                runtime::set_current_stream(std::ptr::null_mut());
+                // Defensively stop pool capture-tracking on every exit (incl. a closure
+                // panic / early error) so a stray `capture_track` can't keep appending to
+                // every later `malloc`. The success path already took it; this is a no-op then.
+                if let Ok(h) = runtime::hip() {
+                    let _ = h.pool_capture_end();
+                }
+            }
+        }
+        runtime::set_current_stream(stream);
+        let guard = StreamGuard;
+
+        if let Err(e) = h.stream_begin_capture(stream) {
+            drop(guard);
+            h.stream_destroy(stream);
+            return Err(Error::Msg(e));
+        }
+        // Record every device allocation the closure makes (Phase 46d-2 working-set pinning).
+        h.pool_capture_begin();
+        // Record the closure's work onto the stream. Even if it errors we must still end
+        // the capture to return the stream to a clean (non-capturing) state.
+        let r = f();
+        let cap = h.stream_end_capture(stream);
+        // Stop tracking and take the touched set BEFORE any later allocation could perturb
+        // the free-list. The closure's intermediates are already freed (their `Tensor`s
+        // dropped as the closure returned), so they sit in the free-list ready to be pinned.
+        let touched = h.pool_capture_end();
+        drop(guard); // stream restored to null here
+
+        let r = match r {
+            Ok(r) => r,
+            Err(e) => {
+                if let Ok(g) = cap {
+                    h.graph_destroy(g);
+                }
+                h.stream_destroy(stream);
+                return Err(e);
+            }
+        };
+        let graph = cap.map_err(|e| {
+            h.stream_destroy(stream);
+            Error::Msg(format!(
+                "HIP graph capture aborted ({e}): the closure issued a host-synchronizing op \
+                 (a hipMalloc on a caching-pool miss, or a synchronous hipMemcpy). Pre-warm the \
+                 pool by running it once eagerly and keep host work outside the captured region."
+            ))
+        })?;
+        let exec = match h.graph_instantiate(graph) {
+            Ok(e) => e,
+            Err(e) => {
+                h.graph_destroy(graph);
+                h.stream_destroy(stream);
+                return Err(Error::Msg(e));
+            }
+        };
+        // Pin the captured forward's intermediate working set out of the pool free-list for
+        // this graph's lifetime (the result buffer in `r` stays live and is skipped).
+        let pinned = h.pool_pin(&touched);
+        Ok((HipGraph { stream, graph, exec, pinned }, r))
+    }
+
+    /// Replay the captured work in one host dispatch and block until it completes.
+    pub fn replay(&self) -> Result<()> {
+        let h = hip()?;
+        h.graph_launch(self.exec, self.stream).map_err(Error::Msg)?;
+        h.stream_synchronize(self.stream).map_err(Error::Msg)
+    }
+}
+
+impl Drop for HipGraph {
+    fn drop(&mut self) {
+        if let Ok(h) = runtime::hip() {
+            h.graph_exec_destroy(self.exec);
+            h.graph_destroy(self.graph);
+            h.stream_destroy(self.stream);
+            // Return the pinned working set to the pool now the graph can no longer replay.
+            h.pool_unpin(&self.pinned);
+        }
+    }
+}
+
 /// Fused RMSNorm as a single HIP kernel (Phase 45h): `x / sqrt(mean(x²)+eps) · w`,
 /// matching `candle_nn::ops::rms_norm_slow` but in one launch instead of ~7. Profiling
 /// showed rms_norm was the single biggest source of decode kernel launches
@@ -1924,6 +2237,153 @@ pub fn reset_malloc_counts() {
 /// HIP device. Accessible as `candle_core::cuda::rms_norm_fused`.
 pub fn rms_norm_fused(x: &Tensor, w: &Tensor, eps: f32) -> Result<Tensor> {
     x.apply_op2_no_bwd(w, &FusedRmsNorm { eps })
+}
+
+/// Phase 46d-2: in-place device-indexed KV scatter. Writes `src` into `kbuf` at the column
+/// read from `*d_pos` on the device — so a captured HIP graph records the write ONCE and
+/// replays it as the position advances (no host offset baked in). See [`kv_scatter_at`].
+struct KvScatter {
+    d_pos: *const u32,
+    n_kv: usize,
+    head_dim: usize,
+    kv_ctx: usize,
+}
+
+impl crate::InplaceOp2 for KvScatter {
+    fn name(&self) -> &'static str {
+        "kv-scatter"
+    }
+
+    fn cpu_fwd(&self, _: &mut CpuStorage, _: &Layout, _: &CpuStorage, _: &Layout) -> Result<()> {
+        Err(Error::Msg(
+            "kv-scatter is GPU-only (the static KV cache lives on the HIP device)".to_string(),
+        ))
+    }
+
+    fn cuda_fwd(
+        &self,
+        kbuf: &mut HipStorage,
+        l1: &Layout,
+        src: &HipStorage,
+        l2: &Layout,
+    ) -> Result<()> {
+        if kbuf.dtype != DType::F16 || src.dtype != DType::F16 {
+            return Err(Error::Msg(format!(
+                "kv-scatter: f16 only, got kbuf={:?} src={:?}",
+                kbuf.dtype, src.dtype
+            )));
+        }
+        if !l2.is_contiguous() {
+            return Err(Error::Msg("kv-scatter: contiguous src only".to_string()));
+        }
+        let k = runtime::kernels().map_err(Error::Msg)?;
+        let kbuf_ptr = unsafe { (kbuf.ptr as *mut u16).add(l1.start_offset()) };
+        let src_ptr = unsafe { (src.ptr as *const u16).add(l2.start_offset()) };
+        k.kv_scatter_f16(
+            src_ptr,
+            kbuf_ptr,
+            self.d_pos,
+            self.n_kv,
+            self.head_dim,
+            self.kv_ctx,
+        )
+        .map_err(Error::Msg)
+    }
+}
+
+/// Scatter the new token's `src` (`[b, n_kv, 1, head_dim]` f16) into the static KV cache
+/// `kbuf` (`[b, n_kv, kv_ctx, head_dim]` f16) at the device-side column `*d_pos`, in place
+/// on `kbuf`. The device-indexed write is the moving-KV-write half of a real per-token
+/// HIP-graph decode (Phase 46d-2): capture the forward once per block, then advance `d_pos`
+/// (a 4-byte H2D outside the captured region) between replays. `b` is expected to be 1 on
+/// decode. Accessible as `candle_core::cuda::kv_scatter_at`.
+pub fn kv_scatter_at(kbuf: &Tensor, src: &Tensor, d_pos: *const u32) -> Result<()> {
+    let (_b, n_kv, kv_ctx, head_dim) = kbuf.dims4()?;
+    kbuf.inplace_op2(
+        src,
+        &KvScatter {
+            d_pos,
+            n_kv,
+            head_dim,
+            kv_ctx,
+        },
+    )
+}
+
+/// The raw device pointer backing a `u32` HIP tensor (incl. its layout start offset). Lets
+/// the decode driver use one in-place-updated `d_pos` tensor both as the device index for
+/// rope/mask (candle ops) AND as the raw `*const u32` for [`kv_scatter_at`] (Phase 46d-2).
+/// Errors if `t` is not a contiguous-enough U32 HIP tensor.
+pub fn u32_device_ptr(t: &Tensor) -> Result<*const u32> {
+    if t.dtype() != DType::U32 {
+        return Err(Error::Msg(format!(
+            "u32_device_ptr: expected U32 tensor, got {:?}",
+            t.dtype()
+        )));
+    }
+    let (storage, layout) = t.storage_and_layout();
+    match &*storage {
+        crate::Storage::Cuda(s) => {
+            Ok(unsafe { (s.device_ptr() as *const u32).add(layout.start_offset()) })
+        }
+        _ => Err(Error::Msg("u32_device_ptr: tensor is not on the HIP device".into())),
+    }
+}
+
+/// A persistent single-`u32` device buffer for the decode position, used as the device-side
+/// column index by [`kv_scatter_at`] and the decode mask (Phase 46d-2). Its address is
+/// STABLE for the buffer's lifetime, so a captured graph binds to it once and reads the
+/// updated value on each replay; [`set`](DevicePos::set) writes the new position via a
+/// 4-byte H2D (do this OUTSIDE any captured region).
+pub struct DevicePos {
+    ptr: *mut u32,
+}
+
+// Single-compute-thread backend (same contract as HipGraph).
+unsafe impl Send for DevicePos {}
+unsafe impl Sync for DevicePos {}
+
+impl DevicePos {
+    /// Allocate the device position buffer (initialized to 0).
+    pub fn new() -> Result<Self> {
+        let h = hip()?;
+        let ptr = h.malloc(std::mem::size_of::<u32>()).map_err(Error::Msg)? as *mut u32;
+        let zero: u32 = 0;
+        h.memcpy(
+            ptr as *mut c_void,
+            &zero as *const u32 as *const c_void,
+            std::mem::size_of::<u32>(),
+            runtime::MEMCPY_H2D,
+        )
+        .map_err(Error::Msg)?;
+        Ok(Self { ptr })
+    }
+
+    /// The raw device pointer to pass to [`kv_scatter_at`] / mask kernels.
+    pub fn ptr(&self) -> *const u32 {
+        self.ptr
+    }
+
+    /// Write a new position (4-byte H2D). Call OUTSIDE a captured region — the captured
+    /// graph reads the value on the device at replay time.
+    pub fn set(&self, pos: u32) -> Result<()> {
+        let h = hip()?;
+        h.memcpy(
+            self.ptr as *mut c_void,
+            &pos as *const u32 as *const c_void,
+            std::mem::size_of::<u32>(),
+            runtime::MEMCPY_H2D,
+        )
+        .map_err(Error::Msg)
+    }
+}
+
+impl Drop for DevicePos {
+    fn drop(&mut self) {
+        if let Ok(h) = runtime::hip() {
+            h.free(self.ptr as *mut c_void);
+        }
+    }
 }
 
 struct FusedRmsNorm {
@@ -2285,15 +2745,21 @@ pub(crate) fn event_time<R>(
     counter: &'static std::sync::atomic::AtomicU64,
     f: impl FnOnce() -> R,
 ) -> R {
-    if let (Ok(h), Some((a, b))) = (hip(), event_prof_acquire()) {
-        h.event_record(a.0);
-        let r = f();
-        h.event_record(b.0);
-        event_prof_register(counter, a, b);
-        r
-    } else {
-        f()
+    // hipEventRecord targets the null stream. During a HIP-graph capture (Phase 46c) the
+    // kernels run on a non-null capture stream, so recording an event on the null stream
+    // is a cross-stream op that invalidates the capture (Global mode) — the first such
+    // op (rms_norm/reduce/copy, which call this unconditionally) aborted decode-forward
+    // capture. While a launch stream is set, run the op untimed.
+    if runtime::current_stream().is_null() {
+        if let (Ok(h), Some((a, b))) = (hip(), event_prof_acquire()) {
+            h.event_record(a.0);
+            let r = f();
+            h.event_record(b.0);
+            event_prof_register(counter, a, b);
+            return r;
+        }
     }
+    f()
 }
 
 /// `(matmul, eltwise, copy, norm, reduce)` intrinsic GPU ns since process start.
@@ -3877,6 +4343,382 @@ mod op_tests {
         }
         h.graph_exec_destroy(exec);
         h.stream_destroy(stream);
+        Ok(())
+    }
+
+    /// Phase 46c: the public `HipGraph` wrapper captures a candle computation and replays
+    /// it — the same capture/replay the raw-runtime spikes prove, but through the API the
+    /// model decode path uses. The eager warm-up frees the matmul output back to the pool
+    /// so the captured run reuses the same block (no hipMalloc → capture is not aborted).
+    #[test]
+    fn hip_graph_struct_capture_replay() -> Result<()> {
+        let Some(dev) = gpu() else {
+            return Ok(());
+        };
+        let n = 96usize;
+        let adata: Vec<f32> = (0..n * n).map(|i| ((i as f32) * 0.007).sin()).collect();
+        let bdata: Vec<f32> = (0..n * n).map(|i| ((i as f32) * 0.011).cos()).collect();
+        let a = Tensor::from_vec(adata, (n, n), &dev)?;
+        let b = Tensor::from_vec(bdata, (n, n), &dev)?;
+        // Eager reference; also warms rocBLAS + the pool sizes.
+        let want = a.matmul(&b)?.to_vec2::<f32>()?;
+        // Free the warm-up output back to the pool so the captured matmul reuses that exact
+        // block (LIFO) instead of a fresh hipMalloc that would abort capture.
+        drop(a.matmul(&b)?);
+
+        let (graph, c) = super::HipGraph::capture(|| a.matmul(&b))?;
+        // c's storage was allocated during capture but only *computed* on replay.
+        graph.replay()?;
+        let got = c.to_vec2::<f32>()?;
+        for i in 0..n {
+            for j in 0..n {
+                assert!(
+                    (got[i][j] - want[i][j]).abs() < 1e-2,
+                    "HipGraph replay [{i},{j}]: {} != {}",
+                    got[i][j],
+                    want[i][j]
+                );
+            }
+        }
+        // A second replay recomputes the same result (idempotent for fixed inputs).
+        graph.replay()?;
+        let got2 = c.to_vec2::<f32>()?;
+        assert!(
+            (got2[0][0] - want[0][0]).abs() < 1e-2,
+            "HipGraph 2nd replay diverged"
+        );
+        Ok(())
+    }
+
+    /// Phase 46c: capture/replay a full decode ATTENTION block over a persistent f16 KV
+    /// buffer — slice_set (copy2d write), strided f16 gather (`contiguous` on a narrowed
+    /// f16 view), f16→f32 cast, repeat_kv (expand+reshape, stride-0), transpose + batched
+    /// rocBLAS matmul, manual softmax (reduce/exp/div), matmul. The op cluster the simpler
+    /// tests omit. **Regression guard:** this caught the f16↔f32 cast launching on stream 0
+    /// (`AKH_CAST_LAUNCH`) instead of `g_akh_stream` — un-captured during graph capture, so
+    /// the replayed attention read stale K/V (the full-forward decode replay mismatch).
+    #[test]
+    fn hip_graph_capture_replay_attn_block() -> Result<()> {
+        use crate::D;
+        let Some(dev) = gpu() else {
+            return Ok(());
+        };
+        let (nkv, rep, hd, ctx, len) = (2usize, 2usize, 64usize, 8usize, 6usize);
+        let nh = nkv * rep;
+        let mk = |seed: f32| -> Result<Tensor> {
+            let v: Vec<half::f16> = (0..nkv * ctx * hd)
+                .map(|i| half::f16::from_f32(((i as f32) * seed).sin() * 0.3))
+                .collect();
+            Tensor::from_vec(v, (1, nkv, ctx, hd), &dev)
+        };
+        let kbuf = mk(0.013)?;
+        let vbuf = mk(0.017)?;
+        let q = Tensor::from_vec(
+            (0..nh * hd).map(|i| ((i as f32) * 0.02).cos()).collect::<Vec<f32>>(),
+            (1, nh, 1, hd),
+            &dev,
+        )?;
+        let newk = Tensor::from_vec(
+            (0..nkv * hd).map(|i| ((i as f32) * 0.03).sin() * 0.2).collect::<Vec<f32>>(),
+            (1, nkv, 1, hd),
+            &dev,
+        )?;
+        let f = || -> Result<Tensor> {
+            kbuf.slice_set(&newk.to_dtype(DType::F16)?, 2, len - 1)?; // copy2d write
+            let k = kbuf.narrow(2, 0, len)?.contiguous()?.to_dtype(DType::F32)?;
+            let v = vbuf.narrow(2, 0, len)?.contiguous()?.to_dtype(DType::F32)?;
+            let k = k.unsqueeze(2)?.expand((1, nkv, rep, len, hd))?.reshape((1, nh, len, hd))?;
+            let v = v.unsqueeze(2)?.expand((1, nkv, rep, len, hd))?.reshape((1, nh, len, hd))?;
+            let scores = (q.matmul(&k.transpose(2, 3)?)? * 0.125)?;
+            let m = scores.max_keepdim(D::Minus1)?;
+            let e = scores.broadcast_sub(&m)?.exp()?;
+            let s = e.sum_keepdim(D::Minus1)?;
+            let sm = e.broadcast_div(&s)?;
+            sm.matmul(&v)
+        };
+        let want = f()?.flatten_all()?.to_vec1::<f32>()?;
+        drop(f()?); // warm + free
+        let (graph, out) = super::HipGraph::capture(f)?;
+        graph.replay()?;
+        let got = out.flatten_all()?.to_vec1::<f32>()?;
+        close(&got, &want, 1e-2, "attn block graph replay");
+        Ok(())
+    }
+
+    /// Phase 46c: capture/replay a long CHAIN of ops that allocate + free transients
+    /// (heavy caching-pool reuse, like the decode forward's ~2250 ops). Single ops capture
+    /// fine; this stresses whether freed-then-reused blocks during capture stay correct on
+    /// replay — the suspected source of the full-forward replay mismatch.
+    #[test]
+    fn hip_graph_capture_replay_chain() -> Result<()> {
+        let Some(dev) = gpu() else {
+            return Ok(());
+        };
+        let n = 256usize;
+        let w = Tensor::from_vec(
+            (0..n).map(|i| 1.0 + 0.001 * (i as f32)).collect::<Vec<f32>>(),
+            (n,),
+            &dev,
+        )?;
+        let x0 = Tensor::from_vec(
+            (0..n).map(|i| ((i as f32) * 0.01).sin()).collect::<Vec<f32>>(),
+            (1, n),
+            &dev,
+        )?;
+        // Each step allocates several transients then frees them (the prior ones drop),
+        // forcing the pool to recycle blocks — mirroring residual+norm+elementwise layers.
+        let chain = || -> Result<Tensor> {
+            let mut x = x0.clone();
+            for _ in 0..24 {
+                let a = super::rms_norm_fused(&x, &w, 1e-6)?;
+                let b = a.affine(1.5, 0.25)?;
+                let c = b.exp()?;
+                let d = (&c * 0.5)?;
+                x = (&x + &d)?;
+            }
+            Ok(x)
+        };
+        let want = chain()?.flatten_all()?.to_vec1::<f32>()?;
+        drop(chain()?); // warm the pool + free every transient back to the free-list
+        let (graph, out) = super::HipGraph::capture(chain)?;
+        graph.replay()?;
+        let got = out.flatten_all()?.to_vec1::<f32>()?;
+        close(&got, &want, 1e-2, "chain graph replay");
+        Ok(())
+    }
+
+    /// Phase 46d-2: prove HipGraph working-set PINNING protects a replayed graph from the
+    /// decode loop's own inter-replay allocations. After capture, the chain's intermediate
+    /// buffers sit in the pool free-list; here we then allocate many live "victim" blocks of
+    /// the same size and KEEP them live across replays. Without pinning a victim would draw a
+    /// graph-intermediate address and the replay would stomp it (and/or read the victim's
+    /// bytes); with pinning those addresses are out of circulation, so both the graph output
+    /// AND every victim's known pattern survive. This is the make-or-break for a real
+    /// per-token decode graph (where embed/argmax/sample allocate between replays).
+    #[test]
+    fn hip_graph_pinning_survives_interleaved_allocs() -> Result<()> {
+        use crate::Error;
+        let Some(dev) = gpu() else {
+            return Ok(());
+        };
+        let h = super::runtime::hip().map_err(Error::Msg)?;
+        let n = 256usize;
+        let isize_bytes = n * 4; // (1,n) f32 intermediate
+        let w = Tensor::from_vec(
+            (0..n).map(|i| 1.0 + 0.001 * (i as f32)).collect::<Vec<f32>>(),
+            (n,),
+            &dev,
+        )?;
+        let x0 = Tensor::from_vec(
+            (0..n).map(|i| ((i as f32) * 0.01).sin()).collect::<Vec<f32>>(),
+            (1, n),
+            &dev,
+        )?;
+        let chain = || -> Result<Tensor> {
+            let mut x = x0.clone();
+            for _ in 0..12 {
+                let a = super::rms_norm_fused(&x, &w, 1e-6)?;
+                let b = a.affine(1.5, 0.25)?;
+                let c = b.exp()?;
+                let d = (&c * 0.5)?;
+                x = (&x + &d)?;
+            }
+            Ok(x)
+        };
+        let want = chain()?.flatten_all()?.to_vec1::<f32>()?;
+        drop(chain()?); // warm + free transients to the free-list
+        let (graph, out) = super::HipGraph::capture(chain)?; // pins its working set
+
+        // Allocate many LIVE victims of the intermediate size and stamp each with a distinct
+        // byte pattern. With pinning these cannot land on the graph's intermediate addresses.
+        let mut victims: Vec<(*mut std::ffi::c_void, u8)> = Vec::new();
+        for k in 0..32 {
+            let p = h.malloc(isize_bytes).map_err(Error::Msg)?;
+            let pat = (0x11u8).wrapping_add(k as u8);
+            h.memset(p, pat as i32, isize_bytes).map_err(Error::Msg)?;
+            victims.push((p, pat));
+        }
+
+        // Replay several times with the victims held live throughout.
+        for _ in 0..4 {
+            graph.replay()?;
+            let got = out.flatten_all()?.to_vec1::<f32>()?;
+            close(&got, &want, 1e-2, "pinned graph replay under live victim allocs");
+        }
+
+        // Every victim must still hold its stamped pattern (replay never wrote into them).
+        for (p, pat) in &victims {
+            let mut host = vec![0u8; isize_bytes];
+            h.memcpy(
+                host.as_mut_ptr() as *mut std::ffi::c_void,
+                *p,
+                isize_bytes,
+                super::runtime::MEMCPY_D2H,
+            )
+            .map_err(Error::Msg)?;
+            assert!(
+                host.iter().all(|&b| b == *pat),
+                "victim block at {:p} stomped by graph replay (pattern {:#x} corrupted) — \
+                 working-set pinning failed",
+                *p,
+                pat
+            );
+        }
+        for (p, _) in victims {
+            h.free(p);
+        }
+        Ok(())
+    }
+
+    /// Phase 46d-2: the device-indexed KV scatter must write the SAME bytes as the existing
+    /// host-offset `slice_set` for every position — the parity guarantee that lets it replace
+    /// `slice_set` on the decode path.
+    #[test]
+    fn kv_scatter_at_matches_slice_set() -> Result<()> {
+        use crate::Error;
+        let Some(dev) = gpu() else {
+            return Ok(());
+        };
+        let (b, n_kv, kv_ctx, hd) = (1usize, 4usize, 16usize, 8usize);
+        let src = Tensor::from_vec(
+            (0..n_kv * hd).map(|i| (i as f32) * 0.5 - 3.0).collect::<Vec<f32>>(),
+            (b, n_kv, 1, hd),
+            &dev,
+        )?
+        .to_dtype(DType::F16)?;
+        let h = super::runtime::hip().map_err(Error::Msg)?;
+        for &pos in &[0usize, 1, 7, 15] {
+            let kbuf = Tensor::zeros((b, n_kv, kv_ctx, hd), DType::F16, &dev)?;
+            let dpos = h.malloc(4).map_err(Error::Msg)?;
+            let p = pos as u32;
+            h.memcpy(dpos, &p as *const u32 as *const std::ffi::c_void, 4, super::runtime::MEMCPY_H2D)
+                .map_err(Error::Msg)?;
+            super::kv_scatter_at(&kbuf, &src, dpos as *const u32)?;
+            h.free(dpos);
+
+            let kref = Tensor::zeros((b, n_kv, kv_ctx, hd), DType::F16, &dev)?;
+            kref.slice_set(&src, 2, pos)?;
+
+            let got = kbuf.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+            let want = kref.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+            close(&got, &want, 1e-3, &format!("kv_scatter device-pos {pos} vs slice_set"));
+        }
+        Ok(())
+    }
+
+    /// Phase 46d-2: capture the KV scatter into a graph, then CHANGE the device position and
+    /// replay — the replay must write the column the CURRENT `*d_pos` names, not the one bound
+    /// at capture time. This is the moving-KV-write mechanism for per-token graph decode.
+    #[test]
+    fn kv_scatter_graph_replay_follows_device_pos() -> Result<()> {
+        use crate::Error;
+        let Some(dev) = gpu() else {
+            return Ok(());
+        };
+        let (b, n_kv, kv_ctx, hd) = (1usize, 2usize, 8usize, 4usize);
+        let src = Tensor::from_vec(
+            (0..n_kv * hd).map(|i| 1.0 + i as f32).collect::<Vec<f32>>(),
+            (b, n_kv, 1, hd),
+            &dev,
+        )?
+        .to_dtype(DType::F16)?;
+        let want_row = src.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?; // [n_kv*hd]
+        let kbuf = Tensor::zeros((b, n_kv, kv_ctx, hd), DType::F16, &dev)?;
+        let h = super::runtime::hip().map_err(Error::Msg)?;
+        let dpos = h.malloc(4).map_err(Error::Msg)?;
+        let set = |p: u32| -> Result<()> {
+            h.memcpy(dpos, &p as *const u32 as *const std::ffi::c_void, 4, super::runtime::MEMCPY_H2D)
+                .map_err(Error::Msg)
+        };
+
+        set(2)?;
+        super::kv_scatter_at(&kbuf, &src, dpos as *const u32)?; // warm: EXECUTES → writes col 2
+        let (graph, ()) = super::HipGraph::capture(|| {
+            super::kv_scatter_at(&kbuf, &src, dpos as *const u32) // records only (capture pos = 2)
+        })?;
+        set(6)?; // advance the device position AFTER capture
+        graph.replay()?; // must write col 6, NOT re-write col 2
+
+        // Read the whole cache; verify cols 2 (warm) and 6 (replay) hold src, others are 0.
+        let all = kbuf.to_dtype(DType::F32)?; // [b, n_kv, kv_ctx, hd]
+        for col in 0..kv_ctx {
+            let got = all.narrow(2, col, 1)?.flatten_all()?.to_vec1::<f32>()?; // [n_kv*hd]
+            let expect_src = col == 2 || col == 6;
+            for (j, &g) in got.iter().enumerate() {
+                let w = if expect_src { want_row[j] } else { 0.0 };
+                assert!(
+                    (g - w).abs() < 1e-3,
+                    "kv_scatter graph replay: col {col} elem {j} = {g}, want {w} \
+                     (replay did not follow device pos)"
+                );
+            }
+        }
+        h.free(dpos);
+        Ok(())
+    }
+
+    /// Phase 46d-2: `u32_device_ptr` must yield a pointer that drives `kv_scatter_at` to the
+    /// same result as a host-offset `slice_set` — proving one in-place-updated `d_pos` candle
+    /// tensor can serve BOTH the candle-op readers (rope/mask) and the raw-ptr scatter.
+    #[test]
+    fn u32_device_ptr_feeds_kv_scatter() -> Result<()> {
+        let Some(dev) = gpu() else {
+            return Ok(());
+        };
+        let (b, n_kv, kv_ctx, hd) = (1usize, 3usize, 12usize, 8usize);
+        let src = Tensor::from_vec(
+            (0..n_kv * hd).map(|i| (i as f32) * 0.25 + 1.0).collect::<Vec<f32>>(),
+            (b, n_kv, 1, hd),
+            &dev,
+        )?
+        .to_dtype(DType::F16)?;
+        let pos = 5usize;
+        // d_pos as a normal candle u32 tensor, updated in place (the decode-driver model).
+        let d_pos = Tensor::zeros((1,), DType::U32, &dev)?;
+        d_pos.slice_set(&Tensor::from_slice(&[pos as u32], (1,), &dev)?, 0, 0)?;
+
+        let kbuf = Tensor::zeros((b, n_kv, kv_ctx, hd), DType::F16, &dev)?;
+        super::kv_scatter_at(&kbuf, &src, super::u32_device_ptr(&d_pos)?)?;
+
+        let kref = Tensor::zeros((b, n_kv, kv_ctx, hd), DType::F16, &dev)?;
+        kref.slice_set(&src, 2, pos)?;
+
+        let got = kbuf.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+        let want = kref.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+        close(&got, &want, 1e-3, "u32_device_ptr-fed kv_scatter vs slice_set");
+        Ok(())
+    }
+
+    /// Phase 46c: capture/replay a BATCHED (3D) rocBLAS GEMM — the decode attention uses
+    /// strided-batched GEMMs, unlike the simple 2D `hip_graph_capture_replay_matmul`. If
+    /// this replays correctly, batched rocBLAS is graph-safe; if it diverges, the
+    /// strided-batched path is the source of the decode-forward replay mismatch.
+    #[test]
+    fn hip_graph_capture_replay_batched_matmul() -> Result<()> {
+        let Some(dev) = gpu() else {
+            return Ok(());
+        };
+        // Mimic an attention-scores GEMM batch: [bh, m, k] · [bh, k, n].
+        let (bh, m, kd, n) = (8usize, 1usize, 64usize, 12usize);
+        let adata: Vec<f32> = (0..bh * m * kd).map(|i| ((i as f32) * 0.01).sin()).collect();
+        let bdata: Vec<f32> = (0..bh * kd * n).map(|i| ((i as f32) * 0.013).cos()).collect();
+        let a = Tensor::from_vec(adata, (bh, m, kd), &dev)?;
+        let b = Tensor::from_vec(bdata, (bh, kd, n), &dev)?;
+        let want = a.matmul(&b)?.to_vec3::<f32>()?;
+        drop(a.matmul(&b)?); // warm rocBLAS for this shape + free the output to the pool
+
+        let (graph, c) = super::HipGraph::capture(|| a.matmul(&b))?;
+        graph.replay()?;
+        let got = c.to_vec3::<f32>()?;
+        let mut maxd = 0f32;
+        for i in 0..bh {
+            for j in 0..m {
+                for l in 0..n {
+                    maxd = maxd.max((got[i][j][l] - want[i][j][l]).abs());
+                }
+            }
+        }
+        assert!(maxd < 1e-2, "batched matmul replay max diff {maxd} (rocBLAS batched not graph-safe)");
         Ok(())
     }
 

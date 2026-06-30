@@ -214,6 +214,14 @@ pub struct AkhConfig {
     #[serde(default)]
     pub backend: ChatBacking,
 
+    /// Speculative (prompt-lookup) **greedy** decode for the Candle backing (Phase 47 / ADR 075).
+    /// gemma4 only; ~2× on echo-heavy output (agentic / RAG / structured), lossless vs plain
+    /// greedy, near-neutral otherwise. Off by default. Seeds the live `InferenceOptions` flag at
+    /// startup; toggle at runtime with the `inference_config` tool. No effect on the Ollama
+    /// backing. (The batched verify GEMV it relies on is on by default — Phase 47d.)
+    #[serde(default)]
+    pub spec_decode: bool,
+
     /// Names of related workspaces this akh federates reads across (P6).
     #[serde(default)]
     pub related_workspaces: Vec<String>,
@@ -246,6 +254,7 @@ impl Default for AkhConfig {
             system_prompt: None,
             is_main: true,
             backend: ChatBacking::default(),
+            spec_decode: false,
             related_workspaces: Vec::new(),
             path_mode: PathMode::default(),
             ollama_endpoint: OllamaEndpoint::default(),

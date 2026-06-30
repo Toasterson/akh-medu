@@ -1011,7 +1011,13 @@ impl ServerState {
         if akh_config.backend == akh_medu::akh_config::ChatBacking::Candle {
             let model_dir = self.paths.models_dir();
             match akh_medu::nlu::candle_backend::CandleBackend::try_load(&model_dir) {
-                Some(cb) => {
+                Some(mut cb) => {
+                    // Phase 47: share this akh's live inference options (Arc) with the backend and
+                    // seed speculative decode from the persisted config. The `inference_config`
+                    // tool flips the same Arc at runtime; the backend reads it each turn.
+                    let opts = agent.engine().inference_options().clone();
+                    opts.set_spec_decode(akh_config.spec_decode);
+                    cb.set_inference_options(opts);
                     let system_prompt = akh_config.system_prompt.clone().unwrap_or_else(|| {
                         "You are an akh: a precise, curious neuro-symbolic assistant. \
                          Answer grounded in your knowledge graph; call tools when useful."
@@ -1022,7 +1028,10 @@ impl ServerState {
                         system_prompt,
                     ));
                     agent.set_chat_backend(backend);
-                    tracing::info!(workspace = %name, backend = "candle", "Candle chat backing attached");
+                    tracing::info!(
+                        workspace = %name, backend = "candle", spec_decode = akh_config.spec_decode,
+                        "Candle chat backing attached"
+                    );
                 }
                 None => {
                     tracing::warn!(

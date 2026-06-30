@@ -357,6 +357,9 @@ impl Agent {
         // Trigger management.
         registry.register(Box::new(tools::TriggerManageTool));
 
+        // Runtime inference options (Phase 47: speculative decode toggle).
+        registry.register(Box::new(tools::InferenceConfigTool));
+
         // Audit log.
         registry.register(Box::new(tools::AuditLogTool));
 

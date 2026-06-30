@@ -23,6 +23,9 @@ pub mod micro_ml;
 
 pub mod llm_translator;
 pub mod candle_backend;
+/// Speculative decoding (Phase 47 / ADR 075): draft-free prompt-lookup drafter + the
+/// greedy verify/accept loop. The drafter is pure token logic (no model dependency).
+pub mod spec_decode;
 
 // Candle GPU + audio + hidden-states forks (ADRs 067/068/069). `gpu` is a pure
 // host-capability probe (no candle dep); `hip` needs the ROCm toolchain

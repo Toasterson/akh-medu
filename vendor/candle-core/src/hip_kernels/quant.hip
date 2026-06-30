@@ -319,6 +319,125 @@ __global__ void akh_gemv_q6k_f32_kernel(const unsigned char* __restrict__ W,
     if (lane == 0) out[row] = acc;
 }
 
+// ---- fused *batched* quantized GEMV — m activation rows (Phase 47d) ----------
+// The spec-decode verify forward (and short prefills) run a small *matrix* of
+// activations, m = γ+1 rows, against the SAME quantized weight. The m=1 GEMV above
+// dequantizes each weight once and uses it once; the GEMM fallback dequantizes the
+// whole weight into a 4× f32 temp and reuses it across m rows via rocBLAS. For SMALL
+// m both are wasteful: the GEMM still writes+reads the full f32 weight, amortized over
+// only ~9 rows. These kernels keep the m=1 kernel's "dequant each superblock once"
+// structure but carry **M accumulators per lane** (one per activation row), so each
+// dequantized weight is reused across all M rows *in registers* — no f32 weight temp,
+// the quantized weights are streamed exactly once. M is a template parameter so `acc[M]`
+// is a compile-time register array (fully unrolled); the C dispatcher below selects the
+// instantiation for the runtime m (caller caps m ≤ AKH_GEMV_BATCH_MAX, routing larger m
+// to the GEMM path, which amortizes the dequant well once m is large).
+//
+// Layout: X is row-major [M, in_dim], out is row-major [M, n_rows]
+//   out[r*n_rows + row] = Σ_k dequant(W[row,k]) * X[r*in_dim + k].
+#define AKH_GEMV_BATCH_MAX 16
+
+template <int M>
+__global__ void akh_gemv_batched_q4k_f32_kernel(const unsigned char* __restrict__ W,
+                                 const float* __restrict__ X, float* __restrict__ out,
+                                 unsigned long n_rows, unsigned long in_dim) {
+    int lane = threadIdx.x & (AKH_GEMV_WARP - 1);
+    int warp = threadIdx.x / AKH_GEMV_WARP;
+    unsigned long row = (unsigned long)blockIdx.x * AKH_GEMV_WARPS + warp;
+    if (row >= n_rows) return;
+    unsigned long bpr = in_dim / AKH_Q4K_QK;
+    const unsigned char* base = W + row * bpr * AKH_Q4K_BLOCK_BYTES;
+    float acc[M];
+    #pragma unroll
+    for (int r = 0; r < M; r++) acc[r] = 0.0f;
+    for (unsigned long sb = 0; sb < bpr; sb++) {
+        const unsigned char* b = base + sb * AKH_Q4K_BLOCK_BYTES;
+        float d = __half2float(*reinterpret_cast<const __half*>(b + 0));
+        float dmin = __half2float(*reinterpret_cast<const __half*>(b + 2));
+        const unsigned char* scales = b + 4;
+        const unsigned char* qs = b + 16;
+        unsigned long xbase = sb * AKH_Q4K_QK;
+        #pragma unroll
+        for (int t = 0; t < AKH_Q4K_QK / AKH_GEMV_WARP; t++) {
+            int pp = lane + AKH_GEMV_WARP * t; // 0..255
+            int iter = pp / 64;
+            int within = pp % 64;
+            int qoff = iter * 32 + (within & 31);
+            int is = 2 * iter + (within < 32 ? 0 : 1);
+            unsigned char sc, mn;
+            akh_q4k_scale_min(is, scales, &sc, &mn);
+            int nib = (within < 32) ? (qs[qoff] & 0xF) : (qs[qoff] >> 4);
+            float w = d * (float)sc * (float)nib - dmin * (float)mn; // dequant ONCE…
+            unsigned long xcol = xbase + (unsigned long)pp;
+            #pragma unroll
+            for (int r = 0; r < M; r++) {                            // …reuse across M rows
+                acc[r] += w * X[(unsigned long)r * in_dim + xcol];
+            }
+        }
+    }
+    #pragma unroll
+    for (int r = 0; r < M; r++) {
+        float a = acc[r];
+        for (int off = AKH_GEMV_WARP / 2; off > 0; off >>= 1) a += __shfl_down(a, off);
+        if (lane == 0) out[(unsigned long)r * n_rows + row] = a;
+    }
+}
+
+template <int M>
+__global__ void akh_gemv_batched_q6k_f32_kernel(const unsigned char* __restrict__ W,
+                                 const float* __restrict__ X, float* __restrict__ out,
+                                 unsigned long n_rows, unsigned long in_dim) {
+    int lane = threadIdx.x & (AKH_GEMV_WARP - 1);
+    int warp = threadIdx.x / AKH_GEMV_WARP;
+    unsigned long row = (unsigned long)blockIdx.x * AKH_GEMV_WARPS + warp;
+    if (row >= n_rows) return;
+    unsigned long bpr = in_dim / AKH_Q6K_QK;
+    const unsigned char* base = W + row * bpr * AKH_Q6K_BLOCK_BYTES;
+    float acc[M];
+    #pragma unroll
+    for (int r = 0; r < M; r++) acc[r] = 0.0f;
+    for (unsigned long sb = 0; sb < bpr; sb++) {
+        const unsigned char* b = base + sb * AKH_Q6K_BLOCK_BYTES;
+        const unsigned char* ql = b + 0;
+        const unsigned char* qh = b + 128;
+        const signed char* sc = reinterpret_cast<const signed char*>(b + 192);
+        float d = __half2float(*reinterpret_cast<const __half*>(b + 208));
+        unsigned long xbase = sb * AKH_Q6K_QK;
+        #pragma unroll
+        for (int t = 0; t < AKH_Q6K_QK / AKH_GEMV_WARP; t++) {
+            int pp = lane + AKH_GEMV_WARP * t; // 0..255
+            int idx = pp / 128;
+            int within = pp % 128;
+            int quarter = within / 32;
+            int l = within % 32;
+            int isub = l / 16;
+            const unsigned char* qlb = ql + 64 * idx;
+            const unsigned char* qhb = qh + 32 * idx;
+            const signed char* scb = sc + 8 * idx;
+            unsigned char qhbyte = qhb[l];
+            int qval;
+            switch (quarter) {
+                case 0: qval = (qlb[l] & 0xF)      | ((qhbyte & 3) << 4); break;
+                case 1: qval = (qlb[l + 32] & 0xF) | (((qhbyte >> 2) & 3) << 4); break;
+                case 2: qval = (qlb[l] >> 4)       | (((qhbyte >> 4) & 3) << 4); break;
+                default: qval = (qlb[l + 32] >> 4) | (((qhbyte >> 6) & 3) << 4); break;
+            }
+            float w = d * (float)scb[isub + 2 * quarter] * (float)(qval - 32); // dequant ONCE…
+            unsigned long xcol = xbase + (unsigned long)pp;
+            #pragma unroll
+            for (int r = 0; r < M; r++) {                                      // …reuse across M
+                acc[r] += w * X[(unsigned long)r * in_dim + xcol];
+            }
+        }
+    }
+    #pragma unroll
+    for (int r = 0; r < M; r++) {
+        float a = acc[r];
+        for (int off = AKH_GEMV_WARP / 2; off > 0; off >>= 1) a += __shfl_down(a, off);
+        if (lane == 0) out[(unsigned long)r * n_rows + row] = a;
+    }
+}
+
 extern "C" {
 
 // Phase 46c: set the launch stream for this kernel library (null = default stream).
@@ -343,6 +462,43 @@ int akh_gemv_q6k_f32(const unsigned char* W, const float* x, float* out,
     hipLaunchKernelGGL(akh_gemv_q6k_f32_kernel, dim3(grid), dim3(AKH_GEMV_BLOCK), 0, g_akh_stream,
                        W, x, out, (unsigned long)n_rows, (unsigned long)in_dim);
     // No per-kernel sync (Phase 45h) — ordered on the null stream.
+    return (int)hipGetLastError();
+}
+
+// Fused *batched* GEMV (Phase 47d): out[m,n_rows] = X[m,in_dim] · W[n_rows,in_dim]ᵀ,
+// weights dequantized inline and reused across the m rows in registers (no f32 temp).
+// `m` selects a template instantiation (1..AKH_GEMV_BATCH_MAX); returns -1 if the caller
+// passes m outside that range (it must then route to the GEMM path). One warp per weight
+// row, AKH_GEMV_WARPS rows per block — identical geometry to the m=1 kernel.
+#define AKH_GEMV_BATCH_CASE(KERNEL, N) \
+    case N: hipLaunchKernelGGL(HIP_KERNEL_NAME(KERNEL<N>), dim3(grid), dim3(AKH_GEMV_BLOCK), 0, \
+                g_akh_stream, W, X, out, (unsigned long)n_rows, (unsigned long)in_dim); break;
+#define AKH_GEMV_BATCH_DISPATCH(KERNEL) \
+    switch (m) { \
+        AKH_GEMV_BATCH_CASE(KERNEL, 1)  AKH_GEMV_BATCH_CASE(KERNEL, 2) \
+        AKH_GEMV_BATCH_CASE(KERNEL, 3)  AKH_GEMV_BATCH_CASE(KERNEL, 4) \
+        AKH_GEMV_BATCH_CASE(KERNEL, 5)  AKH_GEMV_BATCH_CASE(KERNEL, 6) \
+        AKH_GEMV_BATCH_CASE(KERNEL, 7)  AKH_GEMV_BATCH_CASE(KERNEL, 8) \
+        AKH_GEMV_BATCH_CASE(KERNEL, 9)  AKH_GEMV_BATCH_CASE(KERNEL, 10) \
+        AKH_GEMV_BATCH_CASE(KERNEL, 11) AKH_GEMV_BATCH_CASE(KERNEL, 12) \
+        AKH_GEMV_BATCH_CASE(KERNEL, 13) AKH_GEMV_BATCH_CASE(KERNEL, 14) \
+        AKH_GEMV_BATCH_CASE(KERNEL, 15) AKH_GEMV_BATCH_CASE(KERNEL, 16) \
+        default: return -1; \
+    }
+
+int akh_gemv_batched_q4k_f32(const unsigned char* W, const float* X, float* out,
+                             size_t n_rows, size_t in_dim, size_t m) {
+    if (n_rows == 0 || m == 0) return 0;
+    unsigned grid = (unsigned)((n_rows + AKH_GEMV_WARPS - 1) / AKH_GEMV_WARPS);
+    AKH_GEMV_BATCH_DISPATCH(akh_gemv_batched_q4k_f32_kernel)
+    return (int)hipGetLastError();
+}
+
+int akh_gemv_batched_q6k_f32(const unsigned char* W, const float* X, float* out,
+                             size_t n_rows, size_t in_dim, size_t m) {
+    if (n_rows == 0 || m == 0) return 0;
+    unsigned grid = (unsigned)((n_rows + AKH_GEMV_WARPS - 1) / AKH_GEMV_WARPS);
+    AKH_GEMV_BATCH_DISPATCH(akh_gemv_batched_q6k_f32_kernel)
     return (int)hipGetLastError();
 }
 

@@ -169,6 +169,10 @@ pub struct Engine {
     /// mode. Every successful assert/retract is recorded here (best-effort,
     /// non-blocking).
     mutation_sink: std::sync::OnceLock<Arc<dyn crate::mutation::MutationSink>>,
+    /// Phase 47: live, lock-free inference toggles (e.g. speculative decode). Shared by `Arc`
+    /// with the Candle chat backend so a tool flipping it via `&Engine` is observed next turn.
+    /// Seeded from the akh's `AkhConfig` at startup.
+    inference_options: Arc<crate::inference_options::InferenceOptions>,
 }
 
 impl Engine {
@@ -376,6 +380,7 @@ impl Engine {
             predicate_hierarchy: RwLock::new(None),
             hierarchy_dirty: AtomicBool::new(true),
             mutation_sink: std::sync::OnceLock::new(),
+            inference_options: Arc::new(crate::inference_options::InferenceOptions::default()),
         };
 
         // Restore Phase 9 registries from persistent storage if available.
@@ -2998,6 +3003,13 @@ impl Engine {
     /// Get the engine configuration.
     pub fn config(&self) -> &EngineConfig {
         &self.config
+    }
+
+    /// Live, lock-free inference toggles for this akh (Phase 47). Shared by `Arc` with the
+    /// Candle chat backend, so a tool flipping an option here is observed on the next turn.
+    /// Seeded from the akh's `AkhConfig` at startup; mutated by the `inference_config` tool.
+    pub fn inference_options(&self) -> &Arc<crate::inference_options::InferenceOptions> {
+        &self.inference_options
     }
 
     /// Get the compartment manager (if data_dir is configured).

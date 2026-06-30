@@ -158,6 +158,167 @@ impl GenBenchStats {
     }
 }
 
+/// Stats from the Phase 46c fixed-position HIP-graph capture/replay probe.
+///
+/// The decisive, cheap measurement for whether HIP-graph replay can close the
+/// Candle↔Ollama decode gap. At a **fixed** decode position it compares eager
+/// `forward_from_embed` (the per-token kernel storm, host-enqueue-gapped) against a single
+/// `hipGraphLaunch` replay of the same forward. This is the *upper bound* on the graph win
+/// — no per-token KV write / growing shapes to update — so if replay does not clearly beat
+/// eager here, the dispatch-idle hypothesis is wrong and the full per-token graph decode is
+/// not worth building (revert + record). If it wins big, that headroom pays for the
+/// per-token update overhead the real integration needs.
+#[cfg(all(feature = "candle-backend", feature = "hip"))]
+#[derive(Debug, Clone)]
+pub struct GraphBenchStats {
+    /// Fixed decode position the forward was captured at (= prompt length).
+    pub position: usize,
+    /// Iterations timed for each of eager / replay (after warm-up).
+    pub iters: u32,
+    /// Eager `forward_from_embed` throughput at the fixed position (tok/s), drained
+    /// per iteration so it reflects real dispatch+execute cost.
+    pub eager_tok_s: f32,
+    /// Single-dispatch graph-replay throughput at the fixed position (tok/s); 0 if
+    /// capture failed (see [`captured`](Self::captured)).
+    pub replay_tok_s: f32,
+    /// hipMalloc cache *misses* on a *warm* eager forward (after warm-up) — diagnostic:
+    /// > 0 means the forward still issues a real (host-synchronizing) hipMalloc through
+    /// our caching pool even at a fixed position, which would abort graph capture.
+    pub warm_malloc_miss: u64,
+    /// Total caching-allocator calls on that warm forward (context for the miss count).
+    pub warm_malloc_calls: u64,
+    /// Whether the forward was successfully captured into a HIP graph.
+    pub captured: bool,
+    /// Capture failure reason, if any (e.g. a hipMalloc / rocBLAS-internal alloc that
+    /// invalidated the capture).
+    pub capture_error: Option<String>,
+    /// Whether the replayed logits' argmax (greedy token) matches a *fresh* eager
+    /// forward's at the same KV state (only meaningful when [`captured`](Self::captured)).
+    pub argmax_matches: bool,
+    /// Max absolute difference between the last replay and a fresh eager forward
+    /// (byte-coherence check; the correctness gate).
+    pub max_abs_diff: f32,
+    /// Max absolute difference between the first and last replay outputs — 0 ⇒ replay is
+    /// deterministic across launches; > 0 ⇒ a race (cross-stream / reused buffer).
+    pub replay_determinism: f32,
+    /// Max absolute difference between an eager forward run on a *private stream* (no
+    /// graph) and the default-stream forward — 0 ⇒ every op honors the launch stream (a
+    /// replay mismatch is then a graph-machinery/allocator fault); > 0 ⇒ some op ignored
+    /// the stream and raced (the cause of the replay mismatch).
+    pub stream_eager_diff: f32,
+}
+
+/// Byte-exactness of the Phase 46d-2c **graph-ready** decode forward — the
+/// [`GraphDecodeCtx`](super::vendored::quantized_gemma3::GraphDecodeCtx)-driven path
+/// (device-pos rope `index_select`, `kv_scatter_at`, fixed block-padded `read_len` + a
+/// device-built keep-mask) run **eagerly** at a fixed position — against the normal decode
+/// forward at the same position. The 46d-2c gate: both diffs must be `0` before adding
+/// capture/replay (46d-2d). If they are not, the graph-ready math diverged and capturing it
+/// would replay a wrong forward.
+#[derive(Debug, Clone)]
+pub struct GraphDecodeParity {
+    /// Fixed decode position the forwards ran at (= prompt length).
+    pub position: usize,
+    /// max|Δlogits| between normal decode and the graph-ready forward reading the EXACT
+    /// `read_len = pos + 1` (no padding) — isolates the device-pos rope + scatter from the
+    /// padding/mask path. Expected `0`.
+    pub exact_diff: f32,
+    /// max|Δlogits| between normal decode and the graph-ready forward reading a PADDED
+    /// `read_len > pos + 1` with the block tail masked — proves the fixed-shape + masked-
+    /// tail attention is bit-identical to attention over the valid prefix. Expected `0`.
+    pub padded_diff: f32,
+    /// The block-padded `read_len` used for [`padded_diff`](Self::padded_diff).
+    pub padded_read_len: usize,
+    /// Whether the device-pos `kv_scatter_at` write path (hip) was exercised (vs the
+    /// `slice_set` fallback). Always true in a `hip` build reaching the cuda KV path.
+    pub used_device_scatter: bool,
+}
+
+/// Result of the Phase 46d-2d **real per-token graph decode loop** — the payoff measurement
+/// for the whole 46d effort. One HIP graph is captured for the decode forward and replayed
+/// once per token (advancing the device position + refreshing the fixed embedding buffer
+/// between replays), generating a full sequence in single-dispatch steps instead of the
+/// per-token kernel storm. Compared against eager generation of the same sequence.
+///
+/// The gate: [`tokens_match`](Self::tokens_match) must be true (graph replay decodes the
+/// **same** greedy tokens as eager — correctness) and `graph_tok_s` should beat
+/// `eager_tok_s` (the speed payoff). Per the measure-or-revert discipline, if replay does
+/// not beat eager the integration is reverted and the finding recorded.
+#[derive(Debug, Clone)]
+pub struct GraphDecodeLoopStats {
+    /// Prompt length (the first decode position).
+    pub position: usize,
+    /// Tokens requested.
+    pub requested_new: usize,
+    /// Tokens actually decoded (≤ requested; capped by the static cache or an early EOS).
+    pub decoded: usize,
+    /// Eager generation throughput (`forward_from_embed` per token, exact KV prefix) — the
+    /// real baseline (tok/s).
+    pub eager_tok_s: f32,
+    /// Graph-replay generation throughput (one `hipGraphLaunch` per token) — the new path
+    /// (tok/s).
+    pub graph_tok_s: f32,
+    /// hipMalloc cache *misses* on the warm forward right before capture — `0` ⇒ the forward
+    /// is allocation-stable and the capture is clean.
+    pub capture_miss: u64,
+    /// Whether the graph-replayed greedy token sequence is identical to the eager one — the
+    /// correctness gate. A captured graph that decodes different tokens is wrong.
+    pub tokens_match: bool,
+}
+
+/// Phase 47a gate: byte-exactness of the **all-position verify forward** (the speculative-decode
+/// primitive) against incremental single-token decode. The target scores `seq_len` candidate
+/// positions in one forward (`forward_verify` → `[1, seq, vocab]`); each position's logits must
+/// equal what a sequence of single-token `forward`s would produce at the same position (same K/V
+/// writes, same per-position rope/mask). Both diffs must be `0` before the verify forward is used
+/// to accept/reject draft tokens (47c) — a wrong verify forward accepts wrong tokens.
+#[derive(Debug, Clone)]
+pub struct VerifyParity {
+    /// Prefix length the verify block was appended at (`index_pos`).
+    pub position: usize,
+    /// Number of candidate positions scored in the one verify forward.
+    pub seq_len: usize,
+    /// max over ALL positions of max|Δlogits| (verify vs incremental). `0` only at `seq_len==1`
+    /// (both use the m=1 GEMV); for `seq_len>1` the verify projections use the m=n GEMM, a
+    /// different quant kernel → small (~1e-2) divergence, NOT a bug.
+    pub max_abs_diff: f32,
+    /// max|Δlogits| at the LAST position.
+    pub last_pos_diff: f32,
+    /// Positions where `argmax(verify) == argmax(incremental)` — the greedy-token gate. The
+    /// logit divergence is harmless iff this equals `seq_len` (the verify picks the same token a
+    /// pure m=1 decode would).
+    pub argmax_agree: usize,
+}
+
+/// Result of the Phase 47c greedy **speculative-decode loop** — the payoff measurement for
+/// Phase 47. Compares plain greedy decode against prompt-lookup speculative decode (n-gram
+/// drafter + one `forward_verify` per round, accept the matching greedy prefix, advance up to
+/// `accepted+1` tokens). The win is workload-conditional: high where output echoes context.
+#[derive(Debug, Clone)]
+pub struct SpecDecodeStats {
+    /// Prompt length (first decode position).
+    pub position: usize,
+    /// Tokens generated by plain greedy decode (the baseline).
+    pub plain_tokens: usize,
+    /// Tokens generated by speculative decode (compared over `min(plain, spec)`).
+    pub spec_tokens: usize,
+    /// Plain greedy decode throughput (tok/s) — one forward per token.
+    pub plain_tok_s: f32,
+    /// Speculative decode throughput (tok/s) — one `forward_verify` per round.
+    pub spec_tok_s: f32,
+    /// Verify forwards the spec run issued (rounds).
+    pub rounds: usize,
+    /// Total draft tokens proposed across all rounds.
+    pub drafted: usize,
+    /// Total draft tokens accepted (`accepted/drafted` = acceptance rate; `accepted/rounds`
+    /// + 1 = mean tokens per forward).
+    pub accepted: usize,
+    /// Whether the spec-decoded token sequence equals the plain greedy one over the shared
+    /// prefix. Usually true (47a: 100% argmax agreement); a rare flip is the m=1 GEMV vs m=n
+    /// GEMM quant divergence, not a logic error.
+    pub tokens_match: bool,
+}
+
 // ---------------------------------------------------------------------------
 // Expected model paths
 // ---------------------------------------------------------------------------
@@ -196,6 +357,11 @@ pub struct CandleBackend {
     context_length: usize,
     config: CandleConfig,
     model_path: PathBuf,
+    /// Live, lock-free inference toggles shared (by `Arc`) with this akh's
+    /// [`Engine`](crate::engine::Engine) (Phase 47 / ADR 075). `None` when the backend runs
+    /// standalone (benches/tests) — eligibility then falls back to the `AKH_SPEC_DECODE` env
+    /// flag. Wired by `CandleChatBackend` construction so a runtime tool flip is seen next turn.
+    runtime_options: Option<std::sync::Arc<crate::inference_options::InferenceOptions>>,
 }
 
 impl std::fmt::Debug for CandleBackend {
@@ -328,7 +494,26 @@ impl CandleBackend {
             context_length,
             config,
             model_path: model_path.to_path_buf(),
+            runtime_options: None,
         })
+    }
+
+    /// Attach this akh's shared [`InferenceOptions`](crate::inference_options::InferenceOptions)
+    /// (Phase 47). Once set, [`spec_decode_eligible`](Self::spec_decode_eligible) reads the live
+    /// shared flag instead of the `AKH_SPEC_DECODE` env fallback — so the `inference_config` tool
+    /// can toggle speculative decode at runtime without a restart.
+    pub fn set_inference_options(
+        &mut self,
+        opts: std::sync::Arc<crate::inference_options::InferenceOptions>,
+    ) {
+        self.runtime_options = Some(opts);
+    }
+
+    /// Override the sampling temperature (0.0 = greedy). Primarily for benches/tests that need to
+    /// exercise the temperature path; production sets it via [`CandleConfig`] at load.
+    #[cfg(feature = "candle-backend")]
+    pub fn set_temperature(&mut self, temperature: f32) {
+        self.config.temperature = temperature;
     }
 
     /// The model's context window (tokens), read from the GGUF
@@ -544,6 +729,738 @@ impl CandleBackend {
             text: result.text,
             tokens_generated: result.tokens_generated,
             decode_secs: result.decode_secs,
+        })
+    }
+
+    /// Phase 46c make-or-break probe: capture `forward_from_embed` at a **fixed** decode
+    /// position and replay it, comparing eager vs single-dispatch-graph throughput and
+    /// logits parity. gemma3 only (the model with the static-KV + embed/forward_from_embed
+    /// split). `iters` forwards/replays are timed after warm-up. See [`GraphBenchStats`].
+    ///
+    /// The flow mirrors the proven `hip_graph_capture_replay_*` spikes scaled to the whole
+    /// forward: prefill the prompt to reach a realistic position P, compute the next
+    /// token's embedding OUTSIDE the captured region (it does a host-synchronizing D2H+H2D),
+    /// warm the caching pool with eager forwards, then capture the forward at P (every
+    /// allocation now hits the warm pool → zero hipMalloc → capturable) and replay it.
+    #[cfg(all(feature = "candle-backend", feature = "hip"))]
+    pub fn bench_graph_replay(&mut self, prompt: &str, iters: u32) -> NluResult<GraphBenchStats> {
+        use candle_core::cuda;
+
+        let iters = iters.max(1);
+        let fail = |reason: String| NluError::LlmGenerationFailed { reason };
+
+        // --- Prefill to a realistic position P (mirrors generate_inner) -------------
+        let encoding = self
+            .tokenizer
+            .encode(prompt, true)
+            .map_err(|e| fail(format!("tokenization: {e}")))?;
+        let mut prompt_tokens: Vec<u32> = encoding.get_ids().to_vec();
+        if matches!(self.family, ModelFamily::Gemma | ModelFamily::Gemma4) {
+            if let Some(bos) = self.tokenizer.token_to_id("<bos>") {
+                if prompt_tokens.first() != Some(&bos) {
+                    prompt_tokens.insert(0, bos);
+                }
+            }
+        }
+        let position = prompt_tokens.len();
+        let input = Tensor::new(prompt_tokens.as_slice(), &self.device)
+            .and_then(|t| t.unsqueeze(0))
+            .map_err(|e| fail(format!("prompt tensor: {e}")))?;
+        let prefill = self
+            .model
+            .forward(&input, 0)
+            .map_err(|e| fail(format!("prefill: {e}")))?;
+        // Greedy next token = the token the decode loop would feed next.
+        let next_token = prefill
+            .i((0, ..))
+            .and_then(|l| l.argmax(0))
+            .and_then(|t| t.to_scalar::<u32>())
+            .map_err(|e| fail(format!("prefill argmax: {e}")))?;
+        let tok_input = Tensor::new(&[next_token], &self.device)
+            .and_then(|t| t.unsqueeze(0))
+            .map_err(|e| fail(format!("token tensor: {e}")))?;
+
+        // --- gemma3-only (the model with the static-KV + embed split) --------------
+        let model = match &mut self.model {
+            LoadedModel::Gemma(m) => m,
+            _ => return Err(fail("graph replay probe currently supports gemma3 only".to_string())),
+        };
+
+        // The embedding lookup stays OUTSIDE the captured region (host-sync D2H+H2D).
+        let embed = model.embed(&tok_input).map_err(|e| fail(format!("embed: {e}")))?;
+
+        // Bisection toggle (Phase 46c): capture only the transformer stack + final norm
+        // (`hidden_states_from_embed`, excluding the lm_head GEMV) when AKH_BENCH_GRAPH_HIDDEN
+        // is set, so a replay mismatch can be localized to the layers vs the output head.
+        let hidden_only = std::env::var("AKH_BENCH_GRAPH_HIDDEN").as_deref() == Ok("1");
+        let run = |m: &mut super::vendored::quantized_gemma3::ModelWeights| -> candle_core::Result<Tensor> {
+            if hidden_only {
+                m.hidden_states_from_embed(&embed, position, None)
+            } else {
+                m.forward_from_embed(&embed, position, None)
+            }
+        };
+
+        let to_vec0 = |t: &Tensor, what: &str| -> NluResult<Vec<f32>> {
+            t.i((0, ..))
+                .and_then(|t| t.to_vec1::<f32>())
+                .map_err(|e| fail(format!("{what} logits: {e}")))
+        };
+        let argmax = |v: &[f32]| -> usize {
+            v.iter()
+                .enumerate()
+                .fold((0usize, f32::NEG_INFINITY), |(bi, bv), (i, &x)| {
+                    if x > bv { (i, x) } else { (bi, bv) }
+                })
+                .0
+        };
+        let max_diff = |a: &[f32], b: &[f32]| -> f32 {
+            a.iter().zip(b.iter()).map(|(x, y)| (x - y).abs()).fold(0.0f32, f32::max)
+        };
+
+        // --- Eager baseline ---------------------------------------------------------
+        // Warm-ups so every transient allocation has a recycled pool block before capture
+        // (which aborts on any real hipMalloc). CRUCIAL: never hold a logits device tensor
+        // live across the capture — doing so drains the pool of that block so the capture
+        // forward's own logits alloc misses → a hipMalloc that aborts capture. So every
+        // reference forward is read to a host Vec and its device tensor dropped immediately.
+        for _ in 0..2 {
+            run(model).map_err(|e| fail(format!("eager warmup: {e}")))?;
+            cuda::device_synchronize().map_err(|e| fail(format!("sync: {e}")))?;
+        }
+        // Reference (warm) → host, device tensor dropped. Also the zero-miss check.
+        cuda::reset_malloc_counts();
+        let eager_vec = {
+            let l = run(model).map_err(|e| fail(format!("warm forward: {e}")))?;
+            cuda::device_synchronize().map_err(|e| fail(format!("sync: {e}")))?;
+            to_vec0(&l, "eager")?
+        };
+        let (warm_malloc_calls, warm_malloc_miss, _) = cuda::malloc_profile();
+
+        // Same forward on a PRIVATE stream (no graph) → host, device dropped. If this
+        // matches the default-stream result, every op honors the launch stream.
+        let stream_vec = {
+            let l = cuda::run_on_private_stream(|| run(model))
+                .map_err(|e| fail(format!("private-stream forward: {e}")))?;
+            to_vec0(&l, "stream")?
+        };
+        let stream_eager_diff = max_diff(&eager_vec, &stream_vec);
+
+        // Eager throughput (drained per iteration; results dropped each iter).
+        let eager_t0 = std::time::Instant::now();
+        for _ in 0..iters {
+            run(model).map_err(|e| fail(format!("eager forward: {e}")))?;
+            cuda::device_synchronize().map_err(|e| fail(format!("sync: {e}")))?;
+        }
+        let eager_secs = eager_t0.elapsed().as_secs_f32();
+        let eager_tok_s = if eager_secs > 0.0 { iters as f32 / eager_secs } else { 0.0 };
+
+        // --- Capture the forward at the fixed position (non-fatal on failure) -------
+        let capture = cuda::HipGraph::capture(|| run(model));
+
+        let mut replay_tok_s = 0.0;
+        let mut captured = false;
+        let mut capture_error = None;
+        let mut argmax_matches = false;
+        let mut max_abs_diff = f32::NAN;
+        let mut replay_determinism = f32::NAN;
+
+        match capture {
+            Err(e) => capture_error = Some(format!("{e}")),
+            Ok((graph, replay_logits)) => {
+                captured = true;
+                // First replay → its output (read before any further replays).
+                graph.replay().map_err(|e| fail(format!("replay warmup: {e}")))?;
+                let first_vec = to_vec0(&replay_logits, "replay-first")?;
+
+                let replay_t0 = std::time::Instant::now();
+                for _ in 0..iters {
+                    graph.replay().map_err(|e| fail(format!("replay: {e}")))?;
+                }
+                let replay_secs = replay_t0.elapsed().as_secs_f32();
+                replay_tok_s = if replay_secs > 0.0 { iters as f32 / replay_secs } else { 0.0 };
+                let last_vec = to_vec0(&replay_logits, "replay-last")?;
+
+                replay_determinism = max_diff(&first_vec, &last_vec);
+                argmax_matches = argmax(&eager_vec) == argmax(&last_vec);
+                max_abs_diff = max_diff(&eager_vec, &last_vec);
+            }
+        }
+
+        Ok(GraphBenchStats {
+            position,
+            iters,
+            eager_tok_s,
+            replay_tok_s,
+            warm_malloc_miss,
+            warm_malloc_calls,
+            captured,
+            capture_error,
+            argmax_matches,
+            max_abs_diff,
+            replay_determinism,
+            stream_eager_diff,
+        })
+    }
+
+    /// Phase 46d-2c gate: byte-exact A/B of the **graph-ready** decode forward against the
+    /// normal decode forward at a fixed position (see [`GraphDecodeParity`]). The graph-ready
+    /// path (device-pos rope `index_select`, `kv_scatter_at`, fixed block-padded `read_len` +
+    /// a device-built keep-mask) is run EAGERLY here — no capture — so any divergence is
+    /// attributed to the new math, not to graph machinery. Both diffs must be `0` before
+    /// 46d-2d wraps this forward in a captured/replayed graph. gemma3 only.
+    #[cfg(all(feature = "candle-backend", feature = "hip"))]
+    pub fn bench_graph_decode_parity(&mut self, prompt: &str) -> NluResult<GraphDecodeParity> {
+        use super::vendored::quantized_gemma3::GraphDecodeCtx;
+        let fail = |reason: String| NluError::LlmGenerationFailed { reason };
+
+        // --- Prefill to a realistic position P (mirrors bench_graph_replay) ---------
+        let encoding = self
+            .tokenizer
+            .encode(prompt, true)
+            .map_err(|e| fail(format!("tokenization: {e}")))?;
+        let mut prompt_tokens: Vec<u32> = encoding.get_ids().to_vec();
+        if matches!(self.family, ModelFamily::Gemma | ModelFamily::Gemma4) {
+            if let Some(bos) = self.tokenizer.token_to_id("<bos>") {
+                if prompt_tokens.first() != Some(&bos) {
+                    prompt_tokens.insert(0, bos);
+                }
+            }
+        }
+        let position = prompt_tokens.len();
+        let input = Tensor::new(prompt_tokens.as_slice(), &self.device)
+            .and_then(|t| t.unsqueeze(0))
+            .map_err(|e| fail(format!("prompt tensor: {e}")))?;
+        let prefill = self
+            .model
+            .forward(&input, 0)
+            .map_err(|e| fail(format!("prefill: {e}")))?;
+        let next_token = prefill
+            .i((0, ..))
+            .and_then(|l| l.argmax(0))
+            .and_then(|t| t.to_scalar::<u32>())
+            .map_err(|e| fail(format!("prefill argmax: {e}")))?;
+        let tok_input = Tensor::new(&[next_token], &self.device)
+            .and_then(|t| t.unsqueeze(0))
+            .map_err(|e| fail(format!("token tensor: {e}")))?;
+
+        // Clone the device handle before the mutable model borrow (GraphDecodeCtx::new needs it).
+        let device = self.device.clone();
+        let model = match &mut self.model {
+            LoadedModel::Gemma(m) => m,
+            _ => {
+                return Err(fail(
+                    "graph decode parity probe supports gemma3 only".to_string(),
+                ))
+            }
+        };
+        // The embedding lookup is a host-sync op; the graph-ready forward starts from it.
+        let embed = model.embed(&tok_input).map_err(|e| fail(format!("embed: {e}")))?;
+
+        let to_vec = |t: &Tensor| -> NluResult<Vec<f32>> {
+            t.i((0, ..))
+                .and_then(|t| t.to_vec1::<f32>())
+                .map_err(|e| fail(format!("logits: {e}")))
+        };
+        let max_diff = |a: &[f32], b: &[f32]| -> f32 {
+            a.iter()
+                .zip(b.iter())
+                .map(|(x, y)| (x - y).abs())
+                .fold(0.0f32, f32::max)
+        };
+
+        // Normal decode forward at P (writes K/V col P via slice_set, reads [0, P+1)).
+        let normal = to_vec(
+            &model
+                .forward_from_embed(&embed, position, None)
+                .map_err(|e| fail(format!("normal forward: {e}")))?,
+        )?;
+
+        // Graph-ready, EXACT read_len = P + 1: re-writes col P via the device-pos
+        // kv_scatter_at and reads the same [0, P+1) — isolates device-pos rope + scatter
+        // from the padding/mask path.
+        let g_exact = GraphDecodeCtx::new(&device, position + 1)
+            .map_err(|e| fail(format!("graph ctx (exact): {e}")))?;
+        g_exact
+            .set_pos(position)
+            .map_err(|e| fail(format!("set_pos (exact): {e}")))?;
+        let exact = to_vec(
+            &model
+                .forward_from_embed(&embed, position, Some(&g_exact))
+                .map_err(|e| fail(format!("graph-ready forward (exact): {e}")))?,
+        )?;
+
+        // Graph-ready, PADDED read_len > P + 1: reads a fixed padded slice; the > P tail is
+        // masked by the keep-mask — proves the block-padding + masked-tail attention is
+        // bit-identical to attention over the valid prefix.
+        let padded_read_len = (position + 1 + 8).min(model.kv_ctx().max(position + 1));
+        let g_pad = GraphDecodeCtx::new(&device, padded_read_len)
+            .map_err(|e| fail(format!("graph ctx (padded): {e}")))?;
+        g_pad
+            .set_pos(position)
+            .map_err(|e| fail(format!("set_pos (padded): {e}")))?;
+        let padded = to_vec(
+            &model
+                .forward_from_embed(&embed, position, Some(&g_pad))
+                .map_err(|e| fail(format!("graph-ready forward (padded): {e}")))?,
+        )?;
+
+        Ok(GraphDecodeParity {
+            position,
+            exact_diff: max_diff(&normal, &exact),
+            padded_diff: max_diff(&normal, &padded),
+            padded_read_len,
+            used_device_scatter: true,
+        })
+    }
+
+    /// Phase 46d-2d: the real per-token graph decode loop (see [`GraphDecodeLoopStats`]).
+    /// Captures the decode forward ONCE at `read_len = position + max_new` (block-padded to
+    /// the longest position the run reaches) and replays it per token — because every
+    /// position-dependent read now comes from the device `d_pos` (rope `index_select`,
+    /// `kv_scatter_at` column, additive mask), one graph follows the whole generation: each
+    /// token only updates `d_pos` (4-byte H2D) and refreshes a fixed embedding buffer in
+    /// place, then a single `hipGraphLaunch` runs the forward. Generates the same sequence
+    /// eagerly first for an A/B (identical greedy tokens ⇒ correct; faster ⇒ the payoff).
+    /// gemma3 only.
+    #[cfg(all(feature = "candle-backend", feature = "hip"))]
+    pub fn bench_graph_decode_loop(
+        &mut self,
+        prompt: &str,
+        max_new: u32,
+    ) -> NluResult<GraphDecodeLoopStats> {
+        use super::vendored::quantized_gemma3::GraphDecodeCtx;
+        use candle_core::cuda;
+        let fail = |reason: String| NluError::LlmGenerationFailed { reason };
+        let max_new = max_new.max(1) as usize;
+
+        // --- tokenize + bos --------------------------------------------------------
+        let encoding = self
+            .tokenizer
+            .encode(prompt, true)
+            .map_err(|e| fail(format!("tokenization: {e}")))?;
+        let mut prompt_tokens: Vec<u32> = encoding.get_ids().to_vec();
+        if matches!(self.family, ModelFamily::Gemma | ModelFamily::Gemma4) {
+            if let Some(bos) = self.tokenizer.token_to_id("<bos>") {
+                if prompt_tokens.first() != Some(&bos) {
+                    prompt_tokens.insert(0, bos);
+                }
+            }
+        }
+        let position = prompt_tokens.len();
+        let input = Tensor::new(prompt_tokens.as_slice(), &self.device)
+            .and_then(|t| t.unsqueeze(0))
+            .map_err(|e| fail(format!("prompt tensor: {e}")))?;
+        let eos = self
+            .tokenizer
+            .token_to_id("<eos>")
+            .or_else(|| self.tokenizer.token_to_id("<end_of_turn>"));
+
+        let device = self.device.clone();
+        let model = match &mut self.model {
+            LoadedModel::Gemma(m) => m,
+            _ => {
+                return Err(fail(
+                    "graph decode loop probe supports gemma3 only".to_string(),
+                ))
+            }
+        };
+
+        // One graph spans the whole run: read_len covers the deepest position decoded
+        // (P + effective_new - 1 ⇒ read prefix length P + effective_new). Clamp to the cache.
+        let kv_ctx = model.kv_ctx();
+        let read_len = (position + max_new).min(kv_ctx);
+        let effective_new = read_len.saturating_sub(position);
+
+        let greedy = |logits: &Tensor| -> NluResult<u32> {
+            logits
+                .i((0, ..))
+                .and_then(|l| l.argmax(0))
+                .and_then(|t| t.to_scalar::<u32>())
+                .map_err(|e| fail(format!("argmax: {e}")))
+        };
+
+        // ===== EAGER reference run (forward_from_embed None — the real baseline) =====
+        let prefill = model
+            .forward(&input, 0)
+            .map_err(|e| fail(format!("prefill (eager): {e}")))?;
+        let mut tok = greedy(&prefill)?;
+        let mut eager_tokens: Vec<u32> = Vec::with_capacity(effective_new);
+        let eager_t0 = std::time::Instant::now();
+        for t in 0..effective_new {
+            let pos = position + t;
+            let tok_input = Tensor::new(&[tok], &device)
+                .and_then(|x| x.unsqueeze(0))
+                .map_err(|e| fail(format!("tok tensor: {e}")))?;
+            let embed = model
+                .embed(&tok_input)
+                .map_err(|e| fail(format!("embed (eager): {e}")))?;
+            let logits = model
+                .forward_from_embed(&embed, pos, None)
+                .map_err(|e| fail(format!("eager forward: {e}")))?;
+            tok = greedy(&logits)?;
+            eager_tokens.push(tok);
+            if Some(tok) == eos {
+                break;
+            }
+        }
+        cuda::device_synchronize().ok();
+        let eager_secs = eager_t0.elapsed().as_secs_f32();
+        let eager_tok_s = if eager_secs > 0.0 {
+            eager_tokens.len() as f32 / eager_secs
+        } else {
+            0.0
+        };
+
+        // ===== GRAPH run (single capture, replay per token) =========================
+        // Reset the KV base to [0, P) so both runs decode from the same state.
+        let prefill2 = model
+            .forward(&input, 0)
+            .map_err(|e| fail(format!("prefill (graph): {e}")))?;
+        let tok0 = greedy(&prefill2)?;
+
+        let gctx = GraphDecodeCtx::new(&device, read_len)
+            .map_err(|e| fail(format!("graph ctx: {e}")))?;
+
+        // Fixed embedding buffer the captured forward reads — overwritten in place each
+        // token (its address stays stable, so the graph reads the refreshed embedding).
+        let tok0_input = Tensor::new(&[tok0], &device)
+            .and_then(|x| x.unsqueeze(0))
+            .map_err(|e| fail(format!("tok0 tensor: {e}")))?;
+        let embed_buf = model
+            .embed(&tok0_input)
+            .and_then(|e| e.contiguous())
+            .map_err(|e| fail(format!("embed0: {e}")))?;
+        gctx.set_pos(position)
+            .map_err(|e| fail(format!("set_pos (capture): {e}")))?;
+
+        // Warm the pool with the EXACT captured shapes. The first passes prime the pool; the
+        // reported miss is from a final steady pass (0 ⇒ allocation-stable ⇒ a clean capture).
+        for _ in 0..2 {
+            model
+                .forward_from_embed(&embed_buf, position, Some(&gctx))
+                .map_err(|e| fail(format!("graph warmup: {e}")))?;
+            cuda::device_synchronize().map_err(|e| fail(format!("sync: {e}")))?;
+        }
+        cuda::reset_malloc_counts();
+        model
+            .forward_from_embed(&embed_buf, position, Some(&gctx))
+            .map_err(|e| fail(format!("graph warmup (measured): {e}")))?;
+        cuda::device_synchronize().map_err(|e| fail(format!("sync: {e}")))?;
+        let (_calls, capture_miss, _) = cuda::malloc_profile();
+
+        // Capture the decode forward once.
+        let (graph, logits_buf) =
+            cuda::HipGraph::capture(|| model.forward_from_embed(&embed_buf, position, Some(&gctx)))
+                .map_err(|e| fail(format!("graph capture: {e}")))?;
+
+        // Decode by replay: update embed_buf + d_pos (outside capture), then one dispatch.
+        let mut graph_tokens: Vec<u32> = Vec::with_capacity(effective_new);
+        let mut tok = tok0;
+        let graph_t0 = std::time::Instant::now();
+        for t in 0..effective_new {
+            let pos = position + t;
+            if t > 0 {
+                let tok_input = Tensor::new(&[tok], &device)
+                    .and_then(|x| x.unsqueeze(0))
+                    .map_err(|e| fail(format!("tok tensor: {e}")))?;
+                let new_embed = model
+                    .embed(&tok_input)
+                    .map_err(|e| fail(format!("embed: {e}")))?;
+                // In-place refresh — keeps embed_buf's address stable for the captured graph.
+                embed_buf
+                    .slice_set(&new_embed, 0, 0)
+                    .map_err(|e| fail(format!("embed refresh: {e}")))?;
+            }
+            gctx.set_pos(pos)
+                .map_err(|e| fail(format!("set_pos: {e}")))?;
+            graph.replay().map_err(|e| fail(format!("replay: {e}")))?;
+            tok = greedy(&logits_buf)?;
+            graph_tokens.push(tok);
+            if Some(tok) == eos {
+                break;
+            }
+        }
+        let graph_secs = graph_t0.elapsed().as_secs_f32();
+        let graph_tok_s = if graph_secs > 0.0 {
+            graph_tokens.len() as f32 / graph_secs
+        } else {
+            0.0
+        };
+
+        Ok(GraphDecodeLoopStats {
+            position,
+            requested_new: max_new,
+            decoded: graph_tokens.len(),
+            eager_tok_s,
+            graph_tok_s,
+            capture_miss,
+            tokens_match: eager_tokens == graph_tokens,
+        })
+    }
+
+    /// Phase 47a gate: byte-exact A/B of gemma4's all-position **verify forward** against
+    /// incremental single-token decode (see [`VerifyParity`]). Prefills the prompt to position
+    /// `P`, greedily decodes `n` tokens one-at-a-time recording each position's logits (the
+    /// reference + the token sequence), resets the KV to `[0, P)` by re-prefilling, then scores
+    /// the SAME `n` tokens in one `forward_verify` at `P` and compares every position. gemma4 only.
+    #[cfg(feature = "candle-backend")]
+    pub fn bench_verify_parity(&mut self, prompt: &str, n: usize) -> NluResult<VerifyParity> {
+        let fail = |reason: String| NluError::LlmGenerationFailed { reason };
+        let n = n.max(1);
+
+        let encoding = self
+            .tokenizer
+            .encode(prompt, true)
+            .map_err(|e| fail(format!("tokenization: {e}")))?;
+        let mut prompt_tokens: Vec<u32> = encoding.get_ids().to_vec();
+        if matches!(self.family, ModelFamily::Gemma | ModelFamily::Gemma4) {
+            if let Some(bos) = self.tokenizer.token_to_id("<bos>") {
+                if prompt_tokens.first() != Some(&bos) {
+                    prompt_tokens.insert(0, bos);
+                }
+            }
+        }
+        let position = prompt_tokens.len();
+        let input = Tensor::new(prompt_tokens.as_slice(), &self.device)
+            .and_then(|t| t.unsqueeze(0))
+            .map_err(|e| fail(format!("prompt tensor: {e}")))?;
+
+        let device = self.device.clone();
+        let model = match &mut self.model {
+            LoadedModel::Gemma4(m) => m,
+            _ => return Err(fail("verify-parity probe supports gemma4 only".to_string())),
+        };
+
+        let argmax = |v: &[f32]| -> u32 {
+            v.iter()
+                .enumerate()
+                .fold((0usize, f32::NEG_INFINITY), |(bi, bv), (i, &x)| {
+                    if x > bv { (i, x) } else { (bi, bv) }
+                })
+                .0 as u32
+        };
+        let max_diff = |a: &[f32], b: &[f32]| -> f32 {
+            a.iter()
+                .zip(b.iter())
+                .map(|(x, y)| (x - y).abs())
+                .fold(0.0f32, f32::max)
+        };
+        let row = |t: &Tensor, i: usize| -> NluResult<Vec<f32>> {
+            t.i((0, i, ..))
+                .and_then(|r| r.to_vec1::<f32>())
+                .map_err(|e| fail(format!("logits row {i}: {e}")))
+        };
+
+        // Prefill -> P; first token = argmax(prefill).
+        let prefill = model
+            .forward(&input, 0)
+            .map_err(|e| fail(format!("prefill: {e}")))?;
+        let prefill_vec = prefill
+            .i((0, ..))
+            .and_then(|l| l.to_vec1::<f32>())
+            .map_err(|e| fail(format!("prefill logits: {e}")))?;
+        let mut s = argmax(&prefill_vec);
+
+        // Incremental reference: feed the greedy sequence one token at a time, recording each
+        // position's logits. This writes KV [P, P+n).
+        let mut seq: Vec<u32> = Vec::with_capacity(n);
+        let mut ref_logits: Vec<Vec<f32>> = Vec::with_capacity(n);
+        for i in 0..n {
+            let inp = Tensor::new(&[s], &device)
+                .and_then(|t| t.unsqueeze(0))
+                .map_err(|e| fail(format!("tok tensor: {e}")))?;
+            let logits = model
+                .forward(&inp, position + i)
+                .map_err(|e| fail(format!("incremental forward {i}: {e}")))?;
+            let lv = logits
+                .i((0, ..))
+                .and_then(|l| l.to_vec1::<f32>())
+                .map_err(|e| fail(format!("incremental logits {i}: {e}")))?;
+            seq.push(s);
+            s = argmax(&lv);
+            ref_logits.push(lv);
+        }
+
+        // Score the SAME seq in one verify forward. No re-prefill needed: the prefix [0, P) was
+        // written once by the initial prefill and is never overwritten (both incremental and
+        // verify only write [P, P+n)); verify just re-writes [P, P+n) with the same tokens. A
+        // re-prefill here would re-run the (potentially non-deterministic rocBLAS) prefill GEMM
+        // and give verify a slightly different prefix — a measurement confound, not a real diff.
+        let seq_t = Tensor::new(seq.as_slice(), &device)
+            .and_then(|t| t.unsqueeze(0))
+            .map_err(|e| fail(format!("seq tensor: {e}")))?;
+        let verify = model
+            .forward_verify(&seq_t, position)
+            .map_err(|e| fail(format!("verify forward: {e}")))?;
+
+        let mut max_abs_diff = 0.0f32;
+        let mut last_pos_diff = 0.0f32;
+        let mut argmax_agree = 0usize;
+        for i in 0..n {
+            let vrow = row(&verify, i)?;
+            let d = max_diff(&vrow, &ref_logits[i]);
+            max_abs_diff = max_abs_diff.max(d);
+            if i == n - 1 {
+                last_pos_diff = d;
+            }
+            if argmax(&vrow) == argmax(&ref_logits[i]) {
+                argmax_agree += 1;
+            }
+        }
+
+        Ok(VerifyParity {
+            position,
+            seq_len: n,
+            max_abs_diff,
+            last_pos_diff,
+            argmax_agree,
+        })
+    }
+
+    /// Phase 47c: greedy speculative decode loop (see [`SpecDecodeStats`]). A/Bs plain greedy
+    /// decode against prompt-lookup speculative decode — the n-gram drafter proposes a span from
+    /// the token history, one `forward_verify` scores it, the matching greedy prefix is accepted,
+    /// and the round advances `accepted+1` tokens (KV rollback is implicit: the next round just
+    /// writes from the new position, overwriting the rejected tail). gemma4 only.
+    #[cfg(all(feature = "candle-backend", feature = "hip"))]
+    pub fn bench_spec_decode(&mut self, prompt: &str, max_new: u32) -> NluResult<SpecDecodeStats> {
+        use super::spec_decode::{accept_run, DrafterConfig, NgramDrafter};
+        use candle_core::cuda;
+        let fail = |reason: String| NluError::LlmGenerationFailed { reason };
+        let max_new = max_new.max(1) as usize;
+
+        let encoding = self
+            .tokenizer
+            .encode(prompt, true)
+            .map_err(|e| fail(format!("tokenization: {e}")))?;
+        let mut prompt_tokens: Vec<u32> = encoding.get_ids().to_vec();
+        if matches!(self.family, ModelFamily::Gemma | ModelFamily::Gemma4) {
+            if let Some(bos) = self.tokenizer.token_to_id("<bos>") {
+                if prompt_tokens.first() != Some(&bos) {
+                    prompt_tokens.insert(0, bos);
+                }
+            }
+        }
+        let position = prompt_tokens.len();
+        let input = Tensor::new(prompt_tokens.as_slice(), &self.device)
+            .and_then(|t| t.unsqueeze(0))
+            .map_err(|e| fail(format!("prompt tensor: {e}")))?;
+        let eos = self
+            .tokenizer
+            .token_to_id("<eos>")
+            .or_else(|| self.tokenizer.token_to_id("<end_of_turn>"));
+
+        let device = self.device.clone();
+        let model = match &mut self.model {
+            LoadedModel::Gemma4(m) => m,
+            _ => return Err(fail("spec-decode probe supports gemma4 only".to_string())),
+        };
+        let kv_ctx = model.kv_ctx();
+
+        // On-device argmax → only the token id(s) come back over PCIe (no full-logits D2H).
+        // `[1, vocab]` -> 1 id; `[1, m, vocab]` -> m ids.
+        let argmax_ids = |t: &Tensor| -> NluResult<Vec<u32>> {
+            t.argmax(candle_core::D::Minus1)
+                .and_then(|a| a.flatten_all())
+                .and_then(|a| a.to_vec1::<u32>())
+                .map_err(|e| fail(format!("argmax: {e}")))
+        };
+
+        // Prefill -> P; first generated token = argmax(prefill).
+        let prefill = model
+            .forward(&input, 0)
+            .map_err(|e| fail(format!("prefill: {e}")))?;
+        let cur0 = argmax_ids(&prefill)?[0];
+
+        // ===== PLAIN greedy baseline (one forward per token) ========================
+        let mut plain: Vec<u32> = vec![cur0];
+        let mut cur = cur0;
+        let mut pos = position;
+        let plain_t0 = std::time::Instant::now();
+        while plain.len() < max_new {
+            let inp = Tensor::new(&[cur], &device)
+                .and_then(|t| t.unsqueeze(0))
+                .map_err(|e| fail(format!("tok tensor: {e}")))?;
+            let logits = model
+                .forward(&inp, pos)
+                .map_err(|e| fail(format!("plain forward: {e}")))?;
+            let next = argmax_ids(&logits)?[0];
+            plain.push(next);
+            if Some(next) == eos {
+                break;
+            }
+            cur = next;
+            pos += 1;
+        }
+        cuda::device_synchronize().ok();
+        let plain_secs = plain_t0.elapsed().as_secs_f32();
+        let plain_tok_s = plain.len() as f32 / plain_secs.max(1e-6);
+
+        // ===== SPECULATIVE decode (prompt-lookup + verify per round) ================
+        // No re-prefill: plain only wrote [P, ..]; the prefix [0, P) is the one shared prefill,
+        // and the spec verify overwrites [P, ..] with its own K/V before reading.
+        let drafter = NgramDrafter::new(DrafterConfig::default());
+        let mut all: Vec<u32> = prompt_tokens.clone();
+        all.push(cur0);
+        let mut spec: Vec<u32> = vec![cur0];
+        let mut cur = cur0;
+        let mut pos = position;
+        let (mut rounds, mut drafted, mut accepted) = (0usize, 0usize, 0usize);
+        let spec_t0 = std::time::Instant::now();
+        while spec.len() < max_new {
+            // Propose, then cap the span so the verify write [pos, pos+gamma] fits the cache.
+            let mut drafts = drafter.propose(&all);
+            let max_gamma = kv_ctx.saturating_sub(pos + 1);
+            if drafts.len() > max_gamma {
+                drafts.truncate(max_gamma);
+            }
+
+            // Verify [cur, drafts..] at [pos, ..] in one forward; greedy-accept the prefix.
+            let feed: Vec<u32> = std::iter::once(cur).chain(drafts.iter().copied()).collect();
+            let feed_t = Tensor::new(feed.as_slice(), &device)
+                .and_then(|t| t.unsqueeze(0))
+                .map_err(|e| fail(format!("feed tensor: {e}")))?;
+            let verify = model
+                .forward_verify(&feed_t, pos)
+                .map_err(|e| fail(format!("verify forward: {e}")))?;
+            let argmaxes = argmax_ids(&verify)?; // length 1 + gamma
+            let k = accept_run(&drafts, &argmaxes);
+            rounds += 1;
+            drafted += drafts.len();
+            accepted += k;
+
+            // Emit the k accepted drafts + the bonus/correction (argmaxes[k] always exists).
+            for &d in drafts.iter().take(k) {
+                spec.push(d);
+                all.push(d);
+            }
+            let bonus = argmaxes[k];
+            spec.push(bonus);
+            all.push(bonus);
+            pos += k + 1;
+            cur = bonus;
+            if Some(bonus) == eos || pos + 1 >= kv_ctx {
+                break;
+            }
+        }
+        cuda::device_synchronize().ok();
+        let spec_secs = spec_t0.elapsed().as_secs_f32();
+        let spec_tok_s = spec.len() as f32 / spec_secs.max(1e-6);
+
+        let cmp = plain.len().min(spec.len());
+        let tokens_match = plain[..cmp] == spec[..cmp];
+
+        Ok(SpecDecodeStats {
+            position,
+            plain_tokens: plain.len(),
+            spec_tokens: spec.len(),
+            plain_tok_s,
+            spec_tok_s,
+            rounds,
+            drafted,
+            accepted,
+            tokens_match,
         })
     }
 
@@ -1107,8 +2024,75 @@ impl CandleBackend {
             }
         })?;
 
-        // Continue token-by-token from the prefilled prompt.
-        self.decode_loop(logits, prompt_tokens.len(), max_tokens, stop)
+        // Continue token-by-token from the prefilled prompt. Eligible gemma4 turns take the
+        // speculative (prompt-lookup) path (Phase 47 / ADR 075): greedy → byte-exact vs plain
+        // greedy, temperature → distribution-lossless speculative sampling (47e). Every other
+        // case keeps the proven plain decode loop unchanged.
+        if self.spec_decode_eligible() {
+            if self.config.temperature == 0.0 {
+                self.spec_decode_loop(logits, prompt_tokens, max_tokens, stop)
+            } else {
+                self.spec_sample_decode_loop(logits, prompt_tokens, max_tokens, stop)
+            }
+        } else {
+            self.decode_loop(logits, prompt_tokens.len(), max_tokens, stop)
+        }
+    }
+
+    /// Emit one freshly-chosen `token` into `st` and apply the `StopMode` stopping rules,
+    /// returning `true` when generation should stop. An EOS in any non-`Fixed` mode stops
+    /// *before* the token is counted or detokenized (so the marker never reaches the output),
+    /// matching plain greedy decode. Shared by [`decode_loop`](Self::decode_loop) and
+    /// [`spec_decode_loop`](Self::spec_decode_loop) so their detokenization and stop semantics
+    /// are byte-identical — the speculative loop just calls this once per accepted/bonus token.
+    #[cfg(feature = "candle-backend")]
+    fn process_token(
+        &self,
+        token: u32,
+        eos: Option<u32>,
+        stop: StopMode,
+        st: &mut DecodeState,
+    ) -> bool {
+        if !matches!(stop, StopMode::Fixed) && Some(token) == eos {
+            return true;
+        }
+        st.n_generated += 1;
+        let piece = self.tokenizer.decode(&[token], false).unwrap_or_default();
+        st.generated_text.push_str(&piece);
+        match stop {
+            StopMode::Json => {
+                for ch in piece.chars() {
+                    if ch == '{' {
+                        st.brace_depth += 1;
+                        st.saw_open_brace = true;
+                    } else if ch == '}' {
+                        st.brace_depth -= 1;
+                    }
+                }
+                if st.saw_open_brace && st.brace_depth <= 0 {
+                    return true;
+                }
+            }
+            StopMode::Text => {
+                if st.generated_text.contains("<|im_end|>")
+                    || st.generated_text.contains("<end_of_turn>")
+                {
+                    return true;
+                }
+                for ch in piece.chars() {
+                    if ch == '\n' {
+                        st.consecutive_newlines += 1;
+                    } else {
+                        st.consecutive_newlines = 0;
+                    }
+                }
+                if st.consecutive_newlines >= 2 {
+                    return true;
+                }
+            }
+            StopMode::Fixed => {}
+        }
+        false
     }
 
     /// Shared autoregressive decode loop: given the `logits` from a prefill of
@@ -1127,17 +2111,12 @@ impl CandleBackend {
         max_tokens: u32,
         stop: StopMode,
     ) -> NluResult<GenerationResult> {
-        let mut generated_text = String::new();
-        let mut n_generated = 0u32;
-        let mut brace_depth: i32 = 0;
-        let mut saw_open_brace = false;
-        let mut consecutive_newlines = 0u32;
-
+        let mut st = DecodeState::default();
         let eos_token = self.find_eos_token();
 
         // Phase 45a: time the autoregressive decode (prefill excluded) for tok/s.
         let decode_start = std::time::Instant::now();
-        while n_generated < max_tokens {
+        while st.n_generated < max_tokens {
             // Sample next token. Both quantized_qwen2 and quantized_gemma3
             // `forward` already reduce to the last position internally, so
             // `logits` is `[batch, vocab]` — take row 0 to get `[vocab]`.
@@ -1186,54 +2165,9 @@ impl CandleBackend {
                 sample_from_probs(&probs_vec)
             };
 
-            // Check EOS (ignored in Fixed mode: a throughput probe decodes the
-            // full token budget regardless of content).
-            if !matches!(stop, StopMode::Fixed) && Some(next_token) == eos_token {
+            // Emit the token + apply the StopMode rules (EOS / brace / newline / markers).
+            if self.process_token(next_token, eos_token, stop, &mut st) {
                 break;
-            }
-
-            n_generated += 1;
-
-            // Decode token to text
-            let piece = self
-                .tokenizer
-                .decode(&[next_token], false)
-                .unwrap_or_default();
-            generated_text.push_str(&piece);
-
-            // Check stop condition
-            match stop {
-                StopMode::Json => {
-                    for ch in piece.chars() {
-                        if ch == '{' {
-                            brace_depth += 1;
-                            saw_open_brace = true;
-                        } else if ch == '}' {
-                            brace_depth -= 1;
-                        }
-                    }
-                    if saw_open_brace && brace_depth <= 0 {
-                        break;
-                    }
-                }
-                StopMode::Text => {
-                    if generated_text.contains("<|im_end|>")
-                        || generated_text.contains("<end_of_turn>")
-                    {
-                        break;
-                    }
-                    for ch in piece.chars() {
-                        if ch == '\n' {
-                            consecutive_newlines += 1;
-                        } else {
-                            consecutive_newlines = 0;
-                        }
-                    }
-                    if consecutive_newlines >= 2 {
-                        break;
-                    }
-                }
-                StopMode::Fixed => {}
             }
 
             // Prepare next forward pass (single token).
@@ -1248,7 +2182,7 @@ impl CandleBackend {
 
             logits = self
                 .model
-                .forward(&next_input, prompt_len + n_generated as usize - 1)
+                .forward(&next_input, prompt_len + st.n_generated as usize - 1)
                 .map_err(|e| NluError::LlmGenerationFailed {
                     reason: format!("decode step: {e}"),
                 })?;
@@ -1256,20 +2190,324 @@ impl CandleBackend {
 
         let decode_secs = decode_start.elapsed().as_secs_f32();
         let tok_s = if decode_secs > 0.0 {
-            n_generated as f32 / decode_secs
+            st.n_generated as f32 / decode_secs
         } else {
             0.0
         };
         tracing::debug!(
-            tokens_generated = n_generated,
+            tokens_generated = st.n_generated,
             decode_secs,
             tok_s,
             "Candle generation complete"
         );
 
         Ok(GenerationResult {
-            text: generated_text,
-            tokens_generated: n_generated,
+            text: st.generated_text,
+            tokens_generated: st.n_generated,
+            decode_secs,
+        })
+    }
+
+    /// Whether this turn should use the speculative (prompt-lookup) decode path
+    /// ([`spec_decode_loop`](Self::spec_decode_loop)) instead of plain
+    /// [`decode_loop`](Self::decode_loop).
+    ///
+    /// Gated to the cases where it is **lossless and a potential win**:
+    /// - gemma4 only — the only loaded family exposing `forward_verify` + the batched verify GEMV;
+    /// - enabled — the live per-akh flag (set from `AkhConfig.spec_decode`, toggled at runtime by
+    ///   the `inference_config` tool). When no shared options are wired (benches/tests), falls back
+    ///   to the `AKH_SPEC_DECODE=1` env flag.
+    ///
+    /// `generate_inner` then routes by temperature: greedy (`== 0`) →
+    /// [`spec_decode_loop`](Self::spec_decode_loop) (matches plain greedy exactly), `> 0` →
+    /// [`spec_sample_decode_loop`](Self::spec_sample_decode_loop) (lossless speculative sampling —
+    /// same *distribution* as plain sampling, Phase 47e). The throughput win is additionally
+    /// conditional on the batched verify GEMV (default-on, Phase 47d).
+    #[cfg(feature = "candle-backend")]
+    fn spec_decode_eligible(&self) -> bool {
+        let enabled = match &self.runtime_options {
+            Some(opts) => opts.spec_decode(),
+            None => std::env::var("AKH_SPEC_DECODE").as_deref() == Ok("1"),
+        };
+        enabled && matches!(self.family, ModelFamily::Gemma4)
+    }
+
+    /// Speculative (prompt-lookup) **greedy** decode loop — gemma4 only (Phase 47 / ADR 075).
+    ///
+    /// Produces up to `γ+1` tokens per target forward: each round drafts a continuation from the
+    /// token history with an n-gram lookup (no draft model — works for gemma4, whose tokenizer
+    /// has no compatible small sibling), verifies the whole span in one `forward_verify`, and
+    /// greedily accepts the matching prefix plus one bonus/correction token. KV rollback is free
+    /// — the next round simply writes from the new position, overwriting any rejected tail
+    /// (device-pos static cache, Phase 46d-2). Every accepted/bonus token is emitted through the
+    /// shared [`process_token`](Self::process_token), so stop/detokenization match plain decode
+    /// exactly; the generated tokens match plain greedy decode in practice (validated
+    /// token-identical on the Phase 47c bench prompts).
+    ///
+    /// Wins where output echoes context (agentic / RAG / code / structured output) and is
+    /// near-neutral otherwise (an empty draft falls back to a cheap `m=1` verify). The throughput
+    /// win additionally requires the batched verify GEMV (`AKH_GEMV_BATCH=1`, Phase 47d) — without
+    /// it the verify is ~4× a decode and this *loses*; a warning is logged in that case.
+    #[cfg(feature = "candle-backend")]
+    fn spec_decode_loop(
+        &mut self,
+        logits: Tensor,
+        prompt_tokens: Vec<u32>,
+        max_tokens: u32,
+        stop: StopMode,
+    ) -> NluResult<GenerationResult> {
+        use super::spec_decode::{accept_run, DrafterConfig, NgramDrafter};
+        let fail = |reason: String| NluError::LlmGenerationFailed { reason };
+
+        if std::env::var("AKH_GEMV_BATCH").as_deref() == Ok("0") {
+            tracing::warn!(
+                "speculative decode is enabled but AKH_GEMV_BATCH=0 disables the batched verify \
+                 GEMV (Phase 47d): the verify forward is then ~4× a single decode, so spec decode \
+                 will be SLOWER than plain decode. Unset AKH_GEMV_BATCH to restore the fast path."
+            );
+        }
+
+        let device = self.device.clone();
+        let eos = self.find_eos_token();
+        // Echo-gate (min_ngram=2): only draft when at least a 2-token suffix recurs. Lone
+        // single-token matches are usually rejected on free-form text — requiring a longer
+        // match keeps the precision high so rejected γ-rounds stay rare.
+        let drafter = NgramDrafter::new(DrafterConfig {
+            min_ngram: 2,
+            ..DrafterConfig::default()
+        });
+        let kv_ctx = match &self.model {
+            LoadedModel::Gemma4(m) => m.kv_ctx(),
+            _ => return Err(fail("spec decode: gemma4 only".to_string())),
+        };
+        // On-device argmax → only the token id(s) cross PCIe (no full-logits D2H).
+        let argmax_ids = |t: &Tensor| -> NluResult<Vec<u32>> {
+            t.argmax(candle_core::D::Minus1)
+                .and_then(|a| a.flatten_all())
+                .and_then(|a| a.to_vec1::<u32>())
+                .map_err(|e| fail(format!("argmax: {e}")))
+        };
+
+        let mut st = DecodeState::default();
+        let mut all = prompt_tokens; // drafter context: prompt + everything generated
+        let mut pos = all.len();
+        let decode_start = std::time::Instant::now();
+
+        // First token = argmax(prefill) (last position).
+        let cur0 = *argmax_ids(&logits)?
+            .last()
+            .ok_or_else(|| fail("empty prefill argmax".to_string()))?;
+        all.push(cur0);
+        let mut cur = cur0;
+        let mut stop_now = self.process_token(cur0, eos, stop, &mut st);
+
+        while !stop_now && st.n_generated < max_tokens {
+            // Draft from the history, then verify [cur, drafts..] at [pos, ..] in ONE forward.
+            // Scope the &mut self.model borrow so process_token (&self) can run after it.
+            let (drafts, argmaxes) = {
+                let model = match &mut self.model {
+                    LoadedModel::Gemma4(m) => m,
+                    _ => return Err(fail("spec decode: gemma4 only".to_string())),
+                };
+                let mut drafts = drafter.propose(&all);
+                // Cap γ so the verify write [pos, pos+γ] fits the static KV cache.
+                let max_gamma = kv_ctx.saturating_sub(pos + 1);
+                if drafts.len() > max_gamma {
+                    drafts.truncate(max_gamma);
+                }
+                let feed: Vec<u32> = std::iter::once(cur).chain(drafts.iter().copied()).collect();
+                let feed_t = Tensor::new(feed.as_slice(), &device)
+                    .and_then(|t| t.unsqueeze(0))
+                    .map_err(|e| fail(format!("feed tensor: {e}")))?;
+                let verify = model
+                    .forward_verify(&feed_t, pos)
+                    .map_err(|e| fail(format!("verify forward: {e}")))?;
+                (drafts, argmax_ids(&verify)?) // argmaxes length = 1 + drafts.len()
+            };
+
+            let k = accept_run(&drafts, &argmaxes);
+            // Emit the k accepted drafts then the bonus/correction (argmaxes[k] always exists),
+            // each through the shared per-token path. Stop mid-run on EOS / a stop rule / budget.
+            for i in 0..=k {
+                let tok = if i < k { drafts[i] } else { argmaxes[k] };
+                all.push(tok);
+                if self.process_token(tok, eos, stop, &mut st) {
+                    stop_now = true;
+                    break;
+                }
+                if st.n_generated >= max_tokens {
+                    stop_now = true;
+                    break;
+                }
+            }
+            cur = argmaxes[k]; // bonus becomes the next round's current token
+            pos += k + 1;
+            if pos + 1 >= kv_ctx {
+                break;
+            }
+        }
+
+        let decode_secs = decode_start.elapsed().as_secs_f32();
+        tracing::debug!(
+            tokens_generated = st.n_generated,
+            decode_secs,
+            tok_s = st.n_generated as f32 / decode_secs.max(1e-6),
+            "Candle speculative generation complete"
+        );
+        Ok(GenerationResult {
+            text: st.generated_text,
+            tokens_generated: st.n_generated,
+            decode_secs,
+        })
+    }
+
+    /// Speculative (prompt-lookup) **sampling** decode loop — gemma4 only (Phase 47e / ADR 075).
+    ///
+    /// The temperature analogue of [`spec_decode_loop`](Self::spec_decode_loop). Each round drafts
+    /// a span from the token history, verifies it in one `forward_verify`, then walks the drafted
+    /// positions **accepting drafted token `d` with probability `p_target(d)`** and, on the first
+    /// rejection, resampling from the residual `norm(p ∖ {d})` (speculative sampling specialized to
+    /// a deterministic point-mass draft — see [`spec_sample_step`](super::spec_decode::spec_sample_step)).
+    /// The emitted sequence has the **same distribution** as plain temperature sampling (not
+    /// byte-identical, by nature — proven distribution-lossless by `spec_sample_step`'s test).
+    /// Shares [`process_token`](Self::process_token) for stop/detokenization; KV rollback is free
+    /// (device-pos cache). Engaged only for `temperature > 0`; the throughput win is conditional on
+    /// output echoing context (and the batched verify GEMV, default-on Phase 47d).
+    #[cfg(feature = "candle-backend")]
+    fn spec_sample_decode_loop(
+        &mut self,
+        logits: Tensor,
+        prompt_tokens: Vec<u32>,
+        max_tokens: u32,
+        stop: StopMode,
+    ) -> NluResult<GenerationResult> {
+        use super::spec_decode::{categorical, spec_sample_step, DrafterConfig, NgramDrafter};
+        use rand::Rng;
+        let fail = |reason: String| NluError::LlmGenerationFailed { reason };
+
+        if std::env::var("AKH_GEMV_BATCH").as_deref() == Ok("0") {
+            tracing::warn!(
+                "speculative sampling is enabled but AKH_GEMV_BATCH=0 disables the batched verify \
+                 GEMV (Phase 47d): the verify forward is ~4× a single decode, so this will be \
+                 SLOWER than plain sampling. Unset AKH_GEMV_BATCH to restore the fast path."
+            );
+        }
+
+        let device = self.device.clone();
+        let eos = self.find_eos_token();
+        // Temperature scale for softmax (guard against a degenerate 0 — eligibility only routes
+        // here for temperature > 0, but stay defensive).
+        let temp = (self.config.temperature.max(f32::MIN_POSITIVE)) as f64;
+        let drafter = NgramDrafter::new(DrafterConfig {
+            min_ngram: 2,
+            ..DrafterConfig::default()
+        });
+        let kv_ctx = match &self.model {
+            LoadedModel::Gemma4(m) => m.kv_ctx(),
+            _ => return Err(fail("spec decode: gemma4 only".to_string())),
+        };
+        let mut rng = rand::thread_rng();
+
+        // Temperature-softmax a logits tensor to a row-major host probability Vec (one row per
+        // leading position). D2H of the full vocab rows is the same order as plain sampling's
+        // per-token `to_vec1`; only the needed rows of a verify cross the bus.
+        let to_probs = |t: &Tensor| -> NluResult<Vec<f32>> {
+            let scaled = (t / temp).map_err(|e| fail(format!("temp scale: {e}")))?;
+            candle_nn::ops::softmax(&scaled, candle_core::D::Minus1)
+                .and_then(|p| p.flatten_all())
+                .and_then(|p| p.to_vec1::<f32>())
+                .map_err(|e| fail(format!("softmax/d2h: {e}")))
+        };
+
+        let mut st = DecodeState::default();
+        let mut all = prompt_tokens;
+        let mut pos = all.len();
+        let decode_start = std::time::Instant::now();
+
+        // First token: sample from the prefill distribution (last position).
+        let cur0 = categorical(&to_probs(&logits)?, rng.r#gen::<f32>());
+        all.push(cur0);
+        let mut cur = cur0;
+        let mut stop_now = self.process_token(cur0, eos, stop, &mut st);
+
+        while !stop_now && st.n_generated < max_tokens {
+            // Draft + verify in one forward; pull the per-position probabilities. Scope the
+            // &mut self.model borrow so process_token (&self) can run after.
+            let (drafts, probs, vocab) = {
+                let model = match &mut self.model {
+                    LoadedModel::Gemma4(m) => m,
+                    _ => return Err(fail("spec decode: gemma4 only".to_string())),
+                };
+                let mut drafts = drafter.propose(&all);
+                let max_gamma = kv_ctx.saturating_sub(pos + 1);
+                if drafts.len() > max_gamma {
+                    drafts.truncate(max_gamma);
+                }
+                let feed: Vec<u32> = std::iter::once(cur).chain(drafts.iter().copied()).collect();
+                let feed_t = Tensor::new(feed.as_slice(), &device)
+                    .and_then(|t| t.unsqueeze(0))
+                    .map_err(|e| fail(format!("feed tensor: {e}")))?;
+                let verify = model
+                    .forward_verify(&feed_t, pos)
+                    .map_err(|e| fail(format!("verify forward: {e}")))?;
+                let (_, _seq, vocab) =
+                    verify.dims3().map_err(|e| fail(format!("verify dims: {e}")))?;
+                (drafts, to_probs(&verify)?, vocab) // probs: (drafts.len()+1) rows × vocab
+            };
+
+            // Speculative-sampling accept: accept drafted d_j with prob p_j[d_j]; on the first
+            // rejection, resample from the residual and stop. `row(i)` is verify position i.
+            let row = |i: usize| &probs[i * vocab..(i + 1) * vocab];
+            let mut k = drafts.len();
+            let mut bonus: Option<u32> = None;
+            for j in 0..drafts.len() {
+                let (u, rp) = (rng.r#gen::<f32>(), rng.r#gen::<f32>());
+                let (tok, accepted) = spec_sample_step(row(j), drafts[j], u, rp);
+                if !accepted {
+                    bonus = Some(tok);
+                    k = j;
+                    break;
+                }
+            }
+            // All drafts accepted → sample the extra (bonus) position; else use the residual draw.
+            let bonus =
+                bonus.unwrap_or_else(|| categorical(row(drafts.len()), rng.r#gen::<f32>()));
+
+            // Emit the k accepted drafts + the bonus, each through the shared per-token path.
+            for i in 0..k {
+                all.push(drafts[i]);
+                if self.process_token(drafts[i], eos, stop, &mut st) {
+                    stop_now = true;
+                    break;
+                }
+                if st.n_generated >= max_tokens {
+                    stop_now = true;
+                    break;
+                }
+            }
+            if !stop_now {
+                all.push(bonus);
+                if self.process_token(bonus, eos, stop, &mut st) || st.n_generated >= max_tokens {
+                    stop_now = true;
+                }
+            }
+            cur = bonus;
+            pos += k + 1;
+            if pos + 1 >= kv_ctx {
+                break;
+            }
+        }
+
+        let decode_secs = decode_start.elapsed().as_secs_f32();
+        tracing::debug!(
+            tokens_generated = st.n_generated,
+            decode_secs,
+            tok_s = st.n_generated as f32 / decode_secs.max(1e-6),
+            "Candle speculative-sampling generation complete"
+        );
+        Ok(GenerationResult {
+            text: st.generated_text,
+            tokens_generated: st.n_generated,
             decode_secs,
         })
     }
@@ -1540,6 +2778,21 @@ struct GenerationResult {
     /// Wall-clock spent in the autoregressive decode loop (prefill excluded), in
     /// seconds. Drives the Phase 45a tok/s baseline. Zero when no token was decoded.
     decode_secs: f32,
+}
+
+/// Running state shared by the plain [`CandleBackend::decode_loop`] and the speculative
+/// [`CandleBackend::spec_decode_loop`]: the accumulated text, the emitted-token count, and
+/// the [`StopMode`] bookkeeping (brace depth / newline run). Bundled so both loops drive
+/// [`CandleBackend::process_token`] identically — the speculative loop emits a *batch* of
+/// accepted tokens per forward but each goes through the same per-token path.
+#[cfg(feature = "candle-backend")]
+#[derive(Default)]
+struct DecodeState {
+    generated_text: String,
+    n_generated: u32,
+    brace_depth: i32,
+    saw_open_brace: bool,
+    consecutive_newlines: u32,
 }
 
 // ---------------------------------------------------------------------------

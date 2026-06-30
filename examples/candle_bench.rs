@@ -18,12 +18,14 @@
 //! `AKH_BENCH_BANDWIDTH_GBS` (default 960 = RX 7900 XTX). Set `AKH_HIP_TRACE=1` is
 //! not required — PCIe counters are always live; they are reset after load here.
 //!
-//! HIP caching-allocator pool (Phase 46 sweep): the default is a fixed 512 MB cap —
-//! the safe, near-optimal point for a 12B model on a 24 GB card (a bigger pool spills
-//! to GTT). On a *dedicated* GPU with headroom, `AKH_HIP_POOL_MB=2048` buys ~+10%
-//! decode (gemma4-12b 9.4 → 10.4 tok/s @ 24.65 GB, GTT spill). On roomier or
-//! multi-akh GPUs prefer `AKH_HIP_POOL_MARGIN_MB=2560` (adaptive: keeps ≥ that many MB
-//! free via live `hipMemGetInfo`, so it auto-sizes and never OOMs).
+//! HIP caching-allocator pool (Phase 46d sweep): the default is now ADAPTIVE — a 512 MB
+//! floor that grows while ≥ 2.5 GB VRAM stays free (live `hipMemGetInfo`). On the resident
+//! `Device::Hip` decode path the per-token transient working set is ~3 GB, so the old fixed
+//! 512 MB cap thrashed (7.25 tok/s); the adaptive default auto-reaches the plateau —
+//! gemma3-12b 10.4 tok/s (+44%), gemma4-12b 9.6 (+35%) — and falls back to the floor under
+//! VRAM pressure (multi-akh / op-offload / 27B), so it never OOMs. Override with
+//! `AKH_HIP_POOL_MB=<n>` (plain fixed cap; `=512` restores the old behavior) or
+//! `AKH_HIP_POOL_MARGIN_MB=<n>` (tune the headroom; `=0` ⇒ pure fixed floor).
 
 #[cfg(feature = "candle-backend")]
 fn main() -> miette::Result<()> {
@@ -100,6 +102,198 @@ fn main() -> miette::Result<()> {
     candle_core::cuda::reset_pcie_counts();
     #[cfg(feature = "hip")]
     candle_core::cuda::reset_malloc_counts();
+
+    // Phase 46d-2c: byte-exact A/B of the graph-ready decode forward (device-pos rope +
+    // kv_scatter_at + block-padded read_len + device-built keep-mask, run EAGERLY) vs the
+    // normal decode forward at a fixed position. The gate for the per-token graph decode:
+    // both diffs must be 0 before 46d-2d wraps the forward in a captured graph.
+    #[cfg(feature = "hip")]
+    if std::env::var("AKH_BENCH_GRAPH_PARITY").as_deref() == Ok("1") {
+        let p = backend.bench_graph_decode_parity(&prompt)?;
+        let verdict = |d: f32| if d == 0.0 { "BYTE-EXACT" } else { "DIVERGED" };
+        println!();
+        println!("=== Phase 46d-2c graph-ready decode parity (eager A/B) ===");
+        println!("position (P)        : {} tokens", p.position);
+        println!(
+            "device KV write     : {}",
+            if p.used_device_scatter {
+                "kv_scatter_at (device *d_pos)"
+            } else {
+                "slice_set (host offset)"
+            }
+        );
+        println!(
+            "exact  read_len=P+1 : max|Δlogits| {:.3e}  ({})",
+            p.exact_diff,
+            verdict(p.exact_diff)
+        );
+        println!(
+            "padded read_len={:<5}: max|Δlogits| {:.3e}  ({})",
+            p.padded_read_len,
+            p.padded_diff,
+            verdict(p.padded_diff)
+        );
+        return Ok(());
+    }
+
+    // Phase 47 productization probe (AKH_BENCH_GEN=1): exercise the *production* `generate`
+    // path (generate_inner → decode_loop or spec_decode_loop per AKH_SPEC_DECODE). Run twice
+    // across two processes — once with `AKH_SPEC_DECODE=1 AKH_GEMV_BATCH=1`, once without — and
+    // compare the printed text (must be identical: spec decode is greedy-lossless) and tok/s.
+    #[cfg(feature = "candle-backend")]
+    if std::env::var("AKH_BENCH_GEN").as_deref() == Ok("1") {
+        let new: u32 = env_parse("AKH_BENCH_TOKENS").unwrap_or(96);
+        let spec_on = std::env::var("AKH_SPEC_DECODE").as_deref() == Ok("1");
+        // AKH_BENCH_TEMP > 0 exercises the speculative-*sampling* path (Phase 47e); default greedy.
+        if let Some(temp) = env_parse::<f32>("AKH_BENCH_TEMP") {
+            backend.set_temperature(temp);
+            println!("temperature        : {temp}");
+        }
+        let t0 = Instant::now();
+        let text = backend.generate(&prompt, new)?;
+        let secs = t0.elapsed().as_secs_f32();
+        println!();
+        println!("=== Phase 47 production generate probe ===");
+        println!("spec decode        : {}", if spec_on { "ON (AKH_SPEC_DECODE=1)" } else { "off" });
+        println!("wall (incl prefill): {secs:.3}s");
+        println!("--- text ({} chars) ---", text.len());
+        println!("{text}");
+        println!("--- end text ---");
+        return Ok(());
+    }
+
+    // Phase 47c: greedy speculative decode (AKH_BENCH_SPEC=1). A/B of plain greedy decode vs
+    // prompt-lookup spec decode (n-gram drafter + one forward_verify per round). The win is
+    // workload-conditional — high acceptance where the output echoes context.
+    #[cfg(feature = "hip")]
+    if std::env::var("AKH_BENCH_SPEC").as_deref() == Ok("1") {
+        let new: u32 = env_parse("AKH_BENCH_TOKENS").unwrap_or(96);
+        let s = backend.bench_spec_decode(&prompt, new)?;
+        let speedup = s.spec_tok_s / s.plain_tok_s.max(1e-6);
+        let accept_rate = if s.drafted > 0 {
+            100.0 * s.accepted as f32 / s.drafted as f32
+        } else {
+            0.0
+        };
+        let toks_per_fwd = if s.rounds > 0 {
+            s.spec_tokens as f32 / s.rounds as f32
+        } else {
+            0.0
+        };
+        println!();
+        println!("=== Phase 47c greedy speculative decode (gemma4) ===");
+        println!("prefix P           : {} tokens", s.position);
+        println!("plain / spec toks  : {} / {}", s.plain_tokens, s.spec_tokens);
+        println!(
+            "tokens match (A/B) : {}",
+            if s.tokens_match { "YES (spec == plain)" } else { "NO — diverged" }
+        );
+        println!(
+            "acceptance         : {}/{} drafts = {:.0}%  ({:.2} tokens/forward)",
+            s.accepted, s.drafted, accept_rate, toks_per_fwd
+        );
+        println!("plain  decode      : {:.2} tok/s", s.plain_tok_s);
+        println!("spec   decode      : {:.2} tok/s", s.spec_tok_s);
+        println!("speedup            : {speedup:.2}x  (spec / plain)");
+        return Ok(());
+    }
+
+    // Phase 47a: all-position verify-forward parity (AKH_BENCH_VERIFY=1). Byte-exact A/B of
+    // gemma4's forward_verify ([1, seq, vocab]) vs incremental single-token decode — the gate
+    // for the speculative-decode verify primitive (both diffs must be 0).
+    #[cfg(feature = "hip")]
+    if std::env::var("AKH_BENCH_VERIFY").as_deref() == Ok("1") {
+        let n: usize = env_parse("AKH_BENCH_TOKENS").unwrap_or(8);
+        let p = backend.bench_verify_parity(&prompt, n)?;
+        println!();
+        println!("=== Phase 47a verify-forward parity (gemma4) ===");
+        println!("prefix P / seq n   : {} / {}", p.position, p.seq_len);
+        println!(
+            "max|Δlogits|       : {:.3e}  (0 at n=1; n>1 = m=1 GEMV vs m=n GEMM quant diff)",
+            p.max_abs_diff
+        );
+        println!(
+            "argmax agreement   : {}/{}  ({})",
+            p.argmax_agree,
+            p.seq_len,
+            if p.argmax_agree == p.seq_len {
+                "PASS — verify picks the same greedy token"
+            } else {
+                "FLIP — quant divergence changed a token"
+            }
+        );
+        return Ok(());
+    }
+
+    // Phase 46d-2d: the real per-token graph decode loop (AKH_BENCH_GRAPH_LOOP=1). One graph
+    // captured for the decode forward, replayed once per token (advancing the device d_pos +
+    // refreshing the embedding in place between replays), generating a full sequence. A/B vs
+    // eager generation of the same sequence — identical greedy tokens ⇒ correct, faster ⇒ the
+    // 46d payoff.
+    #[cfg(feature = "hip")]
+    if std::env::var("AKH_BENCH_GRAPH_LOOP").as_deref() == Ok("1") {
+        let new: u32 = env_parse("AKH_BENCH_TOKENS").unwrap_or(64);
+        let s = backend.bench_graph_decode_loop(&prompt, new)?;
+        let speedup = s.graph_tok_s / s.eager_tok_s.max(1e-6);
+        println!();
+        println!("=== Phase 46d-2d real per-token graph decode loop ===");
+        println!("position (P)       : {} tokens", s.position);
+        println!("decoded            : {} / {} requested", s.decoded, s.requested_new);
+        println!(
+            "warm fwd allocs    : {} miss  (0 ⇒ forward is capturable)",
+            s.capture_miss
+        );
+        println!(
+            "tokens match (A/B) : {}",
+            if s.tokens_match { "YES (graph == eager)" } else { "NO — DIVERGED" }
+        );
+        println!("eager   (per token): {:.2} tok/s", s.eager_tok_s);
+        println!("graph   (per token): {:.2} tok/s", s.graph_tok_s);
+        println!("speedup            : {speedup:.2}x  (graph / eager)");
+        return Ok(());
+    }
+
+    // Phase 46c: fixed-position HIP-graph capture/replay probe (AKH_BENCH_GRAPH=1). The
+    // decisive measurement — eager forward vs single-dispatch graph replay at one fixed
+    // decode position — for whether graph replay can close the dispatch-bound decode gap.
+    #[cfg(feature = "hip")]
+    if std::env::var("AKH_BENCH_GRAPH").as_deref() == Ok("1") {
+        let iters: u32 = env_parse("AKH_BENCH_TOKENS").unwrap_or(128);
+        let stats = backend.bench_graph_replay(&prompt, iters)?;
+        println!();
+        println!("=== Phase 46c fixed-position HIP-graph replay probe ===");
+        println!("position (P)       : {} tokens", stats.position);
+        println!("iters (each)       : {}", stats.iters);
+        println!(
+            "warm fwd allocs    : {} miss / {} calls  (0 miss ⇒ forward is capturable)",
+            stats.warm_malloc_miss, stats.warm_malloc_calls
+        );
+        println!("eager  (fwd @P)    : {:.2} tok/s", stats.eager_tok_s);
+        println!(
+            "stream-eager diff  : max|private−null| {:.3e}  (0 ⇒ all ops honor the stream)",
+            stats.stream_eager_diff
+        );
+        if stats.captured {
+            let speedup = stats.replay_tok_s / stats.eager_tok_s.max(1e-6);
+            println!("replay (graph @P)  : {:.2} tok/s", stats.replay_tok_s);
+            println!("speedup            : {speedup:.2}x  (replay / eager)");
+            println!(
+                "parity (replay≟fresh): argmax {} | max|Δlogits| {:.3e}",
+                if stats.argmax_matches { "MATCH" } else { "MISMATCH" },
+                stats.max_abs_diff
+            );
+            println!(
+                "replay determinism : max|first−last| {:.3e}  (0 ⇒ deterministic)",
+                stats.replay_determinism
+            );
+        } else {
+            println!(
+                "capture            : FAILED — {}",
+                stats.capture_error.as_deref().unwrap_or("unknown")
+            );
+        }
+        return Ok(());
+    }
 
     let vram_before = vram_used_bytes();
 

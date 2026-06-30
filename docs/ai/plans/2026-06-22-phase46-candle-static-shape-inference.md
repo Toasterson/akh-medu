@@ -78,3 +78,147 @@ for the Neural→VSA bridge. (Scoped in detail in the Phase 27 plan once 46a–4
 - Anima WI: Akh-Medu project `019d9844-ce74-7993-a9f0-c953b8f04a4e` (create a Phase 46
   work item; promote to agent-ready once 46a lands).
 - Seshat: ingest this plan + ADR 074 so the corpus stays searchable.
+
+## 46c status (2026-06-23) — HIP-graph capture VALIDATED, byte-exact
+
+The full gemma3 decode forward now captures into a `hipGraph` and replays in one
+`hipGraphLaunch`, **bit-identical to eager** (fixed-position probe `AKH_BENCH_GRAPH=1`:
+parity max|Δlogits|=0, deterministic). Speedup: **1.33× @ P=22** (replay 41.6 vs eager
+31.3 tok/s), **1.26× @ P=362** (27.6 vs 22.0, 3 GB pool). Confirms the dispatch-idle
+hypothesis with correct output.
+
+Three capture-enabling fixes (commit `d80d632`), found by bisecting capture failures
+through fast candle-core op_tests (single → batched → chain → attn_block):
+1. **The correctness bug**: the f16↔f32 cast (`AKH_CAST_LAUNCH`) launched on stream `0`
+   instead of `g_akh_stream`. The KV cache's per-layer read-cast ran un-captured on the
+   null stream → missing from replay → stale K/V → wrong output (compounded to max|Δ|=43.5).
+   Byte-identical for normal execution (g_akh_stream is null there).
+2. `event_time`'s `hipEventRecord` (null stream) invalidated Global-mode capture → skip
+   while a launch stream is set.
+3. rocBLAS automatic-mode per-call workspace hipMalloc aborted capture → fixed 64 MB
+   `rocblas_set_workspace`.
+
+API: `candle_core::cuda::HipGraph` + `device_synchronize` + `run_on_private_stream`;
+gemma3 `embed`/`hidden_states_from_embed`/`forward_from_embed` split.
+
+**Reframing for 46d (measured):** at P=362 the default 512 MB pool misses 241
+hipMalloc/token (growing attention transients overflow the cap) → eager only 12.4 tok/s; a
+3 GB pool is 0-miss → 22.0 tok/s (**1.77×**). So the growing-shape malloc-thrash, not the
+0.5% seen at P=22, is the dominant large-P cost. The 46d static-buffer rewrite (pre-alloc
+attention scratch at MAX size + len-extent views) eliminates BOTH the thrash AND enables
+capture at all P → combined **~2× at P=362** (12.4 → 27.6). Remaining 46d work: the moving
+KV-write (device-pointer write offset + attention len read from device, updated outside the
+captured region — not per-token recapture); the flash-attn stash is groundwork.
+
+## 46d status (2026-06-23) — pool is the lever; adaptive default shipped (+44%/+35%)
+
+The 46d static-shape work was driven by measurement, and the measurement **corrected the
+46c reframing above**. The "241 miss/token = 1.77× from a 3 GB pool" was a *fixed-position*
+artifact: re-running the SAME P repeatedly, the 512 MB cap can't hold one forward's working
+set so it evicts + re-mallocs even same-size blocks. In **real generation** every position
+is a new size, so a bigger pool can't pre-cache a size you never re-see — block-padding (the
+planned 46d-1) is what would make consecutive tokens share a size.
+
+So 46d-1 (block-pad the decode KV read to a `kv_block` multiple, mask the tail to -inf,
+bit-identical) was implemented and **measured against the trivial alternative — and reverted**
+(measure-or-revert):
+
+| config (gemma3-12b, long prompt, P≈200-330) | pool | tok/s | h2d |
+|---|---|---|---|
+| baseline (no padding)        | 512 MB | 7.25  | 690    |
+| **pool-only (no padding)**   | **3 GB** | **10.42** | 690 |
+| block-pad BLK=256            | 512 MB | 6.21  | 49 585 |
+| block-pad BLK=256            | 3 GB   | 9.00  | 49 585 |
+
+Block-padding **net-loses**: its per-token tail mask adds ~49k host-sync crossings, and even
+zero-h2d it would only remove the ~240 *cheap* growing-buffer misses/token (~2-3% at a 3 GB
+pool). The real bottleneck is the **pool cap**, and a pool sweep confirms a ~3 GB plateau:
+
+  512 MB 7.25 | 2 GB 9.57 | 3 GB 10.39 | 4/6 GB 10.35/10.37 (13.50 GB peak / 24 GB card)
+
+**Shipped (commit `e3a0e60`):** the HIP caching allocator default is now **adaptive with a
+floor** — always recycle up to the 512 MB cap, then grow while ≥ 2.5 GB VRAM stays free
+(live `hipMemGetInfo`). Strictly ≥ the old fixed-512 behavior: a roomy single-12B GPU
+auto-reaches the plateau, multi-akh / op-offload / 27B pressure falls back to the floor (no
+OOM). Parity-exact (byte-identical sample), graph-compatible (46c probe: 0 malloc-miss,
+1.29× replay, max|Δ|=0).
+
+  gemma3-12b 7.25 → 10.43 tok/s (+44%), 13.50 GB peak
+  gemma4-12b 7.13 →  9.60 tok/s (+35%), 16.34 GB peak
+  escape hatch `AKH_HIP_POOL_MB=512` restores 7.24 exactly
+
+**The honest 46d conclusion:** the big, free, safe decode win was the pool default, not the
+static-shape rewrite. The decode is still only ~8% of the bandwidth roofline → deeply
+**dispatch-bound**, so the only remaining lever is the **HIP graph** (46c's 1.26-1.33×).
+
+### 46d-2 (open): real per-token graph decode — large, genuinely uncertain
+A real per-token decode graph needs stable shapes (block-padding, now cheap to land *inside*
+a graph since the mask goes in a fixed buffer updated outside the captured region) PLUS the
+moving KV-write handled by **device-pointer indirection** (a custom KV-scatter kernel + a
+masked attention that read the position/length from a device variable, updated between
+replays), with a **per-block graph cache** (~16 graphs over a 4 K context) so the captured
+shape stays constant within a block. Ceiling ≈ 1.3× on top of the pool win (10.4 → ~13
+tok/s); cost = a multi-session custom-kernel effort with real integration risk. The flash-attn
+stash is groundwork. **Deferred pending go-ahead** — banking the pool win is a clean stop.
+
+## 46d-2 progress (2026-06-23) — real per-token graph decode: foundations DONE
+
+User chose "full 46d-2 now". The two genuinely-uncertain mechanisms are built, validated,
+and shipped; the rest is integration. Three position-dependent reads must follow the
+advancing decode position from ONE device variable (`d_pos`): the KV-write column, the rope
+cos/sin row, and the causal mask. Per-block graph cache (~16 graphs / 4 K ctx) keeps the
+captured shape constant within a block.
+
+- **46d-2a working-set pinning (`c0709e4`).** THE make-or-break. A captured graph's
+  intermediate buffers sit in the pool free-list after capture; the decode loop's own
+  embed/argmax/sample allocations between replays would draw those addresses and the next
+  replay would stomp live data. Fix: capture-scoped malloc tracking (`Pool.capture_track`)
+  + `HipGraph` pins the touched-then-freed working set out of the free-list for its lifetime
+  (the live result buffer, owned by its Tensor, is skipped); `Drop` unpins. Intra-capture
+  reuse preserved (only the small unique set is pinned, not 48×). Test
+  `hip_graph_pinning_survives_interleaved_allocs` — VERIFIED meaningful: fails ("victim block
+  stomped") with pinning disabled, byte-exact with it on.
+- **46d-2b device-pos KV-scatter (`edc2605`).** `kv_scatter_f16_kernel` writes the new K/V to
+  cache column `*d_pos` (read on the device) so one captured graph follows the position;
+  `KvScatter` InplaceOp2 + `kv_scatter_at` + `DevicePos`. Tests: byte-identical to `slice_set`
+  at every position; capture at pos 2 + advance d_pos to 6 + replay → writes col 6 (device-pos
+  indirection works inside a graph).
+- **46d-2c prep (`7f80e76`).** `u32_device_ptr` extracts the raw device ptr from an
+  in-place-updated u32 candle tensor so ONE `d_pos` tensor serves both the candle-op readers
+  (rope `index_select`, mask) and the raw-ptr scatter. Tested.
+
+## 46d-2 COMPLETE (2026-06-23) — real per-token graph decode works; +1.10× net
+
+Both remaining steps landed and are byte-exact. The per-token HIP-graph decode runs
+end-to-end and beats eager, so per measure-or-revert it stays.
+
+- **46d-2c graph-ready forward (`478bc65`).** `GraphDecodeCtx { d_pos: u32[1], positions:
+  arange u32[read_len], read_len }` (akh-medu `quantized_gemma3`); `Option<&GraphDecodeCtx>`
+  threaded through `forward_from_embed → hidden_states_from_embed → forward_attn +
+  apply_rotary_emb_qkv`. When `Some` (decode only): rope rows via `index_select(&d_pos)`; KV
+  write via `kv_scatter_at(*d_pos)` (hip; `slice_set` fallback elsewhere); KV read a FIXED
+  block-padded `narrow(0, read_len)`; mask = ONE **additive** f32 mask `relu(positions − pos)
+  · (-1e30)`, `broadcast_add` — drives the padded tail to exactly 0 in softmax. Additive, NOT
+  the U8 `where_cond` keep-mask: the HIP device has no U8 cast (`to_dtype U8→U32`
+  unimplemented). All other callers pass `None` → byte-identical to the existing path. Gate
+  (`AKH_BENCH_GRAPH_PARITY=1`, gemma3-12b @ P=231, run **eagerly**): exact read_len=P+1 AND
+  padded read_len=240 both **max|Δlogits| 0.000e0 BYTE-EXACT**.
+- **46d-2d real decode loop (`194f4d0`).** Key realization: because every position-dependent
+  read now comes from `d_pos`, ONE graph (captured at `read_len = P + max_new`, padded)
+  follows the whole generation — no per-block recapture needed. Per token (outside capture):
+  refresh a fixed `embed_buf` in place + `set_pos(d_pos)` (4-byte H2D), then one
+  `hipGraphLaunch`. `bench_graph_decode_loop` (`AKH_BENCH_GRAPH_LOOP=1`) A/Bs graph-replay vs
+  eager generation. gemma3-12b @ P=231: **0 warm-miss → clean capture; tokens MATCH (graph ==
+  eager); eager 10.5 / graph 11.5 tok/s = 1.09–1.10× (stable 64/128-tok runs).**
+
+### Finding — net win is modest (1.10×), and why
+The forward-only ceiling is 1.26–1.33× (46c). The loop realizes only ~1.10× because the
+per-token **embed (host-sync quantized `get_rows`) + sampling** are identical in both paths
+and don't speed up — they dilute the dispatch win. The masked-attention overhead of the
+single padded graph is small (the dominant per-token cost is the fixed MLP/projection work).
+**Next lever is NOT more graph machinery** — it's removing per-token host-sync: device-side
+sampling (argmax stays on device, only the chosen id D2H) and a capturable embedding path.
+Block recapture would only trim the small masked-attention overhead; not worth it yet.
+
+The 46d-2 foundations stand: working-set pinning (`c0709e4`), device-pos KV-scatter
+(`edc2605`), `u32_device_ptr` (`7f80e76`) — all candle-core, all separately tested.

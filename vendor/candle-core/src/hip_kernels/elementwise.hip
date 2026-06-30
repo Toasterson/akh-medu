@@ -510,6 +510,27 @@ __global__ void ucopy_f16(const unsigned short* src, unsigned short* dst, size_t
     dst[o] = src[s];
 }
 
+// Phase 46d-2: scatter the new token's K (or V) into a static KV cache at a DEVICE-side
+// column index. The write offset is read from `d_pos` in global memory (so it can be
+// updated between HIP-graph replays via a 4-byte H2D) instead of being baked into the
+// launch as a host offset — the key to capturing a per-token decode forward ONCE per block
+// and replaying it as the position advances. dtype-agnostic 2-byte (f16) raw copy.
+//   src   : [n_kv, head_dim]            the new token's K/V for this layer (contiguous)
+//   kbuf  : [n_kv, kv_ctx, head_dim]    the static cache (contiguous; batch = 1 on decode)
+//   d_pos : device pointer to one uint32 column index in [0, kv_ctx)
+__global__ void kv_scatter_f16_kernel(const unsigned short* __restrict__ src,
+                                      unsigned short* __restrict__ kbuf,
+                                      const unsigned int* __restrict__ d_pos,
+                                      size_t n_kv, size_t head_dim, size_t kv_ctx) {
+    size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    size_t total = n_kv * head_dim;
+    if (i >= total) return;
+    size_t pos = (size_t)(*d_pos);
+    size_t h = i / head_dim;
+    size_t d = i - h * head_dim;
+    kbuf[(h * kv_ctx + pos) * head_dim + d] = src[i];
+}
+
 extern "C" {
 
 // Phase 46c: set the launch stream for this kernel library (null = default stream).
@@ -756,6 +777,19 @@ int akh_ucopy_f16(const unsigned short* src, unsigned short* dst, size_t n, size
     return hipGetLastError() == hipSuccess ? 0 : 1;
 }
 
+// Phase 46d-2: device-indexed KV scatter (see kv_scatter_f16_kernel). One thread per
+// (head, head_dim) element; the column index is read from `d_pos` on the device.
+int akh_kv_scatter_f16(const unsigned short* src, unsigned short* kbuf,
+                       const unsigned int* d_pos, size_t n_kv, size_t head_dim, size_t kv_ctx) {
+    size_t total = n_kv * head_dim;
+    if (total == 0) return 0;
+    int t = 256;
+    size_t blocks = (total + t - 1) / t;
+    hipLaunchKernelGGL(kv_scatter_f16_kernel, dim3(blocks), dim3(t), 0, g_akh_stream,
+                       src, kbuf, d_pos, n_kv, head_dim, kv_ctx);
+    return hipGetLastError() == hipSuccess ? 0 : 1;
+}
+
 } // extern "C"
 
 // ---- dtype casts (Phase 45d) -----------------------------------------------
@@ -777,8 +811,13 @@ __global__ void cast_kernel(const Src* x, Dst* y, size_t n) {
         if ((n) == 0) return 0;                                                \
         int t = 256;                                                           \
         size_t blocks = ((n) + t - 1) / t;                                     \
+        /* Phase 46c: launch on g_akh_stream, NOT stream 0. Hardcoding the null   \
+           stream made the f16<->f32 cast (the KV cache's per-layer read cast)    \
+           run UN-captured during HIP-graph capture — missing from the replay, so \
+           the attention read stale K/V (~0.05/layer, compounding to a wrong      \
+           full-forward replay). Every other launcher already uses g_akh_stream. */\
         hipLaunchKernelGGL((cast_kernel<SRC, DST>), dim3(blocks), dim3(t), 0,  \
-                           0, (xptr), (yptr), (n));                            \
+                           g_akh_stream, (xptr), (yptr), (n));                 \
         return hipGetLastError() == hipSuccess ? 0 : 1;                        \
     } while (0)
 
