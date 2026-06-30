@@ -1,6 +1,6 @@
 # Phase 47 — Speculative Decoding (Candle, gemma4-12b)
 
-- **Status:** Active (47a–47d + productization done + validated on gfx1100; default-on toggle + 47e remain)
+- **Status:** COMPLETE — 47a–47e + productization + per-akh config/tool + batched-GEMV default-on, all validated on gfx1100. Off by default.
 - **Anima work item:** Akh-Medu project `019d9844-ce74-7993-a9f0-c953b8f04a4e` (work-item id TBD — create + link)
 - **ADR:** [075-speculative-decoding](../decisions/075-speculative-decoding.md)
 - **Builds on:** Phase 46d-2 (HIP-graph per-token decode; device-pos static KV cache) — [plan](2026-06-22-phase46-candle-static-shape-inference.md), [ADR 074]
@@ -249,4 +249,25 @@ short-prefill `generate()` is **byte-identical** batched-on vs `AKH_GEMV_BATCH=0
 default change newly touches for non-gemma4 models; the m=1 decode kernel is separate and
 unaffected). `AKH_GEMV_BATCH=0` remains the escape hatch.
 
-Remaining: 47e (sampling spec decode) for non-greedy turns.
+### 47e — speculative SAMPLING (2026-06-29 cont., `285ebe8`)
+Extends spec decode to **temperature > 0**, distribution-losslessly. With a deterministic
+prompt-lookup draft, speculative sampling specializes to: **accept drafted token `d` with
+probability `p_target(d)`, else resample from the residual `norm(p ∖ {d})`** — which marginally
+emits exactly `p_target` (chain-rule ⇒ the whole sequence has the same distribution as plain
+sampling).
+- `spec_decode::spec_sample_step` (pure; residual walked inline, no vocab alloc on reject) +
+  `categorical` for the all-accepted bonus. **Distribution-losslessness test**: 600k-trial
+  empirical emit frequency == target within 0.5% for every drafted `d`.
+- `candle_backend::spec_sample_decode_loop` (gemma4 temperature path) — same round structure +
+  shared `process_token` + free KV rollback as the greedy loop, but pulls the per-position softmax
+  probs and runs `spec_sample_step`. `spec_decode_eligible` drops the greedy gate; `generate_inner`
+  routes `temp==0 → greedy spec`, `temp>0 → sampling spec`.
+
+Validated on gfx1100, gemma4-12b: low temp (0.2) → spec sampling **== plain sampling == greedy**
+byte-identical (a correct sampler reproduces a peaked distribution exactly); temp 0.7 high-echo →
+**17.06s → 6.91s (2.47×)** — plain sampling's per-token full-vocab softmax+D2H makes the win larger
+than greedy's — coherent across runs.
+
+**Phase 47 is complete** (47a–47e + productization + per-akh config/tool + batched GEMV default-on),
+all validated on hardware. Off by default; per-akh `spec_decode` config + `inference_config` tool
+to enable.

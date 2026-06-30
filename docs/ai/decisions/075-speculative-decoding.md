@@ -1,6 +1,6 @@
 # ADR 075 — Speculative Decoding for the Candle gemma4 Boundary
 
-- **Status:** Accepted — 47a–47d + productization into the generate path, validated on gfx1100 (2026-06-29); default-on toggle + 47e (sampling) remain
+- **Status:** Accepted — COMPLETE (47a–47e + productization + per-akh config/tool + batched-GEMV default-on), all validated on gfx1100 (2026-06-29)
 - **Date:** 2026-06-24 (updated 2026-06-29)
 - **Context plan:** [Phase 47](../plans/2026-06-24-phase47-speculative-decoding.md)
 - **Supersedes / relates:** builds on [ADR 074] (Phase 46d HIP-graph decode) and the device-pos
@@ -106,5 +106,10 @@ benches/tests.
 **Batched GEMV default-on (`877dc5a`).** `AKH_GEMV_BATCH` flipped to opt-out (`=0` disables): the
 validated batched verify GEMV is the default, so enabling `spec_decode` is fast with no second
 flag. Verified the candle-core parity suite stays green default-routing through the batched kernel
-and that gemma3 short-prefill output is byte-identical on/off. Sampling turns still need 47e
-(probabilistic accept + residual resample); that is the remaining work.
+and that gemma3 short-prefill output is byte-identical on/off. **Speculative sampling (47e, `285ebe8`).** Spec decode now also covers temperature > 0,
+distribution-losslessly: with a deterministic draft, accept `d` with prob `p_target(d)` else
+resample the residual `norm(p ∖ {d})` — marginally emits exactly `p_target` (`spec_sample_step`,
+proven by a 600k-trial test). `generate_inner` routes greedy → byte-exact spec, temperature →
+sampling spec. Validated: low-temp spec == plain == greedy byte-identical; temp-0.7 high-echo
+2.47× (larger than greedy's win because plain sampling's per-token full-vocab softmax+D2H is
+costly). **Phase 47 is complete** — all sub-phases validated on gfx1100, off by default.
