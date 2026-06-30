@@ -373,22 +373,37 @@ impl LayerWeights {
             (k, v)
         };
 
-        // Repeat KV for GQA
-        let k = candle_transformers::utils::repeat_kv(k, self.n_head / self.n_kv_head)?;
-        let v = candle_transformers::utils::repeat_kv(v, self.n_head / self.n_kv_head)?;
-
-        // Scaled Dot-Product Attention
+        // Scaled Dot-Product Attention.
         let scale = 1.0 / (self.head_dim as f64).sqrt();
-        let mut attn_weights = (q.matmul(&k.transpose(2, 3)?)? * scale)?;
-
-        if let Some(mask) = mask {
-            let mask = mask.broadcast_as(attn_weights.shape())?;
-            let neg_inf = self.neg_inf.broadcast_as(attn_weights.dims())?;
-            attn_weights = mask.eq(0u32)?.where_cond(&neg_inf, &attn_weights)?;
-        }
-
-        let attn_weights = softmax_last_dim_dev(&attn_weights)?;
-        let attn_output = attn_weights.matmul(&v)?;
+        // Phase 46b: decode (seq_len==1, no mask) fuses q·kᵀ→online-softmax→·v over the
+        // static KV in one HIP kernel — no scores tensor, no softmax swarm. Prefill
+        // (seq_len>1) + CPU keep the matmul/softmax path.
+        #[cfg(feature = "hip")]
+        let flash = seq_len == 1 && q.device().is_cuda();
+        #[cfg(not(feature = "hip"))]
+        let flash = false;
+        let attn_output = if flash {
+            #[cfg(feature = "hip")]
+            {
+                let len = index_pos + seq_len;
+                let (kbuf, vbuf) = self.kv_buf.as_ref().unwrap();
+                candle::cuda::flash_attn_decode(&q.contiguous()?, kbuf, vbuf, len, scale as f32)?
+            }
+            #[cfg(not(feature = "hip"))]
+            unreachable!()
+        } else {
+            // Repeat KV for GQA.
+            let k = candle_transformers::utils::repeat_kv(k, self.n_head / self.n_kv_head)?;
+            let v = candle_transformers::utils::repeat_kv(v, self.n_head / self.n_kv_head)?;
+            let mut attn_weights = (q.matmul(&k.transpose(2, 3)?)? * scale)?;
+            if let Some(mask) = mask {
+                let mask = mask.broadcast_as(attn_weights.shape())?;
+                let neg_inf = self.neg_inf.broadcast_as(attn_weights.dims())?;
+                attn_weights = mask.eq(0u32)?.where_cond(&neg_inf, &attn_weights)?;
+            }
+            let attn_weights = softmax_last_dim_dev(&attn_weights)?;
+            attn_weights.matmul(&v)?
+        };
 
         let attn_output = attn_output
             .transpose(1, 2)?

@@ -62,6 +62,93 @@ __global__ void rms_norm_f32(const float* __restrict__ x, const float* __restric
     }
 }
 
+// Flash-attention decode (Phase 46b): one warp per (batch, query-head). The single
+// decode query streams the static KV prefix [0..len) with ONLINE softmax — running
+// max + sum + output accumulator — so there is no materialised `[b,nh,1,len]` scores
+// tensor and no separate softmax (collapses the ~9-kernel attention swarm → 1). GQA:
+// kv head = head / (n_head/n_kv_head). No mask (decode passes none — matches the model).
+//   q:   [B, n_head,   1,      head_dim]  contiguous
+//   k,v: [B, n_kv_head, kv_ctx, head_dim] contiguous static buffers; only [0..len) read
+//   out: [B, n_head,   1,      head_dim]
+// head_dim must be a multiple of the warp size (32 on gfx1100); dims-per-lane ≤ MAXDPL.
+#define AKH_FA_WARP 32
+#define AKH_FA_MAXDPL 16
+// Flash-DECODING (split-K): one warp per (batch, head, split) streams its KV chunk
+// [j0,j1) with online softmax and writes the RAW (un-normalised) accumulator + running
+// max `m` + sum `l` to scratch. A second kernel combines the splits. This adds the
+// parallelism the naive one-warp-per-head version lacked (only B·n_head warps → the GPU
+// idled at long context); splitting the KV gives B·n_head·n_split warps.
+__global__ void flash_attn_partial_kernel(
+    const float* __restrict__ q, const float* __restrict__ k, const float* __restrict__ v,
+    float* __restrict__ partial_acc, float* __restrict__ partial_ml,
+    int B, int n_head, int n_kv_head, int head_dim,
+    unsigned long kv_ctx, unsigned long len, float scale, int n_split) {
+    int lane = threadIdx.x & (AKH_FA_WARP - 1);
+    int gwarp = blockIdx.x * (blockDim.x / AKH_FA_WARP) + threadIdx.x / AKH_FA_WARP;
+    if (gwarp >= B * n_head * n_split) return;
+    int split = gwarp % n_split;
+    int bh = gwarp / n_split;
+    int b = bh / n_head, head = bh % n_head;
+    int kvh = head / (n_head / n_kv_head);
+    int dpl = head_dim / AKH_FA_WARP;
+    unsigned long per = (len + n_split - 1) / n_split;
+    unsigned long j0 = (unsigned long)split * per;
+    unsigned long j1 = j0 + per;
+    if (j1 > len) j1 = len;
+
+    const float* qrow = q + (unsigned long)(b * n_head + head) * head_dim;
+    const float* kbase = k + (unsigned long)(b * n_kv_head + kvh) * kv_ctx * head_dim;
+    const float* vbase = v + (unsigned long)(b * n_kv_head + kvh) * kv_ctx * head_dim;
+    float ql[AKH_FA_MAXDPL], acc[AKH_FA_MAXDPL];
+    for (int i = 0; i < dpl; i++) { ql[i] = qrow[lane + AKH_FA_WARP * i]; acc[i] = 0.0f; }
+    float m = -INFINITY, l = 0.0f;
+    for (unsigned long j = j0; j < j1; j++) {
+        const float* kj = kbase + j * head_dim;
+        float partial = 0.0f;
+        for (int i = 0; i < dpl; i++) partial += ql[i] * kj[lane + AKH_FA_WARP * i];
+        for (int off = AKH_FA_WARP / 2; off > 0; off >>= 1) partial += __shfl_xor(partial, off);
+        float score = partial * scale;
+        float m_new = fmaxf(m, score);
+        float corr = expf(m - m_new), p = expf(score - m_new);
+        l = l * corr + p;
+        const float* vj = vbase + j * head_dim;
+        for (int i = 0; i < dpl; i++) acc[i] = acc[i] * corr + p * vj[lane + AKH_FA_WARP * i];
+        m = m_new;
+    }
+    unsigned long po = (unsigned long)(bh * n_split + split) * head_dim;
+    for (int i = 0; i < dpl; i++) partial_acc[po + lane + AKH_FA_WARP * i] = acc[i];
+    if (lane == 0) {
+        partial_ml[(bh * n_split + split) * 2 + 0] = m;
+        partial_ml[(bh * n_split + split) * 2 + 1] = l;
+    }
+}
+
+// Combine the per-split partials for each (batch, head): global max over splits, then
+// `out = Σ_s exp(m_s-gm)·acc_s / Σ_s exp(m_s-gm)·l_s`. One warp per (batch, head).
+__global__ void flash_attn_combine_kernel(
+    const float* __restrict__ partial_acc, const float* __restrict__ partial_ml,
+    float* __restrict__ out, int B, int n_head, int head_dim, int n_split) {
+    int lane = threadIdx.x & (AKH_FA_WARP - 1);
+    int bh = blockIdx.x * (blockDim.x / AKH_FA_WARP) + threadIdx.x / AKH_FA_WARP;
+    if (bh >= B * n_head) return;
+    int dpl = head_dim / AKH_FA_WARP;
+    float gm = -INFINITY;
+    for (int s = 0; s < n_split; s++) gm = fmaxf(gm, partial_ml[(bh * n_split + s) * 2]);
+    float gl = 0.0f;
+    float acc[AKH_FA_MAXDPL];
+    for (int i = 0; i < dpl; i++) acc[i] = 0.0f;
+    for (int s = 0; s < n_split; s++) {
+        float ms = partial_ml[(bh * n_split + s) * 2];
+        float ls = partial_ml[(bh * n_split + s) * 2 + 1];
+        float w = expf(ms - gm);
+        gl += ls * w;
+        unsigned long po = (unsigned long)(bh * n_split + s) * head_dim;
+        for (int i = 0; i < dpl; i++) acc[i] += w * partial_acc[po + lane + AKH_FA_WARP * i];
+    }
+    float inv = (gl > 0.0f) ? (1.0f / gl) : 0.0f;
+    for (int i = 0; i < dpl; i++) out[(unsigned long)bh * head_dim + lane + AKH_FA_WARP * i] = acc[i] * inv;
+}
+
 // op: 0 neg, 1 exp, 2 silu, 3 gelu, 4 sqr, 5 sqrt, 6 recip, 7 relu, 8 tanh, 9 abs,
 //     10 cos, 11 sin, 12 log
 __global__ void unary_f32(const float* x, float* y, size_t n, int op) {
@@ -446,6 +533,29 @@ int akh_rms_norm_f32(const float* x, const float* w, float* out,
     if (n_rows == 0) return 0;
     hipLaunchKernelGGL(rms_norm_f32, dim3((unsigned)n_rows), dim3(AKH_RMSNORM_BLOCK), 0, g_akh_stream,
                        x, w, out, (unsigned long)n_rows, (unsigned long)hidden, eps);
+    return hipGetLastError() == hipSuccess ? 0 : 1;
+}
+
+// Flash-decoding (split-K): partial kernel (B·n_head·n_split warps) then combine
+// (B·n_head warps). `partial_acc`/`partial_ml` are caller-provided scratch sized
+// B·n_head·n_split·head_dim and B·n_head·n_split·2 floats. head_dim must be a multiple
+// of 32 and head_dim/32 <= AKH_FA_MAXDPL. No sync (ordered on the null stream).
+#define AKH_FA_WARPS 8
+int akh_flash_attn_decode_f32(const float* q, const float* k, const float* v, float* out,
+                              float* partial_acc, float* partial_ml,
+                              int B, int n_head, int n_kv_head, int head_dim,
+                              size_t kv_ctx, size_t len, float scale, int n_split) {
+    if (B * n_head == 0 || len == 0 || n_split <= 0) return 0;
+    if (head_dim % AKH_FA_WARP != 0 || head_dim / AKH_FA_WARP > AKH_FA_MAXDPL) return 2;
+    int pw = B * n_head * n_split;
+    unsigned pgrid = (unsigned)((pw + AKH_FA_WARPS - 1) / AKH_FA_WARPS);
+    hipLaunchKernelGGL(flash_attn_partial_kernel, dim3(pgrid), dim3(AKH_FA_WARP * AKH_FA_WARPS),
+                       0, 0, q, k, v, partial_acc, partial_ml, B, n_head, n_kv_head, head_dim,
+                       (unsigned long)kv_ctx, (unsigned long)len, scale, n_split);
+    int cw = B * n_head;
+    unsigned cgrid = (unsigned)((cw + AKH_FA_WARPS - 1) / AKH_FA_WARPS);
+    hipLaunchKernelGGL(flash_attn_combine_kernel, dim3(cgrid), dim3(AKH_FA_WARP * AKH_FA_WARPS),
+                       0, 0, partial_acc, partial_ml, out, B, n_head, head_dim, n_split);
     return hipGetLastError() == hipSuccess ? 0 : 1;
 }
 

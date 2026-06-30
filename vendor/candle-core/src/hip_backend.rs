@@ -65,6 +65,25 @@ pub(crate) mod runtime {
         margin_bytes: usize,
     }
 
+    /// Persistent split-K scratch for flash-attention decode (Phase 46b): a grow-only
+    /// device buffer pair (`acc`, `ml`) allocated ONCE and reused across every layer
+    /// and token, held OUTSIDE the caching pool. Routing these through the pool made
+    /// the per-call alloc/free tip gemma4's working set over the pool cap, so every
+    /// `free` fell back to a device-syncing `hipFree` and every `malloc` to a real
+    /// `hipMalloc` (measured ~1253 syncs/token → a 3% decode regression). Keeping the
+    /// scratch out of the pool removes that churn, and "allocate once, then never
+    /// allocate during steady-state decode" is exactly the pattern HIP-graph capture
+    /// (46c) needs. The forward runs on the null stream, which serialises flash calls,
+    /// so a single shared buffer is safe. Pointers stored as `usize` (raw `*mut` in a
+    /// struct is not `Send`; the enclosing `Hip` is `unsafe impl Send + Sync`).
+    #[derive(Default)]
+    struct FlashScratch {
+        acc: usize,
+        acc_bytes: usize,
+        ml: usize,
+        ml_bytes: usize,
+    }
+
     // PCIe-crossing counters (Phase 45f): every non-empty H2D/D2H `memcpy` bumps one.
     // The bench resets them after model load, then divides by tokens decoded to prove
     // the resident forward crosses the bus ~twice/token (input id up, logits down) vs
@@ -184,6 +203,7 @@ pub(crate) mod runtime {
         graph_destroy: GraphDestroy,
         memset_async: MemsetAsync,
         pool: Mutex<Pool>,
+        flash_scratch: Mutex<FlashScratch>,
     }
     unsafe impl Send for Hip {}
     unsafe impl Sync for Hip {}
@@ -292,6 +312,7 @@ pub(crate) mod runtime {
                         margin_bytes,
                         ..Pool::default()
                     }),
+                    flash_scratch: Mutex::new(FlashScratch::default()),
                 })
             }
         }
@@ -392,6 +413,51 @@ pub(crate) mod runtime {
                 drop(pool);
                 unsafe { (self.free)(ptr) };
             }
+        }
+
+        /// Persistent flash-decode split-K scratch (Phase 46b): grow-only `(acc, ml)`
+        /// device buffers reused across all layers/tokens and held OUT of the caching
+        /// pool — see [`FlashScratch`]. Reallocates (a real, device-syncing `hipMalloc`)
+        /// only when a larger size is first requested (`n_split` grows with context, then
+        /// stabilises), so steady-state decode allocates nothing here. Returns
+        /// `(acc_ptr, ml_ptr)` as `*mut f32`; the buffers live for the process lifetime.
+        pub fn flash_scratch(
+            &self,
+            acc_bytes: usize,
+            ml_bytes: usize,
+        ) -> std::result::Result<(*mut f32, *mut f32), String> {
+            let mut s = self.flash_scratch.lock().unwrap();
+            // `hipFree` of the old buffer synchronises the device, so any kernel still
+            // reading it has drained before we drop it — safe, and rare (grow only).
+            if acc_bytes > s.acc_bytes {
+                if s.acc != 0 {
+                    unsafe { (self.free)(s.acc as *mut c_void) };
+                }
+                let mut p: *mut c_void = std::ptr::null_mut();
+                let rc = unsafe { (self.malloc)(&mut p, acc_bytes) };
+                if rc != 0 || p.is_null() {
+                    return Err(format!(
+                        "flash scratch acc hipMalloc({acc_bytes}) failed (rc={rc})"
+                    ));
+                }
+                s.acc = p as usize;
+                s.acc_bytes = acc_bytes;
+            }
+            if ml_bytes > s.ml_bytes {
+                if s.ml != 0 {
+                    unsafe { (self.free)(s.ml as *mut c_void) };
+                }
+                let mut p: *mut c_void = std::ptr::null_mut();
+                let rc = unsafe { (self.malloc)(&mut p, ml_bytes) };
+                if rc != 0 || p.is_null() {
+                    return Err(format!(
+                        "flash scratch ml hipMalloc({ml_bytes}) failed (rc={rc})"
+                    ));
+                }
+                s.ml = p as usize;
+                s.ml_bytes = ml_bytes;
+            }
+            Ok((s.acc as *mut f32, s.ml as *mut f32))
         }
 
         pub fn memcpy(
@@ -1017,6 +1083,25 @@ pub(crate) mod runtime {
     // Phase 45h: fused RMSNorm (x, weight) -> out; one kernel replaces ~7.
     type RmsNormF32 =
         unsafe extern "C" fn(*const f32, *const f32, *mut f32, usize, usize, f32) -> c_int;
+    // Phase 46b: flash-decoding (split-K) attention. (q, k, v, out, partial_acc,
+    // partial_ml, B, n_head, n_kv_head, head_dim, kv_ctx, len, scale, n_split).
+    #[allow(clippy::type_complexity)]
+    type FlashAttnDecodeF32 = unsafe extern "C" fn(
+        *const f32,
+        *const f32,
+        *const f32,
+        *mut f32,
+        *mut f32,
+        *mut f32,
+        c_int,
+        c_int,
+        c_int,
+        c_int,
+        usize,
+        usize,
+        f32,
+        c_int,
+    ) -> c_int;
     type UnaryF32 = unsafe extern "C" fn(*const f32, *mut f32, usize, c_int) -> c_int;
     type BinaryF32 = unsafe extern "C" fn(*const f32, *const f32, *mut f32, usize, c_int) -> c_int;
     // Phase 45d (subagent ops): reduce / cast / index_select / where_cond / strided-copy.
@@ -1146,6 +1231,7 @@ pub(crate) mod runtime {
         affine_f32: AffineF32,
         set_stream: SetStream,
         rms_norm_f32: RmsNormF32,
+        flash_attn_decode_f32: FlashAttnDecodeF32,
         unary_f32: UnaryF32,
         binary_f32: BinaryF32,
         reduce_f32: ReduceF32,
@@ -1192,6 +1278,9 @@ pub(crate) mod runtime {
                 let rms_norm_f32: RmsNormF32 = *lib
                     .get(b"akh_rms_norm_f32\0")
                     .map_err(|e| format!("missing akh_rms_norm_f32: {e}"))?;
+                let flash_attn_decode_f32: FlashAttnDecodeF32 = *lib
+                    .get(b"akh_flash_attn_decode_f32\0")
+                    .map_err(|e| format!("missing akh_flash_attn_decode_f32: {e}"))?;
                 let unary_f32: UnaryF32 = *lib
                     .get(b"akh_unary_f32\0")
                     .map_err(|e| format!("missing akh_unary_f32: {e}"))?;
@@ -1261,6 +1350,7 @@ pub(crate) mod runtime {
                     affine_f32,
                     set_stream,
                     rms_norm_f32,
+                    flash_attn_decode_f32,
                     unary_f32,
                     binary_f32,
                     reduce_f32,
@@ -1327,6 +1417,39 @@ pub(crate) mod runtime {
             let rc = unsafe { (self.rms_norm_f32)(x, w, out, n_rows, hidden, eps) };
             if rc != 0 {
                 return Err(format!("akh_rms_norm_f32 failed (rc={rc})"));
+            }
+            Ok(())
+        }
+
+        /// Flash-decoding (split-K): `out[B,n_head,1,head_dim] = softmax(scale·q·kᵀ)·v`
+        /// over the static KV prefix `[0..len)`. `partial_acc`/`partial_ml` are scratch
+        /// (`B·n_head·n_split·head_dim` / `·2` floats). All device ptrs.
+        #[allow(clippy::too_many_arguments)]
+        pub fn flash_attn_decode_f32(
+            &self,
+            q: *const f32,
+            k: *const f32,
+            v: *const f32,
+            out: *mut f32,
+            partial_acc: *mut f32,
+            partial_ml: *mut f32,
+            b: i32,
+            n_head: i32,
+            n_kv_head: i32,
+            head_dim: i32,
+            kv_ctx: usize,
+            len: usize,
+            scale: f32,
+            n_split: i32,
+        ) -> std::result::Result<(), String> {
+            let rc = unsafe {
+                (self.flash_attn_decode_f32)(
+                    q, k, v, out, partial_acc, partial_ml, b, n_head, n_kv_head, head_dim,
+                    kv_ctx, len, scale, n_split,
+                )
+            };
+            if rc != 0 {
+                return Err(format!("akh_flash_attn_decode_f32 failed (rc={rc})"));
             }
             Ok(())
         }
@@ -1873,6 +1996,127 @@ impl crate::CustomOp2 for FusedRmsNorm {
                 len: n,
             },
             l1.shape().clone(),
+        ))
+    }
+}
+
+/// Flash-attention decode as a single HIP kernel (Phase 46b): fuses q·kᵀ → online
+/// softmax → ·v over the static KV prefix `[0..len)`, replacing the ~9-kernel decode
+/// attention swarm (repeat_kv, matmul, scale, softmax×5, matmul). `q` is
+/// `[B,n_head,1,head_dim]`; `k`/`v` are the contiguous static buffers
+/// `[B,n_kv_head,kv_ctx,head_dim]`. No mask (decode passes none). Accessible as
+/// `candle_core::cuda::flash_attn_decode`.
+pub fn flash_attn_decode(q: &Tensor, k: &Tensor, v: &Tensor, len: usize, scale: f32) -> Result<Tensor> {
+    q.apply_op3_no_bwd(k, v, &FlashAttnDecode { len, scale })
+}
+
+struct FlashAttnDecode {
+    len: usize,
+    scale: f32,
+}
+
+impl crate::CustomOp3 for FlashAttnDecode {
+    fn name(&self) -> &'static str {
+        "flash-attn-decode"
+    }
+
+    fn cpu_fwd(
+        &self,
+        _: &CpuStorage,
+        _: &Layout,
+        _: &CpuStorage,
+        _: &Layout,
+        _: &CpuStorage,
+        _: &Layout,
+    ) -> Result<(CpuStorage, Shape)> {
+        Err(Error::Msg(
+            "flash-attn-decode is GPU-only; CPU uses the matmul/softmax path".to_string(),
+        ))
+    }
+
+    fn cuda_fwd(
+        &self,
+        q: &HipStorage,
+        ql: &Layout,
+        k: &HipStorage,
+        kl: &Layout,
+        v: &HipStorage,
+        vl: &Layout,
+    ) -> Result<(HipStorage, Shape)> {
+        if q.dtype != DType::F32 || k.dtype != DType::F32 || v.dtype != DType::F32 {
+            return Err(Error::Msg("flash-attn-decode: f32 only".to_string()));
+        }
+        if !ql.is_contiguous() || !kl.is_contiguous() || !vl.is_contiguous() {
+            return Err(Error::Msg("flash-attn-decode: contiguous q/k/v only".to_string()));
+        }
+        let qd = ql.dims();
+        let kd = kl.dims();
+        // q: [B, n_head, 1, head_dim]; k/v: [B, n_kv_head, kv_ctx, head_dim].
+        if qd.len() != 4 || kd.len() != 4 || qd[2] != 1 {
+            return Err(Error::Msg(format!(
+                "flash-attn-decode: expected q[B,nh,1,hd] k[B,nkv,ctx,hd], got q{qd:?} k{kd:?}"
+            )));
+        }
+        let (b, n_head, head_dim) = (qd[0], qd[1], qd[3]);
+        let (n_kv_head, kv_ctx) = (kd[1], kd[2]);
+        if self.len == 0 || self.len > kv_ctx {
+            return Err(Error::Msg(format!(
+                "flash-attn-decode: len {} out of range (kv_ctx {kv_ctx})",
+                self.len
+            )));
+        }
+        let h = hip()?;
+        let kern = runtime::kernels().map_err(Error::Msg)?;
+        let qp = unsafe { (q.ptr as *const f32).add(ql.start_offset()) };
+        let kp = unsafe { (k.ptr as *const f32).add(kl.start_offset()) };
+        let vp = unsafe { (v.ptr as *const f32).add(vl.start_offset()) };
+        let out_len = b * n_head * head_dim;
+        let out = h.malloc(out_len * std::mem::size_of::<f32>()).map_err(Error::Msg)?;
+        // Split the KV across enough warps to fill the GPU (B·n_head is tiny — ~16).
+        // n_split = clamp(len/CHUNK, 1, 64); each split streams ~CHUNK positions.
+        let n_split = ((self.len.div_ceil(64)).clamp(1, 64)) as usize;
+        let acc_len = b * n_head * n_split * head_dim;
+        let ml_len = b * n_head * n_split * 2;
+        // Persistent, un-pooled split-K scratch: allocate-once + reuse, so steady-state
+        // decode does no per-call scratch malloc/free. Pooling these tipped gemma4's
+        // working set over the pool cap → ~1253 device-syncing hipMalloc/free per token
+        // (a 3% regression); this removes the churn. See `Hip::flash_scratch`.
+        let (pacc, pml) = h
+            .flash_scratch(
+                acc_len * std::mem::size_of::<f32>(),
+                ml_len * std::mem::size_of::<f32>(),
+            )
+            .map_err(Error::Msg)?;
+        let res = event_time(&MATMUL_NANOS, || {
+            kern.flash_attn_decode_f32(
+                qp,
+                kp,
+                vp,
+                out as *mut f32,
+                pacc,
+                pml,
+                b as c_int,
+                n_head as c_int,
+                n_kv_head as c_int,
+                head_dim as c_int,
+                kv_ctx,
+                self.len,
+                self.scale,
+                n_split as c_int,
+            )
+        });
+        if let Err(e) = res {
+            h.free(out);
+            return Err(Error::Msg(e));
+        }
+        Ok((
+            HipStorage {
+                device: q.device.clone(),
+                ptr: out,
+                dtype: DType::F32,
+                len: out_len,
+            },
+            Shape::from((b, n_head, 1, head_dim)),
         ))
     }
 }
@@ -3929,6 +4173,53 @@ mod op_tests {
             .flatten_all()?
             .to_vec1::<f32>()?;
         close(&g, &c, 1e-4, "fused rms_norm");
+        Ok(())
+    }
+
+    /// Phase 46b flash-attention decode parity: the fused `softmax(scale·q·kᵀ)·v` over
+    /// the static KV prefix matches the reference matmul→softmax→matmul (with GQA
+    /// repeat) computed on CPU. Online-softmax reordering ⇒ ~1e-3 tolerance.
+    #[test]
+    fn flash_attn_decode_matches() -> Result<()> {
+        let Some(dev) = gpu() else {
+            return Ok(());
+        };
+        let (b, n_head, n_kv_head, head_dim, kv_ctx, len) = (1usize, 4, 2, 64, 8, 6);
+        let rep = n_head / n_kv_head;
+        let scale = 1.0f64 / (head_dim as f64).sqrt();
+        let q: Vec<f32> = (0..b * n_head * head_dim).map(|i| ((i as f32) * 0.021).sin()).collect();
+        let kk: Vec<f32> =
+            (0..b * n_kv_head * kv_ctx * head_dim).map(|i| ((i as f32) * 0.013).cos() * 0.5).collect();
+        let vv: Vec<f32> =
+            (0..b * n_kv_head * kv_ctx * head_dim).map(|i| ((i as f32) * 0.017).sin() * 0.5).collect();
+        // GPU fused flash decode.
+        let gq = Tensor::from_vec(q.clone(), (b, n_head, 1, head_dim), &dev)?;
+        let gk = Tensor::from_vec(kk.clone(), (b, n_kv_head, kv_ctx, head_dim), &dev)?;
+        let gv = Tensor::from_vec(vv.clone(), (b, n_kv_head, kv_ctx, head_dim), &dev)?;
+        let g = super::flash_attn_decode(&gq, &gk, &gv, len, scale as f32)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        // CPU reference: repeat_kv + matmul + softmax + matmul over the [0..len) prefix.
+        let cq = Tensor::from_vec(q, (b, n_head, 1, head_dim), &Device::Cpu)?;
+        let ck = Tensor::from_vec(kk, (b, n_kv_head, kv_ctx, head_dim), &Device::Cpu)?
+            .narrow(2, 0, len)?;
+        let cv = Tensor::from_vec(vv, (b, n_kv_head, kv_ctx, head_dim), &Device::Cpu)?
+            .narrow(2, 0, len)?;
+        let krep = ck
+            .unsqueeze(2)?
+            .expand((b, n_kv_head, rep, len, head_dim))?
+            .reshape((b, n_head, len, head_dim))?;
+        let vrep = cv
+            .unsqueeze(2)?
+            .expand((b, n_kv_head, rep, len, head_dim))?
+            .reshape((b, n_head, len, head_dim))?;
+        let aw = (cq.matmul(&krep.transpose(2, 3)?)? * scale)?;
+        let m = aw.max_keepdim(D::Minus1)?;
+        let e = aw.broadcast_sub(&m)?.exp()?;
+        let s = e.sum_keepdim(D::Minus1)?;
+        let aw = e.broadcast_div(&s)?;
+        let c = aw.matmul(&vrep)?.flatten_all()?.to_vec1::<f32>()?;
+        close(&g, &c, 1e-3, "flash_attn_decode");
         Ok(())
     }
 
