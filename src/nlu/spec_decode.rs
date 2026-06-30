@@ -112,6 +112,61 @@ pub fn accept_run(draft: &[u32], verify_argmax: &[u32]) -> usize {
         .count()
 }
 
+/// Sample an index from a (normalized) probability vector via the inverse-CDF draw
+/// `pick` ∈ [0,1). Mirrors `candle_backend::sample_from_probs` (`cum >= pick`) so the
+/// speculative and plain sampling paths pick identically given the same draw. Used for the
+/// "all drafts accepted" bonus position (a plain target sample); the rejection residual is
+/// sampled inline by [`spec_sample_step`].
+pub fn categorical(probs: &[f32], pick: f32) -> u32 {
+    let mut cum = 0.0f32;
+    for (i, &p) in probs.iter().enumerate() {
+        cum += p;
+        if cum >= pick {
+            return i as u32;
+        }
+    }
+    probs.len().saturating_sub(1) as u32
+}
+
+/// One position of greedy-draft **speculative sampling** (Phase 47e / ADR 075).
+///
+/// `p` is the target's temperature-scaled probability vector; `d` the drafted token; `u` an
+/// accept draw ∈ [0,1); `resid_pick` a draw ∈ [0,1) for the rejection resample. Returns
+/// `(token, accepted)`:
+/// - **accept** `d` (→ `(d, true)`) with probability `p[d]` (i.e. when `u < p[d]`);
+/// - otherwise **reject** (→ `(bonus, false)`): resample from the residual
+///   `norm(p with index d removed)`.
+///
+/// Marginally `token ~ p` *exactly*, so chaining these reproduces the target distribution —
+/// lossless speculative sampling (Leviathan et al. / Chen et al.) specialized to a deterministic
+/// point-mass draft `q = δ_d`: there `accept-prob = min(1, p[d]/q[d]) = p[d]` and the residual
+/// `norm((p − q)₊)` is just `p` with `d`'s mass removed. The residual is walked inline (no
+/// vocab-sized allocation on the reject path).
+pub fn spec_sample_step(p: &[f32], d: u32, u: f32, resid_pick: f32) -> (u32, bool) {
+    let di = d as usize;
+    let pd = p.get(di).copied().unwrap_or(0.0);
+    if u < pd {
+        return (d, true);
+    }
+    // Reject: sample from the residual (p with index d zeroed, renormalized) by walking its CDF,
+    // skipping d, with the draw scaled into [0, 1 − p[d]).
+    let z = (1.0 - pd).max(f32::MIN_POSITIVE);
+    let target = resid_pick * z;
+    let mut cum = 0.0f32;
+    let mut last = di; // fallback to *some* non-d index if rounding leaves the draw unmatched
+    for (i, &pi) in p.iter().enumerate() {
+        if i == di {
+            continue;
+        }
+        last = i;
+        cum += pi;
+        if cum >= target {
+            return (i as u32, false);
+        }
+    }
+    (last as u32, false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -171,5 +226,60 @@ mod tests {
         assert_eq!(accept_run(&[10, 11, 12], &[99, 11, 12, 7]), 0);
         // empty draft → 0.
         assert_eq!(accept_run(&[], &[7]), 0);
+    }
+
+    #[test]
+    fn categorical_inverse_cdf() {
+        let p = [0.2f32, 0.5, 0.3];
+        assert_eq!(categorical(&p, 0.0), 0); // first bucket
+        assert_eq!(categorical(&p, 0.1), 0); // < 0.2
+        assert_eq!(categorical(&p, 0.5), 1); // in (0.2, 0.7]
+        assert_eq!(categorical(&p, 0.9), 2); // in (0.7, 1.0]
+    }
+
+    #[test]
+    fn spec_sample_accepts_below_pd_rejects_above() {
+        let p = [0.6f32, 0.4];
+        // u < p[d] → accept the drafted token.
+        assert_eq!(spec_sample_step(&p, 0, 0.3, 0.0), (0, true));
+        // u >= p[d] → reject; residual over {1} (the only non-d token) → must be token 1.
+        assert_eq!(spec_sample_step(&p, 0, 0.9, 0.5), (1, false));
+        // drafting the low-prob token: reject often, residual is the other token.
+        assert_eq!(spec_sample_step(&p, 1, 0.9, 0.5), (0, false));
+    }
+
+    /// The losslessness proof: for a fixed target `p` and any drafted token `d`, the marginal
+    /// distribution of the emitted token equals `p`. Uses a deterministic LCG so the test needs
+    /// no RNG dependency and is reproducible.
+    #[test]
+    fn spec_sample_step_is_distribution_lossless() {
+        let p = [0.45f32, 0.25, 0.15, 0.10, 0.05];
+        let trials = 600_000u64;
+        // Drafting a *non-modal* token stresses the reject/residual path the most.
+        for d in 0u32..p.len() as u32 {
+            let mut counts = [0u64; 5];
+            let mut s = 0x2545F4914F6CDD1Du64 ^ (d as u64).wrapping_mul(0x9E3779B97F4A7C15);
+            let mut next = || {
+                // SplitMix64 → f32 in [0,1).
+                s = s.wrapping_add(0x9E3779B97F4A7C15);
+                let mut z = s;
+                z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+                z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+                z ^= z >> 31;
+                ((z >> 40) as f32) / ((1u64 << 24) as f32) // 24-bit mantissa → [0,1)
+            };
+            for _ in 0..trials {
+                let (u, rp) = (next(), next());
+                let (tok, _) = spec_sample_step(&p, d, u, rp);
+                counts[tok as usize] += 1;
+            }
+            for (i, &pi) in p.iter().enumerate() {
+                let freq = counts[i] as f32 / trials as f32;
+                assert!(
+                    (freq - pi).abs() < 0.005,
+                    "d={d} token {i}: emitted freq {freq:.4} vs target p {pi:.4}"
+                );
+            }
+        }
     }
 }

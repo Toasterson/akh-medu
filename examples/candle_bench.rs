@@ -144,6 +144,11 @@ fn main() -> miette::Result<()> {
     if std::env::var("AKH_BENCH_GEN").as_deref() == Ok("1") {
         let new: u32 = env_parse("AKH_BENCH_TOKENS").unwrap_or(96);
         let spec_on = std::env::var("AKH_SPEC_DECODE").as_deref() == Ok("1");
+        // AKH_BENCH_TEMP > 0 exercises the speculative-*sampling* path (Phase 47e); default greedy.
+        if let Some(temp) = env_parse::<f32>("AKH_BENCH_TEMP") {
+            backend.set_temperature(temp);
+            println!("temperature        : {temp}");
+        }
         let t0 = Instant::now();
         let text = backend.generate(&prompt, new)?;
         let secs = t0.elapsed().as_secs_f32();

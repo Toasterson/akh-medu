@@ -509,6 +509,13 @@ impl CandleBackend {
         self.runtime_options = Some(opts);
     }
 
+    /// Override the sampling temperature (0.0 = greedy). Primarily for benches/tests that need to
+    /// exercise the temperature path; production sets it via [`CandleConfig`] at load.
+    #[cfg(feature = "candle-backend")]
+    pub fn set_temperature(&mut self, temperature: f32) {
+        self.config.temperature = temperature;
+    }
+
     /// The model's context window (tokens), read from the GGUF
     /// `<arch>.context_length` metadata (fallback [`MAX_PROMPT_TOKENS`]).
     #[cfg(feature = "candle-backend")]
@@ -2017,11 +2024,16 @@ impl CandleBackend {
             }
         })?;
 
-        // Continue token-by-token from the prefilled prompt. Greedy gemma4 turns with
-        // AKH_SPEC_DECODE=1 take the speculative (prompt-lookup) path (Phase 47 / ADR 075);
-        // every other case keeps the proven plain decode loop unchanged.
+        // Continue token-by-token from the prefilled prompt. Eligible gemma4 turns take the
+        // speculative (prompt-lookup) path (Phase 47 / ADR 075): greedy → byte-exact vs plain
+        // greedy, temperature → distribution-lossless speculative sampling (47e). Every other
+        // case keeps the proven plain decode loop unchanged.
         if self.spec_decode_eligible() {
-            self.spec_decode_loop(logits, prompt_tokens, max_tokens, stop)
+            if self.config.temperature == 0.0 {
+                self.spec_decode_loop(logits, prompt_tokens, max_tokens, stop)
+            } else {
+                self.spec_sample_decode_loop(logits, prompt_tokens, max_tokens, stop)
+            }
         } else {
             self.decode_loop(logits, prompt_tokens.len(), max_tokens, stop)
         }
@@ -2201,25 +2213,23 @@ impl CandleBackend {
     /// [`decode_loop`](Self::decode_loop).
     ///
     /// Gated to the cases where it is **lossless and a potential win**:
-    /// - greedy only (`temperature == 0`) — spec decode matches plain *greedy* decode; under
-    ///   temperature the accept rule would distort the sampling distribution (that needs the
-    ///   sampling variant, Phase 47e);
     /// - gemma4 only — the only loaded family exposing `forward_verify` + the batched verify GEMV;
     /// - enabled — the live per-akh flag (set from `AkhConfig.spec_decode`, toggled at runtime by
     ///   the `inference_config` tool). When no shared options are wired (benches/tests), falls back
     ///   to the `AKH_SPEC_DECODE=1` env flag.
     ///
-    /// The win is additionally conditional on the batched verify GEMV (`AKH_GEMV_BATCH=1`,
-    /// Phase 47d); [`spec_decode_loop`] warns if that is unset (correct but slow without it).
+    /// `generate_inner` then routes by temperature: greedy (`== 0`) →
+    /// [`spec_decode_loop`](Self::spec_decode_loop) (matches plain greedy exactly), `> 0` →
+    /// [`spec_sample_decode_loop`](Self::spec_sample_decode_loop) (lossless speculative sampling —
+    /// same *distribution* as plain sampling, Phase 47e). The throughput win is additionally
+    /// conditional on the batched verify GEMV (default-on, Phase 47d).
     #[cfg(feature = "candle-backend")]
     fn spec_decode_eligible(&self) -> bool {
         let enabled = match &self.runtime_options {
             Some(opts) => opts.spec_decode(),
             None => std::env::var("AKH_SPEC_DECODE").as_deref() == Ok("1"),
         };
-        enabled
-            && self.config.temperature == 0.0
-            && matches!(self.family, ModelFamily::Gemma4)
+        enabled && matches!(self.family, ModelFamily::Gemma4)
     }
 
     /// Speculative (prompt-lookup) **greedy** decode loop — gemma4 only (Phase 47 / ADR 075).
@@ -2343,6 +2353,157 @@ impl CandleBackend {
             decode_secs,
             tok_s = st.n_generated as f32 / decode_secs.max(1e-6),
             "Candle speculative generation complete"
+        );
+        Ok(GenerationResult {
+            text: st.generated_text,
+            tokens_generated: st.n_generated,
+            decode_secs,
+        })
+    }
+
+    /// Speculative (prompt-lookup) **sampling** decode loop — gemma4 only (Phase 47e / ADR 075).
+    ///
+    /// The temperature analogue of [`spec_decode_loop`](Self::spec_decode_loop). Each round drafts
+    /// a span from the token history, verifies it in one `forward_verify`, then walks the drafted
+    /// positions **accepting drafted token `d` with probability `p_target(d)`** and, on the first
+    /// rejection, resampling from the residual `norm(p ∖ {d})` (speculative sampling specialized to
+    /// a deterministic point-mass draft — see [`spec_sample_step`](super::spec_decode::spec_sample_step)).
+    /// The emitted sequence has the **same distribution** as plain temperature sampling (not
+    /// byte-identical, by nature — proven distribution-lossless by `spec_sample_step`'s test).
+    /// Shares [`process_token`](Self::process_token) for stop/detokenization; KV rollback is free
+    /// (device-pos cache). Engaged only for `temperature > 0`; the throughput win is conditional on
+    /// output echoing context (and the batched verify GEMV, default-on Phase 47d).
+    #[cfg(feature = "candle-backend")]
+    fn spec_sample_decode_loop(
+        &mut self,
+        logits: Tensor,
+        prompt_tokens: Vec<u32>,
+        max_tokens: u32,
+        stop: StopMode,
+    ) -> NluResult<GenerationResult> {
+        use super::spec_decode::{categorical, spec_sample_step, DrafterConfig, NgramDrafter};
+        use rand::Rng;
+        let fail = |reason: String| NluError::LlmGenerationFailed { reason };
+
+        if std::env::var("AKH_GEMV_BATCH").as_deref() == Ok("0") {
+            tracing::warn!(
+                "speculative sampling is enabled but AKH_GEMV_BATCH=0 disables the batched verify \
+                 GEMV (Phase 47d): the verify forward is ~4× a single decode, so this will be \
+                 SLOWER than plain sampling. Unset AKH_GEMV_BATCH to restore the fast path."
+            );
+        }
+
+        let device = self.device.clone();
+        let eos = self.find_eos_token();
+        // Temperature scale for softmax (guard against a degenerate 0 — eligibility only routes
+        // here for temperature > 0, but stay defensive).
+        let temp = (self.config.temperature.max(f32::MIN_POSITIVE)) as f64;
+        let drafter = NgramDrafter::new(DrafterConfig {
+            min_ngram: 2,
+            ..DrafterConfig::default()
+        });
+        let kv_ctx = match &self.model {
+            LoadedModel::Gemma4(m) => m.kv_ctx(),
+            _ => return Err(fail("spec decode: gemma4 only".to_string())),
+        };
+        let mut rng = rand::thread_rng();
+
+        // Temperature-softmax a logits tensor to a row-major host probability Vec (one row per
+        // leading position). D2H of the full vocab rows is the same order as plain sampling's
+        // per-token `to_vec1`; only the needed rows of a verify cross the bus.
+        let to_probs = |t: &Tensor| -> NluResult<Vec<f32>> {
+            let scaled = (t / temp).map_err(|e| fail(format!("temp scale: {e}")))?;
+            candle_nn::ops::softmax(&scaled, candle_core::D::Minus1)
+                .and_then(|p| p.flatten_all())
+                .and_then(|p| p.to_vec1::<f32>())
+                .map_err(|e| fail(format!("softmax/d2h: {e}")))
+        };
+
+        let mut st = DecodeState::default();
+        let mut all = prompt_tokens;
+        let mut pos = all.len();
+        let decode_start = std::time::Instant::now();
+
+        // First token: sample from the prefill distribution (last position).
+        let cur0 = categorical(&to_probs(&logits)?, rng.r#gen::<f32>());
+        all.push(cur0);
+        let mut cur = cur0;
+        let mut stop_now = self.process_token(cur0, eos, stop, &mut st);
+
+        while !stop_now && st.n_generated < max_tokens {
+            // Draft + verify in one forward; pull the per-position probabilities. Scope the
+            // &mut self.model borrow so process_token (&self) can run after.
+            let (drafts, probs, vocab) = {
+                let model = match &mut self.model {
+                    LoadedModel::Gemma4(m) => m,
+                    _ => return Err(fail("spec decode: gemma4 only".to_string())),
+                };
+                let mut drafts = drafter.propose(&all);
+                let max_gamma = kv_ctx.saturating_sub(pos + 1);
+                if drafts.len() > max_gamma {
+                    drafts.truncate(max_gamma);
+                }
+                let feed: Vec<u32> = std::iter::once(cur).chain(drafts.iter().copied()).collect();
+                let feed_t = Tensor::new(feed.as_slice(), &device)
+                    .and_then(|t| t.unsqueeze(0))
+                    .map_err(|e| fail(format!("feed tensor: {e}")))?;
+                let verify = model
+                    .forward_verify(&feed_t, pos)
+                    .map_err(|e| fail(format!("verify forward: {e}")))?;
+                let (_, _seq, vocab) =
+                    verify.dims3().map_err(|e| fail(format!("verify dims: {e}")))?;
+                (drafts, to_probs(&verify)?, vocab) // probs: (drafts.len()+1) rows × vocab
+            };
+
+            // Speculative-sampling accept: accept drafted d_j with prob p_j[d_j]; on the first
+            // rejection, resample from the residual and stop. `row(i)` is verify position i.
+            let row = |i: usize| &probs[i * vocab..(i + 1) * vocab];
+            let mut k = drafts.len();
+            let mut bonus: Option<u32> = None;
+            for j in 0..drafts.len() {
+                let (u, rp) = (rng.r#gen::<f32>(), rng.r#gen::<f32>());
+                let (tok, accepted) = spec_sample_step(row(j), drafts[j], u, rp);
+                if !accepted {
+                    bonus = Some(tok);
+                    k = j;
+                    break;
+                }
+            }
+            // All drafts accepted → sample the extra (bonus) position; else use the residual draw.
+            let bonus =
+                bonus.unwrap_or_else(|| categorical(row(drafts.len()), rng.r#gen::<f32>()));
+
+            // Emit the k accepted drafts + the bonus, each through the shared per-token path.
+            for i in 0..k {
+                all.push(drafts[i]);
+                if self.process_token(drafts[i], eos, stop, &mut st) {
+                    stop_now = true;
+                    break;
+                }
+                if st.n_generated >= max_tokens {
+                    stop_now = true;
+                    break;
+                }
+            }
+            if !stop_now {
+                all.push(bonus);
+                if self.process_token(bonus, eos, stop, &mut st) || st.n_generated >= max_tokens {
+                    stop_now = true;
+                }
+            }
+            cur = bonus;
+            pos += k + 1;
+            if pos + 1 >= kv_ctx {
+                break;
+            }
+        }
+
+        let decode_secs = decode_start.elapsed().as_secs_f32();
+        tracing::debug!(
+            tokens_generated = st.n_generated,
+            decode_secs,
+            tok_s = st.n_generated as f32 / decode_secs.max(1e-6),
+            "Candle speculative-sampling generation complete"
         );
         Ok(GenerationResult {
             text: st.generated_text,
