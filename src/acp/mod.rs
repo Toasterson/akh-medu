@@ -1706,16 +1706,106 @@ fn next_session_suffix() -> u128 {
     nanos.wrapping_add(u128::from(n))
 }
 
+/// Grace given to a connection after the peer's read side reaches EOF, so an
+/// in-flight response can still be flushed (a half-closing client). After it
+/// elapses the connection future is dropped, which closes the socket and frees
+/// its fds.
+const POST_EOF_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// How long the accept loops sleep after a failed `accept()` before retrying.
+const ACCEPT_RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// A `futures` [`AsyncRead`](futures::io::AsyncRead) adapter that fires a
+/// oneshot the first time the inner reader reaches EOF or errors — i.e. when
+/// the peer has disconnected or shut down its write side.
+struct SignalOnEof<R> {
+    inner: R,
+    signal: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+impl<R> SignalOnEof<R> {
+    fn new(inner: R) -> (Self, tokio::sync::oneshot::Receiver<()>) {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        (
+            Self {
+                inner,
+                signal: Some(tx),
+            },
+            rx,
+        )
+    }
+}
+
+impl<R: futures::io::AsyncRead + Unpin> futures::io::AsyncRead for SignalOnEof<R> {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut [u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        let me = self.get_mut();
+        let res = std::pin::Pin::new(&mut me.inner).poll_read(cx, buf);
+        match &res {
+            std::task::Poll::Ready(Ok(0)) if !buf.is_empty() => {
+                if let Some(tx) = me.signal.take() {
+                    let _ = tx.send(());
+                }
+            }
+            std::task::Poll::Ready(Err(_)) => {
+                if let Some(tx) = me.signal.take() {
+                    let _ = tx.send(());
+                }
+            }
+            _ => {}
+        }
+        res
+    }
+}
+
+/// Drive one connection's protocol future until it finishes on its own, or
+/// until the peer disconnects (read EOF) plus [`POST_EOF_GRACE`].
+///
+/// The protocol crate's `connect_to` does NOT resolve on read-EOF alone: its
+/// background actors are `try_join!`ed and the outgoing/task actors keep
+/// waiting for traffic that will never come, so the future pends forever.
+/// Without this watchdog every disconnected peer leaks its task + socket fds
+/// until the process hits EMFILE — observed in production (archibald akh-thoth,
+/// 2026-06/07: ~1k closed-socket fds from the gateway's 15s discovery polls,
+/// then a dead accept loop).
+async fn drive_until_disconnect(
+    conn: impl std::future::Future<Output = Result<(), agent_client_protocol::Error>>,
+    eof: tokio::sync::oneshot::Receiver<()>,
+) -> AcpResult<()> {
+    tokio::pin!(conn);
+    tokio::select! {
+        res = &mut conn => {
+            res?;
+            Ok(())
+        }
+        _ = eof => {
+            match tokio::time::timeout(POST_EOF_GRACE, &mut conn).await {
+                Ok(res) => {
+                    res?;
+                    Ok(())
+                }
+                // Timed out after EOF: nothing left to read and the protocol
+                // loop didn't end on its own — drop it, closing the socket.
+                Err(_) => Ok(()),
+            }
+        }
+    }
+}
+
 /// Serve the ACP agent over a tokio [`UnixStream`], adapting it into the
 /// crate's `futures`-based [`ByteStreams`] transport.
 ///
 /// The stream is split into read/write halves and bridged with
 /// [`tokio_util::compat`]. This consumes the connection and runs until the
-/// peer disconnects or the protocol loop ends.
+/// protocol loop ends or the peer disconnects (read EOF + a short flush
+/// grace) — see [`drive_until_disconnect`].
 pub async fn serve_stream(me: AkhAcpAgent, stream: UnixStream) -> AcpResult<()> {
     // tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf} → futures io via compat.
     let (read_half, write_half) = stream.into_split();
-    let incoming = read_half.compat();
+    let (incoming, eof_rx) = SignalOnEof::new(read_half.compat());
     let outgoing = write_half.compat_write();
 
     // ByteStreams::new(outgoing_writer, incoming_reader)
@@ -1725,8 +1815,7 @@ pub async fn serve_stream(me: AkhAcpAgent, stream: UnixStream) -> AcpResult<()> 
     // (a role-agnostic ConnectTo<Agent>) runs the agent's dispatch loop over the
     // socket, mirroring how `Stdio`/`AcpAgent` wire byte streams in the crate.
     use agent_client_protocol::ConnectTo;
-    build_connection(me).connect_to(transport).await?;
-    Ok(())
+    drive_until_disconnect(build_connection(me).connect_to(transport), eof_rx).await
 }
 
 /// Bind a Unix domain socket at `path`, accept exactly ONE connection, and serve
@@ -1765,14 +1854,13 @@ pub async fn serve_tcp_stream(me: AkhAcpAgent, stream: TcpStream) -> AcpResult<(
     // Disable Nagle so small JSON-RPC frames are not delayed.
     let _ = stream.set_nodelay(true);
     let (read_half, write_half) = stream.into_split();
-    let incoming = read_half.compat();
+    let (incoming, eof_rx) = SignalOnEof::new(read_half.compat());
     let outgoing = write_half.compat_write();
 
     let transport = ByteStreams::new(outgoing, incoming);
 
     use agent_client_protocol::ConnectTo;
-    build_connection(me).connect_to(transport).await?;
-    Ok(())
+    drive_until_disconnect(build_connection(me).connect_to(transport), eof_rx).await
 }
 
 /// Accept connections on a bound [`UnixListener`] until `shutdown` flips to
@@ -1781,7 +1869,10 @@ pub async fn serve_tcp_stream(me: AkhAcpAgent, stream: TcpStream) -> AcpResult<(
 /// This is the production accept loop: the cheap-to-clone [`AkhAcpAgent`]
 /// (`Arc`-backed) is cloned per connection, so many clients are served
 /// concurrently against the same shared engine/agent. A failed connection logs
-/// and is dropped; it does not tear down the loop.
+/// and is dropped; it does not tear down the loop. A failed `accept()` (EMFILE
+/// under fd exhaustion, ECONNABORTED from a half-open peer, …) logs and retries
+/// after [`ACCEPT_RETRY_BACKOFF`] — returning instead would leave the daemon up
+/// but permanently deaf.
 pub async fn serve_unix_loop(
     me: AkhAcpAgent,
     listener: UnixListener,
@@ -1790,16 +1881,20 @@ pub async fn serve_unix_loop(
     loop {
         tokio::select! {
             accepted = listener.accept() => {
-                let (stream, _addr) = accepted.map_err(|source| AcpError::Accept {
-                    path: PathBuf::from("<acp-unix-listener>"),
-                    source,
-                })?;
-                let conn = me.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = serve_stream(conn, stream).await {
-                        tracing::warn!("ACP unix connection ended with error: {e}");
+                match accepted {
+                    Ok((stream, _addr)) => {
+                        let conn = me.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = serve_stream(conn, stream).await {
+                                tracing::warn!("ACP unix connection ended with error: {e}");
+                            }
+                        });
                     }
-                });
+                    Err(e) => {
+                        tracing::error!(error = %e, "ACP unix accept failed; retrying");
+                        tokio::time::sleep(ACCEPT_RETRY_BACKOFF).await;
+                    }
+                }
             }
             res = shutdown.changed() => {
                 // Sender dropped (Err) or signalled true → stop accepting.
@@ -1822,16 +1917,20 @@ pub async fn serve_tcp_loop(
     loop {
         tokio::select! {
             accepted = listener.accept() => {
-                let (stream, _addr) = accepted.map_err(|source| AcpError::Accept {
-                    path: PathBuf::from("<acp-tcp-listener>"),
-                    source,
-                })?;
-                let conn = me.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = serve_tcp_stream(conn, stream).await {
-                        tracing::warn!("ACP tcp connection ended with error: {e}");
+                match accepted {
+                    Ok((stream, _addr)) => {
+                        let conn = me.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = serve_tcp_stream(conn, stream).await {
+                                tracing::warn!("ACP tcp connection ended with error: {e}");
+                            }
+                        });
                     }
-                });
+                    Err(e) => {
+                        tracing::error!(error = %e, "ACP tcp accept failed; retrying");
+                        tokio::time::sleep(ACCEPT_RETRY_BACKOFF).await;
+                    }
+                }
             }
             res = shutdown.changed() => {
                 if res.is_err() || *shutdown.borrow() {
@@ -2509,6 +2608,99 @@ mod tests {
         let joined = tokio::time::timeout(std::time::Duration::from_secs(30), loop_task)
             .await
             .expect("accept loop did not shut down within 5s")
+            .expect("accept loop task joined");
+        joined.expect("accept loop returned Ok");
+    }
+
+    /// Regression (archibald 2026-06/07 fd leak): the per-connection serve
+    /// future must END when the peer disconnects, releasing the socket fds.
+    /// The protocol crate's `connect_to` pends forever after read-EOF, so
+    /// without the `drive_until_disconnect` watchdog this task lives (and
+    /// holds its fds) until the process dies — 1k+ leaked fds in production.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn acp_tcp_serve_ends_when_peer_disconnects() {
+        let me = workspace();
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind tcp");
+        let addr = listener.local_addr().expect("local addr");
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept tcp");
+            serve_tcp_stream(me, stream).await
+        });
+
+        // Connect and immediately hang up — the shape of a gateway discovery
+        // poll that errors out, and of any client that finished its business.
+        let stream = TcpStream::connect(addr).await.expect("connect tcp");
+        drop(stream);
+
+        let joined = tokio::time::timeout(std::time::Duration::from_secs(30), server)
+            .await
+            .expect(
+                "serve_tcp_stream did not end after peer disconnect — \
+                 the connection task (and its socket fds) would leak",
+            )
+            .expect("server task joined");
+        joined.expect("serve returned Ok after peer disconnect");
+    }
+
+    /// Unix-socket twin of `acp_tcp_serve_ends_when_peer_disconnects`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn acp_unix_serve_ends_when_peer_disconnects() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("akh-acp-eof.sock");
+
+        let me = workspace();
+        let listener = UnixListener::bind(&sock).expect("bind unix");
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept unix");
+            serve_stream(me, stream).await
+        });
+
+        let stream = connect_with_retry(&sock).await;
+        drop(stream);
+
+        let joined = tokio::time::timeout(std::time::Duration::from_secs(30), server)
+            .await
+            .expect(
+                "serve_stream did not end after peer disconnect — \
+                 the connection task (and its socket fds) would leak",
+            )
+            .expect("server task joined");
+        joined.expect("serve returned Ok after peer disconnect");
+    }
+
+    /// Regression (archibald 2026-06/07): connection churn must not wedge the
+    /// accept loop. 20 clients connect and hang up without speaking a byte
+    /// (the discovery-poll storm shape); every serve task must end, and the
+    /// loop must still serve a real request afterwards.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn acp_tcp_accept_loop_survives_connect_disconnect_churn() {
+        let me = workspace();
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind tcp");
+        let addr = listener.local_addr().expect("local addr").to_string();
+
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let server = tokio::spawn(async move { serve_tcp_loop(me, listener, shutdown_rx).await });
+
+        for _ in 0..20 {
+            let stream = TcpStream::connect(&addr).await.expect("connect tcp");
+            drop(stream);
+        }
+
+        // The loop still answers a real data-plane request after the churn.
+        let caps = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            ext_request_tcp(&addr, "_akh/meta/capabilities", serde_json::json!({})),
+        )
+        .await
+        .expect("ext caps after churn timed out")
+        .expect("ext caps after churn ok");
+        assert_eq!(caps["protocol"], "acp");
+
+        shutdown_tx.send(true).expect("send shutdown");
+        let joined = tokio::time::timeout(std::time::Duration::from_secs(30), server)
+            .await
+            .expect("accept loop did not shut down")
             .expect("accept loop task joined");
         joined.expect("accept loop returned Ok");
     }

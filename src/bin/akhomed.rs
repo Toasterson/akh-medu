@@ -2019,6 +2019,48 @@ async fn init_postgres(
     None
 }
 
+/// Raise the soft `RLIMIT_NOFILE` to the hard limit. Container runtimes often
+/// leave the soft limit at 1024 (docker's default) while the hard limit is in
+/// the hundreds of thousands; a long-lived daemon accepting many short TCP
+/// connections (the gateway's ACP discovery polls) exhausts 1024 in days.
+#[cfg(unix)]
+fn raise_nofile_limit() {
+    // SAFETY: plain libc rlimit syscalls on a zeroed struct; no aliasing.
+    unsafe {
+        let mut lim = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) != 0 {
+            return;
+        }
+        if lim.rlim_cur >= lim.rlim_max {
+            return;
+        }
+        let soft_before = lim.rlim_cur;
+        lim.rlim_cur = lim.rlim_max;
+        // macOS refuses a soft limit above OPEN_MAX (10240) even when the hard
+        // limit reports RLIM_INFINITY (armini runs akhomed natively). libc
+        // doesn't export OPEN_MAX, so use its (ABI-stable) value.
+        #[cfg(target_os = "macos")]
+        {
+            lim.rlim_cur = lim.rlim_cur.min(10240);
+        }
+        if lim.rlim_cur <= soft_before {
+            return;
+        }
+        if libc::setrlimit(libc::RLIMIT_NOFILE, &lim) == 0 {
+            tracing::info!(from = soft_before, to = lim.rlim_cur, "raised RLIMIT_NOFILE soft limit");
+        } else {
+            tracing::warn!(
+                soft = soft_before,
+                hard = lim.rlim_max,
+                "could not raise RLIMIT_NOFILE soft limit"
+            );
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt()
@@ -2028,6 +2070,9 @@ async fn main() {
             }),
         )
         .init();
+
+    #[cfg(unix)]
+    raise_nofile_limit();
 
     // `bind`/`port` no longer bind an HTTP listener (ADR-061 P8.5) — they are
     // retained only for the discovery PID record consumed by `akh` clients.

@@ -104,5 +104,10 @@ USER akh
 WORKDIR /data
 VOLUME ["/data", "/config"]
 
+# fd headroom: docker's default soft RLIMIT_NOFILE is 1024, which a long-lived
+# ACP daemon can exhaust (2026-06 archibald incident). akhomed raises its own
+# soft limit to the hard limit at startup, so no --ulimit flag is needed as
+# long as the runtime's HARD limit is generous (dockerd default: 524288).
+
 ENTRYPOINT ["tini", "--"]
 CMD ["akhomed"]
