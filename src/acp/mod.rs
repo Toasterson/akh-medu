@@ -204,6 +204,29 @@ pub struct AkhAcpAgent {
     /// (tests, embedded use) — those methods then return a clean "no backend"
     /// error. See [`ServerControl`].
     control: Option<Arc<dyn ServerControl>>,
+    /// Watchdog for a prompt turn: if the turn emits **nothing** (no answer
+    /// delta, no reasoning, no tool step) for this long, the prompt handler
+    /// stops waiting, sends the client an `error[acp]` message, and ends the
+    /// turn — so a wedged step (a blocked lock, an unanswered client
+    /// round-trip, a hung backend) returns an error instead of pinning the
+    /// gateway slot forever. Zero disables the watchdog. Defaults from
+    /// `AKH_TURN_IDLE_TIMEOUT_SECS` (see [`turn_idle_timeout_from_env`]).
+    turn_idle_timeout: std::time::Duration,
+}
+
+/// Default prompt-turn idle watchdog (seconds). Generous: a healthy turn
+/// streams progress messages (answer deltas, tool steps, audit lines) far more
+/// often than this; only a genuinely stuck turn is silent for minutes.
+const DEFAULT_TURN_IDLE_TIMEOUT_SECS: u64 = 300;
+
+/// The prompt-turn idle watchdog from `AKH_TURN_IDLE_TIMEOUT_SECS` (seconds;
+/// `0` disables), defaulting to [`DEFAULT_TURN_IDLE_TIMEOUT_SECS`].
+fn turn_idle_timeout_from_env() -> std::time::Duration {
+    let secs = std::env::var("AKH_TURN_IDLE_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_TURN_IDLE_TIMEOUT_SECS);
+    std::time::Duration::from_secs(secs)
 }
 
 impl AkhAcpAgent {
@@ -227,6 +250,7 @@ impl AkhAcpAgent {
             name: "akh-medu".to_string(),
             client_caps: Arc::new(Mutex::new(None)),
             control: None,
+            turn_idle_timeout: turn_idle_timeout_from_env(),
         }
     }
 
@@ -246,7 +270,17 @@ impl AkhAcpAgent {
             sessions: Arc::new(Mutex::new(std::collections::HashMap::new())),
             client_caps: Arc::new(Mutex::new(None)),
             control: Some(control),
+            turn_idle_timeout: turn_idle_timeout_from_env(),
         }
+    }
+
+    /// Override the prompt-turn idle watchdog (zero disables). Tests use a tiny
+    /// value to exercise the stall path; production reads
+    /// `AKH_TURN_IDLE_TIMEOUT_SECS` at construction instead.
+    #[must_use]
+    pub fn with_turn_idle_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.turn_idle_timeout = timeout;
+        self
     }
 
     /// Override the agent name advertised during `initialize`. In held
@@ -1290,7 +1324,27 @@ struct PermissionAskRequest {
     danger: String,
     input_summary: String,
     /// The approver replies here with allow (`true`) / reject (`false`).
-    reply: tokio::sync::oneshot::Sender<bool>,
+    /// A `std` sync channel so the blocking asker can wait with
+    /// [`recv_timeout`](std::sync::mpsc::Receiver::recv_timeout) — a client
+    /// that never answers `session/request_permission` must deny (fail
+    /// closed), not wedge the turn forever.
+    reply: std::sync::mpsc::SyncSender<bool>,
+}
+
+/// Default bound on one `session/request_permission` round-trip (seconds).
+/// Long enough for a human to answer an interactive prompt; short enough that
+/// a client which does not implement the method (e.g. a headless gateway)
+/// denies instead of hanging the chat turn. `AKH_PERMISSION_ASK_TIMEOUT_SECS`
+/// overrides; `0` disables the bound.
+const DEFAULT_PERMISSION_ASK_TIMEOUT_SECS: u64 = 120;
+
+/// The permission-ask bound from `AKH_PERMISSION_ASK_TIMEOUT_SECS`.
+fn permission_ask_timeout() -> std::time::Duration {
+    let secs = std::env::var("AKH_PERMISSION_ASK_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_PERMISSION_ASK_TIMEOUT_SECS);
+    std::time::Duration::from_secs(secs)
 }
 
 /// A [`PermissionAsker`](crate::agent::permission::PermissionAsker) that bridges
@@ -1307,19 +1361,35 @@ impl crate::agent::permission::PermissionAsker for AcpPermissionAsker {
         manifest: &crate::agent::tool_manifest::ToolManifest,
         input_summary: &str,
     ) -> bool {
-        let (reply, reply_rx) = tokio::sync::oneshot::channel();
+        let (reply, reply_rx) = std::sync::mpsc::sync_channel(1);
         let req = PermissionAskRequest {
             tool_name: manifest.name.clone(),
             danger: manifest.danger.level.to_string(),
             input_summary: input_summary.to_string(),
             reply,
         };
-        // We are inside spawn_blocking, so blocking_send / blocking_recv are
+        // We are inside spawn_blocking, so blocking_send / a blocking recv are
         // correct (never call these on an async runtime thread).
         if self.tx.blocking_send(req).is_err() {
             return false;
         }
-        reply_rx.blocking_recv().unwrap_or(false)
+        // Bound the wait: a client that never answers the permission request
+        // (or does not implement it) denies instead of wedging the turn.
+        let bound = permission_ask_timeout();
+        if bound.is_zero() {
+            return reply_rx.recv().unwrap_or(false);
+        }
+        match reply_rx.recv_timeout(bound) {
+            Ok(approved) => approved,
+            Err(_) => {
+                tracing::warn!(
+                    tool = %manifest.name,
+                    timeout_secs = bound.as_secs(),
+                    "permission ask unanswered within the bound — denying (fail closed)"
+                );
+                false
+            }
+        }
     }
 }
 
@@ -1349,14 +1419,36 @@ async fn serve_permission_asks(
             PermissionOption::new("reject", "Reject", PermissionOptionKind::RejectOnce),
         ];
         let request = RequestPermissionRequest::new(session_id.clone(), tool_call, options);
-        let approved = match cx.send_request(request).block_task().await {
-            Ok(resp) => match resp.outcome {
+        // Mirror the asker-side bound: even though the blocking asker already
+        // times out and denies, this task must not stay parked forever on a
+        // request the client will never answer (that would wedge the prompt
+        // handler's final `approver.await`).
+        let bound = permission_ask_timeout();
+        let response = cx.send_request(request).block_task();
+        let outcome = if bound.is_zero() {
+            response.await.ok()
+        } else {
+            match tokio::time::timeout(bound, response).await {
+                Ok(resp) => resp.ok(),
+                Err(_) => {
+                    tracing::warn!(
+                        tool = %req.tool_name,
+                        timeout_secs = bound.as_secs(),
+                        "client did not answer session/request_permission — denying"
+                    );
+                    None
+                }
+            }
+        };
+        let approved = match outcome {
+            Some(resp) => match resp.outcome {
                 RequestPermissionOutcome::Selected(sel) => sel.option_id.0.as_ref() == "allow",
                 _ => false, // Cancelled / future variants → deny.
             },
-            Err(_) => false, // client error → deny.
+            None => false, // client error / timeout → deny.
         };
-        let _ = req.reply.send(approved);
+        // `try_send`: the asker may have timed out and gone; never block here.
+        let _ = req.reply.try_send(approved);
     }
 }
 
@@ -1462,8 +1554,25 @@ fn build_connection(
                         // Route to the session's workspace (recorded at
                         // session/new) and resolve its handles on demand — the
                         // chat half of `-w`: one daemon serves any configured akh.
+                        // Resolution can wake the akh from its backing store, so
+                        // it too rides the idle watchdog: a hung wake (e.g. a
+                        // wedged Postgres connection) must error, not pin the
+                        // client's slot forever.
                         let ws = me.session_workspace(&session_id.to_string());
-                        let (engine, agent, processor) = match me.resolve_handles(&ws).await {
+                        let idle = me.turn_idle_timeout;
+                        let resolved = if idle.is_zero() {
+                            me.resolve_handles(&ws).await
+                        } else {
+                            match tokio::time::timeout(idle, me.resolve_handles(&ws)).await {
+                                Ok(r) => r,
+                                Err(_) => Err(format!(
+                                    "workspace resolution stalled for {}s (wake from \
+                                     the backing store may be blocked)",
+                                    idle.as_secs()
+                                )),
+                            }
+                        };
+                        let (engine, agent, processor) = match resolved {
                             Ok(h) => h,
                             Err(e) => {
                                 AcpSink::new(cx.clone(), session_id.clone()).emit(
@@ -1504,18 +1613,66 @@ fn build_connection(
                             engine,
                             agent,
                             processor,
-                            ws,
+                            ws.clone(),
                             text,
                             Some(asker),
                             ChannelSink { tx: msg_tx },
                         );
 
+                        // Drain the turn's messages under the idle watchdog: a
+                        // healthy turn keeps emitting (deltas, tool steps, audit
+                        // lines); one that goes silent for the whole window is
+                        // wedged — a blocked lock, a hung backend, an unanswered
+                        // client round-trip. Fail the turn instead of pinning
+                        // the client's slot forever.
                         let sink = AcpSink::new(cx, session_id.clone());
-                        while let Some(msg) = msg_rx.recv().await {
-                            sink.emit(&msg);
+                        let mut stalled = false;
+                        loop {
+                            let next = if idle.is_zero() {
+                                msg_rx.recv().await
+                            } else {
+                                match tokio::time::timeout(idle, msg_rx.recv()).await {
+                                    Ok(next) => next,
+                                    Err(_) => {
+                                        stalled = true;
+                                        break;
+                                    }
+                                }
+                            };
+                            match next {
+                                Some(msg) => sink.emit(&msg),
+                                // Channel closed ⇒ the turn finished and dropped
+                                // its sink.
+                                None => break,
+                            }
                         }
 
-                        // Channel closed ⇒ the turn finished and dropped its sink.
+                        if stalled {
+                            // The blocking turn thread cannot be killed; leave it
+                            // behind (it holds the agent lock until whatever it is
+                            // blocked on resolves) and free the client's slot with
+                            // an explicit error.
+                            tracing::error!(
+                                workspace = %ws,
+                                idle_secs = idle.as_secs(),
+                                "chat turn stalled (no progress within the idle \
+                                 watchdog) — ending the turn with an error; the \
+                                 turn's worker thread may still be blocked"
+                            );
+                            sink.emit(&AkhMessage::error(
+                                "acp",
+                                format!(
+                                    "chat turn stalled: no progress for {}s — \
+                                     aborting this turn. The stuck step may still \
+                                     be blocked inside the daemon; check akhomed \
+                                     logs (workspace \"{ws}\").",
+                                    idle.as_secs()
+                                ),
+                            ));
+                            return responder
+                                .respond(PromptResponse::new(StopReason::EndTurn));
+                        }
+
                         // Join to surface a panicked turn task, and let the
                         // approver (whose Sender was dropped with the asker at
                         // turn-end) drain and finish.
@@ -2415,6 +2572,82 @@ mod tests {
                  (single-accept dispatch loop) — acceptable for the spike"
             ),
         }
+    }
+
+    /// Regression: the production companion health-check prompt (observed on
+    /// akh-thoth, develop 75086fa) hung the turn forever after a successful
+    /// tier-1 NLU parse in a `server,delegation`-only build. The turn must
+    /// complete — answer or error — never hang.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn prompt_turn_completes_for_companion_health_check() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("akh-hc.sock");
+
+        let me = workspace();
+        let server_sock = sock.clone();
+        let _server = tokio::spawn(async move { serve_unix(me, &server_sock).await });
+
+        let stream = connect_with_retry(&sock).await;
+        let answer = unix_client_prompt(
+            stream,
+            "Health check after the ACP fd-leak fix deploy: please reply with \
+             a one-line status of your knowledge graph.",
+        )
+        .await;
+        assert!(
+            !answer.trim().is_empty(),
+            "expected non-empty ACP prompt response, got: {answer:?}"
+        );
+    }
+
+    /// Regression: a wedged chat turn (here: the agent lock is held forever, so
+    /// the turn's `spawn_blocking` closure blocks before emitting anything) must
+    /// NOT hang the prompt forever — the idle watchdog ends the turn with an
+    /// `error[acp]` message so the client's slot is freed. This is the guard for
+    /// the akh-thoth production hang (develop 75086fa): a turn that blocked
+    /// silently after its tier-1 NLU parse pinned the gateway slot for good.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn stalled_prompt_turn_fails_fast_instead_of_hanging() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("akh-stall.sock");
+
+        let me = workspace().with_turn_idle_timeout(std::time::Duration::from_secs(2));
+
+        // Wedge the workspace: hold the agent lock on another thread, so the
+        // prompt turn blocks at `agent.lock()` and never emits a message. The
+        // lock is released after the assertion (via the release flag): the
+        // wedged turn thread must be allowed to finish, because dropping the
+        // test runtime waits for in-flight blocking tasks.
+        let blocker = Arc::clone(me.agent.as_ref().expect("held-mode agent"));
+        let release = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let release_flag = Arc::clone(&release);
+        let blocker_thread = std::thread::spawn(move || {
+            let _guard = blocker.lock().unwrap_or_else(|e| e.into_inner());
+            while !release_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                std::thread::park_timeout(std::time::Duration::from_millis(25));
+            }
+        });
+        // Give the blocker thread a moment to actually take the lock.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let server_sock = sock.clone();
+        let _server = tokio::spawn(async move { serve_unix(me, &server_sock).await });
+
+        let stream = connect_with_retry(&sock).await;
+        // unix_client_prompt is hard-bounded at 60s: if the watchdog does not
+        // fire, this test fails by timeout instead of hanging the suite.
+        let answer = unix_client_prompt(stream, "hello?").await;
+
+        // Unwedge before asserting so the turn thread can finish even if the
+        // assertion fails.
+        release.store(true, std::sync::atomic::Ordering::Relaxed);
+        blocker_thread.thread().unpark();
+        let _ = blocker_thread.join();
+
+        assert!(
+            answer.contains("error[acp]") && answer.contains("stalled"),
+            "expected the idle-watchdog error in the turn output, got: {answer:?}"
+        );
     }
 
     /// Connect to the Unix socket, retrying briefly while the server binds.
