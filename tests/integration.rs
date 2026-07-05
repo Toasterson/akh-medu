@@ -898,15 +898,17 @@ fn goal_status_transitions() {
 fn tool_registry_crud() {
     let mut agent = test_agent();
 
-    // Should have 34 built-in tools:
+    // Should have 38 built-in tools:
     //   5 core + 4 external + 2 autonomous + 5 ingest + 1 library + 1 doc
     //   + 3 code (code_gen, compile_feedback, pattern_mine)
     //   + 4 agent (agent_list, agent_spawn, agent_message, agent_retire)
     //   + 1 trigger (trigger_manage) + 1 audit_log
     //   + 1 tool-graph query (tool_query) + 1 delegate
     //   + 5 Claude-Code-parity (edit, glob, grep, web_search, task_list)
+    //   + 3 typed writers (memory_write, skill_author, identity_awaken; ADR 076)
+    //   + 1 inference_config (Phase 47)
     let tools = agent.list_tools();
-    assert_eq!(tools.len(), 34);
+    assert_eq!(tools.len(), 38);
 
     let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
     // Core tools.
@@ -950,6 +952,12 @@ fn tool_registry_crud() {
     assert!(names.contains(&"grep"));
     assert!(names.contains(&"web_search"));
     assert!(names.contains(&"task_list"));
+    // Typed writer tools (ADR 076).
+    assert!(names.contains(&"memory_write"));
+    assert!(names.contains(&"skill_author"));
+    assert!(names.contains(&"identity_awaken"));
+    // Runtime inference options (Phase 47).
+    assert!(names.contains(&"inference_config"));
 
     // Register a custom tool.
     struct CustomTool;
@@ -985,8 +993,8 @@ fn tool_registry_crud() {
     }
 
     agent.register_tool(Box::new(CustomTool));
-    // 34 built-in tools + 1 custom.
-    assert_eq!(agent.list_tools().len(), 35);
+    // 38 built-in tools + 1 custom.
+    assert_eq!(agent.list_tools().len(), 39);
 }
 
 #[test]
