@@ -111,3 +111,40 @@ VOLUME ["/data", "/config"]
 
 ENTRYPOINT ["tini", "--"]
 CMD ["akhomed"]
+
+# ── Stage 3: Implementer runtime (akhomed + coding toolchain) ───────────────
+# For implementer akhs that build/test what they edit (Anima worktrees under
+# their scratch/): git + Node/npm + a Rust toolchain + sccache, so `cargo
+# build`/`npm test` work inside the akh's shell tool. sccache shares the same
+# S3 compile cache as the anima-runner fleet — inject SCCACHE_BUCKET/ENDPOINT/
+# REGION + AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY and RUSTC_WRAPPER=sccache
+# at run time (see anima's docker-compose.runner.yml runner-env for values).
+# The default `runtime` stage stays lean; build this variant with
+#   docker buildx build -f docker/akhomed-cloud.Dockerfile --target implementer \
+#     -t akhomed:cloud-tools --load .
+FROM runtime AS implementer
+USER root
+ARG SCCACHE_VERSION=v0.10.0
+# Toolchain lives read-only in /usr/local; cargo's writable state (registry,
+# git checkouts) goes to the /data volume at runtime (uid 999 = akh).
+ENV RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    PATH=/usr/local/cargo/bin:/usr/local/bin:/usr/bin:/bin
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      git curl build-essential pkg-config libssl-dev nodejs npm && \
+    rm -rf /var/lib/apt/lists/* && \
+    curl -fsSL https://sh.rustup.rs | sh -s -- -y \
+      --default-toolchain stable --profile minimal -c rustfmt -c clippy && \
+    chmod -R a+rX "${RUSTUP_HOME}" "${CARGO_HOME}" && \
+    ARCH="$(dpkg --print-architecture)" && \
+    case "$ARCH" in \
+      arm64) T=aarch64-unknown-linux-musl ;; \
+      *)     T=x86_64-unknown-linux-musl  ;; \
+    esac && \
+    curl -fsSL "https://github.com/mozilla/sccache/releases/download/${SCCACHE_VERSION}/sccache-${SCCACHE_VERSION}-${T}.tar.gz" \
+      | tar xz -C /tmp && \
+    install -m 0755 "/tmp/sccache-${SCCACHE_VERSION}-${T}/sccache" /usr/local/bin/sccache && \
+    rm -rf /tmp/sccache-*
+ENV CARGO_HOME=/data/cache/cargo
+USER akh
