@@ -43,6 +43,35 @@ impl TerseGrammar {
                 Ok(format!("{s} → {p} → {o}"))
             }
 
+            // Phase 33a: aggregated statement, dense notation.
+            // "Dog → {is-a → Mammal; has-a → fur, tail}"
+            AbsTree::Aggregated {
+                subject,
+                appositions,
+                groups,
+                ..
+            } => {
+                let subj = self.linearize_inner(subject, ctx)?;
+                let mut parts: Vec<String> = Vec::new();
+                if !appositions.is_empty() {
+                    let apps: Vec<String> = appositions
+                        .iter()
+                        .map(|a| self.linearize_inner(a, ctx))
+                        .collect::<GrammarResult<Vec<_>>>()?;
+                    parts.push(format!("is-a → {}", apps.join(", ")));
+                }
+                for group in groups {
+                    let p = self.linearize_inner(&group.predicate, ctx)?;
+                    let objs: Vec<String> = group
+                        .objects
+                        .iter()
+                        .map(|o| self.linearize_inner(o, ctx))
+                        .collect::<GrammarResult<Vec<_>>>()?;
+                    parts.push(format!("{p} → {}", objs.join(", ")));
+                }
+                Ok(format!("{subj} → {{{}}}", parts.join("; ")))
+            }
+
             AbsTree::Similarity {
                 entity,
                 similar_to,

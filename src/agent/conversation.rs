@@ -480,12 +480,32 @@ pub fn ground_query(
     // Step 6: Also try discourse-aware rendering for richer prose.
     let prose = if summary.overview.is_empty() {
         // Fallback: compose natural-language prose from triples.
+        // Phase 33a: shared-subject triples are folded into fluent
+        // aggregated sentences instead of one sentence per triple.
         const MAX_FALLBACK_TRIPLES: usize = 8;
         let capped: Vec<_> = grounded.iter().take(MAX_FALLBACK_TRIPLES).collect();
-        let mut lines: Vec<String> = capped
-            .iter()
-            .map(|g| triple_to_prose(&g.subject_label, &g.predicate_label, &g.object_label))
-            .collect();
+        let agg_cfg = crate::grammar::aggregate::AggregationConfig::from_env();
+        let mut lines: Vec<String> = if agg_cfg.enabled {
+            let items: Vec<crate::grammar::AbsTree> = capped
+                .iter()
+                .map(|g| {
+                    crate::grammar::AbsTree::triple(
+                        crate::grammar::AbsTree::entity(&g.subject_label),
+                        crate::grammar::AbsTree::relation(&g.predicate_label),
+                        crate::grammar::AbsTree::entity(&g.object_label),
+                    )
+                })
+                .collect();
+            crate::grammar::aggregate::aggregate_statements(&items, &agg_cfg)
+                .iter()
+                .filter_map(crate::grammar::aggregate::realize_statement)
+                .collect()
+        } else {
+            capped
+                .iter()
+                .map(|g| triple_to_prose(&g.subject_label, &g.predicate_label, &g.object_label))
+                .collect()
+        };
         let remaining = grounded.len().saturating_sub(MAX_FALLBACK_TRIPLES);
         if remaining > 0 {
             lines.push(format!("There are {remaining} additional relation(s) on record."));

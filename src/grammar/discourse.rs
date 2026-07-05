@@ -456,6 +456,19 @@ pub fn build_discourse_response(
 
     let items: Vec<AbsTree> = abs_items.into_iter().map(|(tree, _, _)| tree).collect();
 
+    // Phase 33a: fold shared-subject triples into fluent aggregated
+    // sentences. First/second person answers keep their own dedicated
+    // merging in the narrative grammar (merge_i_am_clauses), so only
+    // third-person responses aggregate here.
+    let items = if ctx.pov == PointOfView::ThirdPerson {
+        crate::grammar::aggregate::aggregate_statements(
+            &items,
+            &crate::grammar::aggregate::AggregationConfig::from_env(),
+        )
+    } else {
+        items
+    };
+
     let inner = if items.len() == 1 {
         items.into_iter().next().unwrap()
     } else {

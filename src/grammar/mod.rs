@@ -37,6 +37,7 @@
 //! ```
 
 pub mod abs;
+pub mod aggregate;
 pub mod bridge;
 pub mod cat;
 pub mod concrete;
@@ -59,7 +60,8 @@ pub mod terse;
 
 use std::collections::HashMap;
 
-pub use abs::{AbsTree, ProvenanceTag, VsaRoleSymbols};
+pub use abs::{AbsTree, PredicateGroup, ProvenanceTag, VsaRoleSymbols};
+pub use aggregate::{AggregationConfig, aggregate_statements};
 pub use cat::Cat;
 pub use concrete::{ConcreteGrammar, LinContext, ParseContext};
 pub use error::{GrammarError, GrammarResult};

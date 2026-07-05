@@ -52,6 +52,64 @@ impl FormalGrammar {
                 Ok(format!("The entity {s} {p} {o}."))
             }
 
+            // Phase 33a: shared-subject aggregated statement.
+            // "The entity 'Dog', a 'Mammal', has 'fur' and 'tail'."
+            // Continuations repeat the entity with a connective (formal
+            // register avoids pronouns): "Additionally, the entity 'Dog' …"
+            AbsTree::Aggregated {
+                subject,
+                appositions,
+                groups,
+                continuation,
+            } => {
+                let subj = self.linearize_inner(subject, ctx)?;
+                let opener = if *continuation {
+                    format!("Additionally, the entity {subj}")
+                } else {
+                    format!("The entity {subj}")
+                };
+                let mut out = opener;
+
+                if !appositions.is_empty() {
+                    let parts: Vec<String> = appositions
+                        .iter()
+                        .map(|a| {
+                            // Article from the raw label; the rendered form
+                            // is quoted ('Mammal') so derive "a"/"an" first.
+                            let raw = a.label().unwrap_or_default().to_string();
+                            let rendered = self.linearize_inner(a, ctx)?;
+                            Ok(format!("{} {rendered}", morpho::article(&raw)))
+                        })
+                        .collect::<GrammarResult<Vec<_>>>()?;
+                    let phrase = morpho::join_list(&parts, "and");
+                    if groups.is_empty() {
+                        out.push_str(&format!(" is {phrase}."));
+                        return Ok(out);
+                    }
+                    out.push_str(&format!(", {phrase},"));
+                }
+
+                let vps: Vec<String> = groups
+                    .iter()
+                    .map(|g| {
+                        let p = self.linearize_inner(&g.predicate, ctx)?;
+                        let objs: Vec<String> = g
+                            .objects
+                            .iter()
+                            .map(|o| self.linearize_inner(o, ctx))
+                            .collect::<GrammarResult<Vec<_>>>()?;
+                        Ok(format!("{p} {}", morpho::join_list(&objs, "and")))
+                    })
+                    .collect::<GrammarResult<Vec<_>>>()?;
+
+                if !vps.is_empty() {
+                    out.push(' ');
+                    out.push_str(&morpho::join_list(&vps, "and"));
+                }
+                out.push('.');
+                Ok(out)
+            }
+
             AbsTree::Similarity {
                 entity,
                 similar_to,
