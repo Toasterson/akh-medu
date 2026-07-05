@@ -8,6 +8,7 @@ members = [
     "crates/akh-egraph-bench",
     "crates/grug-data",
     "crates/grug-train",
+    "benchmarks/harness-core",
 ]
 resolver = "3"
 
