@@ -1,0 +1,9 @@
+id = "c-03-libscf-smf-state"
+family = "c-native-libs"
+description = "Compile a C program against libscf that reports an SMF instance's restarter state"
+timeout_secs = 900
+expected_manpages = ["scf_simple_prop_get", "libscf", "smf"]
+mode = ["autonomous", "advisory"]
+
+[version_trap]
+present = false

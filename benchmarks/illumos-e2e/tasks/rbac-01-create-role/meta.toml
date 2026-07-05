@@ -1,0 +1,17 @@
+id = "rbac-01-create-role"
+family = "rbac"
+description = "Create an RBAC role with a rights profile and assign it to an existing user"
+timeout_secs = 600
+expected_manpages = ["roleadd", "usermod", "profiles", "roles"]
+mode = ["autonomous", "advisory"]
+
+[version_trap]
+present = true
+note = """
+Linux's group-based sudo habit (`usermod -aG wheel opuser` / editing
+/etc/sudoers) grants nothing on illumos: there is no sudoers file and
+group membership does not confer command privilege here. illumos RBAC
+is orthogonal to Unix groups -- rights are granted via named profiles
+(prof_attr(5)/exec_attr(5)) bound to a role (roleadd(8)) or directly to a
+user (usermod -P), discoverable from profiles(1)/roles(1).
+"""

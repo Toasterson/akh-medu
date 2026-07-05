@@ -1,0 +1,17 @@
+id = "discover-01-cpu-info"
+family = "manpage-discovery"
+description = "Report online CPU count and CPU 0 clock speed via native illumos tools"
+timeout_secs = 300
+expected_manpages = ["psrinfo", "kstat"]
+mode = ["autonomous", "advisory"]
+
+[version_trap]
+present = true
+note = """
+There is no /proc/cpuinfo and no lscpu on illumos: /proc here is proc(4),
+a binary-structured interface (psinfo_t/lwpsinfo_t etc.), not Linux's text
+procfs, so `cat /proc/cpuinfo` fails and there is nothing analogous to
+grep. The manpage-correct discovery path is psrinfo(1M) (-v gives clock
+speed in a human line) or kstat(1M)/kstat(3KSTAT) reading the cpu_info
+kstat's clock_MHz statistic.
+"""

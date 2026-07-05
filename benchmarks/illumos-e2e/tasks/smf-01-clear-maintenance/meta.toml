@@ -1,0 +1,17 @@
+id = "smf-01-clear-maintenance"
+family = "smf"
+description = "Diagnose an SMF service stuck in maintenance and bring it back online"
+timeout_secs = 600
+expected_manpages = ["svcs", "svcadm"]
+mode = ["autonomous", "advisory"]
+
+[version_trap]
+present = true
+note = """
+A Linux/systemctl habit (or a naive `svcadm restart`) does not clear a
+service from maintenance: svcadm(1M)'s restart subcommand only affects
+instances already in the online or degraded states. The manpage-correct
+recovery path is `svcadm clear <fmri>` after the underlying fault is fixed;
+running only `svcadm restart` against a service in maintenance is a no-op
+that leaves it in maintenance.
+"""

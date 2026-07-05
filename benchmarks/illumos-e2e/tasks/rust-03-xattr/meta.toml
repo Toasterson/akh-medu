@@ -1,0 +1,18 @@
+id = "rust-03-xattr"
+family = "rust-illumos"
+description = "Rust FFI using illumos extended attributes (attropen/O_XATTR), not the Linux xattr syscalls"
+timeout_secs = 900
+expected_manpages = ["attropen", "fsattr"]
+mode = ["autonomous", "advisory"]
+
+[version_trap]
+present = true
+note = """
+Linux's setxattr(2)/getxattr(2) syscalls (and the popular Rust `xattr`
+crate built on them) do not exist on illumos. illumos models extended
+attributes as files-within-a-hidden-namespace instead: open the base file,
+then openat(2) an attribute name against it with the O_XATTR flag (or use
+the attropen(3C) convenience wrapper), per fsattr(5). A Rust program that
+reaches for the `xattr` crate or raw setxattr/getxattr FFI will fail to
+build/link on illumos; the manpage-correct path is attropen/openat+O_XATTR.
+"""
