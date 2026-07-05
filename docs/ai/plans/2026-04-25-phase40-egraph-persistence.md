@@ -1,14 +1,20 @@
 # Phase 40 — E-graph Persistence (Measure + Report + Decide)
 
 > Date: 2026-04-25
-> Status: PROPOSED — measurement pending
+> Status: MEASURED + DECIDED (2026-07-05) — Option (0), persist nothing.
+>         40a harness: `crates/akh-egraph-bench/`. 40b synthetic run:
+>         [findings report](../2026-07-05-phase40-egraph-resaturation.md)
+>         (real-workload arm deferred — see report §Gaps). 40c decision:
+>         [ADR 084](../decisions/084-egraph-persistence-decision.md)
+>         (ADR 051 amended to point there). 40d closed as no-op.
 > Phase: 40
 > Depends on: Phase 38 (Relocatable Session-Based Akh — provides the snapshot/replay
 >             framework this hooks into, or doesn't, depending on the outcome)
 > Related: Phase 9 (microtheory rules), Phase 15 (causal rewrites),
 >          Phase 19 (epistemic rewrites), Phase 26 (HNSW(VSA) is a sibling
 >          wake-path cost worth measuring alongside)
-> ADR: [051-egraph-persistence](../decisions/051-egraph-persistence.md)
+> ADR: [051-egraph-persistence](../decisions/051-egraph-persistence.md),
+>      [084-egraph-persistence-decision](../decisions/084-egraph-persistence-decision.md)
 
 ## Executive Summary
 
@@ -527,3 +533,14 @@ This plan is verified when:
 ### 2026-04-25
 
 - **P40Q1** (HNSW measurement flag): confirmed. The `--what hnsw|egraph|both` CLI flag for the measurement harness is a Phase 40a deliverable from day one. Default is `egraph`; the HNSW arm folds in for measurement parity in the same harness. Q1 is promoted from open question to confirmed deliverable.
+
+### 2026-07-05 — measured + decided (40a/40b/40c/40d closed)
+
+- **40a**: harness landed as `crates/akh-egraph-bench/` (arms: `egraph`, `hnsw`, `fork`; per-cell subprocess for clean `VmHWM` attribution; prod = `Runner::default()` engine parity + generous limit profiles; deterministic seed). Deviations from the sketch above: plain `Instant` timing with p50/min/max instead of criterion (grid-report shape, not micro-bench), and the real compiled rule packs (7/15/18 rewrites) instead of synthetic ≤200-rule packs — the decision is about *our* rule set.
+- **40b**: synthetic grid ran 2026-07-05 on an 8-core x86_64 / 31 GB box; report at [`docs/ai/2026-07-05-phase40-egraph-resaturation.md`](../2026-07-05-phase40-egraph-resaturation.md) (path per fleet task; supersedes the `2026-04-25-phase40-measurement-report.md` name sketched above). Real-workload arm + M2/x86 tier comparison deferred and recorded as reopening triggers in ADR 084 — the synthetic result is not marginal (production-semantics median 0.3–179 ms vs the 5 s threshold) and the synthetic whole-KG conjunction upper-bounds the per-query expressions production actually saturates.
+- **40c**: **Option (0) selected** — ADR 051 amended to ACCEPTED; decision record, including the honest treatment of the one in-band generous cell (100 k-fact full saturation, 19.5 s — a workload no call site executes), in [ADR 084](../decisions/084-egraph-persistence-decision.md).
+- **40d**: closed as no-op — the chosen path is already what we do today. No schema, no seam.
+- **Q2** (fork workload): measured — clone + perturb + re-run = 15.3 ms median per fork (100 forks in 1.6 s); incremental e-graph state is not a persistence concern.
+- **Q3** (per-microtheory granularity): moot under Option (0) — production cost is bounded and small; partitioning would subdivide a negligible cost.
+- **Q5** (generic derived-structure cache): answered NO — e-graph (ms) vs HNSW rebuild (~14 min at 100 k items) landed maximally asymmetric; ADR 049's HNSW-specific local-disk cache is the right shape.
+- **Bug found**: `calendar_rules()` had panicked at construction since Phase 13f (`cal-conflict` RHS used unbound `?conflicts`); zero callers and zero tests hid it. Fixed + construction tests added (`src/reason/mod.rs`).
