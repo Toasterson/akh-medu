@@ -1,0 +1,9 @@
+id = "rbac-02-custom-profile"
+family = "rbac"
+description = "Author a custom rights profile granting elevated execution of one command, assigned directly to a user"
+timeout_secs = 600
+expected_manpages = ["prof_attr", "exec_attr", "pfexec", "usermod"]
+mode = ["autonomous", "advisory"]
+
+[version_trap]
+present = false

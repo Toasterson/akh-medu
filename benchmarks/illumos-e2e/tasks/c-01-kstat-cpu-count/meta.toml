@@ -1,0 +1,9 @@
+id = "c-01-kstat-cpu-count"
+family = "c-native-libs"
+description = "Compile a C program against libkstat that counts cpu_info kstat instances"
+timeout_secs = 900
+expected_manpages = ["kstat_open", "kstat_lookup", "libkstat"]
+mode = ["autonomous", "advisory"]
+
+[version_trap]
+present = false

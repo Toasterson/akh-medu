@@ -1,0 +1,9 @@
+id = "smf-03-import-manifest"
+family = "smf"
+description = "Author a new SMF manifest for an existing daemon script and bring it under svc.startd"
+timeout_secs = 900
+expected_manpages = ["svccfg", "service_bundle", "smf_method"]
+mode = ["autonomous", "advisory"]
+
+[version_trap]
+present = false
