@@ -86,6 +86,31 @@ enum Commands {
         #[command(subcommand)]
         action: SetupAction,
     },
+
+    /// Compile / inspect schema packs (ADR 081). Local file operations — the
+    /// registry admit/install verbs arrive with the Postgres registry.
+    Schema {
+        #[command(subcommand)]
+        action: SchemaAction,
+    },
+}
+
+/// Schema-pack operations (offline compiler half of ADR 081 Slice 2).
+#[derive(Subcommand)]
+enum SchemaAction {
+    /// Compile a portable schema-pack source (JSON) into a native-triple blob.
+    Compile {
+        /// Path to the portable source (e.g. data/schema-packs/schema-org-core.json).
+        source: PathBuf,
+        /// Output blob path (default: source path with `.akhschema` extension).
+        #[arg(short, long)]
+        out: Option<PathBuf>,
+    },
+    /// Decode and summarize a compiled schema-pack blob.
+    Show {
+        /// Path to a compiled `.akhschema` blob.
+        blob: PathBuf,
+    },
 }
 
 /// Relocation / lifecycle ops: snapshot, wake, sleep, or relocate an akh
@@ -725,11 +750,79 @@ fn main() -> Result<()> {
             dispatch_setup(action)?;
         }
 
+        // ── Schema packs (ADR 081) ──────────────────────────────────────
+        Commands::Schema { action } => {
+            dispatch_schema(action)?;
+        }
+
         // ── Wiki (Akhipedia) ─────────────────────────────────────────────
     }
 
     Ok(())
     }
+}
+
+/// Dispatch `akh schema` subcommands. Local file operations; no Engine, no ACP.
+fn dispatch_schema(action: SchemaAction) -> Result<()> {
+    use akh_medu::schema::{CompiledSchemaPack, compile};
+
+    match action {
+        SchemaAction::Compile { source, out } => {
+            let text = std::fs::read_to_string(&source).into_diagnostic()?;
+            let pack = compile(&text)?;
+            let blob = pack.to_blob()?;
+            let out = out.unwrap_or_else(|| source.with_extension("akhschema"));
+            std::fs::write(&out, &blob).into_diagnostic()?;
+            println!(
+                "Compiled schema pack {}@{} ({})",
+                pack.name, pack.version, pack.scope
+            );
+            println!("  microtheory: {}", pack.microtheory_label());
+            println!(
+                "  types: {} · relations: {} · triples: {}",
+                pack.types.len(),
+                pack.relations.len(),
+                pack.triples.len()
+            );
+            println!(
+                "  blob: {} ({} bytes, blake3 {})",
+                out.display(),
+                blob.len(),
+                akh_medu::schema::compile::checksum_hex(&blob)
+            );
+            if !pack.assumes.is_empty() {
+                println!(
+                    "  assumes (verified against the registry at confirm time): {}",
+                    pack.assumes.join(", ")
+                );
+            }
+        }
+        SchemaAction::Show { blob } => {
+            let bytes = std::fs::read(&blob).into_diagnostic()?;
+            let pack = CompiledSchemaPack::from_blob(&bytes)?;
+            println!(
+                "Schema pack {}@{} ({}) — format v{}",
+                pack.name, pack.version, pack.scope, pack.format_version
+            );
+            println!("  microtheory: {}", pack.microtheory_label());
+            if let Some(url) = &pack.source_url {
+                println!("  source: {url}");
+            }
+            println!("  source checksum: {}", pack.source_checksum);
+            println!("  types: {}", pack.types.join(", "));
+            if !pack.relations.is_empty() {
+                println!("  relations: {}", pack.relations.join(", "));
+            }
+            if !pack.assumes.is_empty() {
+                println!("  assumes: {}", pack.assumes.join(", "));
+            }
+            println!("  triples ({}):", pack.triples.len());
+            for t in &pack.triples {
+                println!("    ({}, {}, {})", t.subject, t.predicate, t.object);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Dispatch `akh service` subcommands. Works without an Engine.

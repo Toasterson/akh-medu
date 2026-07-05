@@ -1,0 +1,132 @@
+{
+  "pack": {
+    "name": "schema-org-core",
+    "version": "0.1.0",
+    "scope": "shared",
+    "source_url": "https://github.com/Toasterson/akh-medu/blob/develop/data/schema-packs/schema-org-core.json",
+    "description": "Seed core vocabulary (ADR 081 decision 4): a curated schema.org Thing subset small models already emit, plus the Akh-native types (Akh, Goal, Skill, Decision). Property value types use Obsidian's set."
+  },
+  "types": [
+    {
+      "name": "Thing",
+      "description": "schema.org root: the most generic type of item.",
+      "properties": [
+        { "name": "name", "value_type": "text", "required": true },
+        { "name": "description", "value_type": "text" },
+        { "name": "url", "value_type": "link" }
+      ]
+    },
+    {
+      "name": "Person",
+      "is_a": "Thing",
+      "description": "schema.org Person: a person (alive, dead, undead, or fictional).",
+      "properties": [
+        { "name": "email", "value_type": "text" },
+        { "name": "birthDate", "value_type": "date" },
+        { "name": "knows", "value_type": "list" }
+      ]
+    },
+    {
+      "name": "Organization",
+      "is_a": "Thing",
+      "description": "schema.org Organization: a business, agency, NGO, club, etc.",
+      "properties": [
+        { "name": "member", "value_type": "list" },
+        { "name": "foundingDate", "value_type": "date" }
+      ]
+    },
+    {
+      "name": "Place",
+      "is_a": "Thing",
+      "description": "schema.org Place: entities with a somewhat fixed physical extension.",
+      "properties": [
+        { "name": "address", "value_type": "text" }
+      ]
+    },
+    {
+      "name": "Event",
+      "is_a": "Thing",
+      "description": "schema.org Event: something happening at a time and location.",
+      "properties": [
+        { "name": "startDate", "value_type": "datetime" },
+        { "name": "endDate", "value_type": "datetime" },
+        { "name": "location", "value_type": "link" }
+      ]
+    },
+    {
+      "name": "CreativeWork",
+      "is_a": "Thing",
+      "description": "schema.org CreativeWork: the most generic kind of creative work (documents, notes, code).",
+      "properties": [
+        { "name": "author", "value_type": "link" },
+        { "name": "dateCreated", "value_type": "datetime" }
+      ]
+    },
+    {
+      "name": "Akh",
+      "is_a": "Thing",
+      "description": "Akh-native: a workspace-unit lifeform (model + KG + notes + capabilities + behaviour).",
+      "properties": [
+        { "name": "workspace", "value_type": "text", "required": true }
+      ]
+    },
+    {
+      "name": "Goal",
+      "is_a": "Thing",
+      "description": "Akh-native: a goal the agent pursues.",
+      "properties": [
+        { "name": "status", "value_type": "text" },
+        { "name": "dueDate", "value_type": "date" }
+      ]
+    },
+    {
+      "name": "Skill",
+      "is_a": "Thing",
+      "description": "Akh-native: an installable behaviour (skillpack).",
+      "properties": [
+        { "name": "active", "value_type": "checkbox" }
+      ]
+    },
+    {
+      "name": "Decision",
+      "is_a": "Thing",
+      "description": "Akh-native: a recorded decision with rationale (ADR-shaped).",
+      "properties": [
+        { "name": "status", "value_type": "text" },
+        { "name": "decidedOn", "value_type": "date" }
+      ]
+    }
+  ],
+  "relations": [
+    {
+      "name": "worksFor",
+      "description": "schema.org worksFor: a person works for an organization.",
+      "arg1_type": "Person",
+      "arg2_type": "Organization"
+    },
+    {
+      "name": "memberOf",
+      "description": "schema.org memberOf: an entity belongs to an organization.",
+      "arg1_type": "Thing",
+      "arg2_type": "Organization"
+    },
+    {
+      "name": "attendee",
+      "description": "schema.org attendee (inverted domain): an event has a person attending.",
+      "arg1_type": "Event",
+      "arg2_type": "Person"
+    },
+    {
+      "name": "authorOf",
+      "description": "Inverse-style authorship: a person authored a creative work.",
+      "arg1_type": "Person",
+      "arg2_type": "CreativeWork"
+    },
+    {
+      "name": "pursues",
+      "description": "Akh-native: an akh pursues a goal.",
+      "arg1_type": "Akh",
+      "arg2_type": "Goal"
+    }
+  ]
+}

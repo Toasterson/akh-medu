@@ -22,6 +22,7 @@ use crate::grammar::lexer::Language;
 use crate::grammar::parser::{ParseResult, parse_prose};
 use crate::graph::Triple;
 use crate::graph::analytics;
+use crate::graph::identity::TripleIdentity;
 use crate::graph::index::KnowledgeGraph;
 use crate::graph::sparql::SparqlStore;
 use crate::graph::traverse::{TraversalConfig, TraversalResult};
@@ -179,6 +180,24 @@ pub struct Engine {
     /// with the Candle chat backend so a tool flipping it via `&Engine` is observed next turn.
     /// Seeded from the akh's `AkhConfig` at startup.
     inference_options: Arc<crate::inference_options::InferenceOptions>,
+    /// ADR 081 P2: content-addressed triple-identity index. Maps the stable
+    /// label-based [`TripleIdentity`] hash to the session-local (s, p, o,
+    /// compartment) key so a projection can ask "same fact, still true?" in
+    /// O(1). Maintained on `add_triple`; bulk-restore paths mark it stale and
+    /// it lazily rebuilds from the KG (the hash is a pure function of
+    /// persisted labels, so the rebuild is deterministic).
+    identity_index: dashmap::DashMap<TripleIdentity, IdentityKey>,
+    /// Whether `identity_index` is complete w.r.t. the current KG contents.
+    identity_index_built: AtomicBool,
+}
+
+/// Session-local key of an indexed triple (values in [`Engine::identity_index`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct IdentityKey {
+    subject: SymbolId,
+    predicate: SymbolId,
+    object: SymbolId,
+    compartment_id: Option<String>,
 }
 
 impl Engine {
@@ -387,6 +406,8 @@ impl Engine {
             hierarchy_dirty: AtomicBool::new(true),
             mutation_sink: std::sync::OnceLock::new(),
             inference_options: Arc::new(crate::inference_options::InferenceOptions::default()),
+            identity_index: dashmap::DashMap::new(),
+            identity_index_built: AtomicBool::new(false),
         };
 
         // Restore Phase 9 registries from persistent storage if available.
@@ -679,6 +700,18 @@ impl Engine {
             }
         }
 
+        // --- ADR 081 P2: mint the stable triple identity alongside insertion ---
+        let identity = self.triple_identity(triple);
+        self.identity_index.insert(
+            identity,
+            IdentityKey {
+                subject: triple.subject,
+                predicate: triple.predicate,
+                object: triple.object,
+                compartment_id: triple.compartment_id.clone(),
+            },
+        );
+
         // --- Phase 38b: write-ahead log ---
         self.record_mutation(
             crate::mutation::MutationKind::Assert,
@@ -688,10 +721,88 @@ impl Engine {
                 "object": triple.object.get(),
                 "confidence": triple.confidence,
                 "compartment": triple.compartment_id,
+                // ADR 081 P2: content-addressed identity (stable across
+                // akhs/sessions) persisted with the mutation for diffing.
+                "identity": identity.to_hex(),
             }),
         );
 
         Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // ADR 081 P2: stable triple identity
+    // -----------------------------------------------------------------------
+
+    /// Compute the content-addressed [`TripleIdentity`] of a triple: a blake3
+    /// hash over the canonical *labels* of (subject, predicate, object) plus
+    /// the owning compartment, excluding volatile fields (confidence,
+    /// timestamp, provenance). Re-asserting the same fact — in any session or
+    /// akh — yields the same identity (ADR 081,
+    /// `docs/ai/decisions/081-akh-memory-schema-typing.md`).
+    pub fn triple_identity(&self, triple: &Triple) -> TripleIdentity {
+        TripleIdentity::compute(
+            &self.resolve_label(triple.subject),
+            &self.resolve_label(triple.predicate),
+            &self.resolve_label(triple.object),
+            triple.compartment_id.as_deref(),
+        )
+    }
+
+    /// Look up the live triple carrying a given stable identity.
+    ///
+    /// Returns the triple with its *current* volatile fields (confidence,
+    /// timestamp) if the fact is still asserted, or `None` if it was never
+    /// asserted or has since been removed/retracted from the KG. Lazily
+    /// (re)builds the identity index on first use after a bulk restore.
+    pub fn triple_by_identity(&self, identity: &TripleIdentity) -> Option<Triple> {
+        self.ensure_identity_index();
+        let key = self.identity_index.get(identity)?.clone();
+        // Verify against the live KG so removals never yield stale hits.
+        let live = self
+            .knowledge_graph
+            .triples_from(key.subject)
+            .into_iter()
+            .find(|t| {
+                t.predicate == key.predicate
+                    && t.object == key.object
+                    && t.compartment_id == key.compartment_id
+            });
+        if live.is_none() {
+            // Evict the stale entry so future lookups stay O(1)-honest.
+            self.identity_index.remove(identity);
+        }
+        live
+    }
+
+    /// Rebuild the identity index from the current KG contents.
+    ///
+    /// Needed after bulk-restore paths that bypass `add_triple` (engine
+    /// construction, `restore_triples`). Returns the number of indexed
+    /// triples. Idempotent; also invoked lazily by [`Self::triple_by_identity`].
+    pub fn rebuild_identity_index(&self) -> usize {
+        self.identity_index.clear();
+        let triples = self.knowledge_graph.all_triples();
+        for t in &triples {
+            self.identity_index.insert(
+                self.triple_identity(t),
+                IdentityKey {
+                    subject: t.subject,
+                    predicate: t.predicate,
+                    object: t.object,
+                    compartment_id: t.compartment_id.clone(),
+                },
+            );
+        }
+        self.identity_index_built.store(true, Ordering::Release);
+        self.identity_index.len()
+    }
+
+    /// Build the identity index if it is not known to be complete.
+    fn ensure_identity_index(&self) {
+        if !self.identity_index_built.load(Ordering::Acquire) {
+            self.rebuild_identity_index();
+        }
     }
 
     /// Search for similar symbols by hypervector.
@@ -1189,6 +1300,10 @@ impl Engine {
             self.item_memory.get_or_create(&self.ops, t.predicate);
             self.item_memory.get_or_create(&self.ops, t.object);
         }
+        // ADR 081 P2: this path bypasses `add_triple`, so the identity index
+        // is no longer complete; it lazily rebuilds on next identity query.
+        self.identity_index_built
+            .store(false, Ordering::Release);
         Ok(count)
     }
 
@@ -3292,6 +3407,112 @@ mod tests {
         let results = engine.search_similar_to(sun.id, 3).unwrap();
         assert!(!results.is_empty());
         assert_eq!(results[0].symbol_id, sun.id);
+    }
+
+    // -- ADR 081 P2: stable triple identity ---------------------------------
+
+    fn identity_test_engine() -> Engine {
+        Engine::new(EngineConfig {
+            dimension: Dimension::TEST,
+            ..Default::default()
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn triple_identity_stable_across_reassertion() {
+        let engine = identity_test_engine();
+        let s = engine.resolve_or_create_entity("Sun").unwrap();
+        let p = engine.resolve_or_create_relation("emits").unwrap();
+        let o = engine.resolve_or_create_entity("Light").unwrap();
+
+        let t1 = Triple::new(s, p, o).with_confidence(0.9);
+        engine.add_triple(&t1).unwrap();
+        let id1 = engine.triple_identity(&t1);
+
+        // Re-assert the same fact with different volatile fields.
+        let t2 = Triple {
+            confidence: 0.4,
+            timestamp: t1.timestamp + 1000,
+            provenance_id: Some(42),
+            ..t1.clone()
+        };
+        engine.add_triple(&t2).unwrap();
+        assert_eq!(id1, engine.triple_identity(&t2));
+
+        // Changing any content field changes the identity.
+        let other_o = engine.resolve_or_create_entity("Heat").unwrap();
+        let t3 = Triple::new(s, p, other_o);
+        assert_ne!(id1, engine.triple_identity(&t3));
+        let t4 = t1.clone().with_compartment("mt:other".into());
+        assert_ne!(id1, engine.triple_identity(&t4));
+    }
+
+    #[test]
+    fn triple_identity_stable_across_engines_with_different_symbol_ids() {
+        // The identity is label-based, so two akhs whose SymbolId allocation
+        // differs still agree on the identity of the same assertion.
+        let a = identity_test_engine();
+        let b = identity_test_engine();
+        // Skew b's allocator.
+        for i in 0..5 {
+            b.resolve_or_create_entity(&format!("skew-{i}")).unwrap();
+        }
+
+        let mk = |e: &Engine| {
+            let s = e.resolve_or_create_entity("Sun").unwrap();
+            let p = e.resolve_or_create_relation("is-a").unwrap();
+            let o = e.resolve_or_create_entity("Star").unwrap();
+            let t = Triple::new(s, p, o);
+            e.add_triple(&t).unwrap();
+            (t.subject.get(), e.triple_identity(&t))
+        };
+        let (sid_a, id_a) = mk(&a);
+        let (sid_b, id_b) = mk(&b);
+        assert_ne!(sid_a, sid_b, "test needs skewed SymbolIds to be meaningful");
+        assert_eq!(id_a, id_b);
+    }
+
+    #[test]
+    fn triple_by_identity_queries_live_triple() {
+        let engine = identity_test_engine();
+        let s = engine.resolve_or_create_entity("Sun").unwrap();
+        let p = engine.resolve_or_create_relation("emits").unwrap();
+        let o = engine.resolve_or_create_entity("Light").unwrap();
+        let t = Triple::new(s, p, o).with_confidence(0.7);
+        engine.add_triple(&t).unwrap();
+
+        let id = engine.triple_identity(&t);
+        let found = engine.triple_by_identity(&id).expect("fact should be live");
+        assert_eq!(found.subject, s);
+        assert_eq!(found.predicate, p);
+        assert_eq!(found.object, o);
+        assert!((found.confidence - 0.7).abs() < 1e-6);
+
+        // An identity never asserted is absent.
+        let ghost = crate::graph::identity::TripleIdentity::compute("No", "such", "fact", None);
+        assert!(engine.triple_by_identity(&ghost).is_none());
+
+        // Removal is visible: the lookup verifies against the live KG.
+        assert!(engine.knowledge_graph().remove_triple(s, p, o));
+        assert!(engine.triple_by_identity(&id).is_none());
+    }
+
+    #[test]
+    fn identity_index_rebuilds_after_bulk_restore() {
+        let engine = identity_test_engine();
+        let s = engine.resolve_or_create_entity("Sun").unwrap();
+        let p = engine.resolve_or_create_relation("is-a").unwrap();
+        let o = engine.resolve_or_create_entity("Star").unwrap();
+
+        // Bypass add_triple entirely (Phase 38c wake path).
+        let t = Triple::new(s, p, o);
+        engine.restore_triples(std::slice::from_ref(&t)).unwrap();
+
+        // The lazily rebuilt index still answers.
+        let id = engine.triple_identity(&t);
+        assert!(engine.triple_by_identity(&id).is_some());
+        assert!(engine.rebuild_identity_index() >= 1);
     }
 
     #[test]
