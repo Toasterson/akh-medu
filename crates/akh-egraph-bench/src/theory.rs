@@ -68,24 +68,31 @@ pub fn build_theory(n_facts: usize, branching: usize, seed: u64) -> RecExpr<AkhL
 
 /// `causes` edges of a `b`-ary tree (heap numbering) in DFS preorder.
 fn causal_facts(expr: &mut RecExpr<AkhLang>, facts: &mut Vec<Id>, n: usize, b: usize) {
+    // Child ids come from a sequential counter, NOT heap numbering
+    // (`parent*b + k + 1`): heap ids grow as b^depth, and a DFS descends
+    // O(n/b) levels, so heap numbering overflows u64 (debug panic; silent
+    // wrap + entity collisions in release). Sequential ids keep every
+    // entity < n while preserving the tree shape and the DFS adjacency
+    // that lets cause-trans fire on (and (causes a b) (causes b c)).
     let mut stack: Vec<u64> = vec![0];
+    let mut next_id: u64 = 1;
     let mut emitted = 0usize;
-    let mut next_root = 0u64;
     while emitted < n {
         let parent = match stack.pop() {
             Some(p) => p,
             None => {
-                // Tree exhausted before n edges (can't happen with heap
-                // numbering, but keep the generator total anyway).
-                next_root += 10_000_000;
-                next_root
+                // Tree exhausted — start a new root (kept for totality).
+                let root = next_id;
+                next_id += 1;
+                root
             }
         };
-        for k in 0..b {
+        for _ in 0..b {
             if emitted >= n {
                 break;
             }
-            let child = parent * b as u64 + 1 + k as u64;
+            let child = next_id;
+            next_id += 1;
             let p = expr.add(AkhLang::Num(CAUSAL_BASE + parent as i64));
             let c = expr.add(AkhLang::Num(CAUSAL_BASE + child as i64));
             facts.push(expr.add(AkhLang::Causes([p, c])));
