@@ -107,6 +107,46 @@ pub struct ArchetypeWeights {
     pub explorer: f32,
 }
 
+impl ArchetypeWeights {
+    /// Derive an OCEAN profile by weighted-averaging per-archetype baselines.
+    ///
+    /// Uses the same archetype→OCEAN data as `bootstrap::identity` so the
+    /// derivation is consistent with the Ritual of Awakening path. Used when
+    /// no explicit [`OceanProfile`] was set on the psyche.
+    pub fn derive_ocean(&self) -> OceanProfile {
+        // Baselines per archetype: [O, C, E, A, N].
+        const SAGE: [f32; 5] = [0.9, 0.8, 0.3, 0.6, 0.2];
+        const HEALER: [f32; 5] = [0.6, 0.7, 0.6, 0.9, 0.4]; // ≈ caregiver
+        const GUARDIAN: [f32; 5] = [0.4, 0.9, 0.4, 0.7, 0.3];
+        const EXPLORER: [f32; 5] = [0.9, 0.4, 0.7, 0.5, 0.4];
+
+        let total = self.sage + self.healer + self.guardian + self.explorer;
+        if total < f32::EPSILON {
+            return OceanProfile {
+                openness: 0.5,
+                conscientiousness: 0.5,
+                extraversion: 0.5,
+                agreeableness: 0.5,
+                neuroticism: 0.5,
+            };
+        }
+        let blend = |idx: usize| {
+            (self.sage * SAGE[idx]
+                + self.healer * HEALER[idx]
+                + self.guardian * GUARDIAN[idx]
+                + self.explorer * EXPLORER[idx])
+                / total
+        };
+        OceanProfile {
+            openness: blend(0).clamp(0.0, 1.0),
+            conscientiousness: blend(1).clamp(0.0, 1.0),
+            extraversion: blend(2).clamp(0.0, 1.0),
+            agreeableness: blend(3).clamp(0.0, 1.0),
+            neuroticism: blend(4).clamp(0.0, 1.0),
+        }
+    }
+}
+
 /// Big Five (OCEAN) personality profile.
 ///
 /// Present when the psyche was initialized via the Ritual of Awakening (Phase 14b).
@@ -246,6 +286,16 @@ impl ShadowPattern {
 // ---------------------------------------------------------------------------
 
 impl Psyche {
+    /// The effective OCEAN profile: explicit if present, derived from
+    /// archetype weights otherwise. Never fails — callers always get a
+    /// usable personality profile.
+    pub fn effective_ocean(&self) -> OceanProfile {
+        if let Some(ref o) = self.ocean {
+            return o.clone();
+        }
+        self.archetypes.derive_ocean()
+    }
+
     /// Whether this psyche has been finalized by the Ritual of Awakening.
     pub fn is_awakened(&self) -> bool {
         self.awakened

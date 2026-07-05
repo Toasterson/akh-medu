@@ -514,7 +514,8 @@ pub fn ground_query(
 ///
 /// Maps well-known predicates to sentence fragments:
 /// `("rust", "is-a", "language")` → `"rust is a language"`.
-fn triple_to_prose(subject: &str, predicate: &str, object: &str) -> String {
+/// Shared with the communicative pipeline (Phase 34f).
+pub(crate) fn triple_to_prose(subject: &str, predicate: &str, object: &str) -> String {
     match predicate {
         "is-a" => format!("{subject} is a {object}"),
         "subclass-of" => format!("{subject} is a kind of {object}"),

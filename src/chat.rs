@@ -45,6 +45,10 @@ pub struct ChatProcessorConfig {
     /// and no OODA cycles run. Unresolved input synthesises from existing knowledge
     /// instead of escalating to a new goal. Defaults to `true` for TUI/WS sessions.
     pub create_goal: bool,
+    /// Phase 34: communicative intelligence on the grounded response path
+    /// (strategy selection + psyche style transform + shadow filter).
+    /// Defaults to `true`; set env `AKH_COMM_INTEL=0` to disable.
+    pub communicative: bool,
 }
 
 impl Default for ChatProcessorConfig {
@@ -53,8 +57,14 @@ impl Default for ChatProcessorConfig {
             grammar: "narrative".to_string(),
             max_escalation_cycles: 10,
             create_goal: true,
+            communicative: communicative_default(),
         }
     }
+}
+
+/// Communicative pipeline default: on, unless `AKH_COMM_INTEL=0`.
+fn communicative_default() -> bool {
+    std::env::var("AKH_COMM_INTEL").map(|v| v != "0").unwrap_or(true)
 }
 
 // ── ChatProcessor ───────────────────────────────────────────────────────
@@ -77,6 +87,9 @@ pub struct ChatProcessor {
     kg_cache: KgContextCache,
     /// ELIZA routing classifier (KG vs LLM decision).
     eliza: ElizaRouter,
+    /// Discourse trajectory (Phase 34d): topic repetition, discourse mode,
+    /// strategy history, engagement estimate.
+    trajectory: crate::agent::trajectory::DiscourseTrajectory,
 }
 
 impl ChatProcessor {
@@ -111,6 +124,7 @@ impl ChatProcessor {
             lexicon,
             kg_cache: KgContextCache::new(),
             eliza: ElizaRouter::new(),
+            trajectory: crate::agent::trajectory::DiscourseTrajectory::default(),
         }
     }
 
@@ -134,6 +148,10 @@ impl ChatProcessor {
         if trimmed.is_empty() {
             return Vec::new();
         }
+
+        // ── Discourse trajectory (Phase 34d) ────────────────────────
+        // Update discourse mode + engagement from every user turn.
+        self.trajectory.observe_input(trimmed);
 
         // ── Structural command fast-path (skip NLU) ─────────────────
         // These are system commands where NLU parsing would be wasteful.
@@ -729,9 +747,16 @@ impl ChatProcessor {
     ) {
         // Phase 12b+12c: Try grounded dialogue with constraint checking.
         let grounded = crate::agent::conversation::ground_query(subject, engine, grammar);
-        if let Some(ref gr) = grounded {
+        if let Some(gr) = grounded {
+            // ── Phase 34f: communicative pipeline on the grounded path ──
+            // Strategy selection (34a) → shadow filter (34e) → content
+            // filter (34c) → psyche style transform (34b), then the
+            // composed prose flows through the existing constraint check
+            // and rendering — one wiring point for all chat surfaces.
+            let (gr, shadow_journal) =
+                self.apply_communicative(gr, subject, original_input, agent, engine);
             let (out_msg, decision) = agent.check_and_wrap_grounded(
-                gr,
+                &gr,
                 "operator",
                 crate::agent::ChannelKind::Operator,
             );
@@ -763,6 +788,11 @@ impl ChatProcessor {
                         "[constraint check: some violations detected]".to_string(),
                     ));
                 }
+            }
+            // Shadow encounters are journaled to the audit log (Phase 34e),
+            // visible via psyche exposure — never in the chat stream.
+            if let Some(journal) = shadow_journal {
+                msgs.push(AkhMessage::audit_log(0, "shadow", journal));
             }
             return;
         }
@@ -923,6 +953,89 @@ impl ChatProcessor {
             return;
         }
         self.push_summary(msgs, &summary, grammar);
+    }
+
+    /// Phase 34f: run the communicative pipeline over a grounded response.
+    ///
+    /// Selects a response strategy (34a) from the psyche + trajectory +
+    /// affective state, runs the shadow filter (34e), filters content (34c),
+    /// and applies the psyche style transform (34b). Returns the transformed
+    /// response plus an optional shadow-journal entry.
+    ///
+    /// Skipped (returns the response untouched) when the pipeline is
+    /// disabled (`AKH_COMM_INTEL=0` / `config.communicative == false`) or
+    /// the operator asked for `concise` detail — terse output should stay
+    /// terse.
+    fn apply_communicative(
+        &mut self,
+        gr: crate::agent::conversation::GroundedResponse,
+        subject: &str,
+        original_input: &str,
+        agent: &mut Agent,
+        engine: &Arc<Engine>,
+    ) -> (crate::agent::conversation::GroundedResponse, Option<String>) {
+        use crate::agent::communicative::{
+            classify_query_type, compose_grounded, context_from_grounded,
+        };
+        use crate::agent::conversation::ResponseDetail;
+        use crate::agent::response_strategy::Sentiment;
+
+        if !self.config.communicative
+            || agent.conversation_state().response_detail == ResponseDetail::Concise
+        {
+            return (gr, None);
+        }
+
+        // Psyche: loaded compartment, or the default Scholar psyche.
+        let psyche = engine
+            .compartments()
+            .and_then(|cm| cm.psyche())
+            .unwrap_or_default();
+
+        // Affective signal (Phase 23): current mood valence → user-facing tone.
+        let sentiment = Sentiment::from_valence(agent.affective_system.current_affect().valence);
+
+        let query_type = classify_query_type(original_input, subject);
+        let ctx = context_from_grounded(
+            &gr,
+            subject,
+            query_type,
+            &self.trajectory,
+            Some(sentiment),
+        );
+        let composed = compose_grounded(&gr, subject, &psyche, &ctx);
+
+        tracing::debug!(
+            subject = %subject,
+            strategy = composed.strategy,
+            companion = ?composed.companion,
+            mode = %self.trajectory.discourse_mode(),
+            "communicative strategy selected"
+        );
+
+        // Record this response turn in the trajectory (34d).
+        self.trajectory.record_turn(
+            Some(subject),
+            engine.resolve_symbol(subject).ok(),
+            composed.strategy,
+        );
+
+        let shadow_journal = composed.shadow_journal.clone();
+        let transformed = crate::agent::conversation::GroundedResponse {
+            prose: composed.text,
+            ..gr
+        };
+        (transformed, shadow_journal)
+    }
+
+    /// Access the discourse trajectory (Phase 34d) — for introspection and tests.
+    pub fn trajectory(&self) -> &crate::agent::trajectory::DiscourseTrajectory {
+        &self.trajectory
+    }
+
+    /// Enable or disable the communicative pipeline (Phase 34f).
+    pub fn set_communicative(&mut self, enabled: bool) {
+        self.config.communicative = enabled;
     }
 
     /// Extract question word from raw input using the lexicon.

@@ -142,49 +142,15 @@ impl ReflectionDepth {
 
 /// ARCHETYPE_OCEAN baseline: [openness, conscientiousness, extraversion, agreeableness, neuroticism].
 /// Matches the static table in `bootstrap::identity`.
-const SAGE_OCEAN: [f32; 5] = [0.9, 0.8, 0.3, 0.6, 0.2];
-const HEALER_OCEAN: [f32; 5] = [0.6, 0.7, 0.6, 0.9, 0.4]; // ≈ caregiver
-const GUARDIAN_OCEAN: [f32; 5] = [0.4, 0.9, 0.4, 0.7, 0.3];
-const EXPLORER_OCEAN: [f32; 5] = [0.9, 0.4, 0.7, 0.5, 0.4];
-
 /// Return the effective OCEAN profile: explicit if present, derived otherwise.
+///
+/// Delegates to [`Psyche::effective_ocean`] — the derivation lives on the
+/// psyche types themselves so Phase 34 (communicative intelligence) shares
+/// the exact same personality profile.
 fn effective_ocean(psyche: &Psyche) -> OceanProfile {
-    if let Some(ref o) = psyche.ocean {
-        return o.clone();
-    }
-    derive_ocean(&psyche.archetypes)
+    psyche.effective_ocean()
 }
 
-/// Derive an OCEAN profile by weighted averaging the per-archetype baselines.
-///
-/// Uses the same ARCHETYPE_OCEAN data as `bootstrap::identity` so derivation
-/// is consistent with the Ritual of Awakening path.
-fn derive_ocean(a: &ArchetypeWeights) -> OceanProfile {
-    let total = a.sage + a.healer + a.guardian + a.explorer;
-    if total < f32::EPSILON {
-        return OceanProfile {
-            openness: 0.5,
-            conscientiousness: 0.5,
-            extraversion: 0.5,
-            agreeableness: 0.5,
-            neuroticism: 0.5,
-        };
-    }
-    let blend = |idx: usize| {
-        (a.sage * SAGE_OCEAN[idx]
-            + a.healer * HEALER_OCEAN[idx]
-            + a.guardian * GUARDIAN_OCEAN[idx]
-            + a.explorer * EXPLORER_OCEAN[idx])
-            / total
-    };
-    OceanProfile {
-        openness: blend(0).clamp(0.0, 1.0),
-        conscientiousness: blend(1).clamp(0.0, 1.0),
-        extraversion: blend(2).clamp(0.0, 1.0),
-        agreeableness: blend(3).clamp(0.0, 1.0),
-        neuroticism: blend(4).clamp(0.0, 1.0),
-    }
-}
 
 // ── Priority helpers ──────────────────────────────────────────────────────
 
@@ -991,7 +957,7 @@ mod tests {
             guardian: 0.4,
             explorer: 0.5,
         };
-        let ocean = derive_ocean(&a);
+        let ocean = a.derive_ocean();
         // Sage-heavy → high openness.
         assert!(ocean.openness > 0.6, "sage-heavy profile should have openness > 0.6");
         // Guardian-ish → decent conscientiousness.
