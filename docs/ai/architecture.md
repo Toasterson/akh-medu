@@ -1,6 +1,6 @@
 # Akh-medu Architecture
 
-> Last updated: 2026-04-14 (Kubernetes deployment: Helm chart + Docker images, ADR 048)
+> Last updated: 2026-07-05 (Phase 34: communicative intelligence — response strategy selector, psyche style transform, conversation trajectory, shadow filter; ADR 044)
 
 ## Overview
 
@@ -168,6 +168,16 @@ All user input (except slash commands) flows through `ChatProcessor::process_inp
 4. **Freeform / unparseable input** is escalated to an autonomous goal.
 
 The Tier 1 rule parser detects dialogue acts first via `try_dialogue_act()` using Lexicon word lists, before attempting structural or relational parses. The GBNF grammar also covers dialogue acts so Tier 3 (LLM) can produce them via constrained decoding.
+
+### Communicative Intelligence (Phase 34, ADR 044)
+
+On the grounded query path, `ChatProcessor` runs the communicative pipeline before constraint checking — one wiring point covers TUI, daemon WS, and headless CLI (ADR 024). Three symbolic stages, no LLM:
+
+1. **Response strategy selection** (`agent/response_strategy.rs`, 34a) — an 18-strategy taxonomy (Knowledge / Epistemic / Conversational / Meta-cognitive) scored by a deterministic function over the `StrategyContext`: answer confidence, Dempster-Shafer conflict + belief interval (Phase 17 primitives), topic repetition, discourse mode, engagement, and user sentiment (Phase 23 affect) — modulated by the psyche's OCEAN profile and archetype weights. A conversational companion move (e.g. `DirectAnswer` + `Empathy`) can ride along.
+2. **Content filter** (34c) — each strategy selects its own slice of the grounded triples (top-3 for direct answers, taxonomic-first for contextualization, pro/con partition for evidence weighing, derivation-tagged for reasoning traces).
+3. **Psyche style transform** (`grammar/style_transform.rs`, 34b) — OCEAN → `CommunicationRegister` (formality, hedging, elaboration, warmth, metaphor), dominant archetype → opening/closing moves + characteristic phrases, all deterministic string rewrites.
+
+The **shadow filter** (34e) sits between stages 1 and 2: shadow bias patterns soften assertive strategies (`Challenge` → `EvidenceWeighing`) and journal the encounter to the audit log. The **discourse trajectory** (`agent/trajectory.rs`, 34d) feeds selection: repeated topics switch strategy, argumentative mode favours evidence weighing, dropping engagement favours exploration prompts. Composition lives in `agent/communicative.rs` (34f); disable per-processor via `set_communicative(false)` or env `AKH_COMM_INTEL=0`. `concise` response detail bypasses the pipeline. Demo: `cargo run --example phase34_demo`.
 
 **Deprecated**: `classify_intent()`, `classify_conversational()`, and `ConversationalKind` in `nlp.rs` are deprecated (ADR 025). They remain as a structural-command fast-path but will be removed once all callers migrate to AbsTree dispatch.
 

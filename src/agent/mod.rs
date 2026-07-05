@@ -25,6 +25,7 @@ pub mod contact_calendar;
 pub mod contact_memory;
 pub mod contact_rel;
 pub mod contact_style;
+pub mod communicative;
 pub mod constraint_check;
 pub mod conversation;
 pub mod credibility;
@@ -253,6 +254,9 @@ pub use watch::{
     WorldSnapshot,
 };
 pub use memory_sync::{MemorySyncConfig, MemorySyncResult};
+pub use communicative::{
+    ComposedResponse, classify_query_type, compose_grounded, context_from_grounded,
+};
 pub use response_strategy::{
     ConfidenceLevel, QueryType, ResponseStrategy, SelectedContent, Sentiment, ShadowFilter,
     ShadowFilterResult, StrategyCategory, StrategyChoice, StrategyContext, StrategySelector,

@@ -151,10 +151,6 @@ fn effective_ocean(psyche: &Psyche) -> OceanProfile {
     psyche.effective_ocean()
 }
 
-/// Derive an OCEAN profile by weighted averaging the per-archetype baselines.
-fn derive_ocean(a: &ArchetypeWeights) -> OceanProfile {
-    a.derive_ocean()
-}
 
 // ── Priority helpers ──────────────────────────────────────────────────────
 
@@ -961,7 +957,7 @@ mod tests {
             guardian: 0.4,
             explorer: 0.5,
         };
-        let ocean = derive_ocean(&a);
+        let ocean = a.derive_ocean();
         // Sage-heavy → high openness.
         assert!(ocean.openness > 0.6, "sage-heavy profile should have openness > 0.6");
         // Guardian-ish → decent conscientiousness.

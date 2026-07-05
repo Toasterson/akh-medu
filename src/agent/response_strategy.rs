@@ -654,7 +654,7 @@ impl StrategySelector {
                 if ctx.evidence_conflict > 0.3
                     && ctx.discourse_mode == DiscourseMode::Argumentative
                 {
-                    0.25 + (1.0 - o.agreeableness) * 0.35 + ctx.evidence_conflict * 0.25
+                    0.3 + (1.0 - o.agreeableness) * 0.35 + ctx.evidence_conflict * 0.25
                 } else if ctx.evidence_conflict > 0.5 {
                     (1.0 - o.agreeableness) * 0.3 + ctx.evidence_conflict * 0.2
                 } else {

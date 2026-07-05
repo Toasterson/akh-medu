@@ -221,10 +221,12 @@ impl StyleTransform {
             out.push(' ');
         }
         out.push_str(&body);
+        // Ensure terminal punctuation before appending the closing move.
+        if !out.ends_with('.') && !out.ends_with('?') && !out.ends_with('!') {
+            out.push('.');
+        }
         if let Some(closing) = &self.framing.closing_move {
-            if !out.ends_with(' ') {
-                out.push(' ');
-            }
+            out.push(' ');
             out.push_str(closing);
         }
         out
