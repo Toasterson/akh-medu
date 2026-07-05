@@ -117,11 +117,30 @@ fn main() -> Result<()> {
                 String::from_utf8_lossy(&out.stderr)
             ));
         }
-        let line = String::from_utf8_lossy(&out.stdout);
+        // Libraries under measurement may print noise to stdout (hnsw_rs
+        // logs "setting number of points ..."), so the cell contract is:
+        // the *last* non-empty stdout line is the JSON payload.
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let line = stdout
+            .lines()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("");
         let result: CellResult = serde_json::from_str(line.trim())
             .into_diagnostic()
-            .wrap_err_with(|| format!("parsing cell result: {line}"))?;
+            .wrap_err_with(|| format!("parsing cell result line: {line}"))?;
         eprintln!("    done in {:.1}s", t.elapsed().as_secs_f64());
+
+        // Persist incrementally (JSONL sidecar) so a failing late cell
+        // cannot lose the results of every cell before it.
+        let mut partial = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(cli.out_json.with_extension("partial.jsonl"))
+            .into_diagnostic()
+            .wrap_err("opening incremental JSONL sidecar")?;
+        writeln!(partial, "{}", line.trim()).into_diagnostic()?;
+
         results.push(result);
     }
 
