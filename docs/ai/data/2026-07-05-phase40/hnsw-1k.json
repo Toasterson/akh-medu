@@ -1,0 +1,1 @@
+{"arm":"hnsw","spec":{"arm":"hnsw","n_items":1000,"reps":3},"cold_build_ms":641.1817239999999,"rebuild_ms":[623.646256,630.535339,652.876575],"peak_rss_mb":12.25}

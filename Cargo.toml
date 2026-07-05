@@ -1,5 +1,12 @@
 [workspace]
-members = [".", "crates/seshat", "crates/heka", "crates/anima-ai", "crates/akhomed-store"]
+members = [
+    ".",
+    "crates/seshat",
+    "crates/heka",
+    "crates/anima-ai",
+    "crates/akhomed-store",
+    "crates/akh-egraph-bench",
+]
 resolver = "3"
 
 [package]

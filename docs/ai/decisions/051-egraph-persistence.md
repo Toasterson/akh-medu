@@ -1,7 +1,9 @@
 # ADR 051 — E-graph Persistence: Measure Before Deciding
 
 > Date: 2026-04-25
-> Status: PROPOSED — pending measurement results
+> Status: ACCEPTED (2026-07-05) — measurement ran; Option (0) selected.
+>         Decision record: [ADR 084](084-egraph-persistence-decision.md).
+>         Data: [findings report](../2026-07-05-phase40-egraph-resaturation.md).
 > Phase: 40
 > Depends on: Phase 38 (Relocatable Session-Based Akh — wake protocol this
 >             would hook into)
@@ -83,10 +85,20 @@ Concretely:
 | 5 s – 30 s | **Option (1)** — persist canonicalized e-class roots only |
 | > 30 s | **Option (2)** — persist full e-graph state |
 
-### Default heading: Option (0) "rebuild from facts"
+### Selected (2026-07-05): Option (0) "rebuild from facts"
 
-The plan and this ADR both lean toward Option (0) until measurement says
-otherwise. Reasons:
+Measurement ran on 2026-07-05 (`crates/akh-egraph-bench`, 8-core x86_64,
+release; findings in
+[`docs/ai/2026-07-05-phase40-egraph-resaturation.md`](../2026-07-05-phase40-egraph-resaturation.md)).
+Median saturation under production `Runner::default()` semantics was
+**36.2 ms at 1 000 facts, 14.0 ms at 10 000, 168.2 ms at 100 000** (medium
+pack) — far below the 5 s threshold — and full whole-KG saturation under
+generous limits reached 22.1 s only at 100 000 facts, a workload no call
+site executes. Option (0) is selected; details, the honest treatment of the
+one in-band generous cell, and reopening triggers are in
+[ADR 084](084-egraph-persistence-decision.md).
+
+The pre-measurement reasons for leaning (0), all confirmed by the data:
 
 - The e-graph is a **derived structure**. Persisting derived state always
   carries an invalidation cost; persisting derived state that is also
@@ -106,8 +118,9 @@ otherwise. Reasons:
   future contributor who has to reason about whether the cached e-graph is
   stale relative to the current facts.
 
-This is "lean toward (0)" not "commit to (0)". The threshold table above
-binds: if measurement says > 5 s, we deviate from the lean.
+This was "lean toward (0)" not "commit to (0)" until the data came in; the
+threshold table above bound the choice, measurement came in under 5 s, and
+the lean became the decision (ADR 084).
 
 ## Alternatives Considered
 
