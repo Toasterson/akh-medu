@@ -611,7 +611,7 @@ impl JsonRpcRequest for AkhExtRequest {
 /// affects `_akh/meta/capabilities`, which advertises the control groups +
 /// methods so a client never offers an op the server can't honour.
 fn dispatch_akh(
-    engine: &Engine,
+    engine: &Arc<Engine>,
     workspace: &str,
     has_control: bool,
     method: &str,
@@ -632,6 +632,9 @@ fn dispatch_akh(
                 "meta", "workspace", "symbols", "triples", "query", "memory", "infer",
                 "permission", "goals", "tools", "skills", "projects", "status", "usage",
                 "reasoning", "evidence",
+                // Phase 29 capability-exposure groups (plan
+                // docs/ai/plans/2026-03-26-phase29-capability-exposure.md, ADR 039).
+                "microtheory", "psyche", "argue", "explain", "trust",
             ];
             let mut methods = vec![
                 "_akh/health",
@@ -654,6 +657,28 @@ fn dispatch_akh(
                 "_akh/usage",
                 "_akh/reasoning",
                 "_akh/evidence",
+                // Phase 29a — microtheory (compartment) management.
+                "_akh/microtheory/list",
+                "_akh/microtheory/create",
+                "_akh/microtheory/inspect",
+                "_akh/microtheory/activate",
+                "_akh/microtheory/deactivate",
+                // Phase 29b — skillpack lifecycle.
+                "_akh/skills/inspect",
+                "_akh/skills/activate",
+                "_akh/skills/deactivate",
+                // Phase 29c — psyche inspection + archetype tuning.
+                "_akh/psyche",
+                "_akh/psyche/archetypes",
+                // Phase 29d — argumentation.
+                "_akh/argue",
+                // Phase 29e — transparent reasoning traces.
+                "_akh/explain",
+                "_akh/provenance",
+                // Phase 29h — evidence assessment.
+                "_akh/evidence/assess",
+                // Phase 29i — source trust.
+                "_akh/trust",
             ];
             // Server-level control-plane (only when a backend is wired).
             if has_control {
@@ -1017,8 +1042,415 @@ fn dispatch_akh(
             }
         }
 
+        // ── microtheory group (Phase 29a — capability exposure over ACP; plan
+        //    docs/ai/plans/2026-03-26-phase29-capability-exposure.md, ADR 039).
+        //    Compartments (microtheories) are engine-side state guarded by the
+        //    CompartmentManager's own locks, so no agent lock is needed. A
+        //    workspace without a data_dir has no manager — clean error. ─────
+        "microtheory/list" => {
+            let mgr = compartment_manager(engine)?;
+            let compartments: Vec<serde_json::Value> = mgr
+                .all_compartments()
+                .into_iter()
+                .map(|(manifest, state, triples)| {
+                    serde_json::json!({
+                        "id": manifest.id,
+                        "name": manifest.name,
+                        "kind": format!("{:?}", manifest.kind),
+                        "description": manifest.description,
+                        "parent": manifest.parent,
+                        "tags": manifest.tags,
+                        "state": state.to_string(),
+                        "triples": triples,
+                    })
+                })
+                .collect();
+            Ok(serde_json::json!({
+                "workspace": workspace,
+                "count": compartments.len(),
+                "microtheories": compartments,
+            }))
+        }
+
+        "microtheory/create" => {
+            let mgr = compartment_manager(engine)?;
+            let id = params
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "missing required param: id".to_string())?;
+            let name = params
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(id);
+            let kind_str = params
+                .get("kind")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("project");
+            let kind = parse_compartment_kind(kind_str)?;
+            let manifest = crate::compartment::CompartmentManifest {
+                id: id.to_string(),
+                name: name.to_string(),
+                kind,
+                description: params
+                    .get("description")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                triples_file: None,
+                rules_file: None,
+                grammar_ref: None,
+                tags: params
+                    .get("tags")
+                    .and_then(serde_json::Value::as_array)
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(serde_json::Value::as_str)
+                            .map(str::to_string)
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                parent: params
+                    .get("parent")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string),
+                scope: Default::default(),
+            };
+            mgr.create_compartment(manifest)
+                .map_err(|e| format!("create microtheory failed: {e}"))?;
+            Ok(serde_json::json!({
+                "id": id,
+                "name": name,
+                "kind": kind_str,
+                "state": "Dormant",
+                "created": true,
+            }))
+        }
+
+        "microtheory/inspect" => {
+            let mgr = compartment_manager(engine)?;
+            let id = params
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "missing required param: id".to_string())?;
+            let limit = params
+                .get("limit")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(50) as usize;
+            let (manifest, state, triple_count) = mgr
+                .all_compartments()
+                .into_iter()
+                .find(|(m, _, _)| m.id == id)
+                .ok_or_else(|| format!("unknown microtheory \"{id}\""))?;
+            // Sample the compartment's triples (label-projected, capped).
+            let triples: Vec<serde_json::Value> = engine
+                .all_triples()
+                .into_iter()
+                .filter(|t| t.compartment_id.as_deref() == Some(id))
+                .take(limit)
+                .map(|t| {
+                    serde_json::json!({
+                        "subject": engine.resolve_label(t.subject),
+                        "predicate": engine.resolve_label(t.predicate),
+                        "object": engine.resolve_label(t.object),
+                        "confidence": t.confidence,
+                    })
+                })
+                .collect();
+            Ok(serde_json::json!({
+                "id": manifest.id,
+                "name": manifest.name,
+                "kind": format!("{:?}", manifest.kind),
+                "description": manifest.description,
+                "parent": manifest.parent,
+                "tags": manifest.tags,
+                "state": state.to_string(),
+                "triples": triple_count,
+                "sample": triples,
+            }))
+        }
+
+        "microtheory/activate" => {
+            let mgr = compartment_manager(engine)?;
+            let id = params
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "missing required param: id".to_string())?;
+            mgr.load(id, engine)
+                .map_err(|e| format!("load microtheory \"{id}\" failed: {e}"))?;
+            mgr.activate(id)
+                .map_err(|e| format!("activate microtheory \"{id}\" failed: {e}"))?;
+            let triples = mgr
+                .all_compartments()
+                .into_iter()
+                .find(|(m, _, _)| m.id == id)
+                .map(|(_, _, n)| n)
+                .unwrap_or(0);
+            Ok(serde_json::json!({ "id": id, "state": "Active", "triples": triples }))
+        }
+
+        "microtheory/deactivate" => {
+            let mgr = compartment_manager(engine)?;
+            let id = params
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "missing required param: id".to_string())?;
+            // `unload: true` additionally removes the compartment's triples from
+            // the KG (back to Dormant); default just stops OODA influence.
+            let unload = params
+                .get("unload")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            mgr.deactivate(id)
+                .map_err(|e| format!("deactivate microtheory \"{id}\" failed: {e}"))?;
+            let state = if unload {
+                mgr.unload(id, engine)
+                    .map_err(|e| format!("unload microtheory \"{id}\" failed: {e}"))?;
+                "Dormant"
+            } else {
+                "Loaded"
+            };
+            Ok(serde_json::json!({ "id": id, "state": state }))
+        }
+
+        // ── skillpack lifecycle (Phase 29b). `_akh/skills` (list) already
+        //    exists above; these add inspect/activate/deactivate. All engine
+        //    methods (`&self`), no agent lock. ─────────────────────────────
+        "skills/inspect" => {
+            let id = params
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "missing required param: id".to_string())?;
+            let info = engine
+                .skill_info(id)
+                .map_err(|e| format!("unknown skill \"{id}\": {e}"))?;
+            let actions: Vec<serde_json::Value> = engine
+                .skill_actions(id)
+                .into_iter()
+                .map(|a| serde_json::json!({ "action": a.action, "description": a.description }))
+                .collect();
+            let plans: Vec<serde_json::Value> = engine
+                .skill_plans(id)
+                .into_iter()
+                .map(|p| serde_json::json!({ "goal": p.goal, "steps": p.steps }))
+                .collect();
+            Ok(serde_json::json!({
+                "id": info.id,
+                "name": info.name,
+                "version": info.version,
+                "description": info.description,
+                "state": format!("{:?}", info.state),
+                "domains": info.domains,
+                "actions": actions,
+                "plans": plans,
+            }))
+        }
+
+        "skills/activate" => {
+            let id = params
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "missing required param: id".to_string())?;
+            let activation = engine
+                .load_skill(id)
+                .map_err(|e| format!("activate skill \"{id}\" failed: {e}"))?;
+            Ok(serde_json::json!({
+                "id": activation.skill_id,
+                "state": "Hot",
+                "triples_loaded": activation.triples_loaded,
+                "rules_loaded": activation.rules_loaded,
+                "actions_loaded": activation.actions_loaded,
+                "plans_loaded": activation.plans_loaded,
+                "memory_bytes": activation.memory_bytes,
+            }))
+        }
+
+        "skills/deactivate" => {
+            let id = params
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "missing required param: id".to_string())?;
+            engine
+                .unload_skill(id)
+                .map_err(|e| format!("deactivate skill \"{id}\" failed: {e}"))?;
+            Ok(serde_json::json!({ "id": id, "state": "Cold" }))
+        }
+
+        // ── argue (Phase 29d). Pro/con argumentation over the KG's provenance
+        //    chains with meta-rule scoring; read-only engine work. ──────────
+        "argue" => {
+            let subject = params
+                .get("subject")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "missing required param: subject".to_string())?;
+            let predicate = params
+                .get("predicate")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "missing required param: predicate".to_string())?;
+            let s = engine
+                .resolve_symbol(subject)
+                .map_err(|e| format!("unknown subject \"{subject}\": {e}"))?;
+            let p = engine
+                .resolve_symbol(predicate)
+                .map_err(|e| format!("unknown predicate \"{predicate}\": {e}"))?;
+            let set = engine
+                .argue(s, p)
+                .map_err(|e| format!("argumentation failed: {e}"))?;
+            let v = &set.verdict;
+            Ok(serde_json::json!({
+                "subject": engine.resolve_label(set.subject),
+                "predicate": engine.resolve_label(set.predicate),
+                "candidates": set.candidates.len(),
+                "verdict": {
+                    "answer": v.answer.map(|id| engine.resolve_label(id)),
+                    "confidence": v.confidence,
+                    "reasoning": v.reasoning,
+                    "decisive_rule": v.decisive_rule.map(|r| format!("{r:?}")),
+                    "pro": v.pro.iter().map(|a| argument_json(engine, a)).collect::<Vec<_>>(),
+                    "con": v.con.iter().map(|a| argument_json(engine, a)).collect::<Vec<_>>(),
+                },
+            }))
+        }
+
+        // ── explain group (Phase 29e). Provenance-to-prose derivation traces
+        //    (src/agent/explain.rs) + raw provenance records. ───────────────
+        "explain" => {
+            use crate::agent::explain;
+            // Either a free-text `question` ("why is the sky blue?") routed via
+            // ExplanationQuery::parse, or a bare `subject` (entity label).
+            if let Some(q) = params.get("question").and_then(serde_json::Value::as_str) {
+                let query = explain::ExplanationQuery::parse(q).ok_or_else(|| {
+                    format!(
+                        "could not parse an explanation question from {q:?} — try \
+                         \"why <entity>?\", \"what do you know about <entity>?\", or \
+                         \"how confident are you about <entity>?\" (or pass `subject`)"
+                    )
+                })?;
+                let prose = explain::execute_query(engine, &query, None)
+                    .map_err(|e| format!("explain failed: {e}"))?;
+                Ok(serde_json::json!({ "question": q, "prose": prose }))
+            } else {
+                let subject = params
+                    .get("subject")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| "missing required param: subject (or question)".to_string())?;
+                let max_depth = params
+                    .get("max_depth")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(5) as usize;
+                let prose = explain::explain_entity(engine, subject)
+                    .map_err(|e| format!("explain failed: {e}"))?;
+                let id = engine
+                    .resolve_symbol(subject)
+                    .map_err(|e| format!("unknown symbol \"{subject}\": {e}"))?;
+                let tree = explain::build_derivation_tree(engine, id, max_depth)
+                    .map_err(|e| format!("derivation tree failed: {e}"))?;
+                Ok(serde_json::json!({
+                    "subject": subject,
+                    "prose": prose,
+                    "derivation": derivation_node_json(&tree),
+                }))
+            }
+        }
+
+        "provenance" => {
+            let symbol = params
+                .get("symbol")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "missing required param: symbol".to_string())?;
+            let id = engine
+                .resolve_symbol(symbol)
+                .map_err(|e| format!("unknown symbol \"{symbol}\": {e}"))?;
+            let records: Vec<serde_json::Value> = engine
+                .provenance_of(id)
+                .map_err(|e| format!("provenance lookup failed: {e}"))?
+                .iter()
+                .map(|r| {
+                    serde_json::json!({
+                        "derived": engine.resolve_label(r.derived_id),
+                        "kind": crate::agent::explain::derivation_kind_prose(&r.kind),
+                        "confidence": r.confidence,
+                        "depth": r.depth,
+                        "timestamp": r.timestamp,
+                        "sources": r
+                            .sources
+                            .iter()
+                            .map(|s| engine.resolve_label(*s))
+                            .collect::<Vec<_>>(),
+                    })
+                })
+                .collect();
+            Ok(serde_json::json!({
+                "symbol": engine.resolve_label(id),
+                "count": records.len(),
+                "records": records,
+            }))
+        }
+
         other => Err(format!("unknown _akh data-plane method: _akh/{other}")),
     }
+}
+
+/// The workspace's [`CompartmentManager`], or a clean error for workspaces
+/// without a data_dir (compartments are disk-backed).
+///
+/// [`CompartmentManager`]: crate::compartment::CompartmentManager
+fn compartment_manager(engine: &Engine) -> Result<&crate::compartment::CompartmentManager, String> {
+    engine.compartments().ok_or_else(|| {
+        "this workspace has no compartment manager (no data_dir configured) — \
+         microtheories require a persistent workspace"
+            .to_string()
+    })
+}
+
+/// Parse a wire compartment-kind string into a [`CompartmentKind`].
+///
+/// [`CompartmentKind`]: crate::compartment::CompartmentKind
+fn parse_compartment_kind(s: &str) -> Result<crate::compartment::CompartmentKind, String> {
+    use crate::compartment::CompartmentKind;
+    match s.trim().to_ascii_lowercase().as_str() {
+        "core" => Ok(CompartmentKind::Core),
+        "skill" => Ok(CompartmentKind::Skill),
+        "project" => Ok(CompartmentKind::Project),
+        "library" => Ok(CompartmentKind::Library),
+        "person" => Ok(CompartmentKind::Person),
+        "workspace" => Ok(CompartmentKind::Workspace),
+        other => Err(format!(
+            "unknown microtheory kind \"{other}\" \
+             (expected core|skill|project|library|person|workspace)"
+        )),
+    }
+}
+
+/// Label-anchored JSON projection of one [`Argument`] — the conclusion, its
+/// polarity/strength, and the provenance-chain shape (not the raw records; the
+/// `_akh/provenance` method serves those).
+///
+/// [`Argument`]: crate::argumentation::Argument
+fn argument_json(engine: &Engine, a: &crate::argumentation::Argument) -> serde_json::Value {
+    serde_json::json!({
+        "conclusion": engine.resolve_label(a.conclusion),
+        "polarity": format!("{:?}", a.polarity),
+        "strength": a.strength,
+        "monotonic": a.monotonic,
+        "chain_len": a.chain.len(),
+    })
+}
+
+/// Recursive JSON projection of a [`DerivationNode`] tree (labels + prose
+/// derivation kinds, so the client needs no symbol table).
+///
+/// [`DerivationNode`]: crate::agent::explain::DerivationNode
+fn derivation_node_json(node: &crate::agent::explain::DerivationNode) -> serde_json::Value {
+    serde_json::json!({
+        "label": node.label,
+        "confidence": node.confidence,
+        "depth": node.depth,
+        "derivation": node
+            .derivation
+            .as_ref()
+            .map(crate::agent::explain::derivation_kind_prose),
+        "children": node.children.iter().map(derivation_node_json).collect::<Vec<_>>(),
+    })
 }
 
 /// Agent-read `_akh/*` methods — `goals`, `tools`, `projects`, and the combined
@@ -1039,11 +1471,12 @@ fn dispatch_akh_agent(
     agent: &Arc<Mutex<Agent>>,
     workspace: &str,
     method: &str,
-    _params: &serde_json::Value,
+    params: &serde_json::Value,
 ) -> Option<Result<serde_json::Value, String>> {
     let op = method.strip_prefix("_akh/").unwrap_or(method);
     match op {
-        "goals" | "tools" | "projects" | "status" | "usage" | "reasoning" | "evidence" => {}
+        "goals" | "tools" | "projects" | "status" | "usage" | "reasoning" | "evidence"
+        | "psyche" | "evidence/assess" | "trust" => {}
         _ => return None,
     }
 
@@ -1088,6 +1521,73 @@ fn dispatch_akh_agent(
             "stale": stale,
             "evidence": a.map(|ag| evidence_json(engine, ag)),
         }),
+        // Phase 29c — psyche inspection (read-only; archetype tuning is the
+        // agent-mutating `_akh/psyche/archetypes`, handled in the dispatch
+        // closure like `_akh/permission/mode`).
+        "psyche" => serde_json::json!({
+            "workspace": workspace,
+            "stale": stale,
+            "psyche": a.and_then(|ag| ag.psyche().map(psyche_json)),
+        }),
+        // Phase 29h — Dempster-Shafer assessment of one claim. An unresolvable
+        // claim label is a clean error, not an empty success.
+        "evidence/assess" => {
+            let claim = match params.get("claim").and_then(serde_json::Value::as_str) {
+                Some(c) => c,
+                None => return Some(Err("missing required param: claim".to_string())),
+            };
+            let claim_id = match engine.resolve_symbol(claim) {
+                Ok(id) => id,
+                Err(e) => return Some(Err(format!("unknown claim \"{claim}\": {e}"))),
+            };
+            serde_json::json!({
+                "workspace": workspace,
+                "stale": stale,
+                "assessment": a.map(|ag| {
+                    let c = ag.evidence_manager().assess_claim(claim_id);
+                    serde_json::json!({
+                        "claim": engine.resolve_label(c.claim_entity),
+                        "verdict": c.verdict.as_label(),
+                        "belief": c.interval.belief,
+                        "plausibility": c.interval.plausibility,
+                        "conflict": c.conflict_degree,
+                        "evidence_count": c.evidence_count,
+                        "reasoning": c.reasoning,
+                    })
+                }),
+            })
+        }
+        // Phase 29i — source-trust leaderboard (Admiralty + Bayesian trust).
+        "trust" => {
+            let top_k = params
+                .get("top_k")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(10) as usize;
+            let project = |entries: Vec<(u64, f32, crate::agent::source_reliability::SourceReliability)>| {
+                entries
+                    .into_iter()
+                    .filter_map(|(raw, trust, rating)| {
+                        let label = crate::symbol::SymbolId::new(raw)
+                            .map(|id| engine.resolve_label(id))?;
+                        Some(serde_json::json!({
+                            "source": label,
+                            "trust": trust,
+                            "rating": rating.as_label(),
+                        }))
+                    })
+                    .collect::<Vec<_>>()
+            };
+            serde_json::json!({
+                "workspace": workspace,
+                "stale": stale,
+                "most_reliable": a
+                    .map(|ag| project(ag.reliability_manager().most_reliable(top_k)))
+                    .unwrap_or_default(),
+                "least_reliable": a
+                    .map(|ag| project(ag.reliability_manager().least_reliable(top_k)))
+                    .unwrap_or_default(),
+            })
+        }
         // The combined snapshot backing the whole TUI sidebar in one round-trip.
         "status" => serde_json::json!({
             "workspace": workspace,
@@ -1178,6 +1678,59 @@ fn evidence_json(engine: &Engine, agent: &Agent) -> serde_json::Value {
     serde_json::json!({
         "claims": em.claim_count(),
         "uncertain": uncertain,
+    })
+}
+
+/// JSON projection of the agent's [`Psyche`] (Phase 29c): persona, archetype
+/// weights, OCEAN profile, integration metrics, and shadow-pattern names (the
+/// patterns themselves stay server-side — only their names + severities are
+/// surfaced, enough for "why did you hesitate?" transparency).
+///
+/// [`Psyche`]: crate::compartment::psyche::Psyche
+fn psyche_json(p: &crate::compartment::psyche::Psyche) -> serde_json::Value {
+    let pattern = |sp: &crate::compartment::psyche::ShadowPattern| {
+        serde_json::json!({ "name": sp.name, "severity": sp.severity, "explanation": sp.explanation })
+    };
+    serde_json::json!({
+        "persona": {
+            "name": p.persona.name,
+            "grammar": p.persona.grammar_preference,
+            "traits": p.persona.traits,
+            "tone": p.persona.tone,
+        },
+        "archetypes": archetypes_json(&p.archetypes),
+        "dominant_archetype": p.dominant_archetype(),
+        "ocean": p.ocean.as_ref().map(|o| serde_json::json!({
+            "openness": o.openness,
+            "conscientiousness": o.conscientiousness,
+            "extraversion": o.extraversion,
+            "agreeableness": o.agreeableness,
+            "neuroticism": o.neuroticism,
+        })),
+        "integration": {
+            "individuation_level": p.self_integration.individuation_level,
+            "shadow_encounters": p.self_integration.shadow_encounters,
+            "rebalance_count": p.self_integration.rebalance_count,
+        },
+        "shadow": {
+            "veto_patterns": p.shadow.veto_patterns.iter().map(pattern).collect::<Vec<_>>(),
+            "bias_patterns": p.shadow.bias_patterns.iter().map(pattern).collect::<Vec<_>>(),
+        },
+        "awakened": p.awakened,
+        "ennead_role": p.ennead_role,
+    })
+}
+
+/// JSON projection of [`ArchetypeWeights`] (shared by `_akh/psyche` and the
+/// `_akh/psyche/archetypes` GET/SET echo).
+///
+/// [`ArchetypeWeights`]: crate::compartment::psyche::ArchetypeWeights
+fn archetypes_json(w: &crate::compartment::psyche::ArchetypeWeights) -> serde_json::Value {
+    serde_json::json!({
+        "healer": w.healer,
+        "sage": w.sage,
+        "guardian": w.guardian,
+        "explorer": w.explorer,
     })
 }
 
@@ -1449,6 +2002,64 @@ async fn serve_permission_asks(
         };
         // `try_send`: the asker may have timed out and gone; never block here.
         let _ = req.reply.try_send(approved);
+    }
+}
+
+/// GET/SET the agent's archetype weights (Phase 29c, `_akh/psyche/archetypes`).
+///
+/// With no weight params this reports the current weights. With any of
+/// `healer`/`sage`/`guardian`/`explorer` present it applies a **weights-only
+/// delta**: the psyche is cloned, only the given weights are replaced (clamped
+/// to `[0, 1]`), and the result is force-set on the agent *and* persisted via
+/// the compartment manager (when the workspace has one) so the tuning survives
+/// a restart. `force_set` is deliberate — plan 29c allows archetype calibration
+/// within the awakened identity, and nothing outside the four weights changes.
+///
+/// Errors when the akh has no psyche at all (nothing to tune) or a weight is
+/// not a number.
+fn set_archetype_weights(
+    engine: &Engine,
+    agent: &mut Agent,
+    params: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    const KEYS: [&str; 4] = ["healer", "sage", "guardian", "explorer"];
+    let wants_set = KEYS.iter().any(|k| params.get(k).is_some());
+
+    if wants_set {
+        let mut psyche = agent.psyche().cloned().ok_or_else(|| {
+            "this akh has no psyche loaded — run the ritual of awakening (or load \
+             the psyche compartment) before tuning archetype weights"
+                .to_string()
+        })?;
+        let weight = |key: &str, current: f32| -> Result<f32, String> {
+            match params.get(key) {
+                None => Ok(current),
+                Some(v) => v
+                    .as_f64()
+                    .map(|f| (f as f32).clamp(0.0, 1.0))
+                    .ok_or_else(|| format!("archetype weight \"{key}\" must be a number in [0,1]")),
+            }
+        };
+        psyche.archetypes.healer = weight("healer", psyche.archetypes.healer)?;
+        psyche.archetypes.sage = weight("sage", psyche.archetypes.sage)?;
+        psyche.archetypes.guardian = weight("guardian", psyche.archetypes.guardian)?;
+        psyche.archetypes.explorer = weight("explorer", psyche.archetypes.explorer)?;
+        psyche.self_integration.rebalance_count += 1;
+
+        // Persist to the psyche compartment first (best-effort; a workspace
+        // without a data_dir has no manager), then apply on the live agent.
+        if let Some(cm) = engine.compartments() {
+            cm.force_set_psyche(psyche.clone());
+        }
+        agent.force_set_psyche(psyche);
+    }
+
+    match agent.psyche() {
+        Some(p) => Ok(serde_json::json!({
+            "archetypes": archetypes_json(&p.archetypes),
+            "dominant_archetype": p.dominant_archetype(),
+        })),
+        None => Ok(serde_json::json!({ "archetypes": serde_json::Value::Null })),
     }
 }
 
@@ -1781,6 +2392,39 @@ fn build_connection(
                                             Ok(Ok(mode)) => responder.respond(AkhExtResponse(
                                                 serde_json::json!({ "mode": mode }),
                                             )),
+                                            Ok(Err(e)) => responder.respond_with_error(
+                                                agent_client_protocol::Error::invalid_params()
+                                                    .data(e),
+                                            ),
+                                            Err(join_err) => responder.respond_with_error(
+                                                agent_client_protocol::Error::internal_error()
+                                                    .data(join_err.to_string()),
+                                            ),
+                                        };
+                                    }
+                                    // Agent-mutating method (Phase 29c): archetype
+                                    // tuning. GET with no weight params; SET applies
+                                    // the given weights (clamped to [0,1]) as a
+                                    // weights-only delta — per plan 29c the tuning
+                                    // calibrates *within* the identity established
+                                    // at awakening, so it deliberately bypasses the
+                                    // wholesale-replace immutability guard while
+                                    // touching nothing but the four weights. Runs
+                                    // under the agent lock in spawn_blocking
+                                    // (ADR-027), mirroring `_akh/permission/mode`.
+                                    if method == "_akh/psyche/archetypes" {
+                                        let params = req.params.clone();
+                                        let engine = Arc::clone(&engine);
+                                        let result = tokio::task::spawn_blocking(move || {
+                                            let mut a =
+                                                agent.lock().unwrap_or_else(|e| e.into_inner());
+                                            set_archetype_weights(&engine, &mut a, &params)
+                                        })
+                                        .await;
+                                        return match result {
+                                            Ok(Ok(value)) => {
+                                                responder.respond(AkhExtResponse(value))
+                                            }
                                             Ok(Err(e)) => responder.respond_with_error(
                                                 agent_client_protocol::Error::invalid_params()
                                                     .data(e),
@@ -3388,6 +4032,457 @@ mod tests {
         .await
         .expect("timed out");
         assert!(bad.is_err(), "unknown permission mode must error");
+
+        shutdown_tx.send(true).expect("send shutdown");
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(30), server).await;
+    }
+
+    // ── Phase 29 capability-exposure groups (plan
+    //    docs/ai/plans/2026-03-26-phase29-capability-exposure.md, ADR 039) ──
+
+    /// Build a **persistent** in-process workspace (data_dir on disk) so the
+    /// compartment + skill managers exist — the Phase 29a/29b groups need them.
+    fn persistent_workspace(data_dir: &Path) -> AkhAcpAgent {
+        std::fs::create_dir_all(data_dir).expect("data dir");
+        let engine = Engine::new(EngineConfig {
+            dimension: Dimension::TEST,
+            data_dir: Some(data_dir.to_path_buf()),
+            ..Default::default()
+        })
+        .expect("persistent engine");
+        let engine = Arc::new(engine);
+        let processor = ChatProcessor::new(&engine, NluPipeline::new());
+        let agent = Agent::new(Arc::clone(&engine), AgentConfig::default()).expect("agent");
+        AkhAcpAgent::new(engine, Arc::new(Mutex::new(agent)), processor)
+    }
+
+    /// One bounded `ext_request_unix` that must succeed.
+    async fn ext_ok(
+        sock: &Path,
+        method: &str,
+        params: serde_json::Value,
+    ) -> serde_json::Value {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            ext_request_unix(sock, method, params),
+        )
+        .await
+        .expect("ext request timed out")
+        .expect("ext request ok")
+    }
+
+    /// One bounded `ext_request_unix` whose *error* is under test.
+    async fn ext_err(
+        sock: &Path,
+        method: &str,
+        params: serde_json::Value,
+    ) -> AcpResult<serde_json::Value> {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            ext_request_unix(sock, method, params),
+        )
+        .await
+        .expect("ext request timed out")
+    }
+
+    /// Phase 29a: the microtheory group — create → list → inspect → activate →
+    /// deactivate(+unload) round-trip, capability advertisement, and clean
+    /// errors for unknown ids.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn acp_ext_microtheory_lifecycle() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let me = persistent_workspace(&dir.path().join("ws"));
+        let sock = dir.path().join("akh-acp-mt.sock");
+        let listener = UnixListener::bind(&sock).expect("bind unix");
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let server = tokio::spawn(async move { serve_unix_loop(me, listener, shutdown_rx).await });
+
+        // The new groups + methods are advertised.
+        let caps = ext_ok(&sock, "_akh/meta/capabilities", serde_json::json!({})).await;
+        let methods = caps["methods"].as_array().unwrap();
+        for m in [
+            "_akh/microtheory/list",
+            "_akh/skills/activate",
+            "_akh/psyche/archetypes",
+            "_akh/argue",
+            "_akh/explain",
+            "_akh/provenance",
+            "_akh/evidence/assess",
+            "_akh/trust",
+        ] {
+            assert!(methods.iter().any(|v| v == m), "capabilities missing {m}: {caps}");
+        }
+        assert!(caps["groups"].as_array().unwrap().iter().any(|g| g == "microtheory"));
+
+        // create → Dormant.
+        let created = ext_ok(
+            &sock,
+            "_akh/microtheory/create",
+            serde_json::json!({ "id": "cooking", "description": "my cooking knowledge" }),
+        )
+        .await;
+        assert_eq!(created["created"], true);
+        assert_eq!(created["state"], "Dormant");
+
+        // list contains it.
+        let list = ext_ok(&sock, "_akh/microtheory/list", serde_json::json!({})).await;
+        assert!(
+            list["microtheories"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|m| m["id"] == "cooking"),
+            "created microtheory missing from list: {list}"
+        );
+
+        // inspect echoes the manifest.
+        let ins = ext_ok(
+            &sock,
+            "_akh/microtheory/inspect",
+            serde_json::json!({ "id": "cooking" }),
+        )
+        .await;
+        assert_eq!(ins["state"], "Dormant");
+        assert_eq!(ins["description"], "my cooking knowledge");
+
+        // activate → Active; deactivate(+unload) → Dormant.
+        let act = ext_ok(
+            &sock,
+            "_akh/microtheory/activate",
+            serde_json::json!({ "id": "cooking" }),
+        )
+        .await;
+        assert_eq!(act["state"], "Active");
+        let deact = ext_ok(
+            &sock,
+            "_akh/microtheory/deactivate",
+            serde_json::json!({ "id": "cooking", "unload": true }),
+        )
+        .await;
+        assert_eq!(deact["state"], "Dormant");
+
+        // duplicate create + unknown-id inspect are clean errors.
+        assert!(ext_err(&sock, "_akh/microtheory/create", serde_json::json!({ "id": "cooking" }))
+            .await
+            .is_err());
+        assert!(ext_err(&sock, "_akh/microtheory/inspect", serde_json::json!({ "id": "nope" }))
+            .await
+            .is_err());
+        // bad kind is a clean error too.
+        assert!(ext_err(
+            &sock,
+            "_akh/microtheory/create",
+            serde_json::json!({ "id": "x", "kind": "galaxy" })
+        )
+        .await
+        .is_err());
+
+        shutdown_tx.send(true).expect("send shutdown");
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(30), server).await;
+    }
+
+    /// Phase 29b: the skillpack lifecycle — activate loads a disk skillpack's
+    /// label triples into the KG (visible via `triples/from`), inspect shows
+    /// the manifest, deactivate returns it to Cold. Unknown skills error.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn acp_ext_skills_lifecycle() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().join("ws");
+
+        // A minimal on-disk skillpack with label-based triples.
+        let skill_dir = data_dir.join("skills").join("astronomy");
+        std::fs::create_dir_all(&skill_dir).expect("skill dir");
+        std::fs::write(
+            skill_dir.join("skill.json"),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "id": "astronomy",
+                "name": "Astronomy Pack",
+                "version": "1.0.0",
+                "description": "Basic astronomical knowledge",
+                "domains": ["astronomy"],
+                "weight_size_bytes": 0,
+                "triples_file": "triples.json",
+                "depends": [],
+                "conflicts": [],
+                "provides": ["celestial_bodies"],
+                "requires": []
+            }))
+            .unwrap(),
+        )
+        .expect("skill manifest");
+        std::fs::write(
+            skill_dir.join("triples.json"),
+            serde_json::to_string(&serde_json::json!([
+                { "subject": "Sol", "predicate": "is-a", "object": "Star", "confidence": 1.0 }
+            ]))
+            .unwrap(),
+        )
+        .expect("skill triples");
+
+        let me = persistent_workspace(&data_dir);
+        let sock = dir.path().join("akh-acp-skill.sock");
+        let listener = UnixListener::bind(&sock).expect("bind unix");
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let server = tokio::spawn(async move { serve_unix_loop(me, listener, shutdown_rx).await });
+
+        // activate: Cold → Hot, its triples land in the KG.
+        let act = ext_ok(&sock, "_akh/skills/activate", serde_json::json!({ "id": "astronomy" }))
+            .await;
+        assert_eq!(act["id"], "astronomy");
+        assert!(
+            act["triples_loaded"].as_u64().unwrap() >= 1,
+            "expected the label triple to load: {act}"
+        );
+
+        // the loaded triple is visible through the ordinary data-plane.
+        let from = ext_ok(&sock, "_akh/triples/from", serde_json::json!({ "symbol": "Sol" })).await;
+        assert!(
+            from["triples"].as_array().unwrap().iter().any(|t| t["object"] == "Star"),
+            "skill triple not visible: {from}"
+        );
+
+        // list + inspect report the Hot skill.
+        let list = ext_ok(&sock, "_akh/skills", serde_json::json!({})).await;
+        assert!(
+            list["skills"].as_array().unwrap().iter().any(|s| s["id"] == "astronomy"),
+            "skill missing from list: {list}"
+        );
+        let ins = ext_ok(&sock, "_akh/skills/inspect", serde_json::json!({ "id": "astronomy" }))
+            .await;
+        assert_eq!(ins["name"], "Astronomy Pack");
+        assert_eq!(ins["state"], "Hot");
+
+        // deactivate: Hot → Cold.
+        let de = ext_ok(&sock, "_akh/skills/deactivate", serde_json::json!({ "id": "astronomy" }))
+            .await;
+        assert_eq!(de["state"], "Cold");
+
+        // unknown skill → clean error.
+        assert!(ext_err(&sock, "_akh/skills/activate", serde_json::json!({ "id": "nope" }))
+            .await
+            .is_err());
+
+        shutdown_tx.send(true).expect("send shutdown");
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(30), server).await;
+    }
+
+    /// Phase 29c: psyche inspection + archetype tuning. GET reports the loaded
+    /// psyche; SET applies clamped weights and persists across requests; an akh
+    /// without a psyche reads as null and rejects tuning.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn acp_ext_psyche_group() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        // ── an akh WITHOUT a psyche: read null, tuning is a clean error ──
+        let bare = workspace();
+        let bare_sock = dir.path().join("akh-acp-psyche0.sock");
+        let listener = UnixListener::bind(&bare_sock).expect("bind unix");
+        let (bare_tx, bare_rx) = watch::channel(false);
+        let bare_server =
+            tokio::spawn(async move { serve_unix_loop(bare, listener, bare_rx).await });
+
+        let show = ext_ok(&bare_sock, "_akh/psyche", serde_json::json!({})).await;
+        assert_eq!(show["stale"], serde_json::json!(false));
+        assert_eq!(show["psyche"], serde_json::Value::Null);
+        assert!(
+            ext_err(&bare_sock, "_akh/psyche/archetypes", serde_json::json!({ "sage": 0.9 }))
+                .await
+                .is_err(),
+            "tuning without a psyche must error"
+        );
+        bare_tx.send(true).expect("send shutdown");
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(30), bare_server).await;
+
+        // ── an akh WITH a psyche: full read + clamped tuning round-trip ──
+        let me = workspace();
+        me.agent
+            .as_ref()
+            .expect("held-mode agent")
+            .lock()
+            .unwrap()
+            .force_set_psyche(crate::compartment::psyche::Psyche::default());
+        let sock = dir.path().join("akh-acp-psyche.sock");
+        let listener = UnixListener::bind(&sock).expect("bind unix");
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let server = tokio::spawn(async move { serve_unix_loop(me, listener, shutdown_rx).await });
+
+        let show = ext_ok(&sock, "_akh/psyche", serde_json::json!({})).await;
+        assert!(show["psyche"]["persona"]["name"].is_string(), "psyche read: {show}");
+        assert!(show["psyche"]["archetypes"]["sage"].is_number());
+        assert!(show["psyche"]["dominant_archetype"].is_string());
+
+        // GET weights.
+        let got = ext_ok(&sock, "_akh/psyche/archetypes", serde_json::json!({})).await;
+        assert!(got["archetypes"]["healer"].is_number());
+
+        // SET: sage=0.9 applied, explorer=1.7 clamped to 1.0.
+        let set = ext_ok(
+            &sock,
+            "_akh/psyche/archetypes",
+            serde_json::json!({ "sage": 0.9, "explorer": 1.7 }),
+        )
+        .await;
+        assert!(
+            (set["archetypes"]["sage"].as_f64().unwrap() - 0.9).abs() < 1e-6,
+            "sage weight not applied: {set}"
+        );
+        assert!(
+            (set["archetypes"]["explorer"].as_f64().unwrap() - 1.0).abs() < 1e-6,
+            "explorer weight not clamped: {set}"
+        );
+
+        // The change persisted on the agent.
+        let got2 = ext_ok(&sock, "_akh/psyche/archetypes", serde_json::json!({})).await;
+        assert!((got2["archetypes"]["sage"].as_f64().unwrap() - 0.9).abs() < 1e-6);
+
+        // A non-numeric weight is a clean error.
+        assert!(
+            ext_err(&sock, "_akh/psyche/archetypes", serde_json::json!({ "sage": "high" }))
+                .await
+                .is_err()
+        );
+
+        shutdown_tx.send(true).expect("send shutdown");
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(30), server).await;
+    }
+
+    /// Phase 29d: `_akh/argue` marshals pro/con arguments for
+    /// (subject, predicate, ?) and renders a verdict naming the winning answer.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn acp_ext_argue_verdict() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("akh-acp-argue.sock");
+        let me = workspace(); // seeds ("Sun", "is-a", "Star")
+        let listener = UnixListener::bind(&sock).expect("bind unix");
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let server = tokio::spawn(async move { serve_unix_loop(me, listener, shutdown_rx).await });
+
+        let v = ext_ok(
+            &sock,
+            "_akh/argue",
+            serde_json::json!({ "subject": "Sun", "predicate": "is-a" }),
+        )
+        .await;
+        assert_eq!(v["subject"], "Sun");
+        assert!(v["candidates"].as_u64().unwrap() >= 1, "expected ≥1 candidate: {v}");
+        assert_eq!(v["verdict"]["answer"], "Star", "verdict should name Star: {v}");
+        assert!(v["verdict"]["reasoning"].is_string());
+        assert!(v["verdict"]["pro"].is_array());
+
+        // missing predicate + unknown subject → clean errors.
+        assert!(ext_err(&sock, "_akh/argue", serde_json::json!({ "subject": "Sun" }))
+            .await
+            .is_err());
+        assert!(ext_err(
+            &sock,
+            "_akh/argue",
+            serde_json::json!({ "subject": "NoSuchThing", "predicate": "is-a" })
+        )
+        .await
+        .is_err());
+
+        shutdown_tx.send(true).expect("send shutdown");
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(30), server).await;
+    }
+
+    /// Phase 29e: `_akh/explain` returns prose + a derivation tree for an
+    /// entity, routes free-text questions through `ExplanationQuery`, and
+    /// `_akh/provenance` serves the raw records. Unknown entities error.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn acp_ext_explain_and_provenance() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("akh-acp-explain.sock");
+        // Persistent workspace: the provenance ledger (which explain walks)
+        // requires a durable store — same requirement as the daemon's akhs.
+        let me = persistent_workspace(&dir.path().join("ws"));
+        me.engine
+            .as_ref()
+            .expect("held-mode engine")
+            .ingest_label_triples(&[(
+                "Sun".to_string(),
+                "is-a".to_string(),
+                "Star".to_string(),
+                1.0,
+            )])
+            .expect("seed triple");
+        let listener = UnixListener::bind(&sock).expect("bind unix");
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let server = tokio::spawn(async move { serve_unix_loop(me, listener, shutdown_rx).await });
+
+        // entity form: prose + structured derivation tree.
+        let ex = ext_ok(&sock, "_akh/explain", serde_json::json!({ "subject": "Sun" })).await;
+        assert!(
+            ex["prose"].as_str().unwrap().contains("Sun"),
+            "explanation prose should mention the subject: {ex}"
+        );
+        assert_eq!(ex["derivation"]["label"], "Sun");
+        assert!(ex["derivation"]["children"].is_array());
+
+        // question form: parsed via ExplanationQuery.
+        let q = ext_ok(
+            &sock,
+            "_akh/explain",
+            serde_json::json!({ "question": "what do you know about Sun?" }),
+        )
+        .await;
+        assert!(!q["prose"].as_str().unwrap().is_empty(), "question prose empty: {q}");
+
+        // provenance records for the seeded symbol.
+        let prov = ext_ok(&sock, "_akh/provenance", serde_json::json!({ "symbol": "Sun" })).await;
+        assert_eq!(prov["symbol"], "Sun");
+        assert!(prov["records"].is_array());
+
+        // unknown entity / unparseable question / missing params → clean errors.
+        assert!(ext_err(&sock, "_akh/explain", serde_json::json!({ "subject": "NoSuchThing" }))
+            .await
+            .is_err());
+        assert!(ext_err(
+            &sock,
+            "_akh/explain",
+            serde_json::json!({ "question": "gibberish with no pattern" })
+        )
+        .await
+        .is_err());
+        assert!(ext_err(&sock, "_akh/explain", serde_json::json!({})).await.is_err());
+        assert!(ext_err(&sock, "_akh/provenance", serde_json::json!({ "symbol": "NoSuchThing" }))
+            .await
+            .is_err());
+
+        shutdown_tx.send(true).expect("send shutdown");
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(30), server).await;
+    }
+
+    /// Phase 29h/29i: `_akh/evidence/assess` returns a Dempster-Shafer
+    /// assessment for a resolvable claim (vacuous when no evidence is tracked)
+    /// and errors on unknown claims; `_akh/trust` serves the source-trust
+    /// leaderboard shape.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn acp_ext_evidence_assess_and_trust() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("akh-acp-evidence.sock");
+        let me = workspace(); // seeds ("Sun", "is-a", "Star")
+        let listener = UnixListener::bind(&sock).expect("bind unix");
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let server = tokio::spawn(async move { serve_unix_loop(me, listener, shutdown_rx).await });
+
+        let a = ext_ok(&sock, "_akh/evidence/assess", serde_json::json!({ "claim": "Sun" })).await;
+        assert_eq!(a["stale"], serde_json::json!(false));
+        let assessment = &a["assessment"];
+        assert_eq!(assessment["claim"], "Sun");
+        assert!(assessment["verdict"].is_string(), "verdict label expected: {a}");
+        assert!(assessment["belief"].is_number());
+        assert!(assessment["plausibility"].is_number());
+
+        // unknown claim / missing param → clean errors.
+        assert!(ext_err(&sock, "_akh/evidence/assess", serde_json::json!({ "claim": "NoSuchThing" }))
+            .await
+            .is_err());
+        assert!(ext_err(&sock, "_akh/evidence/assess", serde_json::json!({})).await.is_err());
+
+        // trust leaderboard: both directions present (empty for a fresh agent).
+        let t = ext_ok(&sock, "_akh/trust", serde_json::json!({ "top_k": 5 })).await;
+        assert!(t["most_reliable"].is_array());
+        assert!(t["least_reliable"].is_array());
 
         shutdown_tx.send(true).expect("send shutdown");
         let _ = tokio::time::timeout(std::time::Duration::from_secs(30), server).await;
