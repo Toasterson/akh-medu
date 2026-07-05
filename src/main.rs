@@ -254,6 +254,168 @@ enum AcpOp {
         #[arg(long)]
         set: Option<String>,
     },
+    /// Manage microtheories — isolated knowledge compartments (Phase 29a,
+    /// `_akh/microtheory/*`).
+    Microtheory {
+        #[command(subcommand)]
+        action: MicrotheoryOp,
+    },
+    /// Manage skillpacks — Cold/Warm/Hot capability bundles (Phase 29b,
+    /// `_akh/skills*`).
+    Skill {
+        #[command(subcommand)]
+        action: SkillOp,
+    },
+    /// Inspect the akh's psyche or tune its archetype weights (Phase 29c,
+    /// `_akh/psyche*`).
+    Psyche {
+        #[command(subcommand)]
+        action: PsycheOp,
+    },
+    /// Marshal pro/con arguments for (subject, predicate, ?) from the KG's
+    /// provenance chains and render a verdict (Phase 29d, `_akh/argue`).
+    Argue {
+        /// Subject label (e.g. "Sun").
+        subject: String,
+        /// Predicate (relation) label (e.g. "is-a").
+        predicate: String,
+    },
+    /// Explain a belief: derivation trace + prose — "why do you think X?"
+    /// (Phase 29e, `_akh/explain`).
+    Explain {
+        /// Entity label to explain (e.g. "Sun"). Omit when using --question.
+        subject: Option<String>,
+        /// Free-text explanation question ("why is X?", "what do you know
+        /// about X?", "how confident are you about X?", "what changed?").
+        #[arg(long)]
+        question: Option<String>,
+        /// Maximum derivation-tree depth.
+        #[arg(long, default_value_t = 5)]
+        max_depth: u64,
+    },
+    /// Show the raw provenance records behind a symbol (Phase 29e,
+    /// `_akh/provenance`).
+    Provenance {
+        /// Symbol label (e.g. "Sun").
+        symbol: String,
+    },
+    /// Dempster-Shafer evidence: landscape summary or per-claim assessment
+    /// (Phase 29h, `_akh/evidence*`).
+    Evidence {
+        #[command(subcommand)]
+        action: EvidenceOp,
+    },
+    /// Source-trust leaderboard — Admiralty + Bayesian trust (Phase 29i,
+    /// `_akh/trust`).
+    Trust {
+        /// How many sources to list per direction (most/least reliable).
+        #[arg(long, default_value_t = 10)]
+        top: u64,
+    },
+}
+
+/// Microtheory (compartment) lifecycle verbs (`akh acp microtheory ...`).
+#[derive(Subcommand)]
+enum MicrotheoryOp {
+    /// List every microtheory with its state and triple count.
+    List,
+    /// Create a new (Dormant) microtheory.
+    Create {
+        /// Unique id (e.g. "cooking", "project-x").
+        id: String,
+        /// Display name (defaults to the id).
+        #[arg(long)]
+        name: Option<String>,
+        /// Kind: core | skill | project | library | person | workspace.
+        #[arg(long, default_value = "project")]
+        kind: String,
+        /// Purpose description.
+        #[arg(long)]
+        description: Option<String>,
+        /// Parent microtheory id (hierarchy).
+        #[arg(long)]
+        parent: Option<String>,
+    },
+    /// Inspect one microtheory: manifest, state, and a sample of its triples.
+    Inspect {
+        /// Microtheory id.
+        id: String,
+        /// Maximum sampled triples to return.
+        #[arg(long, default_value_t = 50)]
+        limit: u64,
+    },
+    /// Load a microtheory's triples into the KG and mark it Active.
+    Activate {
+        /// Microtheory id.
+        id: String,
+    },
+    /// Stop a microtheory influencing the OODA loop (back to Loaded); with
+    /// --unload, also remove its triples from the KG (back to Dormant).
+    Deactivate {
+        /// Microtheory id.
+        id: String,
+        /// Also unload the microtheory's triples from the KG.
+        #[arg(long)]
+        unload: bool,
+    },
+}
+
+/// Skillpack lifecycle verbs (`akh acp skill ...`).
+#[derive(Subcommand)]
+enum SkillOp {
+    /// List every discovered skillpack with its state and counts.
+    List,
+    /// Inspect one skillpack: manifest, actions, and plans.
+    Inspect {
+        /// Skill id (e.g. "astronomy").
+        id: String,
+    },
+    /// Activate (load) a skillpack: its triples, rules, actions, and plans
+    /// enter the KG (state → Hot).
+    Activate {
+        /// Skill id.
+        id: String,
+    },
+    /// Deactivate (unload) a skillpack: its knowledge leaves the KG (→ Cold).
+    Deactivate {
+        /// Skill id.
+        id: String,
+    },
+}
+
+/// Psyche verbs (`akh acp psyche ...`).
+#[derive(Subcommand)]
+enum PsycheOp {
+    /// Show the full psyche: persona, archetypes, OCEAN, shadow patterns.
+    Show,
+    /// Show or tune the archetype weights (healer/sage/guardian/explorer).
+    /// With no flags, reports the current weights.
+    Archetypes {
+        /// Healer weight in [0,1] — seeks missing knowledge.
+        #[arg(long)]
+        healer: Option<f64>,
+        /// Sage weight in [0,1] — seeks understanding.
+        #[arg(long)]
+        sage: Option<f64>,
+        /// Guardian weight in [0,1] — seeks stability and safety.
+        #[arg(long)]
+        guardian: Option<f64>,
+        /// Explorer weight in [0,1] — seeks novelty.
+        #[arg(long)]
+        explorer: Option<f64>,
+    },
+}
+
+/// Evidence verbs (`akh acp evidence ...`).
+#[derive(Subcommand)]
+enum EvidenceOp {
+    /// Summarize the evidence landscape (claim count + most uncertain claims).
+    Summary,
+    /// Assess one claim: Dempster-Shafer belief interval + verdict.
+    Assess {
+        /// Claim symbol label.
+        claim: String,
+    },
 }
 
 /// The remote ACP/TCP endpoint chosen by `--remote` (or `AKH_REMOTE`), captured
@@ -382,6 +544,105 @@ fn run_acp_command(ws: &str, op: &AcpOp) -> Result<()> {
             }
             ("_akh/permission/mode", params)
         }
+        // ── Phase 29 capability exposure (plan
+        //    docs/ai/plans/2026-03-26-phase29-capability-exposure.md, ADR 039) ──
+        AcpOp::Microtheory { action } => match action {
+            MicrotheoryOp::List => ("_akh/microtheory/list", serde_json::json!({})),
+            MicrotheoryOp::Create {
+                id,
+                name,
+                kind,
+                description,
+                parent,
+            } => {
+                let mut params = serde_json::json!({ "id": id, "kind": kind });
+                if let Some(n) = name {
+                    params["name"] = serde_json::Value::String(n.clone());
+                }
+                if let Some(d) = description {
+                    params["description"] = serde_json::Value::String(d.clone());
+                }
+                if let Some(p) = parent {
+                    params["parent"] = serde_json::Value::String(p.clone());
+                }
+                ("_akh/microtheory/create", params)
+            }
+            MicrotheoryOp::Inspect { id, limit } => (
+                "_akh/microtheory/inspect",
+                serde_json::json!({ "id": id, "limit": limit }),
+            ),
+            MicrotheoryOp::Activate { id } => {
+                ("_akh/microtheory/activate", serde_json::json!({ "id": id }))
+            }
+            MicrotheoryOp::Deactivate { id, unload } => (
+                "_akh/microtheory/deactivate",
+                serde_json::json!({ "id": id, "unload": unload }),
+            ),
+        },
+        AcpOp::Skill { action } => match action {
+            SkillOp::List => ("_akh/skills", serde_json::json!({})),
+            SkillOp::Inspect { id } => {
+                ("_akh/skills/inspect", serde_json::json!({ "id": id }))
+            }
+            SkillOp::Activate { id } => {
+                ("_akh/skills/activate", serde_json::json!({ "id": id }))
+            }
+            SkillOp::Deactivate { id } => {
+                ("_akh/skills/deactivate", serde_json::json!({ "id": id }))
+            }
+        },
+        AcpOp::Psyche { action } => match action {
+            PsycheOp::Show => ("_akh/psyche", serde_json::json!({})),
+            PsycheOp::Archetypes {
+                healer,
+                sage,
+                guardian,
+                explorer,
+            } => {
+                let mut params = serde_json::json!({});
+                for (key, value) in [
+                    ("healer", healer),
+                    ("sage", sage),
+                    ("guardian", guardian),
+                    ("explorer", explorer),
+                ] {
+                    if let Some(v) = value {
+                        params[key] = serde_json::json!(v);
+                    }
+                }
+                ("_akh/psyche/archetypes", params)
+            }
+        },
+        AcpOp::Argue { subject, predicate } => (
+            "_akh/argue",
+            serde_json::json!({ "subject": subject, "predicate": predicate }),
+        ),
+        AcpOp::Explain {
+            subject,
+            question,
+            max_depth,
+        } => {
+            let mut params = serde_json::json!({ "max_depth": max_depth });
+            match (subject, question) {
+                (_, Some(q)) => params["question"] = serde_json::Value::String(q.clone()),
+                (Some(s), None) => params["subject"] = serde_json::Value::String(s.clone()),
+                (None, None) => miette::bail!(
+                    "`akh acp explain` needs an entity label or a --question — e.g. \
+                     `akh acp explain Sun` or `akh acp explain --question \"why Sun?\"`"
+                ),
+            }
+            ("_akh/explain", params)
+        }
+        AcpOp::Provenance { symbol } => {
+            ("_akh/provenance", serde_json::json!({ "symbol": symbol }))
+        }
+        AcpOp::Evidence { action } => match action {
+            EvidenceOp::Summary => ("_akh/evidence", serde_json::json!({})),
+            EvidenceOp::Assess { claim } => {
+                ("_akh/evidence/assess", serde_json::json!({ "claim": claim }))
+            }
+        },
+        AcpOp::Trust { top } => ("_akh/trust", serde_json::json!({ "top_k": top })),
     };
     // Route the data-plane op to the akh selected by `-w` (the server defaults to
     // its bound workspace when absent). Don't override an explicit param.
