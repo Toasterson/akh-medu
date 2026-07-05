@@ -43,6 +43,9 @@ use thiserror::Error;
 
 use crate::fs::{Filesystem, FsResult, LocalFs};
 
+#[cfg(feature = "remote-executor")]
+pub mod remote;
+
 /// Errors from process execution through a [`Backend`].
 ///
 /// File-verb errors keep the existing [`crate::fs::FsError`] taxonomy so the
@@ -93,6 +96,14 @@ pub enum ExecError {
         #[source]
         source: std::io::Error,
     },
+
+    /// A remote (SSH) exec failed. Kept transparent so [`remote::RemoteError`]'s
+    /// rich diagnostic (host, auth, timeout detail) reaches the caller
+    /// unmodified — only [`remote::RemoteBackend`] constructs this variant.
+    #[cfg(feature = "remote-executor")]
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Remote(#[from] remote::RemoteError),
 }
 
 /// Result alias for exec operations.
@@ -168,6 +179,19 @@ pub enum Confinement {
     /// process/user with full access. Tools riding this posture keep their
     /// `Critical` danger gating.
     Unconfined,
+
+    /// The executor authenticated as a distinct, already-provisioned remote
+    /// OS principal over SSH ([`remote::RemoteBackend`], Phase 48c) rather
+    /// than running as akhomed's own process identity — a different claim
+    /// than [`Confinement::Unconfined`], but not yet the full self-reported
+    /// posture (euid, groups, MAC domain, capability bounding set) 48f's
+    /// handshake adds. Policy treats this identically to `Unconfined` until
+    /// then (ADR 082 §8: "absent assertion ⇒ fail-safe to
+    /// unconfined/Critical") — it exists as its own variant purely so 48e/48f
+    /// can later attach different friction rules to "no boundary at all" vs.
+    /// "a real remote login, boundary unverified".
+    #[cfg(feature = "remote-executor")]
+    RemoteUnverified,
 }
 
 /// An executor's self-reported posture, returned by [`Backend::handshake`].
