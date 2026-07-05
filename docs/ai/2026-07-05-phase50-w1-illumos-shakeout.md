@@ -100,11 +100,41 @@ recording for whoever touches `tests/vm/VMFile.kdl` next (vmctl lives at
    (`oci_client::pull()` → `Vec<u8>`) has the same shape. Both are known,
    both want streaming; flag upstream.
 
-## OpenIndiana-under-KVM boot quirks
+## OpenIndiana-under-KVM boot + provisioning quirks
 
-*(To be filled in once VMs actually boot — this document is being written
-concurrently with the fleet coming up, per instructions to run long
-operations detached and keep working rather than block on them.)*
+**Boot: confirmed working under legacy BIOS.** `vmctl up --name exec1`
+(QEMU q35 + `-cpu host` + SeaBIOS, no OVMF) booted the
+`openindiana-rust-ci` qcow2 cleanly — `QEMU: started status=running` — then
+proceeded to provisioning. This settles quirk #4: the OpenIndiana cloud
+image does **not** need UEFI, so vmctl's hardcoded `uefi: false` is fine.
+The image reports `virtual size: 24 GiB` (qcow2, zlib-compressed, 7.27 GiB
+on disk) via `qemu-img info`, so no `disk` resize is needed in VMFile.kdl
+for a base checkout+build (the release build tree fits in 24 GiB; bump
+`disk` later if the in-VM cargo target dir + image outputs need more).
+
+*(Provisioning / cloud-init RBAC results appended below as exec1 comes
+up — see the anticipated sudo/RBAC risk note.)*
+
+**Anticipated cloud-init/RBAC risk (watch for it):** vmctl's auto-generated
+cloud-config (`crates/vm-manager/src/cloudinit.rs::build_cloud_config`)
+creates the SSH user with `groups: [sudo]` + `sudo: ALL=(ALL) NOPASSWD:ALL`
+and `shell: /bin/bash`. On illumos:
+- there is no `sudo` group by default (it's a Linux/Debian convention);
+  cloud-init typically logs a warning and proceeds, but if the OpenIndiana
+  cloud-init port treats a missing group as fatal, user creation could fail.
+- `/bin/bash` exists on OpenIndiana (unlike some minimal illumos images),
+  so the shell should be fine.
+- the `sudo:` directive writes `/etc/sudoers.d/90-cloud-init-users`, which
+  works regardless of group membership **as long as the `sudo` binary is
+  installed** — `openindiana-rust-ci` is a CI image so it very likely has
+  it, but every provisioner script here (`exec1-`, `pg-`, `builder-`) leans
+  on `sudo`, so if sudo is absent or cloud-init didn't grant it, ALL three
+  provisioners fail at the first `sudo` call. If that happens the fix is to
+  add a `user-data` block to each VM in VMFile.kdl with an
+  illumos-appropriate admin grant (RBAC `Primary Administrator` profile via
+  `profiles`, or `root` login) instead of relying on the Debian-shaped
+  auto-config. Recorded here so the next runner recognizes the signature
+  fast rather than re-diagnosing it.
 
 ## Native build results
 
