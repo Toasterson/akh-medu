@@ -5,7 +5,7 @@
 > Phase: 27
 > Depends on: Phase 26 (Candle backend, neural bridge)
 > Enhances: Phase 33 (Grounded Verbalization), Phase 32 (Knowledge Extraction)
-> ADR: [047-live-training](../decisions/047-live-training.md)
+> ADR: [058-live-training](../decisions/058-live-training.md)
 
 ## Motivation
 

@@ -17,6 +17,8 @@ pub mod calendar;
 pub mod causal;
 pub mod channel;
 pub mod counterfactual;
+pub mod agentic_chat;
+pub mod chat_backend;
 pub mod event_calculus;
 pub mod channel_message;
 pub mod chat;
@@ -26,6 +28,7 @@ pub mod contact_memory;
 pub mod contact_rel;
 pub mod contact_style;
 pub mod constraint_check;
+pub mod context;
 pub mod conversation;
 pub mod credibility;
 pub mod chunking;
@@ -66,6 +69,7 @@ pub mod ooda;
 pub mod ollama;
 pub mod openclaw;
 pub mod output;
+pub mod permission;
 pub mod pim;
 pub mod plan;
 pub mod plan_monitor;
@@ -73,6 +77,7 @@ pub mod preference;
 pub mod priority_reasoning;
 pub mod project;
 pub mod reflect;
+pub mod relation_enrichment;
 pub mod resource;
 pub mod semantic_enrichment;
 pub mod sleep;
@@ -226,7 +231,7 @@ pub use semantic_enrichment::{EnrichmentResult, SemanticPredicates};
 pub use mcts::{MctsConfig, MctsNode, MctsPlanner, MctsReflection, MctsResult, prune_tree};
 pub use model_manager::{
     AgentModelManager, ModelManagerConfig, ModelManagerError, ModelManagerResult,
-    build_system_prompt,
+    PromptMode, build_system_prompt, detect_prompt_mode,
 };
 pub use ollama::{OllamaClient, OllamaConfig, OllamaError, OllamaResult};
 pub use sleep::{ConsolidationPhase, SleepConfig, SleepCycle, SleepMetrics};

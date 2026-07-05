@@ -1,0 +1,136 @@
+name: Release
+# Cut a release by pushing a tag:  git tag v0.7.0 && git push origin v0.7.0
+# (matches release.toml's tag-name = "v{{version}}").
+#
+# Produces, for tag vX.Y.Z:
+#   * docker images akh / akhomed / seshd  :vX.Y.Z + :latest  (Forgejo registry)
+#   * a Linux x86_64 tarball (binaries + systemd units + install.sh)
+#   * an illumos IPS .p5p package (binaries + SMF manifests), built natively
+# The tarball and .p5p are attached to the Forgejo Release for the tag.
+#
+# AUTH: pushes reuse Solstice's boot-time docker auto-auth (REGISTRY_TOKEN /
+# REGISTRY_USERNAME). Release-asset uploads call the Forgejo API and need a
+# token with `write:repository` in the runner environment — REGISTRY_TOKEN
+# works if its scope includes write:repository, otherwise set RELEASE_TOKEN.
+# (Tokens are read from the ambient VM env, NOT via `${{ secrets }}` templating,
+# which Solstice does not reliably substitute inside step env: blocks.)
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  # ── Linux: build & push the three container images ──────────────────────
+  images:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Build & push images
+        run: |
+          set -eu
+          # Inline (not workflow env:) — Solstice does not reliably inject
+          # workflow-level env into the step shell. Mirrors ci.yml.
+          REGISTRY=code.aopc.cloud/toasterson
+          export DOCKER_BUILDKIT=1
+          TAG=$(sh .forgejo/scripts/resolve-tag.sh)
+          [ -n "$TAG" ] || { echo "could not resolve release tag" >&2; exit 1; }
+          echo "releasing $TAG"
+          for img in akh akhomed seshd; do
+            case "$img" in
+              akh)     DF=docker/akh.Dockerfile ;;
+              akhomed) DF=docker/akhomed.Dockerfile ;;
+              seshd)   DF=docker/seshd.Dockerfile ;;
+            esac
+            echo "==> building $img from $DF"
+            docker build -f "$DF" \
+              -t "$REGISTRY/$img:$TAG" \
+              -t "$REGISTRY/$img:latest" .
+            docker push "$REGISTRY/$img:$TAG"
+            # :latest is mutable; a non-200 re-push of an existing digest is non-fatal.
+            docker push "$REGISTRY/$img:latest" || \
+              echo "non-fatal: latest tag push for $img returned non-zero"
+          done
+
+  # ── Linux: tarball assembled from the images (no recompile → no OOM) ─────
+  linux-tarball:
+    runs-on: ubuntu-22.04
+    needs: images
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Extract binaries & assemble tarball
+        run: |
+          set -eu
+          REGISTRY=code.aopc.cloud/toasterson
+          TAG=$(sh .forgejo/scripts/resolve-tag.sh)
+          [ -n "$TAG" ] || { echo "could not resolve release tag" >&2; exit 1; }
+          mkdir -p bin lib dist
+          for img in akh akhomed seshd; do
+            docker pull "$REGISTRY/$img:$TAG"
+            cid=$(docker create "$REGISTRY/$img:$TAG")
+            docker cp "$cid:/usr/local/bin/$img" "bin/$img"
+            docker rm "$cid" >/dev/null
+          done
+          # onnxruntime ships with the akhomed image (nlu-ml); bundle it for
+          # bare-metal Linux installs.
+          cid=$(docker create "$REGISTRY/akhomed:$TAG")
+          docker cp "$cid:/usr/local/lib/." lib/ 2>/dev/null || true
+          docker rm "$cid" >/dev/null
+          sh packaging/build-linux-tarball.sh \
+            --version "${TAG#v}" --bindir bin --libdir lib --arch x86_64 --outdir dist
+          # cargo-binstall artifact for the lean akh client (binary at archive
+          # root; the akh image is built --no-default-features --features client).
+          sh packaging/build-binstall-archive.sh \
+            --version "${TAG#v}" --target x86_64-unknown-linux-gnu --bin bin/akh --outdir dist
+      - name: Upload to Forgejo Release
+        run: |
+          set -eu
+          TAG=$(sh .forgejo/scripts/resolve-tag.sh)
+          for f in dist/*; do
+            [ -f "$f" ] && sh .forgejo/scripts/forgejo-release.sh upload "$TAG" "$f"
+          done
+
+  # ── illumos: native build + IPS package ─────────────────────────────────
+  # Requires a Forgejo act_runner registered on an illumos host with the
+  # `illumos` label and the pkg(5) toolchain + a Rust toolchain installed.
+  illumos-pkg:
+    runs-on: illumos
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Build binaries (ORT-free, candle backend only)
+        run: |
+          set -eu
+          . "$HOME/.cargo/env" 2>/dev/null || true
+          # Bound peak memory; raise on a roomier host.
+          export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-2}"
+          # akh: lean client (ACP transport only, no nlu-candle/onnxruntime).
+          cargo build --release --no-default-features --features client --bin akh
+          # akhomed: daemon feature set; `server` keeps default nlu-candle but
+          # pulls no nlu-ml/ORT.
+          cargo build --release --features server --bin akhomed
+          # seshd: synthesis only (drop `embedding`, which needs onnxruntime).
+          cargo build --release -p seshat --bin seshd \
+            --no-default-features --features synthesis
+      - name: Build IPS package + binstall archive
+        run: |
+          set -eu
+          TAG=$(sh .forgejo/scripts/resolve-tag.sh)
+          [ -n "$TAG" ] || { echo "could not resolve release tag" >&2; exit 1; }
+          sh packaging/illumos/build-ips.sh \
+            --version "${TAG#v}" --bindir target/release --outdir dist
+          # cargo-binstall artifact for the lean akh client on illumos.
+          sh packaging/build-binstall-archive.sh \
+            --version "${TAG#v}" --target x86_64-unknown-illumos \
+            --bin target/release/akh --outdir dist
+      - name: Upload to Forgejo Release
+        run: |
+          set -eu
+          TAG=$(sh .forgejo/scripts/resolve-tag.sh)
+          for f in dist/*; do
+            [ -f "$f" ] && sh .forgejo/scripts/forgejo-release.sh upload "$TAG" "$f"
+          done

@@ -109,7 +109,13 @@ pub fn build_kg_context(
     }
 
     let t0 = std::time::Instant::now();
-    let context = compute_kg_context(engine, &keywords);
+    let triples = collect_relevant_triples(engine, &keywords);
+    let context = if triples.is_empty() {
+        None
+    } else {
+        let texts: Vec<String> = triples.into_iter().map(|(_, t)| t).collect();
+        Some(format_context_block(&texts))
+    };
     tracing::debug!(
         keywords = ?keywords,
         elapsed_ms = t0.elapsed().as_millis(),
@@ -120,6 +126,39 @@ pub fn build_kg_context(
     // Cache the result (empty string for negative results, avoids re-querying).
     cache.insert(cache_key, context.clone().unwrap_or_default());
     context
+}
+
+/// Build a KG context block of only the facts **not yet shown this session** (44d).
+///
+/// Identical relevance retrieval to [`build_kg_context`], but each triple already
+/// recorded in `seen` is omitted and every newly-emitted triple is inserted into
+/// `seen`. On the first turn this is the full block; on later turns it is the
+/// *delta* — the activation frontier that moved — so unchanged facts the model
+/// already holds in its (large-window) history aren't re-sent. Returns `None`
+/// when no relevant facts, or when every relevant fact was already shown.
+///
+/// Caveat (documented, follow-up): if recent history is later evicted under tight
+/// budget, an already-shown fact won't be re-injected. Safe while windows are
+/// large (the measure-first finding); revisit alongside history summarisation.
+pub fn build_kg_context_delta(
+    engine: &Engine,
+    input: &str,
+    seen: &mut std::collections::HashSet<(u64, u64, u64)>,
+) -> Option<String> {
+    let keywords = extract_keywords(input);
+    if keywords.is_empty() {
+        return None;
+    }
+    let fresh: Vec<String> = collect_relevant_triples(engine, &keywords)
+        .into_iter()
+        .filter(|(key, _)| seen.insert(*key))
+        .map(|(_, text)| text)
+        .collect();
+    if fresh.is_empty() {
+        None
+    } else {
+        Some(format_context_block(&fresh))
+    }
 }
 
 // ── Internal helpers ───────────────────────────────────────────────────────
@@ -172,13 +211,17 @@ fn is_stop_word(word: &str) -> bool {
     STOP_WORDS.contains(&lower.as_str())
 }
 
-/// Compute KG context by resolving keywords → symbols → triples.
-fn compute_kg_context(engine: &Engine, keywords: &[String]) -> Option<String> {
-    let mut triple_texts: Vec<String> = Vec::new();
+/// Collect KG context by resolving keywords → symbols → triples.
+///
+/// Returns up to [`MAX_TRIPLES`] `((subject, predicate, object), "s p o")` pairs,
+/// deduplicated. The key lets callers do session-level delta filtering (44d);
+/// [`build_kg_context`] just formats the texts.
+fn collect_relevant_triples(engine: &Engine, keywords: &[String]) -> Vec<((u64, u64, u64), String)> {
+    let mut triples: Vec<((u64, u64, u64), String)> = Vec::new();
     let mut seen: HashSet<(u64, u64, u64)> = HashSet::new();
 
     for keyword in keywords {
-        if triple_texts.len() >= MAX_TRIPLES {
+        if triples.len() >= MAX_TRIPLES {
             break;
         }
 
@@ -192,65 +235,59 @@ fn compute_kg_context(engine: &Engine, keywords: &[String]) -> Option<String> {
             Err(_) => continue,
         };
 
-        collect_triples(engine, seed_sym, &mut triple_texts, &mut seen);
+        collect_triples(engine, seed_sym, &mut triples, &mut seen);
 
-        if triple_texts.len() >= MAX_TRIPLES {
+        if triples.len() >= MAX_TRIPLES {
             break;
         }
 
         // VSA similarity search: expand to related symbols.
         if let Ok(similar) = engine.search_similar_to(seed_sym, TOP_K_SIMILAR) {
             for sr in similar {
-                if triple_texts.len() >= MAX_TRIPLES {
+                if triples.len() >= MAX_TRIPLES {
                     break;
                 }
                 // Skip very low-similarity matches (noise threshold).
                 if sr.similarity < 0.05 {
                     continue;
                 }
-                collect_triples(engine, sr.symbol_id, &mut triple_texts, &mut seen);
+                collect_triples(engine, sr.symbol_id, &mut triples, &mut seen);
             }
         }
     }
 
-    if triple_texts.is_empty() {
-        return None;
-    }
-
-    Some(format_context_block(&triple_texts))
+    triples
 }
 
-/// Append formatted triples for `symbol` to `out`, respecting the dedup set.
+/// Append keyed triples for `symbol` to `out`, respecting the dedup set.
 ///
 /// Collects up to `TRIPLES_PER_SYMBOL` outgoing triples and up to
 /// `TRIPLES_PER_SYMBOL` incoming triples.
 fn collect_triples(
     engine: &Engine,
     symbol: SymbolId,
-    out: &mut Vec<String>,
+    out: &mut Vec<((u64, u64, u64), String)>,
     seen: &mut HashSet<(u64, u64, u64)>,
 ) {
-    for t in engine.triples_from(symbol).iter().take(TRIPLES_PER_SYMBOL) {
+    let mut push = |t: &crate::graph::Triple, out: &mut Vec<((u64, u64, u64), String)>| {
         let key = (t.subject.get(), t.predicate.get(), t.object.get());
         if seen.insert(key) {
-            out.push(format!(
-                "{} {} {}",
-                engine.resolve_label(t.subject),
-                engine.resolve_label(t.predicate),
-                engine.resolve_label(t.object),
+            out.push((
+                key,
+                format!(
+                    "{} {} {}",
+                    engine.resolve_label(t.subject),
+                    engine.resolve_label(t.predicate),
+                    engine.resolve_label(t.object),
+                ),
             ));
         }
+    };
+    for t in engine.triples_from(symbol).iter().take(TRIPLES_PER_SYMBOL) {
+        push(t, out);
     }
     for t in engine.triples_to(symbol).iter().take(TRIPLES_PER_SYMBOL) {
-        let key = (t.subject.get(), t.predicate.get(), t.object.get());
-        if seen.insert(key) {
-            out.push(format!(
-                "{} {} {}",
-                engine.resolve_label(t.subject),
-                engine.resolve_label(t.predicate),
-                engine.resolve_label(t.object),
-            ));
-        }
+        push(t, out);
     }
 }
 
@@ -381,5 +418,25 @@ mod tests {
         // Can test without an engine: keyword extraction returns empty.
         let kws = extract_keywords("what are the and for");
         assert!(kws.is_empty());
+    }
+
+    #[test]
+    fn delta_emits_each_fact_once_per_session() {
+        use crate::engine::{Engine, EngineConfig};
+        use crate::graph::Triple;
+
+        let engine = Engine::new(EngineConfig::default()).unwrap();
+        let rust = engine.resolve_or_create_entity("rustlang").unwrap();
+        let prop = engine.resolve_or_create_entity("has-property").unwrap();
+        let safe = engine.resolve_or_create_entity("memory-safe").unwrap();
+        engine.add_triple(&Triple::new(rust, prop, safe)).unwrap();
+
+        let mut seen = std::collections::HashSet::new();
+        // First turn: the fact is delivered.
+        let first = build_kg_context_delta(&engine, "tell me about rustlang", &mut seen);
+        assert!(first.as_deref().unwrap_or("").contains("memory-safe"), "first turn delivers the fact");
+        // Second turn, same topic: already shown ⇒ nothing new.
+        let second = build_kg_context_delta(&engine, "tell me about rustlang", &mut seen);
+        assert!(second.is_none(), "already-shown fact is not re-sent: {second:?}");
     }
 }

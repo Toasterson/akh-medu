@@ -1,0 +1,42 @@
+#!/bin/sh
+#
+# SMF start method for svc:/application/akh-medu/akhomed.
+# Installed to /lib/svc/method/akhomed (mode 0555).
+#
+# The daemon is environment-driven; this script translates the SMF `config/*`
+# property group into the AKH_SERVER_* env the binary reads, then execs it in
+# the foreground so startd manages it as a contract process.
+
+. /lib/svc/share/smf_include.sh
+
+BIN=/opt/akh-medu/bin/akhomed
+
+if [ ! -x "$BIN" ]; then
+	echo "akhomed binary not found or not executable at $BIN" >&2
+	exit "$SMF_EXIT_ERR_CONFIG"
+fi
+
+# Network bind/port from the config/* property group (default 127.0.0.1:8200,
+# tunable via `svccfg setprop config/...`). If a prop is deleted (svccfg
+# delprop) the lookup is empty and we fall through to the binary's own
+# default (0.0.0.0:8200).
+bind=$(svcprop -p config/bind "$SMF_FMRI" 2>/dev/null)
+port=$(svcprop -p config/port "$SMF_FMRI" 2>/dev/null)
+if [ -n "$bind" ] && [ "$bind" != '""' ]; then
+	AKH_SERVER_BIND="$bind"
+	export AKH_SERVER_BIND
+fi
+if [ -n "$port" ] && [ "$port" != '""' ]; then
+	AKH_SERVER_PORT="$port"
+	export AKH_SERVER_PORT
+fi
+
+case "$1" in
+start)
+	exec "$BIN"
+	;;
+*)
+	echo "usage: $0 start" >&2
+	exit "$SMF_EXIT_ERR_CONFIG"
+	;;
+esac

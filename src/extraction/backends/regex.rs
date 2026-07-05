@@ -191,8 +191,16 @@ mod tests {
     #[test]
     fn extract_is_a() {
         let triples = extract_regex("The pyramid is a structure. The temple is a building.");
-        assert!(triples.iter().any(|t| t.subject == "pyramid" && t.object == "structure"));
-        assert!(triples.iter().any(|t| t.subject == "temple" && t.object == "building"));
+        assert!(
+            triples
+                .iter()
+                .any(|t| t.subject == "pyramid" && t.object == "structure")
+        );
+        assert!(
+            triples
+                .iter()
+                .any(|t| t.subject == "temple" && t.object == "building")
+        );
     }
 
     #[test]

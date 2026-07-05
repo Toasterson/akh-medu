@@ -81,6 +81,152 @@ pub struct AkhomedConfig {
     /// Upstream MCP service endpoints (anima, seshat).
     #[serde(default)]
     pub upstreams: UpstreamsSection,
+
+    /// ACP (Agent Client Protocol) transport settings.
+    #[serde(default)]
+    pub acp: AcpSection,
+
+    /// Phase 38: Postgres backing store. When absent, the daemon runs in legacy
+    /// local-only mode (oxigraph + redb on disk, no WAL / relocation).
+    #[serde(default)]
+    pub postgres: Option<PostgresConfig>,
+}
+
+/// ACP transport configuration. Effective only when the daemon is built with the
+/// `acp` feature. By default the Unix socket is served and TCP is disabled.
+///
+/// Example TOML:
+/// ```toml
+/// [acp]
+/// unix = true
+/// # socket_path = "/run/akh-medu/akhomed-acp.sock"  # default: {runtime_dir}/akhomed-acp.sock
+/// tcp_bind = "127.0.0.1"
+/// tcp_port = 8201
+/// # workspace = "default"   # default: first auto_start workspace, else "default"
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AcpSection {
+    /// Serve ACP over a Unix domain socket (default `true`).
+    #[serde(default = "default_acp_unix")]
+    pub unix: bool,
+    /// Override the Unix socket path. `None` ⇒ `{runtime_dir}/akhomed-acp.sock`.
+    #[serde(default)]
+    pub socket_path: Option<String>,
+    /// TCP bind host for ACP, e.g. `"127.0.0.1"`. Requires `tcp_port`.
+    #[serde(default)]
+    pub tcp_bind: Option<String>,
+    /// TCP port for ACP. `None` disables the TCP listener.
+    #[serde(default)]
+    pub tcp_port: Option<u16>,
+    /// Workspace (akh) the ACP server binds to. `None` ⇒ first auto-start
+    /// workspace, falling back to `"default"`.
+    #[serde(default)]
+    pub workspace: Option<String>,
+}
+
+impl Default for AcpSection {
+    fn default() -> Self {
+        Self {
+            unix: default_acp_unix(),
+            socket_path: None,
+            tcp_bind: None,
+            tcp_port: None,
+            workspace: None,
+        }
+    }
+}
+
+fn default_acp_unix() -> bool {
+    true
+}
+
+impl AcpSection {
+    /// Resolved TCP bind address (`host:port`) if TCP serving is enabled.
+    /// Requires `tcp_port`; the host defaults to `127.0.0.1` when only the port
+    /// is set.
+    pub fn tcp_addr(&self) -> Option<String> {
+        let port = self.tcp_port?;
+        let host = self.tcp_bind.as_deref().unwrap_or("127.0.0.1");
+        Some(format!("{host}:{port}"))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Postgres backing store (Phase 38)
+// ---------------------------------------------------------------------------
+
+/// PostgreSQL backing-store configuration.
+///
+/// Example TOML:
+/// ```toml
+/// [postgres]
+/// url = "postgres://akh:akh@postgres-ha.cluster:5432/akhmedu"
+/// pool_size = 10
+/// connect_timeout_secs = 10
+/// migrate_on_start = true
+/// ```
+///
+/// `DATABASE_URL` in the environment overrides `url` at startup (useful for
+/// Kubernetes secret injection), mirroring Seshat's behaviour.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PostgresConfig {
+    /// Connection URL, e.g. `postgres://user:pass@host:5432/akhmedu`.
+    pub url: String,
+
+    /// Maximum number of pooled connections.
+    #[serde(default = "default_pg_pool_size")]
+    pub pool_size: u32,
+
+    /// Timeout, in seconds, for establishing a new connection.
+    #[serde(default = "default_pg_connect_timeout_secs")]
+    pub connect_timeout_secs: u64,
+
+    /// Run pending migrations automatically on daemon start.
+    #[serde(default)]
+    pub migrate_on_start: bool,
+
+    /// Phase 38b WAL: seconds between mutation-log flush attempts.
+    #[serde(default = "default_wal_flush_interval_secs")]
+    pub wal_flush_interval_secs: u64,
+
+    /// Phase 38b WAL: maximum rows per flush transaction.
+    #[serde(default = "default_wal_batch_size")]
+    pub wal_batch_size: usize,
+
+    /// Phase 38b WAL: in-memory buffer cap in mebibytes before the overflow
+    /// drop policy applies.
+    #[serde(default = "default_wal_max_buffer_mb")]
+    pub wal_max_buffer_mb: usize,
+
+    /// Phase 38c snapshot: seconds between automatic per-workspace snapshots of
+    /// the akh's relational state to Postgres. `0` disables the periodic
+    /// snapshot (a final snapshot on shutdown still runs). Default: 300 (5 min).
+    #[serde(default = "default_snapshot_interval_secs")]
+    pub snapshot_interval_secs: u64,
+}
+
+fn default_pg_pool_size() -> u32 {
+    10
+}
+
+fn default_pg_connect_timeout_secs() -> u64 {
+    10
+}
+
+fn default_wal_flush_interval_secs() -> u64 {
+    2
+}
+
+fn default_wal_batch_size() -> usize {
+    64
+}
+
+fn default_wal_max_buffer_mb() -> usize {
+    16
+}
+
+fn default_snapshot_interval_secs() -> u64 {
+    300
 }
 
 // ---------------------------------------------------------------------------
@@ -142,7 +288,8 @@ impl UpstreamEndpointConfig {
 pub struct DaemonSection {
     /// Workspaces to auto-start daemons for on boot.
     ///
-    /// Defaults to `["default"]`. Set to empty list to disable auto-start.
+    /// Defaults to `[]` (P5: a fresh akh runs no background daemon). Add a
+    /// workspace name to opt in, or override via `AKH_AUTO_START` / `--auto-start`.
     #[serde(default = "default_auto_start")]
     pub auto_start: Vec<String>,
 
@@ -166,7 +313,8 @@ impl Default for DaemonSection {
 }
 
 fn default_auto_start() -> Vec<String> {
-    vec!["default".into()]
+    // P5: off by default — no workspace auto-starts a background daemon.
+    Vec::new()
 }
 
 /// Optional overrides for daemon task intervals (all in seconds).
@@ -248,6 +396,7 @@ impl DaemonSection {
                 .map_or(defaults.knowledge_elicitation_interval, Duration::from_secs),
             kg_compaction_interval: defaults.kg_compaction_interval,
             delegation_interval: defaults.delegation_interval,
+            relation_enrichment_interval: defaults.relation_enrichment_interval,
             max_cycles: self.max_cycles,
         }
     }
@@ -316,7 +465,7 @@ mod tests {
         let config = AkhomedConfig::default();
         let toml_str = toml::to_string_pretty(&config).unwrap();
         let parsed: AkhomedConfig = toml::from_str(&toml_str).unwrap();
-        assert_eq!(parsed.daemon.auto_start, vec!["default".to_string()]);
+        assert!(parsed.daemon.auto_start.is_empty(), "P5: auto_start is empty by default");
         assert_eq!(parsed.daemon.max_cycles, 0);
     }
 
@@ -352,7 +501,7 @@ auto_start = []
     #[test]
     fn load_nonexistent_returns_defaults() {
         let config = AkhomedConfig::load(Path::new("/tmp/akh-does-not-exist.toml")).unwrap();
-        assert_eq!(config.daemon.auto_start, vec!["default".to_string()]);
+        assert!(config.daemon.auto_start.is_empty(), "P5: auto_start is empty by default");
     }
 
     #[test]
@@ -379,6 +528,49 @@ url = "http://seshat.local:4200"
         let config = AkhomedConfig::default();
         assert!(config.upstreams.anima.is_none());
         assert!(config.upstreams.seshat.is_none());
+    }
+
+    #[test]
+    fn postgres_section_parses_with_defaults() {
+        let toml_str = r#"
+[postgres]
+url = "postgres://akh:pw@db.local:5432/akhmedu"
+"#;
+        let config: AkhomedConfig = toml::from_str(toml_str).unwrap();
+        let pg = config.postgres.as_ref().unwrap();
+        assert_eq!(pg.url, "postgres://akh:pw@db.local:5432/akhmedu");
+        assert_eq!(pg.pool_size, 10);
+        assert_eq!(pg.connect_timeout_secs, 10);
+        assert!(!pg.migrate_on_start);
+        // Phase 38b WAL defaults.
+        assert_eq!(pg.wal_flush_interval_secs, 2);
+        assert_eq!(pg.wal_batch_size, 64);
+        assert_eq!(pg.wal_max_buffer_mb, 16);
+    }
+
+    #[test]
+    fn postgres_section_honours_overrides() {
+        let toml_str = r#"
+[postgres]
+url = "postgres://db/akh"
+pool_size = 25
+connect_timeout_secs = 5
+migrate_on_start = true
+"#;
+        let config: AkhomedConfig = toml::from_str(toml_str).unwrap();
+        let pg = config.postgres.as_ref().unwrap();
+        assert_eq!(pg.pool_size, 25);
+        assert_eq!(pg.connect_timeout_secs, 5);
+        assert!(pg.migrate_on_start);
+    }
+
+    #[test]
+    fn postgres_section_absent_means_local_only() {
+        let config = AkhomedConfig::default();
+        assert!(config.postgres.is_none());
+        // A config with only a [daemon] section must still parse with no [postgres].
+        let config: AkhomedConfig = toml::from_str("[daemon]\nauto_start = []\n").unwrap();
+        assert!(config.postgres.is_none());
     }
 
     #[test]

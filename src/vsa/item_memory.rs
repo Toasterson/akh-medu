@@ -287,6 +287,84 @@ impl ItemMemory {
             self.insert(sym, vec);
         }
     }
+
+    // ── Local-disk HNSW wake cache (Phase 38e) ───────────────────────────────
+    //
+    // We never persist the HNSW graph itself (`hnsw_rs`'s `Hnsw<'static, …>` has
+    // no first-class serialization and its lifetime ties it to the process —
+    // ADR 049). Instead we dump the bipolar *vectors* plus a schema fingerprint;
+    // a same-host cold wake replays them into a fresh HNSW in sub-second time. A
+    // missing/stale cache (dimension or encoding mismatch) falls back to a full
+    // rebuild from `akhomed.facts` — the caller re-grounds symbols and the index
+    // rebuilds. The cache is best-effort and safe to discard.
+
+    /// Dump the bipolar vectors + schema fingerprint to `path` (atomic rename).
+    pub fn dump_to_disk(&self, path: &std::path::Path) -> VsaResult<()> {
+        let entries: Vec<(u64, HyperVec)> = self
+            .vectors
+            .iter()
+            .map(|e| (e.key().get(), e.value().clone()))
+            .collect();
+        let cache = HnswDiskCache {
+            dim: self.dim.0,
+            encoding: self.encoding,
+            count: entries.len(),
+            entries,
+        };
+        let bytes = bincode::serialize(&cache).map_err(|e| VsaError::HnswError {
+            message: format!("HNSW cache encode: {e}"),
+        })?;
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let tmp = path.with_extension("tmp");
+        std::fs::write(&tmp, &bytes).map_err(|e| VsaError::HnswError {
+            message: format!("HNSW cache write: {e}"),
+        })?;
+        std::fs::rename(&tmp, path).map_err(|e| VsaError::HnswError {
+            message: format!("HNSW cache rename: {e}"),
+        })?;
+        Ok(())
+    }
+
+    /// Load an item memory from a same-host disk cache, rebuilding the HNSW from
+    /// the dumped vectors. Returns `None` (caller should rebuild from facts) when
+    /// the file is missing/corrupt or the schema fingerprint (dimension/encoding)
+    /// does not match the requested `dim`/`encoding`.
+    pub fn load_from_disk(
+        path: &std::path::Path,
+        dim: Dimension,
+        encoding: Encoding,
+    ) -> Option<Self> {
+        let bytes = std::fs::read(path).ok()?;
+        let cache: HnswDiskCache = bincode::deserialize(&bytes).ok()?;
+        if cache.dim != dim.0 || cache.encoding != encoding {
+            tracing::warn!(
+                cached_dim = cache.dim,
+                want_dim = dim.0,
+                "HNSW disk cache schema mismatch — rebuilding from facts"
+            );
+            return None;
+        }
+        let mem = Self::new(dim, encoding, cache.entries.len().max(64));
+        for (raw, vec) in cache.entries {
+            if let Some(sym) = SymbolId::new(raw) {
+                mem.insert(sym, vec);
+            }
+        }
+        Some(mem)
+    }
+}
+
+/// On-disk form of the HNSW wake cache: the bipolar vectors plus a schema
+/// fingerprint (dimension + encoding). The HNSW graph is *not* stored — it is
+/// rebuilt from these vectors on load (Phase 38e).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct HnswDiskCache {
+    dim: usize,
+    encoding: Encoding,
+    count: usize,
+    entries: Vec<(u64, HyperVec)>,
 }
 
 impl std::fmt::Debug for ItemMemory {
@@ -482,6 +560,35 @@ mod tests {
 
         mem.insert_batch(&ops, &syms);
         assert_eq!(mem.len(), 100);
+    }
+
+    #[test]
+    fn hnsw_disk_cache_roundtrip_and_fingerprint(/* Phase 38e */) {
+        let ops = test_ops();
+        let mem = ItemMemory::new(Dimension::TEST, Encoding::Bipolar, 200);
+        for i in 1..=20u64 {
+            mem.get_or_create(&ops, SymbolId::new(i).unwrap());
+        }
+        let path = std::env::temp_dir()
+            .join(format!("akh_hnsw_cache_test_{}.bin", std::process::id()));
+        mem.dump_to_disk(&path).unwrap();
+
+        // Same fingerprint → loads, vectors + HNSW search reconstructed.
+        let loaded = ItemMemory::load_from_disk(&path, Dimension::TEST, Encoding::Bipolar)
+            .expect("cache should load with matching fingerprint");
+        assert_eq!(loaded.len(), 20);
+        let sym = SymbolId::new(7).unwrap();
+        assert_eq!(loaded.get(sym), mem.get(sym), "vectors survive the round-trip");
+        let q = loaded.get(sym).unwrap();
+        let hits = loaded.search(&q, 3).unwrap();
+        assert!(hits.iter().any(|r| r.symbol_id == sym), "HNSW rebuilt from cache");
+
+        // Mismatched dimension → None (caller rebuilds from facts).
+        assert!(
+            ItemMemory::load_from_disk(&path, Dimension(256), Encoding::Bipolar).is_none(),
+            "schema mismatch must fall back to rebuild"
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

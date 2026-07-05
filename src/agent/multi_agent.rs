@@ -335,6 +335,23 @@ pub enum AgentProtocolMessage {
         /// How many more delegations this instance can accept.
         available_capacity: usize,
     },
+
+    /// (Phase 38f) An akh announced it joined a shared workspace, so peers can
+    /// notice its arrival proactively rather than via a stale membership read.
+    WorkspaceJoin {
+        /// The workspace the akh joined.
+        workspace_id: String,
+        /// The joining akh's identity.
+        akh_id: String,
+    },
+
+    /// (Phase 38f) An akh announced it left a shared workspace.
+    WorkspaceLeave {
+        /// The workspace the akh left.
+        workspace_id: String,
+        /// The departing akh's identity.
+        akh_id: String,
+    },
 }
 
 /// Outcome of a peer-delegated task.

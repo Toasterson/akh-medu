@@ -143,6 +143,17 @@ impl ChatProcessor {
             return self.dispatch_structural(intent, trimmed, agent, engine);
         }
 
+        // ── Polar (yes/no) + relational-wh fast-path (read-only KG) ─────
+        // Answer "Is/Are X Y?" and "Where is X?" / "What is X in?" straight from
+        // a bounded transitive KG walk — instant, no LLM, no writes — before NLU
+        // can fall to the slow LLM tier and mis-store the question as a fact.
+        if let Some(msgs) = self.try_answer_polar(engine, trimmed) {
+            return msgs;
+        }
+        if let Some(msgs) = self.try_answer_wh_relational(engine, trimmed) {
+            return msgs;
+        }
+
         // ── ELIZA routing — classify before NLU ─────────────────────
         // Creative/open-ended queries bypass the KG path and go to the LLM
         // with KG-fact context injected. Factual queries continue to the NLU
@@ -280,7 +291,20 @@ impl ChatProcessor {
 
             // ── Assertable structures (triples, compounds) ──────────
             tree if tree.is_assertable() => {
-                msgs.extend(self.ingest_as_fact(raw_input, engine, "nlu_parse"));
+                // Prefer asserting the parsed AbsTree directly (reuses the
+                // high-quality NLU parse) over re-running the lossy regex
+                // ingester; fall back to text ingest only if nothing landed.
+                let asserted = Self::assert_abstree_triples(tree, engine, 0.9);
+                if asserted > 0 {
+                    let plural = if asserted == 1 { "" } else { "s" };
+                    msgs.push(AkhMessage::tool_result(
+                        "nlu_assert",
+                        true,
+                        format!("Learned {asserted} fact{plural}."),
+                    ));
+                } else {
+                    msgs.extend(self.ingest_as_fact(raw_input, engine, "nlu_parse"));
+                }
             }
 
             // ── Free-form text that parsed but isn't assertable ─────
@@ -725,8 +749,14 @@ impl ChatProcessor {
                     agent.conversation_state_mut().active_topic = Some(sym_id);
                 }
 
-                for akh_msg in out_msg.to_akh_messages() {
-                    msgs.push(akh_msg);
+                // Conversational boundary: rephrase the grounded answer into
+                // natural chat prose if a verbalizer (Candle) is loaded,
+                // constrained to the grounded content. Falls back to the
+                // rendered messages.
+                if !self.maybe_verbalize(msgs, engine, original_input, &rendered) {
+                    for akh_msg in out_msg.to_akh_messages() {
+                        msgs.push(akh_msg);
+                    }
                 }
                 if !out_msg.constraint_check.is_passed() {
                     msgs.push(AkhMessage::system(
@@ -858,6 +888,12 @@ impl ChatProcessor {
                         // Log as NLG training pair (Phase 27f).
                         let tree_desc = format!("{discourse_tree:?}");
                         self.nlu_pipeline.log_nlg_pair(&tree_desc, &prose, grammar);
+                        // Conversational boundary: if a verbalizer (Candle) is
+                        // available, rephrase the grounded prose into chat-like
+                        // text; otherwise emit the grammar prose directly.
+                        if self.maybe_verbalize(msgs, engine, original_input, &prose) {
+                            return;
+                        }
                         msgs.push(AkhMessage::narrative(&prose, grammar));
                         return;
                     }
@@ -872,6 +908,20 @@ impl ChatProcessor {
             engine,
             grammar,
         );
+        // Conversational boundary: verbalize the grounded summary if a
+        // verbalizer (Candle) is available, else emit the synthesized summary.
+        let mut facts_text = summary.overview.clone();
+        for section in &summary.sections {
+            if !section.prose.is_empty() {
+                if !facts_text.is_empty() {
+                    facts_text.push('\n');
+                }
+                facts_text.push_str(&section.prose);
+            }
+        }
+        if self.maybe_verbalize(msgs, engine, original_input, &facts_text) {
+            return;
+        }
         self.push_summary(msgs, &summary, grammar);
     }
 
@@ -1275,7 +1325,7 @@ impl ChatProcessor {
     ) -> Vec<AkhMessage> {
         use crate::agent::tool::Tool;
         let tool_input = crate::agent::ToolInput::new().with_param("text", text);
-        match crate::agent::tools::TextIngestTool.execute(engine, tool_input) {
+        match crate::agent::tools::TextIngestTool::default().execute(engine, tool_input) {
             Ok(output) => {
                 vec![AkhMessage::tool_result(tool_label, output.success, &output.result)]
             }
@@ -1394,7 +1444,10 @@ impl ChatProcessor {
     }
 
     /// Extract persona name and traits from the engine's Psyche compartment.
-    fn persona_name_and_traits(engine: &Engine) -> (String, Vec<String>) {
+    ///
+    /// Public so UIs (e.g. the TUI chat) can label assistant turns with the
+    /// engine's persona name.
+    pub fn persona_name_and_traits(engine: &Engine) -> (String, Vec<String>) {
         engine
             .compartments()
             .and_then(|cm| cm.psyche())
@@ -1403,6 +1456,180 @@ impl ChatProcessor {
                 // Default Psyche name is "Scholar" — "Akh" is the species, not the name.
                 ("Scholar".to_string(), vec!["precise".to_string(), "curious".to_string()])
             })
+    }
+
+    /// Answer a polar (yes/no) question read-only from the KG, before NLU.
+    ///
+    /// Intercepts "Is/Are/Does X …?" so the answer comes straight from a bounded
+    /// transitive KG walk (instant, no LLM, no writes) instead of falling to the
+    /// slow LLM tier and getting mis-stored as a provisional fact. Returns `None`
+    /// when `input` is not a polar question.
+    fn try_answer_polar(&self, engine: &Engine, input: &str) -> Option<Vec<AkhMessage>> {
+        let (subject, aux, object) = parse_polar_question(input)?;
+        let grammar = &self.config.grammar;
+        let text = match polar_verdict(engine, &subject, &object) {
+            PolarVerdict::Yes { direct } => {
+                if direct {
+                    format!("Yes, {subject} {aux} {object}.")
+                } else {
+                    // Held via a chain (e.g. dogs → mammals → animals).
+                    format!("Yes, {subject} {aux} {object} — by what I know.")
+                }
+            }
+            PolarVerdict::No => format!("No, {subject} {aux} not {object}."),
+            PolarVerdict::Unknown { subject_known } => {
+                if subject_known {
+                    format!(
+                        "Not that I know of — I don't have anything linking {subject} to {object}."
+                    )
+                } else {
+                    format!("I don't know about {subject} yet, so I can't say whether it {aux} {object}.")
+                }
+            }
+        };
+        Some(vec![AkhMessage::narrative(text, grammar)])
+    }
+
+    /// Answer a relational wh-question ("What is X in?", "Where is X?") by
+    /// walking the KG transitively (read-only). Returns `None` if `input` is not
+    /// such a question or the subject is unknown.
+    fn try_answer_wh_relational(&self, engine: &Engine, input: &str) -> Option<Vec<AkhMessage>> {
+        let subject = parse_wh_relational(input)?;
+        let grammar = &self.config.grammar;
+        let objs = transitive_object_labels(engine, &subject);
+        if objs.is_empty() {
+            // Subject unknown or no relations — let the normal query path try.
+            engine.resolve_symbol(&subject).ok()?;
+            return Some(vec![AkhMessage::narrative(
+                format!("I don't have anything on where {subject} is."),
+                grammar,
+            )]);
+        }
+        let objs: Vec<String> = objs.iter().map(|o| capitalize_first(o)).collect();
+        let list = humanize_list(&objs);
+        let subject = capitalize_first(&subject);
+        Some(vec![AkhMessage::narrative(
+            format!("{subject} is in {list}."),
+            grammar,
+        )])
+    }
+
+    /// Assert the triples in an already-parsed assertable [`AbsTree`] directly
+    /// into the KG, resolving entity/relation labels to symbols.
+    ///
+    /// This reuses the NLU parse (especially the high-quality LLM tier) instead
+    /// of re-running lossy regex extraction over the raw text — so teaching a
+    /// fact the parser understood actually lands in the graph. Returns the
+    /// number of triples asserted.
+    fn assert_abstree_triples(tree: &AbsTree, engine: &Engine, confidence: f32) -> usize {
+        match tree {
+            AbsTree::Triple {
+                subject,
+                predicate,
+                object,
+            } => {
+                let (Some(s), Some(p), Some(o)) =
+                    (subject.label(), predicate.label(), object.label())
+                else {
+                    return 0;
+                };
+                let (s, p, o) = (s.trim(), p.trim(), o.trim());
+                if s.is_empty() || p.is_empty() || o.is_empty() {
+                    return 0;
+                }
+                match crate::agent::tools::text_ingest::ingest_extracted(
+                    engine, s, p, o, confidence,
+                ) {
+                    Ok(_) => 1,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "assert_abstree: triple insert failed");
+                        0
+                    }
+                }
+            }
+            // Conjunctions assert each conjunct; disjunctions are ambiguous to assert.
+            AbsTree::Conjunction { items, is_and: true } => items
+                .iter()
+                .map(|i| Self::assert_abstree_triples(i, engine, confidence))
+                .sum(),
+            // Modifier wrappers: descend, honoring an explicit confidence.
+            AbsTree::WithConfidence { inner, confidence: c } => {
+                Self::assert_abstree_triples(inner, engine, *c)
+            }
+            AbsTree::WithProvenance { inner, .. }
+            | AbsTree::Modal { inner, .. }
+            | AbsTree::Temporal { inner, .. } => {
+                Self::assert_abstree_triples(inner, engine, confidence)
+            }
+            AbsTree::Quantified { scope, .. } => {
+                Self::assert_abstree_triples(scope, engine, confidence)
+            }
+            AbsTree::RelativeClause { clause, .. } => {
+                Self::assert_abstree_triples(clause, engine, confidence)
+            }
+            // Negation/Comparison/Conditional/Similarity carry semantics that a
+            // plain positive triple can't represent — leave those to the
+            // dedicated ingest path rather than asserting them incorrectly.
+            _ => 0,
+        }
+    }
+
+    /// Conversational output boundary: if a verbalizer (the Candle backend) is
+    /// loaded, rephrase the grounded `facts` into a natural, chat-like reply to
+    /// `question` and push it as the narrative. Returns `true` if it produced the
+    /// reply, `false` if the caller should fall back to the grammar prose.
+    ///
+    /// The verbalizer is constrained to `facts` (which come from the KG /
+    /// grammar), so this stays grounded — the LLM only changes phrasing, not
+    /// content. Opt out per-request with `AKH_LLM_VERBALIZE=0`.
+    fn maybe_verbalize(
+        &self,
+        msgs: &mut Vec<AkhMessage>,
+        engine: &Engine,
+        question: &str,
+        facts: &str,
+    ) -> bool {
+        if !self.nlu_pipeline.has_verbalizer() {
+            return false;
+        }
+        match std::env::var("AKH_LLM_VERBALIZE").as_deref() {
+            Ok("0") | Ok("off") | Ok("false") | Ok("no") => return false,
+            _ => {}
+        }
+        if facts.trim().is_empty() {
+            return false;
+        }
+        let (name, traits) = Self::persona_name_and_traits(engine);
+        // Channel-aware: surface the boundary LLM's reasoning (`thought`) as a
+        // collapsible trace distinct from the answer, rather than dropping it
+        // (ADR 069).
+        if let Some(stream) =
+            self.nlu_pipeline
+                .verbalize_channels(question, facts, &name, &traits)
+        {
+            let answer = stream.answer();
+            if !answer.trim().is_empty() {
+                Self::push_thoughts(msgs, &stream);
+                msgs.push(AkhMessage::narrative(answer.trim(), "conversational"));
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Push the boundary LLM's internal reasoning (if any) as a dim, collapsible
+    /// [`AkhMessage::Reasoning`] trace immediately before the answer narrative.
+    /// The Ctrl-R reasoning-collapse machinery folds it by default (ADR 069).
+    fn push_thoughts(msgs: &mut Vec<AkhMessage>, stream: &crate::nlu::channel::ChannelStream) {
+        if stream.has_thoughts() {
+            let thoughts = stream.thoughts();
+            if !thoughts.trim().is_empty() {
+                msgs.push(AkhMessage::Reasoning {
+                    step: thoughts,
+                    expression: None,
+                });
+            }
+        }
     }
 
     /// Get the label of the active dialogue topic (if any).
@@ -1514,6 +1741,290 @@ fn is_structural_command(text: &str) -> bool {
         || lower.starts_with("set detail ")
         || lower.starts_with("detail ")
         || lower.starts_with("list goals")
+}
+
+// ── Polar (yes/no) question handling ────────────────────────────────────────
+
+/// Verdict for a yes/no question, checked read-only against the KG.
+enum PolarVerdict {
+    /// The relation holds. `direct` is true if found on the subject itself,
+    /// false if reached through a transitive chain.
+    Yes { direct: bool },
+    /// A negation/contradiction holds.
+    No,
+    /// No supporting fact found. `subject_known` distinguishes "I have the
+    /// subject but no link" from "I don't know the subject at all".
+    Unknown { subject_known: bool },
+}
+
+/// Auxiliaries that open a yes/no question.
+const POLAR_AUX: &[&str] = &[
+    "is", "are", "was", "were", "am", "do", "does", "did", "can", "could",
+    "will", "would", "shall", "should", "has", "have", "had",
+];
+
+/// Prepositions that act as the relation in an "X <prep> Y" polar question.
+const POLAR_PREPS: &[&str] = &[
+    "in", "at", "on", "of", "into", "inside", "within", "from", "near", "under", "above",
+];
+
+fn is_polar_void(w: &str) -> bool {
+    matches!(w, "a" | "an" | "the")
+}
+
+/// Common irregular singular/plural pairs the simple `+s`/`-s` rule misses.
+const IRREGULAR_PLURALS: &[(&str, &str)] = &[
+    ("man", "men"),
+    ("woman", "women"),
+    ("person", "people"),
+    ("child", "children"),
+    ("foot", "feet"),
+    ("tooth", "teeth"),
+    ("mouse", "mice"),
+    ("goose", "geese"),
+    ("leaf", "leaves"),
+    ("life", "lives"),
+];
+
+/// Surface variants of `word` to try when matching/resolving KG labels —
+/// the word itself plus regular and irregular singular/plural forms. Lets
+/// "Socrates is a **man**" connect to "All **men** are mortal".
+fn inflect_variants(word: &str) -> Vec<String> {
+    let w = word.trim().to_lowercase();
+    if w.is_empty() {
+        return Vec::new();
+    }
+    let mut out = vec![w.clone()];
+    for (s, p) in IRREGULAR_PLURALS {
+        if w == *s {
+            out.push((*p).to_string());
+        } else if w == *p {
+            out.push((*s).to_string());
+        }
+    }
+    if let Some(stem) = w.strip_suffix("es") {
+        out.push(stem.to_string());
+    }
+    if let Some(stem) = w.strip_suffix('s') {
+        out.push(stem.to_string());
+    }
+    if !w.ends_with('s') {
+        out.push(format!("{w}s"));
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Parse a yes/no question into `(subject, auxiliary, object)`, or `None` if
+/// `input` is not a polar question. The auxiliary (e.g. "are", "is") is kept so
+/// the reply can be phrased with the question's own verb ("Yes, dogs are …").
+fn parse_polar_question(input: &str) -> Option<(String, String, String)> {
+    let lower = input.trim().to_lowercase();
+    let body = lower.strip_suffix('?')?; // must end with '?'
+    let mut toks: Vec<&str> = body.split_whitespace().collect();
+    if toks.is_empty() || !POLAR_AUX.contains(&toks[0]) {
+        return None;
+    }
+    let aux = toks.remove(0).to_string(); // drop + keep the auxiliary
+    let toks: Vec<&str> = toks.into_iter().filter(|w| !is_polar_void(w)).collect();
+    if toks.len() < 2 {
+        return None;
+    }
+    // Preposition split: "paris in europe" → subj="paris", obj="europe".
+    if let Some(pos) = toks.iter().position(|w| POLAR_PREPS.contains(w)) {
+        if pos > 0 && pos + 1 < toks.len() {
+            let subject = toks[..pos].join(" ");
+            let rel = toks[pos];
+            let object = toks[pos + 1..].join(" ");
+            if !subject.is_empty() && !object.is_empty() {
+                // Fold the preposition into the verb: "is in".
+                return Some((subject, format!("{aux} {rel}"), object));
+            }
+        }
+    }
+    // Copula form: "dogs reptiles" → subj="dogs", obj="reptiles".
+    Some((toks[0].to_string(), aux, toks[1..].join(" ")))
+}
+
+/// Read-only KG check: does `subject` relate to `object`? Bounded transitive
+/// walk over taxonomic/locative predicates; the object is matched on any
+/// predicate. No symbols or triples are created.
+fn polar_verdict(engine: &Engine, subject: &str, object: &str) -> PolarVerdict {
+    use std::collections::HashSet;
+    // Resolve the subject, tolerating singular/plural ("dog"↔"dogs", "man"↔"men").
+    let Some(subj_id) = inflect_variants(subject)
+        .iter()
+        .find_map(|v| engine.resolve_symbol(v).ok())
+    else {
+        return PolarVerdict::Unknown {
+            subject_known: false,
+        };
+    };
+    let obj_variants: HashSet<String> = inflect_variants(object).into_iter().collect();
+    let mut seen: HashSet<SymbolId> = HashSet::new();
+    let mut frontier = vec![subj_id];
+    let mut found_negation = false;
+
+    for depth in 0..5 {
+        let mut next = Vec::new();
+        for id in frontier.drain(..) {
+            if !seen.insert(id) {
+                continue;
+            }
+            for t in engine.triples_from(id) {
+                let pred = engine.resolve_label(t.predicate).to_lowercase();
+                let obj_label = engine.resolve_label(t.object).to_lowercase();
+                if obj_variants.contains(&obj_label) {
+                    if pred.contains("not") || pred.contains("negat") || pred.contains("opposite")
+                    {
+                        found_negation = true;
+                    } else {
+                        return PolarVerdict::Yes { direct: depth == 0 };
+                    }
+                }
+                if is_transitive_pred(&pred) {
+                    next.push(t.object);
+                    // Bridge singular/plural at intermediate hops (man → men),
+                    // so chains like Socrates→man, "men are mortal" connect.
+                    for v in inflect_variants(&obj_label) {
+                        if let Ok(vid) = engine.resolve_symbol(&v) {
+                            next.push(vid);
+                        }
+                    }
+                }
+            }
+        }
+        frontier = next;
+    }
+    if found_negation {
+        PolarVerdict::No
+    } else {
+        PolarVerdict::Unknown {
+            subject_known: true,
+        }
+    }
+}
+
+/// Parse a relational wh-question — "Where is X?" or "What is X <prep>?" —
+/// into its subject. Returns `None` for plain "What is X?" (handled by the
+/// normal query path) and for non-wh input.
+fn parse_wh_relational(input: &str) -> Option<String> {
+    let lower = input.trim().to_lowercase();
+    let body = lower.strip_suffix('?')?;
+    let toks: Vec<&str> = body.split_whitespace().collect();
+    if toks.len() < 3 {
+        return None;
+    }
+    let wh = toks[0];
+    if wh != "what" && wh != "where" {
+        return None;
+    }
+    if !POLAR_AUX.contains(&toks[1]) {
+        return None;
+    }
+    let mut body: Vec<&str> = toks[2..]
+        .iter()
+        .copied()
+        .filter(|w| !is_polar_void(w))
+        .collect();
+    let had_prep = body.last().is_some_and(|w| POLAR_PREPS.contains(w));
+    if had_prep {
+        body.pop();
+    }
+    if body.is_empty() {
+        return None;
+    }
+    // Only handle the relational forms here; plain "what is X?" → normal query.
+    if wh == "where" || had_prep {
+        Some(body.join(" "))
+    } else {
+        None
+    }
+}
+
+/// Collect the labels reachable from `subject` over transitive predicates
+/// (read-only), nearest first — for answering "What is X in?" / "Where is X?".
+fn transitive_object_labels(engine: &Engine, subject: &str) -> Vec<String> {
+    use std::collections::HashSet;
+    let Some(subj_id) = inflect_variants(subject)
+        .iter()
+        .find_map(|v| engine.resolve_symbol(v).ok())
+    else {
+        return Vec::new();
+    };
+    let subj_low = subject.trim().to_lowercase();
+    let mut seen: HashSet<SymbolId> = HashSet::new();
+    let mut out: Vec<String> = Vec::new();
+    let mut frontier = vec![subj_id];
+    for _ in 0..5 {
+        let mut next = Vec::new();
+        for id in frontier.drain(..) {
+            if !seen.insert(id) {
+                continue;
+            }
+            for t in engine.triples_from(id) {
+                let pred = engine.resolve_label(t.predicate).to_lowercase();
+                if !is_transitive_pred(&pred) {
+                    continue;
+                }
+                let lab = engine.resolve_label(t.object);
+                let low = lab.to_lowercase();
+                // Skip infrastructure labels and the subject's own forms.
+                if !lab.contains(':')
+                    && low != subj_low
+                    && !out.iter().any(|o| o.eq_ignore_ascii_case(&lab))
+                {
+                    out.push(lab.clone());
+                }
+                next.push(t.object);
+                for v in inflect_variants(&low) {
+                    if let Ok(vid) = engine.resolve_symbol(&v) {
+                        next.push(vid);
+                    }
+                }
+            }
+        }
+        frontier = next;
+    }
+    out
+}
+
+/// Capitalize the first character of `s` (for sentence-initial subjects).
+fn capitalize_first(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
+/// Join labels into a readable list: "France", "France and Europe",
+/// "A, B and C".
+fn humanize_list(items: &[String]) -> String {
+    match items {
+        [] => String::new(),
+        [a] => a.clone(),
+        [a, b] => format!("{a} and {b}"),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
+/// Predicates that are transitive enough to follow for chains like
+/// Paris→France→Europe or dog→mammal→animal.
+///
+/// Short copula/locative predicates are matched **exactly** (so "is"/"in"/"at"
+/// chain, but "consists"/"this" don't accidentally match); longer relational
+/// predicates are matched as substrings.
+fn is_transitive_pred(pred: &str) -> bool {
+    const EXACT: &[&str] = &[
+        "is", "isa", "are", "be", "in", "at", "on", "was", "were",
+    ];
+    const CONTAINS: &[&str] = &[
+        "is-a", "is a", "type", "kind", "subclass", "child-of", "instance",
+        "member", "part-of", "part of", "located", "within", "inside", "subset",
+    ];
+    EXACT.contains(&pred) || CONTAINS.iter().any(|p| pred.contains(p))
 }
 
 #[cfg(test)]

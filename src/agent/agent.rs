@@ -268,6 +268,14 @@ pub struct Agent {
     pub(crate) wasm_runtime: Option<super::wasm_runtime::WasmToolRuntime>,
     /// Per-agent model manager for local Gemma inference via Ollama (optional).
     pub(crate) model_manager: Option<std::sync::Arc<super::model_manager::AgentModelManager>>,
+    /// Alternative chat/agentic backing selected per-akh (ADR 070). When set,
+    /// `run_agentic_turn` drives this instead of wrapping `model_manager`
+    /// (Ollama). `None` ⇒ the Ollama path via `model_manager`.
+    pub(crate) chat_backend: Option<std::sync::Arc<dyn super::chat_backend::ChatBackend>>,
+    /// Working-context assembly strategy (Phase 44a, ADR 065). `None` ⇒ the
+    /// byte-identical pass-through manager (current behaviour). When set,
+    /// `run_agentic_turn` builds each prompt through it.
+    pub(crate) context_manager: Option<Box<dyn super::context::ContextManager>>,
     /// Delegation manager for offloading LLM-class tasks (Phase 36).
     #[cfg(feature = "delegation")]
     pub(crate) delegation_manager: super::delegation::DelegationManager,
@@ -290,22 +298,55 @@ impl Agent {
         registry.register(Box::new(tools::SimilaritySearchTool));
 
         // External world-interaction tools.
-        let scratch_dir = engine.config().data_dir.as_ref().map(|d| d.join("scratch"));
-        registry.register(Box::new(tools::FileIoTool::new(scratch_dir)));
+        // Reads are sandboxed to the whole workspace data dir plus any
+        // `extra_read_roots` (ADR 076 §4 — e.g. `~/.openclaw` when the import
+        // switch is on); writes stay confined to a `scratch/` subdir. With no
+        // data dir (in-memory engine) the filesystem fails closed.
+        let fs: std::sync::Arc<dyn crate::fs::Filesystem> = match engine.config().data_dir.as_ref()
+        {
+            Some(dir) => {
+                let mut read_roots = vec![dir.clone()];
+                read_roots.extend(engine.config().extra_read_roots.iter().cloned());
+                std::sync::Arc::new(crate::fs::LocalFs::new(read_roots, vec![dir.join("scratch")]))
+            }
+            None => std::sync::Arc::new(crate::fs::LocalFs::denied()),
+        };
+        registry.register(Box::new(tools::FileIoTool::new(fs.clone())));
+        // Claude-Code-parity coding tools, sharing the same sandbox so reads
+        // and writes stay confined to the akh's roots.
+        registry.register(Box::new(tools::EditTool::new(fs.clone())));
+        registry.register(Box::new(tools::GlobTool::new(fs.clone())));
+        registry.register(Box::new(tools::GrepTool::new(fs.clone())));
         registry.register(Box::new(tools::HttpFetchTool));
+        registry.register(Box::new(tools::WebSearchTool));
         registry.register(Box::new(tools::ShellExecTool));
         registry.register(Box::new(tools::UserInteractTool));
+        // Structured task list (TodoWrite-style working state).
+        registry.register(Box::new(tools::TaskListTool::new(std::sync::Arc::new(
+            std::sync::Mutex::new(Vec::new()),
+        ))));
 
         // Autonomous reasoning tools.
         registry.register(Box::new(tools::InferRulesTool));
         registry.register(Box::new(tools::GapAnalysisTool));
 
-        // Ingest tools.
-        registry.register(Box::new(tools::CsvIngestTool));
-        registry.register(Box::new(tools::TextIngestTool));
+        // Ingest tools. The single-file ingesters share the agent's sandbox so
+        // their reads stay within the workspace (code/journal ingesters still
+        // read raw — sandboxing those walks folds into the ingestion rework).
+        registry.register(Box::new(tools::CsvIngestTool::sandboxed(fs.clone())));
+        registry.register(Box::new(tools::TextIngestTool::sandboxed(fs.clone())));
         registry.register(Box::new(tools::CodeIngestTool));
         registry.register(Box::new(tools::ContentIngestTool));
         registry.register(Box::new(tools::JournalIngestTool));
+
+        // Typed writer tools (ADR 076): the strongly-typed, LLM-facing
+        // replacements for raw-text ingestion. The model reads source itself and
+        // emits structured data these persist deterministically (no internal NLU
+        // pass). Always-on builtins; the OpenClaw-specific `openclaw_discover`
+        // tool is registered switch-gated by the daemon, not here.
+        registry.register(Box::new(tools::MemoryWriteTool::new(predicates.clone())));
+        registry.register(Box::new(tools::SkillAuthorTool));
+        registry.register(Box::new(tools::IdentityAwakenTool));
 
         // Library search.
         registry.register(Box::new(tools::LibrarySearchTool));
@@ -316,7 +357,7 @@ impl Agent {
         // Code generation, validation, and pattern mining.
         registry.register(Box::new(tools::CodeGenTool));
         registry.register(Box::new(tools::CompileFeedbackTool));
-        registry.register(Box::new(tools::PatternMineTool));
+        registry.register(Box::new(tools::PatternMineTool::sandboxed(fs.clone())));
 
         // Agent management (multi-agent orchestration).
         registry.register(Box::new(tools::AgentListTool));
@@ -326,6 +367,9 @@ impl Agent {
 
         // Trigger management.
         registry.register(Box::new(tools::TriggerManageTool));
+
+        // Runtime inference options (Phase 47: speculative decode toggle).
+        registry.register(Box::new(tools::InferenceConfigTool));
 
         // Audit log.
         registry.register(Box::new(tools::AuditLogTool));
@@ -778,6 +822,8 @@ impl Agent {
             #[cfg(feature = "wasm-tools")]
             wasm_runtime: super::wasm_runtime::WasmToolRuntime::new().ok(),
             model_manager: None,
+            chat_backend: None,
+            context_manager: None,
             #[cfg(feature = "delegation")]
             delegation_manager,
         };
@@ -1592,6 +1638,30 @@ impl Agent {
         self.tool_registry.list()
     }
 
+    /// Set the permission mode gating this agent's tool execution.
+    pub fn set_permission_mode(&mut self, mode: crate::agent::permission::PermissionMode) {
+        self.tool_registry.set_permission_mode(mode);
+    }
+
+    /// The active tool-permission mode.
+    pub fn permission_mode(&self) -> crate::agent::permission::PermissionMode {
+        self.tool_registry.permission_mode()
+    }
+
+    /// Attach an approver that resolves `Ask` permission decisions (e.g. an ACP
+    /// `session/request_permission` bridge) for the duration of a turn.
+    pub fn set_permission_asker(
+        &mut self,
+        asker: std::sync::Arc<dyn crate::agent::permission::PermissionAsker>,
+    ) {
+        self.tool_registry.set_permission_asker(asker);
+    }
+
+    /// Remove the permission approver (`Ask` then fails closed).
+    pub fn clear_permission_asker(&mut self) {
+        self.tool_registry.clear_permission_asker();
+    }
+
     /// Get a reference to the wrapped engine.
     pub fn engine(&self) -> &Engine {
         &self.engine
@@ -1605,6 +1675,119 @@ impl Agent {
     /// Get the agent predicates.
     pub fn predicates(&self) -> &AgentPredicates {
         &self.predicates
+    }
+
+    /// Recall up to `top_k` past-episode summaries relevant to `prompt`, for the
+    /// Phase 44g context section.
+    ///
+    /// Resolves the prompt's content words to seed symbols, **VSA-expands** them
+    /// with their nearest neighbours (so episodes about *related* concepts surface
+    /// too), recalls a wider candidate pool, drops any episode referencing a
+    /// **TMS-retracted** (superseded) fact, then re-ranks by a blend of VSA
+    /// relevance ⊕ recency ⊕ confidence. Empty when nothing resolves or matches.
+    pub(crate) fn recall_for_prompt(&self, engine: &Engine, prompt: &str, top_k: usize) -> Vec<String> {
+        use std::collections::HashMap;
+
+        // 1. Resolve the prompt's content words to seed symbols.
+        let seeds: Vec<crate::symbol::SymbolId> = prompt
+            .split_whitespace()
+            .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase())
+            .filter(|w| w.len() > 2)
+            .filter_map(|w| engine.resolve_symbol(w.as_str()).ok())
+            .collect();
+        if seeds.is_empty() {
+            return Vec::new();
+        }
+
+        // 2. VSA expansion: each seed's nearest neighbours, keyed by similarity.
+        //    Binary-VSA analogy is degenerate, so trust only strong matches.
+        const SIM_FLOOR: f32 = 0.1;
+        let mut query = seeds.clone();
+        let mut sim_of: HashMap<crate::symbol::SymbolId, f32> =
+            seeds.iter().map(|s| (*s, 1.0_f32)).collect();
+        for s in &seeds {
+            if let Ok(neighbours) = engine.search_similar_to(*s, 5) {
+                for n in neighbours {
+                    if n.similarity < SIM_FLOOR {
+                        continue;
+                    }
+                    sim_of
+                        .entry(n.symbol_id)
+                        .and_modify(|v| *v = v.max(n.similarity))
+                        .or_insert(n.similarity);
+                    if !query.contains(&n.symbol_id) {
+                        query.push(n.symbol_id);
+                    }
+                }
+            }
+        }
+
+        // 3. Recall a wider candidate pool over the expanded query.
+        let candidates = match super::memory::recall_episodes(
+            engine,
+            &query,
+            self.predicates(),
+            top_k.saturating_mul(4).max(top_k),
+            None,
+        ) {
+            Ok(c) => c,
+            Err(_) => return Vec::new(),
+        };
+
+        // 4. Drop superseded episodes (any learning the TMS retracted), re-rank.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let tms = engine.tms();
+        let mut scored: Vec<(f32, super::memory::EpisodicEntry)> = candidates
+            .into_iter()
+            .filter(|ep| !ep.learnings.iter().any(|l| tms.was_retracted(*l)))
+            .map(|ep| {
+                let vsa = ep
+                    .learnings
+                    .iter()
+                    .filter_map(|l| sim_of.get(l).copied())
+                    .fold(0.0_f32, f32::max);
+                let age_days = now.saturating_sub(ep.timestamp) as f32 / 86_400.0;
+                let recency = (-age_days / 30.0).exp();
+                let conf = tms.effective_confidence(ep.symbol_id) as f32;
+                let score = 0.5 * vsa + 0.3 * recency + 0.2 * ep.relevance_score.max(conf);
+                (score, ep)
+            })
+            .collect();
+        drop(tms);
+        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+
+        scored
+            .into_iter()
+            .map(|(_, e)| e.summary)
+            .filter(|s| !s.trim().is_empty())
+            .take(top_k)
+            .collect()
+    }
+
+    /// A compact continuity seed for the working context (Phase 44e).
+    ///
+    /// Returns the opening operator ask of the current conversation so an akh
+    /// keeps the thread even when middle turns are later trimmed under budget.
+    /// `None` for a fresh (≤1-turn) conversation — there the first turn *is* the
+    /// current prompt, so a seed would just duplicate it.
+    pub(crate) fn session_seed(&self) -> Option<String> {
+        let conv = self.conversation_state();
+        if conv.turns.len() <= 1 {
+            return None;
+        }
+        let opening = conv
+            .turns
+            .iter()
+            .find(|t| matches!(t.speaker, crate::agent::conversation::Speaker::Operator))?;
+        let ask = opening.text.trim();
+        if ask.is_empty() {
+            return None;
+        }
+        let ask: String = ask.chars().take(200).collect();
+        Some(format!("This conversation began with: \"{ask}\""))
     }
 
     /// Set the message sink for structured output.
@@ -1694,6 +1877,23 @@ impl Agent {
         &self,
     ) -> Option<&super::model_manager::AgentModelManager> {
         self.model_manager.as_deref()
+    }
+
+    /// Set the akh's chat/agentic backing (ADR 070). When set, `run_agentic_turn`
+    /// drives this backend instead of the default Ollama path.
+    pub fn set_chat_backend(
+        &mut self,
+        backend: std::sync::Arc<dyn super::chat_backend::ChatBackend>,
+    ) {
+        self.chat_backend = Some(backend);
+    }
+
+    /// Attach a working-context assembly strategy (Phase 44a, ADR 065). `None`
+    /// (the default) uses the byte-identical pass-through manager, so an akh with
+    /// no manager set behaves exactly as before. Shipped managers should be
+    /// wrapped in [`SafetyEnforced`](super::context::SafetyEnforced) by the caller.
+    pub fn set_context_manager(&mut self, manager: Box<dyn super::context::ContextManager>) {
+        self.context_manager = Some(manager);
     }
 
     /// Register this agent with its attached model manager using the current
@@ -3692,6 +3892,8 @@ impl Agent {
             #[cfg(feature = "wasm-tools")]
             wasm_runtime: super::wasm_runtime::WasmToolRuntime::new().ok(),
             model_manager: None,
+            chat_backend: None,
+            context_manager: None,
             #[cfg(feature = "delegation")]
             delegation_manager,
         };

@@ -83,13 +83,30 @@ impl MmapStore {
             mmap.flush().map_err(|e| StoreError::Io { source: e })?;
             (HashMap::new(), HEADER_SIZE)
         } else {
-            // Validate header and rebuild index
+            // Validate header and rebuild index.
+            // Guard against truncated/corrupt files (e.g. a partial write on a
+            // PVC, or a pod killed mid-flush): a real akh-medu mmap file is always
+            // at least HEADER_SIZE bytes. Anything smaller cannot be indexed and
+            // must surface as a typed StoreError rather than an out-of-bounds panic.
+            if actual_len < HEADER_SIZE {
+                return Err(StoreError::Mmap {
+                    message: format!(
+                        "mmap file truncated: {actual_len} bytes is smaller than the \
+                         {HEADER_SIZE}-byte header — the file is corrupt or was \
+                         incompletely written"
+                    ),
+                });
+            }
             if &mmap[..8] != HEADER_MAGIC {
                 return Err(StoreError::Mmap {
                     message: "invalid mmap file header — is this an akh-medu data file?".into(),
                 });
             }
-            let version = u32::from_le_bytes(mmap[8..12].try_into().expect("4 bytes for version"));
+            let version = u32::from_le_bytes(mmap[8..12].try_into().map_err(|_| {
+                StoreError::Mmap {
+                    message: "mmap header truncated: cannot read 4-byte version field".into(),
+                }
+            })?);
             if version != HEADER_VERSION {
                 return Err(StoreError::Mmap {
                     message: format!("mmap file version {version} != expected {HEADER_VERSION}"),
@@ -99,12 +116,20 @@ impl MmapStore {
             let mut index = HashMap::new();
             let mut pos = HEADER_SIZE;
             while pos + 12 <= actual_len {
-                let id_bytes: [u8; 8] = mmap[pos..pos + 8].try_into().expect("8 bytes");
+                let id_bytes: [u8; 8] = mmap[pos..pos + 8].try_into().map_err(|_| {
+                    StoreError::Mmap {
+                        message: "mmap entry truncated: cannot read 8-byte id".into(),
+                    }
+                })?;
                 let raw_id = u64::from_le_bytes(id_bytes);
                 if raw_id == 0 {
                     break; // End of entries (uninitialized region)
                 }
-                let len_bytes: [u8; 4] = mmap[pos + 8..pos + 12].try_into().expect("4 bytes");
+                let len_bytes: [u8; 4] = mmap[pos + 8..pos + 12].try_into().map_err(|_| {
+                    StoreError::Mmap {
+                        message: "mmap entry truncated: cannot read 4-byte length".into(),
+                    }
+                })?;
                 let data_len = u32::from_le_bytes(len_bytes) as usize;
                 if pos + 12 + data_len > actual_len {
                     break; // Truncated entry
@@ -251,5 +276,23 @@ mod tests {
             let id = SymbolId::new(i).unwrap();
             assert_eq!(store.get(id), Some(vec![i as u8]));
         }
+    }
+
+    #[test]
+    fn truncated_header_returns_error() {
+        // A non-empty file smaller than the header must error, not panic.
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("trunc.mmap"), b"AKHMMAP\0\x01").unwrap();
+        let result = MmapStore::open_or_create(dir.path(), "trunc");
+        assert!(result.is_err(), "expected truncated file to error, not panic");
+    }
+
+    #[test]
+    fn invalid_magic_returns_error() {
+        // A file large enough but without the magic must error.
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("bad.mmap"), vec![0u8; 128]).unwrap();
+        let result = MmapStore::open_or_create(dir.path(), "bad");
+        assert!(result.is_err(), "expected invalid-magic file to error");
     }
 }

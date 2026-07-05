@@ -9,24 +9,30 @@ pub enum ExtractionError {
     #[error("LLM backend unavailable: {reason}")]
     #[diagnostic(
         code(akh::extraction::llm_unavailable),
-        help("Ensure the nlu-llm feature is enabled and model files are present, \
-              or configure an external API in [extraction.external_api].")
+        help(
+            "Ensure the nlu-llm feature is enabled and model files are present, \
+              or configure an external API in [extraction.external_api]."
+        )
     )]
     LlmUnavailable { reason: String },
 
     #[error("failed to parse LLM output as triples: {reason}")]
     #[diagnostic(
         code(akh::extraction::parse_failed),
-        help("The LLM produced output that could not be parsed as a JSON array of triples. \
-              Raw output (truncated): {raw_output}")
+        help(
+            "The LLM produced output that could not be parsed as a JSON array of triples. \
+              Raw output (truncated): {raw_output}"
+        )
     )]
     ParseFailed { raw_output: String, reason: String },
 
     #[error("external API request failed: {url} (status {status})")]
     #[diagnostic(
         code(akh::extraction::api_failed),
-        help("Check the API base URL, API key (AKH_EXTRACTION_API_KEY), and model name \
-              in [extraction.external_api]. Response: {body}")
+        help(
+            "Check the API base URL, API key (AKH_EXTRACTION_API_KEY), and model name \
+              in [extraction.external_api]. Response: {body}"
+        )
     )]
     ApiRequestFailed {
         url: String,

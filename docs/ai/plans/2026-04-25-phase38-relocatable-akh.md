@@ -1,7 +1,16 @@
 # Phase 38 — Relocatable Session-Based Akh: Workspaces + 3-Tier Sleep + Postgres Truth
 
 > Date: 2026-04-25
-> Status: Planned
+> Status: In progress — 38a/b/c **done** (Postgres truth + WAL + snapshot/wake);
+>   38e **done** (SleepLevel enum + HNSW local-disk wake cache; manual deep-sleep
+>   via `akh akh sleep` + evict); 38f **partial** (workspace-as-Postgres-row +
+>   membership ops + `WorkspaceJoin/Leave` protocol — live `pg_notify`
+>   cache-invalidation convergence still TODO); 38g **done** (advisory-lock
+>   split-brain guard + `last_seen` heartbeat + `akh akh relocate` + runbook +
+>   randomized recovery harness). 38d (AGE) **deferred** (CLI `projection refresh`
+>   is a stub). Remaining runtime-coordination tail: daemon auto Running↔Idle
+>   transition (38e) and `pg_notify` pull-on-read (38f) — surface in place, needs
+>   live multi-daemon+Postgres to validate. See ADRs 070/071/072. (Updated 2026-06-20.)
 > Phase: 38
 > Depends on: Phase 14 (identity, provenance), Phase 17 (evidence intervals), Postgres-ha CNPG cluster (shipped)
 > Enhances: Phase 36 (Delegation), Phase 37 (Seshat's Archive)

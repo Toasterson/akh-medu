@@ -1,52 +1,32 @@
 //! akhomed — the akh-medu daemon.
 //!
-//! Single authority over engine instances; the `akh` CLI connects here.
-//! Hosts N engine workspaces with REST and WebSocket APIs.
+//! Single authority over engine instances; ACP clients (the `akh` CLI/TUI,
+//! Anima) connect here. Hosts N engine workspaces behind a single inbound
+//! transport — the Agent Client Protocol (Unix socket + optional TCP). The
+//! legacy surfaces (REST, WebSocket, web UI, inbound MCP) were retired in
+//! ADR-061 (P8.4 deleted REST/WS/web-UI; P8.5 the inbound MCP server).
 //!
-//! Build and run: `cargo run --features server --bin akhomed`
+//! Build and run: `cargo run --features server,acp --bin akhomed`
 //!
-//! See `docs/ai/decisions/023-client-only-mode.md` for the full endpoint inventory.
+//! See `docs/ai/decisions/061-acp-only-retire-legacy-surfaces.md`.
 
-// ── Embedded web UI assets ────────────────────────────────────────────────
-const INDEX_HTML: &str = include_str!("../../data/web/index.html");
-const STYLE_CSS: &str = include_str!("../../data/web/style.css");
-const HTMX_JS: &[u8] = include_bytes!("../../data/web/vendor/htmx.min.js");
-const ALPINE_JS: &[u8] = include_bytes!("../../data/web/vendor/alpine.min.js");
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use axum::extract::ws::{Message, WebSocket};
-use axum::extract::{Path, State, WebSocketUpgrade};
-use axum::http::StatusCode;
-use axum::response::IntoResponse;
-use axum::routing::{delete, get, post, put};
-use axum::{Json, Router};
-use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
-use tower_http::cors::CorsLayer;
 
-use akh_medu::agent::trigger::{Trigger, TriggerStore};
+use akh_medu::agent::trigger::TriggerStore;
+use akh_medu::agent::model_manager::AgentModelManager;
+use akh_medu::agent::ollama::OllamaClient;
 use akh_medu::agent::{Agent, AgentConfig};
+use akh_medu::akh_config::AkhConfig;
 use akh_medu::client::DaemonStatus;
-use akh_medu::mcp;
 use akh_medu::config::AkhomedConfig;
 use akh_medu::engine::{Engine, EngineConfig};
-use akh_medu::grammar::concrete::ParseContext;
-use akh_medu::grammar::entity_resolution::{EquivalenceStats, LearnedEquivalence};
-use akh_medu::grammar::preprocess::{PreProcessRequest, PreProcessResponse, preprocess_batch};
-use akh_medu::graph::Triple;
-use akh_medu::graph::traverse::TraversalConfig;
-use akh_medu::infer::InferenceQuery;
-use akh_medu::library::{
-    ContentFormat, DocumentRecord, IngestConfig, LibraryAddRequest, LibraryAddResponse,
-    LibraryCatalog, LibrarySearchRequest, LibrarySearchResult,
-};
-use akh_medu::message::AkhMessage;
 use akh_medu::paths::AkhPaths;
 use akh_medu::seeds::SeedRegistry;
-use akh_medu::symbol::{SymbolId, SymbolKind};
 use akh_medu::vsa::Dimension;
 use akh_medu::workspace::WorkspaceManager;
 
@@ -60,17 +40,129 @@ struct ServerState {
     /// One shared Agent per workspace — daemon, HTTP handlers, and WS sessions
     /// all operate on the same instance. See ADR-027.
     agents: Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>,
-    /// Non-blocking psyche snapshots shared with McpState.  Populated at agent
-    /// creation time so monitoring reads never block on the agent mutex.
-    psyche_snapshots: mcp::PsycheSnapshotMap,
+    /// Non-blocking psyche snapshots.  Populated at agent creation time so
+    /// monitoring reads never block on the agent mutex.
+    psyche_snapshots: PsycheSnapshotMap,
     /// Cached NLU pipeline per workspace — avoids reloading 1GB+ LLM model on
     /// every WS connection or MCP chat call.
     nlu_pipelines: RwLock<HashMap<String, Arc<Mutex<akh_medu::nlu::NluPipeline>>>>,
+    /// Cached per-akh config (`akh.toml`) per workspace — model pin, explicit
+    /// system prompt, related workspaces, autonomy, etc. (P1 / ADR-053).
+    akh_configs: Arc<RwLock<HashMap<String, Arc<AkhConfig>>>>,
     /// Broadcast channel for audit entries — WS clients subscribe to this.
     audit_broadcast: tokio::sync::broadcast::Sender<akh_medu::audit::AuditEntry>,
-    /// Shared registry of per-workspace pause handles. Daemons write their
-    /// handles here; McpState reads them for suspend/resume via MCP.
-    daemon_pauses: RwLock<HashMap<String, mcp::DaemonPauseHandle>>,
+    /// handles here; the daemon control-plane reads them for suspend/resume.
+    daemon_pauses: RwLock<HashMap<String, DaemonPauseHandle>>,
+    /// Phase 38: optional Postgres backing-store pool. `None` when no
+    /// `[postgres]` section is configured (legacy local-only mode) **or** when
+    /// the connection has not been established yet (boot-time race / PG down).
+    /// Wrapped in a `RwLock` so the background reconnector (ADR 077) can swap a
+    /// live pool in at runtime without restarting the daemon — recovering from
+    /// a startup that fell back to local-only. Consumed by the mutation WAL
+    /// flusher and snapshot writer (sub-phases 38b/38c).
+    pg_pool: std::sync::RwLock<Option<Arc<akhomed_store::DatabaseConnection>>>,
+    /// Phase 38b: per-workspace WAL flusher tasks, keyed by workspace name.
+    /// Drained on graceful shutdown so the final batch reaches Postgres.
+    wal_flushers: RwLock<HashMap<String, WalFlusher>>,
+    /// Phase 38c: per-workspace periodic snapshot tasks, keyed by workspace name.
+    /// Stopped on graceful shutdown, followed by a final synchronous snapshot.
+    snapshot_tickers: RwLock<HashMap<String, SnapshotTicker>>,
+    /// Phase 38c: in-flight `_akh/akh/wake` workspace names — single-flights wake
+    /// so two concurrent wakes of the same cold workspace can't race on the redb.
+    waking: Arc<Mutex<std::collections::HashSet<String>>>,
+    /// Per-workspace load locks serialising the slow (first-load) path of
+    /// `get_engine`: concurrent first-loads must not each build a separate Engine
+    /// (each would wire its own WAL flusher + snapshot ticker and all but the
+    /// last would leak as orphaned background tasks). Keyed by workspace name.
+    engine_load_locks: RwLock<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// Likewise for `get_agent` — avoids a wasted concurrent heavy `Agent::resume`.
+    agent_load_locks: RwLock<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+}
+
+/// Fetch (creating if needed) the per-workspace load lock from `locks`.
+///
+/// Used to serialise `get_engine` / `get_agent` slow paths per workspace name so
+/// each workspace is constructed at most once even under concurrent first-loads.
+async fn fetch_load_lock(
+    locks: &RwLock<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    name: &str,
+) -> Arc<tokio::sync::Mutex<()>> {
+    if let Some(lock) = locks.read().await.get(name) {
+        return Arc::clone(lock);
+    }
+    Arc::clone(
+        locks
+            .write()
+            .await
+            .entry(name.to_string())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
+    )
+}
+
+/// RAII token marking a workspace as mid-wake; clears the name on drop so an
+/// early `?`-return still releases the single-flight slot.
+struct WakeGuard {
+    set: Arc<Mutex<std::collections::HashSet<String>>>,
+    name: String,
+}
+
+impl Drop for WakeGuard {
+    fn drop(&mut self) {
+        self.set
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.name);
+    }
+}
+
+/// Handle to a workspace's background WAL flusher task (Phase 38b).
+struct WalFlusher {
+    shutdown: tokio::sync::watch::Sender<bool>,
+    handle: tokio::task::JoinHandle<()>,
+    /// The log itself, so sleep/relocate can force a synchronous flush of the
+    /// buffer before evicting the engine (Phase 38e/g) instead of waiting for
+    /// the next interval tick.
+    log: Arc<akh_medu::wal::MutationLog>,
+}
+
+/// Handle to a workspace's background snapshot ticker task (Phase 38c).
+struct SnapshotTicker {
+    shutdown: tokio::sync::watch::Sender<bool>,
+    handle: tokio::task::JoinHandle<()>,
+}
+
+/// Capture + persist one snapshot of `name`'s agent (Phase 38c).
+///
+/// The agent lives behind a `std::sync::Mutex`, so capture (sync) runs under the
+/// lock and the guard is dropped before the async DB persist. A not-yet-loaded
+/// agent is a quiet no-op (the ticker fires before the first interaction).
+async fn snapshot_once(
+    pool: &akhomed_store::DatabaseConnection,
+    agents: &RwLock<HashMap<String, Arc<Mutex<Agent>>>>,
+    name: &str,
+    akh_id: akhomed_store::uuid::Uuid,
+    workspace_id: akhomed_store::uuid::Uuid,
+) -> Result<(), String> {
+    let agent = {
+        let map = agents.read().await;
+        match map.get(name) {
+            Some(a) => Arc::clone(a),
+            None => return Ok(()),
+        }
+    };
+    // The akh row is the identity these rows hang off; ensure it exists.
+    akhomed_store::ensure_akh(pool, akh_id, name, None)
+        .await
+        .map_err(|e| e.to_string())?;
+    // Capture under the lock (sync), release, then persist lock-free.
+    let data = {
+        let guard = agent.lock().unwrap_or_else(|e| e.into_inner());
+        akh_medu::snapshot::capture_snapshot(&guard, akh_id, workspace_id)
+            .map_err(|e| e.to_string())?
+    };
+    akh_medu::snapshot::persist_snapshot(data, pool)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Background daemon state for a workspace.
@@ -80,8 +172,42 @@ struct WorkspaceDaemon {
     status: Arc<tokio::sync::Mutex<DaemonStatus>>,
 }
 
+/// Per-workspace psyche snapshot map.
+///
+/// Each value is an `Arc<RwLock<Option<Psyche>>>` extracted from the agent at
+/// creation time so monitoring code can read psyche state without holding the
+/// agent mutex. (Formerly shared with the inbound MCP server's `McpState`;
+/// after ADR-061 P8.5 only `ServerState` uses it.)
+type PsycheSnapshotMap = Arc<
+    RwLock<
+        HashMap<String, Arc<std::sync::RwLock<Option<akh_medu::compartment::psyche::Psyche>>>>,
+    >,
+>;
+
+/// Pause control for a single workspace daemon. The daemon clones `paused` /
+/// `cycle_done` into its `AgentDaemon`; the control-plane toggles `paused` and
+/// waits on `cycle_done` to suspend/resume cleanly between OODA cycles.
+#[derive(Clone)]
+struct DaemonPauseHandle {
+    paused: Arc<std::sync::atomic::AtomicBool>,
+    cycle_done: Arc<tokio::sync::Notify>,
+}
+
+impl DaemonPauseHandle {
+    fn new() -> Self {
+        Self {
+            paused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            cycle_done: Arc::new(tokio::sync::Notify::new()),
+        }
+    }
+}
+
 impl ServerState {
-    fn new(paths: AkhPaths, config: AkhomedConfig) -> Self {
+    fn new(
+        paths: AkhPaths,
+        config: AkhomedConfig,
+        pg_pool: Option<Arc<akhomed_store::DatabaseConnection>>,
+    ) -> Self {
         let (audit_tx, _) = tokio::sync::broadcast::channel(256);
         Self {
             paths,
@@ -91,13 +217,722 @@ impl ServerState {
             agents: Arc::new(RwLock::new(HashMap::new())),
             psyche_snapshots: Arc::new(RwLock::new(HashMap::new())),
             nlu_pipelines: RwLock::new(HashMap::new()),
+            akh_configs: Arc::new(RwLock::new(HashMap::new())),
             audit_broadcast: audit_tx,
             daemon_pauses: RwLock::new(HashMap::new()),
+            pg_pool: std::sync::RwLock::new(pg_pool),
+            wal_flushers: RwLock::new(HashMap::new()),
+            snapshot_tickers: RwLock::new(HashMap::new()),
+            waking: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            engine_load_locks: RwLock::new(HashMap::new()),
+            agent_load_locks: RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// Get or lazily load the [`AkhConfig`] (`akh.toml`) for a workspace.
+    ///
+    /// The akh config is the existing per-workspace config file parsed as an
+    /// [`AkhConfig`]; a legacy workspace-only TOML loads with all akh-level
+    /// fields defaulted, and a missing file yields a name-only default — so this
+    /// never fails for a workspace that opens. A *malformed* config is **not**
+    /// fatal: it logs a `tracing::warn!` (naming the file and parse error) and
+    /// falls back to name-only defaults, mirroring [`Self::get_engine`]'s
+    /// tolerance of a broken workspace TOML so a bad `akh.toml` can't keep the
+    /// whole ACP server from starting.
+    async fn get_akh_config(&self, name: &str) -> Result<Arc<AkhConfig>, String> {
+        {
+            let map = self.akh_configs.read().await;
+            if let Some(cfg) = map.get(name) {
+                return Ok(Arc::clone(cfg));
+            }
+        }
+
+        let config_path = self.paths.workspace_config_file(name);
+        let cfg = if config_path.exists() {
+            match AkhConfig::load(&config_path) {
+                Ok(cfg) => cfg,
+                // A malformed akh.toml (e.g. a hand-written file missing the
+                // required `name`) used to abort ACP startup. Match get_engine's
+                // forgiveness: warn loudly so a real misconfiguration is still
+                // visible, then fall back to name-only defaults. Note this
+                // silently drops any akh-level settings the file *did* parse
+                // (model pin, system prompt, endpoint) — fix the file to apply them.
+                Err(e) => {
+                    tracing::warn!(
+                        workspace = %name,
+                        config = %config_path.display(),
+                        error = %e,
+                        "akh.toml failed to parse; falling back to name-only akh \
+                         defaults (model pin, system prompt, and endpoint settings \
+                         are ignored until the file is fixed)"
+                    );
+                    AkhConfig::with_name(name)
+                }
+            }
+        } else {
+            tracing::debug!(
+                workspace = %name,
+                "no akh.toml found; using name-only akh defaults"
+            );
+            AkhConfig::with_name(name)
+        };
+
+        let cfg = Arc::new(cfg);
+        let mut map = self.akh_configs.write().await;
+        let entry = map.entry(name.to_string()).or_insert(Arc::clone(&cfg));
+        Ok(Arc::clone(entry))
+    }
+
+    /// The Postgres backing-store pool, if connected. `None` in local-only mode
+    /// (not configured, or the reconnector hasn't established a pool yet). Reads
+    /// the swappable slot; a poisoned lock degrades to the inner value rather
+    /// than panicking the data-plane.
+    fn pg_pool(&self) -> Option<Arc<akhomed_store::DatabaseConnection>> {
+        self.pg_pool
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// ADR 077: spawn the background Postgres reconnector. When startup fell
+    /// back to local-only (boot-time network race, or PG transiently down),
+    /// this task keeps retrying the connection with capped backoff. On success
+    /// it swaps the live pool into `pg_pool` and re-enables durability for every
+    /// already-loaded akh — snapshotting each one's in-memory state (everything
+    /// accumulated while local-only) before wiring the WAL, so nothing is lost.
+    /// No-op (returns immediately) when no `[postgres]` section is configured.
+    /// Self-terminates once connected.
+    fn spawn_pg_reconnector(self: &Arc<Self>) {
+        let me = Arc::clone(self);
+        tokio::spawn(async move {
+            let mut backoff = Duration::from_secs(2);
+            loop {
+                // Already connected (startup or a concurrent path won)? Done.
+                if me.pg_pool().is_some() {
+                    return;
+                }
+                // Re-read config each attempt so a `config set` can correct a
+                // bad URL without a restart. No `[postgres]` → nothing to do.
+                let Some((opts, migrate)) = pg_pool_options(&*me.config.read().await) else {
+                    return;
+                };
+                tokio::time::sleep(backoff).await;
+                match try_connect_pg(&opts, migrate).await {
+                    Ok(pool) => {
+                        *me.pg_pool.write().unwrap_or_else(|e| e.into_inner()) = Some(pool);
+                        tracing::info!(
+                            "reconnected to PostgreSQL backing store — re-enabling durability"
+                        );
+                        me.rewire_after_reconnect().await;
+                        return;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            backoff_secs = backoff.as_secs(),
+                            error = %e,
+                            "PostgreSQL reconnect attempt failed — will retry"
+                        );
+                        backoff = (backoff * 2).min(Duration::from_secs(60));
+                    }
+                }
+            }
+        });
+    }
+
+    /// After a runtime reconnect, re-enable the WAL + periodic snapshot for
+    /// every already-loaded workspace and persist a full snapshot of each, so
+    /// the state accumulated during local-only mode reaches Postgres. New
+    /// workspaces loaded after this point wire normally via `get_engine`.
+    async fn rewire_after_reconnect(&self) {
+        // Capture names + engine handles under a short read lock, then release
+        // it before doing per-workspace work (wire_wal / snapshot take locks).
+        let loaded: Vec<(String, Arc<Engine>)> = {
+            let map = self.workspaces.read().await;
+            map.iter()
+                .map(|(n, e)| (n.clone(), Arc::clone(e)))
+                .collect()
+        };
+        if loaded.is_empty() {
+            return;
+        }
+        for (name, engine) in loaded {
+            // Wire the WAL first so mutations from here on are captured, then
+            // snapshot the full current state (idempotent; materialises into the
+            // relational tables what was accumulated while local-only).
+            self.wire_wal(&name, &engine).await;
+            match self.snapshot_workspace(&name).await {
+                Ok(()) => tracing::info!(
+                    workspace = %name,
+                    "re-enabled durability + snapshotted after reconnect"
+                ),
+                Err(e) => tracing::warn!(
+                    workspace = %name,
+                    error = %e,
+                    "post-reconnect snapshot failed; live mutations still flush via WAL"
+                ),
+            }
+        }
+    }
+
+    /// Phase 38b: install the mutation WAL on `engine` for workspace `name`,
+    /// when a Postgres backing store is configured. Best-effort: any failure
+    /// logs and leaves the workspace in local-only mode (no WAL).
+    async fn wire_wal(&self, name: &str, engine: &Engine) {
+        let pool = self.pg_pool();
+        let Some(pool) = pool.as_ref() else {
+            return;
+        };
+        let akh_id = akh_medu::wal::akh_id_for(name);
+        let workspace_id = akh_medu::wal::workspace_id_for(name);
+
+        // The akh row is the FK target for mutation_log; ensure it exists first.
+        if let Err(e) = akhomed_store::ensure_akh(pool, akh_id, name, None).await {
+            tracing::warn!(workspace = %name, error = %e, "could not ensure akh row; WAL disabled");
+            return;
+        }
+
+        let (wal_cfg, snapshot_interval_secs) = {
+            let cfg = self.config.read().await;
+            match cfg.postgres.as_ref() {
+                Some(pg) => (
+                    akh_medu::wal::WalConfig::new(
+                        Duration::from_secs(pg.wal_flush_interval_secs),
+                        pg.wal_batch_size,
+                        pg.wal_max_buffer_mb.saturating_mul(1024 * 1024),
+                    ),
+                    pg.snapshot_interval_secs,
+                ),
+                None => (akh_medu::wal::WalConfig::default(), 0),
+            }
+        };
+
+        let log = Arc::new(akh_medu::wal::MutationLog::new(
+            (**pool).clone(),
+            akh_id,
+            workspace_id,
+            wal_cfg,
+        ));
+        if engine
+            .set_mutation_sink(Arc::clone(&log) as Arc<dyn akh_medu::mutation::MutationSink>)
+            .is_err()
+        {
+            tracing::warn!(workspace = %name, "mutation sink already installed; skipping WAL wiring");
+            return;
+        }
+
+        let (shutdown, shutdown_rx) = tokio::sync::watch::channel(false);
+        let handle = Arc::clone(&log).spawn_flusher(shutdown_rx);
+        self.wal_flushers.write().await.insert(
+            name.to_string(),
+            WalFlusher {
+                shutdown,
+                handle,
+                log: Arc::clone(&log),
+            },
+        );
+        tracing::info!(workspace = %name, %akh_id, "mutation WAL enabled (Postgres backing store)");
+
+        // Phase 38c: periodic snapshot of the akh's relational state. `0` means
+        // no timer (a final snapshot on shutdown still runs).
+        if snapshot_interval_secs > 0 {
+            let ticker = self.spawn_snapshot_ticker(
+                name.to_string(),
+                Arc::clone(pool),
+                Duration::from_secs(snapshot_interval_secs),
+            );
+            self.snapshot_tickers
+                .write()
+                .await
+                .insert(name.to_string(), ticker);
+            tracing::info!(
+                workspace = %name,
+                interval_secs = snapshot_interval_secs,
+                "periodic snapshot enabled"
+            );
+        }
+    }
+
+    /// Spawn the background snapshot ticker for `name`. The task captures the
+    /// agent state under its (sync) lock, then persists it lock-free; it skips
+    /// quietly if the agent is not loaded yet.
+    fn spawn_snapshot_ticker(
+        &self,
+        name: String,
+        pool: Arc<akhomed_store::DatabaseConnection>,
+        interval: Duration,
+    ) -> SnapshotTicker {
+        let agents = Arc::clone(&self.agents);
+        let (shutdown, mut shutdown_rx) = tokio::sync::watch::channel(false);
+        let handle = tokio::spawn(async move {
+            let akh_id = akh_medu::wal::akh_id_for(&name);
+            let workspace_id = akh_medu::wal::workspace_id_for(&name);
+            let mut tick = tokio::time::interval(interval);
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            tick.tick().await; // consume the immediate first tick
+            loop {
+                tokio::select! {
+                    _ = tick.tick() => {
+                        if let Err(e) =
+                            snapshot_once(&pool, &agents, &name, akh_id, workspace_id).await
+                        {
+                            tracing::warn!(workspace = %name, error = %e, "periodic snapshot failed");
+                        }
+                    }
+                    _ = shutdown_rx.changed() => break,
+                }
+            }
+        });
+        SnapshotTicker { shutdown, handle }
+    }
+
+    /// Snapshot one workspace on demand (control-plane `_akh/akh/snapshot`).
+    /// Loads the agent if needed, then captures + persists its state.
+    async fn snapshot_workspace(&self, name: &str) -> Result<(), String> {
+        let pool = self.pg_pool();
+        let Some(pool) = pool.as_ref() else {
+            return Err("no Postgres backing store configured (no [postgres] section)".into());
+        };
+        // Ensure the agent is live so there is state to capture.
+        self.get_agent(name).await?;
+        let akh_id = akh_medu::wal::akh_id_for(name);
+        let workspace_id = akh_medu::wal::workspace_id_for(name);
+        snapshot_once(pool, &self.agents, name, akh_id, workspace_id).await
+    }
+
+    /// Wake a cold workspace from its Postgres snapshot (control-plane
+    /// `_akh/akh/wake`). Populates the local redb, then routes through the normal
+    /// lazy `get_agent` path so resume + model-manager + WAL wiring all apply.
+    async fn wake_workspace(&self, name: &str) -> Result<serde_json::Value, String> {
+        let pool = self.pg_pool();
+        let Some(pool) = pool.as_ref() else {
+            return Err("no Postgres backing store configured (no [postgres] section)".into());
+        };
+        // Single-flight: refuse a second concurrent wake of the same workspace
+        // (otherwise both would open the same redb and one fails confusingly).
+        // The guard clears the slot on drop, including the `?` early returns below.
+        let _wake_guard = {
+            let mut waking = self.waking.lock().unwrap_or_else(|e| e.into_inner());
+            if !waking.insert(name.to_string()) {
+                return Err(format!("wake of \"{name}\" is already in progress"));
+            }
+            WakeGuard {
+                set: Arc::clone(&self.waking),
+                name: name.to_string(),
+            }
+        };
+
+        // Wake operates on a *cold* workspace; a loaded one is already awake.
+        if self.workspaces.read().await.contains_key(name)
+            || self.agents.read().await.contains_key(name)
+        {
+            return Err(format!(
+                "workspace \"{name}\" is already loaded; wake operates on a cold workspace"
+            ));
+        }
+
+        let akh_id = akh_medu::wal::akh_id_for(name);
+        let workspace_id = akh_medu::wal::workspace_id_for(name);
+
+        // 38g split-brain guard: a cold akh may live on another host. Acquire its
+        // Postgres advisory lock before touching state so two hosts can't wake the
+        // same akh concurrently; refuse fast (non-zero CLI exit) if it's held.
+        self.acquire_akh_lock_or_refuse(name, akh_id, "wake").await?;
+
+        let ws_paths = self.paths.workspace(name);
+        std::fs::create_dir_all(&ws_paths.kg_dir)
+            .map_err(|e| format!("cannot create workspace kg dir: {e}"))?;
+
+        // Reconstruct the local redb from Postgres. `wake` persists the KG
+        // snapshot to redb before returning; dropping the engine releases the
+        // redb lock so the lazy path can reopen it.
+        let engine = akh_medu::snapshot::wake(&ws_paths.kg_dir, akh_id, workspace_id, pool)
+            .await
+            .map_err(|e| format!("wake failed: {e}"))?;
+        let triples = engine.all_triples().len();
+        let symbols = engine.all_symbols().len();
+        drop(engine);
+
+        // Bring the akh fully online via the standard path (resume reads the redb
+        // wake just populated; this also wires the WAL + snapshot ticker).
+        self.get_agent(name).await?;
+
+        // Heartbeat: mark this host as the akh's live owner (best-effort).
+        if let Err(e) =
+            akhomed_store::touch_last_seen(pool, akh_id, akhomed_store::chrono::Utc::now()).await
+        {
+            tracing::warn!(workspace = %name, error = %e, "could not update last_seen after wake");
+        }
+
+        tracing::info!(workspace = %name, %akh_id, triples, symbols, "woke akh from Postgres");
+        Ok(serde_json::json!({
+            "woke": name,
+            "triples": triples,
+            "symbols": symbols,
+        }))
+    }
+
+    /// 38g split-brain guard: try to take the Akh's Postgres advisory lock,
+    /// erroring with an operator-facing message if another host holds it.
+    ///
+    /// `op` names the action (`"wake"` / `"relocate"`) for the error text. A
+    /// transient DB error acquiring the lock is treated as a *refusal* (fail
+    /// closed) rather than silently proceeding — split-brain is worse than a
+    /// retry. No-op when there is no Postgres pool (local-only mode has a single
+    /// host by construction, so there is nothing to guard against).
+    async fn acquire_akh_lock_or_refuse(
+        &self,
+        name: &str,
+        akh_id: akhomed_store::uuid::Uuid,
+        op: &str,
+    ) -> Result<(), String> {
+        let pool = self.pg_pool();
+        let Some(pool) = pool.as_ref() else {
+            return Ok(());
+        };
+        match akhomed_store::try_acquire_akh_lock(pool, akh_id).await {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(format!(
+                "refusing to {op} \"{name}\": another host already holds the akh's \
+                 advisory lock (split-brain guard). Confirm no other akhomed is \
+                 serving this akh, then retry."
+            )),
+            Err(e) => Err(format!(
+                "could not acquire the akh advisory lock for \"{name}\" ({e}); \
+                 refusing to {op} to avoid split-brain. Check the Postgres backing store."
+            )),
+        }
+    }
+
+    /// Release the Akh's advisory lock (best-effort) — paired with
+    /// [`Self::acquire_akh_lock_or_refuse`] so a later wake on this host can
+    /// re-acquire. No-op without a pool. Logs (does not error) on failure.
+    async fn release_akh_lock(&self, name: &str, akh_id: akhomed_store::uuid::Uuid) {
+        let pool = self.pg_pool();
+        let Some(pool) = pool.as_ref() else {
+            return;
+        };
+        if let Err(e) = akhomed_store::release_akh_lock(pool, akh_id).await {
+            tracing::warn!(workspace = %name, error = %e, "could not release akh advisory lock");
+        }
+    }
+
+    /// Evict a workspace's cached engine + agent and stop its background tasks
+    /// (daemon, WAL flusher, snapshot ticker), freeing the akh's memory. Shared
+    /// by `sleep_workspace`; the akh's durable state must already be persisted
+    /// (snapshot + WAL flush) before calling this, or unflushed mutations are lost.
+    async fn evict_workspace(&self, name: &str) {
+        // Stop the OODA daemon first so no further mutations are produced.
+        self.stop_workspace_daemon(name).await;
+
+        // Stop + drain the snapshot ticker.
+        if let Some(ticker) = self.snapshot_tickers.write().await.remove(name) {
+            let _ = ticker.shutdown.send(true);
+            if tokio::time::timeout(Duration::from_secs(5), ticker.handle)
+                .await
+                .is_err()
+            {
+                tracing::warn!(workspace = %name, "snapshot ticker did not stop within 5s on evict");
+            }
+        }
+
+        // Stop + drain the WAL flusher (the final batch was already flushed by
+        // the caller's snapshot path; this drains anything buffered since).
+        if let Some(mut flusher) = self.wal_flushers.write().await.remove(name) {
+            let _ = flusher.shutdown.send(true);
+            match tokio::time::timeout(Duration::from_secs(5), &mut flusher.handle).await {
+                Ok(_) => tracing::info!(workspace = %name, "WAL flusher drained on evict"),
+                Err(_) => {
+                    tracing::warn!(workspace = %name, "WAL flusher did not drain within 5s on evict, aborting");
+                    flusher.handle.abort();
+                }
+            }
+        }
+
+        // Drop the cached agent + engine + ancillary caches so memory is freed.
+        // Dropping the engine releases the redb lock so a later wake can reopen it.
+        self.agents.write().await.remove(name);
+        self.workspaces.write().await.remove(name);
+        self.psyche_snapshots.write().await.remove(name);
+        self.nlu_pipelines.write().await.remove(name);
+        self.daemon_pauses.write().await.remove(name);
+
+        // Release the advisory lock so this host (or another) can re-acquire on
+        // the next wake (no-op in local-only mode).
+        self.release_akh_lock(name, akh_medu::wal::akh_id_for(name))
+            .await;
+    }
+
+    /// Deep-sleep a workspace (control-plane `_akh/akh/sleep`).
+    ///
+    /// Force a WAL flush + write a snapshot (so the akh is recoverable), then
+    /// evict its cached engine + agent and stop its background tasks to free
+    /// memory. Without a Postgres pool this still evicts (freeing RAM) but warns
+    /// that durability requires Postgres — there is no relational copy to wake from.
+    async fn sleep_workspace(&self, name: &str) -> Result<serde_json::Value, String> {
+        if self.pg_pool().is_some() {
+            // Snapshot first so the relational copy is current; snapshot_workspace
+            // loads the agent if needed (so there is state to capture) and ensures
+            // the akh row exists.
+            self.snapshot_workspace(name).await?;
+            // Flush the WAL synchronously so any mutation since the snapshot
+            // reaches Postgres before we drop the in-memory engine.
+            self.flush_wal(name).await;
+            self.evict_workspace(name).await;
+            tracing::info!(workspace = %name, "akh deep-slept (snapshot + evict)");
+            Ok(serde_json::json!({
+                "workspace": name,
+                "slept": true,
+                "level": "deep",
+            }))
+        } else {
+            // Local-only: nothing to snapshot to, but freeing memory is still
+            // useful. Persist the local redb best-effort, then evict.
+            if let Ok(engine) = self.get_engine(name).await
+                && let Err(e) = engine.persist()
+            {
+                tracing::warn!(workspace = %name, error = %e, "local persist before sleep failed");
+            }
+            self.evict_workspace(name).await;
+            tracing::warn!(workspace = %name, "akh slept (local-only: evicted, no Postgres durability)");
+            Ok(serde_json::json!({
+                "workspace": name,
+                "slept": true,
+                "level": "deep",
+                "note": "evicted from memory, but durable relocation needs a [postgres] backing store",
+            }))
+        }
+    }
+
+    /// Force a synchronous WAL flush for `name`, if a flusher is wired (Phase
+    /// 38e/g). Used by sleep/relocate so any mutation since the snapshot reaches
+    /// Postgres before the in-memory engine is dropped — without waiting for the
+    /// next interval tick. A no-op when no flusher is wired (local-only mode).
+    async fn flush_wal(&self, name: &str) {
+        let log = self
+            .wal_flushers
+            .read()
+            .await
+            .get(name)
+            .map(|f| Arc::clone(&f.log));
+        if let Some(log) = log {
+            // flush_once drains at most one batch; loop until the buffer is empty
+            // so the relational copy is fully current before eviction/hand-off.
+            let mut total = 0usize;
+            loop {
+                let flushed = log.flush_once().await;
+                total += flushed;
+                if flushed == 0 || log.pending() == 0 {
+                    break;
+                }
+            }
+            tracing::debug!(workspace = %name, rows = total, "forced WAL flush before sleep/relocate");
+        }
+    }
+
+    /// Relocate a workspace (control-plane `_akh/akh/relocate`).
+    ///
+    /// Force a WAL flush + snapshot so another host can `akh akh wake` this akh,
+    /// then update `last_seen`. Requires Postgres — relocation is meaningless
+    /// without the shared backing store, so without a pool this returns a clear
+    /// error telling the operator to configure `[postgres]`.
+    async fn relocate_workspace(&self, name: &str) -> Result<serde_json::Value, String> {
+        let pool = self.pg_pool();
+        let Some(pool) = pool.as_ref() else {
+            return Err(
+                "relocation requires a Postgres backing store (no [postgres] section configured). \
+                 Add a [postgres] section to akhomed's config.toml (or set DATABASE_URL) so the \
+                 akh's state can be woken on another host."
+                    .into(),
+            );
+        };
+        let akh_id = akh_medu::wal::akh_id_for(name);
+
+        // Guard against another host already owning this akh.
+        self.acquire_akh_lock_or_refuse(name, akh_id, "relocate")
+            .await?;
+
+        // Snapshot (loads the agent if needed) + flush so the relational copy is
+        // current and complete before we hand off.
+        self.snapshot_workspace(name).await?;
+        self.flush_wal(name).await;
+
+        // Mark the heartbeat so the recovery host sees a fresh `last_seen`.
+        if let Err(e) =
+            akhomed_store::touch_last_seen(pool, akh_id, akhomed_store::chrono::Utc::now()).await
+        {
+            tracing::warn!(workspace = %name, error = %e, "could not update last_seen on relocate");
+        }
+
+        // Release the lock so the recovery host can acquire it on wake.
+        self.release_akh_lock(name, akh_id).await;
+
+        tracing::info!(workspace = %name, %akh_id, "akh prepared for relocation");
+        Ok(serde_json::json!({
+            "workspace": name,
+            "relocatable": true,
+            "hint": "run `akh akh wake` on the recovery host",
+        }))
+    }
+
+    /// Join: upsert a membership row for this workspace's akh (38f). The
+    /// workspace name resolves to the stable workspace/akh ids; the akh row is
+    /// ensured first so the membership FK target exists. Requires Postgres.
+    async fn workspace_join(&self, name: &str) -> Result<serde_json::Value, String> {
+        let pool = self.pg_pool();
+        let Some(pool) = pool.as_ref() else {
+            return Err(membership_needs_pg("join"));
+        };
+        let akh_id = akh_medu::wal::akh_id_for(name);
+        let workspace_id = akh_medu::wal::workspace_id_for(name);
+        akhomed_store::ensure_akh(pool, akh_id, name, None)
+            .await
+            .map_err(|e| e.to_string())?;
+        akhomed_store::join_workspace(
+            pool,
+            workspace_id,
+            akh_id,
+            "member",
+            akhomed_store::chrono::Utc::now(),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+        Ok(serde_json::json!({
+            "workspace": name,
+            "akh_id": akh_id.to_string(),
+            "role": "member",
+            "joined": true,
+        }))
+    }
+
+    /// Leave: delete this workspace's akh membership row (38f). Requires Postgres.
+    async fn workspace_leave(&self, name: &str) -> Result<serde_json::Value, String> {
+        let pool = self.pg_pool();
+        let Some(pool) = pool.as_ref() else {
+            return Err(membership_needs_pg("leave"));
+        };
+        let akh_id = akh_medu::wal::akh_id_for(name);
+        let workspace_id = akh_medu::wal::workspace_id_for(name);
+        let removed = akhomed_store::leave_workspace(pool, workspace_id, akh_id)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(serde_json::json!({
+            "workspace": name,
+            "akh_id": akh_id.to_string(),
+            "left": removed,
+        }))
+    }
+
+    /// List members: all membership rows for a workspace as a JSON array of
+    /// `{akh_id, role, joined_at}` (38f). Requires Postgres.
+    async fn workspace_list_members(&self, name: &str) -> Result<serde_json::Value, String> {
+        let pool = self.pg_pool();
+        let Some(pool) = pool.as_ref() else {
+            return Err(membership_needs_pg("list-members"));
+        };
+        let workspace_id = akh_medu::wal::workspace_id_for(name);
+        let rows = akhomed_store::list_members(pool, workspace_id)
+            .await
+            .map_err(|e| e.to_string())?;
+        let members: Vec<serde_json::Value> = rows
+            .into_iter()
+            .map(|m| {
+                serde_json::json!({
+                    "akh_id": m.akh_id.to_string(),
+                    "role": m.role,
+                    "joined_at": m.joined_at.to_rfc3339(),
+                })
+            })
+            .collect();
+        Ok(serde_json::json!({
+            "workspace": name,
+            "members": members,
+        }))
+    }
+
+    /// Run the akhomed-store migrations on demand (control-plane `_akh/migrate`).
+    /// Exposes the same runner the daemon calls on start when `migrate_on_start`
+    /// is set; requires Postgres.
+    async fn run_migrations_op(&self) -> Result<serde_json::Value, String> {
+        if self.pg_pool().is_none() {
+            return Err(
+                "migrations require a Postgres backing store (no [postgres] section configured). \
+                 Add a [postgres] section to akhomed's config.toml (or set DATABASE_URL) and retry."
+                    .into(),
+            );
+        }
+        // Build a fresh PoolOptions from config so the migration runs under its
+        // own advisory-locked single connection (safe even if other hosts are
+        // migrating the same cluster concurrently), rather than on the shared
+        // pool. Drop the config guard before the await.
+        let opts = {
+            let cfg = self.config.read().await;
+            let pg = cfg.postgres.as_ref().ok_or_else(|| {
+                "migrations require a Postgres backing store (no [postgres] section configured)."
+                    .to_string()
+            })?;
+            let url = std::env::var("DATABASE_URL").unwrap_or_else(|_| pg.url.clone());
+            akhomed_store::PoolOptions {
+                url,
+                max_connections: pg.pool_size,
+                connect_timeout: std::time::Duration::from_secs(pg.connect_timeout_secs),
+            }
+        };
+        akhomed_store::run_migrations_locked(&opts)
+            .await
+            .map_err(|e| e.to_string())?;
+        tracing::info!("akhomed-store migrations run via ACP control-plane");
+        Ok(serde_json::json!({ "migrated": true }))
+    }
+
+    /// Phase 38b/38c: stop background Postgres tasks on graceful shutdown.
+    ///
+    /// Order: stop snapshot tickers, take one final snapshot per loaded
+    /// workspace (so the relational copy is current), then drain the WAL
+    /// flushers (any mutations buffered after the final snapshot land newer than
+    /// its watermark and are replayed idempotently on the next wake).
+    async fn shutdown_wals(&self) {
+        // Stop periodic snapshot tickers.
+        let tickers: Vec<(String, SnapshotTicker)> =
+            self.snapshot_tickers.write().await.drain().collect();
+        for (name, ticker) in tickers {
+            let _ = ticker.shutdown.send(true);
+            if tokio::time::timeout(Duration::from_secs(5), ticker.handle)
+                .await
+                .is_err()
+            {
+                tracing::warn!(workspace = %name, "snapshot ticker did not stop within 5s");
+            }
+        }
+
+        // Final snapshot of every loaded workspace (best-effort).
+        if self.pg_pool().is_some() {
+            let names: Vec<String> = self.agents.read().await.keys().cloned().collect();
+            for name in names {
+                match self.snapshot_workspace(&name).await {
+                    Ok(()) => tracing::info!(workspace = %name, "final snapshot written on shutdown"),
+                    Err(e) => {
+                        tracing::warn!(workspace = %name, error = %e, "final snapshot on shutdown failed")
+                    }
+                }
+            }
+        }
+
+        let flushers: Vec<(String, WalFlusher)> =
+            self.wal_flushers.write().await.drain().collect();
+        for (name, mut flusher) in flushers {
+            let _ = flusher.shutdown.send(true);
+            match tokio::time::timeout(Duration::from_secs(5), &mut flusher.handle).await {
+                Ok(_) => tracing::info!(workspace = %name, "WAL flusher drained"),
+                Err(_) => {
+                    tracing::warn!(workspace = %name, "WAL flusher did not drain within 5s, aborting");
+                    flusher.handle.abort();
+                }
+            }
         }
     }
 
     /// Get or lazily open an engine for the given workspace.
-    async fn get_engine(&self, name: &str) -> Result<Arc<Engine>, (StatusCode, String)> {
+    async fn get_engine(&self, name: &str) -> Result<Arc<Engine>, String> {
         // Check if already loaded.
         {
             let map = self.workspaces.read().await;
@@ -106,28 +941,67 @@ impl ServerState {
             }
         }
 
-        // Try to load it.
+        // Serialize the slow path per workspace: two concurrent first-loads must
+        // not each build a separate Engine (each would wire its own WAL flusher +
+        // snapshot ticker, and all but the winner would leak as orphaned tasks).
+        let load_lock = fetch_load_lock(&self.engine_load_locks, name).await;
+        let _load_guard = load_lock.lock().await;
+
+        // Double-check: a racing winner may have populated the cache while we
+        // waited for the load lock.
+        {
+            let map = self.workspaces.read().await;
+            if let Some(engine) = map.get(name) {
+                return Ok(Arc::clone(engine));
+            }
+        }
+
+        // Try to load it. A workspace with a config file but no data dir yet is
+        // lazily created from that config (preserving akh-level fields), so any
+        // *configured* akh loads on first use — control-plane (snapshot/sleep),
+        // data-plane, and chat alike — not only the one bound at startup. Only a
+        // workspace with neither data dir nor config is genuinely "not found".
         let ws_paths = self.paths.workspace(name);
         if !ws_paths.root.exists() {
-            return Err((
-                StatusCode::NOT_FOUND,
-                format!("workspace \"{name}\" not found"),
-            ));
+            let config_path = self.paths.workspace_config_file(name);
+            if !config_path.exists() {
+                return Err(format!("workspace \"{name}\" not found"));
+            }
+            let wsm = WorkspaceManager::new(self.paths.clone());
+            let akh_cfg = AkhConfig::load(&config_path).ok();
+            let ws_cfg = akh_cfg
+                .as_ref()
+                .map(|c| c.workspace.clone())
+                .unwrap_or_else(|| akh_medu::workspace::WorkspaceConfig::with_name(name));
+            wsm.create(ws_cfg)
+                .map_err(|e| format!("failed to create workspace \"{name}\" from config: {e}"))?;
+            // `create` persists only the WorkspaceConfig view; restore the full
+            // AkhConfig so akh-level fields (backend/model/endpoint) survive.
+            if let Some(c) = akh_cfg
+                && let Err(e) = c.save(&config_path)
+            {
+                tracing::warn!(workspace = %name, error = %e, "failed to restore akh.toml after lazy create");
+            }
         }
+
+        // Honour the akh's read-root unlock (ADR 076 §4): when `openclaw_import`
+        // is on, `effective_read_roots()` adds `~/.openclaw` so the agent's
+        // `LocalFs` can read the akh's own OpenClaw past life (read-only; writes
+        // still stay confined to `scratch/`). No config / legacy TOML → empty.
+        let extra_read_roots = AkhConfig::load(&self.paths.workspace_config_file(name))
+            .map(|c| c.effective_read_roots())
+            .unwrap_or_default();
 
         let config = EngineConfig {
             dimension: Dimension::DEFAULT,
             data_dir: Some(ws_paths.kg_dir.clone()),
             compartments_dir: Some(ws_paths.compartments_dir.clone()),
+            extra_read_roots,
             ..Default::default()
         };
 
-        let engine = Engine::new(config).map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("failed to open workspace \"{name}\": {e}"),
-            )
-        })?;
+        let engine = Engine::new(config)
+            .map_err(|e| format!("failed to open workspace \"{name}\": {e}"))?;
 
         // Wire audit broadcast sender so WS clients receive live entries.
         if let Some(ledger) = engine.audit_ledger() {
@@ -169,6 +1043,9 @@ impl ServerState {
             }
         }
 
+        // Phase 38b: install the mutation WAL (no-op in local-only mode).
+        self.wire_wal(name, &engine).await;
+
         let engine = Arc::new(engine);
         let mut map = self.workspaces.write().await;
         map.insert(name.to_string(), Arc::clone(&engine));
@@ -180,8 +1057,23 @@ impl ServerState {
     /// One Agent per workspace — daemon, HTTP handlers, and WS sessions all
     /// share the same instance. Construction is heavy (Agent::resume
     /// deserializes + rebuilds KG state), so we cache in `self.agents`.
-    async fn get_agent(&self, name: &str) -> Result<Arc<Mutex<Agent>>, (StatusCode, String)> {
+    async fn get_agent(&self, name: &str) -> Result<Arc<Mutex<Agent>>, String> {
         // Fast path: already cached.
+        {
+            let agents = self.agents.read().await;
+            if let Some(agent) = agents.get(name) {
+                return Ok(Arc::clone(agent));
+            }
+        }
+
+        // Serialize the slow path per workspace so concurrent first-callers don't
+        // each run the heavy `Agent::resume`; the loser reuses the winner's agent.
+        // A distinct lock map from `get_engine`'s, since `get_engine` is called
+        // below while this guard is held (same map would self-deadlock).
+        let load_lock = fetch_load_lock(&self.agent_load_locks, name).await;
+        let _load_guard = load_lock.lock().await;
+
+        // Double-check after acquiring the load lock.
         {
             let agents = self.agents.read().await;
             if let Some(agent) = agents.get(name) {
@@ -191,7 +1083,7 @@ impl ServerState {
 
         // Slow path: create agent (heavy sync work inside spawn_blocking).
         let engine = self.get_engine(name).await?;
-        let agent = tokio::task::spawn_blocking({
+        let mut agent = tokio::task::spawn_blocking({
             let engine = Arc::clone(&engine);
             move || {
                 let config = AgentConfig::default();
@@ -203,20 +1095,111 @@ impl ServerState {
             }
         })
         .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("agent task panicked: {e}"),
-            )
-        })?
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("failed to create agent: {e}"),
-            )
-        })?;
+        .map_err(|e| format!("agent task panicked: {e}"))?
+        .map_err(|e| format!("failed to create agent: {e}"))?;
 
         tracing::info!(workspace = %name, "shared agent created");
+
+        // Wire the per-akh model manager: pinned model + Ollama endpoint +
+        // authoritative system prompt (P1 / ADR-053). Construction is cheap
+        // (config clone + empty registry), and attaching it before the agent is
+        // shared means the first prompt turn already routes to the akh's pinned
+        // model with its own prompt. A missing/legacy akh.toml yields defaults,
+        // reproducing today's behaviour.
+        let akh_config = self.get_akh_config(name).await?;
+        let manager = Arc::new(AgentModelManager::new(akh_config.to_model_manager_config()));
+        agent.set_model_manager(manager);
+        agent.register_with_model_manager(name, name);
+
+        // ADR 076: inject the OpenClaw self-import surface for akhs that opted in
+        // (`openclaw_import = true`). The read-root unlock is already applied via
+        // `EngineConfig.extra_read_roots` in `get_engine`; here we add the
+        // discovery tool, scoped to this akh's id (= the workspace name). Off by
+        // default, so normal akhs never see it.
+        if akh_config.openclaw_import {
+            agent.register_tool(Box::new(
+                akh_medu::agent::tools::OpenClawDiscoverTool::new(name),
+            ));
+            tracing::info!(workspace = %name, "OpenClaw self-import surface enabled");
+        }
+
+        // ADR 070: if this akh is Candle-backed, load a local GGUF model and
+        // attach it as the chat/agentic backing (full, grammar-constrained tool
+        // calling). When the model is absent we log and leave the Ollama path —
+        // run_agentic_turn falls back to it, then to the symbolic pipeline.
+        #[cfg(feature = "candle-backend")]
+        if akh_config.backend == akh_medu::akh_config::ChatBacking::Candle {
+            let model_dir = self.paths.models_dir();
+            match akh_medu::nlu::candle_backend::CandleBackend::try_load(&model_dir) {
+                Some(mut cb) => {
+                    // Phase 47: share this akh's live inference options (Arc) with the backend and
+                    // seed speculative decode from the persisted config. The `inference_config`
+                    // tool flips the same Arc at runtime; the backend reads it each turn.
+                    let opts = agent.engine().inference_options().clone();
+                    opts.set_spec_decode(akh_config.spec_decode);
+                    cb.set_inference_options(opts);
+                    let system_prompt = akh_config.system_prompt.clone().unwrap_or_else(|| {
+                        "You are an akh: a precise, curious neuro-symbolic assistant. \
+                         Answer grounded in your knowledge graph; call tools when useful."
+                            .to_string()
+                    });
+                    let backend = std::sync::Arc::new(akh_medu::agent::chat_backend::CandleChatBackend::new(
+                        std::sync::Arc::new(std::sync::Mutex::new(cb)),
+                        system_prompt,
+                    ));
+                    agent.set_chat_backend(backend);
+                    tracing::info!(
+                        workspace = %name, backend = "candle", spec_decode = akh_config.spec_decode,
+                        "Candle chat backing attached"
+                    );
+                }
+                None => {
+                    tracing::warn!(
+                        workspace = %name, model_dir = %model_dir.display(),
+                        "akh.toml selects backend=candle but no GGUF model was found; \
+                         falling back to Ollama/symbolic. Run `akh setup models`."
+                    );
+                }
+            }
+        }
+
+        // Phase 44b/c/h/i: assemble each turn through a curating context manager,
+        // guarded by `SafetyEnforced` so eviction can never drop a safety-pinned
+        // span. `AKH_CONTEXT_STRATEGY` selects the strategy (default `compacting`):
+        //   compacting — history + KG + recall within the model's real budget,
+        //                with budget-driven section + tool degradation (44b/c/d/e/g);
+        //   passive    — lean context; the longer thread is carried by background
+        //                consolidation + recall, not verbatim history (44h);
+        //   virtual    — MemGPT tiers (core/recall/archival) + the self-edit tools
+        //                core_memory_append/replace + archival_search (44i).
+        // The lib default stays pass-through (tests / embedded).
+        {
+            use akh_medu::agent::context::{
+                CompactingManager, ContextManager, PassiveManager, SafetyEnforced,
+                VirtualContextManager,
+            };
+            let strategy =
+                std::env::var("AKH_CONTEXT_STRATEGY").unwrap_or_else(|_| "compacting".to_string());
+            let manager: Box<dyn ContextManager> = match strategy.as_str() {
+                "passive" => Box::new(SafetyEnforced::new(PassiveManager::default())),
+                "virtual" => {
+                    // Register the self-edit memory tools with this akh's id baked
+                    // in, so each tool always edits its own akh's core memory.
+                    agent.register_tool(Box::new(
+                        akh_medu::agent::tools::CoreMemoryAppendTool::new(name),
+                    ));
+                    agent.register_tool(Box::new(
+                        akh_medu::agent::tools::CoreMemoryReplaceTool::new(name),
+                    ));
+                    agent.register_tool(Box::new(akh_medu::agent::tools::ArchivalSearchTool));
+                    Box::new(SafetyEnforced::new(VirtualContextManager::default()))
+                }
+                _ => Box::new(SafetyEnforced::new(CompactingManager)),
+            };
+            tracing::info!(workspace = %name, %strategy, "context manager attached");
+            agent.set_context_manager(manager);
+        }
+
         // Extract the snapshot Arc before moving agent into Mutex so it can be
         // registered without ever re-acquiring the agent lock.
         let snapshot = agent.psyche_snapshot();
@@ -280,1194 +1263,54 @@ impl ServerState {
             .or_insert(Arc::clone(&shared));
         Arc::clone(entry)
     }
-}
 
-// ── Response types ────────────────────────────────────────────────────────
-
-#[derive(Serialize)]
-struct HealthResponse {
-    status: String,
-    version: String,
-    workspaces_loaded: usize,
-}
-
-#[derive(Serialize)]
-struct WorkspaceInfo {
-    name: String,
-    symbols: usize,
-    triples: usize,
-}
-
-#[derive(Serialize)]
-struct WorkspaceListResponse {
-    workspaces: Vec<String>,
-}
-
-#[derive(Serialize)]
-struct WorkspaceCreatedResponse {
-    name: String,
-    created: bool,
-}
-
-#[derive(Serialize)]
-struct SeedAppliedResponse {
-    pack: String,
-    triples_applied: usize,
-    already_applied: bool,
-}
-
-#[derive(Deserialize)]
-struct WsInput {
-    #[serde(rename = "type")]
-    msg_type: String,
-    #[serde(default)]
-    text: String,
-}
-
-// ── Handlers ──────────────────────────────────────────────────────────────
-
-async fn health(State(state): State<Arc<ServerState>>) -> Json<HealthResponse> {
-    let map = state.workspaces.read().await;
-    Json(HealthResponse {
-        status: "ok".to_string(),
-        version: env!("CARGO_PKG_VERSION").to_string(),
-        workspaces_loaded: map.len(),
-    })
-}
-
-// ── Web UI handlers ─────────────────────────────────────────────────────
-
-async fn homepage_handler() -> axum::response::Html<&'static str> {
-    axum::response::Html(INDEX_HTML)
-}
-
-async fn style_handler() -> impl IntoResponse {
-    (
-        [(axum::http::header::CONTENT_TYPE, "text/css; charset=utf-8")],
-        STYLE_CSS,
-    )
-}
-
-async fn htmx_handler() -> impl IntoResponse {
-    (
-        [(
-            axum::http::header::CONTENT_TYPE,
-            "application/javascript; charset=utf-8",
-        )],
-        HTMX_JS,
-    )
-}
-
-async fn alpine_handler() -> impl IntoResponse {
-    (
-        [(
-            axum::http::header::CONTENT_TYPE,
-            "application/javascript; charset=utf-8",
-        )],
-        ALPINE_JS,
-    )
-}
-
-// ── Config handlers ──────────────────────────────────────────────────────
-
-async fn get_config_handler(
-    State(state): State<Arc<ServerState>>,
-) -> Json<AkhomedConfig> {
-    let config = state.config.read().await;
-    Json(config.clone())
-}
-
-async fn put_config_handler(
-    State(state): State<Arc<ServerState>>,
-    Json(new_config): Json<AkhomedConfig>,
-) -> Result<Json<AkhomedConfig>, (StatusCode, String)> {
-    // Persist to disk.
-    let config_path = state.paths.global_config_file();
-    new_config
-        .save(&config_path)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?;
-
-    // Update in-memory state.
-    let mut config = state.config.write().await;
-    *config = new_config.clone();
-
-    tracing::info!(path = %config_path.display(), "config updated");
-    Ok(Json(new_config))
-}
-
-// ── Workspace handlers ──────────────────────────────────────────────────
-
-async fn list_workspaces(State(state): State<Arc<ServerState>>) -> Json<WorkspaceListResponse> {
-    let names = state.paths.list_workspaces();
-    Json(WorkspaceListResponse { workspaces: names })
-}
-
-#[derive(Deserialize)]
-struct CreateWorkspaceReq {
-    role: Option<String>,
-}
-
-async fn create_workspace(
-    State(state): State<Arc<ServerState>>,
-    Path(name): Path<String>,
-    body: Option<Json<CreateWorkspaceReq>>,
-) -> Result<Json<WorkspaceCreatedResponse>, (StatusCode, String)> {
-    let manager = WorkspaceManager::new(state.paths.clone());
-    let config = akh_medu::workspace::WorkspaceConfig {
-        name: name.clone(),
-        ..Default::default()
-    };
-    match manager.create(config) {
-        Ok(_) => {
-            // Assign role if provided in the request body.
-            if let Some(Json(req)) = body
-                && let Some(ref role) = req.role {
-                    let engine = state.get_engine(&name).await?;
-                    engine.assign_role(role).map_err(|e| {
-                        (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}"))
-                    })?;
-                    engine.persist().map_err(|e| {
-                        (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}"))
-                    })?;
-                }
-            Ok(Json(WorkspaceCreatedResponse {
-                name,
-                created: true,
-            }))
-        }
-        Err(e) => Err((StatusCode::BAD_REQUEST, format!("{e}"))),
-    }
-}
-
-#[derive(Deserialize)]
-struct AssignRoleReq {
-    role: String,
-}
-
-async fn assign_role_handler(
-    State(state): State<Arc<ServerState>>,
-    Path(ws_name): Path<String>,
-    Json(req): Json<AssignRoleReq>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let engine = state.get_engine(&ws_name).await?;
-    engine
-        .assign_role(&req.role)
-        .map_err(|e| (StatusCode::CONFLICT, format!("{e}")))?;
-    engine
-        .persist()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?;
-    Ok(Json(
-        serde_json::json!({ "role": req.role, "assigned": true }),
-    ))
-}
-
-async fn delete_workspace(
-    State(state): State<Arc<ServerState>>,
-    Path(name): Path<String>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    // Remove from loaded engines and agents.
-    {
-        let mut map = state.workspaces.write().await;
-        map.remove(&name);
-    }
-    {
-        let mut agents = state.agents.write().await;
-        agents.remove(&name);
-    }
-
-    let manager = WorkspaceManager::new(state.paths.clone());
-    match manager.delete(&name) {
-        Ok(_) => Ok(Json(serde_json::json!({ "deleted": name }))),
-        Err(e) => Err((StatusCode::BAD_REQUEST, format!("{e}"))),
-    }
-}
-
-async fn workspace_status(
-    State(state): State<Arc<ServerState>>,
-    Path(name): Path<String>,
-) -> Result<Json<WorkspaceInfo>, (StatusCode, String)> {
-    let engine = state.get_engine(&name).await?;
-    Ok(Json(WorkspaceInfo {
-        name,
-        symbols: engine.all_symbols().len(),
-        triples: engine.all_triples().len(),
-    }))
-}
-
-async fn apply_seed(
-    State(state): State<Arc<ServerState>>,
-    Path((ws_name, pack_name)): Path<(String, String)>,
-) -> Result<Json<SeedAppliedResponse>, (StatusCode, String)> {
-    let engine = state.get_engine(&ws_name).await?;
-    let seeds_dir = state.paths.seeds_dir();
-    let registry = SeedRegistry::discover(&seeds_dir);
-    match registry.apply(&pack_name, &engine) {
-        Ok(report) => Ok(Json(SeedAppliedResponse {
-            pack: pack_name,
-            triples_applied: report.triples_applied,
-            already_applied: report.already_applied,
-        })),
-        Err(e) => Err((StatusCode::BAD_REQUEST, format!("{e}"))),
-    }
-}
-
-async fn workspace_preprocess(
-    State(state): State<Arc<ServerState>>,
-    Path(name): Path<String>,
-    Json(request): Json<PreProcessRequest>,
-) -> Result<Json<PreProcessResponse>, (StatusCode, String)> {
-    let engine = state.get_engine(&name).await?;
-    let ctx = ParseContext::with_engine(engine.registry(), engine.ops(), engine.item_memory());
-
-    let start = Instant::now();
-    let results = preprocess_batch(&request.chunks, &ctx);
-    let elapsed = start.elapsed().as_millis() as u64;
-
-    Ok(Json(PreProcessResponse {
-        results,
-        processing_time_ms: elapsed,
-    }))
-}
-
-async fn workspace_equivalences(
-    State(state): State<Arc<ServerState>>,
-    Path(name): Path<String>,
-) -> Result<Json<Vec<LearnedEquivalence>>, (StatusCode, String)> {
-    let engine = state.get_engine(&name).await?;
-    Ok(Json(engine.export_equivalences()))
-}
-
-async fn workspace_equivalences_stats(
-    State(state): State<Arc<ServerState>>,
-    Path(name): Path<String>,
-) -> Result<Json<EquivalenceStats>, (StatusCode, String)> {
-    let engine = state.get_engine(&name).await?;
-    Ok(Json(engine.equivalence_stats()))
-}
-
-// ── Symbol handlers ──────────────────────────────────────────────────────
-
-async fn list_symbols(
-    State(state): State<Arc<ServerState>>,
-    Path(name): Path<String>,
-) -> Result<Json<Vec<akh_medu::symbol::SymbolMeta>>, (StatusCode, String)> {
-    let engine = state.get_engine(&name).await?;
-    Ok(Json(engine.all_symbols()))
-}
-
-async fn resolve_symbol(
-    State(state): State<Arc<ServerState>>,
-    Path((ws_name, sym)): Path<(String, String)>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let engine = state.get_engine(&ws_name).await?;
-    match engine.resolve_symbol(&sym) {
-        Ok(id) => {
-            let label = engine.resolve_label(id);
-            Ok(Json(serde_json::json!({ "id": id.get(), "label": label })))
-        }
-        Err(e) => Err((StatusCode::NOT_FOUND, format!("{e}"))),
-    }
-}
-
-#[derive(Deserialize)]
-struct CreateSymbolReq {
-    kind: String,
-    label: String,
-}
-
-async fn create_symbol(
-    State(state): State<Arc<ServerState>>,
-    Path(ws_name): Path<String>,
-    Json(req): Json<CreateSymbolReq>,
-) -> Result<Json<akh_medu::symbol::SymbolMeta>, (StatusCode, String)> {
-    let engine = state.get_engine(&ws_name).await?;
-    let kind = match req.kind.as_str() {
-        "entity" => SymbolKind::Entity,
-        "relation" => SymbolKind::Relation,
-        other => return Err((StatusCode::BAD_REQUEST, format!("unknown kind: {other}"))),
-    };
-    engine
-        .create_symbol(kind, &req.label)
-        .map(Json)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))
-}
-
-// ── Triple handlers ─────────────────────────────────────────────────────
-
-async fn list_triples(
-    State(state): State<Arc<ServerState>>,
-    Path(name): Path<String>,
-) -> Result<Json<Vec<Triple>>, (StatusCode, String)> {
-    let engine = state.get_engine(&name).await?;
-    Ok(Json(engine.all_triples()))
-}
-
-async fn triples_from(
-    State(state): State<Arc<ServerState>>,
-    Path((ws_name, sym_id)): Path<(String, u64)>,
-) -> Result<Json<Vec<Triple>>, (StatusCode, String)> {
-    let engine = state.get_engine(&ws_name).await?;
-    let id = SymbolId::new(sym_id)
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "invalid symbol id".to_string()))?;
-    Ok(Json(engine.triples_from(id)))
-}
-
-async fn triples_to(
-    State(state): State<Arc<ServerState>>,
-    Path((ws_name, sym_id)): Path<(String, u64)>,
-) -> Result<Json<Vec<Triple>>, (StatusCode, String)> {
-    let engine = state.get_engine(&ws_name).await?;
-    let id = SymbolId::new(sym_id)
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "invalid symbol id".to_string()))?;
-    Ok(Json(engine.triples_to(id)))
-}
-
-#[derive(Deserialize)]
-struct AddTripleReq {
-    subject: u64,
-    predicate: u64,
-    object: u64,
-    #[serde(default = "default_confidence")]
-    confidence: f32,
-}
-
-fn default_confidence() -> f32 {
-    1.0
-}
-
-async fn add_triple(
-    State(state): State<Arc<ServerState>>,
-    Path(ws_name): Path<String>,
-    Json(req): Json<AddTripleReq>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let engine = state.get_engine(&ws_name).await?;
-    let s = SymbolId::new(req.subject)
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "invalid subject id".to_string()))?;
-    let p = SymbolId::new(req.predicate)
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "invalid predicate id".to_string()))?;
-    let o = SymbolId::new(req.object)
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "invalid object id".to_string()))?;
-    let mut triple = Triple::new(s, p, o);
-    triple.confidence = req.confidence;
-    engine
-        .add_triple(&triple)
-        .map(|_| Json(serde_json::json!({"ok": true})))
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))
-}
-
-#[derive(Deserialize)]
-struct IngestReq {
-    triples: Vec<(String, String, String, f32)>,
-}
-
-async fn ingest_triples(
-    State(state): State<Arc<ServerState>>,
-    Path(ws_name): Path<String>,
-    Json(req): Json<IngestReq>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let engine = state.get_engine(&ws_name).await?;
-    match engine.ingest_label_triples(&req.triples) {
-        Ok((syms, trips)) => {
-            let _ = engine.persist();
-            Ok(Json(serde_json::json!({
-                "symbols_created": syms,
-                "triples_ingested": trips,
-            })))
-        }
-        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, format!("{e}"))),
-    }
-}
-
-async fn ingest_csv_handler(
-    State(state): State<Arc<ServerState>>,
-    Path(ws_name): Path<String>,
-    Json(req): Json<akh_medu::api_types::CsvIngestRequest>,
-) -> Result<Json<akh_medu::api_types::IngestResponse>, (StatusCode, String)> {
-    let engine = state.get_engine(&ws_name).await?;
-    let result = tokio::task::spawn_blocking(move || -> Result<_, String> {
-        use akh_medu::agent::tool::{Tool, ToolInput};
-        use akh_medu::agent::tools::CsvIngestTool;
-
-        // Write content to a temp file so CsvIngestTool can read it.
-        let tmp = std::env::temp_dir().join(format!("akh-csv-{}.csv", std::process::id()));
-        std::fs::write(&tmp, &req.content)
-            .map_err(|e| format!("failed to write temp CSV: {e}"))?;
-
-        let input = ToolInput::new()
-            .with_param("path", tmp.to_str().unwrap_or(""))
-            .with_param("format", &req.format);
-
-        let tool = CsvIngestTool;
-        let output = tool.execute(&engine, input).map_err(|e| format!("{e}"))?;
-
-        let _ = std::fs::remove_file(&tmp);
-        let _ = engine.persist();
-
-        Ok(akh_medu::api_types::IngestResponse {
-            success: output.success,
-            message: output.result,
-        })
-    })
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?
-    .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
-    Ok(Json(result))
-}
-
-async fn ingest_text_handler(
-    State(state): State<Arc<ServerState>>,
-    Path(ws_name): Path<String>,
-    Json(req): Json<akh_medu::api_types::TextIngestRequest>,
-) -> Result<Json<akh_medu::api_types::IngestResponse>, (StatusCode, String)> {
-    let engine = state.get_engine(&ws_name).await?;
-    let result = tokio::task::spawn_blocking(move || -> Result<_, String> {
-        use akh_medu::agent::tool::{Tool, ToolInput};
-        use akh_medu::agent::tools::TextIngestTool;
-
-        let input = ToolInput::new()
-            .with_param("text", &req.text)
-            .with_param("max_sentences", req.max_sentences.to_string());
-
-        let tool = TextIngestTool;
-        let output = tool.execute(&engine, input).map_err(|e| format!("{e}"))?;
-
-        let _ = engine.persist();
-
-        Ok(akh_medu::api_types::IngestResponse {
-            success: output.success,
-            message: output.result,
-        })
-    })
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?
-    .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
-    Ok(Json(result))
-}
-
-#[cfg(feature = "calendar")]
-async fn cal_sync_handler(
-    State(state): State<Arc<ServerState>>,
-    Path(ws_name): Path<String>,
-    Json(req): Json<akh_medu::api_types::CalSyncRequest>,
-) -> Result<Json<akh_medu::api_types::CalImportResponse>, (StatusCode, String)> {
-    let engine = state.get_engine(&ws_name).await?;
-    let shared_agent = state.get_agent(&ws_name).await?;
-    let result = tokio::task::spawn_blocking(move || -> Result<_, String> {
-        let mut agent = shared_agent.lock().unwrap();
-        let imported = akh_medu::agent::calendar::sync_caldav(
-            agent.calendar_manager_mut(),
-            &engine,
-            &req.url,
-            &req.user,
-            &req.pass,
-        )
-        .map_err(|e| format!("{e}"))?;
-        let _ = agent.persist_session();
-        Ok(akh_medu::api_types::CalImportResponse {
-            imported_count: imported.len(),
-        })
-    })
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?
-    .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
-    Ok(Json(result))
-}
-
-#[cfg(not(feature = "calendar"))]
-async fn cal_sync_handler(
-    _state: State<Arc<ServerState>>,
-    _ws_name: Path<String>,
-    _req: Json<akh_medu::api_types::CalSyncRequest>,
-) -> Result<Json<akh_medu::api_types::CalImportResponse>, (StatusCode, String)> {
-    Err((
-        StatusCode::NOT_IMPLEMENTED,
-        "CalDAV sync requires --features calendar".into(),
-    ))
-}
-
-async fn library_scan_handler(
-    State(state): State<Arc<ServerState>>,
-    Path(ws_name): Path<String>,
-    Json(req): Json<akh_medu::api_types::LibraryScanRequest>,
-) -> Result<Json<akh_medu::api_types::LibraryScanResponse>, (StatusCode, String)> {
-    let engine = state.get_engine(&ws_name).await?;
-    let paths = state.paths.clone();
-    let result = tokio::task::spawn_blocking(move || -> Result<_, String> {
-        use akh_medu::library::catalog::LibraryCatalog;
-        use akh_medu::library::ingest::{IngestConfig, ingest_file};
-
-        let inbox_dir = req
-            .inbox_dir
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| paths.library_inbox());
-        let library_dir = paths.library_dir();
-        let done_dir = inbox_dir.join("done");
-
-        // Ensure directories exist.
-        let _ = std::fs::create_dir_all(&inbox_dir);
-        let _ = std::fs::create_dir_all(&done_dir);
-
-        let entries = std::fs::read_dir(&inbox_dir)
-            .map_err(|e| format!("cannot read inbox {}: {e}", inbox_dir.display()))?;
-
-        let mut catalog = LibraryCatalog::open(&library_dir)
-            .map_err(|e| format!("cannot open library catalog: {e}"))?;
-
-        let mut processed = 0usize;
-        let mut failed = 0usize;
-
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                continue;
-            }
-            if path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|n| n.starts_with('.'))
+    // ── daemon lifecycle (shared by the REST handlers and the ACP control-plane)
+    //
+    // These hold the actual logic; the REST handlers and `ServerControl` impl
+    // are thin adapters. When REST is deleted (ADR-061 increment 4) only the
+    // adapters vanish — this stays.
+
+    /// Start (or return the already-running) background daemon for a workspace.
+    ///
+    /// `max_cycles == 0` means run indefinitely. Background tasks are gated by
+    /// the akh's `[autonomy]` config (P5): a fresh akh runs only always-on infra
+    /// unless it opts in. Idempotent — a second call while one is live returns
+    /// the existing status rather than spawning a duplicate.
+    async fn spawn_workspace_daemon(
+        &self,
+        ws_name: &str,
+        max_cycles: usize,
+    ) -> Result<DaemonStatus, String> {
+        // Already running? Return its current status.
+        {
+            let daemons = self.daemons.read().await;
+            if let Some(d) = daemons.get(ws_name)
+                && !d.handle.is_finished()
             {
-                continue;
-            }
-
-            match ingest_file(&engine, &mut catalog, &path, IngestConfig::default(), None) {
-                Ok(_result) => {
-                    // Move to done/.
-                    if let Some(filename) = path.file_name() {
-                        let _ = std::fs::rename(&path, done_dir.join(filename));
-                    }
-                    processed += 1;
-                }
-                Err(e) => {
-                    tracing::warn!(path = %path.display(), error = %e, "library scan: ingest failed");
-                    failed += 1;
-                }
+                return Ok(d.status.lock().await.clone());
             }
         }
 
-        let _ = engine.persist();
-
-        Ok(akh_medu::api_types::LibraryScanResponse {
-            files_processed: processed,
-            files_failed: failed,
-        })
-    })
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?
-    .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
-    Ok(Json(result))
-}
-
-// ── Query & reasoning handlers ──────────────────────────────────────────
-
-#[derive(Deserialize)]
-struct SparqlReq {
-    query: String,
-}
-
-async fn sparql_query(
-    State(state): State<Arc<ServerState>>,
-    Path(ws_name): Path<String>,
-    Json(req): Json<SparqlReq>,
-) -> Result<Json<Vec<Vec<(String, String)>>>, (StatusCode, String)> {
-    let engine = state.get_engine(&ws_name).await?;
-    engine
-        .sparql_query(&req.query)
-        .map(Json)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))
-}
-
-async fn infer_handler(
-    State(state): State<Arc<ServerState>>,
-    Path(ws_name): Path<String>,
-    Json(query): Json<InferenceQuery>,
-) -> Result<Json<akh_medu::infer::InferenceResult>, (StatusCode, String)> {
-    let engine = state.get_engine(&ws_name).await?;
-    engine
-        .infer(&query)
-        .map(Json)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))
-}
-
-#[derive(Deserialize)]
-struct ReasonReq {
-    expr: String,
-}
-
-async fn reason_handler(
-    State(state): State<Arc<ServerState>>,
-    Path(ws_name): Path<String>,
-    Json(req): Json<ReasonReq>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let engine = state.get_engine(&ws_name).await?;
-    match engine.simplify_expression(&req.expr) {
-        Ok(result) => Ok(Json(serde_json::json!({ "result": result }))),
-        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, format!("{e}"))),
-    }
-}
-
-#[derive(Deserialize)]
-struct SearchReq {
-    symbol: u64,
-    #[serde(default = "default_top_k")]
-    top_k: usize,
-}
-
-fn default_top_k() -> usize {
-    5
-}
-
-async fn search_handler(
-    State(state): State<Arc<ServerState>>,
-    Path(ws_name): Path<String>,
-    Json(req): Json<SearchReq>,
-) -> Result<Json<Vec<akh_medu::vsa::item_memory::SearchResult>>, (StatusCode, String)> {
-    let engine = state.get_engine(&ws_name).await?;
-    let id = SymbolId::new(req.symbol)
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "invalid symbol id".to_string()))?;
-    engine
-        .search_similar_to(id, req.top_k)
-        .map(Json)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))
-}
-
-#[derive(Deserialize)]
-struct AnalogyReq {
-    a: u64,
-    b: u64,
-    c: u64,
-    #[serde(default = "default_top_k")]
-    top_k: usize,
-}
-
-async fn analogy_handler(
-    State(state): State<Arc<ServerState>>,
-    Path(ws_name): Path<String>,
-    Json(req): Json<AnalogyReq>,
-) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, String)> {
-    let engine = state.get_engine(&ws_name).await?;
-    let a = SymbolId::new(req.a)
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "invalid a".to_string()))?;
-    let b = SymbolId::new(req.b)
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "invalid b".to_string()))?;
-    let c = SymbolId::new(req.c)
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "invalid c".to_string()))?;
-    match engine.infer_analogy(a, b, c, req.top_k) {
-        Ok(results) => Ok(Json(
-            results
-                .into_iter()
-                .map(|(sym, score)| serde_json::json!({"symbol": sym.get(), "score": score}))
-                .collect(),
-        )),
-        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, format!("{e}"))),
-    }
-}
-
-#[derive(Deserialize)]
-struct FillerReq {
-    subject: u64,
-    predicate: u64,
-    #[serde(default = "default_top_k")]
-    top_k: usize,
-}
-
-async fn filler_handler(
-    State(state): State<Arc<ServerState>>,
-    Path(ws_name): Path<String>,
-    Json(req): Json<FillerReq>,
-) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, String)> {
-    let engine = state.get_engine(&ws_name).await?;
-    let s = SymbolId::new(req.subject)
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "invalid subject".to_string()))?;
-    let p = SymbolId::new(req.predicate)
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "invalid predicate".to_string()))?;
-    match engine.recover_filler(s, p, req.top_k) {
-        Ok(results) => Ok(Json(
-            results
-                .into_iter()
-                .map(|(sym, score)| serde_json::json!({"symbol": sym.get(), "score": score}))
-                .collect(),
-        )),
-        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, format!("{e}"))),
-    }
-}
-
-// ── Traversal & analytics handlers ──────────────────────────────────────
-
-#[derive(Deserialize)]
-struct TraverseReq {
-    seeds: Vec<u64>,
-    #[serde(default = "default_max_depth")]
-    max_depth: usize,
-    #[serde(default)]
-    predicate_filter: std::collections::HashSet<u64>,
-    #[serde(default)]
-    min_confidence: f32,
-    #[serde(default = "default_max_results")]
-    max_results: usize,
-}
-
-fn default_max_depth() -> usize {
-    3
-}
-fn default_max_results() -> usize {
-    1000
-}
-
-async fn traverse_handler(
-    State(state): State<Arc<ServerState>>,
-    Path(ws_name): Path<String>,
-    Json(req): Json<TraverseReq>,
-) -> Result<Json<akh_medu::graph::traverse::TraversalResult>, (StatusCode, String)> {
-    let engine = state.get_engine(&ws_name).await?;
-    let seeds: Vec<SymbolId> = req
-        .seeds
-        .iter()
-        .filter_map(|&id| SymbolId::new(id))
-        .collect();
-    let pred_filter: std::collections::HashSet<SymbolId> = req
-        .predicate_filter
-        .iter()
-        .filter_map(|&id| SymbolId::new(id))
-        .collect();
-    let config = TraversalConfig {
-        max_depth: req.max_depth,
-        predicate_filter: pred_filter,
-        min_confidence: req.min_confidence,
-        max_results: req.max_results,
-    };
-    engine
-        .traverse(&seeds, config)
-        .map(Json)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))
-}
-
-async fn degree_centrality_handler(
-    State(state): State<Arc<ServerState>>,
-    Path(ws_name): Path<String>,
-) -> Result<Json<Vec<akh_medu::graph::analytics::DegreeCentrality>>, (StatusCode, String)> {
-    let engine = state.get_engine(&ws_name).await?;
-    Ok(Json(engine.degree_centrality()))
-}
-
-async fn pagerank_handler(
-    State(state): State<Arc<ServerState>>,
-    Path(ws_name): Path<String>,
-    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
-) -> Result<Json<Vec<akh_medu::graph::analytics::PageRankScore>>, (StatusCode, String)> {
-    let engine = state.get_engine(&ws_name).await?;
-    let damping: f64 = params
-        .get("damping")
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0.85);
-    let iterations: usize = params
-        .get("iterations")
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(20);
-    engine
-        .pagerank(damping, iterations)
-        .map(Json)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))
-}
-
-async fn components_handler(
-    State(state): State<Arc<ServerState>>,
-    Path(ws_name): Path<String>,
-) -> Result<Json<Vec<akh_medu::graph::analytics::ConnectedComponent>>, (StatusCode, String)> {
-    let engine = state.get_engine(&ws_name).await?;
-    engine
-        .strongly_connected_components()
-        .map(Json)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))
-}
-
-#[derive(Deserialize)]
-struct ShortestPathReq {
-    from: u64,
-    to: u64,
-}
-
-async fn shortest_path_handler(
-    State(state): State<Arc<ServerState>>,
-    Path(ws_name): Path<String>,
-    Json(req): Json<ShortestPathReq>,
-) -> Result<Json<Option<Vec<u64>>>, (StatusCode, String)> {
-    let engine = state.get_engine(&ws_name).await?;
-    let from = SymbolId::new(req.from)
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "invalid from".to_string()))?;
-    let to = SymbolId::new(req.to)
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "invalid to".to_string()))?;
-    match engine.shortest_path(from, to) {
-        Ok(path) => Ok(Json(path.map(|p| p.into_iter().map(|s| s.get()).collect()))),
-        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, format!("{e}"))),
-    }
-}
-
-// ── Export handlers ─────────────────────────────────────────────────────
-
-async fn export_symbols(
-    State(state): State<Arc<ServerState>>,
-    Path(ws_name): Path<String>,
-) -> Result<Json<Vec<akh_medu::export::SymbolExport>>, (StatusCode, String)> {
-    let engine = state.get_engine(&ws_name).await?;
-    Ok(Json(engine.export_symbol_table()))
-}
-
-async fn export_triples(
-    State(state): State<Arc<ServerState>>,
-    Path(ws_name): Path<String>,
-) -> Result<Json<Vec<akh_medu::export::TripleExport>>, (StatusCode, String)> {
-    let engine = state.get_engine(&ws_name).await?;
-    Ok(Json(engine.export_triples()))
-}
-
-async fn export_provenance(
-    State(state): State<Arc<ServerState>>,
-    Path((ws_name, sym)): Path<(String, String)>,
-) -> Result<Json<Vec<akh_medu::export::ProvenanceExport>>, (StatusCode, String)> {
-    let engine = state.get_engine(&ws_name).await?;
-    let id = engine
-        .resolve_symbol(&sym)
-        .map_err(|e| (StatusCode::NOT_FOUND, format!("{e}")))?;
-    engine
-        .export_provenance_chain(id)
-        .map(Json)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))
-}
-
-// ── Skills handlers ─────────────────────────────────────────────────────
-
-async fn list_skills_handler(
-    State(state): State<Arc<ServerState>>,
-    Path(ws_name): Path<String>,
-) -> Result<Json<Vec<akh_medu::skills::SkillInfo>>, (StatusCode, String)> {
-    let engine = state.get_engine(&ws_name).await?;
-    Ok(Json(engine.list_skills()))
-}
-
-async fn load_skill_handler(
-    State(state): State<Arc<ServerState>>,
-    Path((ws_name, skill_name)): Path<(String, String)>,
-) -> Result<Json<akh_medu::skills::SkillActivation>, (StatusCode, String)> {
-    let engine = state.get_engine(&ws_name).await?;
-    engine
-        .load_skill(&skill_name)
-        .map(Json)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))
-}
-
-async fn unload_skill_handler(
-    State(state): State<Arc<ServerState>>,
-    Path((ws_name, skill_name)): Path<(String, String)>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let engine = state.get_engine(&ws_name).await?;
-    engine
-        .unload_skill(&skill_name)
-        .map(|_| Json(serde_json::json!({"ok": true})))
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))
-}
-
-async fn skill_info_handler(
-    State(state): State<Arc<ServerState>>,
-    Path((ws_name, skill_name)): Path<(String, String)>,
-) -> Result<Json<akh_medu::skills::SkillInfo>, (StatusCode, String)> {
-    let engine = state.get_engine(&ws_name).await?;
-    engine
-        .skill_info(&skill_name)
-        .map(Json)
-        .map_err(|e| (StatusCode::NOT_FOUND, format!("{e}")))
-}
-
-async fn install_skill_handler(
-    State(state): State<Arc<ServerState>>,
-    Path(ws_name): Path<String>,
-    Json(payload): Json<akh_medu::skills::SkillInstallPayload>,
-) -> Result<Json<akh_medu::skills::SkillActivation>, (StatusCode, String)> {
-    let engine = state.get_engine(&ws_name).await?;
-    engine
-        .install_skill(&payload)
-        .map(Json)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))
-}
-
-// ── Library handlers ─────────────────────────────────────────────────────
-
-async fn library_list_handler(
-    State(state): State<Arc<ServerState>>,
-    Path(ws_name): Path<String>,
-) -> Result<Json<Vec<DocumentRecord>>, (StatusCode, String)> {
-    let _engine = state.get_engine(&ws_name).await?;
-    let library_dir = state.paths.library_dir();
-    let catalog = LibraryCatalog::open(&library_dir)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?;
-    Ok(Json(catalog.list().to_vec()))
-}
-
-async fn library_add_handler(
-    State(state): State<Arc<ServerState>>,
-    Path(ws_name): Path<String>,
-    Json(req): Json<LibraryAddRequest>,
-) -> Result<Json<LibraryAddResponse>, (StatusCode, String)> {
-    let engine = state.get_engine(&ws_name).await?;
-    let library_dir = state.paths.library_dir();
-    let mut catalog = LibraryCatalog::open(&library_dir)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?;
-
-    let fmt = req.format.as_deref().and_then(|f| match f {
-        "html" => Some(ContentFormat::Html),
-        "pdf" => Some(ContentFormat::Pdf),
-        "epub" => Some(ContentFormat::Epub),
-        "text" | "txt" => Some(ContentFormat::PlainText),
-        _ => None,
-    });
-
-    let ingest_config = IngestConfig {
-        title: req.title,
-        tags: req.tags,
-        format: fmt,
-        ..Default::default()
-    };
-
-    // Initialise NLU pipeline from this workspace's persisted ranker state.
-    let data_dir = engine.config().data_dir.as_deref();
-    let mut nlu_pipeline = engine
-        .store()
-        .get_meta(b"nlu_ranker_state")
-        .ok()
-        .flatten()
-        .and_then(|bytes| akh_medu::nlu::parse_ranker::ParseRanker::from_bytes(&bytes))
-        .map(|ranker| akh_medu::nlu::NluPipeline::with_ranker_and_models(ranker, data_dir))
-        .unwrap_or_else(|| akh_medu::nlu::NluPipeline::new_with_models(data_dir));
-
-    let result = if req.source.starts_with("http://") || req.source.starts_with("https://") {
-        akh_medu::library::ingest_url(
-            &engine,
-            &mut catalog,
-            &req.source,
-            ingest_config,
-            Some(&mut nlu_pipeline),
-            30,
-        )
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?
-    } else {
-        let path = std::path::PathBuf::from(&req.source);
-        akh_medu::library::ingest_file(
-            &engine,
-            &mut catalog,
-            &path,
-            ingest_config,
-            Some(&mut nlu_pipeline),
-        )
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?
-    };
-
-    // Persist NLU ranker state (parse successes train the ranker).
-    let ranker_bytes = nlu_pipeline.ranker().to_bytes();
-    let _ = engine.store().put_meta(b"nlu_ranker_state", &ranker_bytes);
-
-    // Persist engine state so ingested symbols survive restarts.
-    engine
-        .persist()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("persist: {e}")))?;
-
-    Ok(Json(LibraryAddResponse {
-        id: result.record.id,
-        title: result.record.title,
-        format: result.record.format.to_string(),
-        chunk_count: result.chunk_count,
-        triple_count: result.triple_count,
-        concept_count: result.concept_count,
-    }))
-}
-
-async fn library_search_handler(
-    State(state): State<Arc<ServerState>>,
-    Path(ws_name): Path<String>,
-    Json(req): Json<LibrarySearchRequest>,
-) -> Result<Json<Vec<LibrarySearchResult>>, (StatusCode, String)> {
-    let engine = state.get_engine(&ws_name).await?;
-
-    let query_vec = akh_medu::vsa::encode::encode_label(engine.ops(), &req.query)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("encode: {e}")))?;
-
-    let results = engine
-        .item_memory()
-        .search(&query_vec, req.top_k)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("search: {e}")))?;
-
-    let out: Vec<LibrarySearchResult> = results
-        .into_iter()
-        .enumerate()
-        .map(|(rank, sr)| {
-            let label = engine.resolve_label(sr.symbol_id);
-            LibrarySearchResult {
-                rank: rank + 1,
-                symbol_label: label,
-                similarity: sr.similarity,
-            }
-        })
-        .collect();
-
-    Ok(Json(out))
-}
-
-async fn library_info_handler(
-    State(state): State<Arc<ServerState>>,
-    Path((ws_name, doc_id)): Path<(String, String)>,
-) -> Result<Json<DocumentRecord>, (StatusCode, String)> {
-    let _engine = state.get_engine(&ws_name).await?;
-    let library_dir = state.paths.library_dir();
-    let catalog = LibraryCatalog::open(&library_dir)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?;
-    let doc = catalog
-        .get(&doc_id)
-        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("document not found: \"{doc_id}\"")))?;
-    Ok(Json(doc.clone()))
-}
-
-async fn library_remove_handler(
-    State(state): State<Arc<ServerState>>,
-    Path((ws_name, doc_id)): Path<(String, String)>,
-) -> Result<Json<DocumentRecord>, (StatusCode, String)> {
-    let _engine = state.get_engine(&ws_name).await?;
-    let library_dir = state.paths.library_dir();
-    let mut catalog = LibraryCatalog::open(&library_dir)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?;
-    let removed = catalog
-        .remove(&doc_id)
-        .map_err(|e| (StatusCode::NOT_FOUND, format!("{e}")))?;
-    Ok(Json(removed))
-}
-
-// ── Daemon handlers ─────────────────────────────────────────────────────
-
-#[derive(Deserialize)]
-struct StartDaemonReq {
-    #[serde(default = "default_daemon_max_cycles")]
-    max_cycles: usize,
-}
-
-fn default_daemon_max_cycles() -> usize {
-    0
-}
-
-async fn start_daemon_handler(
-    State(state): State<Arc<ServerState>>,
-    Path(ws_name): Path<String>,
-    body: Option<Json<StartDaemonReq>>,
-) -> Result<Json<DaemonStatus>, (StatusCode, String)> {
-    // Check if already running.
-    {
-        let daemons = state.daemons.read().await;
-        if let Some(d) = daemons.get(&ws_name)
-            && !d.handle.is_finished() {
-                let st = d.status.lock().await;
-                return Ok(Json(st.clone()));
-            }
-    }
-
-    let engine = state.get_engine(&ws_name).await?;
-    let shared_agent = state.get_agent(&ws_name).await?;
-    let max_cycles = body.map(|b| b.max_cycles).unwrap_or(0);
-
-    // Build DaemonConfig from global config with request-level override.
-    let mut daemon_config = state.config.read().await.daemon.to_daemon_config();
-    if max_cycles > 0 {
-        daemon_config.max_cycles = max_cycles;
-    }
-
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-
-    let trigger_count = TriggerStore::new(&engine).list().len();
-
-    let status = Arc::new(tokio::sync::Mutex::new(DaemonStatus {
-        running: true,
-        total_cycles: 0,
-        started_at: now,
-        trigger_count,
-        last_persist_at: None,
-        last_learning_at: None,
-        last_sleep_at: None,
-        last_goal_gen_at: None,
-        active_goals: 0,
-        kg_symbols: 0,
-        kg_triples: 0,
-        knowledge_density: None,
-        last_compaction_at: None,
-    }));
-
-    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-
-    let daemon_status = Arc::clone(&status);
-    let daemon_ws_name = ws_name.clone();
-
-    // Register pause handle so MCP can suspend/resume this daemon.
-    let pause_handle = mcp::DaemonPauseHandle::new();
-    state.daemon_pauses.write().await.insert(ws_name.clone(), pause_handle.clone());
-
-    let task_handle = pause_handle.clone();
-    let handle = tokio::task::spawn(async move {
-        run_daemon_task(
-            shared_agent,
-            daemon_status,
-            shutdown_rx,
-            daemon_config,
-            daemon_ws_name,
-            task_handle,
-        )
-        .await;
-    });
-
-    let daemon = WorkspaceDaemon {
-        handle,
-        shutdown_tx,
-        status: Arc::clone(&status),
-    };
-
-    let st = status.lock().await.clone();
-    state.daemons.write().await.insert(ws_name, daemon);
-    Ok(Json(st))
-}
-
-async fn stop_daemon_handler(
-    State(state): State<Arc<ServerState>>,
-    Path(ws_name): Path<String>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let mut daemons = state.daemons.write().await;
-    if let Some(d) = daemons.remove(&ws_name) {
-        let _ = d.shutdown_tx.send(true);
-        // Give the task a moment to finish.
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), d.handle).await;
-        Ok(Json(serde_json::json!({"stopped": true})))
-    } else {
-        Err((
-            StatusCode::NOT_FOUND,
-            format!("no daemon running for workspace \"{ws_name}\""),
-        ))
-    }
-}
-
-async fn daemon_status_handler(
-    State(state): State<Arc<ServerState>>,
-    Path(ws_name): Path<String>,
-) -> Result<Json<DaemonStatus>, (StatusCode, String)> {
-    let daemons = state.daemons.read().await;
-    if let Some(d) = daemons.get(&ws_name) {
-        let mut st = d.status.lock().await.clone();
-        // Enrich with live KG stats from the engine.
-        if let Ok(engine) = state.get_engine(&ws_name).await {
-            st.kg_symbols = engine.all_symbols().len();
-            st.kg_triples = engine.all_triples().len();
+        let engine = self.get_engine(ws_name).await?;
+        let shared_agent = self.get_agent(ws_name).await?;
+
+        // Build DaemonConfig from global config with request-level override.
+        let mut daemon_config = self.config.read().await.daemon.to_daemon_config();
+        if max_cycles > 0 {
+            daemon_config.max_cycles = max_cycles;
         }
-        Ok(Json(st))
-    } else {
-        Ok(Json(DaemonStatus {
-            running: false,
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let trigger_count = TriggerStore::new(&engine).list().len();
+
+        let status = Arc::new(tokio::sync::Mutex::new(DaemonStatus {
+            running: true,
             total_cycles: 0,
-            started_at: 0,
-            trigger_count: 0,
+            started_at: now,
+            trigger_count,
             last_persist_at: None,
             last_learning_at: None,
             last_sleep_at: None,
@@ -1477,8 +1320,134 @@ async fn daemon_status_handler(
             kg_triples: 0,
             knowledge_density: None,
             last_compaction_at: None,
-        }))
+        }));
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let daemon_status = Arc::clone(&status);
+        let daemon_ws_name = ws_name.to_string();
+
+        // Register pause handle so the control-plane can suspend/resume this daemon.
+        let pause_handle = DaemonPauseHandle::new();
+        self.daemon_pauses
+            .write()
+            .await
+            .insert(ws_name.to_string(), pause_handle.clone());
+        let task_handle = pause_handle.clone();
+
+        // P5: gate background tasks by the akh's [autonomy] config.
+        let autonomy = self
+            .get_akh_config(ws_name)
+            .await
+            .map(|c| c.autonomy.clone())
+            .unwrap_or_default();
+
+        let handle = tokio::task::spawn(async move {
+            run_daemon_task(
+                shared_agent,
+                daemon_status,
+                shutdown_rx,
+                daemon_config,
+                autonomy,
+                daemon_ws_name,
+                task_handle,
+            )
+            .await;
+        });
+
+        let daemon = WorkspaceDaemon {
+            handle,
+            shutdown_tx,
+            status: Arc::clone(&status),
+        };
+
+        let st = status.lock().await.clone();
+        self.daemons.write().await.insert(ws_name.to_string(), daemon);
+        Ok(st)
     }
+
+    /// Stop a workspace's background daemon. Returns `true` if one was running,
+    /// `false` if there was nothing to stop.
+    async fn stop_workspace_daemon(&self, ws_name: &str) -> bool {
+        let mut daemons = self.daemons.write().await;
+        if let Some(d) = daemons.remove(ws_name) {
+            let _ = d.shutdown_tx.send(true);
+            // Give the task a moment to finish.
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(5), d.handle).await;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Snapshot a workspace's daemon status, enriched with live KG stats. When
+    /// no daemon is running, returns a `running: false` zero-status.
+    async fn daemon_status_snapshot(&self, ws_name: &str) -> DaemonStatus {
+        let daemons = self.daemons.read().await;
+        if let Some(d) = daemons.get(ws_name) {
+            let mut st = d.status.lock().await.clone();
+            if let Ok(engine) = self.get_engine(ws_name).await {
+                st.kg_symbols = engine.all_symbols().len();
+                st.kg_triples = engine.all_triples().len();
+            }
+            st
+        } else {
+            DaemonStatus {
+                running: false,
+                total_cycles: 0,
+                started_at: 0,
+                trigger_count: 0,
+                last_persist_at: None,
+                last_learning_at: None,
+                last_sleep_at: None,
+                last_goal_gen_at: None,
+                active_goals: 0,
+                kg_symbols: 0,
+                kg_triples: 0,
+                knowledge_density: None,
+                last_compaction_at: None,
+            }
+        }
+    }
+
+    /// The akhs this daemon currently owns + has awake, as JSON
+    /// `[{ name, awake, owned_here, model }]`.
+    ///
+    /// The live in-memory agent set IS this host's owned+awake set: `wake` loads
+    /// an akh's agent here and takes its Postgres advisory lock; `sleep`/
+    /// `relocate` evict the agent and release the lock (so `last_seen` +
+    /// `pg_try_advisory_lock` keep ownership single-writer, 38g). A dynamic akh
+    /// gateway mirrors exactly this set to advertise routing — it must reflect
+    /// what is *awake here*, not what is merely configured on disk. Side-effect
+    /// free: reads caches only, never lazily loads a workspace. The pinned model
+    /// comes from the cached `akh.toml` when known (`null` otherwise).
+    async fn owned_awake_akhs(&self) -> Vec<serde_json::Value> {
+        let names: Vec<String> = self.agents.read().await.keys().cloned().collect();
+        let configs = self.akh_configs.read().await;
+        let mut out: Vec<serde_json::Value> = names
+            .into_iter()
+            .map(|name| {
+                let model = configs.get(&name).and_then(|c| c.model.clone());
+                serde_json::json!({
+                    "name": name,
+                    "awake": true,
+                    "owned_here": true,
+                    "model": model,
+                })
+            })
+            .collect();
+        out.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+        out
+    }
+}
+
+/// Operator-facing error for a membership op attempted without Postgres (38f).
+/// `op` is the verb (`join` / `leave` / `list-members`).
+fn membership_needs_pg(op: &str) -> String {
+    format!(
+        "workspace {op} requires a Postgres backing store (no [postgres] section configured). \
+         Membership rows live in the shared store; add a [postgres] section to akhomed's \
+         config.toml (or set DATABASE_URL) so multiple akhs can join the workspace."
+    )
 }
 
 /// Background daemon task: delegates to [`AgentDaemon`] for the full set of
@@ -1490,12 +1459,14 @@ async fn run_daemon_task(
     status: Arc<tokio::sync::Mutex<DaemonStatus>>,
     shutdown_rx: tokio::sync::watch::Receiver<bool>,
     daemon_config: akh_medu::agent::DaemonConfig,
+    autonomy: akh_medu::akh_config::AutonomyConfig,
     ws_name: String,
-    pause_handle: mcp::DaemonPauseHandle,
+    pause_handle: DaemonPauseHandle,
 ) {
     use akh_medu::agent::AgentDaemon;
 
     let mut daemon = AgentDaemon::new(shared_agent, daemon_config)
+        .with_autonomy(autonomy)
         .with_shutdown(shutdown_rx)
         .with_status(Arc::clone(&status))
         .with_pause_handles(pause_handle.paused, pause_handle.cycle_done);
@@ -1512,1895 +1483,583 @@ async fn run_daemon_task(
 
 // ── Trigger handlers ─────────────────────────────────────────────────────
 
-async fn list_triggers_handler(
-    State(state): State<Arc<ServerState>>,
-    Path(ws_name): Path<String>,
-) -> Result<Json<Vec<Trigger>>, (StatusCode, String)> {
-    let engine = state.get_engine(&ws_name).await?;
-    let store = TriggerStore::new(&engine);
-    Ok(Json(store.list()))
-}
-
-async fn add_trigger_handler(
-    State(state): State<Arc<ServerState>>,
-    Path(ws_name): Path<String>,
-    Json(trigger): Json<Trigger>,
-) -> Result<Json<Trigger>, (StatusCode, String)> {
-    let engine = state.get_engine(&ws_name).await?;
-    let store = TriggerStore::new(&engine);
-    store
-        .add(trigger)
-        .map(Json)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))
-}
-
-async fn remove_trigger_handler(
-    State(state): State<Arc<ServerState>>,
-    Path((ws_name, trigger_id)): Path<(String, String)>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let engine = state.get_engine(&ws_name).await?;
-    let store = TriggerStore::new(&engine);
-    store
-        .remove(&trigger_id)
-        .map(|_| Json(serde_json::json!({"removed": trigger_id})))
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))
-}
-
-// ── Engine info handler ─────────────────────────────────────────────────
-
-async fn engine_info(
-    State(state): State<Arc<ServerState>>,
-    Path(ws_name): Path<String>,
-) -> Result<Json<akh_medu::engine::EngineInfo>, (StatusCode, String)> {
-    let engine = state.get_engine(&ws_name).await?;
-    Ok(Json(engine.info()))
-}
-
-// ── WebSocket handler ─────────────────────────────────────────────────────
-
-async fn ws_handler(
-    State(state): State<Arc<ServerState>>,
-    Path(ws_name): Path<String>,
-    ws: WebSocketUpgrade,
-) -> impl IntoResponse {
-    let engine_result = state.get_engine(&ws_name).await;
-    let agent_result = state.get_agent(&ws_name).await;
-    // Get cached NLU pipeline (loads models once, shares via Arc).
-    let nlu_result = match &engine_result {
-        Ok(engine) => Some(state.get_nlu_pipeline(&ws_name, engine).await),
-        Err(_) => None,
-    };
-    let audit_rx = state.audit_broadcast.subscribe();
-    ws.on_upgrade(move |socket| async move {
-        match (engine_result, agent_result, nlu_result) {
-            (Ok(engine), Ok(shared_agent), Some(nlu_pipeline)) => {
-                handle_ws_session(socket, shared_agent, engine, nlu_pipeline, ws_name, audit_rx)
-                    .await;
-            }
-            (Err((_, msg)), _, _) | (_, Err((_, msg)), _) => {
-                let err = AkhMessage::error("ws", msg);
-                let _ = send_message(&err, &mut None::<&mut WebSocket>).await;
-            }
-            _ => {
-                let err = AkhMessage::error("ws", "failed to initialize NLU pipeline");
-                let _ = send_message(&err, &mut None::<&mut WebSocket>).await;
-            }
-        }
-    })
-}
-
-async fn handle_ws_session(
-    mut socket: WebSocket,
-    shared_agent: Arc<Mutex<Agent>>,
-    engine: Arc<Engine>,
-    nlu_pipeline: Arc<Mutex<akh_medu::nlu::NluPipeline>>,
-    ws_name: String,
-    mut audit_rx: tokio::sync::broadcast::Receiver<akh_medu::audit::AuditEntry>,
-) {
-    // Clone the shared pipeline — models are Arc-shared (cheap), ranker is
-    // cloned by value for per-session learning.
-    let session_pipeline = nlu_pipeline.lock().unwrap().clone();
-    let mut chat_processor = akh_medu::chat::ChatProcessor::new(&engine, session_pipeline);
-
-    let welcome = AkhMessage::system(format!(
-        "Connected to workspace \"{ws_name}\". {} symbols, {} triples.",
-        engine.all_symbols().len(),
-        engine.all_triples().len(),
-    ));
-    if send_akh_message(&mut socket, &welcome).await.is_err() {
-        return;
+/// akhomed's `ServerState` as the ACP **control-plane** backend (ADR-061
+/// increment 1). Serves the `_akh/{workspace,daemon,config}/*` methods that
+/// span the whole daemon — the ones with no home in a single-workspace
+/// `Engine`. Wired into the ACP agent via `AkhAcpAgent::with_control`; the
+/// per-workspace data-plane (`_akh/health`, `symbols/*`, …) is handled inside
+/// the `acp` module instead.
+///
+/// Daemon ops take an explicit `workspace` param (the control-plane is flat,
+/// not bound to one akh); `config/{get,set}` operate on the global
+/// `AkhomedConfig`. Errors collapse to a string surfaced as a JSON-RPC error.
+#[cfg(feature = "acp")]
+impl akh_medu::acp::ServerControl for ServerState {
+    /// Resolve a workspace's engine + agent + a fresh chat processor (built from
+    /// the cached, Arc-shared NLU pipeline — no second model load). Lazily loads
+    /// the workspace, so the ACP server can serve any configured akh per request.
+    fn resolve<'a>(&'a self, workspace: &'a str) -> akh_medu::acp::ResolveFuture<'a> {
+        Box::pin(async move {
+            let engine = self.get_engine(workspace).await?;
+            let agent = self.get_agent(workspace).await?;
+            let nlu = self.get_nlu_pipeline(workspace, &engine).await;
+            let processor = {
+                let p = nlu.lock().unwrap_or_else(|e| e.into_inner());
+                akh_medu::chat::ChatProcessor::new(&engine, p.clone())
+            };
+            Ok(akh_medu::acp::WorkspaceHandles {
+                engine,
+                agent,
+                processor: std::sync::Arc::new(std::sync::Mutex::new(processor)),
+            })
+        })
     }
 
-    loop {
-        tokio::select! {
-            ws_msg = socket.recv() => {
-                match ws_msg {
-                    Some(Ok(Message::Text(text))) => {
-                        let input: WsInput = match serde_json::from_str(&text) {
-                            Ok(i) => i,
-                            Err(e) => {
-                                let err = AkhMessage::error("parse", format!("invalid JSON: {e}"));
-                                if send_akh_message(&mut socket, &err).await.is_err() {
-                                    break;
-                                }
-                                continue;
-                            }
-                        };
+    fn dispatch<'a>(
+        &'a self,
+        method: &'a str,
+        params: &'a serde_json::Value,
+    ) -> akh_medu::acp::ControlFuture<'a> {
+        Box::pin(async move {
+            let op = method.strip_prefix("_akh/").unwrap_or(method);
+            match op {
+                // ── workspace group ──────────────────────────────────────
+                "workspace/list" => Ok(serde_json::json!({
+                    "workspaces": self.paths.list_workspaces(),
+                })),
+                "workspace/create" => {
+                    let name = params
+                        .get("name")
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or_else(|| "missing required param: name".to_string())?;
+                    let manager = WorkspaceManager::new(self.paths.clone());
+                    let config = akh_medu::workspace::WorkspaceConfig {
+                        name: name.to_string(),
+                        ..Default::default()
+                    };
+                    manager
+                        .create(config)
+                        .map_err(|e| format!("create failed: {e}"))?;
+                    // Optional role assignment (mirrors the REST create body).
+                    if let Some(role) = params.get("role").and_then(serde_json::Value::as_str) {
+                        let engine = self.get_engine(name).await?;
+                        engine
+                            .assign_role(role)
+                            .map_err(|e| format!("assign_role failed: {e}"))?;
+                        engine.persist().map_err(|e| format!("persist failed: {e}"))?;
+                    }
+                    Ok(serde_json::json!({ "name": name, "created": true }))
+                }
+                "workspace/delete" => {
+                    let name = params
+                        .get("name")
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or_else(|| "missing required param: name".to_string())?;
+                    // Drop the cached engine + agent before removing the data.
+                    self.workspaces.write().await.remove(name);
+                    self.agents.write().await.remove(name);
+                    let manager = WorkspaceManager::new(self.paths.clone());
+                    manager
+                        .delete(name)
+                        .map_err(|e| format!("delete failed: {e}"))?;
+                    Ok(serde_json::json!({ "deleted": name }))
+                }
+                "workspace/info" => {
+                    let name = params
+                        .get("name")
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or_else(|| "missing required param: name".to_string())?;
+                    // Opens (lazily loads) the engine and reports live KG stats.
+                    let engine = self.get_engine(name).await?;
+                    Ok(serde_json::json!({
+                        "name": name,
+                        "kg_symbols": engine.all_symbols().len(),
+                        "kg_triples": engine.all_triples().len(),
+                        "role": engine.assigned_role(),
+                        "data_dir": self.paths.workspace(name).root.display().to_string(),
+                    }))
+                }
 
-                        // Lock agent, process synchronously, unlock before async send.
-                        let responses = {
-                            let mut agent = shared_agent.lock().unwrap();
-                            match input.msg_type.as_str() {
-                                "input" => {
-                                    chat_processor.process_input(&input.text, &mut agent, &engine)
-                                }
-                                "command" => {
-                                    process_ws_command(&input.text, &agent, &engine)
-                                }
-                                _ => {
-                                    vec![AkhMessage::error(
-                                        "protocol",
-                                        format!("unknown message type: \"{}\"", input.msg_type),
-                                    )]
-                                }
+                // ── daemon group (explicit `workspace` param) ────────────
+                "daemon/start" => {
+                    let ws = params
+                        .get("workspace")
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or_else(|| "missing required param: workspace".to_string())?;
+                    let max_cycles = params
+                        .get("max_cycles")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(0) as usize;
+                    let st = self
+                        .spawn_workspace_daemon(ws, max_cycles)
+                        .await?;
+                    serde_json::to_value(st).map_err(|e| e.to_string())
+                }
+                "daemon/stop" => {
+                    let ws = params
+                        .get("workspace")
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or_else(|| "missing required param: workspace".to_string())?;
+                    let stopped = self.stop_workspace_daemon(ws).await;
+                    Ok(serde_json::json!({ "stopped": stopped }))
+                }
+                "daemon/status" => {
+                    let ws = params
+                        .get("workspace")
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or_else(|| "missing required param: workspace".to_string())?;
+                    let st = self.daemon_status_snapshot(ws).await;
+                    serde_json::to_value(st).map_err(|e| e.to_string())
+                }
+                // The akhs this daemon currently owns + has awake — the live set
+                // an akh gateway mirrors to advertise routing (ADR-061: akhomed is
+                // the only inbound surface; the gateway never reads akh-pg).
+                "daemon/akhs" => Ok(serde_json::json!({
+                    "akhs": self.owned_awake_akhs().await,
+                })),
+
+                // ── config group (global AkhomedConfig) ──────────────────
+                "config/get" => {
+                    let config = self.config.read().await;
+                    let value = serde_json::to_value(&*config).map_err(|e| e.to_string())?;
+                    Ok(serde_json::json!({ "config": value }))
+                }
+                "config/set" => {
+                    let cfg_val = params.get("config").ok_or_else(|| {
+                        "missing required param: config (the full AkhomedConfig object)".to_string()
+                    })?;
+                    let new_config: AkhomedConfig = serde_json::from_value(cfg_val.clone())
+                        .map_err(|e| format!("invalid config payload: {e}"))?;
+                    let config_path = self.paths.global_config_file();
+                    new_config
+                        .save(&config_path)
+                        .map_err(|e| format!("save failed: {e}"))?;
+                    *self.config.write().await = new_config.clone();
+                    tracing::info!(
+                        path = %config_path.display(),
+                        "config updated via ACP control-plane"
+                    );
+                    let value = serde_json::to_value(&new_config).map_err(|e| e.to_string())?;
+                    Ok(serde_json::json!({ "config": value }))
+                }
+
+                // ── model group (per-akh model + reasoning effort) ────────
+                //
+                // `model/list` builds a transient OllamaClient from the akh's
+                // config and queries `/api/tags`; a cloud endpoint that lists
+                // nothing (or errors) still returns the current model/effort so
+                // the TUI picker can open. `model/set` persists akh.toml AND
+                // rebuilds the running model manager so the next chat turn uses
+                // the new model/effort.
+                "model/list" => {
+                    let ws = params
+                        .get("workspace")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("default");
+                    let cfg = self.get_akh_config(ws).await?;
+                    let mm = cfg.to_model_manager_config();
+                    let current = mm.ollama.model.clone();
+                    let effort = mm.ollama.reasoning_effort.clone();
+                    let client = OllamaClient::new(mm.ollama);
+                    match client.list_models() {
+                        Ok(models) => Ok(serde_json::json!({
+                            "current": current,
+                            "effort": effort,
+                            "models": models,
+                        })),
+                        // Cloud endpoints frequently 404 `/api/tags` or are
+                        // overloaded — don't fail the whole call, just report no
+                        // models + the error so the picker still opens.
+                        Err(e) => Ok(serde_json::json!({
+                            "current": current,
+                            "effort": effort,
+                            "models": Vec::<String>::new(),
+                            "error": e.to_string(),
+                        })),
+                    }
+                }
+                "model/set" => {
+                    let ws = params
+                        .get("workspace")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("default")
+                        .to_string();
+                    let model = params
+                        .get("model")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string);
+                    let effort_raw = params
+                        .get("effort")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string);
+                    if model.is_none() && effort_raw.is_none() {
+                        return Err(
+                            "model/set requires at least one of: model, effort".to_string()
+                        );
+                    }
+
+                    // (a) Load the akh config (fall back to name-only defaults
+                    //     so a missing/broken akh.toml still applies the change).
+                    let config_path = self.paths.workspace_config_file(&ws);
+                    let mut cfg = AkhConfig::load(&config_path)
+                        .unwrap_or_else(|_| AkhConfig::with_name(&ws));
+
+                    // (b) Apply the requested fields.
+                    if let Some(m) = &model {
+                        cfg.model = Some(m.clone());
+                    }
+                    if let Some(level) = &effort_raw {
+                        match level.trim().to_ascii_lowercase().as_str() {
+                            "low" | "medium" | "high" => {
+                                cfg.reasoning_effort = Some(level.trim().to_ascii_lowercase())
                             }
-                        }; // MutexGuard dropped — lock released before async send.
-                        for msg in &responses {
-                            if send_akh_message(&mut socket, msg).await.is_err() {
-                                break;
+                            "off" | "none" => cfg.reasoning_effort = None,
+                            other => {
+                                return Err(format!(
+                                    "unknown reasoning effort \"{other}\" \
+                                     (expected low|medium|high|off)"
+                                ));
                             }
                         }
                     }
-                    Some(Ok(Message::Close(_))) | None => break,
-                    _ => {}
-                }
-            }
-            audit_entry = audit_rx.recv() => {
-                if let Ok(entry) = audit_entry {
-                    let msg = entry.to_message();
-                    if send_akh_message(&mut socket, &msg).await.is_err() {
-                        break;
+
+                    // (c) Persist akh.toml.
+                    cfg.save(&config_path)
+                        .map_err(|e| format!("save akh.toml failed: {e}"))?;
+
+                    let new_model = cfg.model.clone();
+                    let new_effort = cfg.reasoning_effort.clone();
+                    let mm_config = cfg.to_model_manager_config();
+
+                    // (d) Rebuild the running model manager so the next chat turn
+                    //     uses the new model/effort. ADR-027: the agent
+                    //     std::sync::Mutex is locked only synchronously (no await
+                    //     held across the lock).
+                    let agent = self.get_agent(&ws).await?;
+                    {
+                        let mut a = agent.lock().unwrap_or_else(|e| e.into_inner());
+                        a.set_model_manager(Arc::new(AgentModelManager::new(mm_config)));
+                        a.register_with_model_manager(&ws, &ws);
                     }
+
+                    // Refresh the cached akh.toml so subsequent reads (and the
+                    // next get_agent rebuild) see the persisted change.
+                    self.akh_configs
+                        .write()
+                        .await
+                        .insert(ws.clone(), Arc::new(cfg));
+
+                    tracing::info!(
+                        workspace = %ws,
+                        model = ?new_model,
+                        effort = ?new_effort,
+                        "model/effort updated via ACP control-plane"
+                    );
+                    Ok(serde_json::json!({
+                        "model": new_model,
+                        "effort": new_effort,
+                    }))
                 }
+
+                // ── akh group (relocation: snapshot/wake an akh) ─────────
+                "akh/snapshot" => {
+                    let ws = params
+                        .get("workspace")
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or_else(|| "missing required param: workspace".to_string())?;
+                    self.snapshot_workspace(ws).await?;
+                    Ok(serde_json::json!({ "snapshot": ws, "ok": true }))
+                }
+                "akh/wake" => {
+                    let ws = params
+                        .get("workspace")
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or_else(|| "missing required param: workspace".to_string())?;
+                    self.wake_workspace(ws).await
+                }
+                "akh/sleep" => {
+                    let ws = params
+                        .get("workspace")
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or_else(|| "missing required param: workspace".to_string())?;
+                    self.sleep_workspace(ws).await
+                }
+                "akh/relocate" => {
+                    let ws = params
+                        .get("workspace")
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or_else(|| "missing required param: workspace".to_string())?;
+                    self.relocate_workspace(ws).await
+                }
+
+                // ── workspace membership group (38f, Postgres-backed) ─────
+                "workspace/join" => {
+                    let ws = params
+                        .get("id")
+                        .or_else(|| params.get("workspace"))
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or_else(|| "missing required param: id".to_string())?;
+                    self.workspace_join(ws).await
+                }
+                "workspace/leave" => {
+                    let ws = params
+                        .get("id")
+                        .or_else(|| params.get("workspace"))
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or_else(|| "missing required param: id".to_string())?;
+                    self.workspace_leave(ws).await
+                }
+                "workspace/list-members" => {
+                    let ws = params
+                        .get("id")
+                        .or_else(|| params.get("workspace"))
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or_else(|| "missing required param: id".to_string())?;
+                    self.workspace_list_members(ws).await
+                }
+
+                // ── projection group (38d AGE read-model: deferred stub) ──
+                "projection/refresh" => Ok(serde_json::json!({
+                    "refreshed": false,
+                    "note": "AGE projection deferred to Phase 38d",
+                })),
+
+                // ── migrate (run akhomed-store migrations on demand) ──────
+                "migrate" => self.run_migrations_op().await,
+
+                other => Err(format!("unknown control-plane method: _akh/{other}")),
+            }
+        })
+    }
+}
+
+/// Bring up the ACP transport (Unix socket + optional TCP) for one workspace,
+/// serving alongside the REST/WS server during the migration to ACP-only.
+///
+/// Returns `(unix_socket_path, tcp_addr, accept_loop_handles)` — the path/addr
+/// strings (present only for transports that bound successfully) go into the
+/// discovery record; the handles are joined on shutdown. A failure to open the
+/// workspace or bind a listener disables that transport and is logged, never
+/// fatal — the daemon still serves REST.
+#[cfg(feature = "acp")]
+async fn start_acp_server(
+    state: Arc<ServerState>,
+    acp_cfg: akh_medu::config::AcpSection,
+    paths: &AkhPaths,
+    fallback_ws: &str,
+    shutdown_rx: tokio::sync::watch::Receiver<bool>,
+) -> (Option<String>, Option<String>, Vec<tokio::task::JoinHandle<()>>) {
+    use akh_medu::acp::{serve_tcp_loop, serve_unix_loop, AkhAcpAgent};
+    use std::path::PathBuf;
+
+    let ws = acp_cfg
+        .workspace
+        .clone()
+        .unwrap_or_else(|| fallback_ws.to_string());
+
+    // Resolve the akh's shared engine + agent (ADR-027) and build a chat
+    // processor from a cheap clone of the cached NLU pipeline (Arc-shared
+    // models — no second model load).
+    // Warm + validate the bound workspace so a misconfigured akh fails fast and
+    // first-chat latency is low. We don't *hold* the engine here: the ACP agent
+    // runs in provider mode and resolves each request's workspace on demand from
+    // `ServerState`, so it pins no engine (a permanent hold would block a
+    // same-host `sleep`/`wake`) and serves any configured akh per request (`-w`).
+    if let Err(msg) = state.get_engine(&ws).await {
+        tracing::warn!(workspace = %ws, error = %msg, "ACP disabled: cannot open workspace");
+        return (None, None, Vec::new());
+    }
+    // Wire the server-level control-plane + per-request workspace resolution:
+    // `ServerState` answers the `_akh/{workspace,daemon,config}/*` methods and
+    // resolves engine/agent/processor for any workspace by name.
+    let control: Arc<dyn akh_medu::acp::ServerControl> = state.clone();
+    let acp_agent = AkhAcpAgent::with_provider(control, &ws);
+
+    let mut handles = Vec::new();
+    let mut socket_str = None;
+    let mut tcp_str = None;
+
+    if acp_cfg.unix {
+        let sock = acp_cfg
+            .socket_path
+            .clone()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| paths.runtime_dir.join("akhomed-acp.sock"));
+        // Clear a stale socket so bind() doesn't fail with EADDRINUSE.
+        let _ = std::fs::remove_file(&sock);
+        match tokio::net::UnixListener::bind(&sock) {
+            Ok(listener) => {
+                tracing::info!(socket = %sock.display(), workspace = %ws, "ACP serving on Unix socket");
+                socket_str = Some(sock.display().to_string());
+                let a = acp_agent.clone();
+                let rx = shutdown_rx.clone();
+                handles.push(tokio::spawn(async move {
+                    if let Err(e) = serve_unix_loop(a, listener, rx).await {
+                        tracing::error!("ACP unix accept loop ended: {e}");
+                    }
+                }));
+            }
+            Err(e) => {
+                tracing::error!(path = %sock.display(), error = %e, "ACP unix bind failed");
             }
         }
     }
 
-    // Persist ChatProcessor NLU state on disconnect.
-    chat_processor.persist_nlu_state(&engine);
-    // Brief lock to persist agent session.
-    let agent = shared_agent.lock().unwrap();
-    let _ = agent.persist_session();
-}
-
-/// Handle WS protocol commands (status, goals) — these are WS-specific
-/// and not part of the ChatProcessor's concern.
-fn process_ws_command(cmd: &str, agent: &Agent, engine: &Engine) -> Vec<AkhMessage> {
-    let mut msgs = Vec::new();
-    let trimmed = cmd.trim();
-    match trimmed {
-        "status" => {
-            msgs.push(AkhMessage::system(format!(
-                "Cycles: {}, WM: {}, Symbols: {}, Triples: {}",
-                agent.cycle_count(),
-                agent.working_memory().len(),
-                engine.all_symbols().len(),
-                engine.all_triples().len(),
-            )));
-        }
-        "goals" => {
-            let goals = agent.goals();
-            if goals.is_empty() {
-                msgs.push(AkhMessage::system("No active goals.".to_string()));
-            } else {
-                for g in goals {
-                    msgs.push(AkhMessage::goal_progress(
-                        &g.description,
-                        format!("{}", g.status),
-                    ));
-                }
+    if let Some(addr) = acp_cfg.tcp_addr() {
+        match tokio::net::TcpListener::bind(&addr).await {
+            Ok(listener) => {
+                tracing::info!(addr = %addr, workspace = %ws, "ACP serving on TCP");
+                tcp_str = Some(addr);
+                let a = acp_agent.clone();
+                let rx = shutdown_rx.clone();
+                handles.push(tokio::spawn(async move {
+                    if let Err(e) = serve_tcp_loop(a, listener, rx).await {
+                        tracing::error!("ACP tcp accept loop ended: {e}");
+                    }
+                }));
+            }
+            Err(e) => {
+                tracing::error!(addr = %addr, error = %e, "ACP tcp bind failed");
             }
         }
-        _ => {
-            msgs.push(AkhMessage::system(format!("Unknown command: \"{trimmed}\"")));
-        }
     }
-    msgs
+
+    (socket_str, tcp_str, handles)
 }
 
-// ── Audit handlers ──────────────────────────────────────────────────────
-
-#[derive(Deserialize)]
-struct AuditListQuery {
-    #[serde(default)]
-    offset: u64,
-    #[serde(default = "default_audit_limit")]
-    limit: usize,
-    kind: Option<u8>,
-}
-
-fn default_audit_limit() -> usize {
-    50
-}
-
-async fn audit_list_handler(
-    State(state): State<Arc<ServerState>>,
-    Path(ws_name): Path<String>,
-    axum::extract::Query(query): axum::extract::Query<AuditListQuery>,
-) -> Result<Json<akh_medu::audit::AuditPage>, (StatusCode, String)> {
-    let engine = state.get_engine(&ws_name).await?;
-    let ledger = engine
-        .audit_ledger()
-        .ok_or_else(|| (StatusCode::NOT_FOUND, "audit ledger not available".into()))?;
-
-    let page = if let Some(kind_tag) = query.kind {
-        ledger.list_by_kind(kind_tag, query.offset, query.limit)
-    } else {
-        ledger.list_page(query.offset, query.limit)
-    }
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?;
-
-    Ok(Json(page))
-}
-
-async fn audit_get_handler(
-    State(state): State<Arc<ServerState>>,
-    Path((ws_name, id)): Path<(String, u64)>,
-) -> Result<Json<akh_medu::audit::AuditEntry>, (StatusCode, String)> {
-    let engine = state.get_engine(&ws_name).await?;
-    let ledger = engine
-        .audit_ledger()
-        .ok_or_else(|| (StatusCode::NOT_FOUND, "audit ledger not available".into()))?;
-
-    let audit_id = akh_medu::audit::AuditId::new(id)
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "invalid audit id".into()))?;
-
-    let entry = ledger
-        .get(audit_id)
-        .map_err(|e| (StatusCode::NOT_FOUND, format!("{e}")))?;
-
-    Ok(Json(entry))
-}
-
-// ── Awaken status handler ─────────────────────────────────────────────
-
-#[derive(Serialize)]
-struct AwakenStatusResponse {
-    /// `true` if a psyche is loaded (compartment discovered + loaded).
-    awakened: bool,
-    /// `true` if the Ritual of Awakening has been completed (psyche finalized).
-    ritual_complete: bool,
-    psyche: Option<akh_medu::compartment::psyche::Psyche>,
-    active_goals: usize,
-    total_goals: usize,
-    cycle_count: u64,
-}
-
-async fn awaken_status_handler(
-    State(state): State<Arc<ServerState>>,
-    Path(ws_name): Path<String>,
-) -> Result<Json<AwakenStatusResponse>, (StatusCode, String)> {
-    let engine = state.get_engine(&ws_name).await?;
-    let psyche = engine.compartments().and_then(|m| m.psyche());
-
-    let shared_agent = state.get_agent(&ws_name).await?;
-    let agent = shared_agent.lock().unwrap();
-
-    let active_goals = agent
-        .goals()
-        .iter()
-        .filter(|g| matches!(g.status, akh_medu::agent::GoalStatus::Active))
-        .count();
-
-    let ritual_complete = psyche.as_ref().is_some_and(|p| p.is_awakened());
-    Ok(Json(AwakenStatusResponse {
-        awakened: psyche.is_some(),
-        ritual_complete,
-        psyche,
-        active_goals,
-        total_goals: agent.goals().len(),
-        cycle_count: agent.cycle_count(),
-    }))
-}
-
-// ── Goals handler ──────────────────────────────────────────────────────
-
-async fn goals_handler(
-    State(state): State<Arc<ServerState>>,
-    Path(ws_name): Path<String>,
-) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, String)> {
-    let shared_agent = state.get_agent(&ws_name).await?;
-    let agent = shared_agent.lock().unwrap();
-
-    let goals: Vec<serde_json::Value> = agent
-        .goals()
-        .iter()
-        .map(|g| {
-            serde_json::json!({
-                "description": g.description,
-                "status": format!("{}", g.status),
-                "priority": g.priority,
-            })
-        })
-        .collect();
-
-    Ok(Json(goals))
-}
-
-async fn send_akh_message(socket: &mut WebSocket, msg: &AkhMessage) -> Result<(), axum::Error> {
-    let json = serde_json::to_string(msg).unwrap_or_default();
-    socket.send(Message::Text(json.into())).await
-}
-
-/// Helper for error sending when we may not have a socket.
-async fn send_message(_msg: &AkhMessage, _socket: &mut Option<&mut WebSocket>) -> Result<(), ()> {
-    // No-op when socket is None.
-    Ok(())
-}
-
-// ── Seed list/status handlers ────────────────────────────────────────────
-
-async fn list_seeds_handler(
-    State(state): State<Arc<ServerState>>,
-) -> Json<Vec<akh_medu::api_types::SeedPackInfo>> {
-    let seeds_dir = state.paths.seeds_dir();
-    let registry = SeedRegistry::discover(&seeds_dir);
-    let packs: Vec<akh_medu::api_types::SeedPackInfo> = registry
-        .list()
-        .into_iter()
-        .map(|p| akh_medu::api_types::SeedPackInfo {
-            id: p.id.clone(),
-            version: p.version.clone(),
-            description: p.description.clone(),
-            source: format!("{:?}", p.source),
-            triple_count: p.triples.len(),
-        })
-        .collect();
-    Json(packs)
-}
-
-async fn seed_status_handler(
-    State(state): State<Arc<ServerState>>,
-    Path(ws_name): Path<String>,
-) -> Result<Json<akh_medu::api_types::SeedStatusResponse>, (StatusCode, String)> {
-    let engine = state.get_engine(&ws_name).await?;
-    let seeds_dir = state.paths.seeds_dir();
-    let registry = SeedRegistry::discover(&seeds_dir);
-    let seeds: Vec<akh_medu::api_types::SeedStatusEntry> = registry
-        .list()
-        .into_iter()
-        .map(|p| akh_medu::api_types::SeedStatusEntry {
-            applied: akh_medu::seeds::is_seed_applied_public(&engine, &p.id),
-            id: p.id.clone(),
-        })
-        .collect();
-    Ok(Json(akh_medu::api_types::SeedStatusResponse {
-        workspace: ws_name,
-        seeds,
-    }))
-}
-
-/// Workspace-scoped seed list: returns seed packs with their applied status.
-/// Equivalent to `seed_status_handler` but at the `/workspaces/{ws}/seeds` path.
-async fn workspace_seeds_handler(
-    State(state): State<Arc<ServerState>>,
-    Path(ws_name): Path<String>,
-) -> Result<Json<akh_medu::api_types::SeedStatusResponse>, (StatusCode, String)> {
-    let engine = state.get_engine(&ws_name).await?;
-    let seeds_dir = state.paths.seeds_dir();
-    let registry = SeedRegistry::discover(&seeds_dir);
-    let seeds: Vec<akh_medu::api_types::SeedStatusEntry> = registry
-        .list()
-        .into_iter()
-        .map(|p| akh_medu::api_types::SeedStatusEntry {
-            applied: akh_medu::seeds::is_seed_applied_public(&engine, &p.id),
-            id: p.id.clone(),
-        })
-        .collect();
-    Ok(Json(akh_medu::api_types::SeedStatusResponse {
-        workspace: ws_name,
-        seeds,
-    }))
-}
-
-// ── Compartments handler ────────────────────────────────────────────────
-
-async fn compartments_handler(
-    State(state): State<Arc<ServerState>>,
-    Path(ws_name): Path<String>,
-) -> Result<Json<akh_medu::api_types::CompartmentListResponse>, (StatusCode, String)> {
-    let engine = state.get_engine(&ws_name).await?;
-    let compartments = match engine.compartments() {
-        Some(mgr) => mgr
-            .all_compartments()
-            .into_iter()
-            .map(|(m, st, tc)| akh_medu::api_types::CompartmentInfo {
-                id: m.id,
-                name: m.name,
-                kind: format!("{:?}", m.kind),
-                description: m.description,
-                state: st.to_string(),
-                triple_count: tc,
-                tags: m.tags,
-            })
-            .collect(),
-        None => Vec::new(),
-    };
-    Ok(Json(akh_medu::api_types::CompartmentListResponse {
-        compartments,
-    }))
-}
-
-async fn compartment_discover_handler(
-    State(state): State<Arc<ServerState>>,
-    Path(ws_name): Path<String>,
-) -> Result<Json<akh_medu::api_types::CompartmentDiscoverResponse>, (StatusCode, String)> {
-    let engine = state.get_engine(&ws_name).await?;
-    let mgr = engine.compartments().ok_or_else(|| {
-        (
-            StatusCode::NOT_FOUND,
-            "compartment manager not available (no data dir)".to_string(),
-        )
-    })?;
-    let discovered = mgr
-        .discover()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?;
-    let total = mgr.all_compartments().len();
-    Ok(Json(akh_medu::api_types::CompartmentDiscoverResponse {
-        discovered,
-        total,
-    }))
-}
-
-async fn compartment_load_handler(
-    State(state): State<Arc<ServerState>>,
-    Path((ws_name, comp_id)): Path<(String, String)>,
-) -> Result<Json<akh_medu::api_types::CompartmentActionResponse>, (StatusCode, String)> {
-    let engine = state.get_engine(&ws_name).await?;
-    let mgr = engine.compartments().ok_or_else(|| {
-        (
-            StatusCode::NOT_FOUND,
-            "compartment manager not available".to_string(),
-        )
-    })?;
-    mgr.load(&comp_id, &engine)
-        .map_err(|e| (StatusCode::BAD_REQUEST, format!("{e}")))?;
-    Ok(Json(akh_medu::api_types::CompartmentActionResponse {
-        id: comp_id,
-        action: "loaded".to_string(),
-        success: true,
-    }))
-}
-
-async fn compartment_unload_handler(
-    State(state): State<Arc<ServerState>>,
-    Path((ws_name, comp_id)): Path<(String, String)>,
-) -> Result<Json<akh_medu::api_types::CompartmentActionResponse>, (StatusCode, String)> {
-    let engine = state.get_engine(&ws_name).await?;
-    let mgr = engine.compartments().ok_or_else(|| {
-        (
-            StatusCode::NOT_FOUND,
-            "compartment manager not available".to_string(),
-        )
-    })?;
-    mgr.unload(&comp_id, &engine)
-        .map_err(|e| (StatusCode::BAD_REQUEST, format!("{e}")))?;
-    Ok(Json(akh_medu::api_types::CompartmentActionResponse {
-        id: comp_id,
-        action: "unloaded".to_string(),
-        success: true,
-    }))
-}
-
-async fn compartment_activate_handler(
-    State(state): State<Arc<ServerState>>,
-    Path((ws_name, comp_id)): Path<(String, String)>,
-) -> Result<Json<akh_medu::api_types::CompartmentActionResponse>, (StatusCode, String)> {
-    let engine = state.get_engine(&ws_name).await?;
-    let mgr = engine.compartments().ok_or_else(|| {
-        (
-            StatusCode::NOT_FOUND,
-            "compartment manager not available".to_string(),
-        )
-    })?;
-    mgr.activate(&comp_id)
-        .map_err(|e| (StatusCode::BAD_REQUEST, format!("{e}")))?;
-    Ok(Json(akh_medu::api_types::CompartmentActionResponse {
-        id: comp_id,
-        action: "activated".to_string(),
-        success: true,
-    }))
-}
-
-async fn compartment_deactivate_handler(
-    State(state): State<Arc<ServerState>>,
-    Path((ws_name, comp_id)): Path<(String, String)>,
-) -> Result<Json<akh_medu::api_types::CompartmentActionResponse>, (StatusCode, String)> {
-    let engine = state.get_engine(&ws_name).await?;
-    let mgr = engine.compartments().ok_or_else(|| {
-        (
-            StatusCode::NOT_FOUND,
-            "compartment manager not available".to_string(),
-        )
-    })?;
-    mgr.deactivate(&comp_id)
-        .map_err(|e| (StatusCode::BAD_REQUEST, format!("{e}")))?;
-    Ok(Json(akh_medu::api_types::CompartmentActionResponse {
-        id: comp_id,
-        action: "deactivated".to_string(),
-        success: true,
-    }))
-}
-
-// ── Render handler ──────────────────────────────────────────────────────
-
-async fn render_handler(
-    State(state): State<Arc<ServerState>>,
-    Path(ws_name): Path<String>,
-    Json(req): Json<akh_medu::api_types::RenderRequest>,
-) -> Result<Json<akh_medu::api_types::RenderResponse>, (StatusCode, String)> {
-    let engine = state.get_engine(&ws_name).await?;
-
-    let render_config = akh_medu::glyph::RenderConfig {
-        color: false, // No ANSI in HTTP responses.
-        notation: akh_medu::glyph::NotationConfig {
-            use_pua: false,
-            show_confidence: true,
-            show_provenance: false,
-            show_sigils: true,
-            compact: false,
+/// Phase 38: open the Postgres backing-store pool if `[postgres]` is configured.
+///
+/// Returns `None` (and logs a clear warning) when no `[postgres]` section is
+/// present, so the daemon degrades to legacy local-only mode. A connection or
+/// migration failure is also non-fatal: it logs an error and falls back to
+/// local-only rather than refusing to boot.
+/// Build the connection `PoolOptions` from the `[postgres]` config, honouring
+/// the `DATABASE_URL` override (K8s secret injection). Returns `None` when no
+/// `[postgres]` section is present (legacy local-only mode).
+fn pg_pool_options(config: &AkhomedConfig) -> Option<(akhomed_store::PoolOptions, bool)> {
+    let pg = config.postgres.as_ref()?;
+    let url = std::env::var("DATABASE_URL").unwrap_or_else(|_| pg.url.clone());
+    Some((
+        akhomed_store::PoolOptions {
+            url,
+            max_connections: pg.pool_size,
+            connect_timeout: std::time::Duration::from_secs(pg.connect_timeout_secs),
         },
-        ..Default::default()
-    };
-
-    let output = if req.legend {
-        akh_medu::glyph::render::render_legend(&render_config)
-    } else if let Some(ref entity) = req.entity {
-        let sym_id = engine
-            .resolve_symbol(entity)
-            .map_err(|e| (StatusCode::NOT_FOUND, format!("{e}")))?;
-        let result = engine
-            .extract_subgraph(&[sym_id], req.depth)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?;
-        akh_medu::glyph::render::render_to_terminal(&engine, &result.triples, &render_config)
-    } else if req.all {
-        let triples = engine.all_triples();
-        akh_medu::glyph::render::render_to_terminal(&engine, &triples, &render_config)
-    } else {
-        String::new()
-    };
-
-    Ok(Json(akh_medu::api_types::RenderResponse { output }))
-}
-
-// ── Agent run/resume handlers ───────────────────────────────────────────
-
-async fn agent_run_handler(
-    State(state): State<Arc<ServerState>>,
-    Path(ws_name): Path<String>,
-    Json(req): Json<akh_medu::api_types::AgentRunRequest>,
-) -> Result<Json<akh_medu::api_types::AgentRunResponse>, (StatusCode, String)> {
-    let engine = state.get_engine(&ws_name).await?;
-    let shared_agent = state.get_agent(&ws_name).await?;
-    let result = tokio::task::spawn_blocking(move || -> Result<akh_medu::api_types::AgentRunResponse, String> {
-        let mut agent = shared_agent.lock().unwrap();
-
-        // Override max_cycles for this run.
-        agent.set_max_cycles(req.max_cycles);
-
-        if req.fresh {
-            agent.clear_goals();
-        }
-
-        for goal_str in &req.goals {
-            agent
-                .add_goal(goal_str, 128, "Agent-determined completion")
-                .map_err(|e| format!("{e}"))?;
-        }
-
-        let _ = agent.run_until_complete();
-
-        let goals: Vec<akh_medu::api_types::GoalSummary> = agent
-            .goals()
-            .iter()
-            .map(|g| akh_medu::api_types::GoalSummary {
-                symbol_id: g.symbol_id.get(),
-                label: engine.resolve_label(g.symbol_id),
-                status: format!("{}", g.status),
-                description: g.description.clone(),
-            })
-            .collect();
-
-        let goals_joined = req.goals.join(", ");
-        let summary = agent.synthesize_findings(&goals_joined);
-        let _ = agent.persist_session();
-
-        Ok(akh_medu::api_types::AgentRunResponse {
-            cycles_completed: agent.cycle_count() as usize,
-            goals,
-            overview: summary.overview,
-        })
-    })
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("task panicked: {e}")))?
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-
-    Ok(Json(result))
-}
-
-async fn agent_resume_handler(
-    State(state): State<Arc<ServerState>>,
-    Path(ws_name): Path<String>,
-    Json(req): Json<akh_medu::api_types::AgentResumeRequest>,
-) -> Result<Json<akh_medu::api_types::AgentResumeResponse>, (StatusCode, String)> {
-    let engine = state.get_engine(&ws_name).await?;
-    let shared_agent = state.get_agent(&ws_name).await?;
-    let result = tokio::task::spawn_blocking(move || -> Result<akh_medu::api_types::AgentResumeResponse, String> {
-        let mut agent = shared_agent.lock().unwrap();
-
-        // Override max_cycles for this run.
-        agent.set_max_cycles(req.max_cycles);
-
-        let _ = agent.run_until_complete();
-
-        let goals: Vec<akh_medu::api_types::GoalSummary> = agent
-            .goals()
-            .iter()
-            .map(|g| akh_medu::api_types::GoalSummary {
-                symbol_id: g.symbol_id.get(),
-                label: engine.resolve_label(g.symbol_id),
-                status: format!("{}", g.status),
-                description: g.description.clone(),
-            })
-            .collect();
-
-        let _ = agent.persist_session();
-
-        Ok(akh_medu::api_types::AgentResumeResponse {
-            cycles_completed: agent.cycle_count() as usize,
-            goals,
-        })
-    })
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("task panicked: {e}")))?
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-
-    Ok(Json(result))
-}
-
-// ── PIM handlers ────────────────────────────────────────────────────────
-
-async fn pim_inbox_handler(
-    State(state): State<Arc<ServerState>>,
-    Path(ws_name): Path<String>,
-) -> Result<Json<akh_medu::api_types::PimTaskList>, (StatusCode, String)> {
-    let engine = state.get_engine(&ws_name).await?;
-    let shared_agent = state.get_agent(&ws_name).await?;
-    let result = tokio::task::spawn_blocking(move || -> Result<_, String> {
-        let agent = shared_agent.lock().unwrap();
-        let ids = agent
-            .pim_manager()
-            .tasks_by_gtd_state(akh_medu::agent::GtdState::Inbox);
-        let tasks = ids
-            .iter()
-            .map(|&id| akh_medu::api_types::pim_task_item(&engine, &agent, id))
-            .collect();
-        Ok(akh_medu::api_types::PimTaskList { tasks })
-    })
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    Ok(Json(result))
-}
-
-async fn pim_next_handler(
-    State(state): State<Arc<ServerState>>,
-    Path(ws_name): Path<String>,
-    Json(req): Json<akh_medu::api_types::PimNextRequest>,
-) -> Result<Json<akh_medu::api_types::PimTaskList>, (StatusCode, String)> {
-    let engine = state.get_engine(&ws_name).await?;
-    let shared_agent = state.get_agent(&ws_name).await?;
-    let result = tokio::task::spawn_blocking(move || -> Result<_, String> {
-        let agent = shared_agent.lock().unwrap();
-        let ctx = req
-            .context
-            .as_deref()
-            .map(|s| akh_medu::agent::PimContext(s.to_string()));
-        let nrg = req
-            .energy
-            .as_deref()
-            .and_then(akh_medu::api_types::parse_energy_level);
-        let ids = agent
-            .pim_manager()
-            .available_tasks(ctx.as_ref(), nrg, agent.goals());
-        let tasks = ids
-            .iter()
-            .map(|&id| akh_medu::api_types::pim_task_item(&engine, &agent, id))
-            .collect();
-        Ok(akh_medu::api_types::PimTaskList { tasks })
-    })
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    Ok(Json(result))
-}
-
-async fn pim_review_handler(
-    State(state): State<Arc<ServerState>>,
-    Path(ws_name): Path<String>,
-) -> Result<Json<akh_medu::api_types::PimReviewResponse>, (StatusCode, String)> {
-    let engine = state.get_engine(&ws_name).await?;
-    let shared_agent = state.get_agent(&ws_name).await?;
-    let result = tokio::task::spawn_blocking(move || -> Result<_, String> {
-        let agent = shared_agent.lock().unwrap();
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        let review = akh_medu::agent::pim::gtd_weekly_review(
-            agent.pim_manager(),
-            agent.goals(),
-            agent.projects(),
-            now,
-        );
-        let overdue = review
-            .overdue
-            .iter()
-            .map(|&id| akh_medu::api_types::pim_task_item(&engine, &agent, id))
-            .collect();
-        let stale_inbox = review
-            .stale_inbox
-            .iter()
-            .map(|&id| akh_medu::api_types::pim_task_item(&engine, &agent, id))
-            .collect();
-        let stalled_projects = review
-            .stalled_projects
-            .iter()
-            .map(|&id| akh_medu::api_types::pim_task_item(&engine, &agent, id))
-            .collect();
-        Ok(akh_medu::api_types::PimReviewResponse {
-            summary: review.summary,
-            overdue,
-            stale_inbox,
-            stalled_projects,
-            adjustment_count: review.adjustments.len(),
-        })
-    })
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    Ok(Json(result))
-}
-
-async fn pim_project_handler(
-    State(state): State<Arc<ServerState>>,
-    Path((ws_name, project_name)): Path<(String, String)>,
-) -> Result<Json<akh_medu::api_types::PimProjectResponse>, (StatusCode, String)> {
-    let engine = state.get_engine(&ws_name).await?;
-    let shared_agent = state.get_agent(&ws_name).await?;
-    let result = tokio::task::spawn_blocking(move || -> Result<_, String> {
-        let agent = shared_agent.lock().unwrap();
-        let project = agent
-            .projects()
-            .iter()
-            .find(|p| p.name == project_name)
-            .ok_or_else(|| format!("project \"{project_name}\" not found"))?;
-        let goals = project
-            .goals
-            .iter()
-            .map(|&gid| akh_medu::api_types::pim_task_item(&engine, &agent, gid))
-            .collect();
-        Ok(akh_medu::api_types::PimProjectResponse {
-            name: project.name.clone(),
-            status: format!("{}", project.status),
-            goals,
-        })
-    })
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?
-    .map_err(|e| (StatusCode::NOT_FOUND, e))?;
-    Ok(Json(result))
-}
-
-async fn pim_add_handler(
-    State(state): State<Arc<ServerState>>,
-    Path(ws_name): Path<String>,
-    Json(req): Json<akh_medu::api_types::PimAddRequest>,
-) -> Result<Json<akh_medu::api_types::PimAddResponse>, (StatusCode, String)> {
-    let engine = state.get_engine(&ws_name).await?;
-    let shared_agent = state.get_agent(&ws_name).await?;
-    let result = tokio::task::spawn_blocking(move || -> Result<_, String> {
-        let mut agent = shared_agent.lock().unwrap();
-        let goal_sym = SymbolId::new(req.goal)
-            .ok_or_else(|| "invalid goal symbol id".to_string())?;
-        let gtd = akh_medu::api_types::parse_gtd_state(&req.gtd)
-            .ok_or_else(|| format!("invalid GTD state: {}", req.gtd))?;
-        agent
-            .pim_manager_mut()
-            .add_task(&engine, goal_sym, gtd, req.urgency, req.importance)
-            .map_err(|e| format!("{e}"))?;
-
-        if let Some(ref para_str) = req.para {
-            if let Some(para) = akh_medu::agent::ParaCategory::from_label(para_str) {
-                let _ = agent.pim_manager_mut().set_para(&engine, goal_sym, para);
-            }
-        }
-        if let Some(ref ctxs) = req.contexts {
-            for c in ctxs {
-                let _ = agent
-                    .pim_manager_mut()
-                    .add_context(&engine, goal_sym, akh_medu::agent::PimContext(c.clone()));
-            }
-        }
-        if let Some(ref recur_str) = req.recur {
-            if let Ok(r) = akh_medu::agent::Recurrence::parse(recur_str) {
-                let _ = agent.pim_manager_mut().set_recurrence(&engine, goal_sym, r);
-            }
-        }
-        if let Some(dl) = req.deadline {
-            if let Some(m) = agent.pim_manager_mut().get_metadata_mut(goal_sym.get()) {
-                m.deadline = Some(dl);
-            }
-        }
-
-        let quadrant = akh_medu::agent::EisenhowerQuadrant::classify(req.urgency, req.importance);
-        let _ = agent.persist_session();
-
-        Ok(akh_medu::api_types::PimAddResponse {
-            goal: req.goal,
-            gtd_state: format!("{gtd}"),
-            quadrant: quadrant.to_string(),
-        })
-    })
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?
-    .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
-    Ok(Json(result))
-}
-
-async fn pim_transition_handler(
-    State(state): State<Arc<ServerState>>,
-    Path(ws_name): Path<String>,
-    Json(req): Json<akh_medu::api_types::PimTransitionRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let engine = state.get_engine(&ws_name).await?;
-    let shared_agent = state.get_agent(&ws_name).await?;
-    let result = tokio::task::spawn_blocking(move || -> Result<_, String> {
-        let mut agent = shared_agent.lock().unwrap();
-        let goal_sym = SymbolId::new(req.goal)
-            .ok_or_else(|| "invalid goal symbol id".to_string())?;
-        let new_state = akh_medu::api_types::parse_gtd_state(&req.to)
-            .ok_or_else(|| format!("invalid GTD state: {}", req.to))?;
-        agent
-            .pim_manager_mut()
-            .transition_gtd(&engine, goal_sym, new_state)
-            .map_err(|e| format!("{e}"))?;
-        let _ = agent.persist_session();
-        Ok(serde_json::json!({"ok": true, "goal": req.goal, "new_state": req.to}))
-    })
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?
-    .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
-    Ok(Json(result))
-}
-
-async fn pim_matrix_handler(
-    State(state): State<Arc<ServerState>>,
-    Path(ws_name): Path<String>,
-) -> Result<Json<akh_medu::api_types::PimMatrixResponse>, (StatusCode, String)> {
-    let engine = state.get_engine(&ws_name).await?;
-    let shared_agent = state.get_agent(&ws_name).await?;
-    let result = tokio::task::spawn_blocking(move || -> Result<_, String> {
-        let agent = shared_agent.lock().unwrap();
-        let make_items = |quad: akh_medu::agent::EisenhowerQuadrant| -> Vec<akh_medu::api_types::PimTaskItem> {
-            agent
-                .pim_manager()
-                .tasks_by_quadrant(quad)
-                .iter()
-                .map(|&id| akh_medu::api_types::pim_task_item(&engine, &agent, id))
-                .collect()
-        };
-        Ok(akh_medu::api_types::PimMatrixResponse {
-            do_tasks: make_items(akh_medu::agent::EisenhowerQuadrant::Do),
-            schedule_tasks: make_items(akh_medu::agent::EisenhowerQuadrant::Schedule),
-            delegate_tasks: make_items(akh_medu::agent::EisenhowerQuadrant::Delegate),
-            eliminate_tasks: make_items(akh_medu::agent::EisenhowerQuadrant::Eliminate),
-        })
-    })
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    Ok(Json(result))
-}
-
-async fn pim_deps_handler(
-    State(state): State<Arc<ServerState>>,
-    Path(ws_name): Path<String>,
-) -> Result<Json<akh_medu::api_types::PimDepsResponse>, (StatusCode, String)> {
-    let engine = state.get_engine(&ws_name).await?;
-    let shared_agent = state.get_agent(&ws_name).await?;
-    let result = tokio::task::spawn_blocking(move || -> Result<_, String> {
-        let agent = shared_agent.lock().unwrap();
-        let order = agent
-            .pim_manager()
-            .topological_order()
-            .map_err(|e| format!("{e}"))?;
-        let items = order
-            .iter()
-            .map(|&id| akh_medu::api_types::pim_task_item(&engine, &agent, id))
-            .collect();
-        Ok(akh_medu::api_types::PimDepsResponse { order: items })
-    })
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    Ok(Json(result))
-}
-
-async fn pim_overdue_handler(
-    State(state): State<Arc<ServerState>>,
-    Path(ws_name): Path<String>,
-) -> Result<Json<akh_medu::api_types::PimTaskList>, (StatusCode, String)> {
-    let engine = state.get_engine(&ws_name).await?;
-    let shared_agent = state.get_agent(&ws_name).await?;
-    let result = tokio::task::spawn_blocking(move || -> Result<_, String> {
-        let agent = shared_agent.lock().unwrap();
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        let ids = agent.pim_manager().overdue_tasks(now);
-        let tasks = ids
-            .iter()
-            .map(|&id| {
-                let mut item = akh_medu::api_types::pim_task_item(&engine, &agent, id);
-                if let Some(meta) = agent.pim_manager().get_metadata(id.get()) {
-                    if let Some(due) = meta.next_due {
-                        item.overdue_days = Some(now.saturating_sub(due) / 86400);
-                    }
-                }
-                item
-            })
-            .collect();
-        Ok(akh_medu::api_types::PimTaskList { tasks })
-    })
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    Ok(Json(result))
-}
-
-// ── Causal handlers ─────────────────────────────────────────────────────
-
-async fn causal_schemas_handler(
-    State(state): State<Arc<ServerState>>,
-    Path(ws_name): Path<String>,
-) -> Result<Json<Vec<akh_medu::api_types::CausalSchemaSummary>>, (StatusCode, String)> {
-    let shared_agent = state.get_agent(&ws_name).await?;
-    let result = tokio::task::spawn_blocking(move || -> Result<_, String> {
-        let agent = shared_agent.lock().unwrap();
-        let schemas = agent.causal_manager().list_schemas();
-        Ok(schemas
-            .iter()
-            .map(|s| akh_medu::api_types::CausalSchemaSummary {
-                name: s.name.clone(),
-                precondition_count: s.preconditions.len(),
-                effect_count: s.effects.len(),
-                success_rate: s.success_rate as f32,
-                execution_count: s.execution_count as usize,
-            })
-            .collect())
-    })
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    Ok(Json(result))
-}
-
-async fn causal_schema_handler(
-    State(state): State<Arc<ServerState>>,
-    Path((ws_name, schema_name)): Path<(String, String)>,
-) -> Result<Json<akh_medu::api_types::CausalSchemaDetail>, (StatusCode, String)> {
-    let shared_agent = state.get_agent(&ws_name).await?;
-    let result = tokio::task::spawn_blocking(move || -> Result<_, String> {
-        let agent = shared_agent.lock().unwrap();
-        let s = agent
-            .causal_manager()
-            .get_schema(&schema_name)
-            .ok_or_else(|| format!("schema \"{schema_name}\" not found"))?;
-        Ok(akh_medu::api_types::CausalSchemaDetail {
-            name: s.name.clone(),
-            action_id: s.action_id.get(),
-            precondition_count: s.preconditions.len(),
-            effect_count: s.effects.len(),
-            success_rate: s.success_rate as f32,
-            execution_count: s.execution_count as usize,
-        })
-    })
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?
-    .map_err(|e| (StatusCode::NOT_FOUND, e))?;
-    Ok(Json(result))
-}
-
-async fn causal_predict_handler(
-    State(state): State<Arc<ServerState>>,
-    Path(ws_name): Path<String>,
-    Json(req): Json<akh_medu::api_types::CausalPredictRequest>,
-) -> Result<Json<akh_medu::api_types::CausalPredictResponse>, (StatusCode, String)> {
-    let engine = state.get_engine(&ws_name).await?;
-    let shared_agent = state.get_agent(&ws_name).await?;
-    let result = tokio::task::spawn_blocking(move || -> Result<_, String> {
-        let agent = shared_agent.lock().unwrap();
-        let transition = agent
-            .causal_manager()
-            .predict_effects(&req.name, &engine)
-            .map_err(|e| format!("{e}"))?;
-        let label = |id: SymbolId| engine.resolve_label(id);
-        Ok(akh_medu::api_types::CausalPredictResponse {
-            assertions: transition
-                .assertions
-                .iter()
-                .map(|&(s, p, o)| akh_medu::api_types::TransitionTriple {
-                    subject: label(s),
-                    predicate: label(p),
-                    object: label(o),
-                })
-                .collect(),
-            retractions: transition
-                .retractions
-                .iter()
-                .map(|&(s, p, o)| akh_medu::api_types::TransitionTriple {
-                    subject: label(s),
-                    predicate: label(p),
-                    object: label(o),
-                })
-                .collect(),
-            confidence_changes: transition
-                .confidence_changes
-                .iter()
-                .map(|&(s, p, o, d)| akh_medu::api_types::TransitionConfidenceChange {
-                    subject: label(s),
-                    predicate: label(p),
-                    object: label(o),
-                    delta: d,
-                })
-                .collect(),
-        })
-    })
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    Ok(Json(result))
-}
-
-async fn causal_applicable_handler(
-    State(state): State<Arc<ServerState>>,
-    Path(ws_name): Path<String>,
-) -> Result<Json<Vec<akh_medu::api_types::CausalSchemaSummary>>, (StatusCode, String)> {
-    let engine = state.get_engine(&ws_name).await?;
-    let shared_agent = state.get_agent(&ws_name).await?;
-    let result = tokio::task::spawn_blocking(move || -> Result<_, String> {
-        let agent = shared_agent.lock().unwrap();
-        let schemas = agent.causal_manager().applicable_actions(&engine);
-        Ok(schemas
-            .iter()
-            .map(|s| akh_medu::api_types::CausalSchemaSummary {
-                name: s.name.clone(),
-                precondition_count: s.preconditions.len(),
-                effect_count: s.effects.len(),
-                success_rate: s.success_rate as f32,
-                execution_count: s.execution_count as usize,
-            })
-            .collect())
-    })
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    Ok(Json(result))
-}
-
-async fn causal_bootstrap_handler(
-    State(state): State<Arc<ServerState>>,
-    Path(ws_name): Path<String>,
-) -> Result<Json<akh_medu::api_types::CausalBootstrapResponse>, (StatusCode, String)> {
-    let engine = state.get_engine(&ws_name).await?;
-    let shared_agent = state.get_agent(&ws_name).await?;
-    let result = tokio::task::spawn_blocking(move || -> Result<_, String> {
-        let mut agent = shared_agent.lock().unwrap();
-        let tool_names: Vec<String> = agent.list_tools().iter().map(|t| t.name.clone()).collect();
-        let tools_scanned = tool_names.len();
-        let count = agent
-            .causal_manager_mut()
-            .bootstrap_schemas_from_tools(&tool_names, &engine)
-            .map_err(|e| format!("{e}"))?;
-        let _ = agent.persist_session();
-        Ok(akh_medu::api_types::CausalBootstrapResponse {
-            schemas_created: count,
-            tools_scanned,
-        })
-    })
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    Ok(Json(result))
-}
-
-// ── Pref handlers ───────────────────────────────────────────────────────
-
-async fn pref_status_handler(
-    State(state): State<Arc<ServerState>>,
-    Path(ws_name): Path<String>,
-) -> Result<Json<akh_medu::api_types::PrefStatusResponse>, (StatusCode, String)> {
-    let shared_agent = state.get_agent(&ws_name).await?;
-    let result = tokio::task::spawn_blocking(move || -> Result<_, String> {
-        let agent = shared_agent.lock().unwrap();
-        let pref = agent.preference_manager();
-        Ok(akh_medu::api_types::PrefStatusResponse {
-            interaction_count: pref.profile.interaction_count as usize,
-            proactivity_level: format!("{}", pref.profile.proactivity_level),
-            decay_rate: pref.profile.decay_rate as f32,
-            suggestions_offered: pref.profile.suggestions_offered,
-            suggestions_accepted: pref.profile.suggestions_accepted,
-            acceptance_rate: pref.suggestion_acceptance_rate() as f32,
-            prototype_active: pref.profile.interest_prototype.is_some(),
-        })
-    })
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    Ok(Json(result))
-}
-
-async fn pref_train_handler(
-    State(state): State<Arc<ServerState>>,
-    Path(ws_name): Path<String>,
-    Json(req): Json<akh_medu::api_types::PrefTrainRequest>,
-) -> Result<Json<akh_medu::api_types::PrefTrainResponse>, (StatusCode, String)> {
-    let engine = state.get_engine(&ws_name).await?;
-    let shared_agent = state.get_agent(&ws_name).await?;
-    let result = tokio::task::spawn_blocking(move || -> Result<_, String> {
-        let mut agent = shared_agent.lock().unwrap();
-        let sym = SymbolId::new(req.entity)
-            .ok_or_else(|| "invalid entity symbol id".to_string())?;
-        let signal = akh_medu::agent::FeedbackSignal::ExplicitPreference {
-            topic: sym,
-            weight: req.weight,
-        };
-        agent
-            .preference_manager_mut()
-            .record_feedback(&signal, &engine)
-            .map_err(|e| format!("{e}"))?;
-        let label = engine.resolve_label(sym);
-        let total = agent.preference_manager().profile.interaction_count as usize;
-        let _ = agent.persist_session();
-        Ok(akh_medu::api_types::PrefTrainResponse {
-            entity_label: label,
-            weight: req.weight,
-            total_interactions: total,
-        })
-    })
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?
-    .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
-    Ok(Json(result))
-}
-
-async fn pref_level_handler(
-    State(state): State<Arc<ServerState>>,
-    Path(ws_name): Path<String>,
-    Json(req): Json<akh_medu::api_types::PrefLevelRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let shared_agent = state.get_agent(&ws_name).await?;
-    let result = tokio::task::spawn_blocking(move || -> Result<_, String> {
-        let mut agent = shared_agent.lock().unwrap();
-        let level = akh_medu::api_types::parse_proactivity_level(&req.level)
-            .ok_or_else(|| format!("invalid proactivity level: {}", req.level))?;
-        agent.preference_manager_mut().set_proactivity_level(level);
-        let _ = agent.persist_session();
-        Ok(serde_json::json!({"ok": true, "level": req.level}))
-    })
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?
-    .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
-    Ok(Json(result))
-}
-
-async fn pref_interests_handler(
-    State(state): State<Arc<ServerState>>,
-    Path(ws_name): Path<String>,
-    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
-) -> Result<Json<Vec<akh_medu::api_types::PrefInterest>>, (StatusCode, String)> {
-    let engine = state.get_engine(&ws_name).await?;
-    let count: usize = params
-        .get("count")
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(10);
-    let shared_agent = state.get_agent(&ws_name).await?;
-    let result = tokio::task::spawn_blocking(move || -> Result<_, String> {
-        let agent = shared_agent.lock().unwrap();
-        let interests = agent.preference_manager().top_interests(&engine, count);
-        Ok(interests
-            .into_iter()
-            .map(|(label, sim)| akh_medu::api_types::PrefInterest {
-                label,
-                similarity: sim,
-            })
-            .collect())
-    })
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    Ok(Json(result))
-}
-
-async fn pref_suggest_handler(
-    State(state): State<Arc<ServerState>>,
-    Path(ws_name): Path<String>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let engine = state.get_engine(&ws_name).await?;
-    let shared_agent = state.get_agent(&ws_name).await?;
-    let result = tokio::task::spawn_blocking(move || -> Result<_, String> {
-        let agent = shared_agent.lock().unwrap();
-        let jitir = agent
-            .preference_manager()
-            .jitir_query(agent.working_memory(), agent.goals(), &engine)
-            .map_err(|e| format!("{e}"))?;
-        Ok(serde_json::json!({
-            "context_summary": jitir.context_summary,
-            "direct_matches": jitir.direct_matches.iter().map(|s| {
-                serde_json::json!({
-                    "label": s.label,
-                    "relevance": s.relevance,
-                })
-            }).collect::<Vec<_>>(),
-            "serendipity_matches": jitir.serendipity_matches.iter().map(|s| {
-                serde_json::json!({
-                    "label": s.label,
-                    "relevance": s.relevance,
-                    "reasoning": s.reasoning,
-                })
-            }).collect::<Vec<_>>(),
-        }))
-    })
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    Ok(Json(result))
-}
-
-// ── Calendar handlers ───────────────────────────────────────────────────
-
-async fn cal_today_handler(
-    State(state): State<Arc<ServerState>>,
-    Path(ws_name): Path<String>,
-) -> Result<Json<akh_medu::api_types::CalEventList>, (StatusCode, String)> {
-    let shared_agent = state.get_agent(&ws_name).await?;
-    let result = tokio::task::spawn_blocking(move || -> Result<_, String> {
-        let agent = shared_agent.lock().unwrap();
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        let events: Vec<akh_medu::api_types::CalEventSummary> = agent
-            .calendar_manager()
-            .today_events(now)
-            .iter()
-            .map(|e| akh_medu::api_types::CalEventSummary {
-                symbol_id: e.symbol_id.get(),
-                summary: e.summary.clone(),
-                duration_minutes: e.duration_secs() / 60,
-                location: e.location.clone(),
-            })
-            .collect();
-        Ok(akh_medu::api_types::CalEventList { events })
-    })
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    Ok(Json(result))
-}
-
-async fn cal_week_handler(
-    State(state): State<Arc<ServerState>>,
-    Path(ws_name): Path<String>,
-) -> Result<Json<akh_medu::api_types::CalEventList>, (StatusCode, String)> {
-    let shared_agent = state.get_agent(&ws_name).await?;
-    let result = tokio::task::spawn_blocking(move || -> Result<_, String> {
-        let agent = shared_agent.lock().unwrap();
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        let events: Vec<akh_medu::api_types::CalEventSummary> = agent
-            .calendar_manager()
-            .week_events(now)
-            .iter()
-            .map(|e| akh_medu::api_types::CalEventSummary {
-                symbol_id: e.symbol_id.get(),
-                summary: e.summary.clone(),
-                duration_minutes: e.duration_secs() / 60,
-                location: e.location.clone(),
-            })
-            .collect();
-        Ok(akh_medu::api_types::CalEventList { events })
-    })
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    Ok(Json(result))
-}
-
-async fn cal_conflicts_handler(
-    State(state): State<Arc<ServerState>>,
-    Path(ws_name): Path<String>,
-) -> Result<Json<Vec<akh_medu::api_types::CalConflict>>, (StatusCode, String)> {
-    let engine = state.get_engine(&ws_name).await?;
-    let shared_agent = state.get_agent(&ws_name).await?;
-    let result = tokio::task::spawn_blocking(move || -> Result<_, String> {
-        let agent = shared_agent.lock().unwrap();
-        let conflicts = agent.calendar_manager().detect_conflicts();
-        Ok(conflicts
-            .iter()
-            .map(|&(a, b)| akh_medu::api_types::CalConflict {
-                event_a: engine.resolve_label(a),
-                event_b: engine.resolve_label(b),
-            })
-            .collect())
-    })
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    Ok(Json(result))
-}
-
-/// All calendar events (not filtered by date range).
-async fn cal_events_handler(
-    State(state): State<Arc<ServerState>>,
-    Path(ws_name): Path<String>,
-) -> Result<Json<akh_medu::api_types::CalEventList>, (StatusCode, String)> {
-    let shared_agent = state.get_agent(&ws_name).await?;
-    let result = tokio::task::spawn_blocking(move || -> Result<_, String> {
-        let agent = shared_agent.lock().unwrap();
-        let events: Vec<akh_medu::api_types::CalEventSummary> = agent
-            .calendar_manager()
-            .events()
-            .values()
-            .map(|e| akh_medu::api_types::CalEventSummary {
-                symbol_id: e.symbol_id.get(),
-                summary: e.summary.clone(),
-                duration_minutes: e.duration_secs() / 60,
-                location: e.location.clone(),
-            })
-            .collect();
-        Ok(akh_medu::api_types::CalEventList { events })
-    })
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    Ok(Json(result))
-}
-
-async fn cal_add_handler(
-    State(state): State<Arc<ServerState>>,
-    Path(ws_name): Path<String>,
-    Json(req): Json<akh_medu::api_types::CalAddRequest>,
-) -> Result<Json<akh_medu::api_types::CalAddResponse>, (StatusCode, String)> {
-    let engine = state.get_engine(&ws_name).await?;
-    let shared_agent = state.get_agent(&ws_name).await?;
-    let result = tokio::task::spawn_blocking(move || -> Result<_, String> {
-        let mut agent = shared_agent.lock().unwrap();
-        let sym = agent
-            .calendar_manager_mut()
-            .add_event(
-                &engine,
-                &req.summary,
-                req.start,
-                req.end,
-                req.location.as_deref(),
-                None,
-                None,
-                None,
-            )
-            .map_err(|e| format!("{e}"))?;
-        let duration_minutes = req.end.saturating_sub(req.start) / 60;
-        let _ = agent.persist_session();
-        Ok(akh_medu::api_types::CalAddResponse {
-            symbol_id: sym.get(),
-            summary: req.summary,
-            duration_minutes,
-        })
-    })
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?
-    .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
-    Ok(Json(result))
-}
-
-#[cfg(feature = "calendar")]
-async fn cal_import_handler(
-    State(state): State<Arc<ServerState>>,
-    Path(ws_name): Path<String>,
-    Json(req): Json<akh_medu::api_types::CalImportRequest>,
-) -> Result<Json<akh_medu::api_types::CalImportResponse>, (StatusCode, String)> {
-    let engine = state.get_engine(&ws_name).await?;
-    let shared_agent = state.get_agent(&ws_name).await?;
-    let result = tokio::task::spawn_blocking(move || -> Result<_, String> {
-        let mut agent = shared_agent.lock().unwrap();
-        let imported = akh_medu::agent::calendar::import_ical(
-            agent.calendar_manager_mut(),
-            &engine,
-            &req.ical_data,
-        )
-        .map_err(|e| format!("{e}"))?;
-        let _ = agent.persist_session();
-        Ok(akh_medu::api_types::CalImportResponse {
-            imported_count: imported.len(),
-        })
-    })
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?
-    .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
-    Ok(Json(result))
-}
-
-#[cfg(not(feature = "calendar"))]
-async fn cal_import_handler(
-    _state: State<Arc<ServerState>>,
-    _ws_name: Path<String>,
-    _req: Json<akh_medu::api_types::CalImportRequest>,
-) -> Result<Json<akh_medu::api_types::CalImportResponse>, (StatusCode, String)> {
-    Err((
-        StatusCode::NOT_IMPLEMENTED,
-        "calendar import requires --features calendar".into(),
+        pg.migrate_on_start,
     ))
 }
 
-// ── Awaken handlers ─────────────────────────────────────────────────────
-
-async fn awaken_parse_handler(
-    State(state): State<Arc<ServerState>>,
-    Path(ws_name): Path<String>,
-    Json(req): Json<akh_medu::api_types::AwakenParseRequest>,
-) -> Result<Json<akh_medu::api_types::AwakenParseResponse>, (StatusCode, String)> {
-    let _engine = state.get_engine(&ws_name).await?;
-    let result = tokio::task::spawn_blocking(move || -> Result<_, String> {
-        let intent = akh_medu::bootstrap::purpose::parse_purpose(&req.statement)
-            .map_err(|e| format!("{e}"))?;
-        Ok(akh_medu::api_types::AwakenParseResponse {
-            domain: intent.purpose.domain.clone(),
-            competence_level: intent.purpose.competence_level.to_string(),
-            seed_concepts: intent.purpose.seed_concepts.clone(),
-            identity_name: intent.identity.as_ref().map(|i| i.name.clone()),
-            identity_type: intent.identity.as_ref().map(|i| i.entity_type.to_string()),
-        })
-    })
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?
-    .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
-    Ok(Json(result))
+/// One connect attempt + optional advisory-locked migration. Returns the live
+/// pool on success, or a human-readable error describing what failed.
+async fn try_connect_pg(
+    opts: &akhomed_store::PoolOptions,
+    migrate: bool,
+) -> Result<Arc<akhomed_store::DatabaseConnection>, String> {
+    let db = akhomed_store::connect(opts)
+        .await
+        .map_err(|e| format!("connect: {e}"))?;
+    if migrate {
+        // Advisory-locked so several hosts starting against one fresh cluster
+        // database don't race on creating `seaql_migrations`.
+        akhomed_store::run_migrations_locked(opts)
+            .await
+            .map_err(|e| format!("migrations: {e}"))?;
+    }
+    Ok(Arc::new(db))
 }
 
-async fn awaken_resolve_handler(
-    State(state): State<Arc<ServerState>>,
-    Path(ws_name): Path<String>,
-    Json(req): Json<akh_medu::api_types::AwakenResolveRequest>,
-) -> Result<Json<akh_medu::api_types::AwakenResolveResponse>, (StatusCode, String)> {
-    let engine = state.get_engine(&ws_name).await?;
-    let result = tokio::task::spawn_blocking(move || -> Result<_, String> {
-        let identity_ref = akh_medu::bootstrap::IdentityRef {
-            name: req.name.clone(),
-            entity_type: akh_medu::bootstrap::purpose::classify_entity_type(&req.name),
-            source_phrase: format!("resolve {}", req.name),
-        };
-        let knowledge = akh_medu::bootstrap::identity::resolve_identity(&identity_ref, &engine)
-            .map_err(|e| format!("{e}"))?;
+/// Number of quick startup connect attempts before falling back to local-only
+/// (the background reconnector then keeps trying). Sized to ride out the common
+/// boot-time race where launchd starts akhomed before the LAN route is up.
+const PG_STARTUP_ATTEMPTS: u32 = 5;
 
-        // Build a minimal purpose for the ritual.
-        let purpose = akh_medu::bootstrap::PurposeModel {
-            domain: knowledge.domains.first().cloned().unwrap_or_default(),
-            competence_level: akh_medu::bootstrap::DreyfusLevel::Novice,
-            seed_concepts: knowledge.domains.clone(),
-            description: knowledge.description.clone(),
-        };
-        let ritual = akh_medu::bootstrap::identity::ritual_of_awakening(
-            &knowledge, &purpose, &engine, false,
-        )
-        .ok();
+/// Open the Postgres backing store at startup, retrying briefly to absorb a
+/// boot-time network race. On exhaustion returns `None` (local-only); the
+/// caller is expected to spawn [`ServerState::spawn_pg_reconnector`] so the
+/// daemon recovers without a restart (ADR 077).
+async fn init_postgres(
+    config: &AkhomedConfig,
+) -> Option<Arc<akhomed_store::DatabaseConnection>> {
+    let Some((opts, migrate)) = pg_pool_options(config) else {
+        tracing::warn!(
+            "[postgres] not configured — running in legacy local-only mode \
+             (no WAL, no cross-host relocation; Phase 38)"
+        );
+        return None;
+    };
 
-        Ok(akh_medu::api_types::AwakenResolveResponse {
-            name: knowledge.name,
-            entity_type: knowledge.entity_type.to_string(),
-            culture: knowledge.culture.to_string(),
-            description: knowledge.description,
-            domains: knowledge.domains,
-            traits: knowledge.traits,
-            archetypes: knowledge.archetypes,
-            chosen_name: ritual.as_ref().map(|r| r.chosen_name.clone()),
-            persona: ritual
-                .as_ref()
-                .map(|r| format!("{}", r.psyche.persona.name)),
-        })
-    })
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    Ok(Json(result))
-}
-
-async fn awaken_expand_handler(
-    State(state): State<Arc<ServerState>>,
-    Path(ws_name): Path<String>,
-    Json(req): Json<akh_medu::api_types::AwakenExpandRequest>,
-) -> Result<Json<akh_medu::api_types::AwakenExpandResponse>, (StatusCode, String)> {
-    let engine = state.get_engine(&ws_name).await?;
-    let result = tokio::task::spawn_blocking(move || -> Result<_, String> {
-        let purpose = build_purpose_model(req.seeds.as_deref(), req.purpose.as_deref())?;
-        let config = akh_medu::bootstrap::ExpansionConfig {
-            similarity_threshold: req.threshold,
-            max_concepts: req.max_concepts,
-            use_conceptnet: !req.no_conceptnet,
-            ..Default::default()
-        };
-        let mut expander =
-            akh_medu::bootstrap::DomainExpander::new(&engine, config).map_err(|e| format!("{e}"))?;
-        let result = expander
-            .expand(&purpose, &engine)
-            .map_err(|e| format!("{e}"))?;
-        Ok(akh_medu::api_types::AwakenExpandResponse {
-            concept_count: result.concept_count,
-            relation_count: result.relation_count,
-            rejected_count: result.rejected_count,
-            api_calls: result.api_calls,
-            accepted_labels: result.accepted_labels,
-        })
-    })
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    Ok(Json(result))
-}
-
-async fn awaken_prerequisite_handler(
-    State(state): State<Arc<ServerState>>,
-    Path(ws_name): Path<String>,
-    Json(req): Json<akh_medu::api_types::AwakenPrerequisiteRequest>,
-) -> Result<Json<akh_medu::api_types::AwakenPrerequisiteResponse>, (StatusCode, String)> {
-    let engine = state.get_engine(&ws_name).await?;
-    let result = tokio::task::spawn_blocking(move || -> Result<_, String> {
-        let purpose = build_purpose_model(req.seeds.as_deref(), req.purpose.as_deref())?;
-
-        // Expand first.
-        let exp_config = akh_medu::bootstrap::ExpansionConfig::default();
-        let mut expander =
-            akh_medu::bootstrap::DomainExpander::new(&engine, exp_config).map_err(|e| format!("{e}"))?;
-        let expansion = expander.expand(&purpose, &engine).map_err(|e| format!("{e}"))?;
-
-        // Then prerequisites.
-        let prereq_config = akh_medu::bootstrap::PrerequisiteConfig {
-            known_min_triples: req.known_threshold,
-            proximal_similarity_low: req.zpd_low,
-            proximal_similarity_high: req.zpd_high,
-            ..Default::default()
-        };
-        let analyzer =
-            akh_medu::bootstrap::PrerequisiteAnalyzer::new(&engine, prereq_config).map_err(|e| format!("{e}"))?;
-        let result = analyzer
-            .analyze(&expansion, &engine)
-            .unwrap_or_else(|_| {
-                akh_medu::bootstrap::resources::synthetic_curriculum_from_expansion(
-                    &expansion, &engine,
-                )
-            });
-
-        let curriculum: Vec<akh_medu::api_types::CurriculumEntry> = result
-            .curriculum
-            .iter()
-            .map(|e| akh_medu::api_types::CurriculumEntry {
-                tier: e.tier as usize,
-                zone: format!("{}", e.zone),
-                label: e.label.clone(),
-                prereq_coverage: e.prereq_coverage,
-                similarity_to_known: e.similarity_to_known,
-            })
-            .collect();
-
-        Ok(akh_medu::api_types::AwakenPrerequisiteResponse {
-            concepts_analyzed: result.concepts_analyzed,
-            edge_count: result.edge_count,
-            cycles_broken: result.cycles_broken,
-            max_tier: result.max_tier as usize,
-            zone_distribution: result
-                .zone_distribution
-                .iter()
-                .map(|(zone, &count)| (format!("{zone}"), count))
-                .collect(),
-            curriculum,
-        })
-    })
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    Ok(Json(result))
-}
-
-async fn awaken_resources_handler(
-    State(state): State<Arc<ServerState>>,
-    Path(ws_name): Path<String>,
-    Json(req): Json<akh_medu::api_types::AwakenResourcesRequest>,
-) -> Result<Json<akh_medu::api_types::AwakenResourcesResponse>, (StatusCode, String)> {
-    let engine = state.get_engine(&ws_name).await?;
-    let result = tokio::task::spawn_blocking(move || -> Result<_, String> {
-        let purpose = build_purpose_model(req.seeds.as_deref(), req.purpose.as_deref())?;
-
-        // Expand + prerequisite analysis (required for resource discovery).
-        let exp_config = akh_medu::bootstrap::ExpansionConfig::default();
-        let mut expander =
-            akh_medu::bootstrap::DomainExpander::new(&engine, exp_config).map_err(|e| format!("{e}"))?;
-        let expansion = expander.expand(&purpose, &engine).map_err(|e| format!("{e}"))?;
-
-        let prereq_config = akh_medu::bootstrap::PrerequisiteConfig::default();
-        let analyzer =
-            akh_medu::bootstrap::PrerequisiteAnalyzer::new(&engine, prereq_config).map_err(|e| format!("{e}"))?;
-        let prereq_result = analyzer
-            .analyze(&expansion, &engine)
-            .unwrap_or_else(|_| {
-                akh_medu::bootstrap::resources::synthetic_curriculum_from_expansion(
-                    &expansion, &engine,
-                )
-            });
-
-        // Resource discovery.
-        let res_config = akh_medu::bootstrap::ResourceDiscoveryConfig {
-            min_quality: req.min_quality,
-            max_api_calls: req.max_api_calls,
-            use_semantic_scholar: !req.no_semantic_scholar,
-            use_openalex: !req.no_openalex,
-            use_open_library: !req.no_open_library,
-            ..Default::default()
-        };
-        let mut discoverer =
-            akh_medu::bootstrap::ResourceDiscoverer::new(&engine, res_config).map_err(|e| format!("{e}"))?;
-        let result = discoverer
-            .discover(
-                &prereq_result,
-                &expansion,
-                &purpose.seed_concepts,
-                &engine,
-            )
-            .map_err(|e| format!("{e}"))?;
-
-        Ok(akh_medu::api_types::AwakenResourcesResponse {
-            resources_discovered: result.resources.len(),
-            api_calls_used: result.api_calls_made,
-            concepts_covered: result.concepts_searched,
-        })
-    })
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    Ok(Json(result))
-}
-
-async fn awaken_ingest_handler(
-    State(state): State<Arc<ServerState>>,
-    Path(ws_name): Path<String>,
-    Json(req): Json<akh_medu::api_types::AwakenIngestRequest>,
-) -> Result<Json<akh_medu::api_types::AwakenIngestResponse>, (StatusCode, String)> {
-    let engine = state.get_engine(&ws_name).await?;
-    let result = tokio::task::spawn_blocking(move || -> Result<_, String> {
-        let purpose = build_purpose_model(req.seeds.as_deref(), req.purpose.as_deref())?;
-
-        // Full pipeline: expand → prereq → resources → ingest.
-        let exp_config = akh_medu::bootstrap::ExpansionConfig::default();
-        let mut expander =
-            akh_medu::bootstrap::DomainExpander::new(&engine, exp_config).map_err(|e| format!("{e}"))?;
-        let expansion = expander.expand(&purpose, &engine).map_err(|e| format!("{e}"))?;
-
-        let prereq_config = akh_medu::bootstrap::PrerequisiteConfig::default();
-        let analyzer =
-            akh_medu::bootstrap::PrerequisiteAnalyzer::new(&engine, prereq_config).map_err(|e| format!("{e}"))?;
-        let prereq_result = analyzer
-            .analyze(&expansion, &engine)
-            .unwrap_or_else(|_| {
-                akh_medu::bootstrap::resources::synthetic_curriculum_from_expansion(
-                    &expansion, &engine,
-                )
-            });
-
-        let res_config = akh_medu::bootstrap::ResourceDiscoveryConfig::default();
-        let mut discoverer =
-            akh_medu::bootstrap::ResourceDiscoverer::new(&engine, res_config).map_err(|e| format!("{e}"))?;
-        let resource_result = discoverer
-            .discover(
-                &prereq_result,
-                &expansion,
-                &purpose.seed_concepts,
-                &engine,
-            )
-            .map_err(|e| format!("{e}"))?;
-
-        let ingest_config = akh_medu::bootstrap::IngestionConfig {
-            max_cycles: req.max_cycles,
-            saturation_threshold: req.saturation,
-            cross_validation_boost: req.xval_boost,
-            try_url_ingestion: !req.no_url,
-            catalog_dir: req.catalog_dir.map(std::path::PathBuf::from),
-            ..Default::default()
-        };
-        let mut ingestor =
-            akh_medu::bootstrap::CurriculumIngestor::new(&engine, ingest_config).map_err(|e| format!("{e}"))?;
-        let result = ingestor
-            .ingest(&prereq_result, &resource_result, &engine)
-            .map_err(|e| format!("{e}"))?;
-
-        Ok(akh_medu::api_types::AwakenIngestResponse {
-            triples_added: result.total_triples,
-            concepts_covered: result.concepts_ingested,
-            cycles_used: result.cycles,
-        })
-    })
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    Ok(Json(result))
-}
-
-async fn awaken_assess_handler(
-    State(state): State<Arc<ServerState>>,
-    Path(ws_name): Path<String>,
-    Json(req): Json<akh_medu::api_types::AwakenAssessRequest>,
-) -> Result<Json<akh_medu::api_types::AwakenAssessResponse>, (StatusCode, String)> {
-    let engine = state.get_engine(&ws_name).await?;
-    let result = tokio::task::spawn_blocking(move || -> Result<_, String> {
-        let purpose = build_purpose_model(req.seeds.as_deref(), req.purpose.as_deref())?;
-
-        // Expand + prereq (needed for assessment).
-        let exp_config = akh_medu::bootstrap::ExpansionConfig::default();
-        let mut expander =
-            akh_medu::bootstrap::DomainExpander::new(&engine, exp_config).map_err(|e| format!("{e}"))?;
-        let expansion = expander.expand(&purpose, &engine).map_err(|e| format!("{e}"))?;
-
-        let prereq_config = akh_medu::bootstrap::PrerequisiteConfig::default();
-        let analyzer =
-            akh_medu::bootstrap::PrerequisiteAnalyzer::new(&engine, prereq_config).map_err(|e| format!("{e}"))?;
-        let prereq_result = analyzer
-            .analyze(&expansion, &engine)
-            .unwrap_or_else(|_| {
-                akh_medu::bootstrap::resources::synthetic_curriculum_from_expansion(
-                    &expansion, &engine,
-                )
-            });
-
-        let assess_config = akh_medu::bootstrap::CompetenceConfig {
-            min_triples_per_concept: req.min_triples,
-            bloom_max_depth: req.bloom_depth,
-            ..Default::default()
-        };
-        let assessor =
-            akh_medu::bootstrap::CompetenceAssessor::new(&engine, assess_config).map_err(|e| format!("{e}"))?;
-        let report = assessor
-            .assess(&prereq_result, &purpose, &engine)
-            .map_err(|e| format!("{e}"))?;
-
-        Ok(akh_medu::api_types::AwakenAssessResponse {
-            overall_dreyfus: format!("{}", report.overall_dreyfus),
-            overall_score: report.overall_score as f32,
-            recommendation: report.recommendation.to_string(),
-            knowledge_areas: report
-                .knowledge_areas
-                .iter()
-                .map(|ka| akh_medu::api_types::KnowledgeAreaSummary {
-                    name: ka.name.clone(),
-                    dreyfus_level: format!("{}", ka.dreyfus_level),
-                    score: ka.score as f32,
-                })
-                .collect(),
-        })
-    })
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    Ok(Json(result))
-}
-
-async fn awaken_bootstrap_handler(
-    State(state): State<Arc<ServerState>>,
-    Path(ws_name): Path<String>,
-    Json(req): Json<akh_medu::api_types::AwakenBootstrapRequest>,
-) -> Result<Json<akh_medu::api_types::AwakenBootstrapResponse>, (StatusCode, String)> {
-    let engine = state.get_engine(&ws_name).await?;
-    let result = tokio::task::spawn_blocking(move || -> Result<_, String> {
-        // Status-only request.
-        if req.status {
-            let session = akh_medu::bootstrap::BootstrapOrchestrator::status(&engine)
-                .map_err(|e| format!("{e}"))?;
-            return Ok(akh_medu::api_types::AwakenBootstrapResponse {
-                domain: session.raw_purpose.clone(),
-                target_level: String::new(),
-                chosen_name: session.chosen_name,
-                learning_cycles: session.learning_cycle,
-                target_reached: false,
-                final_dreyfus: session
-                    .last_assessment
-                    .as_ref()
-                    .map(|a| format!("{}", a.overall_dreyfus)),
-                final_score: session
-                    .last_assessment
-                    .as_ref()
-                    .map(|a| a.overall_score as f32),
-                recommendation: None,
-            });
+    let mut backoff = Duration::from_secs(1);
+    for attempt in 1..=PG_STARTUP_ATTEMPTS {
+        match try_connect_pg(&opts, migrate).await {
+            Ok(pool) => {
+                tracing::info!("connected to PostgreSQL backing store");
+                return Some(pool);
+            }
+            Err(e) => {
+                if attempt < PG_STARTUP_ATTEMPTS {
+                    tracing::warn!(
+                        attempt,
+                        max = PG_STARTUP_ATTEMPTS,
+                        backoff_secs = backoff.as_secs(),
+                        error = %e,
+                        "PostgreSQL not reachable yet — retrying"
+                    );
+                    tokio::time::sleep(backoff).await;
+                    backoff = (backoff * 2).min(Duration::from_secs(8));
+                } else {
+                    tracing::error!(
+                        error = %e,
+                        "PostgreSQL unavailable after {PG_STARTUP_ATTEMPTS} attempts — \
+                         falling back to local-only mode; background reconnector will keep trying"
+                    );
+                }
+            }
         }
-
-        let config = akh_medu::bootstrap::OrchestratorConfig {
-            max_learning_cycles: req.max_cycles,
-            plan_only: req.plan_only,
-            ..Default::default()
-        };
-
-        let mut orchestrator = if req.resume {
-            akh_medu::bootstrap::BootstrapOrchestrator::resume(&engine, config)
-                .map_err(|e| format!("{e}"))?
-        } else {
-            let stmt = req
-                .statement
-                .as_deref()
-                .ok_or_else(|| "statement required for fresh bootstrap".to_string())?;
-            akh_medu::bootstrap::BootstrapOrchestrator::new(stmt, config)
-                .map_err(|e| format!("{e}"))?
-        };
-
-        let (result, _checkpoints) = orchestrator.run(&engine).map_err(|e| format!("{e}"))?;
-
-        Ok(akh_medu::api_types::AwakenBootstrapResponse {
-            domain: result.intent.purpose.domain.clone(),
-            target_level: result.intent.purpose.competence_level.to_string(),
-            chosen_name: result.chosen_name,
-            learning_cycles: result.learning_cycles,
-            target_reached: result.target_reached,
-            final_dreyfus: result
-                .final_report
-                .as_ref()
-                .map(|r| format!("{}", r.overall_dreyfus)),
-            final_score: result
-                .final_report
-                .as_ref()
-                .map(|r| r.overall_score as f32),
-            recommendation: result
-                .final_report
-                .as_ref()
-                .map(|r| r.recommendation.to_string()),
-        })
-    })
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    Ok(Json(result))
+    }
+    None
 }
 
-/// Build a PurposeModel from optional seeds/purpose fields.
-fn build_purpose_model(
-    seeds: Option<&[String]>,
-    purpose: Option<&str>,
-) -> Result<akh_medu::bootstrap::PurposeModel, String> {
-    if let Some(purpose_str) = purpose {
-        let intent = akh_medu::bootstrap::purpose::parse_purpose(purpose_str)
-            .map_err(|e| format!("{e}"))?;
-        Ok(intent.purpose)
-    } else if let Some(seed_list) = seeds {
-        Ok(akh_medu::bootstrap::PurposeModel {
-            domain: seed_list.first().cloned().unwrap_or_default(),
-            competence_level: akh_medu::bootstrap::DreyfusLevel::Novice,
-            seed_concepts: seed_list.to_vec(),
-            description: String::new(),
-        })
-    } else {
-        Err("either 'seeds' or 'purpose' must be provided".into())
+/// Raise the soft `RLIMIT_NOFILE` to the hard limit. Container runtimes often
+/// leave the soft limit at 1024 (docker's default) while the hard limit is in
+/// the hundreds of thousands; a long-lived daemon accepting many short TCP
+/// connections (the gateway's ACP discovery polls) exhausts 1024 in days.
+#[cfg(unix)]
+fn raise_nofile_limit() {
+    // SAFETY: plain libc rlimit syscalls on a zeroed struct; no aliasing.
+    unsafe {
+        let mut lim = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) != 0 {
+            return;
+        }
+        if lim.rlim_cur >= lim.rlim_max {
+            return;
+        }
+        let soft_before = lim.rlim_cur;
+        lim.rlim_cur = lim.rlim_max;
+        // macOS refuses a soft limit above OPEN_MAX (10240) even when the hard
+        // limit reports RLIM_INFINITY (armini runs akhomed natively). libc
+        // doesn't export OPEN_MAX, so use its (ABI-stable) value.
+        #[cfg(target_os = "macos")]
+        {
+            lim.rlim_cur = lim.rlim_cur.min(10240);
+        }
+        if lim.rlim_cur <= soft_before {
+            return;
+        }
+        if libc::setrlimit(libc::RLIMIT_NOFILE, &lim) == 0 {
+            tracing::info!(from = soft_before, to = lim.rlim_cur, "raised RLIMIT_NOFILE soft limit");
+        } else {
+            tracing::warn!(
+                soft = soft_before,
+                hard = lim.rlim_max,
+                "could not raise RLIMIT_NOFILE soft limit"
+            );
+        }
     }
 }
-
-// ── Main ──────────────────────────────────────────────────────────────────
 
 #[tokio::main]
 async fn main() {
@@ -3412,9 +2071,13 @@ async fn main() {
         )
         .init();
 
+    #[cfg(unix)]
+    raise_nofile_limit();
+
+    // `bind`/`port` no longer bind an HTTP listener (ADR-061 P8.5) — they are
+    // retained only for the discovery PID record consumed by `akh` clients.
     let bind = std::env::var("AKH_SERVER_BIND").unwrap_or_else(|_| "0.0.0.0".to_string());
     let port = std::env::var("AKH_SERVER_PORT").unwrap_or_else(|_| "8200".to_string());
-    let addr = format!("{bind}:{port}");
 
     let paths = AkhPaths::resolve().unwrap_or_else(|e| {
         tracing::error!("failed to resolve XDG paths: {e}");
@@ -3430,7 +2093,7 @@ async fn main() {
     // Load global config from $XDG_CONFIG_HOME/akh-medu/config.toml.
     // Creates a default config file on first boot.
     let config_path = paths.global_config_file();
-    let config = match AkhomedConfig::load_or_create(&config_path) {
+    let mut config = match AkhomedConfig::load_or_create(&config_path) {
         Ok(c) => {
             tracing::info!(path = %config_path.display(), "loaded config");
             c
@@ -3440,6 +2103,24 @@ async fn main() {
             AkhomedConfig::default()
         }
     };
+
+    // ACP TCP env overrides (mirrors AKH_SERVER_* / AKH_AUTO_START). Lets the
+    // Helm chart enable + expose the ACP TCP listener — the daemon's only inbound
+    // surface (ADR-061) — without mounting a config.toml. `AKH_ACP_TCP_PORT`
+    // turns TCP on; `AKH_ACP_TCP_BIND` sets the host (config defaults to the
+    // loopback `127.0.0.1`, so set `0.0.0.0` to reach a kubelet probe/Service).
+    if let Ok(p) = std::env::var("AKH_ACP_TCP_PORT") {
+        match p.trim().parse::<u16>() {
+            Ok(port) => config.acp.tcp_port = Some(port),
+            Err(e) => tracing::warn!("ignoring invalid AKH_ACP_TCP_PORT={p:?}: {e}"),
+        }
+    }
+    if let Ok(host) = std::env::var("AKH_ACP_TCP_BIND") {
+        let host = host.trim();
+        if !host.is_empty() {
+            config.acp.tcp_bind = Some(host.to_string());
+        }
+    }
 
     // AKH_AUTO_START env var overrides config if set.
     // "default" is treated as "no auto-start" (daemons are paused by default).
@@ -3505,12 +2186,27 @@ async fn main() {
         merged
     };
 
-    let state = Arc::new(ServerState::new(paths.clone(), config));
+    // Phase 38: open the Postgres backing store (or fall back to local-only).
+    let pg_pool = init_postgres(&config).await;
 
-    tracing::info!("akhomed initialized");
+    let state = Arc::new(ServerState::new(paths.clone(), config, pg_pool));
 
-    // Write PID file so `akh` CLI can discover this server.
-    if let Err(e) = akh_medu::client::write_pid_file(&paths, port_num, &bind) {
+    tracing::info!(
+        postgres = state.pg_pool().is_some(),
+        "akhomed initialized"
+    );
+
+    // ADR 077: if we started local-only but a [postgres] section is configured,
+    // keep trying to connect in the background and re-enable durability without
+    // a restart (recovers from the launchd boot-time network race). No-op when
+    // already connected or when no backing store is configured.
+    if state.pg_pool().is_none() {
+        state.spawn_pg_reconnector();
+    }
+
+    // Write PID file so `akh` CLI can discover this server. ACP transport
+    // details (socket/tcp) are filled in later, once those listeners bind.
+    if let Err(e) = akh_medu::client::write_pid_file(&paths, port_num, &bind, None, None) {
         tracing::warn!("failed to write PID file: {e}");
     }
 
@@ -3546,7 +2242,13 @@ async fn main() {
                     let daemon_status = Arc::clone(&status);
                     let daemon_ws = ws_name.clone();
                     let dc = daemon_config.clone();
-                    let pause_handle = mcp::DaemonPauseHandle::new();
+                    // P5: per-akh automation gating from [autonomy] (off by default).
+                    let autonomy = state
+                        .get_akh_config(ws_name)
+                        .await
+                        .map(|c| c.autonomy.clone())
+                        .unwrap_or_default();
+                    let pause_handle = DaemonPauseHandle::new();
                     state.daemon_pauses.write().await.insert(ws_name.clone(), pause_handle.clone());
                     let task_handle = pause_handle.clone();
                     let handle = tokio::task::spawn(async move {
@@ -3555,6 +2257,7 @@ async fn main() {
                             daemon_status,
                             shutdown_rx,
                             dc,
+                            autonomy,
                             daemon_ws,
                             task_handle,
                         )
@@ -3570,7 +2273,7 @@ async fn main() {
                     );
                     tracing::info!(workspace = %ws_name, "daemon auto-started");
                 }
-                Err((_status_code, msg)) => {
+                Err(msg) => {
                     tracing::warn!(
                         workspace = %ws_name,
                         error = %msg,
@@ -3581,474 +2284,547 @@ async fn main() {
         }
     }
 
-    let app = Router::new()
-        // Web UI.
-        .route("/", get(homepage_handler))
-        .route("/assets/style.css", get(style_handler))
-        .route("/assets/htmx.min.js", get(htmx_handler))
-        .route("/assets/alpine.min.js", get(alpine_handler))
-        // Health.
-        .route("/health", get(health))
-        // Global config.
-        .route("/config", get(get_config_handler).put(put_config_handler))
-        // Workspace management.
-        .route("/workspaces", get(list_workspaces))
-        .route("/workspaces/{name}", post(create_workspace))
-        .route("/workspaces/{name}", delete(delete_workspace))
-        .route("/workspaces/{name}/status", get(workspace_status))
-        .route(
-            "/workspaces/{ws_name}/assign-role",
-            post(assign_role_handler),
-        )
-        // Symbols.
-        .route(
-            "/workspaces/{ws_name}/symbols",
-            get(list_symbols).post(create_symbol),
-        )
-        .route(
-            "/workspaces/{ws_name}/symbols/{sym}",
-            get(resolve_symbol),
-        )
-        // Triples.
-        .route(
-            "/workspaces/{ws_name}/triples",
-            get(list_triples).post(add_triple),
-        )
-        .route(
-            "/workspaces/{ws_name}/triples/from/{sym_id}",
-            get(triples_from),
-        )
-        .route(
-            "/workspaces/{ws_name}/triples/to/{sym_id}",
-            get(triples_to),
-        )
-        .route("/workspaces/{ws_name}/ingest", post(ingest_triples))
-        .route(
-            "/workspaces/{ws_name}/ingest/csv",
-            post(ingest_csv_handler),
-        )
-        .route(
-            "/workspaces/{ws_name}/ingest/text",
-            post(ingest_text_handler),
-        )
-        // Query & reasoning.
-        .route("/workspaces/{ws_name}/sparql", post(sparql_query))
-        .route("/workspaces/{ws_name}/infer", post(infer_handler))
-        .route("/workspaces/{ws_name}/reason", post(reason_handler))
-        .route("/workspaces/{ws_name}/search", post(search_handler))
-        .route("/workspaces/{ws_name}/analogy", post(analogy_handler))
-        .route("/workspaces/{ws_name}/filler", post(filler_handler))
-        // Traversal & analytics.
-        .route("/workspaces/{ws_name}/traverse", post(traverse_handler))
-        .route(
-            "/workspaces/{ws_name}/analytics/centrality",
-            get(degree_centrality_handler),
-        )
-        .route(
-            "/workspaces/{ws_name}/analytics/pagerank",
-            get(pagerank_handler),
-        )
-        .route(
-            "/workspaces/{ws_name}/analytics/components",
-            get(components_handler),
-        )
-        .route(
-            "/workspaces/{ws_name}/analytics/shortest-path",
-            post(shortest_path_handler),
-        )
-        // Export.
-        .route(
-            "/workspaces/{ws_name}/export/symbols",
-            get(export_symbols),
-        )
-        .route(
-            "/workspaces/{ws_name}/export/triples",
-            get(export_triples),
-        )
-        .route(
-            "/workspaces/{ws_name}/export/provenance/{sym}",
-            get(export_provenance),
-        )
-        // Library.
-        .route(
-            "/workspaces/{ws_name}/library",
-            get(library_list_handler).post(library_add_handler),
-        )
-        // Static routes before wildcard /{doc_id}.
-        .route(
-            "/workspaces/{ws_name}/library/search",
-            post(library_search_handler),
-        )
-        .route(
-            "/workspaces/{ws_name}/library/scan",
-            post(library_scan_handler),
-        )
-        .route(
-            "/workspaces/{ws_name}/library/{doc_id}",
-            get(library_info_handler).delete(library_remove_handler),
-        )
-        // Daemon.
-        .route(
-            "/workspaces/{ws_name}/daemon/start",
-            post(start_daemon_handler),
-        )
-        .route(
-            "/workspaces/{ws_name}/daemon/stop",
-            post(stop_daemon_handler),
-        )
-        .route(
-            "/workspaces/{ws_name}/daemon",
-            get(daemon_status_handler),
-        )
-        // Triggers.
-        .route(
-            "/workspaces/{ws_name}/triggers",
-            get(list_triggers_handler).post(add_trigger_handler),
-        )
-        .route(
-            "/workspaces/{ws_name}/triggers/{trigger_id}",
-            delete(remove_trigger_handler),
-        )
-        // Skills.
-        .route(
-            "/workspaces/{ws_name}/skills",
-            get(list_skills_handler),
-        )
-        // Static /install must come before wildcard /{skill_name}.
-        .route(
-            "/workspaces/{ws_name}/skills/install",
-            post(install_skill_handler),
-        )
-        .route(
-            "/workspaces/{ws_name}/skills/{skill_name}/load",
-            post(load_skill_handler),
-        )
-        .route(
-            "/workspaces/{ws_name}/skills/{skill_name}/unload",
-            post(unload_skill_handler),
-        )
-        .route(
-            "/workspaces/{ws_name}/skills/{skill_name}",
-            get(skill_info_handler),
-        )
-        // Audit.
-        .route(
-            "/workspaces/{ws_name}/audit",
-            get(audit_list_handler),
-        )
-        .route(
-            "/workspaces/{ws_name}/audit/{id}",
-            get(audit_get_handler),
-        )
-        // Goals.
-        .route(
-            "/workspaces/{ws_name}/goals",
-            get(goals_handler),
-        )
-        // Awaken status.
-        .route(
-            "/workspaces/{ws_name}/awaken/status",
-            get(awaken_status_handler),
-        )
-        // Engine info.
-        .route("/workspaces/{ws_name}/info", get(engine_info))
-        // Seed packs.
-        .route("/workspaces/{ws_name}/seed/{pack_name}", post(apply_seed))
-        // Preprocessing.
-        .route("/workspaces/{name}/preprocess", post(workspace_preprocess))
-        .route(
-            "/workspaces/{name}/equivalences",
-            get(workspace_equivalences),
-        )
-        .route(
-            "/workspaces/{name}/equivalences/stats",
-            get(workspace_equivalences_stats),
-        )
-        // Seed list (root-level, not workspace-scoped).
-        .route("/seeds", get(list_seeds_handler))
-        // Seed status (workspace-scoped).
-        .route(
-            "/workspaces/{ws_name}/seeds/status",
-            get(seed_status_handler),
-        )
-        .route(
-            "/workspaces/{ws_name}/seeds",
-            get(workspace_seeds_handler),
-        )
-        // Render.
-        .route(
-            "/workspaces/{ws_name}/render",
-            post(render_handler),
-        )
-        // Agent run/resume.
-        .route(
-            "/workspaces/{ws_name}/agent/run",
-            post(agent_run_handler),
-        )
-        .route(
-            "/workspaces/{ws_name}/agent/resume",
-            post(agent_resume_handler),
-        )
-        // PIM.
-        .route(
-            "/workspaces/{ws_name}/pim/inbox",
-            get(pim_inbox_handler),
-        )
-        .route(
-            "/workspaces/{ws_name}/pim/next",
-            post(pim_next_handler),
-        )
-        .route(
-            "/workspaces/{ws_name}/pim/review",
-            get(pim_review_handler),
-        )
-        .route(
-            "/workspaces/{ws_name}/pim/project/{project_name}",
-            get(pim_project_handler),
-        )
-        .route(
-            "/workspaces/{ws_name}/pim/add",
-            post(pim_add_handler),
-        )
-        .route(
-            "/workspaces/{ws_name}/pim/transition",
-            post(pim_transition_handler),
-        )
-        .route(
-            "/workspaces/{ws_name}/pim/matrix",
-            get(pim_matrix_handler),
-        )
-        .route(
-            "/workspaces/{ws_name}/pim/deps",
-            get(pim_deps_handler),
-        )
-        .route(
-            "/workspaces/{ws_name}/pim/overdue",
-            get(pim_overdue_handler),
-        )
-        // Causal.
-        .route(
-            "/workspaces/{ws_name}/causal/schemas",
-            get(causal_schemas_handler),
-        )
-        .route(
-            "/workspaces/{ws_name}/causal/schemas/{schema_name}",
-            get(causal_schema_handler),
-        )
-        .route(
-            "/workspaces/{ws_name}/causal/predict",
-            post(causal_predict_handler),
-        )
-        .route(
-            "/workspaces/{ws_name}/causal/applicable",
-            get(causal_applicable_handler),
-        )
-        .route(
-            "/workspaces/{ws_name}/causal/bootstrap",
-            post(causal_bootstrap_handler),
-        )
-        // Pref.
-        .route(
-            "/workspaces/{ws_name}/preferences",
-            get(pref_status_handler),
-        )
-        .route(
-            "/workspaces/{ws_name}/pref/status",
-            get(pref_status_handler),
-        )
-        .route(
-            "/workspaces/{ws_name}/pref/train",
-            post(pref_train_handler),
-        )
-        .route(
-            "/workspaces/{ws_name}/pref/level",
-            put(pref_level_handler),
-        )
-        .route(
-            "/workspaces/{ws_name}/pref/interests",
-            get(pref_interests_handler),
-        )
-        .route(
-            "/workspaces/{ws_name}/pref/suggest",
-            get(pref_suggest_handler),
-        )
-        // Calendar.
-        .route(
-            "/workspaces/{ws_name}/cal/events",
-            get(cal_events_handler),
-        )
-        .route(
-            "/workspaces/{ws_name}/cal/today",
-            get(cal_today_handler),
-        )
-        .route(
-            "/workspaces/{ws_name}/cal/week",
-            get(cal_week_handler),
-        )
-        .route(
-            "/workspaces/{ws_name}/cal/conflicts",
-            get(cal_conflicts_handler),
-        )
-        .route(
-            "/workspaces/{ws_name}/cal/add",
-            post(cal_add_handler),
-        )
-        .route(
-            "/workspaces/{ws_name}/cal/import",
-            post(cal_import_handler),
-        )
-        .route(
-            "/workspaces/{ws_name}/cal/sync",
-            post(cal_sync_handler),
-        )
-        // Awaken (extends existing /awaken/status).
-        .route(
-            "/workspaces/{ws_name}/awaken/parse",
-            post(awaken_parse_handler),
-        )
-        .route(
-            "/workspaces/{ws_name}/awaken/resolve",
-            post(awaken_resolve_handler),
-        )
-        .route(
-            "/workspaces/{ws_name}/awaken/expand",
-            post(awaken_expand_handler),
-        )
-        .route(
-            "/workspaces/{ws_name}/awaken/prerequisite",
-            post(awaken_prerequisite_handler),
-        )
-        .route(
-            "/workspaces/{ws_name}/awaken/resources",
-            post(awaken_resources_handler),
-        )
-        .route(
-            "/workspaces/{ws_name}/awaken/ingest",
-            post(awaken_ingest_handler),
-        )
-        .route(
-            "/workspaces/{ws_name}/awaken/assess",
-            post(awaken_assess_handler),
-        )
-        .route(
-            "/workspaces/{ws_name}/awaken/bootstrap",
-            post(awaken_bootstrap_handler),
-        )
-        // Compartments.
-        .route(
-            "/workspaces/{ws_name}/compartments",
-            get(compartments_handler),
-        )
-        .route(
-            "/workspaces/{ws_name}/compartments/discover",
-            post(compartment_discover_handler),
-        )
-        .route(
-            "/workspaces/{ws_name}/compartments/{comp_id}/load",
-            post(compartment_load_handler),
-        )
-        .route(
-            "/workspaces/{ws_name}/compartments/{comp_id}/unload",
-            post(compartment_unload_handler),
-        )
-        .route(
-            "/workspaces/{ws_name}/compartments/{comp_id}/activate",
-            post(compartment_activate_handler),
-        )
-        .route(
-            "/workspaces/{ws_name}/compartments/{comp_id}/deactivate",
-            post(compartment_deactivate_handler),
-        )
-        // WebSocket.
-        .route("/ws/{ws_name}", get(ws_handler))
-        .layer(CorsLayer::permissive())
-        .with_state(Arc::clone(&state));
+    // Self-bootstrap the ACP workspace. A pure-ACP `akh` client can't create the
+    // first workspace (the daemon must already serve ACP to accept
+    // `_akh/workspace/create`), and the ACP server can only bind an *existing*
+    // workspace — so ensure the one it will bind exists before starting it. The
+    // resolution here must match `start_acp_server`'s (acp.workspace → first
+    // auto_start → "default").
+    #[cfg(feature = "acp")]
+    {
+        let acp_ws = state
+            .config
+            .read()
+            .await
+            .acp
+            .workspace
+            .clone()
+            .or_else(|| auto_start.first().cloned())
+            .unwrap_or_else(|| "default".to_string());
+        // Ensure the workspace the ACP server will bind *exists* (data dir), but
+        // never clobber an existing `akh.toml`. `WorkspaceManager::create` persists
+        // only the `WorkspaceConfig` view, so calling it with a default would drop
+        // akh-level fields (`backend`, `model`, `[ollama_endpoint]`, ADR 070). When
+        // an `akh.toml` already exists, create from its embedded WorkspaceConfig and
+        // then restore the full AkhConfig so the chat-backing selection survives.
+        let cfg_file = paths.workspace_config_file(&acp_ws);
+        if !paths.workspace(&acp_ws).exists() {
+            let wsm = WorkspaceManager::new(paths.clone());
+            let existing = cfg_file.exists().then(|| AkhConfig::load(&cfg_file).ok()).flatten();
+            let ws_cfg = existing
+                .as_ref()
+                .map(|c| c.workspace.clone())
+                .unwrap_or_else(|| akh_medu::workspace::WorkspaceConfig::with_name(&acp_ws));
+            match wsm.create(ws_cfg) {
+                Ok(_) => {
+                    // Restore akh-level fields that `create` doesn't persist.
+                    if let Some(akh_cfg) = existing {
+                        if let Err(e) = akh_cfg.save(&cfg_file) {
+                            tracing::warn!(workspace = %acp_ws, error = %e, "failed to restore akh.toml after create");
+                        }
+                    }
+                    tracing::info!(workspace = %acp_ws, "ensured ACP workspace exists (self-bootstrap)")
+                }
+                Err(e) => {
+                    tracing::warn!(workspace = %acp_ws, error = %e, "failed to auto-create ACP workspace")
+                }
+            }
+        }
+    }
 
-    // ── MCP server (feature-gated) ──────────────────────────────────
-    #[cfg(feature = "mcp")]
-    let app = {
-        use rmcp::transport::streamable_http_server::{
-            StreamableHttpService, session::local::LocalSessionManager,
-        };
-
-        let upstreams = state.config.read().await.upstreams.clone();
-        let mcp_state = Arc::new(akh_medu::mcp::McpState::new(
-            paths.clone(),
-            Arc::clone(&state.workspaces),
-            Arc::clone(&state.agents),
-            Arc::clone(&state.psyche_snapshots),
-            upstreams,
-        ));
-
-        let mcp_service = StreamableHttpService::new(
-            move || Ok(akh_medu::mcp::AkhMcpServer::new(Arc::clone(&mcp_state))),
-            LocalSessionManager::default().into(),
-            Default::default(),
-        );
-
-        tracing::info!("MCP server mounted at /mcp");
-        app.nest_service("/mcp", mcp_service)
+    // ── ACP transport (Unix socket + optional TCP) ── the daemon's sole
+    // inbound surface after ADR-061 P8.5 (REST/WS/web-UI/inbound-MCP retired).
+    // Behind the `acp` feature; with it off the daemon has no inbound surface
+    // and simply runs its workspace daemons until signalled.
+    #[cfg(feature = "acp")]
+    let (acp_shutdown_tx, acp_handles, acp_socket_path) = {
+        let acp_cfg = state.config.read().await.acp.clone();
+        let fallback_ws = auto_start
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "default".to_string());
+        let (acp_tx, acp_rx) = tokio::sync::watch::channel(false);
+        let (acp_socket, acp_tcp, handles) =
+            start_acp_server(Arc::clone(&state), acp_cfg, &paths, &fallback_ws, acp_rx).await;
+        // Republish the discovery record now that ACP endpoints are known.
+        if let Err(e) = akh_medu::client::write_pid_file(
+            &paths,
+            port_num,
+            &bind,
+            acp_socket.as_deref(),
+            acp_tcp.as_deref(),
+        ) {
+            tracing::warn!("failed to update PID file with ACP endpoints: {e}");
+        }
+        (acp_tx, handles, acp_socket)
     };
 
-    tracing::info!("akhomed listening on {addr}");
-
-    let listener = tokio::net::TcpListener::bind(&addr)
-        .await
-        .expect("failed to bind");
-
-    // Serve with graceful shutdown on SIGTERM/SIGINT.
+    // No HTTP/WS/MCP surface remains (ADR-061 P8.5) — ACP is the only inbound
+    // transport. Hold the process open until SIGTERM/SIGINT, then drain the ACP
+    // accept loops and workspace daemons. The ACP listeners and workspace
+    // daemons run as their own spawned tasks; main just waits and tears down.
     let paths_for_shutdown = paths.clone();
     let state_for_shutdown = state;
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
-            let ctrl_c = tokio::signal::ctrl_c();
-            #[cfg(unix)]
-            {
-                let mut sigterm =
-                    tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                        .expect("failed to register SIGTERM handler");
-                tokio::select! {
-                    _ = ctrl_c => {},
-                    _ = sigterm.recv() => {},
-                }
-            }
-            #[cfg(not(unix))]
-            {
-                ctrl_c.await.ok();
-            }
-            tracing::info!("akhomed shutting down — draining workspace daemons");
 
-            // Signal all workspace daemons to stop, then join with timeout.
-            let mut daemons = state_for_shutdown.daemons.write().await;
-            let mut aborted = false;
-            for (name, mut daemon) in daemons.drain() {
-                tracing::info!(workspace = %name, "stopping workspace daemon");
-                let _ = daemon.shutdown_tx.send(true);
-                match tokio::time::timeout(Duration::from_secs(5), &mut daemon.handle).await {
-                    Ok(Ok(())) => tracing::info!(workspace = %name, "daemon stopped cleanly"),
-                    Ok(Err(e)) => tracing::warn!(workspace = %name, error = %e, "daemon task panicked"),
-                    Err(_) => {
-                        tracing::warn!(workspace = %name, "daemon did not stop within 5s, aborting");
-                        daemon.handle.abort();
-                        aborted = true;
-                    }
-                }
-            }
-            drop(daemons);
+    let ctrl_c = tokio::signal::ctrl_c();
+    #[cfg(unix)]
+    {
+        let mut sigterm =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("failed to register SIGTERM handler");
+        tokio::select! {
+            _ = ctrl_c => {},
+            _ = sigterm.recv() => {},
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        ctrl_c.await.ok();
+    }
+    tracing::info!("akhomed shutting down — draining workspace daemons");
 
-            akh_medu::client::remove_pid_file(&paths_for_shutdown);
+    // Stop ACP accept loops first so no new sessions start mid-drain.
+    #[cfg(feature = "acp")]
+    {
+        tracing::info!("stopping ACP listeners");
+        let _ = acp_shutdown_tx.send(true);
+        for h in acp_handles {
+            let _ = tokio::time::timeout(Duration::from_secs(3), h).await;
+        }
+        if let Some(path) = acp_socket_path {
+            let _ = std::fs::remove_file(path);
+        }
+    }
 
-            // abort() only cancels at .await points. Daemon tasks run sync CPU
-            // work that never yields, so abort alone won't stop them. Force exit
-            // after a short grace period to avoid leaving the process hanging.
-            if aborted {
-                tracing::info!("force-exiting after abort (daemon tasks run sync CPU work)");
-                std::process::exit(0);
+    // Signal all workspace daemons to stop, then join with timeout.
+    let mut daemons = state_for_shutdown.daemons.write().await;
+    let mut aborted = false;
+    for (name, mut daemon) in daemons.drain() {
+        tracing::info!(workspace = %name, "stopping workspace daemon");
+        let _ = daemon.shutdown_tx.send(true);
+        match tokio::time::timeout(Duration::from_secs(5), &mut daemon.handle).await {
+            Ok(Ok(())) => tracing::info!(workspace = %name, "daemon stopped cleanly"),
+            Ok(Err(e)) => tracing::warn!(workspace = %name, error = %e, "daemon task panicked"),
+            Err(_) => {
+                tracing::warn!(workspace = %name, "daemon did not stop within 5s, aborting");
+                daemon.handle.abort();
+                aborted = true;
             }
-        })
-        .await
-        .expect("server error");
+        }
+    }
+    drop(daemons);
+
+    // Phase 38b: drain WAL flushers (after the daemons stop generating
+    // mutations) so the final batch reaches Postgres.
+    tracing::info!("draining WAL flushers");
+    state_for_shutdown.shutdown_wals().await;
+
+    akh_medu::client::remove_pid_file(&paths_for_shutdown);
+
+    // abort() only cancels at .await points. Daemon tasks run sync CPU work
+    // that never yields, so abort alone won't stop them. Force exit after a
+    // short grace period to avoid leaving the process hanging.
+    if aborted {
+        tracing::info!("force-exiting after abort (daemon tasks run sync CPU work)");
+        std::process::exit(0);
+    }
 
     // Belt-and-suspenders: clean up PID file on normal exit too.
     akh_medu::client::remove_pid_file(&paths);
+}
+
+// ── ACP control-plane (`ServerControl for ServerState`) ─────────────────────
+//
+// Exercises the real backend directly (no socket): the lib's routing tests
+// (`src/acp/mod.rs`) use a mock; here we drive `ServerState::dispatch` against
+// a tempdir-backed state to prove the workspace + config ops actually mutate
+// disk. Daemon ops are covered by their (unchanged) REST behaviour and only the
+// cheap, agent-free `daemon/status` path is checked here.
+#[cfg(all(test, feature = "acp"))]
+mod control_plane_tests {
+    use super::*;
+    use akh_medu::acp::ServerControl;
+    use serde_json::json;
+
+    /// Build a `ServerState` rooted under a fresh tempdir.
+    fn temp_state() -> (tempfile::TempDir, ServerState) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let base = tmp.path();
+        let paths = AkhPaths {
+            config_dir: base.join("config"),
+            data_dir: base.join("data"),
+            state_dir: base.join("state"),
+            runtime_dir: base.join("run"),
+            cache_dir: base.join("cache"),
+        };
+        paths.ensure_dirs().expect("ensure dirs");
+        let state = ServerState::new(paths, AkhomedConfig::default(), None);
+        (tmp, state)
+    }
+
+    #[tokio::test]
+    async fn control_workspace_lifecycle() {
+        let (_tmp, state) = temp_state();
+
+        // list → empty to start.
+        let list = state
+            .dispatch("_akh/workspace/list", &json!({}))
+            .await
+            .expect("list ok");
+        assert_eq!(list["workspaces"].as_array().unwrap().len(), 0);
+
+        // create "alpha".
+        let created = state
+            .dispatch("_akh/workspace/create", &json!({ "name": "alpha" }))
+            .await
+            .expect("create ok");
+        assert_eq!(created["name"], "alpha");
+        assert_eq!(created["created"], true);
+
+        // list now contains it.
+        let list = state
+            .dispatch("_akh/workspace/list", &json!({}))
+            .await
+            .expect("list ok");
+        let names: Vec<&str> = list["workspaces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert!(names.contains(&"alpha"), "created workspace missing: {list}");
+
+        // delete it.
+        let deleted = state
+            .dispatch("_akh/workspace/delete", &json!({ "name": "alpha" }))
+            .await
+            .expect("delete ok");
+        assert_eq!(deleted["deleted"], "alpha");
+
+        let list = state
+            .dispatch("_akh/workspace/list", &json!({}))
+            .await
+            .expect("list ok");
+        assert_eq!(list["workspaces"].as_array().unwrap().len(), 0);
+
+        // missing required param → error.
+        let bad = state.dispatch("_akh/workspace/create", &json!({})).await;
+        assert!(bad.is_err(), "create without name must error");
+    }
+
+    #[tokio::test]
+    async fn control_config_round_trips_to_disk() {
+        let (_tmp, state) = temp_state();
+
+        // get → wraps the AkhomedConfig.
+        let got = state
+            .dispatch("_akh/config/get", &json!({}))
+            .await
+            .expect("get ok");
+        assert!(got["config"].is_object(), "config should be an object: {got}");
+
+        // set with a mutated config → persisted + reflected on get.
+        let cfg = AkhomedConfig {
+            acp: akh_medu::config::AcpSection {
+                tcp_port: Some(8299),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let set = state
+            .dispatch("_akh/config/set", &json!({ "config": cfg }))
+            .await
+            .expect("set ok");
+        assert_eq!(set["config"]["acp"]["tcp_port"], 8299);
+
+        // it landed on disk (config.toml under config_dir).
+        assert!(
+            state.paths.global_config_file().exists(),
+            "config/set should have written config.toml"
+        );
+
+        // get reflects the change.
+        let got = state
+            .dispatch("_akh/config/get", &json!({}))
+            .await
+            .expect("get ok");
+        assert_eq!(got["config"]["acp"]["tcp_port"], 8299);
+
+        // set without a `config` param → error (never silently resets).
+        let bad = state.dispatch("_akh/config/set", &json!({})).await;
+        assert!(bad.is_err(), "config/set without config payload must error");
+    }
+
+    #[tokio::test]
+    async fn get_akh_config_tolerates_malformed_toml() {
+        let (_tmp, state) = temp_state();
+
+        // A hand-written akh.toml that omits the flattened, required `name`
+        // field. Everything else is valid — the sole defect is the missing
+        // name, which `AkhConfig::load` rejects with a `missing field name`
+        // parse error. Before the fix this aborted ACP startup.
+        let config_path = state.paths.workspace_config_file("default");
+        std::fs::write(
+            &config_path,
+            "model = \"x\"\n\n[ollama_endpoint]\nkind = \"local\"\n",
+        )
+        .expect("write malformed default.toml");
+
+        // It must load (not error), defaulting the name to the workspace.
+        let cfg = state
+            .get_akh_config("default")
+            .await
+            .expect("malformed akh.toml must fall back, not error");
+        assert_eq!(cfg.name(), "default", "name defaults to the workspace");
+        // The fallback is name-only defaults: the unparseable file's akh-level
+        // settings are intentionally dropped (the warning tells the operator).
+        assert!(cfg.model.is_none(), "broken config falls back to defaults");
+
+        // A second call returns the cached Arc.
+        let again = state.get_akh_config("default").await.expect("cached load");
+        assert!(Arc::ptr_eq(&cfg, &again), "config should be cached");
+    }
+
+    #[tokio::test]
+    async fn control_daemon_status_when_idle() {
+        let (_tmp, state) = temp_state();
+        // No daemon running → cheap zero-status (no engine/agent construction).
+        let st = state
+            .dispatch("_akh/daemon/status", &json!({ "workspace": "alpha" }))
+            .await
+            .expect("status ok");
+        assert_eq!(st["running"], false);
+
+        // daemon ops require an explicit workspace.
+        let bad = state.dispatch("_akh/daemon/status", &json!({})).await;
+        assert!(bad.is_err(), "daemon/status without workspace must error");
+    }
+
+    #[tokio::test]
+    async fn control_daemon_akhs_reports_live_set() {
+        let (_tmp, state) = temp_state();
+        // It is a control method (routed to ServerControl, not the data-plane).
+        assert!(akh_medu::acp::is_control_method("_akh/daemon/akhs"));
+
+        // No agent loaded → empty owned+awake set (no lazy load, no workspace arg).
+        let res = state
+            .dispatch("_akh/daemon/akhs", &json!({}))
+            .await
+            .expect("daemon/akhs ok");
+        assert_eq!(
+            res["akhs"].as_array().expect("akhs is an array").len(),
+            0,
+            "a daemon with no awake agents reports an empty set: {res}"
+        );
+    }
+
+    #[tokio::test]
+    async fn control_unknown_method_errors() {
+        let (_tmp, state) = temp_state();
+        let bad = state.dispatch("_akh/workspace/teleport", &json!({})).await;
+        assert!(bad.is_err(), "unknown control method must error");
+    }
+
+    #[tokio::test]
+    async fn akh_snapshot_wake_are_registered_control_methods() {
+        // Both must be routed to the control-plane, not mistaken for data-plane.
+        assert!(akh_medu::acp::is_control_method("_akh/akh/snapshot"));
+        assert!(akh_medu::acp::is_control_method("_akh/akh/wake"));
+    }
+
+    #[tokio::test]
+    async fn akh_snapshot_wake_need_workspace_param() {
+        let (_tmp, state) = temp_state();
+        // Missing the required `workspace` param is a clean error (recognised op).
+        let r = state.dispatch("_akh/akh/snapshot", &json!({})).await;
+        assert!(
+            r.as_ref().is_err_and(|e| e.contains("workspace")),
+            "expected missing-param error, got {r:?}",
+        );
+        let r = state.dispatch("_akh/akh/wake", &json!({})).await;
+        assert!(
+            r.as_ref().is_err_and(|e| e.contains("workspace")),
+            "expected missing-param error, got {r:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn akh_snapshot_without_postgres_errors_cleanly() {
+        // temp_state has no pg_pool → snapshot reports the missing backing store
+        // rather than panicking or claiming success.
+        let (_tmp, state) = temp_state();
+        let r = state
+            .dispatch("_akh/akh/snapshot", &json!({ "workspace": "alpha" }))
+            .await;
+        assert!(
+            r.as_ref().is_err_and(|e| e.contains("Postgres")),
+            "expected no-Postgres error, got {r:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn phase38_new_methods_are_registered_control_methods() {
+        for m in [
+            "_akh/akh/sleep",
+            "_akh/akh/relocate",
+            "_akh/workspace/join",
+            "_akh/workspace/leave",
+            "_akh/workspace/list-members",
+            "_akh/projection/refresh",
+            "_akh/migrate",
+        ] {
+            assert!(
+                akh_medu::acp::is_control_method(m),
+                "{m} must route to the control-plane",
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn relocate_and_membership_and_migrate_need_postgres() {
+        // No pg_pool → relocation/membership/migrate report the missing backing
+        // store cleanly (recognised ops, not unknown-method or panic).
+        let (_tmp, state) = temp_state();
+        for (method, params) in [
+            ("_akh/akh/relocate", json!({ "workspace": "alpha" })),
+            ("_akh/workspace/join", json!({ "id": "alpha" })),
+            ("_akh/workspace/leave", json!({ "id": "alpha" })),
+            ("_akh/workspace/list-members", json!({ "id": "alpha" })),
+            ("_akh/migrate", json!({})),
+        ] {
+            let r = state.dispatch(method, &params).await;
+            assert!(
+                r.as_ref().is_err_and(|e| e.contains("Postgres")),
+                "{method} expected no-Postgres error, got {r:?}",
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn membership_ops_need_id_param() {
+        let (_tmp, state) = temp_state();
+        for method in [
+            "_akh/workspace/join",
+            "_akh/workspace/leave",
+            "_akh/workspace/list-members",
+        ] {
+            let r = state.dispatch(method, &json!({})).await;
+            assert!(
+                r.as_ref().is_err_and(|e| e.contains("id")),
+                "{method} without id must error, got {r:?}",
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn projection_refresh_is_a_stub() {
+        // The AGE projection is deferred (Phase 38d); refresh returns an explicit
+        // stub result rather than erroring, and needs no Postgres.
+        let (_tmp, state) = temp_state();
+        let r = state
+            .dispatch("_akh/projection/refresh", &json!({ "workspace": "alpha" }))
+            .await
+            .expect("projection/refresh must succeed (stub)");
+        assert_eq!(r["refreshed"], false);
+        assert!(
+            r["note"].as_str().unwrap_or_default().contains("deferred"),
+            "stub should note deferral, got {r}",
+        );
+    }
+
+    #[tokio::test]
+    async fn sleep_without_postgres_evicts_and_notes_durability() {
+        // temp_state has no pg_pool → sleep still evicts (frees memory) but the
+        // result flags that durable relocation needs Postgres.
+        let (_tmp, state) = temp_state();
+        state
+            .dispatch("_akh/workspace/create", &json!({ "name": "alpha" }))
+            .await
+            .expect("create");
+        let r = state
+            .dispatch("_akh/akh/sleep", &json!({ "workspace": "alpha" }))
+            .await
+            .expect("sleep must succeed (local-only evict)");
+        assert_eq!(r["slept"], true);
+        assert_eq!(r["level"], "deep");
+        assert!(
+            r["note"]
+                .as_str()
+                .unwrap_or_default()
+                .to_ascii_lowercase()
+                .contains("postgres"),
+            "local-only sleep should note Postgres durability gap, got {r}",
+        );
+        // The engine/agent caches are emptied after eviction.
+        assert!(
+            state.workspaces.read().await.is_empty() && state.agents.read().await.is_empty(),
+            "sleep must evict cached engine + agent",
+        );
+    }
+
+    #[tokio::test]
+    async fn get_engine_slow_path_is_single_flight() {
+        let (_tmp, state) = temp_state();
+        let state = Arc::new(state);
+
+        // Materialise the workspace on disk (create without a role does not open it).
+        state
+            .dispatch("_akh/workspace/create", &json!({ "name": "alpha" }))
+            .await
+            .expect("create");
+        assert!(
+            state.workspaces.read().await.is_empty(),
+            "create must not pre-open the engine",
+        );
+
+        // Fire N concurrent first-loads; they race on the per-workspace load lock.
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let s = Arc::clone(&state);
+            handles.push(tokio::spawn(async move { s.get_engine("alpha").await }));
+        }
+        let mut engines = Vec::new();
+        for h in handles {
+            engines.push(h.await.expect("join").expect("get_engine"));
+        }
+
+        // All callers must share exactly one Engine instance (no duplicate build,
+        // hence no leaked WAL flusher / snapshot ticker).
+        for e in &engines[1..] {
+            assert!(
+                Arc::ptr_eq(&engines[0], e),
+                "concurrent first-loads must share one engine",
+            );
+        }
+        assert_eq!(state.workspaces.read().await.len(), 1, "exactly one engine cached");
+    }
+
+    #[tokio::test]
+    async fn get_agent_slow_path_is_single_flight() {
+        let (_tmp, state) = temp_state();
+        let state = Arc::new(state);
+        state
+            .dispatch("_akh/workspace/create", &json!({ "name": "beta" }))
+            .await
+            .expect("create");
+
+        let mut handles = Vec::new();
+        for _ in 0..6 {
+            let s = Arc::clone(&state);
+            handles.push(tokio::spawn(async move { s.get_agent("beta").await }));
+        }
+        let mut agents = Vec::new();
+        for h in handles {
+            agents.push(h.await.expect("join").expect("get_agent"));
+        }
+
+        for a in &agents[1..] {
+            assert!(
+                Arc::ptr_eq(&agents[0], a),
+                "concurrent first-loads must share one agent",
+            );
+        }
+        assert_eq!(state.agents.read().await.len(), 1, "exactly one agent cached");
+        assert_eq!(state.workspaces.read().await.len(), 1, "and exactly one engine");
+    }
 }

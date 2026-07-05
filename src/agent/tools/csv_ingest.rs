@@ -10,10 +10,26 @@ use crate::agent::tool_manifest::{
     Capability, DangerInfo, DangerLevel, ToolManifest, ToolParamSchema, ToolSource,
 };
 use crate::engine::Engine;
+use crate::fs::Filesystem;
 use std::collections::HashSet;
+use std::path::Path;
+use std::sync::Arc;
 
 /// Ingest triples from a CSV file into the knowledge graph.
-pub struct CsvIngestTool;
+///
+/// `fs: Some(..)` confines the file read to the akh's sandbox; `None` (default,
+/// operator-driven CLI/daemon paths) reads raw.
+#[derive(Default)]
+pub struct CsvIngestTool {
+    fs: Option<Arc<dyn Filesystem>>,
+}
+
+impl CsvIngestTool {
+    /// Sandboxed: the CSV read is confined to the akh's filesystem.
+    pub fn sandboxed(fs: Arc<dyn Filesystem>) -> Self {
+        Self { fs: Some(fs) }
+    }
+}
 
 impl Tool for CsvIngestTool {
     fn signature(&self) -> ToolSignature {
@@ -51,7 +67,7 @@ impl Tool for CsvIngestTool {
             .and_then(|d| d.chars().next())
             .unwrap_or(',');
 
-        let content = match std::fs::read_to_string(path_str) {
+        let content = match crate::fs::read_optional(self.fs.as_ref(), Path::new(path_str)) {
             Ok(c) => c,
             Err(e) => {
                 return Ok(ToolOutput::err(format!(
@@ -314,7 +330,7 @@ mod tests {
             .with_param("path", csv_path.to_str().unwrap())
             .with_param("format", "spo");
 
-        let tool = CsvIngestTool;
+        let tool = CsvIngestTool::default();
         let result = tool.execute(&engine, input).unwrap();
         assert!(result.success);
         assert!(result.result.contains("2 triples ingested"));

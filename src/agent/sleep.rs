@@ -31,6 +31,51 @@ pub enum ConsolidationPhase {
     DreamState,
 }
 
+/// Durability/lifecycle state of a relocatable Akh (Phase 38e).
+///
+/// **Orthogonal** to [`ConsolidationPhase`]: that enum is the *cognitive*
+/// sub-activity during a sleep cycle (replay, reorg, dream); `SleepLevel` is the
+/// *durability* state of the process. The continuous WAL flushes in all three
+/// levels, so crash-safety is independent of the level.
+///
+/// - `Running` — full in-memory caches, OODA loop active.
+/// - `IdleInMemory` — caches still hot, OODA parked (no external input for K
+///   cycles); resumes instantly on input. A CPU/perf state, not a durability one.
+/// - `Deep` — in-memory caches dropped; only Postgres holds state. Entered on a
+///   *signal* (SIGTERM grace, explicit command, memory pressure), never on a
+///   timer. Waking is a cold load (snapshot + WAL tail + HNSW rebuild).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum SleepLevel {
+    /// In-memory, OODA loop active.
+    #[default]
+    Running,
+    /// In-memory, OODA loop parked; resumes on input.
+    IdleInMemory,
+    /// Caches freed; state lives only in Postgres until a cold wake.
+    Deep,
+}
+
+impl SleepLevel {
+    /// Stable lowercase tag for status/CLI/persistence.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SleepLevel::Running => "running",
+            SleepLevel::IdleInMemory => "idle",
+            SleepLevel::Deep => "deep",
+        }
+    }
+
+    /// Parse a [`SleepLevel`] from its [`as_str`](Self::as_str) tag.
+    pub fn from_tag(s: &str) -> Option<Self> {
+        match s {
+            "running" => Some(SleepLevel::Running),
+            "idle" | "idle_in_memory" => Some(SleepLevel::IdleInMemory),
+            "deep" => Some(SleepLevel::Deep),
+            _ => None,
+        }
+    }
+}
+
 /// Configuration for the sleep/consolidation cycle.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SleepConfig {

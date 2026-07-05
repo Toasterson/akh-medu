@@ -1,0 +1,101 @@
+{
+  "strategy": "compacting-r20",
+  "n": 8,
+  "accuracy": 6,
+  "retrieval": 6,
+  "wal_delta": 0,
+  "episode_delta": 0,
+  "results": [
+    {
+      "id": "cluster-nodes",
+      "retrieved": true,
+      "correct": true,
+      "tools": [
+        "kg_query",
+        "library_search",
+        "memory_recall",
+        "similarity_search"
+      ],
+      "elapsed": 29.5,
+      "answer": "Let me recall memories related to the home Talos cluster and the May 9 2026 infrastructure failure.The recall returned several relevant episodes. Let me dig deeper \u2014 the cluster topology episodes should have node counts, and the May 14 diagnosis episodes may reference the May 9 f"
+    },
+    {
+      "id": "alert-routing",
+      "retrieved": true,
+      "correct": true,
+      "tools": [
+        "kg_query",
+        "library_search",
+        "memory_recall"
+      ],
+      "elapsed": 34.3,
+      "answer": "Let me recall what I know about the Anima observability and alert routing design.Let me search for alert routing specifics in the KG and library.I have the answer directly from the knowledge graph.\n\n## Anima Observability Alert Routing\n\nThe design defines two routing tiers, store"
+    },
+    {
+      "id": "similarity-bug",
+      "retrieved": true,
+      "correct": true,
+      "tools": [
+        "kg_query",
+        "library_search",
+        "memory_recall"
+      ],
+      "elapsed": 23.3,
+      "answer": "Let me recall that episode from memory.The knowledge graph has the full diagnostic chain. Here's the answer:\n\n## Root Cause: `ground_symbols` Was Never Called\n\nEvery VSA similarity score returned **1.000** because of a **P0 bug in akhomed**: the `ground_symbols` function was neve"
+    },
+    {
+      "id": "utf8-panic",
+      "retrieved": true,
+      "correct": true,
+      "tools": [
+        "grep",
+        "kg_query",
+        "memory_recall"
+      ],
+      "elapsed": 34.2,
+      "answer": "Found it. The knowledge graph has the full record:\n\n## UTF-8 / Byte-Index Panic Bug\n\n| Field | Value |\n|-------|-------|\n| **Source file** | `agent-memory.rs` |\n| **Line** | **456** |\n| **Bug** | Byte-index slicing panicked when it landed on a UTF-8 multi-byte character boundary "
+    },
+    {
+      "id": "merge-loop",
+      "retrieved": false,
+      "correct": false,
+      "tools": [],
+      "elapsed": 6.7,
+      "answer": "I already have this from the knowledge graph:\n\n## Merge-Loop Breakage Timeline\n\nThe merge-loop had been broken **since approximately May 7, 2026** (at least by 2026-05-07).\n\n| Detail | Value |\n|--------|-------|\n| **Stuck since** | ~May 7, 2026 |\n| **Failure rate** | 90% |\n| **St"
+    },
+    {
+      "id": "archibald-disk",
+      "retrieved": true,
+      "correct": true,
+      "tools": [
+        "kg_query",
+        "memory_recall"
+      ],
+      "elapsed": 30.2,
+      "answer": "Let me search the knowledge graph for the Archibald maintenance/disk pressure details.Good \u2014 I can see the disk cleanup result (153G stale worktrees removed, 401G\u2192277G, 93%\u219267%). Let me dig into the maintenance design episode for the two specific waste sources.Got it. Here's the "
+    },
+    {
+      "id": "redb-path",
+      "retrieved": true,
+      "correct": false,
+      "tools": [
+        "glob",
+        "grep",
+        "kg_query",
+        "library_search",
+        "memory_recall",
+        "similarity_search"
+      ],
+      "elapsed": 56.5,
+      "answer": "Let me check my memory for the redb lock/db file path.Based on my search through the knowledge graph and memory, here's what I can tell you:\n\n## redb Knowledge-Graph DB File Path\n\nThe redb database file discovered in the workspace is:\n\n**`akh-medu.redb`**\n\nThis is the redb-backed"
+    },
+    {
+      "id": "hephaistos",
+      "retrieved": false,
+      "correct": true,
+      "tools": [],
+      "elapsed": 3.8,
+      "answer": "From the cluster topology investigation:\n\n## Hephaistos is NOT a Kubernetes Node\n\nHephaistos is a **bare-metal NixOS server** \u2014 specifically, the **physical host machine**. It is the machine that *runs* the K3s cluster, not a node *inside* it.\n\n| Detail | Value |\n|--------|------"
+    }
+  ]
+}
