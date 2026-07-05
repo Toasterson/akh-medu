@@ -49,7 +49,7 @@
 //!
 //! let _reloader = ScriptReloader::new(store.clone(), ElizaMode::Dev)
 //!     .with_local_dir("scripts/")
-//!     .on_change(Box::new(|name, content| {
+//!     .on_change(Box::new(|name: &str, content: &str| {
 //!         println!("Script '{name}' changed ({} bytes)", content.len());
 //!     }))
 //!     .start();
