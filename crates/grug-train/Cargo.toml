@@ -1,0 +1,22 @@
+[package]
+name = "grug-train"
+version = "0.1.0"
+edition = "2024"
+description = "Phase 51 Grug-Brain BabyLLM: Burn-based from-scratch training (CPU/ndarray beachhead)"
+license = "GPL-3.0-only"
+repository = "https://github.com/Toasterson/akh-medu"
+
+# ADR 087 decision 2 / Phase 51 P0: Burn lives in its own workspace crate so the
+# `train` feature's `dataset` -> `burn-dataset` -> rusqlite -> libsqlite3-sys 0.35
+# chain never enters the dependency graph. We depend on exactly three Burn
+# features: `ndarray` (the burn-ndarray CPU tensor backend), `autodiff`
+# (burn-autodiff, wraps a backend to get backward()/grad()), and `std`. No
+# `train` (pulls `dataset`), no `burn-dataset`, no GPU/CubeCL backend
+# (wgpu/cuda/rocm) yet -- see docs/ai/decisions/087-grug-brain-baby-llm-training.md
+# and docs/ai/plans/2026-07-05-phase51-grug-brain-baby-llm.md (P0 gate).
+[dependencies]
+burn = { version = "0.21.0", default-features = false, features = ["ndarray", "autodiff", "std"] }
+
+# Error handling (repo convention: miette + thiserror, rich #[diagnostic] help)
+miette = { version = "7", features = ["fancy"] }
+thiserror = "2"

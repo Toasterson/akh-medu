@@ -6,6 +6,8 @@ members = [
     "crates/anima-ai",
     "crates/akhomed-store",
     "crates/akh-egraph-bench",
+    "crates/grug-data",
+    "crates/grug-train",
 ]
 resolver = "3"
 
