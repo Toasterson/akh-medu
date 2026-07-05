@@ -106,6 +106,13 @@ impl Tool for ShellExecTool {
                     "Failed to wait on command: {source}"
                 )));
             }
+            // Only the russh `RemoteBackend` (feature `remote-executor`)
+            // produces this; the rich `RemoteError` diagnostic already carries
+            // the host/auth/timeout detail, so surface it verbatim.
+            #[cfg(feature = "remote-executor")]
+            Err(remote @ ExecError::Remote(_)) => {
+                return Ok(ToolOutput::err(format!("Remote execution failed: {remote}")));
+            }
         };
 
         let stdout_str = String::from_utf8_lossy(&outcome.stdout);
