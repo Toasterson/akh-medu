@@ -200,12 +200,44 @@ pub fn compose_grounded(
     }
 }
 
-/// Sentences from selected triples: "dog is a mammal. dog has fur."
+/// Sentences from selected triples.
+///
+/// Phase 33a: shared-subject triples are folded into fluent aggregated
+/// sentences ("Dog, a mammal, has fur and is similar to wolf.") before the
+/// psyche style transform (34b) is applied. With aggregation disabled
+/// (`AKH_GRAMMAR_AGGREGATE=0`) this degrades to one sentence per triple.
 fn triples_to_sentences(triples: &[GroundedTriple]) -> String {
-    let sentences: Vec<String> = triples
-        .iter()
-        .map(|t| {
-            let mut s = triple_to_prose(&t.subject_label, &t.predicate_label, &t.object_label);
+    let cfg = crate::grammar::aggregate::AggregationConfig::from_env();
+
+    let sentences: Vec<String> = if cfg.enabled {
+        // Lift into AbsTree statements, aggregate, and realize neutrally.
+        // Confidence is intentionally not lifted: this surface never
+        // rendered per-triple confidence, and band-splitting here would
+        // only fragment the aggregation.
+        let items: Vec<crate::grammar::AbsTree> = triples
+            .iter()
+            .map(|t| {
+                crate::grammar::AbsTree::triple(
+                    crate::grammar::AbsTree::entity(&t.subject_label),
+                    crate::grammar::AbsTree::relation(&t.predicate_label),
+                    crate::grammar::AbsTree::entity(&t.object_label),
+                )
+            })
+            .collect();
+        crate::grammar::aggregate::aggregate_statements(&items, &cfg)
+            .iter()
+            .filter_map(crate::grammar::aggregate::realize_statement)
+            .collect()
+    } else {
+        triples
+            .iter()
+            .map(|t| triple_to_prose(&t.subject_label, &t.predicate_label, &t.object_label))
+            .collect()
+    };
+
+    let sentences: Vec<String> = sentences
+        .into_iter()
+        .map(|mut s| {
             // Sentence-case the first character.
             if let Some(first) = s.get(0..1) {
                 let upper = first.to_uppercase();

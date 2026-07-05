@@ -45,7 +45,13 @@ pub fn article(word: &str) -> &'static str {
 pub fn humanize_predicate(predicate: &str) -> String {
     match predicate {
         "is-a" | "is_a" => "is a".to_string(),
-        "has-a" | "has_a" => "has".to_string(),
+        "has-a" | "has_a" | "has-part" | "has_part" => "has".to_string(),
+        "has-property" | "has_property" => "is".to_string(),
+        "subclass-of" | "subclass_of" => "is a kind of".to_string(),
+        "instance-of" | "instance_of" => "is an instance of".to_string(),
+        "member-of" | "member_of" => "is a member of".to_string(),
+        "created-by" | "created_by" => "was created by".to_string(),
+        "written-in" | "written_in" => "is written in".to_string(),
         "part-of" | "part_of" => "is part of".to_string(),
         "contains" => "contains".to_string(),
         "located-in" | "located_in" => "is located in".to_string(),

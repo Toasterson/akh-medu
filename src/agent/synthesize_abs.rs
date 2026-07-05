@@ -114,6 +114,14 @@ fn build_entity_section(entity: &str, facts: &[ExtractedFact]) -> AbsTree {
         }
     }
 
+    // Phase 33a: fold shared-subject triples into fluent aggregated
+    // sentences before linearization ("X, a Y, has A and B." instead of
+    // one sentence per triple).
+    let body = crate::grammar::aggregate::aggregate_statements(
+        &body,
+        &crate::grammar::aggregate::AggregationConfig::from_env(),
+    );
+
     AbsTree::section(entity, body)
 }
 

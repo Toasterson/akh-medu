@@ -18,6 +18,14 @@ hallucination). The solution is data-to-text NLG with purpose-built models
 
 ### 33a — Grammar Aggregation Rules (~500 lines)
 
+> Status: **Implemented** (2026-07-05). `src/grammar/aggregate.rs` +
+> `AbsTree::Aggregated`/`PredicateGroup`; wired into
+> `build_discourse_response` (third person), `synthesize_abs`
+> entity sections, the communicative `triples_to_sentences` (Phase 34
+> style transform applies after aggregation), and the `ground_query`
+> fallback. Knob: `AKH_GRAMMAR_AGGREGATE` (default on). Confidence-banded
+> merging keeps qualifiers honest. Tests: `tests/phase33_aggregation.rs`.
+
 Improve the existing grammar framework with rule-based sentence combining.
 No model needed — pure AbsTree transformations before linearization.
 
