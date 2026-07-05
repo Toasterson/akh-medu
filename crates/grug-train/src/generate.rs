@@ -5,7 +5,7 @@
 //! not build a computation graph it will never call `.backward()` on.
 
 use burn::tensor::backend::Backend;
-use burn::tensor::{Int, Tensor, TensorData};
+use burn::tensor::{ElementConversion, Int, Tensor, TensorData};
 
 use crate::tokenizer::{ByteTokenizer, BOS, EOS, SEP};
 use crate::transformer::TinyTransformer;
@@ -97,11 +97,19 @@ fn tokenizer_bytes(ids: &[u32]) -> Vec<u8> {
 }
 
 /// Argmax over a 1-D tensor, returned as `u32` (token id).
+///
+/// Uses `into_scalar().elem()` (the same backend-agnostic conversion path
+/// [`crate::train::train_step`] uses for the loss scalar) rather than a
+/// hardcoded `as_slice::<i64>()`: Burn's `Int` element type is
+/// backend-defined (`burn-ndarray`'s CPU backend uses `i64`, but CubeCL
+/// backends like `Rocm`/`Wgpu` default their `Int` type to `i32`), so
+/// assuming `i64` panics with a `TypeMismatch` on GPU backends. `.elem::<i64>()`
+/// converts whatever the backend's actual element type is into `i64` first,
+/// so this works for any backend's `Int` representation.
 fn argmax<B: Backend>(logits: Tensor<B, 1>) -> u32 {
     let idx: Tensor<B, 1, Int> = logits.argmax(0);
-    let data = idx.into_data();
-    let slice = data.as_slice::<i64>().expect("argmax result should be Int i64-castable");
-    slice[0] as u32
+    let value: i64 = idx.into_scalar().elem();
+    value as u32
 }
 
 #[cfg(test)]

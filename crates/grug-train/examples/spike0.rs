@@ -24,7 +24,17 @@ use grug_train::generate::GenerateConfig;
 use grug_train::tokenizer::ByteTokenizer;
 use grug_train::train::{build_batch, init_training, train_step, TrainConfig};
 use grug_train::transformer::TinyTransformerConfig;
-use grug_train::CpuAutodiffBackend;
+
+// Phase 51 P0 gate (R3): the training backend is a pure type-alias swap.
+// Default (no `gpu` feature) trains on CPU (`burn-ndarray`); `--features gpu`
+// swaps in Burn's ROCm/HIP (CubeCL) backend targeting this box's 7900 XTX
+// (gfx1100) -- no other line in this file changes. See
+// `docs/ai/decisions/087-grug-brain-baby-llm-training.md` and
+// `GpuAutodiffBackend` / `CpuAutodiffBackend` in `src/lib.rs`.
+#[cfg(feature = "gpu")]
+use grug_train::GpuAutodiffBackend as ActiveBackend;
+#[cfg(not(feature = "gpu"))]
+use grug_train::CpuAutodiffBackend as ActiveBackend;
 
 const TRAIN_EXAMPLES: usize = 128;
 const HOLDOUT_EXAMPLES: usize = 16;
@@ -34,7 +44,17 @@ const EVAL_EVERY: usize = 25;
 const SEED: u64 = 42;
 
 fn main() {
-    let device = Default::default();
+    #[cfg(feature = "gpu")]
+    let device = {
+        let d = burn::backend::rocm::RocmDevice::default();
+        println!("Spike-0: GPU feature enabled -- training on Burn ROCm/HIP (CubeCL) backend, device: {d:?}");
+        d
+    };
+    #[cfg(not(feature = "gpu"))]
+    let device = {
+        println!("Spike-0: CPU backend (burn-ndarray)");
+        Default::default()
+    };
     let tokenizer = ByteTokenizer::new();
     let train_cfg = TrainConfig::default();
 
@@ -45,7 +65,7 @@ fn main() {
     let holdout = FrozenHoldout::new(&dataset, HOLDOUT_EXAMPLES).expect("generator produces holdout examples");
 
     let model_config = TinyTransformerConfig::spike(grug_train::tokenizer::VOCAB_SIZE);
-    let (mut model, mut optim) = init_training::<CpuAutodiffBackend>(&model_config, &device);
+    let (mut model, mut optim) = init_training::<ActiveBackend>(&model_config, &device);
 
     let param_count = burn::module::Module::num_params(&model);
     println!(
@@ -79,7 +99,7 @@ fn main() {
         let batch_examples: Vec<_> = (0..BATCH_SIZE)
             .map(|i| train_examples[(step * BATCH_SIZE + i) % train_examples.len()].clone())
             .collect();
-        let batch = build_batch::<CpuAutodiffBackend>(
+        let batch = build_batch::<ActiveBackend>(
             &tokenizer,
             &batch_examples,
             model_config.max_seq_len,

@@ -33,3 +33,14 @@ serde_json = "1"
 # Deterministic PRNG for batching/shuffling (not the data generator itself,
 # which lives in grug-data and has its own seeded RNG)
 rand = { version = "0.8", features = ["std", "std_rng"] }
+
+[features]
+default = []
+# Phase 51 P0 gate (R3): opt-in GPU backend for the 7900 XTX (gfx1100) factory
+# box. OFF by default -- the default build/test path stays CPU-only and light
+# per ADR 087 decision 2/3. Enables Burn's ROCm/HIP (CubeCL) backend, which
+# emits both forward *and* backward (autodiff) HIP kernels via CubeCL --
+# unlike the in-repo candle HIP fork (Phase 45), which is inference-only.
+# Requires ROCM_PATH (or CUBECL_ROCM_PATH) to point at the ROCm install
+# (this box: /opt/rocm-6.3.4, gfx1100). See `GpuAutodiffBackend` in `lib.rs`.
+gpu = ["burn/rocm"]

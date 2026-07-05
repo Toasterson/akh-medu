@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# Minimal shim for AMD ROCm's `hipconfig` tool.
+#
+# This box has the ROCm 6.3.4 runtime (/opt/rocm-6.3.4, symlinked at
+# /opt/rocm) fully installed -- libamdhip64.so, libhiprtc.so, rocminfo all
+# work and report gfx1100 -- but the `hipconfig` Python CLI itself (normally
+# shipped by the `hip-runtime-amd` / `rocm-core` package) is missing from
+# this install. `cubecl-hip-sys`'s build.rs (Phase 51 R3, `grug-train`'s
+# opt-in `gpu` feature) shells out to `hipconfig -R` / `-p` / `--version` to
+# discover the ROCm path and HIP patch version and to emit
+# `cargo::rustc-link-lib=dylib=amdhip64`+`rustc-link-search`; without a real
+# `hipconfig` on PATH it silently falls back to "no HIP install" (a graceful
+# clippy-only degradation) and the final link fails with undefined
+# `hip*`/`hiprtc*` symbols.
+#
+# This shim implements just the three subcommands cubecl-hip-sys's build.rs
+# actually calls. `-R`/`-p` are read from $ROCM_PATH/$HIP_PATH. `--version`
+# is NOT the ROCm meta-package version in `$ROCM_PATH/.info/version` (that's
+# a *different* version scheme, e.g. "6.3.4-76" on this box, which is not
+# the HIP runtime's own patch number and does not match any `hip_<patch>`
+# feature cubecl-hip-sys ships) -- it must be HIP's own
+# major.minor.patch-githash string, read from the `HIP_VERSION_*` macros in
+# hip_version.h (this box: HIP_VERSION_PATCH=42134, matching the real
+# `hip_42134` feature in cubecl-hip-sys's Cargo.toml).
+#
+# See docs/ai/decisions/087-grug-brain-baby-llm-training.md and the Phase 51
+# plan (P0 gate) for context. Remove this shim if/when a real `hipconfig`
+# ships with this box's ROCm install.
+
+set -euo pipefail
+
+ROCM_ROOT="${ROCM_PATH:-/opt/rocm}"
+
+case "${1:-}" in
+  -R)
+    printf '%s\n' "$ROCM_ROOT"
+    ;;
+  -p)
+    printf '%s\n' "${HIP_PATH:-$ROCM_ROOT}"
+    ;;
+  --version)
+    hip_version_h="$ROCM_ROOT/include/hip/hip_version.h"
+    if [ ! -f "$hip_version_h" ]; then
+      echo "hipconfig-shim: cannot find $hip_version_h" >&2
+      exit 1
+    fi
+    major=$(grep -oP '(?<=HIP_VERSION_MAJOR )\d+' "$hip_version_h")
+    minor=$(grep -oP '(?<=HIP_VERSION_MINOR )\d+' "$hip_version_h")
+    patch=$(grep -oP '(?<=HIP_VERSION_PATCH )\d+' "$hip_version_h")
+    githash=$(grep -oP '(?<=HIP_VERSION_GITHASH ")[^"]+' "$hip_version_h")
+    printf '%s.%s.%s-%s\n' "$major" "$minor" "$patch" "$githash"
+    ;;
+  *)
+    echo "hipconfig-shim: unsupported argument(s): $*" >&2
+    exit 1
+    ;;
+esac

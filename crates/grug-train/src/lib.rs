@@ -56,3 +56,20 @@ pub type CpuBackend = NdArray<f32>;
 /// without touching model code (Phase 51 P0 gate note: GPU backends are
 /// deliberately *not* wired yet).
 pub type CpuAutodiffBackend = Autodiff<CpuBackend>;
+
+/// The GPU inference backend, behind the opt-in `gpu` cargo feature: Burn's
+/// ROCm/HIP (CubeCL) backend, targeting this box's 7900 XTX (gfx1100).
+///
+/// Requires `ROCM_PATH` or `CUBECL_ROCM_PATH` to point at the ROCm install
+/// (e.g. `/opt/rocm` or `/opt/rocm-6.3.4`) at build time.
+#[cfg(feature = "gpu")]
+pub type GpuBackend = burn::backend::Rocm<f32>;
+
+/// The GPU *training* backend: [`GpuBackend`] wrapped in `Autodiff`.
+///
+/// A pure type-alias swap for [`CpuAutodiffBackend`] -- every model in this
+/// crate is generic over `B: AutodiffBackend`, so training on ROCm requires
+/// no model-code changes, only using this alias (and a
+/// `burn::backend::rocm::RocmDevice`) instead of `CpuAutodiffBackend`.
+#[cfg(feature = "gpu")]
+pub type GpuAutodiffBackend = Autodiff<GpuBackend>;
