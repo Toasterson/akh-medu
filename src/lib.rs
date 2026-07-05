@@ -74,6 +74,9 @@ pub mod reason;
 pub mod reasoning;
 pub mod registry;
 pub mod rule_macro;
+/// ADR 081: schema packs — the installable type system for Akh memory
+/// (stable triple identity lives in `graph::identity`).
+pub mod schema;
 pub mod seeds;
 pub mod service;
 pub mod setup;

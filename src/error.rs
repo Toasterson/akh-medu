@@ -156,6 +156,10 @@ pub enum AkhError {
     #[error(transparent)]
     #[diagnostic(transparent)]
     Thinking(#[from] crate::thinking::error::ThinkingError),
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Schema(#[from] crate::schema::SchemaError),
 }
 
 // ---------------------------------------------------------------------------

@@ -159,7 +159,9 @@ comrak = { version = "0.31", optional = true, default-features = false, features
 syntect = { version = "5", optional = true }
 minijinja = { version = "2", optional = true }
 tantivy = { version = "0.22", optional = true }
-blake3 = { version = "1", optional = true }
+# Unconditional since ADR 081: the stable triple-identity hash (schema/identity
+# prefactor) uses blake3 in the core engine, not only in the wiki feature.
+blake3 = { version = "1" }
 agent-client-protocol = { version = "0.14.0", optional = true }
 
 # ACP spike (P0): Unix-socket transport for the Agent Client Protocol.
@@ -205,7 +207,7 @@ metal = ["candle-backend", "candle-core/metal", "candle-nn/metal", "candle-trans
 hip = ["rocm", "candle-core/hip"]
 burn-training = ["candle-backend"]  # will add "burn" when sqlite3 conflict resolved
 training-data = []
-wiki = ["dep:comrak", "dep:syntect", "dep:minijinja", "dep:tantivy", "dep:blake3"]
+wiki = ["dep:comrak", "dep:syntect", "dep:minijinja", "dep:tantivy"]
 sparql-persist = ["oxigraph/rocksdb"]
 # Phase 32: LLM knowledge elicitation via T5 Knowledge model (Phase 35 provides
 # the model weights; this gate enables the elicitation code path).

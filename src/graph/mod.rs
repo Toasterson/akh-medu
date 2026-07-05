@@ -12,6 +12,7 @@ pub mod arity;
 pub mod argumentation_truth;
 pub mod contradiction;
 pub mod defeasible;
+pub mod identity;
 pub mod index;
 pub mod nart;
 pub mod predicate_hierarchy;
