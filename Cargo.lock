@@ -81,6 +81,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "akh-egraph-bench"
+version = "0.1.0"
+dependencies = [
+ "akh-medu",
+ "clap",
+ "egg",
+ "miette 7.6.0",
+ "rand 0.8.5",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "akh-medu"
 version = "0.7.0"
 dependencies = [
