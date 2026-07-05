@@ -222,7 +222,50 @@ already-cached, catalog-blessed `omnios-bloody` image (`ssh_user: root`,
 `nocloud: true`) — OmniOS rather than OpenIndiana, a deviation from ADR 086
 to note but a working illumos substrate.
 
-*(Result of the OI-hipster-cloudimage attempt appended below.)*
+### Result of the OI-hipster-cloudimage attempt (time-boxed, per coordinator)
+
+Pulled `OI-hipster-cloudimage.img.zstd` (≈747 MiB → 1.95 GiB raw; HTTP+zstd
+pull *streams*, no OOM) and booted it via the q35→pc shim with a NoCloud
+`cidata` seed carrying a standard cloud-init `#cloud-config`. Outcome:
+
+- **Boots clean** past the vioblk panic (i440fx), reaches multi-user.
+- **sshd comes up** — `SSH-2.0-OpenSSH_9.9` answers on the forwarded port
+  (this is *further* than the earlier "sshd never answers" symptom; that was
+  image/agent-specific).
+- **Login still fails for every user** (`vmctl`/`sol`/`root`/…). The serial
+  console (image console is `ttya`, so the agent logs land there) shows why:
+
+```
+INFO searching for cidata device with metadata...
+DEBG found cidata device /dev/dsk/c1t0d0p0 of type hsfs
+INFO mounting cidata device ... to /var/metadata/files
+INFO WRITE NODENAME "oiman"   ... /etc/nodename, /etc/inet/hosts
+INFO ENSURE IPv4 DHCP INTERFACE: vioif0 ... 10.0.2.15/24 (dhcp) complete
+INFO ok, run complete
+oiman console login: ... svc:/system/illumos/useragent:default
+```
+
+**★ FINAL ROOT CAUSE of the SSH blocker:** OpenIndiana provisions via
+`svc:/system/illumos/useragent`, a **minimal illumos-native metadata agent,
+not cloud-init**. It consumes the NoCloud seed's **meta-data** only —
+hostname + `/etc/hosts` + DHCP — then "ok, run complete". It **never reads
+the cloud-init `#cloud-config` user-data**: no user creation, no
+`ssh_authorized_keys` injection, no `sudo`. vmctl's `build_cloud_config`
+emits a Debian-shaped `#cloud-config` (`users:` / `ssh_authorized_keys:` /
+`groups:[sudo]`) that this agent ignores wholesale → no login user is ever
+created, so SSH auth fails though sshd is up. (The `openindiana-rust-ci`
+image is worse: its `svc:/system/sysconfig` provision method is SIGKILLed →
+maintenance.)
+
+**This is a provisioning-format mismatch, not a timeout/contention stall.**
+It blocks `smoke.sh` green AND the `builder` native shakeout (which needs
+SSH into the guest). Full analysis + fix options (match `useragent`'s key
+channel, bake the login into the image, or fall back to `omnios-bloody`) are
+in the ops runbook: [docs/ops/vm-harness-openindiana.md](../ops/vm-harness-openindiana.md).
+
+**STOPPED here per the time-box** — this is a clean, root-caused blocker, not
+worth burning hours reverse-engineering the metadata-agent key format this
+session.
 
 **Anticipated cloud-init/RBAC risk (watch for it):** vmctl's auto-generated
 cloud-config (`crates/vm-manager/src/cloudinit.rs::build_cloud_config`)
@@ -247,15 +290,34 @@ and `shell: /bin/bash`. On illumos:
 
 ## Native build results
 
-*(Pending — `builder` VM not yet provisioned/built against at time of
-writing.)*
+**BLOCKED — not run this session.** The `builder` native build/test shakeout
+(`tests/vm/scripts/builder-shakeout.sh` + `run-shakeout.sh`) needs to rsync
+the worktree in and build/test over SSH. That is gated on SSH login into the
+guest, which is the root-caused blocker above (no login user is provisioned
+on either OpenIndiana image via vmctl's cloud-config seed). The shakeout
+scripts are written and committed and will run as soon as a guest is
+SSH-reachable (fix options in the runbook). The illumos native
+`cargo test --features server` baseline therefore remains the largest open
+W1 item, exactly as the plan sizes it (ongoing discovery, not a
+single-session deliverable).
 
 | Step | Result | Notes |
 |---|---|---|
-| `cargo build --release --no-default-features --features client --bin akh` | pending | |
-| `cargo build --release --features server --bin akhomed` | pending | |
-| `cargo build --release -p seshat --bin seshd --no-default-features --features synthesis` | pending | |
-| `cargo test --features server` | pending | |
+| `cargo build --release --no-default-features --features client --bin akh` | blocked (no SSH) | driver ready: builder-shakeout.sh |
+| `cargo build --release --features server --bin akhomed` | blocked (no SSH) | |
+| `cargo build --release -p seshat --bin seshd --no-default-features --features synthesis` | blocked (no SSH) | |
+| `cargo test --features server` | blocked (no SSH) | |
+
+The static illumos-portability scan (host-side, `grep` over the tree) found
+the crate deps are illumos-clean in the obvious places: no
+`memfd_create`/`SO_REUSEPORT`/`pidfd`/`MAP_POPULATE`/`epoll`/abstract-socket
+usage in `src/` or `crates/`; the only `target_os = "linux"` cfgs are in
+`src/setup.rs` (ONNX Runtime install-dir/lib-name/platform-suffix), which is
+moot on illumos since the release feature sets are ORT-free (`nlu-ml` off).
+So the first *real* illumos failures are expected to surface at the C-toolchain
+/ build-script layer (candle's `esaxx-rs`/tokenizers `cc` builds, `ring`/rustls
+asm, redb mmap semantics) rather than in akh-medu's own `#[cfg]` gates — but
+that's a hypothesis to confirm once the in-VM build can actually run.
 
 ## Failure categories (framework for triage)
 

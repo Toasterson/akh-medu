@@ -2,6 +2,22 @@
 //
 // Plan: docs/ai/plans/2026-07-05-phase50-feature-test-benchmarks.md (W1)
 // ADR:  docs/ai/decisions/086-feature-test-vm-harness-benchmarks.md
+// Runbook + full boot/provisioning analysis: docs/ops/vm-harness-openindiana.md
+// Shakeout baseline: docs/ai/2026-07-05-phase50-w1-illumos-shakeout.md
+//
+// ⚠ STATUS (2026-07-05): guests BOOT + sshd comes up (via the q35→pc shim in
+// scripts/qemu-illumos-shim/, which smoke.sh prepends to PATH — required, or
+// illumos vioblk panics on vmctl's hardcoded q35), but automated SSH
+// provisioning is BLOCKED: neither published OpenIndiana image creates a
+// login user from vmctl's cloud-init cloud-config user-data. OpenIndiana
+// provisions via `svc:/system/illumos/useragent` (hostname + DHCP from
+// meta-data only — it ignores cloud-config user-data), and the rust-ci
+// image's `svc:/system/sysconfig` is SIGKILLed on first boot. So `smoke.sh`
+// cannot go green and the `builder` shakeout can't SSH in yet. See the
+// runbook's "SSH / login user" + "UPDATE" sections for the root cause and
+// fix options (match the metadata agent's key channel / bake a login into
+// the image / fall back to omnios-bloody). This file + the provisioners are
+// correct-in-shape and ready to run the moment a guest is SSH-reachable.
 //
 // Three OpenIndiana guests, all pulled from the same base image
 // (openindiana-rust-ci, the only OpenIndiana image in the CloudNebulaProject
