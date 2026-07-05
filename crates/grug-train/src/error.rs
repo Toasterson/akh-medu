@@ -73,4 +73,60 @@ pub enum GrugError {
         end_loss: f64,
         steps: usize,
     },
+
+    /// A decoded token sequence was not valid UTF-8.
+    ///
+    /// Greedy generation can, in principle, stop mid-codepoint (e.g. if
+    /// `EOS` or `max_len` is hit right after the first byte of a multi-byte
+    /// UTF-8 sequence). Surfacing this distinctly lets callers tell "the
+    /// model emitted well-formed but wrong text" apart from "the model
+    /// emitted byte garbage".
+    #[error("decoded token sequence was not valid UTF-8: {message}")]
+    #[diagnostic(
+        code(grug_train::invalid_utf8),
+        help(
+            "This can happen if generation stops (EOS or max_len) in the \
+             middle of a multi-byte UTF-8 codepoint. Options: (1) treat this \
+             example as a scoring failure rather than panicking -- the eval \
+             harness should count it as invalid output, not crash; (2) if it \
+             happens often, consider decoding lossily with \
+             `String::from_utf8_lossy` for display purposes while still \
+             scoring the strict version as invalid."
+        )
+    )]
+    InvalidUtf8 { message: String },
+
+    /// Writing a JSONL eval time-series row to disk failed.
+    #[error("failed to write eval time-series row: {message}")]
+    #[diagnostic(
+        code(grug_train::eval_log_write_failed),
+        help(
+            "Check that the parent directory of the configured eval log path \
+             exists and is writable. The eval harness appends one JSON line \
+             per report; consider running the example with a path under a \
+             directory you know is writable (e.g. `/tmp` or a scratch dir) if \
+             this keeps failing."
+        )
+    )]
+    EvalLogWriteFailed { message: String },
+
+    /// Serializing an eval time-series row to JSON failed.
+    #[error("failed to serialize eval time-series row: {message}")]
+    #[diagnostic(
+        code(grug_train::eval_log_serialize_failed),
+        help(
+            "This indicates a bug in the `EvalLogRow` type (e.g. a NaN/Inf \
+             float, which `serde_json` cannot represent) rather than an \
+             environment problem. Check whether any rate field could be NaN \
+             (e.g. an empty batch producing a 0/0 division) before this \
+             point."
+        )
+    )]
+    EvalLogSerializeFailed { message: String },
+
+    /// The underlying `grug-data` crate returned an error while generating
+    /// examples or building the dataset split.
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Data(#[from] grug_data::GrugError),
 }

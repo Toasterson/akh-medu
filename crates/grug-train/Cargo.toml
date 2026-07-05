@@ -17,6 +17,19 @@ repository = "https://github.com/Toasterson/akh-medu"
 [dependencies]
 burn = { version = "0.21.0", default-features = false, features = ["ndarray", "autodiff", "std"] }
 
+# The data generator + eval scorer this crate trains against and evaluates
+# on (see docs/ai/plans/2026-07-05-phase51-grug-brain-baby-llm.md decision 5
+# and 9). Pure Rust, no ML dependency of its own.
+grug-data = { path = "../grug-data" }
+
 # Error handling (repo convention: miette + thiserror, rich #[diagnostic] help)
 miette = { version = "7", features = ["fancy"] }
 thiserror = "2"
+
+# Serialization (eval time-series JSONL rows)
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Deterministic PRNG for batching/shuffling (not the data generator itself,
+# which lives in grug-data and has its own seeded RNG)
+rand = { version = "0.8", features = ["std", "std_rng"] }

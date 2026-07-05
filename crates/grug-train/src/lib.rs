@@ -26,10 +26,19 @@
 //! instead of using `burn::train`'s `Learner`.
 
 pub mod error;
+pub mod eval;
+pub mod generate;
 pub mod model;
+pub mod tokenizer;
+pub mod train;
+pub mod transformer;
 
 pub use error::{GrugError, GrugResult};
+pub use eval::{run_eval, run_eval_and_log, EvalLogRow, FrozenHoldout};
+pub use generate::{generate, GenerateConfig};
 pub use model::{Mlp, MlpConfig};
+pub use tokenizer::ByteTokenizer;
+pub use transformer::{Attention, CausalSelfAttention, TinyTransformer, TinyTransformerConfig};
 
 use burn::backend::{Autodiff, NdArray};
 
