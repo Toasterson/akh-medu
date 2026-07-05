@@ -170,8 +170,59 @@ diagnosis was hard: the serial log looked empty on a healthy boot. To watch
 a normal boot, screendump the VGA via QMP (`screendump`) on a VM started
 with a VGA device, or rely on SSH reachability as the liveness signal.
 
-*(Provisioning / cloud-init RBAC results appended below once exec1 finishes
-provisioning with the machine-type fix applied.)*
+### ★ SECOND BLOCKER: `openindiana-rust-ci` image's first-boot provisioning fails
+
+With the `-machine pc` fix the guest boots to multi-user, but SSH is still
+unreachable and vmctl provisioning still fails. QMP `screendump` of the VGA
+console (the only way to see past the serial cutover) shows the real
+reason:
+
+```
+svc:/system/sysconfig:default: Method "/usr/lib/sysconfig/sysconfig
+  provision --source auto" failed due to signal KILL
+svc.startd: system/sysconfig:default failed: transitioned to maintenance
+...
+unknown console login:
+IMPACT: svc:/network/ipmp:default is unavailable.
+IMPACT: svc:/system/sysconfig:default is unavailable.
+PLATFORM: Standard-PC-(i440FX-+-PIIX,-1996)   <- confirms the pc fix is live
+```
+
+**Root cause:** `openindiana-rust-ci` is a **CI-runner image** (built by the
+solstice pipeline to host the solstice runner agent), not a general-purpose
+cloud image. Its first-boot provisioning service `svc:/system/sysconfig`
+runs OpenIndiana's native `sysconfig provision --source auto`, which is
+**killed by an SMF method timeout** — it doesn't consume vmctl's cloud-init
+NoCloud `cidata` seed (illumos `sysconfig` reads an SC-profile, and/or the
+runner image expects the solstice runner's own metadata channel, not
+cloud-config YAML). Because that service dies: no login user is created,
+`network/ipmp` never configures, hostname stays `unknown`, and sshd is
+unreachable. State is terminal (identical console after 45s+).
+
+This is independent of vmctl and of the q35 fix — it's an
+**image/provisioning-format mismatch**. Consequences:
+- vmctl's SSH-based provisioners (and `tests/vm/smoke.sh`) can't run against
+  this image: there's no SSH user and no network.
+- The image DOES boot and run illumos (so the `builder` native-build
+  shakeout could still be done via console or a pre-baked user), but
+  unattended cloud-init provisioning is out.
+
+**Fix / path forward (recommended):** use a **general-purpose OpenIndiana
+cloud image** that supports NoCloud cloud-init, not the CI-runner image. The
+solstice orchestrator's own image-catalog lists exactly this distinction —
+its OpenIndiana entry is `openindiana-hipster`:
+`https://dlc.openindiana.org/isos/hipster/<date>/OI-hipster-cloudimage.img.zstd`
+with `nocloud: true`. That image (≈747 MB compressed, HTTP+zstd — and the
+HTTP pull path *streams* to disk, so it sidesteps the OCI in-RAM-buffering
+bug too) is the right base for exec1/pg/builder. W1 attempts this image
+next; if cloud-init provisioning succeeds on it, point `VMFile.kdl`'s three
+`vm` blocks at it (local `image "…/openindiana-hipster-cloud.img"`) and the
+smoke test should run end-to-end. If it also fails, the fallback is the
+already-cached, catalog-blessed `omnios-bloody` image (`ssh_user: root`,
+`nocloud: true`) — OmniOS rather than OpenIndiana, a deviation from ADR 086
+to note but a working illumos substrate.
+
+*(Result of the OI-hipster-cloudimage attempt appended below.)*
 
 **Anticipated cloud-init/RBAC risk (watch for it):** vmctl's auto-generated
 cloud-config (`crates/vm-manager/src/cloudinit.rs::build_cloud_config`)
