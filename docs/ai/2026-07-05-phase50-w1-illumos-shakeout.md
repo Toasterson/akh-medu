@@ -112,8 +112,66 @@ on disk) via `qemu-img info`, so no `disk` resize is needed in VMFile.kdl
 for a base checkout+build (the release build tree fits in 24 GiB; bump
 `disk` later if the in-VM cargo target dir + image outputs need more).
 
-*(Provisioning / cloud-init RBAC results appended below as exec1 comes
-up — see the anticipated sudo/RBAC risk note.)*
+### ★ BLOCKER (root-caused + fixed): vmctl's `-machine q35` panics illumos
+
+`vmctl up` boots exec1 fine to the OpenIndiana loader, but the kernel then
+**panics** and vmctl's provisioner fails with `Failed getting banner`
+(sshd never comes up because the guest never finishes booting). The serial
+console (`~/.local/share/vmctl/vms/exec1/console.log`) shows the real cause:
+
+```
+WARNING: vioblk0: Failed to map CAP 2 @ BAR4 0x3000+1000
+WARNING: vioblk0: failed to start Virtio init
+WARNING: vioif0: Failed to map CAP 2 @ BAR4 0x3000+1000
+NOTICE: Cannot read the pool label from '/pseudo/lofi@2:b'
+NOTICE: spa_import_rootpool: error 5
+Cannot mount root on /pseudo/lofi@2:b fstype zfs
+panic[cpu0]/thread=...: vfs_mountroot: cannot mount root
+```
+
+**Root cause:** vmctl's QEMU backend hardcodes `-machine q35,accel=kvm`
+(`crates/vm-manager/src/backends/qemu.rs`). q35 is a PCIe machine; illumos's
+`vioblk`/`vioif` drivers fail to map the *modern* virtio PCI capability
+(CAP 2) on the PCIe root complex, so the virtio-blk root disk never
+initializes and the root ZFS pool can't mount.
+
+**Fix (proven):** use the **i440fx** machine (`-machine pc`) — conventional
+PCI, where illumos maps the virtio caps correctly. This is exactly what the
+proven-working `refraction-forger` libvirt backend uses
+(`<type ... machine="pc">`, `crates/vm-manager/src/backends/libvirt.rs:111`).
+Booting the same image manually with `qemu-system-x86_64 -machine pc ...`
+(otherwise identical) gets past the panic — the serial log then shows:
+
+```
+OpenIndiana Hipster 2026.04 Version illumos-44e9e35ce0 64-bit
+NOTICE: Performing full ZFS device scan!
+NOTICE: Original /devices path (/pseudo/lofi@2:b) not available; ZFS is
+  trying an alternate path (/pci@0,0/pci1af4,2@4/blkdev@0,0:b)
+```
+
+i.e. vioblk maps cleanly (`blkdev@0,0`) and ZFS imports the root pool.
+
+**What vmctl needs (one-line-ish upstream change):** a machine-type knob.
+Either (a) a `machine "pc"` field on the `vm` block in VMFile.kdl plumbed
+into `VmSpec`, or (b) default to `pc` (q35 buys nothing for these
+workloads), or (c) auto-select `pc` for illumos/BSD images. Until then, W1
+ships a **non-invasive PATH shim**
+(`tests/vm/scripts/qemu-illumos-shim/qemu-system-x86_64`) that rewrites
+`-machine q35,accel=kvm` → `-machine pc,accel=kvm` and execs the real qemu;
+prepend it to `PATH` when running vmctl against these guests (smoke.sh does
+this automatically). It does not touch the shared `~/.cargo/bin/vmctl` or
+system qemu.
+
+**Console visibility note:** the image directs its console to VGA, not the
+serial ttya, after early boot — so vmctl's serial `console.log` captures
+only the loader + any kernel panic (panics write to every console), and
+normal multi-user boot output is invisible on serial. That's why the first
+diagnosis was hard: the serial log looked empty on a healthy boot. To watch
+a normal boot, screendump the VGA via QMP (`screendump`) on a VM started
+with a VGA device, or rely on SSH reachability as the liveness signal.
+
+*(Provisioning / cloud-init RBAC results appended below once exec1 finishes
+provisioning with the machine-type fix applied.)*
 
 **Anticipated cloud-init/RBAC risk (watch for it):** vmctl's auto-generated
 cloud-config (`crates/vm-manager/src/cloudinit.rs::build_cloud_config`)

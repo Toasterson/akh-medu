@@ -65,9 +65,14 @@ print(data['$vm']['work_dir'])
 log "gen-keys.sh (idempotent)"
 bash scripts/gen-keys.sh
 
-log "vmctl up --file VMFile.kdl (this pulls/boots/provisions all 3 VMs)"
+# PATH shim rewrites vmctl's hardcoded `-machine q35` -> `-machine pc`
+# (i440fx), without which illumos vioblk panics and root ZFS never mounts.
+# See scripts/qemu-illumos-shim/ and the W1 shakeout doc for the full story.
+export PATH="$HERE/scripts/qemu-illumos-shim:$PATH"
+
+log "vmctl up --file VMFile.kdl (this boots+provisions all 3 VMs; -machine pc via shim)"
 if ! ~/.cargo/bin/vmctl up --file VMFile.kdl; then
-    bad "vmctl up did not exit 0"
+    bad "vmctl up did not exit 0 (a VM may have failed to provision; check logs/ + vmctl log <name>)"
     exit 1
 fi
 
