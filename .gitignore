@@ -7,3 +7,4 @@ akh-data
 # Phase 45: vendored candle fork build artifacts (ADR 073)
 vendor/*/target/
 vendor/*/Cargo.lock
+eval_timeseries.jsonl
