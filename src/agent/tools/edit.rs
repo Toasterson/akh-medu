@@ -17,22 +17,32 @@ use crate::agent::tool::{Tool, ToolInput, ToolOutput, ToolParam, ToolSignature};
 use crate::agent::tool_manifest::{
     Capability, DangerInfo, DangerLevel, ToolManifest, ToolParamSchema, ToolSource,
 };
+use crate::backend::{Backend, InProcessBackend};
 use crate::engine::Engine;
 use crate::fs::Filesystem;
 use std::collections::HashSet;
 
-/// Exact-string find-and-replace in a file, through a sandboxed [`Filesystem`].
+/// Exact-string find-and-replace in a file, through the session's
+/// [`Backend`] (ADR 082), whose file verbs carry the sandboxed
+/// [`Filesystem`] contract.
 pub struct EditTool {
-    /// The sandbox the tool reads and writes through. A
+    /// The backend the tool reads and writes through. A backend wrapping a
     /// [`crate::fs::LocalFs::denied`] filesystem disables all access
     /// (fail-closed).
-    fs: Arc<dyn Filesystem>,
+    fs: Arc<dyn Backend>,
 }
 
 impl EditTool {
-    /// Create an `EditTool` backed by the given sandboxed filesystem.
+    /// Create an `EditTool` backed by the given sandboxed filesystem,
+    /// executed in-process (the historic behavior, verbatim).
     pub fn new(fs: Arc<dyn Filesystem>) -> Self {
-        Self { fs }
+        Self::with_backend(Arc::new(InProcessBackend::new(fs)))
+    }
+
+    /// Create an `EditTool` routed through an explicit backend — the seam
+    /// where 48b/48c plug in privilege-dropped or remote targets.
+    pub fn with_backend(backend: Arc<dyn Backend>) -> Self {
+        Self { fs: backend }
     }
 }
 

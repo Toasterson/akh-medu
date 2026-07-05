@@ -24,6 +24,7 @@ use crate::agent::tool::{Tool, ToolInput, ToolOutput, ToolParam, ToolSignature};
 use crate::agent::tool_manifest::{
     Capability, DangerInfo, DangerLevel, ToolManifest, ToolParamSchema, ToolSource,
 };
+use crate::backend::{Backend, InProcessBackend};
 use crate::engine::Engine;
 use crate::fs::Filesystem;
 
@@ -33,17 +34,26 @@ const MAX_MATCHES: usize = 1000;
 /// Maximum directory depth walked, guarding against pathological/looping trees.
 const MAX_DEPTH: usize = 64;
 
-/// Find files matching a glob pattern through a sandboxed [`Filesystem`].
+/// Find files matching a glob pattern through the session's [`Backend`]
+/// (ADR 082), whose file verbs carry the sandboxed [`Filesystem`] contract.
 pub struct GlobTool {
-    /// The sandbox the walk is confined to. A [`crate::fs::LocalFs::denied`]
-    /// filesystem yields no readable roots (fail-closed).
-    fs: Arc<dyn Filesystem>,
+    /// The backend the walk is confined to. A backend wrapping a
+    /// [`crate::fs::LocalFs::denied`] filesystem yields no readable roots
+    /// (fail-closed).
+    fs: Arc<dyn Backend>,
 }
 
 impl GlobTool {
-    /// Create a GlobTool backed by the given sandboxed filesystem.
+    /// Create a GlobTool backed by the given sandboxed filesystem, walked
+    /// in-process (the historic behavior, verbatim).
     pub fn new(fs: Arc<dyn Filesystem>) -> Self {
-        Self { fs }
+        Self::with_backend(Arc::new(InProcessBackend::new(fs)))
+    }
+
+    /// Create a GlobTool routed through an explicit backend — the seam where
+    /// 48b/48c plug in privilege-dropped or remote targets.
+    pub fn with_backend(backend: Arc<dyn Backend>) -> Self {
+        Self { fs: backend }
     }
 
     /// Resolve the base directory: an explicit `path` if given, otherwise the

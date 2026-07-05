@@ -38,6 +38,7 @@ pub mod bench_phase44;
 pub mod cluster;
 pub mod argumentation;
 pub mod audit;
+pub mod backend;
 pub mod bootstrap;
 pub mod chat;
 #[cfg(feature = "email")]

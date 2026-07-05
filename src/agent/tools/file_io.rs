@@ -1,9 +1,11 @@
-//! File I/O tool: read and write files through a sandboxed [`Filesystem`].
+//! File I/O tool: read and write files through the session's [`Backend`]
+//! (ADR 082).
 //!
 //! Both reads and writes are confined to the akh's sandbox roots. The previous
 //! implementation read from *any* path and only loosely checked writes; this
 //! tool now delegates all path resolution and containment to the injected
-//! [`Filesystem`], so the sandbox policy lives in one audited place.
+//! [`Backend`] (whose file verbs carry the [`Filesystem`] contract), so the
+//! sandbox policy lives in one audited place.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -13,21 +15,30 @@ use crate::agent::tool::{Tool, ToolInput, ToolOutput, ToolParam, ToolSignature};
 use crate::agent::tool_manifest::{
     Capability, DangerInfo, DangerLevel, ToolManifest, ToolParamSchema, ToolSource,
 };
+use crate::backend::{Backend, InProcessBackend};
 use crate::engine::Engine;
 use crate::fs::{Filesystem, FsError};
 use std::collections::HashSet;
 
-/// Read and write files through a sandboxed [`Filesystem`].
+/// Read and write files through the session's [`Backend`].
 pub struct FileIoTool {
-    /// The sandbox the tool operates through. A [`crate::fs::LocalFs::denied`]
-    /// filesystem disables all access (fail-closed).
-    fs: Arc<dyn Filesystem>,
+    /// The backend the tool operates through. A backend wrapping a
+    /// [`crate::fs::LocalFs::denied`] filesystem disables all access
+    /// (fail-closed).
+    fs: Arc<dyn Backend>,
 }
 
 impl FileIoTool {
-    /// Create a FileIoTool backed by the given sandboxed filesystem.
+    /// Create a FileIoTool backed by the given sandboxed filesystem, executed
+    /// in-process (the historic behavior, verbatim).
     pub fn new(fs: Arc<dyn Filesystem>) -> Self {
-        Self { fs }
+        Self::with_backend(Arc::new(InProcessBackend::new(fs)))
+    }
+
+    /// Create a FileIoTool routed through an explicit backend — the seam
+    /// where 48b/48c plug in privilege-dropped or remote targets.
+    pub fn with_backend(backend: Arc<dyn Backend>) -> Self {
+        Self { fs: backend }
     }
 }
 
