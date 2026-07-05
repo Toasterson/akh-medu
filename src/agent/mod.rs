@@ -74,6 +74,7 @@ pub mod priority_reasoning;
 pub mod project;
 pub mod reflect;
 pub mod resource;
+pub mod response_strategy;
 pub mod semantic_enrichment;
 pub mod sleep;
 pub mod source_reliability;
@@ -82,6 +83,7 @@ pub mod synthesize;
 pub mod synthesize_abs;
 pub mod temporal_experience;
 pub mod tool;
+pub mod trajectory;
 pub mod tool_graph;
 pub mod tool_manifest;
 pub mod tool_semantics;
@@ -251,4 +253,10 @@ pub use watch::{
     WorldSnapshot,
 };
 pub use memory_sync::{MemorySyncConfig, MemorySyncResult};
+pub use response_strategy::{
+    ConfidenceLevel, QueryType, ResponseStrategy, SelectedContent, Sentiment, ShadowFilter,
+    ShadowFilterResult, StrategyCategory, StrategyChoice, StrategyContext, StrategySelector,
+    StrategySelectorConfig, select_content,
+};
+pub use trajectory::{DiscourseMode, DiscourseTrajectory, TurnRecord, classify_mode};
 pub use openclaw::{OpenClawConfig, OpenClawError};
