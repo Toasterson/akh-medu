@@ -91,9 +91,9 @@ Measurement ran on 2026-07-05 (`crates/akh-egraph-bench`, 8-core x86_64,
 release; findings in
 [`docs/ai/2026-07-05-phase40-egraph-resaturation.md`](../2026-07-05-phase40-egraph-resaturation.md)).
 Median saturation under production `Runner::default()` semantics was
-**38.1 ms at 1 000 facts, 11.8 ms at 10 000, 176.4 ms at 100 000** (medium
+**36.2 ms at 1 000 facts, 14.0 ms at 10 000, 168.2 ms at 100 000** (medium
 pack) — far below the 5 s threshold — and full whole-KG saturation under
-generous limits reached 19.5 s only at 100 000 facts, a workload no call
+generous limits reached 22.1 s only at 100 000 facts, a workload no call
 site executes. Option (0) is selected; details, the honest treatment of the
 one in-band generous cell, and reopening triggers are in
 [ADR 084](084-egraph-persistence-decision.md).

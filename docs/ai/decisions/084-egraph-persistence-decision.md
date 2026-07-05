@@ -25,17 +25,17 @@ the findings report):
 
 | Workload (medium rule pack, `branching = 3`) | Median saturation |
 |---|---|
-| 1 000-fact theory, production `Runner::default()` limits | 38.1 ms (Saturated) |
-| 10 000-fact theory, production limits | 11.8 ms (NodeLimit after 1 iteration) |
-| 100 000-fact theory, production limits | 176.4 ms + 670.9 ms extraction (NodeLimit) |
-| Worst cell in the whole 36-cell production grid | 178.7 ms (architecturally ≤ 5 s: egg's own time limit) |
-| 10 000-fact theory, *generous* limits (1 M nodes / 60 s) | 0.97 s (genuinely Saturated) |
-| 100 000-fact theory, generous limits | 19.5 s (genuinely Saturated) |
+| 1 000-fact theory, production `Runner::default()` limits | 36.2 ms (Saturated) |
+| 10 000-fact theory, production limits | 14.0 ms (NodeLimit after 1 iteration) |
+| 100 000-fact theory, production limits | 168.2 ms + 644.7 ms extraction (NodeLimit) |
+| Worst cell in the whole 36-cell production grid | 253.5 ms (architecturally ≤ 5 s: egg's own time limit) |
+| 10 000-fact theory, *generous* limits (1 M nodes / 60 s) | 1.39 s (genuinely Saturated) |
+| 100 000-fact theory, generous limits | 22.1 s (genuinely Saturated) |
 | 10 000-fact theory, *large* pack, generous limits | 60 s (TimeLimit — `positive-introspection` never terminates) |
 
 The production-semantics median is one to four orders of magnitude below the
 5 s threshold. One generous-limit cell — 100 k-fact whole-KG full saturation
-at 19.5 s — falls inside ADR 051's 5–30 s "Option (1)" band. It does not
+at 22.1 s — falls inside ADR 051's 5–30 s "Option (1)" band. It does not
 flip the decision because no call site executes that workload (finding 1
 below, findings-report §5); it stands as the honest cost estimate if one
 ever does, and the reopening triggers below cover that case. The
@@ -61,7 +61,7 @@ Three structural findings from the harness matter more than the timings:
    call site uses `egg::Runner::default()`: 30 iterations, 10 000 nodes, 5 s
    time limit. The wake-/query-path cost therefore *cannot* exceed ~5 s per
    query regardless of KG size — the 100 k-fact cells hit the node limit in
-   ~0.18 s (+ ~0.67 s extraction). Persistence cannot improve a bound that
+   ~0.25 s (+ ~0.9 s extraction). Persistence cannot improve a bound that
    the runner already enforces.
 
 3. **Conjunctive rules don't do KG-wide joins anyway.** egg pattern rules
@@ -75,7 +75,7 @@ Three structural findings from the harness matter more than the timings:
 Additional supporting data:
 
 - **Q2 (incremental/fork workloads):** cloning a saturated 1 000-fact e-graph,
-  perturbing, and re-running costs 15.3 ms median (51 ms max) per fork — 100
+  perturbing, and re-running costs 15.4 ms median (46.8 ms max) per fork — 100
   forks in 1.6 s. MCTS-style exploration does not need incremental e-graph
   persistence.
 - **Memory:** peak RSS for the largest production-limit cells stayed at
@@ -83,7 +83,7 @@ Additional supporting data:
   snapshot-and-restore design.
 - **HNSW(VSA) is the real wake-path cost** (Q1 arm): rebuild at 100 k
   10 000-bit items is 841 s median (~14 min, ~1 GB peak RSS) on this
-  hardware, versus 0.18 s for the e-graph under production limits at the
+  hardware, versus ~0.2 s for the e-graph under production limits at the
   same scale. This confirms ADR 049's already-decided
   mitigation (local-disk HNSW cache for same-host wake, rebuild from
   `akhomed.facts` cross-host) is aimed at the right structure, and answers

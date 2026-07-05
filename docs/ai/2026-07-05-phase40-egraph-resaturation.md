@@ -54,44 +54,44 @@ saturation wall time; "extract" = `Extractor::new(AstSize)` + `find_best`;
 
 | n_facts | rules | branch | build ms | init nodes | sat p50 ms | sat min | sat max | extract p50 ms | stop | e-nodes | peak RSS MiB |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| 100 | small | 1 | 0.0 | 404 | 0.3 | 0.3 | 1.0 | 0.2 | Saturated | 465 | 3 |
-| 100 | small | 3 | 0.0 | 404 | 0.3 | 0.3 | 1.4 | 0.2 | Saturated | 465 | 3 |
-| 100 | small | 10 | 0.0 | 404 | 0.3 | 0.3 | 1.1 | 0.2 | Saturated | 465 | 3 |
-| 100 | medium | 1 | 0.0 | 404 | 7.5 | 3.4 | 10.3 | 0.2 | Saturated | 741 | 3 |
-| 100 | medium | 3 | 0.0 | 404 | 3.2 | 3.2 | 3.7 | 0.3 | Saturated | 701 | 3 |
-| 100 | medium | 10 | 0.0 | 404 | 2.0 | 1.9 | 8.1 | 0.2 | Saturated | 681 | 3 |
-| 100 | large | 1 | 0.0 | 404 | 37.7 | 24.6 | 59.6 | 2.1 | IterationLimit(30) | 3321 | 4 |
-| 100 | large | 3 | 0.0 | 404 | 42.9 | 42.1 | 44.1 | 2.3 | IterationLimit(30) | 3311 | 4 |
-| 100 | large | 10 | 0.0 | 404 | 42.2 | 41.8 | 43.1 | 2.3 | IterationLimit(30) | 3291 | 4 |
-| 1000 | small | 1 | 0.1 | 4025 | 3.3 | 3.0 | 6.3 | 2.1 | Saturated | 4448 | 4 |
-| 1000 | small | 3 | 0.2 | 4025 | 4.9 | 3.0 | 6.6 | 2.3 | Saturated | 4448 | 5 |
-| 1000 | small | 10 | 0.1 | 4025 | 3.1 | 3.0 | 4.5 | 2.1 | Saturated | 4448 | 4 |
-| 1000 | medium | 1 | 0.1 | 4025 | 41.6 | 40.6 | 76.0 | 2.7 | Saturated | 8337 | 6 |
-| 1000 | medium | 3 | 0.1 | 4025 | 38.1 | 35.8 | 40.0 | 2.4 | Saturated | 7687 | 6 |
-| 1000 | medium | 10 | 0.1 | 4025 | 36.4 | 34.6 | 40.9 | 2.4 | Saturated | 7467 | 6 |
-| 1000 | large | 1 | 0.1 | 4025 | 26.1 | 26.0 | 29.1 | 3.1 | NodeLimit(10171) | 10072 | 6 |
-| 1000 | large | 3 | 0.1 | 4025 | 28.1 | 27.4 | 32.2 | 3.1 | NodeLimit(10081) | 9982 | 6 |
-| 1000 | large | 10 | 0.1 | 4025 | 34.0 | 27.2 | 41.0 | 3.1 | NodeLimit(10249) | 10150 | 6 |
-| 10000 | small | 1 | 0.8 | 40250 | 12.0 | 10.7 | 22.3 | 37.3 | NodeLimit(30993) | 30993 | 18 |
-| 10000 | small | 3 | 0.9 | 40250 | 11.8 | 11.0 | 16.6 | 33.6 | NodeLimit(30993) | 30993 | 18 |
-| 10000 | small | 10 | 0.8 | 40250 | 6.3 | 5.7 | 9.6 | 15.8 | NodeLimit(21027) | 21027 | 12 |
-| 10000 | medium | 1 | 0.8 | 40250 | 11.8 | 10.8 | 15.8 | 38.1 | NodeLimit(30993) | 30993 | 18 |
-| 10000 | medium | 3 | 0.8 | 40250 | 11.8 | 11.6 | 19.8 | 35.2 | NodeLimit(30993) | 30993 | 18 |
-| 10000 | medium | 10 | 0.8 | 40250 | 7.1 | 6.3 | 10.0 | 16.3 | NodeLimit(21027) | 21027 | 12 |
-| 10000 | large | 1 | 0.8 | 40250 | 12.0 | 11.2 | 15.6 | 36.6 | NodeLimit(30993) | 30993 | 18 |
-| 10000 | large | 3 | 0.8 | 40250 | 12.5 | 10.8 | 16.2 | 37.2 | NodeLimit(30993) | 30993 | 18 |
-| 10000 | large | 10 | 0.8 | 40250 | 6.6 | 6.3 | 9.5 | 14.2 | NodeLimit(21027) | 21027 | 11 |
-| 100000 | small | 1 | 7.4 | 402500 | 172.3 | 161.1 | 203.2 | 626.3 | NodeLimit(295462) | 295462 | 130 |
-| 100000 | small | 3 | 7.7 | 402500 | 173.9 | 173.0 | 210.2 | 665.1 | NodeLimit(295462) | 295462 | 131 |
-| 100000 | small | 10 | 7.6 | 402500 | 104.9 | 92.5 | 122.4 | 297.7 | NodeLimit(177561) | 177561 | 74 |
-| 100000 | medium | 1 | 7.5 | 402500 | 178.7 | 166.8 | 213.6 | 649.8 | NodeLimit(295462) | 295462 | 131 |
-| 100000 | medium | 3 | 7.6 | 402500 | 176.4 | 174.1 | 217.7 | 670.9 | NodeLimit(295462) | 295462 | 132 |
-| 100000 | medium | 10 | 7.7 | 402500 | 108.5 | 95.8 | 118.2 | 304.6 | NodeLimit(177561) | 177561 | 74 |
-| 100000 | large | 1 | 11.0 | 402500 | 178.3 | 173.1 | 216.3 | 661.3 | NodeLimit(295462) | 295462 | 131 |
-| 100000 | large | 3 | 7.7 | 402500 | 172.7 | 170.4 | 220.7 | 660.0 | NodeLimit(295462) | 295462 | 132 |
-| 100000 | large | 10 | 9.3 | 402500 | 104.2 | 96.1 | 125.4 | 303.8 | NodeLimit(177561) | 177561 | 73 |
+| 100 | small | 1 | 0.0 | 404 | 0.2 | 0.2 | 0.8 | 0.1 | Saturated | 465 | 3 |
+| 100 | small | 3 | 0.0 | 404 | 0.2 | 0.2 | 0.8 | 0.1 | Saturated | 465 | 3 |
+| 100 | small | 10 | 0.0 | 404 | 0.2 | 0.2 | 0.8 | 0.1 | Saturated | 465 | 3 |
+| 100 | medium | 1 | 0.0 | 404 | 2.1 | 2.0 | 2.7 | 0.2 | Saturated | 741 | 3 |
+| 100 | medium | 3 | 0.0 | 404 | 2.4 | 1.9 | 2.7 | 0.2 | Saturated | 701 | 3 |
+| 100 | medium | 10 | 0.0 | 404 | 2.0 | 1.9 | 2.6 | 0.2 | Saturated | 681 | 3 |
+| 100 | large | 1 | 0.0 | 404 | 24.5 | 22.9 | 28.3 | 1.4 | IterationLimit(30) | 3321 | 4 |
+| 100 | large | 3 | 0.0 | 404 | 23.5 | 23.0 | 25.2 | 1.4 | IterationLimit(30) | 3311 | 4 |
+| 100 | large | 10 | 0.0 | 404 | 23.6 | 22.6 | 26.2 | 1.4 | IterationLimit(30) | 3291 | 4 |
+| 1000 | small | 1 | 0.1 | 4025 | 1.8 | 1.8 | 2.9 | 1.4 | Saturated | 4448 | 4 |
+| 1000 | small | 3 | 0.1 | 4025 | 1.8 | 1.7 | 2.9 | 1.3 | Saturated | 4448 | 4 |
+| 1000 | small | 10 | 0.1 | 4025 | 1.9 | 1.8 | 2.9 | 1.4 | Saturated | 4448 | 4 |
+| 1000 | medium | 1 | 0.1 | 4025 | 38.8 | 38.0 | 41.3 | 2.6 | Saturated | 8337 | 6 |
+| 1000 | medium | 3 | 0.1 | 4025 | 36.2 | 35.9 | 37.8 | 2.5 | Saturated | 7687 | 6 |
+| 1000 | medium | 10 | 0.1 | 4025 | 40.3 | 39.6 | 41.6 | 2.5 | Saturated | 7467 | 6 |
+| 1000 | large | 1 | 0.1 | 4025 | 29.4 | 29.1 | 30.8 | 3.3 | NodeLimit(10171) | 10072 | 6 |
+| 1000 | large | 3 | 0.1 | 4025 | 34.4 | 27.3 | 51.7 | 3.1 | NodeLimit(10081) | 9982 | 6 |
+| 1000 | large | 10 | 0.1 | 4025 | 27.7 | 27.5 | 28.9 | 3.1 | NodeLimit(10249) | 10150 | 6 |
+| 10000 | small | 1 | 0.8 | 40250 | 11.5 | 10.7 | 22.0 | 41.8 | NodeLimit(30993) | 30993 | 18 |
+| 10000 | small | 3 | 1.7 | 40250 | 11.9 | 11.5 | 28.7 | 46.6 | NodeLimit(30993) | 30993 | 18 |
+| 10000 | small | 10 | 0.9 | 40250 | 22.9 | 11.8 | 25.1 | 81.6 | NodeLimit(30993) | 30993 | 18 |
+| 10000 | medium | 1 | 1.3 | 40250 | 11.7 | 10.4 | 16.3 | 33.6 | NodeLimit(30993) | 30993 | 18 |
+| 10000 | medium | 3 | 0.8 | 40250 | 14.0 | 12.4 | 16.4 | 40.3 | NodeLimit(30993) | 30993 | 18 |
+| 10000 | medium | 10 | 0.8 | 40250 | 12.0 | 10.9 | 15.2 | 38.4 | NodeLimit(30993) | 30993 | 18 |
+| 10000 | large | 1 | 0.8 | 40250 | 12.9 | 11.3 | 16.2 | 41.2 | NodeLimit(30993) | 30993 | 18 |
+| 10000 | large | 3 | 0.8 | 40250 | 12.0 | 11.3 | 16.5 | 40.7 | NodeLimit(30993) | 30993 | 18 |
+| 10000 | large | 10 | 0.9 | 40250 | 11.8 | 10.6 | 15.3 | 39.3 | NodeLimit(30993) | 30993 | 18 |
+| 100000 | small | 1 | 7.5 | 402500 | 179.3 | 166.9 | 217.1 | 638.5 | NodeLimit(295462) | 295462 | 130 |
+| 100000 | small | 3 | 14.6 | 402500 | 253.5 | 175.4 | 347.8 | 894.1 | NodeLimit(295462) | 295462 | 131 |
+| 100000 | small | 10 | 7.5 | 402500 | 176.2 | 171.3 | 235.1 | 689.6 | NodeLimit(295462) | 295462 | 132 |
+| 100000 | medium | 1 | 8.0 | 402500 | 211.5 | 166.9 | 266.1 | 695.7 | NodeLimit(295462) | 295462 | 131 |
+| 100000 | medium | 3 | 7.7 | 402500 | 168.2 | 161.8 | 223.5 | 644.7 | NodeLimit(295462) | 295462 | 132 |
+| 100000 | medium | 10 | 7.6 | 402500 | 173.6 | 167.2 | 206.2 | 651.8 | NodeLimit(295462) | 295462 | 133 |
+| 100000 | large | 1 | 7.6 | 402500 | 171.5 | 167.9 | 213.7 | 652.7 | NodeLimit(295462) | 295462 | 132 |
+| 100000 | large | 3 | 7.6 | 402500 | 172.5 | 163.6 | 217.3 | 656.5 | NodeLimit(295462) | 295462 | 132 |
+| 100000 | large | 10 | 7.9 | 402500 | 176.5 | 168.0 | 209.1 | 645.3 | NodeLimit(295462) | 295462 | 133 |
 
-Worst production-limit cell: **178.7 ms median saturation + 670.9 ms
+Worst production-limit cell: **253.5 ms median saturation + 894.1 ms
 extraction** (100 k facts). Note: at ≥10 k facts the initial expression alone
 exceeds the 10 000-node runner limit, so the runner stops after one iteration
 — that is the production semantics for oversized expressions, and it is
@@ -101,23 +101,23 @@ exceeds the 10 000-node runner limit, so the runner stops after one iteration
 
 | n_facts | rules | branch | sat p50 ms | sat min | sat max | extract p50 ms | stop | e-nodes | peak RSS MiB |
 |---|---|---|---|---|---|---|---|---|---|
-| 1000 | medium | 3 | 37.9 | 37.7 | 38.6 | 2.5 | Saturated | 7687 | 6 |
-| 10000 | medium | 3 | 967.5 | 963.4 | 1301.2 | 61.2 | Saturated | 75049 | 31 |
-| 100000 | medium | 3 | 19506.8 | 19026.5 | 23429.4 | 1052.7 | Saturated | 730971 | 224 |
-| 10000 | large | 3 | 60058.3 | 60044.3 | 60121.2 | 4419.8 | TimeLimit(60.0s) | 711511 | 214 |
+| 1000 | medium | 3 | 39.1 | 38.4 | 41.7 | 2.5 | Saturated | 7687 | 6 |
+| 10000 | medium | 3 | 1388.3 | 1007.0 | 1448.6 | 64.2 | Saturated | 75049 | 30 |
+| 100000 | medium | 3 | 22064.0 | 21706.8 | 22743.7 | 1044.1 | Saturated | 730971 | 224 |
+| 10000 | large | 3 | 60119.3 | 60020.0 | 60200.3 | 5485.8 | TimeLimit(60.0s) | 693511 | 202 |
 
 True full saturation of a whole-KG conjunction genuinely converges with the
-medium pack: **~1 s at 10 k facts, ~19.5 s at 100 k facts** (superlinear over
-this decade, ~n^1.3). The large pack never converges by construction
+medium pack: **~1.4 s at 10 k facts, ~22.1 s at 100 k facts** (superlinear over
+this decade, ~n^1.2). The large pack never converges by construction
 (`positive-introspection`) — it burns the whole 60 s budget and grows to
-~711 k e-nodes at 10 k facts. Rule-pack composition, not KG size, is the
+~694 k e-nodes at 10 k facts. Rule-pack composition, not KG size, is the
 dominant risk factor.
 
 ### Q2 fork workload (clone + perturb + re-run, medium rules, prod limits)
 
 | n_facts | forks | base sat ms | fork p50 ms | fork max ms | total (100 forks) | peak RSS MiB |
 |---|---|---|---|---|---|---|
-| 1000 | 100 | 37.6 | 15.3 | 51.0 | 1614.5 ms | 7 |
+| 1000 | 100 | 38.0 | 15.4 | 46.8 | 1618.6 ms | 6 |
 
 ### HNSW(VSA) rebuild — 10 000-bit hypervectors, `Dimension::DEFAULT`
 
@@ -141,8 +141,8 @@ Every production call site (`Engine::simplify_expression()`,
 `src/engine.rs:1340`; the `Reason` pipeline stage, `src/pipeline/mod.rs`;
 `InferEngine::verify_with_egraph`, `src/infer/engine.rs`) uses
 `Runner::default()` — 30 iterations, 10 000 nodes, 5 s time limit. In the
-36-cell production grid the worst cell is **178.7 ms median saturation
-(+ 670.9 ms extraction)** at 100 k facts — it stops at the node limit — and
+36-cell production grid the worst cell is **253.5 ms median saturation
+(+ 894.1 ms extraction)** at 100 k facts — it stops at the node limit — and
 *nothing can exceed ~5 s* because the runner enforces it. Small/medium packs
 on ≤1 k-fact theories genuinely saturate (StopReason `Saturated`) in
 0.3–42 ms.
@@ -171,7 +171,7 @@ cache a structure nothing rebuilds.
 ### 4. Q2 (fork workload): incremental state is cheap
 
 Cloning a saturated 1 000-fact e-graph, adding a perturbation, and re-running
-the medium pack costs 15.3 ms median (51 ms max) per fork — 100 forks in
+the medium pack costs 15.4 ms median (46.8 ms max) per fork — 100 forks in
 1.6 s. An MCTS-style explorer that forks the e-graph hundreds of times per
 decision is comfortably in-memory territory; incremental e-graph
 *persistence* is not the axis that matters (confirming the plan's
@@ -180,7 +180,7 @@ expectation for Q2).
 ### 5. Applying ADR 051's threshold table honestly
 
 One generous-limit cell lands inside the 5–30 s "Option (1)" band: full
-saturation of a 100 k-fact whole-KG conjunction takes 19.5 s. We still pick
+saturation of a 100 k-fact whole-KG conjunction takes 22.1 s. We still pick
 Option (0), and the reasoning must be explicit rather than buried: **that
 workload does not exist in the engine.** No call site saturates a whole-KG
 conjunction — production expressions are per-query (pipeline seeds, inference
@@ -191,7 +191,7 @@ inputs at 10 000 nodes in ~0.2 s, and the wake path (`wake()`,
 production limits — median well under 100 ms — not the synthetic 10⁵-fact
 conjunction, which we measured as an upper bound. If a future phase
 introduces whole-KG or long-lived saturation (e.g. Phase 41's ThinkingLoop),
-the 19.5 s number is the honest cost estimate at 10⁵ facts and this decision
+the 22.1 s number is the honest cost estimate at 10⁵ facts and this decision
 must be revisited — that trigger is recorded in ADR 084.
 
 ### 6. Q1 (HNSW arm): the asymmetric sibling
@@ -229,9 +229,9 @@ causal / epistemic packs currently have **zero non-test callers** —
 ## Decision applied
 
 ADR 051's binding rule: median < 5 s → **Option (0), persist nothing**.
-Measured production-semantics medians are 0.3–179 ms — one to four orders of
+Measured production-semantics medians are 0.2–254 ms — one to four orders of
 magnitude below the threshold — and the worst case is bounded by egg's own
-5 s guard. The single generous-limit cell inside the 5–30 s band (19.5 s,
+5 s guard. The single generous-limit cell inside the 5–30 s band (22.1 s,
 100 k-fact whole-KG full saturation) measures a workload no call site
 executes; see §5 for why it does not flip the decision and what would. The
 decision, its structural rationale, and the reopening conditions are recorded
