@@ -769,26 +769,24 @@ fn reconstruct_episode(
     let mut tags = Vec::new();
     let mut affective_valence = 0.0f32;
 
-    // New format: summary is embedded in the episode entity's own label as
-    // "episode:{id}:{content}".  Extract the third colon-delimited segment.
+    // Cycle episodes (persist_episode) embed the summary in the entity label's
+    // 3rd segment ("episode:{id}:{content}"). The typed `memory_write` path
+    // instead puts a hash/timestamp *discriminator* there (for idempotent labels)
+    // and stores the real summary via `has_summary`. So the label segment is only
+    // a FALLBACK — prefer `has_summary` whenever present, else recall surfaces the
+    // discriminator hash as the "summary".
     let episode_label = engine.resolve_label(episode_id);
-    if let Some(content) = episode_label.splitn(3, ':').nth(2) {
-        if !content.is_empty() {
-            summary = content.to_string();
-        }
-    }
+    let label_summary = episode_label
+        .splitn(3, ':')
+        .nth(2)
+        .filter(|c| !c.is_empty())
+        .unwrap_or("")
+        .to_string();
 
     for triple in &triples {
         if triple.predicate == predicates.has_summary {
-            // Backward compat: legacy episodes stored a separate `summary:*`
-            // entity.  Use it only when the label-embedded summary is absent.
-            if summary.is_empty() {
-                let raw = engine.resolve_label(triple.object);
-                summary = raw
-                    .strip_prefix("summary:")
-                    .unwrap_or(&raw)
-                    .to_string();
-            }
+            let raw = engine.resolve_label(triple.object);
+            summary = raw.strip_prefix("summary:").unwrap_or(&raw).to_string();
         } else if triple.predicate == predicates.learned {
             learnings.push(triple.object);
         } else if triple.predicate == predicates.has_tag {
@@ -799,6 +797,11 @@ fn reconstruct_episode(
                 affective_valence = val_str.parse().unwrap_or(0.0);
             }
         }
+    }
+
+    // No explicit summary → fall back to the label-embedded excerpt (cycle path).
+    if summary.is_empty() {
+        summary = label_summary;
     }
 
     // Get the episode's creation timestamp from its symbol metadata.

@@ -88,6 +88,13 @@ impl EpisodicPredicates {
 // ---------------------------------------------------------------------------
 
 impl Tool for JournalIngestTool {
+    /// Retired from the LLM catalog (ADR 076 §1): `memory_write` is the typed
+    /// replacement inside an LLM session. Still registered for the daemon's
+    /// batch journal-ingest path.
+    fn advertise_to_llm(&self) -> bool {
+        false
+    }
+
     fn signature(&self) -> ToolSignature {
         ToolSignature {
             name: "journal_ingest".into(),
@@ -544,7 +551,7 @@ fn ingest_chunk(
         let text_input = ToolInput::new()
             .with_param("text", &chunk.body)
             .with_param("max_sentences", "200");
-        match TextIngestTool.execute(engine, text_input) {
+        match TextIngestTool::default().execute(engine, text_input) {
             Ok(output) => {
                 for sym in &output.symbols_involved {
                     let _ = engine.add_triple(&Triple::new(

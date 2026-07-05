@@ -1,0 +1,72 @@
+<?xml version="1.0"?>
+<!DOCTYPE service_bundle SYSTEM "/usr/share/lib/xml/dtd/service_bundle.dtd.1">
+<!--
+  SMF manifest for Seshat's Archive (seshd).
+
+  Delivered by the IPS package to /lib/svc/manifest/application/akh-medu/seshd.xml.
+  Runs as the unprivileged `seshat` user and reads its config file path from the
+  `config/file` property (default /etc/akh-medu/seshat.toml).
+
+  seshd needs a reachable PostgreSQL (with pgvector). That database is external
+  (often another host/zone), so there is no hard SMF dependency on a local
+  postgres service — the daemon retries the connection. If you run Postgres in
+  the same zone, add a dependency on its FMRI.
+
+  NOTE: on illumos seshd is built without the `embedding` feature (onnxruntime
+  has no illumos build), so the in-process embed worker is inert. Point akhs at
+  a Linux seshd for embedding, or supply embeddings out of band.
+-->
+<service_bundle type="manifest" name="akh-medu:seshd">
+  <service name="application/akh-medu/seshd" type="service" version="1">
+
+    <create_default_instance enabled="false"/>
+    <single_instance/>
+
+    <dependency name="network" grouping="require_all" restart_on="error" type="service">
+      <service_fmri value="svc:/milestone/network:default"/>
+    </dependency>
+    <dependency name="filesystem-local" grouping="require_all" restart_on="none" type="service">
+      <service_fmri value="svc:/system/filesystem/local:default"/>
+    </dependency>
+
+    <exec_method type="method" name="start"
+                 exec="/lib/svc/method/seshd %m"
+                 timeout_seconds="120">
+      <method_context working_directory="/var/lib/akh-medu/seshat">
+        <method_credential user="seshat" group="seshat"/>
+        <method_environment>
+          <envvar name="HOME" value="/var/lib/akh-medu/seshat"/>
+          <envvar name="SESHAT_MODEL_DIR" value="/var/lib/akh-medu/seshat/models"/>
+          <envvar name="RUST_LOG" value="seshat=info,info"/>
+        </method_environment>
+      </method_context>
+    </exec_method>
+
+    <exec_method type="method" name="stop"
+                 exec=":kill"
+                 timeout_seconds="30"/>
+
+    <property_group name="startd" type="framework">
+      <propval name="duration" type="astring" value="contract"/>
+      <propval name="ignore_error" type="astring" value="core,signal"/>
+    </property_group>
+
+    <property_group name="config" type="application">
+      <propval name="file" type="astring" value="/etc/akh-medu/seshat.toml"/>
+    </property_group>
+
+    <stability value="Evolving"/>
+
+    <template>
+      <common_name>
+        <loctext xml:lang="C">Seshat's Archive (seshd)</loctext>
+      </common_name>
+      <description>
+        <loctext xml:lang="C">Shared corpus MCP service: pgvector RAG over a PostgreSQL archive for akh-medu instances.</loctext>
+      </description>
+      <documentation>
+        <doc_link name="akh-medu.dev" uri="https://akh-medu.dev"/>
+      </documentation>
+    </template>
+  </service>
+</service_bundle>

@@ -162,6 +162,7 @@ mod inner {
                         description: p["description"].as_str().unwrap_or("").to_string(),
                         required: p["required"].as_bool().unwrap_or(false),
                         param_type: p["param_type"].as_str().unwrap_or("string").to_string(),
+                        schema: p.get("schema").cloned(),
                     })
                     .collect()
             })

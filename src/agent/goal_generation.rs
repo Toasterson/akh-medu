@@ -119,7 +119,7 @@ pub fn generate_goals(
     goals: &[Goal],
     drives: &DriveSystem,
     config: &GoalGenerationConfig,
-    _predicates: &AgentPredicates,
+    predicates: &AgentPredicates,
     _cycle: u64,
     impasse: Option<&DecisionImpasse>,
     reflection: Option<&ReflectionResult>,
@@ -135,6 +135,7 @@ pub fn generate_goals(
         goals,
         drives,
         &goal_symbols,
+        predicates,
         impasse,
         reflection,
         watch_firings,
@@ -171,6 +172,7 @@ fn collect_signals(
     goals: &[Goal],
     drives: &DriveSystem,
     goal_symbols: &[SymbolId],
+    predicates: &AgentPredicates,
     impasse: Option<&DecisionImpasse>,
     reflection: Option<&ReflectionResult>,
     watch_firings: &[WatchFiring],
@@ -182,6 +184,12 @@ fn collect_signals(
 
     // 2. Gap-based proposals.
     proposals.extend(proposals_from_gaps(engine, goal_symbols));
+
+    // 2b. Episodic-enrichment proposals — the akh self-refining its own memory
+    //     (ADR 078). Opt-in via AKH_ENRICH_MEMORY while the loop is prototyped.
+    if std::env::var("AKH_ENRICH_MEMORY").is_ok_and(|v| v != "0") {
+        proposals.extend(proposals_from_episodic_gaps(engine, predicates));
+    }
 
     // 3. Anomaly/contradiction proposals.
     proposals.extend(proposals_from_anomalies(engine, goals));
@@ -347,6 +355,15 @@ fn is_goal_worthy_label(label: &str) -> bool {
         return false;
     }
 
+    // OODA cycle artifacts and internal agent metadata.
+    // Entities like "summary:Decide: tool=X, goal=Y" are created by episodic
+    // memory consolidation and carry no knowledge value. Without this guard they
+    // appear as dead-end entities in gap analysis and produce useless
+    // auto-completion goals, contaminating ~39% of the goal set.
+    if super::synthesize::is_metadata_label(&lower) {
+        return false;
+    }
+
     // Common ingestion artifacts
     let junk_patterns = [
         "list of", "index of", "timeline of", "articles for creation",
@@ -364,6 +381,68 @@ fn is_goal_worthy_label(label: &str) -> bool {
     }
 
     true
+}
+
+/// Episodic-memory self-refinement → goal proposals (ADR 078 prototype).
+///
+/// Scans recent episodes for *thin* ones — few grounded facts despite a known
+/// source — and proposes the akh re-read that source to extract the detail it
+/// dropped at import time (e.g. a path/number it kept only as a concept). The
+/// akh executes via its existing tools (`memory_write`/`add-triple`, with
+/// `remove-triple` to prune); this just surfaces the gap as a goal. Reuses the
+/// `GapDetection` source (a thin memory *is* a knowledge gap) so no new variant.
+fn proposals_from_episodic_gaps(
+    engine: &Engine,
+    predicates: &AgentPredicates,
+) -> Vec<GoalProposal> {
+    /// Below this many grounded facts an episode is worth re-reading.
+    const THIN_FACT_THRESHOLD: usize = 5;
+    let episodes = match crate::agent::memory::recall_recent_episodes(engine, predicates, 50) {
+        Ok(e) => e,
+        Err(_) => return Vec::new(),
+    };
+    episodes
+        .into_iter()
+        .filter_map(|ep| {
+            // Only enrichable if we know the original source to re-read.
+            let source = ep.tags.iter().find_map(|t| {
+                engine
+                    .resolve_label(*t)
+                    .strip_prefix("tag:source:")
+                    .map(str::to_string)
+            })?;
+            // "Grounded" facts = learned subjects that actually have outgoing
+            // triples (concept-only learnings with no statements don't count).
+            let fact_count = ep
+                .learnings
+                .iter()
+                .filter(|&&s| !engine.triples_from(s).is_empty())
+                .count();
+            if fact_count >= THIN_FACT_THRESHOLD {
+                return None;
+            }
+            let thinness = 1.0 - (fact_count as f32 / THIN_FACT_THRESHOLD as f32);
+            let short: String = ep.summary.chars().take(48).collect();
+            Some(GoalProposal {
+                description: format!("Enrich memory \"{short}\" by re-reading {source}."),
+                rationale: format!(
+                    "Episode has only {fact_count} grounded fact(s) but its source is on disk."
+                ),
+                source: GoalSource::GapDetection {
+                    gap_entity: ep.symbol_id,
+                    gap_kind: "episodic_enrichment".into(),
+                    severity: thinness,
+                },
+                priority_suggestion: (thinness * 120.0) as u8,
+                success_criteria: format!(
+                    "Episode \"{short}\" has >= {THIN_FACT_THRESHOLD} grounded facts from {source}."
+                ),
+                conflicts_with: Vec::new(),
+                feasibility: 0.0,
+            })
+        })
+        .take(5)
+        .collect()
 }
 
 /// Contradiction provenance → goal proposals.
@@ -898,6 +977,20 @@ mod tests {
     use crate::agent::drives::DriveSystem;
 
     #[test]
+    fn is_goal_worthy_rejects_summary_labels() {
+        // OODA cycle creates "summary:..." entities in the KG; they must never
+        // become goal candidates.
+        assert!(!is_goal_worthy_label("summary:Decide: tool=kg_query, goal=foo"));
+        assert!(!is_goal_worthy_label("summary:Cycle 5: 3 active goals"));
+        assert!(!is_goal_worthy_label("episode:42"));
+        assert!(!is_goal_worthy_label("tag:observation"));
+        assert!(!is_goal_worthy_label("agent:has_summary"));
+        // Real knowledge entities are not rejected.
+        assert!(is_goal_worthy_label("photosynthesis"));
+        assert!(is_goal_worthy_label("Rust programming language"));
+    }
+
+    #[test]
     fn proposals_from_drives_empty_when_below_threshold() {
         let system = DriveSystem::new();
         // All drives at 0.0 → no exceeded → no proposals.
@@ -1252,7 +1345,8 @@ mod tests {
             condition_summary: "delta".into(),
         }];
 
-        let proposals = collect_signals(&engine, &[], &drives, &[], None, None, &firings);
+        let predicates = super::AgentPredicates::init(&engine).unwrap();
+        let proposals = collect_signals(&engine, &[], &drives, &[], &predicates, None, None, &firings);
         assert!(proposals.iter().any(|p| p.description.contains("Watch-generated")));
     }
 }

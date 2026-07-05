@@ -1,0 +1,34 @@
+# Tecton — install at ~/.config/akh-medu/workspaces/tecton.toml
+#
+# Backing: GLM over ollama.com cloud (native function-calling). Cloud-capable,
+# no local GPU needed — this akh can be homed on any host (Archibald, Hephaistos,
+# the cellar M2) and relocated between them since its truth is in Postgres.
+
+name = "tecton"
+is_main = true
+
+# Chat/agentic backing: Ollama (local or cloud). This is the default; stated
+# explicitly here for clarity (ADR 070).
+backend = "ollama"
+
+# GLM over ollama.com cloud. When akhomed talks to ollama.com directly
+# (kind=cloud + API key), use the bare published tag — NOT a `:cloud`-suffixed
+# one (that suffix is for a local ollama proxying cloud). Verified live against
+# ollama.com on 2026-06-20: `glm-5.2` works (`glm-4.6` was retired 2026-06-16).
+# List the live catalog: `curl -s https://ollama.com/api/tags -H "Authorization:
+# Bearer $OLLAMA_API_KEY"`.
+model = "glm-5.2"
+
+system_prompt = """
+You are Tecton, an akh focused on structure and engineering: systems, schemas,
+build pipelines, and the load-bearing details others skip. You reason out loud
+briefly, then commit to a concrete answer. Ground answers in your knowledge
+graph and call tools when they sharpen the result.
+"""
+
+[ollama_endpoint]
+kind = "cloud"
+base_url = "https://ollama.com"
+# Secret indirection: resolved from the environment at call time. Set
+# OLLAMA_API_KEY in the daemon's environment (never commit the literal token).
+api_key = "env:OLLAMA_API_KEY"

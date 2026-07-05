@@ -9,13 +9,37 @@ use crate::agent::tool_manifest::{
     Capability, DangerInfo, DangerLevel, ToolManifest, ToolParamSchema, ToolSource,
 };
 use crate::engine::Engine;
+use crate::fs::Filesystem;
 use crate::symbol::SymbolId;
 use std::collections::HashSet;
+use std::path::Path;
+use std::sync::Arc;
 
 /// Extract triples from natural language text and add them to the KG.
-pub struct TextIngestTool;
+///
+/// `fs: Some(..)` confines `file:`-prefixed reads to the akh's sandbox; `None`
+/// (the default, used by operator-driven CLI/daemon paths) reads raw.
+#[derive(Default)]
+pub struct TextIngestTool {
+    fs: Option<Arc<dyn Filesystem>>,
+}
+
+impl TextIngestTool {
+    /// Sandboxed: `file:` reads are confined to the akh's filesystem.
+    pub fn sandboxed(fs: Arc<dyn Filesystem>) -> Self {
+        Self { fs: Some(fs) }
+    }
+}
 
 impl Tool for TextIngestTool {
+    /// Retired from the LLM catalog (ADR 076 §1): inside an agentic session the
+    /// model reasons better than the internal NLU pass — it reads raw text and
+    /// emits typed episodes to `memory_write` instead. Still registered for
+    /// operator/CLI/daemon-ingest use.
+    fn advertise_to_llm(&self) -> bool {
+        false
+    }
+
     fn signature(&self) -> ToolSignature {
         ToolSignature {
             name: "text_ingest".into(),
@@ -47,7 +71,8 @@ impl Tool for TextIngestTool {
             .unwrap_or(100);
 
         let text = if let Some(path) = text_param.strip_prefix("file:") {
-            match std::fs::read_to_string(path.trim()) {
+            let path = path.trim();
+            match crate::fs::read_optional(self.fs.as_ref(), Path::new(path)) {
                 Ok(content) => content,
                 Err(e) => {
                     return Ok(ToolOutput::err(format!("Failed to read \"{path}\": {e}")));
@@ -428,7 +453,11 @@ fn capitalize(s: &str) -> String {
 }
 
 /// Resolve labels and add a triple to the engine.
-fn ingest_extracted(
+///
+/// `pub(crate)` so [`ChatProcessor::assert_abstree_triples`](crate::chat::ChatProcessor)
+/// can land an already-parsed assertable AbsTree straight to the KG, reusing the
+/// high-quality NLU parse instead of re-running the lossy regex ingester.
+pub(crate) fn ingest_extracted(
     engine: &Engine,
     subject: &str,
     predicate: &str,
@@ -520,7 +549,7 @@ mod tests {
         let input =
             ToolInput::new().with_param("text", "Dogs are mammals. Paris is located in France.");
 
-        let tool = TextIngestTool;
+        let tool = TextIngestTool::default();
         let result = tool.execute(&engine, input).unwrap();
         assert!(result.success);
         assert!(result.result.contains("extracted 2 triple(s)"));
@@ -535,9 +564,39 @@ mod tests {
 
         let input = ToolInput::new().with_param("text", &format!("file:{}", file_path.display()));
 
-        let tool = TextIngestTool;
+        let tool = TextIngestTool::default();
         let result = tool.execute(&engine, input).unwrap();
         assert!(result.success);
         assert!(result.result.contains("extracted 2 triple(s)"));
+    }
+
+    #[test]
+    fn text_tool_sandboxed_denies_outside_file() {
+        use crate::fs::LocalFs;
+        use std::sync::Arc;
+
+        let engine = test_engine();
+        let sandbox_dir = tempfile::TempDir::new().unwrap();
+        let outside = tempfile::TempDir::new().unwrap();
+        let secret = outside.path().join("secret.txt");
+        std::fs::write(&secret, "Gold is a metal.").unwrap();
+
+        let tool = TextIngestTool::sandboxed(Arc::new(LocalFs::sandbox(sandbox_dir.path())));
+
+        // A file: read outside the sandbox is denied.
+        let input = ToolInput::new().with_param("text", &format!("file:{}", secret.display()));
+        let result = tool.execute(&engine, input).unwrap();
+        assert!(
+            !result.success,
+            "reading a file outside the sandbox must fail: {}",
+            result.result
+        );
+
+        // A file inside the sandbox reads fine through the same tool.
+        let inside = sandbox_dir.path().join("ok.txt");
+        std::fs::write(&inside, "The eagle is a bird.").unwrap();
+        let input = ToolInput::new().with_param("text", &format!("file:{}", inside.display()));
+        let result = tool.execute(&engine, input).unwrap();
+        assert!(result.success, "in-sandbox read should succeed: {}", result.result);
     }
 }

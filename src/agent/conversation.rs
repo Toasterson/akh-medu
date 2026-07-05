@@ -98,6 +98,11 @@ pub struct ConversationState {
     pub grammar: String,
     /// How much detail to include in responses.
     pub response_detail: ResponseDetail,
+    /// KG triple keys `(s, p, o)` already injected into this session's context
+    /// (Phase 44d delta refresh). Ephemeral + session-scoped: skipped from
+    /// serialization so a resumed session re-injects its grounding fresh.
+    #[serde(default, skip)]
+    kg_seen: std::collections::HashSet<(u64, u64, u64)>,
 }
 
 impl ConversationState {
@@ -111,7 +116,13 @@ impl ConversationState {
             active_topic: None,
             grammar: grammar.into(),
             response_detail: ResponseDetail::default(),
+            kg_seen: std::collections::HashSet::new(),
         }
+    }
+
+    /// Mutable handle to the session's already-shown KG triple keys (Phase 44d).
+    pub fn kg_seen_mut(&mut self) -> &mut std::collections::HashSet<(u64, u64, u64)> {
+        &mut self.kg_seen
     }
 
     /// Record a turn in the conversation.

@@ -5,7 +5,7 @@
 # Run:    docker run -p 8200:8200 -v akh-data:/data akhomed
 
 ARG RUST_VERSION=1.94.1
-ARG FEATURES="server,mcp,nlu-ml,nlu-candle,delegation,email,calendar"
+ARG FEATURES="server,nlu-ml,nlu-candle,delegation,email,calendar"
 
 # ── Stage 1: Build ────────────────────────────────────────────────────────
 FROM --platform=$BUILDPLATFORM rust:${RUST_VERSION}-bookworm AS builder

@@ -786,6 +786,35 @@ pub enum DerivationKind {
         /// Opaque source identifier (e.g. file path, device name, or URI).
         source_id: String,
     },
+
+    // --- Relation enrichment (work item 019e4026) ----------------------------
+
+    /// The relation-enrichment daemon pass injected predicate symbols and
+    /// linking triples to improve the entity:relation ratio.
+    RelationEnrichment {
+        /// New `SymbolKind::Relation` symbols created this run.
+        relations_added: usize,
+        /// Linking triples added to connect sparse / orphaned entities.
+        triples_added: usize,
+        /// Entity:relation ratio before the pass.
+        ratio_before: f32,
+        /// Entity:relation ratio after the pass.
+        ratio_after: f32,
+    },
+
+    // --- OpenClaw self-import (ADR 076) ---------------------------------------
+
+    /// Knowledge the akh imported from its *own* OpenClaw past life — persona,
+    /// memory journals, skills, or the SQLite/Lance stores. Distinct from the
+    /// generic `FileImport` so the akh can query exactly what it absorbed from
+    /// OpenClaw and dedupe on re-import.
+    OpenClawImport {
+        /// The OpenClaw source path the knowledge came from.
+        source_path: String,
+        /// What kind of artefact: `journal` | `skill` | `persona` |
+        /// `sqlite_memory` | `vector_export`.
+        kind: String,
+    },
 }
 
 impl DerivationKind {
@@ -895,6 +924,8 @@ impl DerivationKind {
             Self::KgCompaction { .. } => 100,
             Self::AffectiveAppraisal { .. } => 101,
             Self::Perceived { .. } => 102,
+            Self::RelationEnrichment { .. } => 103,
+            Self::OpenClawImport { .. } => 104,
         }
     }
 }

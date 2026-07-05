@@ -1,0 +1,122 @@
+{
+  "strategy": "virtual-r20",
+  "n": 8,
+  "accuracy": 5,
+  "retrieval": 7,
+  "wal_delta": 0,
+  "episode_delta": 0,
+  "results": [
+    {
+      "id": "cluster-nodes",
+      "retrieved": true,
+      "correct": true,
+      "tools": [
+        "archival_search",
+        "file_io",
+        "glob",
+        "kg_query",
+        "library_search",
+        "memory_recall",
+        "openclaw_discover",
+        "similarity_search"
+      ],
+      "elapsed": 24.4,
+      "answer": "Let me search my memory for both pieces of information.I see episodes about cluster topology and some from May 2026. Let me dig into the cluster topology episodes and search for anything around May 9.The memory_recall is giving me episode IDs but not the actual content/learnings."
+    },
+    {
+      "id": "alert-routing",
+      "retrieved": true,
+      "correct": false,
+      "tools": [
+        "archival_search",
+        "file_io",
+        "glob",
+        "grep",
+        "kg_query",
+        "library_search",
+        "memory_recall",
+        "openclaw_discover",
+        "shell_exec",
+        "similarity_search"
+      ],
+      "elapsed": 180.0,
+      "answer": "Let me search my knowledge graph and library for the Anima observability alert routing details.I found some alert symbols. Let me drill into those and also check for routing-specific knowledge.There's a specific episode for the observability design. Let me recall it and also look"
+    },
+    {
+      "id": "similarity-bug",
+      "retrieved": true,
+      "correct": true,
+      "tools": [
+        "archival_search",
+        "kg_query",
+        "library_search",
+        "memory_recall"
+      ],
+      "elapsed": 34.9,
+      "answer": "Let me recall these from memory. I'll search for the Anima observability design and the VSA similarity bug.Let me dig deeper into those episodes for the details.I found alert severity info but not the routing yet. Let me dig deeper.I have the VSA answer. Now let me find the Anima"
+    },
+    {
+      "id": "utf8-panic",
+      "retrieved": true,
+      "correct": true,
+      "tools": [
+        "archival_search",
+        "grep",
+        "kg_query",
+        "memory_recall",
+        "openclaw_discover"
+      ],
+      "elapsed": 33.2,
+      "answer": "Let me search the knowledge graph directly for the bug details.Let me look at the OpenClaw workspace memory files directly for this bug.Here it is, straight from the memory journals:\n\n---\n\n### UTF-8 / Byte-Index Panic Bug\n\n| Field | Value |\n|-------|-------|\n| **Source file** | `"
+    },
+    {
+      "id": "merge-loop",
+      "retrieved": false,
+      "correct": false,
+      "tools": [],
+      "elapsed": 4.1,
+      "answer": "From the knowledge graph context already loaded in this session, the answer is clear:\n\n---\n\n### Merge-Loop: Broken Since\n\nThe merge-loop had been broken **since approximately May 7, 2026** (at least 2026-05-07).\n\nSupporting facts from the KG:\n- `merge-loop` `stuck-since` `approxi"
+    },
+    {
+      "id": "archibald-disk",
+      "retrieved": true,
+      "correct": true,
+      "tools": [
+        "archival_search",
+        "file_io",
+        "kg_query",
+        "library_search",
+        "memory_recall",
+        "openclaw_discover",
+        "shell_exec"
+      ],
+      "elapsed": 39.2,
+      "answer": "Let me recall that from memory.From the Archibald maintenance design, the two big sources of wasted disk were:\n\n1. **Stale worktrees** \u2014 153 GB in `/home/toasty/anima-agent-worktrees/` from completed sessions. Normally the orchestrator reaps them, but if it dies, they pile up for"
+    },
+    {
+      "id": "redb-path",
+      "retrieved": true,
+      "correct": false,
+      "tools": [
+        "archival_search",
+        "kg_query",
+        "library_search",
+        "memory_recall",
+        "shell_exec"
+      ],
+      "elapsed": 123.6,
+      "answer": "Based on my memory and the KG findings, here's what I've been able to reconstruct:\n\nThe redb database file discovered was **`akh-medu.redb`**, found in temporary working directories under `~/.openclaw/tmp/` (e.g. `~/.openclaw/tmp/.tmp6tb1xe/akh-medu.redb`). It was ~3.5 MB, accomp"
+    },
+    {
+      "id": "hephaistos",
+      "retrieved": true,
+      "correct": true,
+      "tools": [
+        "kg_query",
+        "memory_recall"
+      ],
+      "elapsed": 6.1,
+      "answer": "**No \u2014 Hephaistos is explicitly *not* a Kubernetes node.** The KG is emphatic about this, with multiple redundant triples:\n\n- `is-k8s-node: false`\n- `is-a: NOT-K8s-cluster-node`\n- `is-a: workstation-gaming-rig`\n- `role: workstation-gaming-rig`\n\nHephaistos is **Toasty's personal w"
+    }
+  ]
+}

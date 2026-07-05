@@ -1,0 +1,43 @@
+# System-level unit for the akh-medu daemon, installed by `install.sh` to
+# /etc/systemd/system/akhomed.service and run as the dedicated `akh` user.
+#
+# This is the system counterpart to ../akhomed.service (which is the per-user
+# `systemctl --user` unit). Enable with: systemctl enable --now akhomed
+[Unit]
+Description=akh-medu daemon — neuro-symbolic reasoning server
+Documentation=https://akh-medu.dev
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=akh
+Group=akh
+ExecStart=/usr/local/bin/akhomed
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=10
+
+# Network bind — override with `systemctl edit akhomed`.
+Environment=AKH_SERVER_BIND=127.0.0.1
+Environment=AKH_SERVER_PORT=8200
+Environment=RUST_LOG=info,egg=warn,hnsw_rs=warn
+# XDG layout for a system service. The binary appends `akh-medu` to each.
+Environment=XDG_CONFIG_HOME=/etc
+Environment=XDG_DATA_HOME=/var/lib
+Environment=XDG_CACHE_HOME=/var/cache
+Environment=XDG_STATE_HOME=/var/lib/akh-medu/state
+Environment=XDG_RUNTIME_DIR=/run
+# onnxruntime ships alongside the binaries in the Linux tarball. Path assumes
+# install.sh's default prefix (/usr/local); adjust if you pass --prefix.
+Environment=ORT_DYLIB_PATH=/usr/local/lib/akh-medu/libonnxruntime.so
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/akh-medu /etc/akh-medu /var/cache/akh-medu
+
+[Install]
+WantedBy=multi-user.target

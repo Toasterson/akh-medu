@@ -272,6 +272,7 @@ impl Tool for CliTool {
                     description: a.description.clone(),
                     required: a.required,
                     param_type: "string".into(),
+                    schema: None,
                 })
                 .collect(),
             danger: self.manifest.danger.clone(),

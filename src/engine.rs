@@ -59,6 +59,11 @@ pub struct EngineConfig {
     pub max_symbols: usize,
     /// Default language for parsing. `Auto` means detect from text.
     pub language: Language,
+    /// Additional read-only filesystem roots folded into the agent's `LocalFs`
+    /// **read** roots (writes stay confined to `scratch/`). Empty by default;
+    /// the OpenClaw self-import switch (ADR 076 §4) widens this to `~/.openclaw`
+    /// so the LLM can read its own OpenClaw past life.
+    pub extra_read_roots: Vec<PathBuf>,
 }
 
 impl Default for EngineConfig {
@@ -71,6 +76,7 @@ impl Default for EngineConfig {
             max_memory_mb: 1024,
             max_symbols: 1_000_000,
             language: Language::Auto,
+            extra_read_roots: Vec::new(),
         }
     }
 }
@@ -164,6 +170,15 @@ pub struct Engine {
     nart_registry: RwLock<crate::graph::nart::NartRegistry>,
     predicate_hierarchy: RwLock<Option<crate::graph::predicate_hierarchy::PredicateHierarchy>>,
     hierarchy_dirty: AtomicBool,
+    /// Phase 38b: optional write-ahead-log sink. Set once when the daemon wires
+    /// a Postgres-backed `MutationLog` for this workspace; absent in local-only
+    /// mode. Every successful assert/retract is recorded here (best-effort,
+    /// non-blocking).
+    mutation_sink: std::sync::OnceLock<Arc<dyn crate::mutation::MutationSink>>,
+    /// Phase 47: live, lock-free inference toggles (e.g. speculative decode). Shared by `Arc`
+    /// with the Candle chat backend so a tool flipping it via `&Engine` is observed next turn.
+    /// Seeded from the akh's `AkhConfig` at startup.
+    inference_options: Arc<crate::inference_options::InferenceOptions>,
 }
 
 impl Engine {
@@ -370,6 +385,8 @@ impl Engine {
             nart_registry: RwLock::new(crate::graph::nart::NartRegistry::new()),
             predicate_hierarchy: RwLock::new(None),
             hierarchy_dirty: AtomicBool::new(true),
+            mutation_sink: std::sync::OnceLock::new(),
+            inference_options: Arc::new(crate::inference_options::InferenceOptions::default()),
         };
 
         // Restore Phase 9 registries from persistent storage if available.
@@ -454,6 +471,26 @@ impl Engine {
                     );
                 }
             }
+        }
+    }
+
+    /// Install the write-ahead-log sink (Phase 38b).
+    ///
+    /// Set once at workspace load when a Postgres backing store is configured.
+    /// Returns `Err` (ignored by callers) if a sink was already installed.
+    pub fn set_mutation_sink(
+        &self,
+        sink: Arc<dyn crate::mutation::MutationSink>,
+    ) -> Result<(), Arc<dyn crate::mutation::MutationSink>> {
+        self.mutation_sink.set(sink)
+    }
+
+    /// Record a mutation on the WAL sink if one is installed. Non-blocking; a
+    /// no-op in local-only mode.
+    #[inline]
+    fn record_mutation(&self, kind: crate::mutation::MutationKind, payload: serde_json::Value) {
+        if let Some(sink) = self.mutation_sink.get() {
+            sink.record(crate::mutation::MutationRecord::new(kind, payload));
         }
     }
 
@@ -641,6 +678,18 @@ impl Engine {
                 }
             }
         }
+
+        // --- Phase 38b: write-ahead log ---
+        self.record_mutation(
+            crate::mutation::MutationKind::Assert,
+            serde_json::json!({
+                "subject": triple.subject.get(),
+                "predicate": triple.predicate.get(),
+                "object": triple.object.get(),
+                "confidence": triple.confidence,
+                "compartment": triple.compartment_id,
+            }),
+        );
 
         Ok(())
     }
@@ -1070,6 +1119,18 @@ impl Engine {
         self.registry.all()
     }
 
+    /// Cheap count of registered symbols (no clone) — for status/introspection
+    /// polled frequently, unlike [`all_symbols`](Self::all_symbols).
+    pub fn symbol_count(&self) -> usize {
+        self.registry.len()
+    }
+
+    /// Cheap count of triples in the knowledge graph (no clone) — counterpart to
+    /// [`symbol_count`](Self::symbol_count).
+    pub fn triple_count(&self) -> usize {
+        self.knowledge_graph.triple_count()
+    }
+
     /// Resolve a name-or-id string: try parsing as u64 first, then label lookup.
     pub fn resolve_symbol(&self, name_or_id: &str) -> AkhResult<SymbolId> {
         // Try numeric ID first.
@@ -1109,6 +1170,26 @@ impl Engine {
     /// Get all triples in the knowledge graph.
     pub fn all_triples(&self) -> Vec<Triple> {
         self.knowledge_graph.all_triples()
+    }
+
+    /// All registered symbols (id ↔ kind ↔ label). Used by the Phase 38c
+    /// snapshot writer to materialise the registry into Postgres.
+    pub fn dump_symbols(&self) -> Vec<SymbolMeta> {
+        self.registry.all()
+    }
+
+    /// Bulk-load triples into the KG and item memory **without** the Phase 9
+    /// pipeline or the WAL (Phase 38c wake path). Used when rebuilding a fresh
+    /// engine's KG from `akhomed.facts`; the WAL sink must not be installed yet,
+    /// so this does not re-log. Returns the number of triples loaded.
+    pub fn restore_triples(&self, triples: &[Triple]) -> AkhResult<usize> {
+        let count = self.knowledge_graph.bulk_load(triples)?;
+        for t in triples {
+            self.item_memory.get_or_create(&self.ops, t.subject);
+            self.item_memory.get_or_create(&self.ops, t.predicate);
+            self.item_memory.get_or_create(&self.ops, t.object);
+        }
+        Ok(count)
     }
 
     /// Execute a SPARQL SELECT query.
@@ -2055,6 +2136,17 @@ impl Engine {
             });
         }
 
+        // --- Phase 38b: write-ahead log (only the primary retract; TMS-cascaded
+        // removals are re-derived on replay since the TMS rebuilds from facts) ---
+        self.record_mutation(
+            crate::mutation::MutationKind::Retract,
+            serde_json::json!({
+                "subject": subject.get(),
+                "predicate": predicate.get(),
+                "object": object.get(),
+            }),
+        );
+
         // Sync removal to SPARQL store
         if let Some(ref sparql) = self.sparql {
             let _ = sparql.remove_triple(subject, predicate, object);
@@ -2917,6 +3009,13 @@ impl Engine {
     /// Get the engine configuration.
     pub fn config(&self) -> &EngineConfig {
         &self.config
+    }
+
+    /// Live, lock-free inference toggles for this akh (Phase 47). Shared by `Arc` with the
+    /// Candle chat backend, so a tool flipping an option here is observed on the next turn.
+    /// Seeded from the akh's `AkhConfig` at startup; mutated by the `inference_config` tool.
+    pub fn inference_options(&self) -> &Arc<crate::inference_options::InferenceOptions> {
+        &self.inference_options
     }
 
     /// Get the compartment manager (if data_dir is configured).

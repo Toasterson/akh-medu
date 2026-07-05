@@ -1,0 +1,66 @@
+#
+# pkgmogrify(1) transform manifest for the akh-medu IPS package.
+#
+# Applied by packaging/illumos/build-ips.sh on top of the `pkgsend generate`
+# output of the staged proto area. Macros ($(VERSION) etc.) are supplied with
+# pkgmogrify -D. See ADR 079.
+#
+
+# --- package metadata -------------------------------------------------------
+set name=pkg.fmri value=pkg://$(PUBLISHER)/application/akh-medu@$(VERSION)-$(BRANCH)
+set name=pkg.summary value="akh-medu — neuro-symbolic AI engine"
+set name=pkg.description value="akh-medu neuro-symbolic AI engine: the akh CLI/TUI client, the akhomed reasoning daemon, and the seshd corpus archive service. SMF-managed; built without onnxruntime (candle backend only) on illumos."
+set name=info.classification value="org.opensolaris.category.2008:System/Services"
+set name=variant.arch value=i386
+
+# --- SMF: import manifests on install/refresh -------------------------------
+<transform file path=lib/svc/manifest/.+\.xml$ -> set restart_fmri svc:/system/manifest-import:default>
+
+# --- modes (belt-and-suspenders over the staged proto perms) ----------------
+<transform file path=opt/akh-medu/bin/.+$ -> set mode 0555>
+<transform file path=lib/svc/method/.+$ -> set mode 0555>
+<transform file path=lib/svc/manifest/.+$ -> set mode 0444>
+
+# --- keep operator edits to the live config across upgrades -----------------
+<transform file path=etc/akh-medu/seshat\.toml$ -> set preserve true>
+
+# --- directory ownership for the data/cache trees ---------------------------
+<transform dir path=opt/akh-medu(/bin)?$ -> set owner root>
+<transform dir path=opt/akh-medu(/bin)?$ -> set group bin>
+<transform dir path=etc/akh-medu$ -> set owner root>
+<transform dir path=etc/akh-medu$ -> set group akh>
+<transform dir path=etc/akh-medu$ -> set mode 0750>
+<transform dir path=var/lib/akh-medu/seshat(/models)?$ -> set owner seshat>
+<transform dir path=var/lib/akh-medu/seshat(/models)?$ -> set group seshat>
+<transform dir path=var/lib/akh-medu/seshat(/models)?$ -> set mode 0750>
+<transform dir path=var/lib/akh-medu(/state)?$ -> set owner akh>
+<transform dir path=var/lib/akh-medu(/state)?$ -> set group akh>
+<transform dir path=var/lib/akh-medu(/state)?$ -> set mode 0750>
+<transform dir path=var/cache/akh-medu$ -> set owner akh>
+<transform dir path=var/cache/akh-medu$ -> set group akh>
+<transform dir path=var/cache/akh-medu$ -> set mode 0750>
+
+# --- drop OS-owned ancestor directories (we only own the leaves) ------------
+<transform dir path=etc$ -> drop>
+<transform dir path=lib$ -> drop>
+<transform dir path=lib/svc$ -> drop>
+<transform dir path=lib/svc/manifest$ -> drop>
+<transform dir path=lib/svc/manifest/application$ -> drop>
+<transform dir path=lib/svc/method$ -> drop>
+<transform dir path=opt$ -> drop>
+<transform dir path=usr$ -> drop>
+<transform dir path=usr/bin$ -> drop>
+<transform dir path=var$ -> drop>
+<transform dir path=var/lib$ -> drop>
+<transform dir path=var/cache$ -> drop>
+
+# --- service accounts (created at install time) -----------------------------
+# UIDs/GIDs are site-local defaults — override with build-ips.sh -D if they
+# collide with existing accounts on your hosts.
+group groupname=akh gid=$(AKH_GID)
+group groupname=seshat gid=$(SESHAT_GID)
+user username=akh uid=$(AKH_UID) group=akh gcos-field="akh-medu daemon" home-dir=/var/lib/akh-medu login-shell=/bin/false ftpuser=false
+user username=seshat uid=$(SESHAT_UID) group=seshat gcos-field="Seshat Archive" home-dir=/var/lib/akh-medu/seshat login-shell=/bin/false ftpuser=false
+
+# --- license ----------------------------------------------------------------
+license LICENSE license="GPL-3.0-only"

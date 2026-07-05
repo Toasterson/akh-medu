@@ -26,6 +26,7 @@
 
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use miette::Diagnostic;
@@ -35,7 +36,39 @@ use thiserror::Error;
 use crate::compartment::psyche::{ArchetypeWeights, Psyche};
 use crate::extraction::config::ExternalApiConfig;
 
-use super::ollama::{OllamaClient, OllamaConfig, OllamaError};
+use super::ollama::{AssistantTurn, OllamaClient, OllamaConfig, OllamaError};
+
+// ---------------------------------------------------------------------------
+// PromptMode
+// ---------------------------------------------------------------------------
+
+/// Controls how the agent's system prompt is structured for a given model.
+///
+/// Auto-detected from the model name by [`detect_prompt_mode`], but can be
+/// overridden via [`ModelManagerConfig::prompt_mode`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptMode {
+    /// Full Psyche-encoded prompt — best for capable models (e.g. DeepSeek).
+    #[default]
+    Standard,
+    /// Compact prompt with strict brevity constraints — for smaller or verbose
+    /// models (e.g. Gemma 4) that otherwise produce excessive text per cycle,
+    /// inflating OODA cycle counts.
+    Terse,
+}
+
+/// Auto-detect the prompt mode from a model identifier string.
+///
+/// Returns `PromptMode::Terse` when `model` contains `"gemma"` (case-insensitive),
+/// `PromptMode::Standard` otherwise.
+pub fn detect_prompt_mode(model: &str) -> PromptMode {
+    if model.to_ascii_lowercase().contains("gemma") {
+        PromptMode::Terse
+    } else {
+        PromptMode::Standard
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Config
@@ -55,6 +88,23 @@ pub struct ModelManagerConfig {
     /// TTL in seconds before an idle agent entry is evicted (default: 300 = 5 min).
     #[serde(default = "default_ttl")]
     pub idle_ttl_secs: u64,
+    /// Explicit prompt mode override.
+    ///
+    /// When `None` (the default), the mode is auto-detected from `ollama.model`:
+    /// any model whose name contains `"gemma"` (case-insensitive) gets
+    /// [`PromptMode::Terse`]; everything else gets [`PromptMode::Standard`].
+    ///
+    /// Set to `Some(PromptMode::Terse)` to force terse mode for other small or
+    /// verbose models, or `Some(PromptMode::Standard)` to suppress auto-detection.
+    #[serde(default)]
+    pub prompt_mode: Option<PromptMode>,
+    /// Explicit, authoritative system prompt for this akh. When `Some`, it
+    /// *replaces* the psyche-derived prompt in [`assemble_system_prompt`] (the
+    /// `prompt_mode` brevity block is *not* applied — an explicit prompt is
+    /// verbatim); when `None`, the psyche-derived prompt is used. Sourced from
+    /// `AkhConfig.system_prompt`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_prompt: Option<String>,
 }
 
 impl Default for ModelManagerConfig {
@@ -63,6 +113,8 @@ impl Default for ModelManagerConfig {
             ollama: OllamaConfig::default(),
             fallback_api: None,
             idle_ttl_secs: default_ttl(),
+            prompt_mode: None,
+            system_prompt: None,
         }
     }
 }
@@ -148,21 +200,137 @@ struct AgentEntry {
 /// Thread-safe via `Mutex<HashMap<...>>`.  The OODA loop is single-threaded so
 /// contention is negligible; the Mutex exists for daemon use-cases where the
 /// manager may be shared via `Arc`.
+/// Per-manager token-usage tally, accumulated across agentic chat turns.
+///
+/// Interior-mutable (atomics) so it can be updated from `&self` chat methods
+/// while the manager is shared behind an `Arc`. `prompt`/`completion` are
+/// cumulative spend; `last_context_tokens` is the most recent turn's footprint
+/// (a stand-in for "current context fill").
+#[derive(Debug, Default)]
+pub struct UsageLedger {
+    prompt_tokens: AtomicU64,
+    completion_tokens: AtomicU64,
+    turns: AtomicU64,
+    last_context_tokens: AtomicU64,
+}
+
+impl UsageLedger {
+    /// Record one model turn's token counts.
+    fn record(&self, prompt: u64, completion: u64) {
+        self.prompt_tokens.fetch_add(prompt, Ordering::Relaxed);
+        self.completion_tokens.fetch_add(completion, Ordering::Relaxed);
+        self.turns.fetch_add(1, Ordering::Relaxed);
+        self.last_context_tokens
+            .store(prompt + completion, Ordering::Relaxed);
+    }
+
+    /// A consistent-enough point-in-time copy for read-only callers. The
+    /// `context_window` is filled by the manager (it owns that cache), not here.
+    fn snapshot(&self) -> UsageSnapshot {
+        UsageSnapshot {
+            prompt_tokens: self.prompt_tokens.load(Ordering::Relaxed),
+            completion_tokens: self.completion_tokens.load(Ordering::Relaxed),
+            turns: self.turns.load(Ordering::Relaxed),
+            context_tokens: self.last_context_tokens.load(Ordering::Relaxed),
+            context_window: None,
+        }
+    }
+}
+
+/// Plain snapshot of a [`UsageLedger`] for reporting (e.g. `_akh/usage`).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct UsageSnapshot {
+    /// Cumulative prompt (input) tokens this session.
+    pub prompt_tokens: u64,
+    /// Cumulative completion (output) tokens this session.
+    pub completion_tokens: u64,
+    /// Number of model turns recorded.
+    pub turns: u64,
+    /// Most recent turn's token footprint (prompt + completion) — a proxy for
+    /// current context fill.
+    pub context_tokens: u64,
+    /// Model context-window size, when known (lazily fetched via `/api/show`);
+    /// `None` ⇒ the meter shows absolute counts without a percentage.
+    pub context_window: Option<u64>,
+}
+
+impl UsageSnapshot {
+    /// Total tokens billed this session (prompt + completion).
+    #[must_use]
+    pub fn total_tokens(&self) -> u64 {
+        self.prompt_tokens + self.completion_tokens
+    }
+}
+
 pub struct AgentModelManager {
     config: ModelManagerConfig,
     ollama: OllamaClient,
     agents: Mutex<HashMap<String, AgentEntry>>,
+    /// Resolved prompt mode for this manager (auto-detected or config-overridden).
+    prompt_mode: PromptMode,
+    /// Cumulative token usage across this manager's agentic turns.
+    usage: UsageLedger,
+    /// Lazily-fetched model context-window size (0 = unknown). Populated once via
+    /// [`OllamaClient::context_length`] after the first turn.
+    context_window: AtomicU64,
+    /// Whether the one-time context-window fetch has been attempted.
+    context_window_tried: AtomicBool,
 }
 
 impl AgentModelManager {
     /// Create a new manager with the given config.
     pub fn new(config: ModelManagerConfig) -> Self {
+        let prompt_mode = config
+            .prompt_mode
+            .unwrap_or_else(|| detect_prompt_mode(&config.ollama.model));
         let ollama = OllamaClient::new(config.ollama.clone());
+        tracing::debug!(
+            model = %config.ollama.model,
+            ?prompt_mode,
+            "model manager initialised",
+        );
         Self {
             config,
             ollama,
             agents: Mutex::new(HashMap::new()),
+            prompt_mode,
+            usage: UsageLedger::default(),
+            context_window: AtomicU64::new(0),
+            context_window_tried: AtomicBool::new(false),
         }
+    }
+
+    /// Return the prompt mode in effect for this manager.
+    pub fn prompt_mode(&self) -> PromptMode {
+        self.prompt_mode
+    }
+
+    /// A point-in-time copy of this manager's cumulative token usage, including
+    /// the cached context-window size when known.
+    pub fn usage(&self) -> UsageSnapshot {
+        let mut snap = self.usage.snapshot();
+        let window = self.context_window.load(Ordering::Relaxed);
+        snap.context_window = (window > 0).then_some(window);
+        snap
+    }
+
+    /// Lazily fetch and cache the model's context-window size, at most once
+    /// (best-effort). Called after a turn so the one `/api/show` round-trip never
+    /// blocks the first user-visible response.
+    fn ensure_context_window(&self) {
+        if self.context_window_tried.swap(true, Ordering::Relaxed) {
+            return; // already attempted
+        }
+        if let Some(window) = self.ollama.context_length() {
+            self.context_window.store(window, Ordering::Relaxed);
+        }
+    }
+
+    /// The pinned model's capabilities (context window, thinking/tools support),
+    /// read once from Ollama's `/api/show` and cached. Used by the Phase 44
+    /// context budget and reasoning-effort gating.
+    pub fn capabilities(&self) -> super::chat_backend::ModelCapabilities {
+        self.ollama.capabilities().clone()
     }
 
     // ── Registration ───────────────────────────────────────────────────────
@@ -175,7 +343,13 @@ impl AgentModelManager {
     /// Callers can pass `None` for `psyche` to get a generic system prompt
     /// keyed only on the agent's name.
     pub fn load_agent(&self, agent_id: &str, agent_name: &str, psyche: Option<&Psyche>) {
-        let prompt = build_system_prompt(agent_id, agent_name, psyche);
+        let prompt = assemble_system_prompt(
+            agent_id,
+            agent_name,
+            psyche,
+            self.config.system_prompt.as_deref(),
+            self.prompt_mode,
+        );
         let mut agents = self.agents.lock().expect("model manager lock poisoned");
         let entry = agents.entry(agent_id.to_string()).or_insert_with(|| AgentEntry {
             system_prompt: prompt.clone(),
@@ -249,6 +423,78 @@ impl AgentModelManager {
         })
     }
 
+    /// Run one tool-enabled chat turn for the agent.
+    ///
+    /// Prepends the agent's cached (psyche-/config-derived) system prompt to
+    /// `conversation`, then calls Ollama `/api/chat` with the `tools` catalog.
+    /// Unlike [`generate`](Self::generate) there is **no** remote fallback — tool
+    /// calling is an Ollama-only capability for now, so callers should gate on
+    /// [`ollama_available`](Self::ollama_available) and degrade to the symbolic
+    /// pipeline when it returns `false`.
+    pub fn chat_with_tools(
+        &self,
+        agent_id: &str,
+        conversation: &[serde_json::Value],
+        tools: &[serde_json::Value],
+    ) -> ModelManagerResult<AssistantTurn> {
+        let system_prompt = {
+            let mut agents = self.agents.lock().expect("model manager lock poisoned");
+            let entry =
+                agents
+                    .get_mut(agent_id)
+                    .ok_or_else(|| ModelManagerError::AgentNotLoaded {
+                        agent_id: agent_id.into(),
+                    })?;
+            entry.last_used = Instant::now();
+            entry.system_prompt.clone()
+        };
+
+        let mut messages = Vec::with_capacity(conversation.len() + 1);
+        messages.push(serde_json::json!({"role": "system", "content": system_prompt}));
+        messages.extend_from_slice(conversation);
+
+        let turn = self.ollama.chat(&messages, tools)?;
+        self.usage.record(turn.prompt_tokens, turn.completion_tokens);
+        self.ensure_context_window();
+        Ok(turn)
+    }
+
+    /// Streaming counterpart of [`chat_with_tools`](Self::chat_with_tools).
+    ///
+    /// Identical prompt assembly (agent system prompt prepended), but delegates
+    /// to [`OllamaClient::chat_stream`] so the answer/thinking deltas reach
+    /// `on_event` as the model generates. Returns the assembled
+    /// [`AssistantTurn`] (full content + any tool calls). No remote fallback —
+    /// same Ollama-only constraint as the non-streaming path.
+    pub fn chat_with_tools_streaming(
+        &self,
+        agent_id: &str,
+        conversation: &[serde_json::Value],
+        tools: &[serde_json::Value],
+        on_event: &mut dyn FnMut(super::ollama::StreamEvent),
+    ) -> ModelManagerResult<AssistantTurn> {
+        let system_prompt = {
+            let mut agents = self.agents.lock().expect("model manager lock poisoned");
+            let entry =
+                agents
+                    .get_mut(agent_id)
+                    .ok_or_else(|| ModelManagerError::AgentNotLoaded {
+                        agent_id: agent_id.into(),
+                    })?;
+            entry.last_used = Instant::now();
+            entry.system_prompt.clone()
+        };
+
+        let mut messages = Vec::with_capacity(conversation.len() + 1);
+        messages.push(serde_json::json!({"role": "system", "content": system_prompt}));
+        messages.extend_from_slice(conversation);
+
+        let turn = self.ollama.chat_stream(&messages, tools, on_event)?;
+        self.usage.record(turn.prompt_tokens, turn.completion_tokens);
+        self.ensure_context_window();
+        Ok(turn)
+    }
+
     // ── Lifecycle ─────────────────────────────────────────────────────────
 
     /// Evict agent entries that have been idle longer than `idle_ttl_secs`.
@@ -319,6 +565,21 @@ impl AgentModelManager {
         agents.contains_key(agent_id)
     }
 
+    /// The assembled system prompt currently stored for an agent, if registered.
+    ///
+    /// Exposes the result of [`assemble_system_prompt`] so callers (and tests)
+    /// can confirm which prompt — explicit override or psyche-derived — an akh
+    /// will send, without performing inference.
+    pub fn system_prompt_for(&self, agent_id: &str) -> Option<String> {
+        let agents = self.agents.lock().expect("model manager lock poisoned");
+        agents.get(agent_id).map(|e| e.system_prompt.clone())
+    }
+
+    /// The model name this manager is pinned to (the akh's pinned model).
+    pub fn model(&self) -> &str {
+        &self.config.ollama.model
+    }
+
     // ── Fallback helpers ──────────────────────────────────────────────────
 
     fn generate_via_fallback(
@@ -385,13 +646,70 @@ impl AgentModelManager {
 
 /// Build a Psyche-encoded system prompt for an agent (Method A).
 ///
+/// Single authoritative system-prompt assembly entry point.
+///
+/// Precedence (ADR-053):
+/// 1. An explicit, non-empty `explicit` prompt (from `AkhConfig.system_prompt`)
+///    is returned **verbatim** — it fully replaces the psyche-derived text, with
+///    no archetype/persona framing appended.
+/// 2. Otherwise the psyche-derived prompt from [`build_system_prompt`] is used.
+///
+/// This collapses the previously-scattered prompt-assembly logic so callers on
+/// the inference path go through exactly one function.
+pub fn assemble_system_prompt(
+    agent_id: &str,
+    agent_name: &str,
+    psyche: Option<&Psyche>,
+    explicit: Option<&str>,
+    mode: PromptMode,
+) -> String {
+    if let Some(text) = explicit {
+        if !text.trim().is_empty() {
+            // Authoritative: returned verbatim. `mode` (incl. Terse brevity) is
+            // intentionally NOT applied — the operator owns the full prompt.
+            return text.to_string();
+        }
+    }
+    build_system_prompt(agent_id, agent_name, psyche, mode)
+}
+
 /// Translates the agent's Jungian psyche configuration into a natural-language
 /// system prompt that Ollama injects as the `system` role in every request.
 /// Two agents with different psyches will produce different responses to identical
 /// knowledge-graph facts.
 ///
 /// When `psyche` is `None`, a minimal generic prompt is returned.
-pub fn build_system_prompt(agent_id: &str, agent_name: &str, psyche: Option<&Psyche>) -> String {
+///
+/// When `mode` is [`PromptMode::Terse`], a strict brevity constraint block is
+/// appended.  This significantly reduces OODA cycle counts for smaller or verbose
+/// models such as Gemma 4 (observed: 30 cycles/fact → ~4 cycles/fact baseline).
+///
+/// Prefer [`assemble_system_prompt`] on the inference path — it adds the
+/// explicit-prompt override on top of this psyche-derived fallback.
+pub fn build_system_prompt(
+    agent_id: &str,
+    agent_name: &str,
+    psyche: Option<&Psyche>,
+    mode: PromptMode,
+) -> String {
+    let body = build_system_prompt_body(agent_id, agent_name, psyche);
+    match mode {
+        PromptMode::Standard => body,
+        PromptMode::Terse => format!("{body}\n\n{TERSE_CONSTRAINTS}"),
+    }
+}
+
+/// Terse-mode constraint block injected for verbose/small models (e.g. Gemma 4).
+///
+/// Keeps each model response under ~50 tokens so the OODA loop converges in
+/// fewer cycles per fact.
+const TERSE_CONSTRAINTS: &str = "\
+## Response Constraints (Terse Mode)\n\
+CRITICAL: Respond in at most 2 sentences. No preamble. No summaries.\n\
+State only the required answer or the chosen tool and its parameters.\n\
+Do not explain your reasoning. Do not repeat the question. Just act.";
+
+fn build_system_prompt_body(agent_id: &str, agent_name: &str, psyche: Option<&Psyche>) -> String {
     let Some(p) = psyche else {
         return format!(
             "You are {agent_name} (id: {agent_id}), an autonomous neuro-symbolic AI agent. \
@@ -468,6 +786,20 @@ fn describe_archetypes(a: &ArchetypeWeights) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn usage_ledger_accumulates_and_snapshots() {
+        let ledger = UsageLedger::default();
+        ledger.record(100, 20);
+        ledger.record(50, 10);
+        let snap = ledger.snapshot();
+        assert_eq!(snap.prompt_tokens, 150);
+        assert_eq!(snap.completion_tokens, 30);
+        assert_eq!(snap.turns, 2);
+        assert_eq!(snap.total_tokens(), 180);
+        // context_tokens reflects only the most recent turn's footprint.
+        assert_eq!(snap.context_tokens, 60);
+    }
+
     fn tecton_psyche() -> Psyche {
         let mut p = Psyche::default();
         p.persona.name = "Ptah".into();
@@ -498,7 +830,7 @@ mod tests {
 
     #[test]
     fn build_system_prompt_none_psyche() {
-        let prompt = build_system_prompt("a1", "GenericAgent", None);
+        let prompt = build_system_prompt("a1", "GenericAgent", None, PromptMode::Standard);
         assert!(prompt.contains("GenericAgent"));
         assert!(prompt.contains("a1"));
         assert!(prompt.contains("neuro-symbolic"));
@@ -507,7 +839,7 @@ mod tests {
     #[test]
     fn build_system_prompt_tecton_contains_ptah_traits() {
         let p = tecton_psyche();
-        let prompt = build_system_prompt("tecton-01", "Tecton", Some(&p));
+        let prompt = build_system_prompt("tecton-01", "Tecton", Some(&p), PromptMode::Standard);
         assert!(prompt.contains("Ptah"));
         assert!(prompt.contains("creative"));
         assert!(prompt.contains("inspiring"));
@@ -517,7 +849,7 @@ mod tests {
     #[test]
     fn build_system_prompt_thoth_contains_thoth_traits() {
         let p = thoth_psyche();
-        let prompt = build_system_prompt("thoth-01", "Thoth", Some(&p));
+        let prompt = build_system_prompt("thoth-01", "Thoth", Some(&p), PromptMode::Standard);
         assert!(prompt.contains("Thoth"));
         assert!(prompt.contains("analytical"));
         assert!(prompt.contains("scholarly"));
@@ -525,9 +857,146 @@ mod tests {
 
     #[test]
     fn tecton_and_thoth_produce_different_prompts() {
-        let tecton = build_system_prompt("t1", "Tecton", Some(&tecton_psyche()));
-        let thoth = build_system_prompt("t2", "Thoth", Some(&thoth_psyche()));
+        let tecton = build_system_prompt("t1", "Tecton", Some(&tecton_psyche()), PromptMode::Standard);
+        let thoth = build_system_prompt("t2", "Thoth", Some(&thoth_psyche()), PromptMode::Standard);
         assert_ne!(tecton, thoth, "different psyches must produce different prompts");
+    }
+
+    // ── PromptMode tests ────────────────────────────────────────────────
+
+    #[test]
+    fn detect_prompt_mode_gemma_is_terse() {
+        assert_eq!(detect_prompt_mode("gemma4:e4b"), PromptMode::Terse);
+        assert_eq!(detect_prompt_mode("gemma3:27b"), PromptMode::Terse);
+        assert_eq!(detect_prompt_mode("Gemma4:e4b"), PromptMode::Terse);
+        assert_eq!(detect_prompt_mode("GEMMA"), PromptMode::Terse);
+    }
+
+    #[test]
+    fn detect_prompt_mode_non_gemma_is_standard() {
+        assert_eq!(detect_prompt_mode("deepseek-r1"), PromptMode::Standard);
+        assert_eq!(detect_prompt_mode("llama3:8b"), PromptMode::Standard);
+        assert_eq!(detect_prompt_mode("mistral:7b"), PromptMode::Standard);
+        assert_eq!(detect_prompt_mode(""), PromptMode::Standard);
+    }
+
+    #[test]
+    fn terse_prompt_contains_constraints() {
+        let prompt = build_system_prompt("a1", "Akh", None, PromptMode::Terse);
+        assert!(
+            prompt.contains("Terse Mode"),
+            "terse prompt must include constraint block: {prompt}",
+        );
+        assert!(
+            prompt.contains("2 sentences"),
+            "terse prompt must cap response length: {prompt}",
+        );
+    }
+
+    #[test]
+    fn standard_prompt_lacks_terse_constraints() {
+        let prompt = build_system_prompt("a1", "Akh", None, PromptMode::Standard);
+        assert!(
+            !prompt.contains("Terse Mode"),
+            "standard prompt must not include constraint block",
+        );
+    }
+
+    #[test]
+    fn manager_auto_detects_gemma_as_terse() {
+        let cfg = ModelManagerConfig {
+            ollama: OllamaConfig {
+                model: "gemma4:e4b".into(),
+                ..OllamaConfig::default()
+            },
+            ..ModelManagerConfig::default()
+        };
+        let mgr = AgentModelManager::new(cfg);
+        assert_eq!(mgr.prompt_mode(), PromptMode::Terse);
+    }
+
+    #[test]
+    fn manager_auto_detects_deepseek_as_standard() {
+        let cfg = ModelManagerConfig {
+            ollama: OllamaConfig {
+                model: "deepseek-r1:14b".into(),
+                ..OllamaConfig::default()
+            },
+            ..ModelManagerConfig::default()
+        };
+        let mgr = AgentModelManager::new(cfg);
+        assert_eq!(mgr.prompt_mode(), PromptMode::Standard);
+    }
+
+    #[test]
+    fn manager_config_override_beats_auto_detect() {
+        // Gemma model but explicitly forced to Standard.
+        let cfg = ModelManagerConfig {
+            ollama: OllamaConfig {
+                model: "gemma4:e4b".into(),
+                ..OllamaConfig::default()
+            },
+            prompt_mode: Some(PromptMode::Standard),
+            ..ModelManagerConfig::default()
+        };
+        let mgr = AgentModelManager::new(cfg);
+        assert_eq!(mgr.prompt_mode(), PromptMode::Standard);
+    }
+
+    #[test]
+    fn assemble_prefers_explicit_prompt_verbatim() {
+        let explicit = "You are Thoth, keeper of records.";
+        // Even with a rich psyche present, the explicit prompt wins verbatim.
+        let prompt = assemble_system_prompt(
+            "t1",
+            "Thoth",
+            Some(&thoth_psyche()),
+            Some(explicit),
+            PromptMode::Standard,
+        );
+        assert_eq!(prompt, explicit);
+        assert!(!prompt.contains("archetype"), "no psyche framing is appended");
+    }
+
+    #[test]
+    fn assemble_falls_back_to_psyche_when_no_explicit() {
+        let psyche_prompt =
+            build_system_prompt("t1", "Thoth", Some(&thoth_psyche()), PromptMode::Standard);
+        let assembled =
+            assemble_system_prompt("t1", "Thoth", Some(&thoth_psyche()), None, PromptMode::Standard);
+        assert_eq!(assembled, psyche_prompt);
+    }
+
+    #[test]
+    fn assemble_ignores_blank_explicit_prompt() {
+        let psyche_prompt =
+            build_system_prompt("t1", "Thoth", Some(&thoth_psyche()), PromptMode::Standard);
+        let assembled = assemble_system_prompt(
+            "t1",
+            "Thoth",
+            Some(&thoth_psyche()),
+            Some("   \n  "),
+            PromptMode::Standard,
+        );
+        assert_eq!(
+            assembled, psyche_prompt,
+            "a whitespace-only explicit prompt is treated as absent"
+        );
+    }
+
+    #[test]
+    fn load_agent_uses_explicit_prompt_from_config() {
+        let cfg = ModelManagerConfig {
+            system_prompt: Some("You are a pinned akh.".into()),
+            ..Default::default()
+        };
+        let mgr = AgentModelManager::new(cfg);
+        // Even with a psyche, the configured explicit prompt is authoritative.
+        mgr.load_agent("a1", "Alice", Some(&thoth_psyche()));
+        assert_eq!(
+            mgr.system_prompt_for("a1").as_deref(),
+            Some("You are a pinned akh.")
+        );
     }
 
     #[test]
@@ -580,6 +1049,7 @@ mod tests {
             },
             fallback_api: None,
             idle_ttl_secs: 300,
+            ..Default::default()
         };
         let mgr = AgentModelManager::new(cfg);
         mgr.load_agent("a1", "Alice", None);

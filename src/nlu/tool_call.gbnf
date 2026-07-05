@@ -1,0 +1,31 @@
+# GBNF grammar for Candle tool-call arguments (ADR 070).
+#
+# This is the readable spec for the constraint enforced at decode time by
+# `src/nlu/json_constraint.rs::JsonConstraint` (a pushdown automaton applied as a
+# per-token logits filter — only candidates that keep the output a valid prefix
+# of this grammar are sampled). The model picks WHICH valid token (the tool +
+# argument semantics); the grammar guarantees the bytes PARSE as a JSON object,
+# the same way llama.cpp/Ollama enforce tool-call JSON via GBNF.
+#
+# The Candle backend wraps a tool call in the model's native marker
+# (`<tool_call> … </tool_call>` for Qwen2.5, the function-call block for Gemma);
+# the constraint below governs the JSON object inside that marker.
+
+root        ::= object
+
+object      ::= "{" ws ( member ( ws "," ws member )* )? ws "}"
+member      ::= string ws ":" ws value
+value       ::= object | array | string | number | "true" | "false" | "null"
+array       ::= "[" ws ( value ( ws "," ws value )* )? ws "]"
+
+string      ::= "\"" char* "\""
+char        ::= [^"\\] | "\\" escape
+escape      ::= ["\\/bfnrt] | "u" hex hex hex hex
+hex         ::= [0-9a-fA-F]
+
+number      ::= "-"? int frac? exp?
+int         ::= "0" | [1-9] [0-9]*
+frac        ::= "." [0-9]+
+exp         ::= ("e" | "E") ("+" | "-")? [0-9]+
+
+ws          ::= [ \t\n\r]*

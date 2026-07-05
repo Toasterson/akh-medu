@@ -35,10 +35,21 @@ pub struct ToolParam {
 }
 
 /// Input to a tool execution.
+///
+/// Values are [`serde_json::Value`], so a parameter can be a string, number,
+/// bool, array, or nested object. The string-based API ([`with_param`](Self::with_param),
+/// [`get`](Self::get), [`require`](Self::require)) is preserved verbatim —
+/// `with_param` stores a JSON string and `get`/`require` return the borrowed
+/// `&str` of a JSON-string value — so the existing ~285 call sites and the flat
+/// `{string:string}` WASM/CLI wire contracts are unchanged. Typed/structured
+/// accessors ([`with_value`](Self::with_value), [`get_bool`](Self::get_bool),
+/// [`get_i64`](Self::get_i64), [`get_str_list`](Self::get_str_list),
+/// [`get_value`](Self::get_value), …) are additive, for tools whose inputs are
+/// genuinely structured (e.g. the task-list tool's array of task objects).
 #[derive(Debug, Clone, Default)]
 pub struct ToolInput {
-    /// Named parameters.
-    pub params: HashMap<String, String>,
+    /// Named parameters, each a JSON value.
+    pub params: serde_json::Map<String, serde_json::Value>,
 }
 
 impl ToolInput {
@@ -47,23 +58,126 @@ impl ToolInput {
         Self::default()
     }
 
-    /// Add a parameter.
+    /// Add a string parameter (back-compatible: stores a JSON string).
     pub fn with_param(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.params
+            .insert(name.into(), serde_json::Value::String(value.into()));
+        self
+    }
+
+    /// Add a parameter with an arbitrary JSON value (number, bool, array,
+    /// nested object). Use this for structured tool inputs.
+    pub fn with_value(
+        mut self,
+        name: impl Into<String>,
+        value: impl Into<serde_json::Value>,
+    ) -> Self {
         self.params.insert(name.into(), value.into());
         self
     }
 
-    /// Get a parameter value.
+    /// Get a parameter as a string slice.
+    ///
+    /// Returns `Some` only when the value is a JSON string — preserving the
+    /// historical string-map semantics for the existing `get`/`require` callers.
     pub fn get(&self, name: &str) -> Option<&str> {
-        self.params.get(name).map(|s| s.as_str())
+        self.params.get(name).and_then(|v| v.as_str())
     }
 
-    /// Get a required parameter, returning an error if missing.
+    /// Get a required string parameter, returning an error if missing.
     pub fn require(&self, name: &str, tool_name: &str) -> AgentResult<&str> {
         self.get(name).ok_or(AgentError::ToolExecution {
             tool_name: tool_name.into(),
             message: format!("missing required parameter: {name}"),
         })
+    }
+
+    /// Get the raw JSON value for a parameter.
+    pub fn get_value(&self, name: &str) -> Option<&serde_json::Value> {
+        self.params.get(name)
+    }
+
+    /// Get a boolean parameter, accepting either a JSON bool or the legacy
+    /// string encodings (`"true"`/`"1"`/`"yes"` / `"false"`/`"0"`/`"no"`,
+    /// case-insensitive). Returns `None` for any other shape.
+    pub fn get_bool(&self, name: &str) -> Option<bool> {
+        match self.params.get(name)? {
+            serde_json::Value::Bool(b) => Some(*b),
+            serde_json::Value::String(s) => {
+                let s = s.trim();
+                if s.eq_ignore_ascii_case("true") || s == "1" || s.eq_ignore_ascii_case("yes") {
+                    Some(true)
+                } else if s.eq_ignore_ascii_case("false")
+                    || s == "0"
+                    || s.eq_ignore_ascii_case("no")
+                {
+                    Some(false)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Get an integer parameter, accepting a JSON number or a numeric string.
+    pub fn get_i64(&self, name: &str) -> Option<i64> {
+        match self.params.get(name)? {
+            serde_json::Value::Number(n) => n.as_i64(),
+            serde_json::Value::String(s) => s.trim().parse().ok(),
+            _ => None,
+        }
+    }
+
+    /// Get an unsigned integer parameter, accepting a JSON number or string.
+    pub fn get_u64(&self, name: &str) -> Option<u64> {
+        match self.params.get(name)? {
+            serde_json::Value::Number(n) => n.as_u64(),
+            serde_json::Value::String(s) => s.trim().parse().ok(),
+            _ => None,
+        }
+    }
+
+    /// Get a float parameter, accepting a JSON number or numeric string.
+    pub fn get_f64(&self, name: &str) -> Option<f64> {
+        match self.params.get(name)? {
+            serde_json::Value::Number(n) => n.as_f64(),
+            serde_json::Value::String(s) => s.trim().parse().ok(),
+            _ => None,
+        }
+    }
+
+    /// Get a list of strings, accepting either a JSON string array or a single
+    /// comma-separated string (the legacy encoding used by `tags`,
+    /// `query_symbols`, `subjects`). Entries are trimmed and empties dropped;
+    /// returns an empty vec when the parameter is absent.
+    pub fn get_str_list(&self, name: &str) -> Vec<String> {
+        match self.params.get(name) {
+            Some(serde_json::Value::Array(items)) => items
+                .iter()
+                .filter_map(|v| v.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
+            Some(serde_json::Value::String(s)) => s
+                .split(',')
+                .map(|p| p.trim().to_string())
+                .filter(|p| !p.is_empty())
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+}
+
+impl From<HashMap<String, String>> for ToolInput {
+    /// Build an input from a flat string map (e.g. persisted trigger params),
+    /// wrapping each value as a JSON string.
+    fn from(map: HashMap<String, String>) -> Self {
+        let params = map
+            .into_iter()
+            .map(|(k, v)| (k, serde_json::Value::String(v)))
+            .collect();
+        Self { params }
     }
 }
 
@@ -121,13 +235,34 @@ pub trait Tool: Send + Sync {
     /// Return structured manifest describing this tool's danger metadata,
     /// capabilities, and source.
     fn manifest(&self) -> ToolManifest;
+
+    /// Whether this tool is advertised in the LLM's agentic tool catalog
+    /// (ADR 076 §1). Defaults to `true`. Raw-text NLU ingesters
+    /// (`text_ingest`, `content_ingest`, `journal_ingest`) override this to
+    /// `false`: inside an LLM session the model reasons better than the
+    /// regex/NLU passes and emits typed structured data to the typed writer
+    /// tools instead. They stay registered (and dispatchable) for
+    /// operator/CLI/daemon-ingest contexts — only the catalog hides them.
+    fn advertise_to_llm(&self) -> bool {
+        true
+    }
 }
 
 /// Registry of available tools.
 pub struct ToolRegistry {
     tools: HashMap<String, Box<dyn Tool>>,
     manifests: HashMap<String, ToolManifest>,
+    /// Names of tools suppressed from the LLM catalog (`advertise_to_llm()` is
+    /// `false`). They stay registered and dispatchable; only the catalog hides
+    /// them. Recorded at registration so the catalog filter is a cheap lookup.
+    unadvertised: std::collections::HashSet<String>,
     audit_ledger: Option<Arc<AuditLedger>>,
+    /// Permission policy consulted before every dispatch. Defaults to
+    /// [`PermissionMode::Bypass`] (allow all) so a standalone akh is unaffected.
+    policy: super::permission::PermissionPolicy,
+    /// Optional approver for [`PermissionDecision::Ask`] tools (e.g. an ACP
+    /// client bridge). With none attached, `Ask` fails closed.
+    asker: Option<Arc<dyn super::permission::PermissionAsker>>,
 }
 
 impl ToolRegistry {
@@ -136,7 +271,10 @@ impl ToolRegistry {
         Self {
             tools: HashMap::new(),
             manifests: HashMap::new(),
+            unadvertised: std::collections::HashSet::new(),
             audit_ledger: None,
+            policy: super::permission::PermissionPolicy::default(),
+            asker: None,
         }
     }
 
@@ -145,11 +283,37 @@ impl ToolRegistry {
         self.audit_ledger = Some(ledger);
     }
 
+    /// Set the permission mode gating tool execution.
+    pub fn set_permission_mode(&mut self, mode: super::permission::PermissionMode) {
+        self.policy = super::permission::PermissionPolicy::new(mode);
+    }
+
+    /// The active permission mode.
+    pub fn permission_mode(&self) -> super::permission::PermissionMode {
+        self.policy.mode
+    }
+
+    /// Attach an approver that resolves `Ask` decisions (e.g. an ACP
+    /// `session/request_permission` bridge).
+    pub fn set_permission_asker(&mut self, asker: Arc<dyn super::permission::PermissionAsker>) {
+        self.asker = Some(asker);
+    }
+
+    /// Remove any attached approver. `Ask` decisions then fail closed (deny).
+    pub fn clear_permission_asker(&mut self) {
+        self.asker = None;
+    }
+
     /// Register a tool. Caches its manifest on registration.
     /// If a tool with the same name exists, it is replaced.
     pub fn register(&mut self, tool: Box<dyn Tool>) {
         let manifest = tool.manifest();
         let name = manifest.name.clone();
+        if tool.advertise_to_llm() {
+            self.unadvertised.remove(&name);
+        } else {
+            self.unadvertised.insert(name.clone());
+        }
         self.manifests.insert(name.clone(), manifest);
         self.tools.insert(name, tool);
     }
@@ -167,6 +331,21 @@ impl ToolRegistry {
     /// List all registered tool manifests.
     pub fn list_manifests(&self) -> Vec<&ToolManifest> {
         self.manifests.values().collect()
+    }
+
+    /// Whether a tool is advertised to the LLM catalog (ADR 076 §1). Unknown
+    /// names are treated as advertised (the default).
+    pub fn is_advertised(&self, name: &str) -> bool {
+        !self.unadvertised.contains(name)
+    }
+
+    /// List manifests for tools advertised to the LLM catalog — i.e. excluding
+    /// those whose `advertise_to_llm()` returned `false`.
+    pub fn list_advertised_manifests(&self) -> Vec<&ToolManifest> {
+        self.manifests
+            .values()
+            .filter(|m| !self.unadvertised.contains(&m.name))
+            .collect()
     }
 
     /// List all registered tool signatures.
@@ -188,6 +367,32 @@ impl ToolRegistry {
         let tool = self
             .get(name)
             .ok_or_else(|| AgentError::ToolNotFound { name: name.into() })?;
+
+        // Permission gate (no-op under the default Bypass mode). A denied or
+        // unapproved tool returns a failed ToolOutput rather than Err, so the
+        // OODA loop's tool-error isolation is preserved.
+        if let Some(manifest) = self.manifests.get(name) {
+            use super::permission::PermissionDecision;
+            match self.policy.decide(manifest) {
+                PermissionDecision::Allow => {}
+                PermissionDecision::Deny(reason) => {
+                    return Ok(ToolOutput::err(format!("permission denied: {reason}")));
+                }
+                PermissionDecision::Ask(reason) => {
+                    let summary = truncate_summary(&format!("{:?}", input.params), 200);
+                    let approved = self
+                        .asker
+                        .as_ref()
+                        .map(|a| a.ask(manifest, &summary))
+                        .unwrap_or(false);
+                    if !approved {
+                        return Ok(ToolOutput::err(format!(
+                            "permission required but not granted: {reason}"
+                        )));
+                    }
+                }
+            }
+        }
 
         let start = std::time::Instant::now();
         let result = tool.execute(engine, input.clone());
@@ -243,11 +448,20 @@ impl std::fmt::Debug for ToolRegistry {
 }
 
 /// Truncate a string for audit summaries, appending "..." if cut.
+///
+/// Truncation lands on a UTF-8 char boundary: audit summaries include tool
+/// output (web/file content) and params that can place a multibyte character
+/// across byte `max_len`, where a naive `&s[..max_len]` would panic — and this
+/// runs in the registry's audit wrapper around *every* tool call.
 fn truncate_summary(s: &str, max_len: usize) -> String {
     if s.len() <= max_len {
         s.to_string()
     } else {
-        format!("{}...", &s[..max_len])
+        let mut end = max_len;
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}...", &s[..end])
     }
 }
 
@@ -257,6 +471,76 @@ mod tests {
 
     use super::*;
     use crate::agent::tool_manifest::{Capability, DangerInfo, DangerLevel, ToolSource};
+
+    #[test]
+    fn truncate_summary_handles_multibyte_at_boundary() {
+        // 100 × "あ" = 300 bytes; byte 200 lands inside a 3-byte char.
+        // A naive &s[..200] would panic — this must not.
+        let s = "あ".repeat(100);
+        assert!(!s.is_char_boundary(200));
+        let out = truncate_summary(&s, 200);
+        assert!(out.ends_with("..."));
+        // Truncated body is valid UTF-8 and shorter than the cap.
+        let body = out.trim_end_matches("...");
+        assert!(body.len() <= 200 && body.is_char_boundary(body.len()));
+        // ASCII shorter than the cap is returned unchanged.
+        assert_eq!(truncate_summary("hello", 200), "hello");
+    }
+
+    #[test]
+    fn permission_gate_denies_under_plan_mode() {
+        use crate::agent::permission::PermissionMode;
+        use crate::engine::{Engine, EngineConfig};
+        use crate::vsa::Dimension;
+
+        struct WriteTool;
+        impl Tool for WriteTool {
+            fn signature(&self) -> ToolSignature {
+                ToolSignature {
+                    name: "w".into(),
+                    description: "w".into(),
+                    parameters: vec![],
+                }
+            }
+            fn execute(&self, _e: &Engine, _i: ToolInput) -> AgentResult<ToolOutput> {
+                Ok(ToolOutput::ok("did write"))
+            }
+            fn manifest(&self) -> ToolManifest {
+                ToolManifest {
+                    name: "w".into(),
+                    description: "w".into(),
+                    parameters: vec![],
+                    danger: DangerInfo {
+                        level: DangerLevel::Dangerous,
+                        capabilities: HashSet::from([Capability::WriteFilesystem]),
+                        description: "w".into(),
+                        shadow_triggers: vec![],
+                    },
+                    source: ToolSource::Native,
+                }
+            }
+        }
+
+        let engine = Engine::new(EngineConfig {
+            dimension: Dimension::TEST,
+            ..Default::default()
+        })
+        .unwrap();
+
+        // Default (Bypass) → the write tool runs.
+        let mut reg = ToolRegistry::new();
+        reg.register(Box::new(WriteTool));
+        assert!(
+            reg.execute("w", ToolInput::new(), &engine).unwrap().success,
+            "bypass mode should allow the write tool"
+        );
+
+        // Plan mode → denied (failed ToolOutput, not Err — OODA isolation kept).
+        reg.set_permission_mode(PermissionMode::Plan);
+        let out = reg.execute("w", ToolInput::new(), &engine).unwrap();
+        assert!(!out.success, "plan mode should deny the write tool");
+        assert!(out.result.contains("permission denied"), "result: {}", out.result);
+    }
 
     struct DummyTool;
     impl Tool for DummyTool {

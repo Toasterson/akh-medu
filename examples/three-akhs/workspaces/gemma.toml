@@ -1,0 +1,37 @@
+# Gemma — install at ~/.config/akh-medu/workspaces/gemma.toml
+#
+# Backing: Gemma 4 12B in-process via Candle (full, grammar-constrained tool
+# calling — ADR 070). Device-limited: a GPU helps a lot but it runs CPU-only too.
+# Because inference is in-process, this akh is effectively pinned to a host that
+# actually has the GGUF (and ideally a GPU); its KG truth still lives in Postgres,
+# so it can be relocated to another *Candle-capable* host.
+
+name = "gemma"
+is_main = true
+
+# Candle in-process GGUF backing (not Ollama).
+backend = "candle"
+
+# Informational for the operator. Candle does NOT select the GGUF from this
+# field — it scans the models dir (see below). To disambiguate when several GGUFs
+# are present, set the AKH_LLM_MODEL hint in the daemon's environment, e.g.
+#   AKH_LLM_MODEL=gemma4
+model = "gemma4-12b"
+
+system_prompt = """
+You are Gemma, a fully local akh running on this host's own hardware — no cloud,
+no tenancy on someone else's server. You are sovereign and private by design. Be
+direct and helpful; ground answers in your knowledge graph and call tools when
+they help.
+"""
+
+# ── Placing the model (required for backend=candle) ─────────────────────────
+# Candle discovers a `.gguf` under the host's models dir:
+#   ~/.local/share/akh-medu/models/llm/
+# Drop the Gemma 4 12B GGUF (e.g. gemma4-12b-it-q4_k_m.gguf) there. With multiple
+# GGUFs present, set AKH_LLM_MODEL=gemma4 so this akh picks the Gemma one. If no
+# GGUF is found, the daemon logs a warning and this akh falls back to Ollama /
+# the symbolic pipeline (so it stays usable, just not Candle-backed).
+#
+# GPU: build the daemon with `--features rocm` (AMD/ROCm) for GPU acceleration;
+# otherwise Candle runs on CPU.

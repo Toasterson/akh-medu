@@ -29,9 +29,12 @@
 //! engine.add_triple(&Triple::new(sun.id, is_a.id, star.id)).unwrap();
 //! ```
 
+#[cfg(feature = "acp")]
+pub mod acp;
 pub mod agent;
-pub mod api_types;
+pub mod akh_config;
 pub mod bench_phase41g;
+pub mod bench_phase44;
 pub mod cluster;
 pub mod argumentation;
 pub mod audit;
@@ -50,16 +53,17 @@ pub mod engine;
 pub mod extraction;
 pub mod error;
 pub mod export;
+pub mod fs;
 pub mod glyph;
 pub mod grammar;
 pub mod graph;
 pub mod infer;
+pub mod inference_options;
 pub mod library;
-#[cfg(feature = "mcp")]
-pub mod mcp;
 #[cfg(feature = "daemon")]
 pub mod upstream_client;
 pub mod message;
+pub mod mutation;
 pub mod nlu;
 pub mod partition;
 pub mod perception;
@@ -85,3 +89,9 @@ pub mod tui;
 pub mod vsa;
 pub mod wiki;
 pub mod workspace;
+/// Phase 38b: mutation write-ahead log to the Postgres backing store.
+#[cfg(feature = "postgres")]
+pub mod wal;
+/// Phase 38c: snapshot the akh's relational state to Postgres + wake from it.
+#[cfg(feature = "postgres")]
+pub mod snapshot;
