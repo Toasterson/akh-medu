@@ -1,0 +1,7 @@
+# Host-local vmctl state, downloaded/pulled base images, generated keys, and
+# smoke-test logs — never commit these.
+logs/
+.keys/
+.sanity/
+*.qcow2
+*.img
