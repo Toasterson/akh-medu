@@ -110,6 +110,7 @@ Plans live under `docs/ai/plans/`, ADRs under `docs/ai/decisions/`.
 
 See individual plan docs for details. Phases are ordered by dependency, not priority.
 
+- **50 (PLANNED, grilling-locked)**: Feature-test VM harness + benchmark program — `vmctl` OpenIndiana VMs (exec1/pg/builder) as the test bed that unblocks + validates 48b LocalDrop (illumos RBAC) and 48c russh remote; agentic illumos sysadmin E2E corpus (deterministic verify + manpage-grounding grade + version-traps); advisory mode (engineer-sim + rotation judge); public legs (frontiercode/LoCoMo/LongMemEval/Terminal-Bench across deepseek/GLM-5.2/qwen); orchestrator-shaped fleet-orchestration bench vs single-akh control; versioned results + generated HTML leaderboard for publishing (and measuring the tiny-LLM track against). 48d cert-auth stays deferred (lab uses plain SSH keys). — [plan](docs/ai/plans/2026-07-05-phase50-feature-test-benchmarks.md), [ADR 086](docs/ai/decisions/086-feature-test-vm-harness-benchmarks.md)
 - **Release Alpha**: K8s deployment — [plan](docs/ai/plans/2026-02-23-release-alpha.md)
 - **26**: LLM-VSA Deep Integration (Candle migration, Neural→VSA bridge, PolarQuant, NEON SIMD) — [plan](docs/ai/plans/2026-03-26-phase26-llm-vsa-deep-integration.md), [ADR 037](docs/ai/decisions/037-llm-vsa-deep-integration.md)
 - **29f/29g**: Hypothesis Explorer + Causal Explorer exposure (stateful surfaces, need their own designs) — [plan](docs/ai/plans/2026-03-26-phase29-capability-exposure.md)
