@@ -311,15 +311,25 @@ impl Agent {
             }
             None => std::sync::Arc::new(crate::fs::LocalFs::denied()),
         };
-        registry.register(Box::new(tools::FileIoTool::new(fs.clone())));
+        // One shared Backend (ADR 082) binds the executor-facing tools —
+        // file_io/edit/glob/grep/shell_exec — to a single target, so a file
+        // write and a shell command are guaranteed coherent. Phase 48a: the
+        // in-process backend only (unconfined, honestly Critical); 48b/48c
+        // swap in privilege-dropped / remote executors here.
+        let backend: std::sync::Arc<dyn crate::backend::Backend> = std::sync::Arc::new(
+            crate::backend::InProcessBackend::new(fs.clone()),
+        );
+        registry.register(Box::new(tools::FileIoTool::with_backend(backend.clone())));
         // Claude-Code-parity coding tools, sharing the same sandbox so reads
         // and writes stay confined to the akh's roots.
-        registry.register(Box::new(tools::EditTool::new(fs.clone())));
-        registry.register(Box::new(tools::GlobTool::new(fs.clone())));
-        registry.register(Box::new(tools::GrepTool::new(fs.clone())));
+        registry.register(Box::new(tools::EditTool::with_backend(backend.clone())));
+        registry.register(Box::new(tools::GlobTool::with_backend(backend.clone())));
+        registry.register(Box::new(tools::GrepTool::with_backend(backend.clone())));
         registry.register(Box::new(tools::HttpFetchTool));
         registry.register(Box::new(tools::WebSearchTool));
-        registry.register(Box::new(tools::ShellExecTool));
+        registry.register(Box::new(tools::ShellExecTool::with_backend(
+            backend.clone(),
+        )));
         registry.register(Box::new(tools::UserInteractTool));
         // Structured task list (TodoWrite-style working state).
         registry.register(Box::new(tools::TaskListTool::new(std::sync::Arc::new(

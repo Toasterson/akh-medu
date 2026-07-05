@@ -18,6 +18,7 @@ use crate::agent::tool::{Tool, ToolInput, ToolOutput, ToolParam, ToolSignature};
 use crate::agent::tool_manifest::{
     Capability, DangerInfo, DangerLevel, ToolManifest, ToolParamSchema, ToolSource,
 };
+use crate::backend::{Backend, InProcessBackend};
 use crate::engine::Engine;
 use crate::fs::Filesystem;
 use std::collections::HashSet;
@@ -36,17 +37,26 @@ const MAX_CONTENT_LINES: usize = 200;
 /// chain. Mirrors the Glob tool's guard.
 const MAX_DEPTH: usize = 64;
 
-/// Search file contents by regex through a sandboxed [`Filesystem`].
+/// Search file contents by regex through the session's [`Backend`]
+/// (ADR 082), whose file verbs carry the sandboxed [`Filesystem`] contract.
 pub struct GrepTool {
-    /// The sandbox the tool reads through. A [`crate::fs::LocalFs::denied`]
-    /// filesystem disables all access (fail-closed).
-    fs: Arc<dyn Filesystem>,
+    /// The backend the tool reads through. A backend wrapping a
+    /// [`crate::fs::LocalFs::denied`] filesystem disables all access
+    /// (fail-closed).
+    fs: Arc<dyn Backend>,
 }
 
 impl GrepTool {
-    /// Create a GrepTool backed by the given sandboxed filesystem.
+    /// Create a GrepTool backed by the given sandboxed filesystem, read
+    /// in-process (the historic behavior, verbatim).
     pub fn new(fs: Arc<dyn Filesystem>) -> Self {
-        Self { fs }
+        Self::with_backend(Arc::new(InProcessBackend::new(fs)))
+    }
+
+    /// Create a GrepTool routed through an explicit backend — the seam where
+    /// 48b/48c plug in privilege-dropped or remote targets.
+    pub fn with_backend(backend: Arc<dyn Backend>) -> Self {
+        Self { fs: backend }
     }
 
     /// Resolve the base directory: explicit `path`, else the first read root,
