@@ -22,7 +22,7 @@
 //! Plan: docs/ai/plans/2026-03-26-phase33-grounded-verbalization.md (33a)
 //! ADR:  docs/ai/decisions/043-grounded-verbalization.md
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::abs::{AbsTree, PredicateGroup};
 use super::morpho;
@@ -183,17 +183,16 @@ pub fn aggregate_statements(items: &[AbsTree], cfg: &AggregationConfig) -> Vec<A
 
     // Pass 2: emit in original order; each group is emitted (aggregated)
     // at the position of its first member.
-    let mut emitted: HashMap<GroupKey, ()> = HashMap::new();
+    let mut emitted: HashSet<GroupKey> = HashSet::new();
     let mut result: Vec<AbsTree> = Vec::with_capacity(items.len());
 
     for (item, slot) in items.iter().zip(&slots) {
         match slot {
             None => result.push(item.clone()),
             Some(key) => {
-                if emitted.contains_key(key) {
+                if !emitted.insert(key.clone()) {
                     continue;
                 }
-                emitted.insert(key.clone(), ());
                 let facts = &groups[key];
                 if facts.len() == 1 {
                     // Single fact — keep the original node untouched.
@@ -565,8 +564,10 @@ mod tests {
             t("dog", "chases", "cats"),
             t("dog", "guards", "houses"),
         ];
-        let mut config = cfg();
-        config.max_groups_per_sentence = 2;
+        let config = AggregationConfig {
+            max_groups_per_sentence: 2,
+            ..cfg()
+        };
         let out = aggregate_statements(&items, &config);
         assert_eq!(out.len(), 2, "four VP groups at max 2/sentence → 2 nodes");
         let prose = realize_all(&out);

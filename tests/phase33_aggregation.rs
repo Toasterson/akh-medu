@@ -98,8 +98,10 @@ fn continuation_sentence_uses_pronoun_in_narrative() {
         t("dog", "chases", "cats"),
         t("dog", "guards", "houses"),
     ];
-    let mut cfg = AggregationConfig::default();
-    cfg.max_groups_per_sentence = 2;
+    let cfg = AggregationConfig {
+        max_groups_per_sentence: 2,
+        ..AggregationConfig::default()
+    };
     let aggregated = aggregate_statements(&facts, &cfg);
     assert_eq!(aggregated.len(), 2);
 
