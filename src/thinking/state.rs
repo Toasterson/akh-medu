@@ -220,6 +220,12 @@ impl ThoughtState {
             .count()
     }
 
+    /// Is there frontier left to explore? Focus stability while unexpanded
+    /// frontier remains is *traversal through chaff*, not convergence.
+    pub fn has_unexplored_frontier(&self) -> bool {
+        self.frontier.iter().any(|s| !self.expanded.contains(s))
+    }
+
     /// The hypothesis with the highest belief, if any.
     pub fn top_hypothesis(&self) -> Option<&Hypothesis> {
         self.hypotheses

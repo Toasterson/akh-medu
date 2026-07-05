@@ -215,8 +215,12 @@ impl<'e> ThinkingLoop<'e> {
             let steps = state.budget.used_steps;
 
             // -- Halting: convergence (cheap check, every step) --
+            // Focus stability only counts as convergence once there is an
+            // answer in hand or nothing left to explore; a stable focus with
+            // unexpanded frontier is just traversal through known chaff.
             if let Some(delta) = self.verifier.convergence.stable(&state)
                 && steps as usize > self.config.focus_window
+                && (state.top_hypothesis().is_some() || !state.has_unexplored_frontier())
             {
                 return self.conclude(state, started, HaltReason::Converged { delta });
             }
