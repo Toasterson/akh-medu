@@ -53,6 +53,7 @@ pub mod narrative;
 pub mod parser;
 pub mod preprocess;
 pub mod rust_gen;
+pub mod style_transform;
 pub mod templates;
 pub mod terse;
 
@@ -64,6 +65,10 @@ pub use concrete::{ConcreteGrammar, LinContext, ParseContext};
 pub use error::{GrammarError, GrammarResult};
 pub use lexer::Language;
 pub use parser::ParseResult;
+pub use style_transform::{
+    ArchetypeFraming, CommunicationRegister, InhibitionAction, ShadowInhibition, StyleTransform,
+    apply_register,
+};
 
 /// Runtime registry of available concrete grammars.
 ///
