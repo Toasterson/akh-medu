@@ -95,7 +95,20 @@ impl VocBudgetController {
     ///
     /// `top_belief` is the current best hypothesis belief; the marginal-value
     /// magnitude is its complement (little left to gain once belief is high).
-    pub fn decide(&self, goal: SymbolId, budget: &ThinkingBudget, top_belief: f32) -> VocDecision {
+    ///
+    /// `exploring` reports whether unexpanded search frontier remains. While
+    /// it does *and* no hypothesis has formed, a flat verifier score is not
+    /// evidence of diminishing returns — it is uncharted territory. Halting
+    /// there reproduces the illusion-of-thinking failure (giving up on hard
+    /// problems before the budget is spent), so the halt rule only applies
+    /// to the refinement regime.
+    pub fn decide(
+        &self,
+        goal: SymbolId,
+        budget: &ThinkingBudget,
+        top_belief: f32,
+        exploring: bool,
+    ) -> VocDecision {
         // No observations yet: nothing to reason about.
         if self.observations == 0 {
             return VocDecision::Continue;
@@ -107,8 +120,11 @@ impl VocBudgetController {
 
         // Halt on negative marginal value, but only once the improvement
         // signal has actually stalled — a single flat check right after a
-        // strong step should not kill the deliberation.
+        // strong step should not kill the deliberation — and never while
+        // initial search is still uncovering frontier without an answer.
+        let searching = exploring && top_belief <= 0.0;
         if marginal_value < self.halt_threshold
+            && !searching
             && (self.observations >= 2 || history_diminishing_returns(&self.history, goal))
         {
             return VocDecision::Halt { marginal_value };
@@ -142,7 +158,7 @@ mod tests {
     fn no_observations_means_continue() {
         let budget = ThinkingBudget::steps(100);
         let ctl = VocBudgetController::for_budget(&budget);
-        assert_eq!(ctl.decide(goal(), &budget, 0.0), VocDecision::Continue);
+        assert_eq!(ctl.decide(goal(), &budget, 0.0, false), VocDecision::Continue);
     }
 
     #[test]
@@ -153,7 +169,7 @@ mod tests {
         ctl.observe_score(goal(), 0.5);
         ctl.observe_score(goal(), 0.5);
         ctl.observe_score(goal(), 0.5);
-        match ctl.decide(goal(), &budget, 0.5) {
+        match ctl.decide(goal(), &budget, 0.5, false) {
             VocDecision::Halt { marginal_value } => {
                 assert!(marginal_value < 0.0, "flat curve should have negative VOC");
             }
@@ -168,7 +184,27 @@ mod tests {
         ctl.observe_score(goal(), 0.1);
         ctl.observe_score(goal(), 0.4);
         ctl.observe_score(goal(), 0.7);
-        assert_eq!(ctl.decide(goal(), &budget, 0.3), VocDecision::Continue);
+        assert_eq!(ctl.decide(goal(), &budget, 0.3, false), VocDecision::Continue);
+    }
+
+    #[test]
+    fn flat_scores_do_not_halt_while_exploring_without_answer() {
+        let budget = ThinkingBudget::steps(100);
+        let mut ctl = VocBudgetController::for_budget(&budget);
+        ctl.observe_score(goal(), 0.4);
+        ctl.observe_score(goal(), 0.4);
+        ctl.observe_score(goal(), 0.4);
+        // Frontier remains + no hypothesis (top_belief 0): keep searching.
+        assert_eq!(
+            ctl.decide(goal(), &budget, 0.0, true),
+            VocDecision::Continue
+        );
+        // Same flat signal but with an answer in hand: refinement regime,
+        // diminishing returns halts.
+        assert!(matches!(
+            ctl.decide(goal(), &budget, 0.4, true),
+            VocDecision::Halt { .. }
+        ));
     }
 
     #[test]
@@ -180,7 +216,7 @@ mod tests {
         for _ in 0..9 {
             budget.charge(1.0, 0);
         }
-        match ctl.decide(goal(), &budget, 0.2) {
+        match ctl.decide(goal(), &budget, 0.2, false) {
             VocDecision::Extend { extra, .. } => assert!(extra >= 1),
             other => panic!("expected Extend, got {other:?}"),
         }
@@ -196,6 +232,6 @@ mod tests {
         for _ in 0..9 {
             budget.charge(1.0, 0);
         }
-        assert_eq!(ctl.decide(goal(), &budget, 0.2), VocDecision::Continue);
+        assert_eq!(ctl.decide(goal(), &budget, 0.2, false), VocDecision::Continue);
     }
 }

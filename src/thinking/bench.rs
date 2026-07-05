@@ -87,7 +87,7 @@ pub struct TaskSetConfig {
 impl Default for TaskSetConfig {
     fn default() -> Self {
         Self {
-            multi_hop_depths: vec![2, 4, 8, 16],
+            multi_hop_depths: vec![2, 4, 8, 16, 32],
             instances_per_depth: 5,
             branching: 6,
             sub_branching: 3,

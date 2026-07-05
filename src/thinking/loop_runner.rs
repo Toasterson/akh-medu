@@ -258,7 +258,8 @@ impl<'e> ThinkingLoop<'e> {
                 && steps % ctl.check_every == 0
             {
                 let top_belief = state.top_hypothesis().map(|h| h.belief()).unwrap_or(0.0);
-                match ctl.decide(goal, &state.budget, top_belief) {
+                let exploring = state.has_unexplored_frontier();
+                match ctl.decide(goal, &state.budget, top_belief, exploring) {
                     VocDecision::Continue => {}
                     VocDecision::Halt { marginal_value } => {
                         return self.conclude(
