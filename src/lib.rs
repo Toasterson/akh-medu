@@ -83,6 +83,8 @@ pub mod skills;
 pub mod store;
 pub mod symbol;
 pub mod temporal;
+/// Phase 41: the unified thinking loop (ADR 052).
+pub mod thinking;
 pub mod tms;
 pub mod training;
 pub mod tui;

@@ -152,6 +152,10 @@ pub enum AkhError {
     #[error(transparent)]
     #[diagnostic(transparent)]
     Perception(#[from] crate::perception::PerceptionError),
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Thinking(#[from] crate::thinking::error::ThinkingError),
 }
 
 // ---------------------------------------------------------------------------

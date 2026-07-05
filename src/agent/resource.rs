@@ -311,6 +311,58 @@ pub fn compute_voc(
     p_improvement * magnitude - cycle_cost
 }
 
+/// Marginal value of continued computation for a *thinking* workload
+/// (Phase 41e; composes the Phase 11g VOC formula).
+///
+/// Same shape as [`compute_voc`] — `VOC = P(improvement) * magnitude - cost` —
+/// but driven by the thinking loop's own improvement signal (verifier-score
+/// deltas recorded via [`record_improvement`] keyed by the deliberation goal)
+/// instead of goal-progress cycles, and with an explicit per-step cost.
+///
+/// `magnitude` is how much answering the goal is worth (the thinking loop
+/// uses `1 - top_hypothesis_belief`: the closer we are to a confident answer,
+/// the less another step can add). New deliberations with no recorded history
+/// default to `P(improvement) = 0.5`, matching `compute_voc`'s prior for new
+/// goals.
+pub fn thinking_marginal_value(
+    history: &ImprovementHistory,
+    goal_id: SymbolId,
+    magnitude: f32,
+    step_cost: f32,
+) -> f32 {
+    let rate = history
+        .entries
+        .get(&goal_id.get())
+        .and_then(|entries| entries.last())
+        .map(|&(_, r)| r)
+        .unwrap_or(0.5);
+    let p_improvement = rate.clamp(0.0, 1.0);
+    p_improvement * magnitude.clamp(0.0, 1.0) - step_cost
+}
+
+/// Diminishing-returns check over a raw [`ImprovementHistory`] key
+/// (Phase 41e; the `Goal`-typed [`detect_diminishing_returns`] needs a full
+/// agent goal, which a thinking-loop deliberation does not have).
+///
+/// Same rule: `true` when the current rate is less than half the previous
+/// window's rate.
+pub fn history_diminishing_returns(history: &ImprovementHistory, key: SymbolId) -> bool {
+    let Some(entries) = history.entries.get(&key.get()) else {
+        return false;
+    };
+    if entries.len() < 2 {
+        return false;
+    }
+    let current = entries.last().map(|&(_, r)| r).unwrap_or(0.0);
+    let prev = entries
+        .iter()
+        .rev()
+        .nth(1)
+        .map(|&(_, r)| r)
+        .unwrap_or(0.0);
+    prev > 0.01 && current < prev * 0.5
+}
+
 /// Dynamic stall threshold: adapts based on estimated effort.
 ///
 /// Uses `1.5 * estimated_effort` if available, otherwise falls back
