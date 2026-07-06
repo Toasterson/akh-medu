@@ -5,19 +5,38 @@
 // Runbook + full boot/provisioning analysis: docs/ops/vm-harness-openindiana.md
 // Shakeout baseline: docs/ai/2026-07-05-phase50-w1-illumos-shakeout.md
 //
-// ⚠ STATUS (2026-07-05): guests BOOT + sshd comes up (via the q35→pc shim in
-// scripts/qemu-illumos-shim/, which smoke.sh prepends to PATH — required, or
-// illumos vioblk panics on vmctl's hardcoded q35), but automated SSH
-// provisioning is BLOCKED: neither published OpenIndiana image creates a
-// login user from vmctl's cloud-init cloud-config user-data. OpenIndiana
-// provisions via `svc:/system/illumos/useragent` (hostname + DHCP from
-// meta-data only — it ignores cloud-config user-data), and the rust-ci
-// image's `svc:/system/sysconfig` is SIGKILLed on first boot. So `smoke.sh`
-// cannot go green and the `builder` shakeout can't SSH in yet. See the
-// runbook's "SSH / login user" + "UPDATE" sections for the root cause and
-// fix options (match the metadata agent's key channel / bake a login into
-// the image / fall back to omnios-bloody). This file + the provisioners are
-// correct-in-shape and ready to run the moment a guest is SSH-reachable.
+// ⚠ STATUS (2026-07-06): this file was MISSING the `uefi #true` /
+// `virtio-transitional #true` nodes that the installed vmctl binary already
+// supports (it was rebuilt with them by an earlier session, but the
+// committed VMFile.kdl never actually set them) — without both, `vmctl up`
+// either can't boot the GPT/UEFI-only openindiana-rust-ci image at all (no
+// OVMF pflash => SeaBIOS has no bootable code) or panics illumos's vioblk on
+// the modern-virtio-pci capability layout. Both are now set on all three
+// guests (2026-07-06 fix), on top of the pre-existing q35->pc PATH shim
+// (scripts/qemu-illumos-shim/, still required — smoke.sh prepends it).
+// With that fix, `vmctl up` now reaches the SAME failure the prior manual
+// investigation found: guests BOOT to multi-user and reach a console login
+// prompt, but automated SSH provisioning is still BLOCKED — no published
+// OpenIndiana image creates a login user from vmctl's cloud-init
+// cloud-config user-data. `svc:/system/sysconfig:default` (the rust-ci
+// image's provisioner) fails FAST (not a 120s SIGKILL as previously
+// assumed — SMF's own diagnosis is "method failing in a retryable manner
+// but too often") and transitions to maintenance, alongside
+// `svc:/network/ipmp:default` failing fatally; the console then shows
+// `unknown console login:` with no working credentials. IMPORTANT
+// debugging note for whoever continues: these images redirect their
+// console to VGA text mode once the kernel takes over from the loader —
+// vmctl's qemu backend passes `-nodefaults` with no `-vga`, so serial
+// `console.log` goes silent after the loader stage even on a perfectly
+// healthy boot (this made the stall look like a hang in earlier
+// investigations; it is not — use a QMP `screendump` with a `-vga std`
+// device added to actually see what's happening). A quick omnios-sysconfig
+// fallback attempt (2026-07-06) also did not reach an SSH banner within
+// ~2 minutes of reaching its console login prompt, so it is not a drop-in
+// fix either without further work. See the runbook's "SSH / login user" +
+// "UPDATE 2026-07-06" sections for the full trace and fix options. This
+// file + the provisioners are correct-in-shape and ready to run the moment
+// a guest is SSH-reachable.
 //
 // Three OpenIndiana guests, all pulled from the same base image
 // (openindiana-rust-ci, the only OpenIndiana image in the CloudNebulaProject
@@ -56,6 +75,8 @@ vm "exec1" {
     image "~/.local/share/vmctl/images/openindiana-rust-ci.qcow2"
     vcpus 2
     memory 4096
+    uefi #true
+    virtio-transitional #true
 
     network "user"
 
@@ -86,6 +107,8 @@ vm "pg" {
     image "~/.local/share/vmctl/images/openindiana-rust-ci.qcow2"
     vcpus 2
     memory 4096
+    uefi #true
+    virtio-transitional #true
 
     network "user"
 
@@ -104,8 +127,10 @@ vm "pg" {
 
 vm "builder" {
     image "~/.local/share/vmctl/images/openindiana-rust-ci.qcow2"
-    vcpus 2
-    memory 4096
+    vcpus 4
+    memory 8192
+    uefi #true
+    virtio-transitional #true
 
     network "user"
 
