@@ -174,6 +174,26 @@ fn main() {
         max_seq_len: model_config.max_seq_len,
     };
 
+    // Prompt-length sanity: with hard distractors the offered-tool JSON grows;
+    // if prompt+target exceeds max_seq_len, `build_batch` silently truncates the
+    // TARGET off the end and corrupts the loss. Measure before a long run.
+    {
+        let sample = dataset.train_examples(256).unwrap_or_default();
+        let mut lens: Vec<usize> = sample
+            .iter()
+            .filter_map(|ex| grug_train::train::encode_example(&tokenizer, ex).ok().map(|e| e.ids.len()))
+            .collect();
+        lens.sort_unstable();
+        let max = lens.last().copied().unwrap_or(0);
+        let p95 = lens.get(lens.len().saturating_mul(95) / 100).copied().unwrap_or(0);
+        let over = lens.iter().filter(|&&l| l > model_config.max_seq_len).count();
+        println!(
+            "train_p1a: PROMPT-LEN check (n={}) max={max} p95={p95} ctx={} over_ctx={over}",
+            lens.len(),
+            model_config.max_seq_len
+        );
+    }
+
     let (mut model, mut optim) = init_training::<ActiveBackend>(&model_config, &device);
     let param_count = burn::module::Module::num_params(&model);
     println!(
@@ -306,7 +326,17 @@ fn main() {
 /// -- keeps the pre-Wave-2 CLI invocation working unchanged.
 fn build_dataset(seed: u64, n_tools: Option<usize>, holdout_frac: f64) -> grug_data::GrugResult<Dataset> {
     match n_tools {
-        Some(n) => Dataset::new_sized(seed, n, holdout_frac),
+        // 4 hard (same-family) distractors + target = 5 offered tools. Measured
+        // via the PROMPT-LEN check: the hard() default of 6 distractors overflows
+        // the 640-token ctx on ~4% of examples (max 785), which would silently
+        // truncate targets in build_batch; 4 keeps max well under 640 while still
+        // forcing in-context schema discrimination. (Phase 51 P1a-3, axis-A.)
+        Some(n) => Dataset::new_sized_with_distractors(
+            seed,
+            n,
+            holdout_frac,
+            grug_data::DistractorConfig::hard_with_count(4),
+        ),
         None => Dataset::new(seed),
     }
 }

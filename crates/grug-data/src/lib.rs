@@ -40,7 +40,7 @@ pub use catalog::ToolCatalog;
 pub use dataset::{AxisReport, Dataset, EvalAxis};
 pub use error::{GrugError, GrugResult};
 pub use eval::{ArgMismatch, DiversityReport, EvalOutcome, EvalReport, SchemaViolation};
-pub use generator::{Generator, PhrasingMode};
+pub use generator::{DistractorConfig, Generator, PhrasingMode};
 pub use phrasing::{PhrasingBank, PhrasingRegistry, PhrasingTemplate, TemplatePart};
 pub use procedural::{build_catalog as build_procedural_catalog, DEFAULT_TEMPLATES_PER_TOOL};
 pub use schema::{Example, ParamSpec, ParamType, ToolCall, ToolSchema};

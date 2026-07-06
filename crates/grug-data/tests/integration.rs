@@ -5,7 +5,7 @@
 use std::collections::HashSet;
 
 use grug_data::eval::{score_output, ArgMismatch, DiversityReport, EvalReport, SchemaViolation};
-use grug_data::{Dataset, EvalAxis, Example, Generator, ToolCatalog};
+use grug_data::{Dataset, DistractorConfig, EvalAxis, Example, Generator, ToolCatalog};
 
 #[test]
 fn determinism_same_seed_same_stream() {
@@ -939,15 +939,52 @@ fn procedural_generation_is_fast_at_moderate_volume() {
     // Not the full 100k throughput probe (kept `#[ignore]`d below for manual
     // runs), but part of the fast gate: confirm procedural generation of a
     // few thousand examples over a sizable (1000-tool) catalog completes
-    // comfortably within the <15s fast-test-gate budget for this whole file.
+    // comfortably within budget in an unoptimized debug build.
+    //
+    // Budget note (Phase 51 P1a-3 step 2): `Dataset::new_sized` now defaults
+    // to `DistractorConfig::hard()`, which does real per-example work
+    // (`select_nth_unstable_by` over the whole train catalog, O(n) average)
+    // instead of the old O(distractor_count) uniform index sampling. That
+    // moved this measured debug-build cost from ~1-2s to ~25-30s (vs. ~5s in
+    // `--release`) -- still linear in n_tools * n_examples with no
+    // per-comparison allocation (see `ToolFingerprint`), just a bigger
+    // constant factor than before. 40s comfortably covers that in debug
+    // builds under normal load; the `--release` companion test below is the
+    // tighter, allocation/algorithm regression guard.
     let dataset = Dataset::new_sized(11, 1000, 0.15).unwrap();
     let start = std::time::Instant::now();
     let examples = dataset.train_examples(20_000).unwrap();
     let elapsed = start.elapsed();
     assert_eq!(examples.len(), 20_000);
     assert!(
-        elapsed.as_secs() < 5,
-        "20k procedural example generation took {elapsed:?}, expected well under 5s"
+        elapsed.as_secs() < 40,
+        "20k procedural example generation took {elapsed:?}, expected well under 40s (debug build)"
+    );
+}
+
+#[test]
+#[ignore = "tight perf budget only holds in --release; run manually with \
+            `cargo test -p grug-data --release -- --ignored hard_distractor_default_scales`"]
+fn hard_distractor_default_scales_to_thousands_of_tools_in_release() {
+    // The `--release` companion to `procedural_generation_is_fast_at_moderate_volume`:
+    // a tighter budget that only holds with an optimized build, so a manual
+    // `--release` run catches an algorithmic regression (e.g. accidentally
+    // reintroducing an O(n log n) full sort or a per-comparison allocation)
+    // that the necessarily-loose debug-mode gate above wouldn't catch.
+    // `#[ignore]`d (like the throughput probes below) because plain
+    // `cargo test` runs in debug mode, where this budget doesn't hold by
+    // design -- not because the code is slow, but because unoptimized Rust
+    // is ~5x slower here and this crate's fast gate must stay debug-mode
+    // green.
+    let dataset = Dataset::new_sized(23, 1500, 0.15).unwrap();
+    let start = std::time::Instant::now();
+    let examples = dataset.train_examples(20_000).unwrap();
+    let elapsed = start.elapsed();
+    assert_eq!(examples.len(), 20_000);
+    assert!(
+        elapsed.as_secs() < 15,
+        "20k procedural examples over 1500 tools took {elapsed:?} -- fine in --release, \
+         but investigate if this creeps up (possible algorithmic regression)"
     );
 }
 
@@ -964,6 +1001,241 @@ fn procedural_throughput_probe_100k() {
         n as f64 / elapsed.as_secs_f64()
     );
     assert_eq!(examples.len(), n);
+}
+
+// ---------------------------------------------------------------------
+// Hard distractors (Phase 51 P1a-3 step 2): force in-context schema-reading
+// by offering more, harder-to-rule-out distractor tools, on BOTH the train
+// stream and both eval axes.
+// ---------------------------------------------------------------------
+
+#[test]
+fn hard_distractor_bundles_are_denser_than_the_old_default() {
+    // The old default was 2 distractors (3 tools offered); the new default
+    // must offer strictly more so there is genuinely more to discriminate.
+    let dataset = Dataset::new_sized(1, 500, 0.15).unwrap();
+    let examples = dataset.train_examples(50).unwrap();
+    for ex in &examples {
+        assert!(
+            ex.tools.len() > 3,
+            "default distractor config should offer more than the old 3-tool bundle, got {}",
+            ex.tools.len()
+        );
+    }
+}
+
+#[test]
+fn hard_distractor_bundles_contain_same_family_or_similar_shape_tools() {
+    // Build a big-enough procedural catalog that every tool has at least a
+    // few genuinely similar siblings (shared name token or param-type
+    // histogram), then confirm hard-mode's offered bundles actually surface
+    // that similarity rather than looking uniformly random.
+    let dataset = Dataset::new_sized_with_distractors(
+        7,
+        800,
+        0.15,
+        DistractorConfig::hard_with_count(5),
+    )
+    .unwrap();
+    let examples = dataset.train_examples(200).unwrap();
+
+    let mut bundles_with_a_similar_distractor = 0usize;
+    for ex in &examples {
+        let target = ex.expected_schema().expect("target is among offered tools");
+        let target_tokens: HashSet<&str> = target.name.split('_').collect();
+        let target_kind_multiset: Vec<&str> = target
+            .params
+            .iter()
+            .map(|p| match p.ty {
+                grug_data::ParamType::String => "string",
+                grug_data::ParamType::Integer => "integer",
+                grug_data::ParamType::Number => "number",
+                grug_data::ParamType::Boolean => "boolean",
+                grug_data::ParamType::Enum(_) => "enum",
+            })
+            .collect();
+
+        let has_similar = ex.tools.iter().any(|t| {
+            if t.name == target.name {
+                return false;
+            }
+            let shares_name_token = t.name.split('_').any(|tok| target_tokens.contains(tok));
+            let same_param_count = t.params.len() == target.params.len();
+            let kinds: Vec<&str> = t
+                .params
+                .iter()
+                .map(|p| match p.ty {
+                    grug_data::ParamType::String => "string",
+                    grug_data::ParamType::Integer => "integer",
+                    grug_data::ParamType::Number => "number",
+                    grug_data::ParamType::Boolean => "boolean",
+                    grug_data::ParamType::Enum(_) => "enum",
+                })
+                .collect();
+            let shares_shape = same_param_count && kinds == target_kind_multiset;
+            shares_name_token || shares_shape
+        });
+        if has_similar {
+            bundles_with_a_similar_distractor += 1;
+        }
+    }
+
+    // Hard mode should surface a similar distractor in the large majority of
+    // bundles at this catalog size/distractor count — not every single one
+    // (some targets are genuinely unusual), but far more than uniform-random
+    // selection would produce by chance.
+    assert!(
+        bundles_with_a_similar_distractor as f64 / examples.len() as f64 > 0.5,
+        "expected hard-mode bundles to mostly contain a same-family/similar-shape distractor, \
+         got {bundles_with_a_similar_distractor}/{}",
+        examples.len()
+    );
+}
+
+#[test]
+fn distractor_count_is_configurable_on_dataset() {
+    for count in [1usize, 3, 6, 10] {
+        let dataset = Dataset::new_sized_with_distractors(
+            2,
+            500,
+            0.15,
+            DistractorConfig::hard_with_count(count),
+        )
+        .unwrap();
+        let examples = dataset.train_examples(10).unwrap();
+        for ex in &examples {
+            assert_eq!(ex.tools.len(), count + 1, "target + {count} distractors expected");
+        }
+    }
+}
+
+#[test]
+fn easy_distractor_mode_is_still_reachable_for_ab_comparison() {
+    let dataset =
+        Dataset::new_sized_with_distractors(3, 500, 0.15, DistractorConfig::easy()).unwrap();
+    let examples = dataset.train_examples(10).unwrap();
+    for ex in &examples {
+        assert_eq!(ex.tools.len(), DistractorConfig::easy().distractor_count + 1);
+    }
+}
+
+#[test]
+fn train_and_both_eval_axes_use_the_same_hard_distractor_bundle_size() {
+    // The training bin's config must apply uniformly: train, axis-A
+    // (whole-tool holdout), and axis-B (held-out-phrasing) should all offer
+    // the same bundle width, so axis-A eval genuinely tests the same
+    // schema-discrimination task the model was trained on.
+    let config = DistractorConfig::hard_with_count(5);
+    let dataset = Dataset::new_sized_with_distractors(9, 600, 0.15, config).unwrap();
+
+    let train = dataset.train_examples(20).unwrap();
+    let axis_a = dataset.holdout_examples(20).unwrap();
+    let axis_b = dataset.holdout_phrasing_examples(20).unwrap();
+
+    for ex in train.iter().chain(axis_a.iter()).chain(axis_b.iter()) {
+        assert_eq!(ex.tools.len(), 6, "target + 5 distractors on every stream");
+    }
+}
+
+#[test]
+fn hard_distractors_preserve_whole_tool_holdout_disjointness() {
+    // Re-run the pre-existing disjointness guarantee under hard-distractor
+    // config with a wider bundle, since hard-mode selection is a new code
+    // path that must still only ever draw from the generator's own (train or
+    // holdout) catalog.
+    let dataset = Dataset::new_sized_with_distractors(
+        13,
+        400,
+        0.2,
+        DistractorConfig::hard_with_count(6),
+    )
+    .unwrap();
+
+    let holdout_names: HashSet<&str> = dataset.holdout_tools().iter().map(|t| t.name.as_str()).collect();
+    let train_names: HashSet<&str> = dataset.train_tools().iter().map(|t| t.name.as_str()).collect();
+    assert!(holdout_names.is_disjoint(&train_names));
+
+    let train_examples = dataset.train_examples(300).unwrap();
+    for ex in &train_examples {
+        for offered in &ex.tools {
+            assert!(
+                !holdout_names.contains(offered.name.as_str()),
+                "holdout tool {} leaked into training offered-tools bundle under hard distractors",
+                offered.name
+            );
+        }
+    }
+
+    let holdout_examples = dataset.holdout_examples(150).unwrap();
+    for ex in &holdout_examples {
+        for offered in &ex.tools {
+            assert!(
+                !train_names.contains(offered.name.as_str()),
+                "train tool {} leaked into holdout offered-tools bundle under hard distractors",
+                offered.name
+            );
+        }
+    }
+}
+
+#[test]
+fn hard_distractors_preserve_arg_copyability_and_target_presence() {
+    // Every required arg must still appear verbatim in the rendered request
+    // (arg-copyability), and the target tool must still be the one whose
+    // call is expected, regardless of how many/which distractors surround it.
+    let dataset = Dataset::new_sized_with_distractors(
+        21,
+        400,
+        0.15,
+        DistractorConfig::hard_with_count(7),
+    )
+    .unwrap();
+    let examples = dataset.train_examples(200).unwrap();
+
+    for ex in &examples {
+        let schema = ex
+            .expected_schema()
+            .expect("expected tool must be among the offered tools");
+        assert_eq!(schema.name, ex.expected_call.name);
+
+        for p in schema.required_params() {
+            if let Some(v) = ex.expected_call.arguments_map().get(&p.name) {
+                let text = match v {
+                    serde_json::Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                };
+                assert!(
+                    ex.user_request.contains(&text),
+                    "required arg {}={:?} not copyable from rendered request {:?} \
+                     (tool {}, {} distractors offered)",
+                    p.name,
+                    v,
+                    ex.user_request,
+                    schema.name,
+                    ex.tools.len() - 1
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn hard_distractor_determinism_holds_at_dataset_level() {
+    let cfg = DistractorConfig::hard_with_count(5);
+    let ds_a = Dataset::new_sized_with_distractors(444, 700, 0.15, cfg).unwrap();
+    let ds_b = Dataset::new_sized_with_distractors(444, 700, 0.15, cfg).unwrap();
+
+    let train_a = ds_a.train_examples(40).unwrap();
+    let train_b = ds_b.train_examples(40).unwrap();
+    assert_eq!(train_a, train_b);
+
+    let axis_a_a = ds_a.holdout_examples(20).unwrap();
+    let axis_a_b = ds_b.holdout_examples(20).unwrap();
+    assert_eq!(axis_a_a, axis_a_b);
+
+    let axis_b_a = ds_a.holdout_phrasing_examples(20).unwrap();
+    let axis_b_b = ds_b.holdout_phrasing_examples(20).unwrap();
+    assert_eq!(axis_b_a, axis_b_b);
 }
 
 #[test]

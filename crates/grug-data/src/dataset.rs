@@ -21,7 +21,7 @@
 use crate::catalog::{ToolCatalog, DEFAULT_HOLDOUT_COUNT};
 use crate::error::GrugResult;
 use crate::eval::{DiversityReport, EvalReport};
-use crate::generator::{Generator, PhrasingMode};
+use crate::generator::{DistractorConfig, Generator, PhrasingMode};
 use crate::schema::Example;
 
 /// An owned train/holdout split plus the seed used to derive all three
@@ -36,6 +36,7 @@ pub struct Dataset {
     seed: u64,
     train_catalog: ToolCatalog,
     holdout_catalog: ToolCatalog,
+    distractors: DistractorConfig,
 }
 
 /// XOR salt distinguishing the whole-tool holdout RNG stream (axis A) from
@@ -61,19 +62,33 @@ const HOLDOUT_PHRASING_SEED_SALT: u64 = 0xC2B2_AE3D_27D4_EB4F;
 
 impl Dataset {
     /// Build the default dataset: the built-in catalog, split with
-    /// [`DEFAULT_HOLDOUT_COUNT`] tools reserved for whole-tool holdout.
+    /// [`DEFAULT_HOLDOUT_COUNT`] tools reserved for whole-tool holdout, using
+    /// the default (hard) distractor config.
     pub fn new(seed: u64) -> GrugResult<Self> {
         Self::with_catalog(seed, ToolCatalog::built_in(), DEFAULT_HOLDOUT_COUNT)
     }
 
     /// Build a dataset over a caller-supplied catalog and whole-tool holdout
-    /// count.
+    /// count, using the default (hard) distractor config.
     pub fn with_catalog(seed: u64, catalog: ToolCatalog, holdout_count: usize) -> GrugResult<Self> {
+        Self::with_catalog_and_distractors(seed, catalog, holdout_count, DistractorConfig::default())
+    }
+
+    /// Build a dataset over a caller-supplied catalog, whole-tool holdout
+    /// count, and explicit [`DistractorConfig`] — the full-control
+    /// constructor every other `Dataset` builder delegates to.
+    pub fn with_catalog_and_distractors(
+        seed: u64,
+        catalog: ToolCatalog,
+        holdout_count: usize,
+        distractors: DistractorConfig,
+    ) -> GrugResult<Self> {
         let (train_catalog, holdout_catalog) = catalog.split_at(holdout_count)?;
         Ok(Self {
             seed,
             train_catalog,
             holdout_catalog,
+            distractors,
         })
     }
 
@@ -83,7 +98,9 @@ impl Dataset {
     /// train tool) for the whole-tool holdout axis (axis A). This is the
     /// scale-up constructor for Phase 51 P1a-2 — use this instead of
     /// [`Dataset::new`] once the training run wants hundreds-to-thousands of
-    /// tools rather than the hand-authored ~56.
+    /// tools rather than the hand-authored ~56. Uses the default (hard)
+    /// distractor config; use [`Dataset::new_sized_with_distractors`] to
+    /// override.
     ///
     /// # Example
     /// ```
@@ -95,14 +112,42 @@ impl Dataset {
     /// assert_eq!(examples.len(), 100);
     /// ```
     pub fn new_sized(seed: u64, n_tools: usize, holdout_frac: f64) -> GrugResult<Self> {
+        Self::new_sized_with_distractors(seed, n_tools, holdout_frac, DistractorConfig::default())
+    }
+
+    /// Like [`Dataset::new_sized`], but with an explicit [`DistractorConfig`]
+    /// — the knob the training bin should use to enable hard distractors (the
+    /// default) with a chosen `distractor_count`, or fall back to
+    /// [`DistractorConfig::easy`] for A/B comparison against the original
+    /// P1a-2 numbers.
+    ///
+    /// # Example
+    /// ```
+    /// use grug_data::{Dataset, DistractorConfig};
+    /// let dataset = Dataset::new_sized_with_distractors(
+    ///     42, 1000, 0.15,
+    ///     DistractorConfig::hard_with_count(7),
+    /// ).unwrap();
+    /// let examples = dataset.train_examples(10).unwrap();
+    /// // Target + 7 hard distractors offered per example (catalog is large
+    /// // enough that the cap never binds here).
+    /// assert_eq!(examples[0].tools.len(), 8);
+    /// ```
+    pub fn new_sized_with_distractors(
+        seed: u64,
+        n_tools: usize,
+        holdout_frac: f64,
+        distractors: DistractorConfig,
+    ) -> GrugResult<Self> {
         let catalog = ToolCatalog::procedural(seed, n_tools);
         let holdout_count = holdout_count_from_frac(n_tools, holdout_frac);
-        Self::with_catalog(seed, catalog, holdout_count)
+        Self::with_catalog_and_distractors(seed, catalog, holdout_count, distractors)
     }
 
     /// Like [`Dataset::new_sized`], but with an explicit
     /// templates-per-tool count instead of
-    /// [`crate::procedural::DEFAULT_TEMPLATES_PER_TOOL`].
+    /// [`crate::procedural::DEFAULT_TEMPLATES_PER_TOOL`]. Uses the default
+    /// (hard) distractor config.
     pub fn new_sized_with_templates(
         seed: u64,
         n_tools: usize,
@@ -111,7 +156,7 @@ impl Dataset {
     ) -> GrugResult<Self> {
         let catalog = ToolCatalog::procedural_with_templates(seed, n_tools, templates_per_tool);
         let holdout_count = holdout_count_from_frac(n_tools, holdout_frac);
-        Self::with_catalog(seed, catalog, holdout_count)
+        Self::with_catalog_and_distractors(seed, catalog, holdout_count, DistractorConfig::default())
     }
 
     /// Tool schemas available for training (never includes a whole-tool
@@ -127,7 +172,12 @@ impl Dataset {
 
     /// Generate `n` training examples: TRAIN tools × TRAIN phrasings only.
     pub fn train_examples(&self, n: usize) -> GrugResult<Vec<Example>> {
-        let mut generator = Generator::with_catalog(self.seed, self.train_catalog.clone());
+        let mut generator = Generator::with_catalog_mode_and_distractors(
+            self.seed,
+            self.train_catalog.clone(),
+            PhrasingMode::Train,
+            self.distractors,
+        );
         generator.generate(n)
     }
 
@@ -136,17 +186,28 @@ impl Dataset {
     /// straight to a JSONL file. Uses the same derived seed, so consuming
     /// `n` items from this iterator yields exactly `train_examples(n)`.
     pub fn train_examples_iter(&self) -> impl Iterator<Item = GrugResult<Example>> + '_ {
-        let mut generator = Generator::with_catalog(self.seed, self.train_catalog.clone());
+        let mut generator = Generator::with_catalog_mode_and_distractors(
+            self.seed,
+            self.train_catalog.clone(),
+            PhrasingMode::Train,
+            self.distractors,
+        );
         std::iter::from_fn(move || Some(generator.try_next_example()))
     }
 
     /// Generate `n` **whole-tool holdout** (axis A) examples: HOLDOUT tools
     /// (never trained) × any phrasing, using an RNG stream independent of
     /// `train_examples`. Tests in-context schema-reading on tools the model
-    /// has never seen.
+    /// has never seen. Uses the same [`DistractorConfig`] as the train
+    /// stream, so axis-A eval poses the same discrimination task the model
+    /// was trained on (just against unseen tools).
     pub fn holdout_examples(&self, n: usize) -> GrugResult<Vec<Example>> {
-        let mut generator =
-            Generator::with_catalog(self.seed ^ HOLDOUT_SEED_SALT, self.holdout_catalog.clone());
+        let mut generator = Generator::with_catalog_mode_and_distractors(
+            self.seed ^ HOLDOUT_SEED_SALT,
+            self.holdout_catalog.clone(),
+            PhrasingMode::Train,
+            self.distractors,
+        );
         generator.generate(n)
     }
 
@@ -157,12 +218,14 @@ impl Dataset {
     /// honest-gate axis: a holdout-phrasing template can never have appeared
     /// in the training stream, because `PhrasingMode::Train` (used by
     /// `train_examples`) only ever draws from `PhrasingBank::train_templates`,
-    /// disjoint by construction from `PhrasingBank::holdout_templates`.
+    /// disjoint by construction from `PhrasingBank::holdout_templates`. Uses
+    /// the same [`DistractorConfig`] as the train stream.
     pub fn holdout_phrasing_examples(&self, n: usize) -> GrugResult<Vec<Example>> {
-        let mut generator = Generator::with_catalog_and_mode(
+        let mut generator = Generator::with_catalog_mode_and_distractors(
             self.seed ^ HOLDOUT_PHRASING_SEED_SALT,
             self.train_catalog.clone(),
             PhrasingMode::Holdout,
+            self.distractors,
         );
         generator.generate(n)
     }
