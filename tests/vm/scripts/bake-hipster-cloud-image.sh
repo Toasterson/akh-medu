@@ -168,5 +168,31 @@ for ifc in net0 vioif0; do
 done
 log "baked declarative /etc/hostname.{net0,vioif0} + /etc/dhcp.{net0,vioif0} (DHCP bypass for the pool-name metadata abort)"
 
+# 5. DNS resolution (W1d-2). DHCP (step 4) brings up the interface + IP, but
+#    OpenIndiana does NOT wire DNS on its own -- and normally it's the
+#    metadata agent (which aborts, see step 4) that would write resolv.conf
+#    from DHCP. Without this, the interface is up + SSH works, but
+#    `pkg`/`git`/`curl` fail with "Could not resolve host: pkg.openindiana.org"
+#    and the pg/builder provisioners can't install anything. Two files, per
+#    the illumos gotcha:
+#    (a) /etc/resolv.conf -> QEMU usernet's built-in DNS forwarder at
+#        10.0.2.3 (the standard address for `-netdev user`), plus a public
+#        fallback so this also works under bridged/other net setups.
+#    (b) nsswitch.conf `hosts:`/`ipnodes:` MUST list `dns` -- resolv.conf
+#        alone is insufficient on illumos. This image already ships
+#        `files dns mdns`, but ensure it idempotently in case a future base
+#        ships a bare `files` / `files mdns`.
+sudo sh -c "printf 'nameserver 10.0.2.3\nnameserver 1.1.1.1\n' > '$MNT/etc/resolv.conf'"
+sudo chmod 644 "$MNT/etc/resolv.conf"
+sudo chown root:root "$MNT/etc/resolv.conf"
+# Ensure `dns` is in the hosts:/ipnodes: lookup order (no-op if already present).
+for db in hosts ipnodes; do
+    if ! sudo grep -qE "^${db}:.*\bdns\b" "$MNT/etc/nsswitch.conf"; then
+        sudo sed -i "s/^\(${db}:[[:space:]]*files\)\b/\1 dns/" "$MNT/etc/nsswitch.conf"
+    fi
+done
+log "baked /etc/resolv.conf (10.0.2.3 + 1.1.1.1) + ensured nsswitch hosts/ipnodes include dns"
+log "  nsswitch now: $(sudo grep -E '^(hosts|ipnodes):' "$MNT/etc/nsswitch.conf" | tr '\n' '; ')"
+
 log "done. $DST is ready; point VMFile.kdl's vm blocks at it with"
 log "  ssh { user \"root\"; private-key \"$(basename "$(dirname "$ROOT_PUBKEY")")/$(basename "${ROOT_PUBKEY%.pub}")\" }"

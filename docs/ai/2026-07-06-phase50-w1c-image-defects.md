@@ -242,21 +242,78 @@ instead (independent of any agent): static `/root/.ssh/authorized_keys`,
 `sshd_config PermitRootLogin no → prohibit-password`, and the `sudo→pfexec`
 shim. All three were confirmed present + correct in the booted guest.
 
-### The fix (cheap, offline, high-confidence) — added to the bake, not yet boot-verified
+### The fix (cheap, offline) — VERIFIED GREEN: DHCP + DNS, root SSH login live
 
-The one missing piece is networking, and it does **not** need the metadata
-agent: baking two empty declarative files — `/etc/hostname.vioif0` +
-`/etc/dhcp.vioif0` (illumos's classic "DHCP this NIC" mechanism, read by
-`svc:/network/physical:default`, which is enabled and ran fine) — makes the
-guest DHCP `vioif0` on its own, entirely bypassing the aborting metadata
-agent. `scripts/bake-hipster-cloud-image.sh` now does this (step 4), and the
-script was re-run end-to-end so
-`~/.local/share/vmctl/images/openindiana-hipster-cloud-fixed.qcow2` already
-contains it. **This last step was baked but NOT boot-verified this session**
-(the VM-boot track was closed per plan after the second timeout). It is
-high-confidence: sshd + datalink + static key are all already proven up; the
-only missing element was an IP, and declarative DHCP is the standard,
-agent-independent way to get one. One `tests/vm/smoke.sh` run should confirm.
+The missing pieces were networking + DNS, neither of which needs the
+metadata agent:
+
+- **DHCP** (`bake` step 4): two empty declarative files —
+  `/etc/hostname.vioif0` + `/etc/dhcp.vioif0` (illumos's classic "DHCP this
+  NIC" mechanism, read by `svc:/network/physical:default`, which is enabled
+  and runs fine) — make the guest DHCP `vioif0` on its own, bypassing the
+  aborting metadata agent.
+- **DNS** (`bake` step 5): OpenIndiana does **not** wire DNS by default
+  (again, that's the metadata agent's job, and it aborted). Two files, both
+  required (the illumos gotcha): `/etc/resolv.conf` →
+  `nameserver 10.0.2.3` (QEMU usernet's DNS forwarder) + `1.1.1.1` fallback,
+  **and** `nsswitch.conf` `hosts:`/`ipnodes:` must list `dns` (resolv.conf
+  alone is insufficient on illumos; this image already ships
+  `files dns mdns`, so the bake's `sed` is a no-op here but idempotent for
+  other bases). Without this, the NIC is up + SSH works but `pkg`/`git`/
+  `curl` fail with "Could not resolve host: pkg.openindiana.org".
+
+**VERIFIED on a real boot (2026-07-06):**
+```
+# ssh -i .keys/root_ed25519 -p 10042 root@127.0.0.1
+LOGIN_OK   uid=0(root) gid=0(root)
+ipadm show-addr:  vioif0/?  dhcp  ok  10.0.2.15/24
+grep '^hosts:' /etc/nsswitch.conf:  hosts:  files dns mdns
+cat /etc/resolv.conf:  nameserver 10.0.2.3 / nameserver 1.1.1.1
+getent hosts pkg.openindiana.org:  65.21.23.2  pkg.openindiana.org
+id akh-exec:  uid=100(akh-exec) gid=1(other)   # exec1 provisioner ran
+svcs network/ssh:  online
+```
+Both `exec1` (:10042) and `pg` (:10043) answer `SSH-2.0-OpenSSH_9.9` and
+accept the baked root key. **The SSH/login unblock is real and
+reproducible.**
+
+### Reproducible recipe (fresh operator, from clean)
+
+```
+cd tests/vm
+bash scripts/gen-keys.sh                       # mints .keys/{root,akh-exec}_ed25519
+scripts/bake-hipster-cloud-image.sh \          # offline bake: key+sshd+sudo+DHCP+DNS
+    ~/.local/share/vmctl/images/openindiana-hipster-cloud.img \
+    ~/.local/share/vmctl/images/openindiana-hipster-cloud-fixed.qcow2 \
+    .keys/root_ed25519.pub
+./smoke.sh                                       # PATH-shims q35->pc, vmctl up, checks
+```
+`vmctl up` creates any VM not already in `~/.local/share/vmctl/vms.json`
+(fresh CoW overlay over the shared `-fixed` base) and reuses ones already
+running; `vmctl down --destroy` removes them. exec1 comes up green first and
+independently of pg/builder.
+
+### Provisioning-content status (secondary; SSH unblock is the win)
+
+- **exec1 = GREEN**: `akh-exec` non-root user created, `network/ssh` online,
+  DHCP IP, DNS resolves. This is the load-bearing guest (48c executor / W3
+  runner / 48b target).
+- **pg**: DNS resolves and the IPS catalog fetches fine, but the first run
+  FAILed on a provisioner-CONTENT bug — `pg-provision.sh` looked for
+  `database/postgresql-<N>`, whereas OI ships `database/postgres-<NN>` (and
+  the `<NN>` legacy trains 82..96 out-sort the modern 10..12 numerically).
+  Fixed in `pg-provision.sh` (selects `database/postgres-12`, installs the
+  `/developer` + `/library` subpackages for pgvector); **not yet run through
+  a full postgres+pgvector build** (slow over guest egress — deferred).
+- **builder**: never reached this run — `smoke.sh` bails when `vmctl up`
+  returns non-zero (pg's provisioner failure), before the SSH assertion
+  checks. hipster-cloud ships no Rust toolchain, so `builder-provision.sh`'s
+  rustup fallback (now that DNS works) is the path; deferred with pg.
+
+Note: `smoke.sh` today treats *any* guest's provisioner failure as fatal to
+the whole run (it exits on `vmctl up` non-zero before the per-guest SSH
+assertions). exec1 still boots green regardless, but a future tidy-up could
+decouple the exec1 assertions from pg/builder provisioning-content.
 
 ## Recommendation for the image rebuild (single clearest path)
 

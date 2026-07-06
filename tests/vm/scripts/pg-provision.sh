@@ -17,27 +17,45 @@ log "illumos release: $(uname -v 2>/dev/null || true)"
 # --- discover + install postgresql via IPS ------------------------------
 sudo pkg refresh 2>&1 || log "WARN: pkg refresh failed (publisher unreachable?)"
 
-PG_PKG=$(pkg list -a 2>/dev/null | awk '{print $1}' \
-    | grep -E '^(database/)?postgresql-[0-9]+$' \
-    | sed 's#.*/##' \
-    | sort -t- -k2 -n -u \
-    | tail -1)
+# W1d: OpenIndiana ships PostgreSQL as `database/postgres-<NN>` (NOT
+# `postgresql-<NN>` — that earlier guess produced a false "no package
+# found" FAIL even though DNS + the catalog were fine). The <NN> suffix
+# encodes the version: modern majors are 10..17, while the legacy trains
+# are 82/83/.../96 (= 8.2 .. 9.6). Prefer the newest MODERN major (suffix
+# in 10..79) so a plain numeric sort doesn't pick "96" (9.6) over "12".
+PG_SUFFIX=$(pkg list -a 2>/dev/null | awk '{print $1}' \
+    | grep -E '^database/postgres-[0-9]+$' \
+    | sed 's#.*/postgres-##' \
+    | awk '$1 >= 10 && $1 < 80' \
+    | sort -n | tail -1)
+if [ -z "${PG_SUFFIX:-}" ]; then
+    # No modern major in the catalog; fall back to the newest legacy train.
+    PG_SUFFIX=$(pkg list -a 2>/dev/null | awk '{print $1}' \
+        | grep -E '^database/postgres-[0-9]+$' \
+        | sed 's#.*/postgres-##' | sort -n | tail -1)
+fi
 
-if [ -z "${PG_PKG:-}" ]; then
-    fail "no database/postgresql-<N> package found in the IPS catalog (pkg list -a | grep postgres for the real name)"
+if [ -z "${PG_SUFFIX:-}" ]; then
+    fail "no database/postgres-<NN> package found in the IPS catalog (pkg list -a | grep postgres for the real name)"
     pkg list -a 2>/dev/null | grep -i postgres || true
     exit 1
 fi
+PG_PKG="postgres-${PG_SUFFIX}"
 
-log "installing database/${PG_PKG}"
+log "installing database/${PG_PKG} (+ /developer for pg_config, /library)"
 sudo pkg install -v "database/${PG_PKG}" 2>&1 || {
     fail "pkg install database/${PG_PKG} failed"
     exit 1
 }
 
-# Postgres dev headers (pg_config, server headers) needed to build pgvector.
-sudo pkg install -v "database/${PG_PKG%%-*}-${PG_PKG#*-}" 2>&1 || true
-for cand in "database/postgresql-dev" "database/postgresql-${PG_PKG#postgresql-}-dev" "developer/build/gnu-make" "developer/gcc-13" "developer/gcc-14"; do
+# Postgres server dev headers (pg_config) + runtime libs needed to build
+# pgvector. On OI these are subpackages of the versioned postgres package.
+for cand in \
+    "database/${PG_PKG}/developer" \
+    "database/${PG_PKG}/library" \
+    "developer/build/gnu-make" \
+    "developer/gcc-13" "developer/gcc-14" \
+; do
     sudo pkg install -v "$cand" 2>&1 || true
 done
 
