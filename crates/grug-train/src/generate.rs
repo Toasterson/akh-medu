@@ -7,7 +7,7 @@
 use burn::tensor::backend::Backend;
 use burn::tensor::{ElementConversion, Int, Tensor, TensorData};
 
-use crate::tokenizer::{ByteTokenizer, BOS, EOS, SEP};
+use crate::tokenizer::Vocab;
 use crate::transformer::TinyTransformer;
 
 /// Generation options.
@@ -37,26 +37,25 @@ impl Default for GenerateConfig {
 ///
 /// Stops at `EOS`, at `max_new_tokens`, or (defensively) if the running
 /// sequence would exceed `max_seq_len` even after left-truncation of prompt
-/// tokens -- returns whatever was generated so far in every case, decoded
-/// lossily (`String::from_utf8_lossy`) since a partially-generated sequence
-/// is exactly the case where a stray split multi-byte codepoint is
-/// expected, and the eval harness needs a string back either way (an
-/// invalid-JSON string still scores as "invalid json", which is a real and
-/// useful eval outcome -- an error here would just be a worse way to convey
-/// the same information).
-pub fn generate<B: Backend>(
+/// tokens -- returns whatever was generated so far in every case. Decoding
+/// goes through `tokenizer.decode`, which strips special tokens; if decoding
+/// fails outright (e.g. [`crate::tokenizer::ByteTokenizer`] hitting a
+/// mid-codepoint stop), the raw generated ids are decoded lossily as UTF-8
+/// bytes instead of erroring, since the eval harness needs a string back
+/// either way -- an invalid-JSON string still scores as "invalid json",
+/// which is a real and useful eval outcome.
+pub fn generate<B: Backend, V: Vocab>(
     model: &TinyTransformer<B>,
-    tokenizer: &ByteTokenizer,
+    tokenizer: &V,
     prompt: &str,
     config: GenerateConfig,
     device: &B::Device,
 ) -> String {
     let mut ids: Vec<u32> = Vec::new();
-    ids.push(BOS);
-    ids.extend(tokenizer.encode(prompt));
-    ids.push(SEP);
+    ids.push(tokenizer.bos_id());
+    ids.extend(tokenizer.encode(prompt).unwrap_or_default());
+    ids.push(tokenizer.sep_id());
 
-    let target_start = ids.len();
     let mut generated: Vec<u32> = Vec::new();
 
     for _ in 0..config.max_new_tokens {
@@ -78,22 +77,21 @@ pub fn generate<B: Backend>(
 
         let next_id = argmax(last_logits);
 
-        if next_id == EOS {
+        if next_id == tokenizer.eos_id() {
             break;
         }
         ids.push(next_id);
         generated.push(next_id);
     }
 
-    let _ = target_start; // kept for readability/symmetry with `encode_example`; not needed to slice `generated`.
-    String::from_utf8_lossy(&tokenizer_bytes(&generated)).into_owned()
-}
-
-/// Extract only the byte-range tokens from `ids` as raw bytes (drops any
-/// special tokens that might appear, though generation should only ever
-/// append byte tokens or `EOS`, and `EOS` is never pushed into `generated`).
-fn tokenizer_bytes(ids: &[u32]) -> Vec<u8> {
-    ids.iter().copied().filter(|&t| t < 256).map(|t| t as u8).collect()
+    tokenizer.decode(&generated).unwrap_or_else(|_| {
+        // Fallback for tokenizers (e.g. the byte tokenizer) whose `decode`
+        // can fail on a truncated multi-byte codepoint -- lossily decode the
+        // byte-range tokens directly rather than surfacing an error from a
+        // generation call, per this function's documented contract.
+        let bytes: Vec<u8> = generated.iter().copied().filter(|&t| t < 256).map(|t| t as u8).collect();
+        String::from_utf8_lossy(&bytes).into_owned()
+    })
 }
 
 /// Argmax over a 1-D tensor, returned as `u32` (token id).
@@ -115,6 +113,7 @@ fn argmax<B: Backend>(logits: Tensor<B, 1>) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tokenizer::ByteTokenizer;
     use crate::transformer::TinyTransformerConfig;
     use crate::CpuBackend;
 

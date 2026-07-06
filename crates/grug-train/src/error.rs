@@ -129,4 +129,129 @@ pub enum GrugError {
     #[error(transparent)]
     #[diagnostic(transparent)]
     Data(#[from] grug_data::GrugError),
+
+    /// [`crate::bpe::BpeTokenizer::train`] was given an empty corpus.
+    #[error("cannot train a BPE tokenizer on an empty corpus")]
+    #[diagnostic(
+        code(grug_train::empty_training_corpus),
+        help(
+            "Pass at least one training string. Typically this comes from \
+             `grug_data::Dataset::train_examples` -- check the requested \
+             example count and dataset seed produced a non-empty `Vec`."
+        )
+    )]
+    EmptyTrainingCorpus,
+
+    /// The `tokenizers` crate's BPE trainer returned an error.
+    #[error("BPE tokenizer training failed: {message}")]
+    #[diagnostic(
+        code(grug_train::tokenizer_training_failed),
+        help(
+            "This is an error from the `tokenizers` crate's `Tokenizer::train` \
+             call. Common causes: a corpus so small/repetitive that the \
+             byte-level pre-tokenizer produces no learnable merges, or an \
+             internal panic caught as an error. Try a larger/more varied \
+             corpus, or a smaller requested `vocab_size`."
+        )
+    )]
+    TokenizerTrainingFailed { message: String },
+
+    /// Loading a previously-saved BPE tokenizer file failed.
+    #[error("failed to load BPE tokenizer from {path}: {message}")]
+    #[diagnostic(
+        code(grug_train::tokenizer_load_failed),
+        help(
+            "Check the path exists and was written by `BpeTokenizer::save` \
+             (a `tokenizers` JSON file) -- not a byte-tokenizer artifact or a \
+             checkpoint file, which use different formats. If resuming a \
+             run, confirm the `--artifacts-dir` matches the original run's."
+        )
+    )]
+    TokenizerLoadFailed { path: String, message: String },
+
+    /// Saving a trained BPE tokenizer to disk failed.
+    #[error("failed to save BPE tokenizer to {path}: {message}")]
+    #[diagnostic(
+        code(grug_train::tokenizer_save_failed),
+        help(
+            "Check that the target directory is writable and there is \
+             enough disk space. The tokenizer is saved as a single JSON \
+             file; a partially-written file from a previous failed run at \
+             the same path may also need to be removed first."
+        )
+    )]
+    TokenizerSaveFailed { path: String, message: String },
+
+    /// A trained/loaded BPE tokenizer is missing one of the four required
+    /// special tokens (`<bos>`/`<eos>`/`<pad>`/`<sep>`).
+    #[error("BPE tokenizer is missing required special token `{token}`")]
+    #[diagnostic(
+        code(grug_train::tokenizer_missing_special_token),
+        help(
+            "Every `BpeTokenizer` must be trained via `BpeTokenizer::train` \
+             (which always reserves `<bos>`/`<eos>`/`<pad>`/`<sep>`) or \
+             loaded from a file that was itself saved from such a tokenizer. \
+             This error usually means a tokenizer JSON file from an \
+             unrelated/incompatible training run was loaded by mistake."
+        )
+    )]
+    TokenizerMissingSpecialToken { token: String },
+
+    /// Encoding text with a [`crate::bpe::BpeTokenizer`] failed.
+    #[error("BPE tokenizer encode failed: {message}")]
+    #[diagnostic(
+        code(grug_train::tokenizer_encode_failed),
+        help(
+            "This is an error surfaced from the `tokenizers` crate's \
+             `Tokenizer::encode`. Since encoding is byte-level and total, \
+             this should be rare -- check for a regression in pre-tokenizer \
+             configuration if it appears consistently."
+        )
+    )]
+    TokenizerEncodeFailed { message: String },
+
+    /// Decoding token ids with a [`crate::bpe::BpeTokenizer`] failed.
+    #[error("BPE tokenizer decode failed: {message}")]
+    #[diagnostic(
+        code(grug_train::tokenizer_decode_failed),
+        help(
+            "This is an error surfaced from the `tokenizers` crate's \
+             `Tokenizer::decode`. Check that the token ids being decoded are \
+             within this tokenizer's vocabulary range (e.g. not ids produced \
+             by a *different* trained tokenizer)."
+        )
+    )]
+    TokenizerDecodeFailed { message: String },
+
+    /// Writing a training checkpoint (model + optimizer state + metadata)
+    /// failed.
+    #[error("failed to write checkpoint to {path}: {message}")]
+    #[diagnostic(
+        code(grug_train::checkpoint_write_failed),
+        help(
+            "Check that the checkpoint directory is writable and there is \
+             enough disk space for both the model and optimizer state files \
+             (the optimizer state is roughly 2x the model size for Adam's \
+             first/second moment buffers). If this is a detached long run, \
+             check `df -h` on the artifacts volume."
+        )
+    )]
+    CheckpointWriteFailed { path: String, message: String },
+
+    /// Loading a training checkpoint failed.
+    #[error("failed to load checkpoint from {path}: {message}")]
+    #[diagnostic(
+        code(grug_train::checkpoint_read_failed),
+        help(
+            "Common causes: (1) the directory does not exist or is missing \
+             `model`/`optim`/`meta.json` (a partially-written checkpoint from \
+             a killed run -- prefer the second-to-last checkpoint directory \
+             in that case); (2) the model/optimizer config passed to \
+             `load_checkpoint` does not match the config the checkpoint was \
+             saved with (different `d_model`/`n_layers`/vocab size -- shapes \
+             must match exactly); (3) a `schema_version` mismatch from a \
+             checkpoint written by an older/incompatible build of this crate."
+        )
+    )]
+    CheckpointReadFailed { path: String, message: String },
 }

@@ -22,6 +22,34 @@
 
 use crate::error::{GrugError, GrugResult};
 
+/// The tokenizer seam (Phase 51 P1a): anything that can turn text into
+/// token ids and back, plus report its special-token ids and vocab size.
+///
+/// [`ByteTokenizer`] (P0, this module) and [`crate::bpe::BpeTokenizer`]
+/// (P1a) both implement this trait, so [`crate::train`], [`crate::generate`],
+/// and [`crate::eval`] can be written once against `V: Vocab` rather than
+/// duplicated per tokenizer. `encode`/`decode` return [`GrugResult`] (rather
+/// than `ByteTokenizer`'s infallible `Vec<u32>`/fallible-only-on-bad-UTF8
+/// shape) since [`crate::bpe::BpeTokenizer`]'s underlying `tokenizers` calls
+/// are fallible; `ByteTokenizer`'s impl simply never returns `Err` from
+/// `encode`.
+pub trait Vocab {
+    /// Encode `text` with no special tokens added.
+    fn encode(&self, text: &str) -> GrugResult<Vec<u32>>;
+    /// Decode token ids back into a `String`, dropping special tokens.
+    fn decode(&self, tokens: &[u32]) -> GrugResult<String>;
+    /// The full vocabulary size (including special tokens).
+    fn vocab_size(&self) -> usize;
+    /// `BOS` token id.
+    fn bos_id(&self) -> u32;
+    /// `EOS` token id (also the generation stop token).
+    fn eos_id(&self) -> u32;
+    /// `PAD` token id.
+    fn pad_id(&self) -> u32;
+    /// `SEP` token id -- separates prompt tokens from target tokens.
+    fn sep_id(&self) -> u32;
+}
+
 /// `BOS` token id: one past the 256 byte-value tokens (0..=255).
 pub const BOS: u32 = 256;
 /// `EOS` token id.
@@ -87,6 +115,30 @@ impl ByteTokenizer {
         String::from_utf8(bytes).map_err(|e| GrugError::InvalidUtf8 {
             message: e.to_string(),
         })
+    }
+}
+
+impl Vocab for ByteTokenizer {
+    fn encode(&self, text: &str) -> GrugResult<Vec<u32>> {
+        Ok(ByteTokenizer::encode(self, text))
+    }
+    fn decode(&self, tokens: &[u32]) -> GrugResult<String> {
+        ByteTokenizer::decode(self, tokens)
+    }
+    fn vocab_size(&self) -> usize {
+        ByteTokenizer::vocab_size(self)
+    }
+    fn bos_id(&self) -> u32 {
+        BOS
+    }
+    fn eos_id(&self) -> u32 {
+        EOS
+    }
+    fn pad_id(&self) -> u32 {
+        PAD
+    }
+    fn sep_id(&self) -> u32 {
+        SEP
     }
 }
 

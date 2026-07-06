@@ -5311,12 +5311,14 @@ name = "grug-train"
 version = "0.1.0"
 dependencies = [
  "burn",
+ "clap",
  "grug-data",
  "miette 7.6.0",
  "rand 0.8.5",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "tokenizers",
 ]
 
 [[package]]

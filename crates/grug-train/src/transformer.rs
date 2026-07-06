@@ -228,6 +228,20 @@ impl TinyTransformerConfig {
         Self::new(vocab_size, 128, 4, 2, 512, 256)
     }
 
+    /// The P1a scale-up default (Phase 51 plan, "Model" bullet): "~5-30M
+    /// params (d_model 384-512, 6-8 layers/heads, ctx 512-1024), sized to
+    /// the *task* not the organ". `d_model=384, n_heads=6, n_layers=6,
+    /// d_ff=1536, max_seq_len=640` lands in the middle of that range --
+    /// roughly 10-20M params depending on the (now much smaller, BPE) vocab
+    /// size, vs. the byte tokenizer's fixed 260. See
+    /// [`TinyTransformer::num_params`] for the actual count at a given
+    /// vocab size; the P1a plan's gate is on *task performance*, not a
+    /// precise parameter budget, so this is a reasonable starting point
+    /// rather than a tuned optimum.
+    pub fn p1a(vocab_size: usize) -> Self {
+        Self::new(vocab_size, 384, 6, 6, 1536, 640)
+    }
+
     pub fn init<B: Backend>(&self, device: &B::Device) -> TinyTransformer<B> {
         let blocks = (0..self.n_layers)
             .map(|_| DecoderBlockConfig::new(self.d_model, self.n_heads, self.d_ff).init(device))
@@ -365,5 +379,18 @@ mod tests {
         // every hyperparameter tweak.
         assert!(n > 100_000, "spike model suspiciously small: {n} params");
         assert!(n < 20_000_000, "spike model larger than the P0 target: {n} params");
+    }
+
+    #[test]
+    fn p1a_config_param_count_is_in_target_range() {
+        let device = Default::default();
+        // A representative BPE vocab size (P1a target ~2-4K); the exact
+        // count depends on the actually-trained vocab, but this pins the
+        // architecture (not vocab) contribution to the 5-30M P1a range from
+        // the Phase 51 plan.
+        let model = TinyTransformerConfig::p1a(2500).init::<CpuBackend>(&device);
+        let n = model.num_params();
+        assert!(n > 5_000_000, "P1a model below the 5-30M target range: {n} params");
+        assert!(n < 30_000_000, "P1a model above the 5-30M target range: {n} params");
     }
 }

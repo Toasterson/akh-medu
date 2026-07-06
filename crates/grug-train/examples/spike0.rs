@@ -99,12 +99,13 @@ fn main() {
         let batch_examples: Vec<_> = (0..BATCH_SIZE)
             .map(|i| train_examples[(step * BATCH_SIZE + i) % train_examples.len()].clone())
             .collect();
-        let batch = build_batch::<ActiveBackend>(
+        let batch = build_batch::<ActiveBackend, _>(
             &tokenizer,
             &batch_examples,
             model_config.max_seq_len,
             &device,
-        );
+        )
+        .expect("byte tokenizer encoding never fails");
 
         let step_start = Instant::now();
         let (next_model, loss) = train_step(model, &mut optim, &batch, train_cfg.learning_rate);

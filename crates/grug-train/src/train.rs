@@ -23,7 +23,7 @@ use burn::tensor::{Int, Tensor, TensorData};
 
 use grug_data::schema::Example;
 
-use crate::tokenizer::{ByteTokenizer, EOS, PAD, SEP};
+use crate::tokenizer::Vocab;
 use crate::transformer::{TinyTransformer, TinyTransformerConfig};
 
 /// Render the tools offered in `example` plus the user request as the
@@ -51,19 +51,19 @@ pub struct Encoded {
 }
 
 /// Tokenize `example` into the `BOS <prompt> SEP <target> EOS` framing.
-pub fn encode_example(tokenizer: &ByteTokenizer, example: &Example) -> Encoded {
+pub fn encode_example<V: Vocab>(tokenizer: &V, example: &Example) -> crate::error::GrugResult<Encoded> {
     let prompt = format_prompt(example);
     let target = example.expected_call_as_json_string();
 
     let mut ids = Vec::with_capacity(prompt.len() + target.len() + 3);
-    ids.push(crate::tokenizer::BOS);
-    ids.extend(tokenizer.encode(&prompt));
-    ids.push(SEP);
+    ids.push(tokenizer.bos_id());
+    ids.extend(tokenizer.encode(&prompt)?);
+    ids.push(tokenizer.sep_id());
     let target_start = ids.len();
-    ids.extend(tokenizer.encode(&target));
-    ids.push(EOS);
+    ids.extend(tokenizer.encode(&target)?);
+    ids.push(tokenizer.eos_id());
 
-    Encoded { ids, target_start }
+    Ok(Encoded { ids, target_start })
 }
 
 /// Hyperparameters for [`train_step`] / the training loop in `examples/spike0.rs`.
@@ -100,13 +100,17 @@ pub struct Batch<B: AutodiffBackend> {
 
 /// Build a training batch from a slice of examples, truncating/padding every
 /// sequence to the batch's own max length (capped at `max_seq_len`).
-pub fn build_batch<B: AutodiffBackend>(
-    tokenizer: &ByteTokenizer,
+pub fn build_batch<B: AutodiffBackend, V: Vocab>(
+    tokenizer: &V,
     examples: &[Example],
     max_seq_len: usize,
     device: &B::Device,
-) -> Batch<B> {
-    let encoded: Vec<Encoded> = examples.iter().map(|ex| encode_example(tokenizer, ex)).collect();
+) -> crate::error::GrugResult<Batch<B>> {
+    let pad_id = tokenizer.pad_id();
+    let encoded: Vec<Encoded> = examples
+        .iter()
+        .map(|ex| encode_example(tokenizer, ex))
+        .collect::<crate::error::GrugResult<Vec<_>>>()?;
 
     let longest = encoded.iter().map(|e| e.ids.len()).max().unwrap_or(1).min(max_seq_len);
     let batch_size = encoded.len();
@@ -121,7 +125,7 @@ pub fn build_batch<B: AutodiffBackend>(
         let mut ids = enc.ids.clone();
         ids.truncate(longest);
         while ids.len() < longest {
-            ids.push(PAD);
+            ids.push(pad_id);
         }
 
         for i in 0..seq_len {
@@ -130,7 +134,7 @@ pub fn build_batch<B: AutodiffBackend>(
             // Target position i+1 counts toward the loss iff it's at or
             // past target_start (i.e. it's part of the expected-call JSON
             // or the trailing EOS) and isn't PAD.
-            let is_target_token = i + 1 >= enc.target_start && ids[i + 1] != PAD;
+            let is_target_token = i + 1 >= enc.target_start && ids[i + 1] != pad_id;
             loss_mask.push(is_target_token);
         }
     }
@@ -144,13 +148,13 @@ pub fn build_batch<B: AutodiffBackend>(
         device,
     );
 
-    Batch {
+    Ok(Batch {
         input_ids,
         targets,
         loss_mask,
         batch_size,
         seq_len,
-    }
+    })
 }
 
 /// Run one forward + backward + optimizer-step training iteration.
@@ -236,6 +240,7 @@ pub fn to_eval_model<B: AutodiffBackend>(model: &TinyTransformer<B>) -> TinyTran
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tokenizer::ByteTokenizer;
     use crate::CpuAutodiffBackend;
     use grug_data::Dataset;
 
@@ -248,10 +253,10 @@ mod tests {
         let tok = ByteTokenizer::new();
         let dataset = Dataset::new(1).unwrap();
         let examples = dataset.train_examples(1).unwrap();
-        let enc = encode_example(&tok, &examples[0]);
+        let enc = encode_example(&tok, &examples[0]).unwrap();
 
-        assert_eq!(enc.ids[enc.target_start - 1], SEP);
-        assert_eq!(*enc.ids.last().unwrap(), EOS);
+        assert_eq!(enc.ids[enc.target_start - 1], crate::tokenizer::SEP);
+        assert_eq!(*enc.ids.last().unwrap(), crate::tokenizer::EOS);
     }
 
     #[test]
@@ -261,7 +266,7 @@ mod tests {
         let dataset = Dataset::new(2).unwrap();
         let examples = dataset.train_examples(4).unwrap();
 
-        let batch = build_batch::<CpuAutodiffBackend>(&tok, &examples, 64, &device);
+        let batch = build_batch::<CpuAutodiffBackend, _>(&tok, &examples, 64, &device).unwrap();
         assert_eq!(batch.batch_size, 4);
         assert_eq!(batch.input_ids.dims(), [4, batch.seq_len]);
         assert_eq!(batch.targets.dims(), [4, batch.seq_len]);
@@ -282,7 +287,7 @@ mod tests {
 
         let (mut model, mut optim) =
             init_training::<CpuAutodiffBackend>(&tiny_model_config(), &device);
-        let batch = build_batch::<CpuAutodiffBackend>(&tok, &examples, 64, &device);
+        let batch = build_batch::<CpuAutodiffBackend, _>(&tok, &examples, 64, &device).unwrap();
 
         let lr = 1e-2;
         let mut losses = Vec::new();
@@ -297,6 +302,42 @@ mod tests {
         assert!(
             last < first,
             "expected loss to decrease over {} steps: first={first}, last={last}, all={losses:?}",
+            losses.len()
+        );
+    }
+
+    /// P1a: the same training loop, batching, and masked-loss machinery
+    /// must work unchanged with [`crate::bpe::BpeTokenizer`] substituted for
+    /// [`ByteTokenizer`] -- this is the entire point of the `Vocab` seam.
+    #[test]
+    fn training_loop_decreases_loss_with_bpe_tokenizer() {
+        let device = Default::default();
+        let dataset = Dataset::new(5).unwrap();
+        let train_examples = dataset.train_examples(16).unwrap();
+
+        let corpus: Vec<String> = train_examples
+            .iter()
+            .flat_map(|ex| vec![format_prompt(ex), ex.expected_call_as_json_string()])
+            .collect();
+        let tok = crate::bpe::BpeTokenizer::train(corpus, 512).unwrap();
+
+        let model_config = TinyTransformerConfig::new(tok.vocab_size(), 16, 2, 1, 32, 128);
+        let (mut model, mut optim) = init_training::<CpuAutodiffBackend>(&model_config, &device);
+        let batch = build_batch::<CpuAutodiffBackend, _>(&tok, &train_examples[..4], 128, &device).unwrap();
+
+        let lr = 1e-2;
+        let mut losses = Vec::new();
+        for _ in 0..30 {
+            let (next_model, loss) = train_step(model, &mut optim, &batch, lr);
+            model = next_model;
+            losses.push(loss);
+        }
+
+        let first = losses.first().copied().unwrap();
+        let last = losses.last().copied().unwrap();
+        assert!(
+            last < first,
+            "expected loss to decrease over {} steps with BPE tokenizer: first={first}, last={last}, all={losses:?}",
             losses.len()
         );
     }

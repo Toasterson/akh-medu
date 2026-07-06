@@ -34,6 +34,18 @@ serde_json = "1"
 # which lives in grug-data and has its own seeded RNG)
 rand = { version = "0.8", features = ["std", "std_rng"] }
 
+# P1a scale-up (Phase 51 plan): trainable byte-level BPE tokenizer, replacing
+# the P0 fixed byte-per-token scheme for real training runs (see `bpe.rs`).
+# Reuses the exact version already in the workspace root Cargo.toml
+# (`nlu-ml`/`candle-backend` features) so no new dependency version enters
+# the graph -- default-features off, only the pieces we actually use.
+tokenizers = { version = "0.22", default-features = false, features = ["progressbar", "fancy-regex"] }
+
+# CLI config for `examples/train_p1a.rs` (steps/model-size/data-size/seed/
+# artifacts-dir/--resume). Reuses the exact version+features already in the
+# workspace root Cargo.toml.
+clap = { version = "4.5", features = ["derive"] }
+
 [features]
 default = []
 # Phase 51 P0 gate (R3): opt-in GPU backend for the 7900 XTX (gfx1100) factory
