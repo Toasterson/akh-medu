@@ -11,11 +11,24 @@
 # `ssh` binary with no way to pass a remote command through vmctl itself —
 # see crates/vmctl/src/commands/ssh.rs), so this script talks to the guests
 # directly: it reads vmctl's own state file (~/.local/share/vmctl/vms.json)
-# for each VM's forwarded SSH port and per-VM generated key
-# (<work_dir>/id_ed25519_generated), then runs plain `ssh user@127.0.0.1
+# for each VM's forwarded SSH port, then runs plain `ssh user@127.0.0.1
 # -p <port> <command>` itself. That's the documented, stable way to script
 # non-interactive commands against a vmctl-managed VM until vmctl grows a
 # `ssh <name> -- <cmd>` passthrough.
+#
+# Phase 50 / W1d: the login user is `root` with a STATIC key
+# (.keys/root_ed25519), not vmctl's per-run auto-generated cloud-init key.
+# See VMFile.kdl's exec1 comment + scripts/bake-hipster-cloud-image.sh for
+# why: the openindiana-hipster-cloud image's real provisioning agents
+# (illumos's own metadata/useragent) ship `PermitRootLogin no` and no
+# sudo(8), and the cloud-init user-data path grants created users no admin
+# rights -- so the SSH channel this script depends on is baked directly
+# into the image offline, independent of whether the cloud-init seed is
+# ever read. Because the key is explicit (VMFile.kdl `ssh { private-key }`),
+# vmctl does NOT write a work_dir/id_ed25519_generated file for it (that
+# filename is only used for the auto-generated-keypair path) -- so this
+# script uses the fixed .keys/root_ed25519 path directly instead of reading
+# it from vms.json.
 #
 # This is a long-running operation (image pull already cached separately,
 # but boot + cloud-init + provisioning can take several minutes per VM).
@@ -27,7 +40,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$HERE"
 
 VMS_JSON="${HOME}/.local/share/vmctl/vms.json"
-SSH_USER="vmctl"
+SSH_USER="root"
+SSH_KEY="$HERE/.keys/root_ed25519"
 FAIL=0
 
 log() { printf '[smoke] %s\n' "$*"; }
@@ -37,7 +51,7 @@ bad() { printf '[smoke] FAIL: %s\n' "$*" >&2; FAIL=1; }
 remote() {
     # remote <vm-name> <command...>
     local vm="$1"; shift
-    local port key
+    local port
     port=$(python3 -c "
 import json
 with open('${VMS_JSON}') as f:
@@ -48,18 +62,12 @@ print(data['$vm']['ssh_host_port'])
         bad "$vm: could not read ssh_host_port from $VMS_JSON"
         return 1
     fi
-    key=$(python3 -c "
-import json
-with open('${VMS_JSON}') as f:
-    data = json.load(f)
-print(data['$vm']['work_dir'])
-" 2>/dev/null)/id_ed25519_generated
-    if [ ! -f "$key" ]; then
-        bad "$vm: generated key not found at $key"
+    if [ ! -f "$SSH_KEY" ]; then
+        bad "$vm: root key not found at $SSH_KEY (run gen-keys.sh + bake-hipster-cloud-image.sh)"
         return 1
     fi
     ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-        -o ConnectTimeout=10 -i "$key" -p "$port" "${SSH_USER}@127.0.0.1" "$@"
+        -o ConnectTimeout=10 -i "$SSH_KEY" -p "$port" "${SSH_USER}@127.0.0.1" "$@"
 }
 
 log "gen-keys.sh (idempotent)"
