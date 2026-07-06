@@ -1,0 +1,4 @@
+{"kind":"header","schema_version":1,"timestamp":"2026-07-06T11:23:36.193536293Z","harness":"frontiercode","harness_git_sha":"92ffc17f10e4d18025258e54d1a0d1cdd7d22931","task_set_hash":"a63ea7b69e2bf8341bfee302fc654f3ccb68161591104459a9289eb5b059cdb6","model":{"tag":"glm-5.2","backing":{"backing":"cloud","provider_tag":"glm-5.2"}},"grading":{"mode":"autonomous"},"host_tier":{"tier":"host"}}
+{"kind":"task","task_id":"sympy__sympy-13852","outcome":{"outcome":"fail"},"score":0.0,"wall_time":300.0,"usage":{"tokens_used":null,"requests_used":2},"notes":"no usable edit from Tecton"}
+{"kind":"task","task_id":"sympy__sympy-17630","outcome":{"outcome":"fail"},"score":0.0,"wall_time":77.2,"usage":{"tokens_used":null,"requests_used":1},"notes":null}
+{"kind":"summary","total_tasks":2,"passed":0,"failed":2,"aborted":0,"pass_rate":0.0,"mean_score":0.0,"total_wall_time_secs":377.2,"total_tokens":null,"total_requests":3}

@@ -1,0 +1,8 @@
+{"kind":"header","schema_version":1,"timestamp":"2026-07-06T11:16:55.286151173Z","harness":"longmemeval","harness_git_sha":"92ffc17f10e4d18025258e54d1a0d1cdd7d22931","task_set_hash":"45683f0beafbb07589e82ef80f191fae90abf88d1d259090e56710559f4d3422","model":{"tag":"qwen","backing":{"backing":"cloud","provider_tag":"qwen3.5:397b"}},"grading":{"mode":"autonomous"},"host_tier":{"tier":"host"}}
+{"kind":"task","task_id":"e47becba","outcome":{"outcome":"fail"},"score":0.0,"wall_time":10.8,"usage":{"tokens_used":null,"requests_used":1},"notes":"0/1 questions correct"}
+{"kind":"task","task_id":"118b2229","outcome":{"outcome":"fail"},"score":0.0,"wall_time":5.8,"usage":{"tokens_used":null,"requests_used":1},"notes":"0/1 questions correct"}
+{"kind":"task","task_id":"51a45a95","outcome":{"outcome":"pass"},"score":1.0,"wall_time":37.0,"usage":{"tokens_used":null,"requests_used":1},"notes":"1/1 questions correct"}
+{"kind":"task","task_id":"58bf7951","outcome":{"outcome":"pass"},"score":1.0,"wall_time":3.9,"usage":{"tokens_used":null,"requests_used":1},"notes":"1/1 questions correct"}
+{"kind":"task","task_id":"1e043500","outcome":{"outcome":"pass"},"score":1.0,"wall_time":12.4,"usage":{"tokens_used":null,"requests_used":1},"notes":"1/1 questions correct"}
+{"kind":"task","task_id":"c5e8278d","outcome":{"outcome":"pass"},"score":1.0,"wall_time":4.7,"usage":{"tokens_used":null,"requests_used":1},"notes":"1/1 questions correct"}
+{"kind":"summary","total_tasks":6,"passed":4,"failed":2,"aborted":0,"pass_rate":0.6666666666666666,"mean_score":0.6666666666666666,"total_wall_time_secs":74.60000000000001,"total_tokens":null,"total_requests":6}

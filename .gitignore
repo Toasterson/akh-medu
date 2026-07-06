@@ -13,3 +13,7 @@ eval_timeseries.jsonl
 # BPE tokenizer, training logs) -- large/binary, live outside any worktree at
 # an absolute path (/home/toasty/ws/agi/akh-medu/runs/), never committed.
 runs/
+
+# Python bytecode caches (scripts/, benchmarks/*.py harness drivers).
+__pycache__/
+*.pyc

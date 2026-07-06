@@ -141,7 +141,7 @@ def build_prompt(task: dict, repo_dir: Path, max_context=24000,
 # ── per-task run ────────────────────────────────────────────────────────────
 def run_task(task: dict, *, dry_run_gold=False, no_tests=False, workspace="tecton",
              timeout=600, keep=False, max_context=24000, judge_workspace=None,
-             edit_format="search-replace") -> dict:
+             edit_format="search-replace", host="127.0.0.1", port=8201) -> dict:
     iid = task["instance_id"]
     print(f"\n{'='*70}\n[{iid}] {task['repo']} @ {task['base_commit'][:10]} "
           f"({task['difficulty']})")
@@ -182,7 +182,8 @@ def run_task(task: dict, *, dry_run_gold=False, no_tests=False, workspace="tecto
                             "single fenced ```diff block and nothing else — no tools, "
                             "no prose.")
                 target = lambda t: util.extract_patch(t) is not None
-            text, mrec = drive_tecton(prompt, workspace, timeout, followup, target)
+            text, mrec = drive_tecton(prompt, workspace, timeout, followup, target,
+                                      host=host, port=port)
             rec["stages"]["model"] = mrec
             # Convert the model's CODE output into a clean unified diff via git
             # (the "don't make the LLM generate patches" path).
@@ -268,26 +269,30 @@ def run_task(task: dict, *, dry_run_gold=False, no_tests=False, workspace="tecto
 
 
 def drive_tecton(prompt: str, workspace: str, timeout: int,
-                 followup_prompt: str, target_present) -> tuple[str | None, dict]:
+                 followup_prompt: str, target_present,
+                 host: str = "127.0.0.1", port: int = 8201) -> tuple[str | None, dict]:
     """Run the akh and return (model_text, rec). `model_text` is the best output
     (answer; reasoning appended as a fallback, since glm-5.2 is a reasoning model
     that may leave the edit in the thinking stream). If `target_present(text)` is
     false after the first turn, do ONE tool-free elicitation follow-up in the same
-    session. Format-agnostic — the caller turns the text into a patch."""
+    session (so at most 2 requests/task — the per-task budget cap, ADR 086 §5).
+    Format-agnostic — the caller turns the text into a patch."""
     from acp_adapter import AkhClient
 
     def best(t):
         return t.answer if target_present(t.answer) else \
             (t.answer or "") + "\n" + (t.reasoning or "")
 
-    rec: dict = {"mode": "tecton"}
+    rec: dict = {"mode": "tecton", "requests_used": 0}
     turn = followup = None
     try:
-        with AkhClient(workspace, timeout=timeout) as c:
+        with AkhClient(workspace, host=host, port=port, timeout=timeout) as c:
             turn = c.prompt(prompt)
+            rec["requests_used"] += 1
             text = best(turn)
             if not target_present(text):
                 followup = c.prompt(followup_prompt)
+                rec["requests_used"] += 1
                 text = best(followup)
     except Exception as e:
         rec["error"] = f"{type(e).__name__}: {e}"
@@ -331,6 +336,10 @@ def main(argv=None) -> int:
     ap.add_argument("--no-tests", action="store_true",
                     help="scope+apply only; no env build / test exec")
     ap.add_argument("--workspace", default="tecton")
+    ap.add_argument("--host", default="127.0.0.1",
+                    help="akhomed ACP host (Phase 50 W5: point at a benchmark "
+                         "akhomed instance, not necessarily the default 8201 one)")
+    ap.add_argument("--port", type=int, default=8201, help="akhomed ACP TCP port")
     ap.add_argument("--timeout", type=float, default=600)
     ap.add_argument("--keep", action="store_true", help="keep temp workdirs")
     ap.add_argument("--max-context", type=int, default=24000,
@@ -360,10 +369,13 @@ def main(argv=None) -> int:
                        workspace=args.workspace, timeout=int(args.timeout),
                        keep=args.keep, max_context=args.max_context,
                        judge_workspace=args.judge_workspace,
-                       edit_format=args.edit_format)
+                       edit_format=args.edit_format,
+                       host=args.host, port=args.port)
         summary.append({"instance_id": rec["instance_id"],
                         "score": rec.get("score", 0),
-                        "error": rec.get("error")})
+                        "error": rec.get("error"),
+                        "elapsed_s": (rec.get("stages", {}).get("model", {}) or {}).get("elapsed_s"),
+                        "requests_used": (rec.get("stages", {}).get("model", {}) or {}).get("requests_used")})
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     total = sum(s["score"] or 0 for s in summary)
     roll = {"n": len(summary), "passed": total,
