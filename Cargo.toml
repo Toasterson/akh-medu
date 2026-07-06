@@ -186,7 +186,9 @@ futures = { version = "0.3", optional = true }
 # commonly RSA; `flate2`/`serde` stay off (unneeded).
 russh = { version = "0.62.1", default-features = false, features = ["ring", "rsa"], optional = true }
 # Encodes file-write payloads for `RemoteBackend`'s shell-command file verbs
-# (base64 | base64 -d over the exec channel — see src/backend/remote.rs).
+# (base64 | openssl base64 -d over the exec channel — see src/backend/remote.rs;
+# the remote-side decode uses `openssl base64 -d`, not GNU `base64 -d` — found
+# missing on the illumos exec1 guest in Phase 50 W2b).
 base64 = { version = "0.22.1", optional = true }
 
 [features]

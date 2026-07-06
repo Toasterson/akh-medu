@@ -650,14 +650,26 @@ impl Filesystem for RemoteBackend {
         Ok(String::from_utf8_lossy(&outcome.stdout).into_owned())
     }
 
-    /// Writes go over the exec channel as `base64 | base64 -d > path`: the
-    /// content is base64-encoded client-side and embedded directly in the
-    /// command line (base64's alphabet is quote-safe), avoiding a second
-    /// stdin-streaming round trip for what is normally config/text-sized
-    /// content. **Caveat**: this roughly triples the wire size and holds the
-    /// whole payload in one command-line argument, so it is not the right
-    /// path for large binary transfers — a future SFTP-backed write would
-    /// remove that ceiling (see the module doc's SFTP-vs-shell note).
+    /// Writes go over the exec channel as `printf ... | openssl base64 -d >
+    /// path`: the content is base64-encoded client-side and embedded directly
+    /// in the command line (base64's alphabet is quote-safe), avoiding a
+    /// second stdin-streaming round trip for what is normally config/
+    /// text-sized content. **Caveat**: this roughly triples the wire size and
+    /// holds the whole payload in one command-line argument, so it is not the
+    /// right path for large binary transfers — a future SFTP-backed write
+    /// would remove that ceiling (see the module doc's SFTP-vs-shell note).
+    ///
+    /// **Decoder is `openssl base64 -d`, not GNU coreutils `base64 -d`.**
+    /// Found live against the illumos `exec1` guest (Phase 50 W2b): OpenIndiana's
+    /// default image ships no `base64` binary at all (`/usr/bin`, `/usr/gnu/bin`
+    /// — nowhere on `$PATH`), so the original GNU-coreutils-only invocation
+    /// failed closed with "command not found" on every write. `openssl`
+    /// (unlike `base64`) is effectively universal — present on both this
+    /// illumos image and every Linux distro tested — and its `base64`
+    /// subcommand decodes the same alphabet. It needs the input
+    /// newline-terminated to flush the last line (hence `printf '%s\n'`
+    /// below, not `printf '%s'`); verified byte-exact for both short and
+    /// 300-byte payloads on the live guest.
     fn write(&self, path: &Path, contents: &str) -> FsResult<()> {
         if self.config.write_roots.is_empty() {
             return Err(FsError::WritesDisabled);
@@ -670,9 +682,9 @@ impl Filesystem for RemoteBackend {
             command.push_str(&shell_quote_path(parent));
             command.push_str(" && ");
         }
-        command.push_str("printf '%s' ");
+        command.push_str("printf '%s\\n' ");
         command.push_str(&shell_quote(&encoded));
-        command.push_str(" | base64 -d > ");
+        command.push_str(" | openssl base64 -d > ");
         command.push_str(&shell_quote_path(path));
         let outcome = self.run_file_op(path, command)?;
         if !outcome.success {
