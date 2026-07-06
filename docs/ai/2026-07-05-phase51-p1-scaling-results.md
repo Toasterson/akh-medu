@@ -73,8 +73,22 @@ Same model. 1000 procedural tools (850 train / 150 whole-tool holdout), ~47 exam
 - Train (GPU): `source scripts/train-env.sh && cargo run -p grug-train --example train_p1a --release --features gpu -- --n-tools 1000 --holdout-frac 0.15 --train-examples 40000 --epochs 4 --batch-size 16 --learning-rate 3e-4 --eval-every 500 --ckpt-every 1000 --seed 42 --artifacts-dir runs/p1a2`.
 - Eval time-series: `runs/<run>/eval_axes.jsonl` (rows tagged by `axis`). Checkpoints: `runs/<run>/checkpoints/step_*/` (Burn `Recorder`, resumable via `--resume`).
 
-## 8. Open next steps (for a fresh decision)
+## 8. P1a-3 — a three-lever ablation of the remaining walls (2026-07-05)
 
-1. **Close the gate cheaply:** fix the BPE-corpus cap + a little more training → push arg-correct decisively past 0.7.
-2. **Zero-shot (axis A):** the real remaining frontier — more tools / contrastive negatives / copy-pointer bias.
-3. **P1b (Apertus):** in-distribution tool-calling works; bring in foundation pretraining for natural-language comprehension.
+After P1a-2 left two gaps — arg-correct just under the 0.7 gate, and axis-A (zero-shot to unseen tools) near zero — three levers were tested, each isolated:
+
+**Step 1 — more training (gate close).** 4→8 epochs (same 13M model + data). Arg-correct was *still climbing* at 4 epochs, not plateaued; 8 epochs took axis-B **arg 0.69 → 0.78, schema 0.90** — gate met. (The BPE-corpus-cap "fix" was a red herring: the procedural corpus is diversity-limited, so 5k→60k examples only moved vocab 2953→3045; more training was the real lever.)
+
+**Step 2 — harder data (force schema-reading).** Same-family, similarity-ranked "hard" distractors (`DistractorConfig`) to force in-context schema discrimination. Result: **net-negative.** Axis-A zero-shot rose only ~0.03 → ~0.05–0.07 (peak 0.10, collapse broken) while axis-B *regressed* (arg 0.78 → 0.52) — the harder task made the model worse at what it was good at. Two real bugs surfaced + fixed: silent target-truncation when prompt+target overflows the 640 ctx (`build_batch`'s `ids.truncate`; now guarded by a startup PROMPT-LEN check + capping to 4 distractors), and **NaN divergence** at ~step 100 (unclipped Adam on the harder/longer task; fixed with gradient-norm clipping at 1.0).
+
+**Step 3 — more capacity.** 13M → **~28.7M** (`p1a_large`: d_model 512, 8 layers/heads), same easy-distractor data as Step 1, 8 epochs. Result: **no help on either axis.** Axis-B arg **0.73** / schema 0.84 ≈ 13M's 0.78/0.90 (flat; train loss cratered to 0.045 = fit training faster, no better generalization). Axis-A zero-shot **0.008** ≈ 13M's ~0.03 (flat at the floor). **2.2× capacity broke neither ceiling.**
+
+### Conclusion — the remaining wall is *architectural*
+
+A clean ablation ruled out the obvious levers: **more data (Step 2) and more capacity (Step 3) both fail** to move zero-shot-to-unseen-tools. In-distribution grounding is also saturated for this architecture (30M ≈ 13M). Therefore the remaining gap is **not** data-, epoch-, or capacity-bound — the model lacks the *mechanism* to copy novel param names from an unseen in-prompt schema into its call. The indicated lever is **architectural**: a copy/pointer mechanism (bias generation toward copying spans from the offered schema), *not* more parameters, more data, or Apertus foundation pretraining. (Apertus buys natural-language comprehension, which was never the bottleneck for these synthetic templates.)
+
+## 9. Open next steps (for a fresh decision)
+
+1. **Copy/pointer mechanism** — the evidence-backed lever for zero-shot: let the model copy param-name/value spans directly from the offered schema. Architectural change to `TinyTransformer`.
+2. **Organ-scale + High Grug/KG** — accept that true zero-shot generalization belongs to the larger organ (P3+) where schema knowledge comes from the KG via the gap-token, not from weights.
+3. **P1b (Apertus)** — still open, but de-prioritized: it addresses comprehension, which this ablation shows is not the current bottleneck.
