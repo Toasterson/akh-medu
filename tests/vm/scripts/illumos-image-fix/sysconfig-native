@@ -1,0 +1,159 @@
+#!/sbin/sh
+#
+# sysconfig-native -- Phase 50 / W1c
+#
+# Native illumos replacement for the sysconfig provisioner shipped (broken)
+# in the openindiana-rust-ci image. The shipped /usr/lib/sysconfig/sysconfig
+# is an x86-64 GNU/Linux ELF (interpreter /lib64/ld-linux-x86-64.so.2) that
+# illumos cannot exec -- its SMF method died from SIGKILL on every boot and
+# the service went to maintenance, so no login user was ever created and the
+# guest was unreachable over SSH. This POSIX-sh reimplementation reads the
+# same NoCloud CIDATA seed vmctl attaches and applies: hostname, login users
+# + their SSH authorized_keys (granting the illumos "Primary Administrator"
+# profile so the sudo->pfexec shim gives them root), then ensures DHCP on the
+# primary virtio NIC. Best-effort + idempotent; always exits 0 so the
+# transient SMF instance reaches 'online' instead of 'maintenance'.
+#
+# The SMF manifest invokes this with `provision --source auto`; the args are
+# ignored on purpose.
+#
+PATH=/usr/sbin:/usr/bin:/sbin:/usr/lib; export PATH
+
+log() { echo "sysconfig-native: $*"; }
+
+MNT=/var/run/cidata
+mkdir -p "$MNT" 2>/dev/null
+
+# --- locate + mount the CIDATA (NoCloud) seed -------------------------------
+# vmctl attaches the seed as an IDE CD-ROM; illumos surfaces it as an hsfs
+# volume. Scan the usual slice/partition nodes, matching sysconfig's own
+# cloud_init provider (fstyp == hsfs and a user-data/meta-data file present).
+seed_dev=""
+for d in /dev/dsk/c*s2 /dev/dsk/c*p0 /dev/dsk/c*s0 /dev/dsk/c*p1; do
+    [ -e "$d" ] || continue
+    fs=`fstyp "$d" 2>/dev/null`
+    [ "$fs" = "hsfs" ] || continue
+    umount "$MNT" 2>/dev/null
+    if mount -F hsfs -o ro "$d" "$MNT" 2>/dev/null; then
+        if [ -f "$MNT/user-data" ] || [ -f "$MNT/meta-data" ]; then
+            seed_dev="$d"
+            break
+        fi
+        umount "$MNT" 2>/dev/null
+    fi
+done
+
+if [ -z "$seed_dev" ]; then
+    log "no CIDATA seed found (scanned /dev/dsk/c*); skipping user provisioning"
+else
+    log "found NoCloud seed on $seed_dev"
+    UD="$MNT/user-data"
+    MD="$MNT/meta-data"
+
+    # --- hostname -----------------------------------------------------------
+    hn=""
+    [ -f "$MD" ] && hn=`grep -i '^local-hostname:' "$MD" 2>/dev/null | sed 's/^[^:]*:[ ]*//' | tr -d ' \r'`
+    if [ -z "$hn" ] && [ -f "$UD" ]; then
+        hn=`grep -i '^[ ]*hostname:' "$UD" 2>/dev/null | sed 's/^[^:]*:[ ]*//' | tr -d ' \r'`
+    fi
+    if [ -n "$hn" ]; then
+        log "setting hostname -> $hn"
+        echo "$hn" > /etc/nodename
+        /usr/bin/hostname "$hn" 2>/dev/null
+    fi
+
+    # --- users + ssh keys ---------------------------------------------------
+    # The vmctl cloud-config shape is fixed and simple: one admin user block
+    #   - name: <user>
+    #     shell: <shell>
+    #     ssh_authorized_keys:
+    #       - <key>
+    #       - <key>
+    # We support one or more users; every ssh-* key line is attached to the
+    # most recently seen `- name:`. awk emits shell-eval records.
+    if [ -f "$UD" ]; then
+        awk '
+          /^[ \t]*-[ \t]*name:/ {
+            u=$0; sub(/^.*name:[ \t]*/,"",u); gsub(/[ \t\r"]/,"",u);
+            cur=u; order[++n]=u; seen[u]=1; next
+          }
+          /^[ \t]*shell:/ {
+            s=$0; sub(/^.*shell:[ \t]*/,"",s); gsub(/[ \t\r"]/,"",s);
+            if (cur!="") shell[cur]=s; next
+          }
+          /ssh-(ed25519|rsa|ecdsa|dss)/ {
+            k=$0; sub(/^[ \t]*-[ \t]*/,"",k); sub(/[\r]+$/,"",k);
+            gsub(/^"|"$/,"",k);
+            if (cur!="") key[cur]=key[cur] k "\n";
+          }
+          END {
+            for (i=1;i<=n;i++){ u=order[i];
+              sh=shell[u]; if (sh=="") sh="/bin/bash";
+              printf("USER\t%s\t%s\n", u, sh);
+              m=split(key[u], ka, "\n");
+              for (j=1;j<=m;j++) if (ka[j]!="") printf("KEY\t%s\t%s\n", u, ka[j]);
+            }
+          }
+        ' "$UD" > /var/run/cidata_users.tsv 2>/dev/null
+
+        while IFS='	' read -r tag u rest; do
+            case "$tag" in
+            USER)
+                sh="$rest"
+                [ -x "$sh" ] || sh=/bin/bash
+                home="/export/home/$u"
+                if id "$u" >/dev/null 2>&1; then
+                    log "user $u already exists"
+                else
+                    log "creating user $u (shell $sh, home $home)"
+                    mkdir -p /export/home 2>/dev/null
+                    useradd -m -d "$home" -s "$sh" "$u" 2>/dev/null \
+                        || useradd -m -d "$home" -s /bin/sh "$u" 2>/dev/null
+                    passwd -N "$u" 2>/dev/null
+                fi
+                # Grant root-equivalent via RBAC so the sudo->pfexec shim works.
+                usermod -P 'Primary Administrator' "$u" 2>/dev/null \
+                    || log "WARN: could not grant Primary Administrator to $u"
+                mkdir -p "$home/.ssh" 2>/dev/null
+                : > "$home/.ssh/authorized_keys"
+                chmod 700 "$home/.ssh" 2>/dev/null
+                chmod 600 "$home/.ssh/authorized_keys" 2>/dev/null
+                ;;
+            KEY)
+                home="/export/home/$u"
+                if [ -d "$home/.ssh" ]; then
+                    echo "$rest" >> "$home/.ssh/authorized_keys"
+                    log "installed a key for $u"
+                fi
+                ;;
+            esac
+        done < /var/run/cidata_users.tsv
+
+        # Fix ownership of every provisioned home (uid resolved post-useradd).
+        for u in `awk -F'\t' '$1=="USER"{print $2}' /var/run/cidata_users.tsv`; do
+            home="/export/home/$u"
+            chown -R "$u":staff "$home/.ssh" 2>/dev/null
+        done
+    fi
+    umount "$MNT" 2>/dev/null
+fi
+
+# --- DHCP on the primary virtio NIC ----------------------------------------
+# Declarative /etc/hostname.<if> + /etc/dhcp.<if> are baked into the image so
+# svc:/network/physical:default plumbs DHCP on its own; this is a live-boot
+# backstop in case the interface name differs from what was baked.
+primary=`dladm show-phys -p -o link 2>/dev/null | head -1`
+if [ -n "$primary" ]; then
+    if ! ipadm show-addr -p -o addrobj 2>/dev/null | grep -q "^${primary}/"; then
+        log "plumbing DHCP on $primary"
+        ipadm create-if -t "$primary" 2>/dev/null
+        ipadm create-addr -t -T dhcp -w 20 "${primary}/v4" 2>/dev/null \
+            || log "WARN: dhcp create-addr on $primary did not complete"
+    fi
+fi
+
+# Make sure sshd is up for the host to reach us.
+svcadm enable -rs network/ssh 2>/dev/null
+
+log "provisioning complete"
+exit 0
