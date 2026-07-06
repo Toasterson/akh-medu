@@ -148,3 +148,153 @@ roles (which don't need the baked Rust toolchain) it may be a drop-in
 substitute — worth a single boot test before committing to a multi-hour
 rebuild. It still needs a readable seed (defect #2 may or may not apply) and
 a working provisioner, but it clears the hard #3 blocker for free.
+
+---
+
+# Phase 50 / W1d — hipster-cloud evaluated: ONE remaining root cause (pool-name → no DHCP)
+
+*2026-07-06, follow-up. The "cheaper alternative" above was taken to its
+conclusion: offline-inspected, seed/key-channel reverse-engineered, booted,
+and forensically re-inspected offline.*
+
+## Verdict: hipster-cloud is FAR better than rust-ci, blocked by ONE cheap defect
+
+`openindiana-hipster-cloud.img` clears **all three** rust-ci defects for
+free (verified by offline `qemu-nbd` + `zpool import`, no boot):
+
+- **networking binaries PRESENT** — `/sbin/dladm`, `/sbin/ipadm`,
+  `/sbin/flowadm` are real 32-bit Solaris ELF (rust-ci defect #3 gone).
+- **IDE/ATAPI cdrom driver PRESENT** — `kernel/drv/{ata,ahci,cmdk,sd}`
+  installed, `driver_aliases` has `ata "ide"` + `ahci "pciclass,010601"`
+  (rust-ci defect #2's driver gap gone; the CIDATA seed *is* enumerable).
+- **native provisioner** — it does NOT use the Linux-ELF `sysconfig`;
+  instead it ships illumos's own `svc:/system/illumos/{metadata,useragent}`
+  agents (`/usr/lib/{metadata,useragent}`, genuine Solaris x86-64 ELF, Rust
+  binaries — the upstream `illumos/metadata-agent`) (rust-ci defect #1 gone).
+
+But a real boot still never answers SSH ("Connection timed out during
+banner exchange"). The precise, forensically-confirmed root cause is a
+**single, different, cheaply-fixable defect**:
+
+### Root cause: root pool is `oirpool`, the metadata agent hardcodes `rpool`, so networking is never configured
+
+Console + the guest's own SMF log
+(`/var/svc/log/system-illumos-metadata:default.log`, read offline from the
+booted overlay):
+
+```
+[ Enabled. ] [ Executing start method ("/usr/lib/metadata | tee /dev/msglog"). ]
+INFO SMF instance: svc:/system/illumos/metadata:default
+INFO mkdir /var/metadata
+ERRO fatal error: zpool list failure: exit code 1: cannot open 'rpool': no such pool
+[ Method "start" exited with status 0. ]
+```
+
+The image's root pool is named **`oirpool`** (loader: `Setting currdev to
+zfs:oirpool/ROOT/0242d35e`), but the illumos metadata agent's very first
+real action after `mkdir /var/metadata` is a `zpool list rpool` (for its
+"expand rpool" step). That fails, and the agent bails **before it reaches
+its network-config stage** — where it, and *only* it, would run
+`ipadm create-addr -T dhcp vioif0/v4`. (It exits status 0, so it does NOT go
+to maintenance; it just silently does nothing further.)
+
+Downstream, confirmed by mounting the post-boot overlay offline:
+
+- `/etc/ipadm/ipadm.conf` is **empty** (no interface objects); there is no
+  `aobjmap.conf` and no `/var/db/dhcpagent/` lease → **`vioif0` has a
+  datalink but never got an IP.** NWAM is inactive in this cloud image, and
+  there were no `/etc/hostname.*`/`/etc/dhcp.*` files, so nothing else
+  configured the NIC.
+- `svc:/network/ssh:default` **DID start** (`Method "start" exited with
+  status 0`, generated host keys) — sshd is up and healthy. It just has no
+  network address to answer on, so QEMU's `hostfwd tcp::10042-:22` completes
+  the TCP handshake (QEMU accepts) but the guest sends no banner → the exact
+  "Failed getting banner" / "timed out during banner exchange" symptom.
+
+So this is **not** a seed-format problem and **not** an SSH/PermitRootLogin
+problem — the login channel is fine, the guest simply has no IP.
+
+### The key/login channel (reverse-engineered, works, and is now moot for the blocker)
+
+For the record, the metadata/useragent key channel *was* precisely
+identified (via `strings` + DWARF debug-info on `/usr/lib/{metadata,useragent}`):
+
+- **NoCloud/cidata IS supported**: `metadata` scans `/dev/dsk` + `/dev/rdsk`
+  for a `cidata`-labelled volume, mounts it (`meta-data` + `user-data` +
+  `network-config`), and reads `public-keys/0/openssh-key` → installs to
+  **`/root/.ssh/authorized_keys`** (root is the key target, confirmed by the
+  `checking SSH public keys for user .../root/.ssh` code path).
+- **`useragent` parses cloud-config `#cloud-config`** with a genuine
+  cloud-init-shaped deserializer — DWARF shows `struct CloudConfig { groups,
+  users, write_files, ca_certs, bootcmd, runcms, final_message, packages,
+  package_update, phone_home, growpart, ssh_authorized_keys, ssh_keys,
+  no_ssh_fingerprints, ssh }` and `struct UserConfig { name, expire_date,
+  gecos, homedir, primary_group, groups, lock_passwd, inactive, passwd,
+  no_create_home, no_user_group, ssh_authorized_keys, system, shell }`. So
+  vmctl's default `#cloud-config` (users + ssh_authorized_keys) is
+  format-compatible — **but note `UserConfig` has no sudo/RBAC-profile
+  field**, so a cloud-init-created user gets key auth and zero admin rights.
+
+Because both the seed read AND the useragent run happen *after* the network
+stage that the pool-name abort skips — and because relying on them still
+wouldn't grant admin — the login channel was **baked statically offline**
+instead (independent of any agent): static `/root/.ssh/authorized_keys`,
+`sshd_config PermitRootLogin no → prohibit-password`, and the `sudo→pfexec`
+shim. All three were confirmed present + correct in the booted guest.
+
+### The fix (cheap, offline, high-confidence) — added to the bake, not yet boot-verified
+
+The one missing piece is networking, and it does **not** need the metadata
+agent: baking two empty declarative files — `/etc/hostname.vioif0` +
+`/etc/dhcp.vioif0` (illumos's classic "DHCP this NIC" mechanism, read by
+`svc:/network/physical:default`, which is enabled and ran fine) — makes the
+guest DHCP `vioif0` on its own, entirely bypassing the aborting metadata
+agent. `scripts/bake-hipster-cloud-image.sh` now does this (step 4), and the
+script was re-run end-to-end so
+`~/.local/share/vmctl/images/openindiana-hipster-cloud-fixed.qcow2` already
+contains it. **This last step was baked but NOT boot-verified this session**
+(the VM-boot track was closed per plan after the second timeout). It is
+high-confidence: sshd + datalink + static key are all already proven up; the
+only missing element was an IP, and declarative DHCP is the standard,
+agent-independent way to get one. One `tests/vm/smoke.sh` run should confirm.
+
+## Recommendation for the image rebuild (single clearest path)
+
+**Base the rebuild on `openindiana-hipster-cloud` (OI 2025.04), NOT
+`openindiana-rust-ci`.** It already solves rust-ci's three fatal defects
+(net binaries, cdrom driver, native provisioner). Then the *only* fixes a
+clean rebuild needs are:
+
+1. **Name the root pool `rpool`** (the illumos metadata agent hardcodes it),
+   OR ship declarative `/etc/hostname.vioif0` + `/etc/dhcp.vioif0` so
+   networking is agent-independent. Either one unblocks SSH. (The offline
+   bake here does the latter, non-invasively.)
+2. **For the `builder` role only**: install the Rust toolchain + `gcc`/
+   `clang`/`gmake`/`git` (hipster-cloud is minimal and ships none). `exec1`
+   and `pg` don't need it.
+3. **Optional niceties already handled by the offline bake**: a `sudo(8)`
+   (or the pfexec shim), and `PermitRootLogin prohibit-password` + a root
+   authorized_keys — needed only if you want key-based root SSH without
+   depending on the metadata/useragent seed path.
+
+Everything else (UEFI + virtio-transitional, the q35→pc shim) is already in
+`tests/vm/VMFile.kdl` + `tests/vm/scripts/qemu-illumos-shim/` and works.
+
+## Consolidated "what a bootable, SSH-reachable illumos guest needs" (all images tested)
+
+| Requirement | rust-ci 2026.04 | hipster-cloud 2025.04 | why it matters |
+|---|---|---|---|
+| `/sbin/dladm`,`ipadm`,`flowadm` binaries | ❌ missing | ✅ present | no datalink/IP layer without them |
+| IDE/ATAPI cdrom driver (`ata`/`ahci`) | ❌ absent | ✅ present | else the CIDATA seed is unreadable |
+| native-illumos provisioner (not Linux ELF) | ❌ Linux ELF `sysconfig` | ✅ illumos `metadata`/`useragent` | Linux ELF is SIGKILLed on exec |
+| provisioner actually configures the NIC | n/a (never ran) | ❌ aborts on `rpool` name | **the hipster-cloud blocker** |
+| root pool named `rpool` (or declarative DHCP) | unknown | ❌ `oirpool` → fix needed | metadata agent hardcodes `rpool` |
+| `svc:/network/ssh` enabled by default | — | ✅ (generic profile) | sshd must be up |
+| root SSH key channel | — | ✅ metadata→`/root/.ssh` (or bake) | login target |
+| `sudo(8)` present | ❌ | ❌ (shim baked) | provisioner scripts call `sudo` |
+| Rust toolchain (builder role) | claimed, unusable | ❌ absent | `builder` native build |
+| UEFI + virtio-transitional + q35→pc shim | ✅ (W1b/W1) | ✅ (same) | boots to multi-user |
+
+Net: **rust-ci is unfixable offline (missing net binaries); hipster-cloud is
+one non-invasive offline fix (declarative DHCP, already baked) away from
+green, and is the correct rebuild base.**
