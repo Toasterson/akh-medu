@@ -9,3 +9,12 @@ Per ADR 086 §4: once a task-set hash has a published run against it, that hash 
 | demo | deepseek | cloud (`deepseek-synthetic-demo`) | autonomous | host | 2026-07-05 | 3/6 | 50.0% | 0.465 | `123882d36278` | `774181c92286` |
 | demo | glm-5.2 | cloud (`glm-5.2-synthetic-demo`) | autonomous | host | 2026-07-05 | 2/6 | 33.3% | 0.412 | `123882d36278` | `774181c92286` |
 | demo | qwen | cloud (`qwen-synthetic-demo`) | autonomous | host | 2026-07-05 | 5/6 | 83.3% | 0.704 | `123882d36278` | `774181c92286` |
+| frontiercode | deepseek | cloud (`deepseek-v4-pro`) | autonomous | host | 2026-07-06 | 0/2 | 0.0% | 0.000 | `a63ea7b69e2b` | `92ffc17f10e4` |
+| frontiercode | glm-5.2 | cloud (`glm-5.2`) | autonomous | host | 2026-07-06 | 0/2 | 0.0% | 0.000 | `a63ea7b69e2b` | `92ffc17f10e4` |
+| frontiercode | qwen | cloud (`qwen3.5:397b`) | autonomous | host | 2026-07-06 | 0/2 | 0.0% | 0.000 | `a63ea7b69e2b` | `92ffc17f10e4` |
+| locomo | deepseek | cloud (`deepseek-v4-pro`) | autonomous | host | 2026-07-06 | 0/1 | 0.0% | 0.200 | `b0a503efba1a` | `92ffc17f10e4` |
+| locomo | glm-5.2 | cloud (`glm-5.2`) | autonomous | host | 2026-07-06 | 0/1 | 0.0% | 0.200 | `b0a503efba1a` | `92ffc17f10e4` |
+| locomo | qwen | cloud (`qwen3.5:397b`) | autonomous | host | 2026-07-06 | 0/1 | 0.0% | 0.000 | `b0a503efba1a` | `92ffc17f10e4` |
+| longmemeval | deepseek | cloud (`deepseek-v4-pro`) | autonomous | host | 2026-07-06 | 3/6 | 50.0% | 0.500 | `45683f0beafb` | `92ffc17f10e4` |
+| longmemeval | glm-5.2 | cloud (`glm-5.2`) | autonomous | host | 2026-07-06 | 3/6 | 50.0% | 0.500 | `45683f0beafb` | `92ffc17f10e4` |
+| longmemeval | qwen | cloud (`qwen3.5:397b`) | autonomous | host | 2026-07-06 | 4/6 | 66.7% | 0.667 | `45683f0beafb` | `92ffc17f10e4` |

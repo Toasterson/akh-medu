@@ -108,30 +108,74 @@ def load_longmemeval(sample: int, haystack: int):
     return items
 
 
-def run(items, label, timeout, max_inject_chars):
+def run(items, label, timeout, max_inject_chars, workspace="tecton",
+        host="127.0.0.1", port=8201, max_requests=0):
+    """Drive `items` through one ACP session per item. `max_requests` (0 =
+    unbounded) is the Phase 50 W5 / ADR 086 §5 budget cap: a hard ceiling on
+    total cloud requests (session turns) across the WHOLE run. When it is
+    hit, further questions/items are recorded as `aborted` (budget_exceeded)
+    rather than silently dropped — surfaced via `capped_at` in the output and
+    a printed warning, so a capped run is never mistaken for a complete one."""
     results = []
+    requests_used = 0
+    capped_at = None
     for it in items:
-        with AkhClient("tecton", timeout=timeout) as c:
-            # Inject each relevant session as a "remember this" turn.
-            for sname, stext in it["sessions"]:
-                stext = stext[:max_inject_chars]
-                c.prompt(f"Here is a past conversation to remember ({sname}). "
-                         f"Acknowledge briefly.\n\n{stext}")
+        if max_requests and requests_used >= max_requests:
+            capped_at = it["id"]
+            break
+        try:
+            with AkhClient(workspace, host=host, port=port, timeout=timeout) as c:
+                # Inject each relevant session as a "remember this" turn.
+                for sname, stext in it["sessions"]:
+                    if max_requests and requests_used >= max_requests:
+                        break
+                    stext = stext[:max_inject_chars]
+                    c.prompt(f"Here is a past conversation to remember ({sname}). "
+                             f"Acknowledge briefly.\n\n{stext}")
+                    requests_used += 1
+                for q, gold, meta in it["qas"]:
+                    if max_requests and requests_used >= max_requests:
+                        results.append({"item": it["id"], "q": q, "gold": gold,
+                                        "pred": "", "correct": False, "f1": 0.0,
+                                        "elapsed": 0.0, "aborted": "budget_exceeded"})
+                        capped_at = it["id"]
+                        continue
+                    turn = c.prompt(f"Based only on the conversations you were just given, "
+                                    f"answer concisely: {q}")
+                    requests_used += 1
+                    ok, f1 = judge(turn.answer, gold)
+                    results.append({"item": it["id"], "q": q, "gold": gold,
+                                    "pred": turn.answer.strip()[:240], "correct": ok,
+                                    "f1": round(f1, 2), "elapsed": round(turn.elapsed_s, 1)})
+                    flag = "OK" if ok else "XX"
+                    print(f"[{flag}] {it['id']!s:>10} f1={f1:.2f} {turn.elapsed_s:4.0f}s "
+                          f"Q:{q[:50]} | gold:{gold[:30]} | pred:{turn.answer.strip()[:60]}")
+        except Exception as e:
+            # A transient ACP/network failure (e.g. a cloud-model turn running
+            # long enough to trip the socket timeout) must not lose every
+            # result already computed in this process — ADR 086 §5 treats a
+            # budget/robustness cap-out as a recorded failure, never a silent
+            # or total loss. Any question(s) for this item not yet answered
+            # are recorded as aborted with the real exception as the reason.
+            answered = {r["q"] for r in results if r["item"] == it["id"] and not r.get("aborted")}
             for q, gold, meta in it["qas"]:
-                turn = c.prompt(f"Based only on the conversations you were just given, "
-                                f"answer concisely: {q}")
-                ok, f1 = judge(turn.answer, gold)
+                if q in answered:
+                    continue
                 results.append({"item": it["id"], "q": q, "gold": gold,
-                                "pred": turn.answer.strip()[:240], "correct": ok,
-                                "f1": round(f1, 2), "elapsed": round(turn.elapsed_s, 1)})
-                flag = "OK" if ok else "XX"
-                print(f"[{flag}] {it['id']!s:>10} f1={f1:.2f} {turn.elapsed_s:4.0f}s "
-                      f"Q:{q[:50]} | gold:{gold[:30]} | pred:{turn.answer.strip()[:60]}")
-    n = len(results)
-    acc = sum(r["correct"] for r in results)
-    mf1 = sum(r["f1"] for r in results) / n if n else 0.0
-    print(f"\n[{label}] accuracy={acc}/{n}  mean_f1={mf1:.2f}")
+                                "pred": "", "correct": False, "f1": 0.0, "elapsed": 0.0,
+                                "aborted": f"{type(e).__name__}: {e}"})
+            print(f"[!!] {it['id']!s:>10} item aborted by exception: {type(e).__name__}: {e}")
+    if capped_at:
+        print(f"\n*** BUDGET CAP HIT (max_requests={max_requests}) at item {capped_at!r} "
+              f"— remaining items/questions recorded as aborted, not silently dropped ***")
+    scored = [r for r in results if not r.get("aborted")]
+    n = len(scored)
+    acc = sum(r["correct"] for r in scored)
+    mf1 = sum(r["f1"] for r in scored) / n if n else 0.0
+    print(f"\n[{label}] accuracy={acc}/{n}  mean_f1={mf1:.2f}"
+          + (f"  (+{len(results) - n} aborted by budget cap)" if len(results) > n else ""))
     out = {"benchmark": label, "n": n, "accuracy": acc, "mean_f1": round(mf1, 2),
+           "requests_used": requests_used, "capped_at": capped_at,
            "results": results}
     path = os.path.join(HERE, f"results_{label}.json")
     json.dump(out, open(path, "w"), indent=2)
@@ -151,6 +195,14 @@ def main():
     ap.add_argument("--timeout", type=float, default=180.0)
     ap.add_argument("--max-inject-chars", type=int, default=6000)
     ap.add_argument("--label", default=None)
+    ap.add_argument("--workspace", default="tecton",
+                    help="akhomed workspace name (Phase 50 W5: the per-model benchmark akh)")
+    ap.add_argument("--host", default="127.0.0.1")
+    ap.add_argument("--port", type=int, default=8201)
+    ap.add_argument("--max-requests", type=int, default=0,
+                    help="hard cap on total cloud requests for this run (0 = unbounded); "
+                         "ADR 086 §5 budget discipline — exceeding it aborts remaining "
+                         "items as budget_exceeded rather than looping unbounded")
     args = ap.parse_args()
 
     if args.benchmark == "locomo":
@@ -165,7 +217,9 @@ def main():
     ns = sum(len(it["sessions"]) for it in items)
     print(f"=== {label}: {len(items)} items, {ns} sessions to inject, {nq} questions "
           f"(~{ns+nq} GLM turns) ===")
-    run(items, label, args.timeout, args.max_inject_chars)
+    run(items, label, args.timeout, args.max_inject_chars,
+        workspace=args.workspace, host=args.host, port=args.port,
+        max_requests=args.max_requests)
 
 
 if __name__ == "__main__":

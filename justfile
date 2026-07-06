@@ -21,18 +21,27 @@ default:
 # TODO(W3 — illumos E2E corpus + runner): wire `illumos-e2e` to the
 #   `(setup.sh, prompt, verify.sh)` runner over the vmctl exec1 VM, autonomous
 #   + advisory grading, manpage-grounding audit-trail check.
-# TODO(W5 — public legs): wire `frontiercode` / `locomo` / `longmemeval` /
-#   `terminal-bench` to their existing harnesses (benchmarks/frontiercode/,
-#   run_memory_bench.py, the Terminal-Bench adapter) per-model.
+# DONE(W5 — public legs, partial): `frontiercode` / `locomo` / `longmemeval`
+#   are real now — drive the harness directly against a benchmark akhomed
+#   instance (see `benchmarks/frontiercode/harness/runner.py --workspace
+#   <model> --port <port>` and `benchmarks/run_memory_bench.py --workspace
+#   <model> --host <host> --port <port> --max-requests <cap>`), then convert
+#   with `benchmarks/emit_run_record.py {frontiercode,memory} ...`, which
+#   shells out to `bench-tool record-run` (below) to do the actual
+#   schema-validated write. `terminal-bench` has no adapter yet — still a
+#   TODO. This `bench` recipe itself still only records a synthetic run
+#   (no live akhomed lifecycle management here); real runs are driven by
+#   hand/script per the above until that's wired into one command.
 # TODO(W6 — fleet orchestration): wire `fleet` to the orchestrator-vs-single-akh
 #   control comparison over the VM fleet.
 #
-# Until those runners exist, every harness name falls through to the
-# synthetic recorder below so the results→leaderboard→site pipeline stays
-# demonstrably end-to-end runnable today. Real runners should call
-# `harness_core::store::write_run` directly (see
-# `benchmarks/harness-core/src/bin/bench_tool.rs`'s `record_synthetic` for
-# the shape) rather than shelling out to `bench-tool record-synthetic`.
+# Every harness name here still falls through to the synthetic recorder so
+# the results→leaderboard→site pipeline stays demonstrably end-to-end
+# runnable with zero setup. Real runners should call
+# `harness_core::store::write_run` directly — either via `bench-tool
+# record-run` (a JSON-array-of-task-rows seam any harness, Rust or Python,
+# can target; see `record_run` in `bench_tool.rs`) or by constructing a
+# `RunRecord` in-process (see `record_synthetic` for the shape).
 bench harness model *seed="42":
     #!/usr/bin/env bash
     set -euo pipefail

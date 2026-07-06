@@ -1,0 +1,3 @@
+{"kind":"header","schema_version":1,"timestamp":"2026-07-06T11:13:33.490762930Z","harness":"locomo","harness_git_sha":"92ffc17f10e4d18025258e54d1a0d1cdd7d22931","task_set_hash":"b0a503efba1a805028a76f45bc11aba82c9c521ec44765560b38e5cfb1805abf","model":{"tag":"deepseek","backing":{"backing":"cloud","provider_tag":"deepseek-v4-pro"}},"grading":{"mode":"autonomous"},"host_tier":{"tier":"host"}}
+{"kind":"task","task_id":"conv-26","outcome":{"outcome":"fail"},"score":0.2,"wall_time":11.9,"usage":{"tokens_used":null,"requests_used":5},"notes":"1/5 questions correct"}
+{"kind":"summary","total_tasks":1,"passed":0,"failed":1,"aborted":0,"pass_rate":0.0,"mean_score":0.2,"total_wall_time_secs":11.9,"total_tokens":null,"total_requests":5}
