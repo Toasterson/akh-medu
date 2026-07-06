@@ -17,38 +17,121 @@
 //! to be selected while rendering a training example: the training generator
 //! never even holds a reference to the holdout half of the bank.
 
+use std::sync::Arc;
+
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 
 use crate::error::{GrugError, GrugResult};
 use crate::schema::ToolCall;
 
+/// One piece of a procedurally-built [`TemplateBody::Pattern`]: either literal
+/// text or a slot that renders one argument's fuzzed value verbatim.
+///
+/// Keeping this as data (rather than a closure) is what makes procedural
+/// phrasing generation possible at all: hundreds/thousands of tools each need
+/// several templates, and Rust has no way to synthesize a distinct `fn`
+/// pointer per tool at runtime. A `Vec<TemplatePart>` is fully data-driven —
+/// [`TemplatePart::render_into`] pulls the named argument's value straight out
+/// of the [`ToolCall`], so "the value appears verbatim in the text" is a
+/// structural guarantee of this type, not something each template author has
+/// to remember (see the `arg_copyability` test in `procedural.rs`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TemplatePart {
+    /// Literal text, copied as-is.
+    Literal(String),
+    /// The named argument's fuzzed value, rendered as it would appear in
+    /// natural text (strings/enums unquoted, numbers/bools via `Display`).
+    /// If the argument is absent from the call (an omitted optional), this
+    /// part renders as the empty string.
+    Arg(String),
+}
+
+impl TemplatePart {
+    fn render_into(&self, out: &mut String, call: &ToolCall) {
+        match self {
+            TemplatePart::Literal(s) => out.push_str(s),
+            TemplatePart::Arg(name) => {
+                if let Some(v) = call.arguments_map().get(name) {
+                    out.push_str(&value_as_text(v));
+                }
+            }
+        }
+    }
+}
+
+/// Render a JSON value the way it should appear inlined in natural-language
+/// text: strings/enums unquoted, numbers/booleans via their plain `Display`
+/// form. Shared by [`TemplatePart::render_into`] and the procedural template
+/// builder so "what text does the value produce" has exactly one definition.
+pub(crate) fn value_as_text(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Bool(b) => b.to_string(),
+        serde_json::Value::Number(n) => n.to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// The rendering strategy behind a [`PhrasingTemplate`]: either the original
+/// hand-authored `fn(&ToolCall) -> String`, or a data-driven sequence of
+/// [`TemplatePart`]s built by the procedural generator.
+///
+/// Both variants are exercised by the exact same [`PhrasingBank`]/[`PhrasingRegistry`]
+/// split-and-render machinery — the hand-authored catalog and the procedural
+/// catalog are indistinguishable to `Generator` and `Dataset`.
+#[derive(Clone)]
+enum TemplateBody {
+    Fn(fn(&ToolCall) -> String),
+    Pattern(Arc<[TemplatePart]>),
+}
+
 /// A single natural-language phrasing template for one tool.
 ///
-/// `render` takes the tool's fuzzed [`ToolCall`] and produces the
-/// user-facing request string that should elicit exactly that call. Templates
-/// reference the call's argument values (via [`ToolCall::arguments_map`]) so
-/// the rendered text and the ground-truth call agree by construction — the
-/// same "label is the source of truth" discipline as `generator::fuzz_value`.
-#[derive(Clone, Copy)]
+/// Renders the tool's fuzzed [`ToolCall`] into the user-facing request string
+/// that should elicit exactly that call. Templates reference the call's
+/// argument values so the rendered text and the ground-truth call agree by
+/// construction — the same "label is the source of truth" discipline as
+/// `generator::fuzz_value`.
+#[derive(Clone)]
 pub struct PhrasingTemplate {
     /// Stable identity within a tool's bank; also its position in
     /// [`PhrasingBank::templates`] before splitting. Used only for
     /// diagnostics/tests, not for rendering.
     pub template_id: usize,
-    render: fn(&ToolCall) -> String,
+    body: TemplateBody,
 }
 
 impl PhrasingTemplate {
+    /// Build a template from a hand-authored render function (the original
+    /// `catalog_tools.rs` construction path).
     pub const fn new(template_id: usize, render: fn(&ToolCall) -> String) -> Self {
         Self {
             template_id,
-            render,
+            body: TemplateBody::Fn(render),
+        }
+    }
+
+    /// Build a template from a data-driven sequence of parts (the procedural
+    /// construction path — see `crate::procedural`).
+    pub fn from_parts(template_id: usize, parts: Vec<TemplatePart>) -> Self {
+        Self {
+            template_id,
+            body: TemplateBody::Pattern(Arc::from(parts)),
         }
     }
 
     pub fn render(&self, call: &ToolCall) -> String {
-        (self.render)(call)
+        match &self.body {
+            TemplateBody::Fn(f) => f(call),
+            TemplateBody::Pattern(parts) => {
+                let mut out = String::new();
+                for part in parts.iter() {
+                    part.render_into(&mut out, call);
+                }
+                out
+            }
+        }
     }
 }
 

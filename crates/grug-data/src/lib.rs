@@ -33,6 +33,7 @@ pub mod error;
 pub mod eval;
 pub mod generator;
 pub mod phrasing;
+pub mod procedural;
 pub mod schema;
 
 pub use catalog::ToolCatalog;
@@ -40,5 +41,6 @@ pub use dataset::{AxisReport, Dataset, EvalAxis};
 pub use error::{GrugError, GrugResult};
 pub use eval::{ArgMismatch, DiversityReport, EvalOutcome, EvalReport, SchemaViolation};
 pub use generator::{Generator, PhrasingMode};
-pub use phrasing::{PhrasingBank, PhrasingRegistry, PhrasingTemplate};
+pub use phrasing::{PhrasingBank, PhrasingRegistry, PhrasingTemplate, TemplatePart};
+pub use procedural::{build_catalog as build_procedural_catalog, DEFAULT_TEMPLATES_PER_TOOL};
 pub use schema::{Example, ParamSpec, ParamType, ToolCall, ToolSchema};

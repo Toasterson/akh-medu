@@ -43,6 +43,15 @@ pub struct Dataset {
 /// reproducibility.
 const HOLDOUT_SEED_SALT: u64 = 0x9E37_79B9_7F4A_7C15;
 
+/// Convert a whole-tool holdout *fraction* into a tool *count*, rounding up
+/// and clamping to `[1, n_tools - 1]` so the split is never degenerate (see
+/// `ToolCatalog::split_at`'s `DegenerateSplit` guard) even for small
+/// `n_tools` or a `holdout_frac` of `0.0`/`1.0`.
+fn holdout_count_from_frac(n_tools: usize, holdout_frac: f64) -> usize {
+    let raw = (n_tools as f64 * holdout_frac).ceil() as usize;
+    raw.clamp(1, n_tools.saturating_sub(1).max(1))
+}
+
 /// XOR salt distinguishing the held-out-phrasing RNG stream (axis B) from
 /// both the train stream and the whole-tool holdout stream. Arbitrary but
 /// fixed, and distinct from `HOLDOUT_SEED_SALT` so the two holdout axes never
@@ -66,6 +75,43 @@ impl Dataset {
             train_catalog,
             holdout_catalog,
         })
+    }
+
+    /// Build a dataset over the **procedural** catalog (see
+    /// `crate::procedural`): `n_tools` deterministically-generated tools,
+    /// reserving `holdout_frac` of them (rounded up, clamped to leave >= 1
+    /// train tool) for the whole-tool holdout axis (axis A). This is the
+    /// scale-up constructor for Phase 51 P1a-2 — use this instead of
+    /// [`Dataset::new`] once the training run wants hundreds-to-thousands of
+    /// tools rather than the hand-authored ~56.
+    ///
+    /// # Example
+    /// ```
+    /// use grug_data::Dataset;
+    /// // 1000 procedural tools, ~15% (150) reserved for whole-tool holdout.
+    /// let dataset = Dataset::new_sized(42, 1000, 0.15).unwrap();
+    /// assert_eq!(dataset.train_tools().len() + dataset.holdout_tools().len(), 1000);
+    /// let examples = dataset.train_examples(100).unwrap();
+    /// assert_eq!(examples.len(), 100);
+    /// ```
+    pub fn new_sized(seed: u64, n_tools: usize, holdout_frac: f64) -> GrugResult<Self> {
+        let catalog = ToolCatalog::procedural(seed, n_tools);
+        let holdout_count = holdout_count_from_frac(n_tools, holdout_frac);
+        Self::with_catalog(seed, catalog, holdout_count)
+    }
+
+    /// Like [`Dataset::new_sized`], but with an explicit
+    /// templates-per-tool count instead of
+    /// [`crate::procedural::DEFAULT_TEMPLATES_PER_TOOL`].
+    pub fn new_sized_with_templates(
+        seed: u64,
+        n_tools: usize,
+        holdout_frac: f64,
+        templates_per_tool: usize,
+    ) -> GrugResult<Self> {
+        let catalog = ToolCatalog::procedural_with_templates(seed, n_tools, templates_per_tool);
+        let holdout_count = holdout_count_from_frac(n_tools, holdout_frac);
+        Self::with_catalog(seed, catalog, holdout_count)
     }
 
     /// Tool schemas available for training (never includes a whole-tool

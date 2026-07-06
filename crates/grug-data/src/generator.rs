@@ -144,31 +144,48 @@ impl Generator {
     }
 }
 
+/// Number of distractor tools offered alongside the chosen tool.
+const N_DISTRACTORS: usize = 2;
+
 /// Build the list of tools offered alongside `chosen_name`: the chosen tool
-/// plus up to 2 distractors, order-shuffled.
+/// plus up to [`N_DISTRACTORS`] distractors, order-shuffled.
+///
+/// Picks distractor *indices* via `rand::seq::index::sample` and clones only
+/// those `N_DISTRACTORS + 1` schemas, rather than cloning every tool in the
+/// catalog to build a shuffle-then-truncate candidate list. That distinction
+/// is what keeps this `O(distractors)` instead of `O(catalog size)` per
+/// example — at catalog sizes in the hundreds-to-thousands (the procedural
+/// path), the naive "clone all, shuffle, truncate" approach turns generating
+/// N examples into an `O(N * catalog_size)` clone storm.
 fn offer_bundle(rng: &mut StdRng, tools: &[ToolSchema], chosen_name: &str) -> Vec<ToolSchema> {
-    let chosen = tools
+    let chosen_idx = tools
         .iter()
-        .find(|t| t.name == chosen_name)
-        .expect("chosen tool is in this catalog")
-        .clone();
+        .position(|t| t.name == chosen_name)
+        .expect("chosen tool is in this catalog");
 
-    let mut distractors: Vec<ToolSchema> = tools
-        .iter()
-        .filter(|t| t.name != chosen_name)
-        .cloned()
-        .collect();
-    distractors.shuffle(rng);
-    distractors.truncate(2);
-
-    let mut offered = vec![chosen];
-    offered.extend(distractors);
+    let n_distractors = N_DISTRACTORS.min(tools.len().saturating_sub(1));
+    let mut offered: Vec<ToolSchema> = if n_distractors == 0 {
+        Vec::new()
+    } else {
+        // Sample distinct indices from the catalog excluding `chosen_idx` by
+        // sampling from a size-(len-1) space and skipping over it, avoiding
+        // an allocation of the full "all other tools" candidate list.
+        let sample_space = tools.len() - 1;
+        rand::seq::index::sample(rng, sample_space, n_distractors)
+            .into_iter()
+            .map(|i| if i >= chosen_idx { i + 1 } else { i })
+            .map(|i| tools[i].clone())
+            .collect()
+    };
+    offered.push(tools[chosen_idx].clone());
     offered.shuffle(rng);
     offered
 }
 
-/// Fuzz a single value respecting `ty`.
-fn fuzz_value(rng: &mut StdRng, ty: &ParamType) -> Value {
+/// Fuzz a single value respecting `ty`. Crate-visible so `crate::procedural`'s
+/// tests can build representative `ToolCall`s using the exact same value
+/// distribions the real generator uses, without duplicating this logic.
+pub(crate) fn fuzz_value(rng: &mut StdRng, ty: &ParamType) -> Value {
     match ty {
         ParamType::String => Value::String(fuzz_string(rng)),
         ParamType::Integer => Value::from(rng.gen_range(1..=500) as i64),

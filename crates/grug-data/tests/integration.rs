@@ -680,6 +680,292 @@ fn throughput_probe_50k() {
     assert_eq!(examples.len(), n);
 }
 
+// ---------------------------------------------------------------------
+// Phase 51 P1a-2: procedural catalog scale-up (hundreds-thousands of
+// tools, few examples each, arg-copyability by construction).
+// ---------------------------------------------------------------------
+
+#[test]
+fn procedural_catalog_deterministic_across_construction() {
+    let a = grug_data::ToolCatalog::procedural(42, 1000);
+    let b = grug_data::ToolCatalog::procedural(42, 1000);
+    assert_eq!(a.len(), 1000);
+    assert_eq!(b.len(), 1000);
+    for (ta, tb) in a.tools().iter().zip(b.tools().iter()) {
+        assert_eq!(ta, tb, "same seed must produce byte-identical tool schemas");
+    }
+}
+
+#[test]
+fn procedural_mean_examples_per_tool_stays_low_at_scale() {
+    // The whole point of the procedural switch: with 1000 tools and 30k
+    // examples, each tool should appear roughly 30 times on average, not the
+    // ~500x/tool the 56-hand-authored-tool catalog produced -- well under
+    // the 100x/tool threshold where memorization becomes feasible again.
+    let n_tools = 1000;
+    let n_examples = 30_000;
+    let dataset = Dataset::new_sized(7, n_tools, 0.15).unwrap();
+
+    let examples = dataset.train_examples(n_examples).unwrap();
+    assert_eq!(examples.len(), n_examples);
+
+    let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for ex in &examples {
+        *counts.entry(ex.expected_call.name.as_str()).or_insert(0) += 1;
+    }
+
+    let train_tool_count = dataset.train_tools().len();
+    let mean = n_examples as f64 / train_tool_count as f64;
+    assert!(
+        mean < 100.0,
+        "mean examples/tool = {mean:.1}, expected well under 100 (memorization threshold)"
+    );
+
+    // Every observed per-tool count should also individually be nowhere near
+    // the old ~500x/tool regime -- a generous 5x-mean ceiling catches a
+    // pathologically skewed draw distribution, not just the average.
+    let max_count = counts.values().copied().max().unwrap_or(0);
+    assert!(
+        (max_count as f64) < mean * 5.0 + 20.0,
+        "a single tool was drawn {max_count} times, mean is {mean:.1} -- draw is not roughly uniform"
+    );
+
+    eprintln!(
+        "procedural scale probe: {train_tool_count} train tools, {n_examples} examples, \
+         mean={mean:.2}/tool, max={max_count}/tool"
+    );
+}
+
+#[test]
+fn procedural_required_arg_values_are_copyable_from_user_request() {
+    // The load-bearing invariant: for a sample of generated examples, every
+    // required argument's fuzzed value string must appear verbatim in the
+    // rendered `user_request` text. This is what makes argument-copying
+    // learnable at all -- P1a's hand-authored catalog already guaranteed
+    // this per-tool; here we check it holds at procedural scale too.
+    let dataset = Dataset::new_sized(2024, 500, 0.15).unwrap();
+    let examples = dataset.train_examples(3000).unwrap();
+    assert_eq!(examples.len(), 3000);
+
+    let mut checked_required_args = 0usize;
+    for ex in &examples {
+        let schema = ex
+            .expected_schema()
+            .expect("expected tool is always among offered tools");
+        let args = ex.expected_call.arguments_map();
+        for required in schema.required_params() {
+            let value = args
+                .get(&required.name)
+                .unwrap_or_else(|| panic!("required param {} missing from generated call", required.name));
+            let value_text = match value {
+                serde_json::Value::String(s) => s.clone(),
+                serde_json::Value::Bool(b) => b.to_string(),
+                serde_json::Value::Number(n) => n.to_string(),
+                other => other.to_string(),
+            };
+            assert!(
+                ex.user_request.contains(&value_text),
+                "tool {}: required arg {}={value_text:?} not found verbatim in user_request {:?}",
+                schema.name,
+                required.name,
+                ex.user_request
+            );
+            checked_required_args += 1;
+        }
+    }
+    assert!(
+        checked_required_args > 1000,
+        "expected to have checked a substantial number of required args, got {checked_required_args}"
+    );
+
+    // Also probe the whole-tool holdout and held-out-phrasing streams --
+    // copyability must hold there too since it's a property of the phrasing
+    // templates, not of which stream draws from them.
+    for holdout_examples in [
+        dataset.holdout_examples(300).unwrap(),
+        dataset.holdout_phrasing_examples(300).unwrap(),
+    ] {
+        for ex in &holdout_examples {
+            let schema = ex.expected_schema().unwrap();
+            let args = ex.expected_call.arguments_map();
+            for required in schema.required_params() {
+                let value = args.get(&required.name).unwrap();
+                let value_text = match value {
+                    serde_json::Value::String(s) => s.clone(),
+                    serde_json::Value::Bool(b) => b.to_string(),
+                    serde_json::Value::Number(n) => n.to_string(),
+                    other => other.to_string(),
+                };
+                assert!(
+                    ex.user_request.contains(&value_text),
+                    "holdout tool {}: required arg {}={value_text:?} not verbatim in {:?}",
+                    schema.name,
+                    required.name,
+                    ex.user_request
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn procedural_whole_tool_holdout_disjoint_at_scale() {
+    let dataset = Dataset::new_sized(55, 800, 0.15).unwrap();
+
+    let holdout_names: HashSet<&str> = dataset
+        .holdout_tools()
+        .iter()
+        .map(|t| t.name.as_str())
+        .collect();
+    let train_names: HashSet<&str> = dataset
+        .train_tools()
+        .iter()
+        .map(|t| t.name.as_str())
+        .collect();
+    assert!(!holdout_names.is_empty());
+    assert!(!train_names.is_empty());
+    assert!(holdout_names.is_disjoint(&train_names));
+    assert_eq!(holdout_names.len() + train_names.len(), 800);
+
+    let train_examples = dataset.train_examples(3000).unwrap();
+    for ex in &train_examples {
+        assert!(!holdout_names.contains(ex.expected_call.name.as_str()));
+        for offered in &ex.tools {
+            assert!(!holdout_names.contains(offered.name.as_str()));
+        }
+    }
+
+    let holdout_examples = dataset.holdout_examples(1000).unwrap();
+    for ex in &holdout_examples {
+        assert!(!train_names.contains(ex.expected_call.name.as_str()));
+        for offered in &ex.tools {
+            assert!(!train_names.contains(offered.name.as_str()));
+        }
+    }
+}
+
+#[test]
+fn procedural_phrasing_holdout_leak_proof_at_scale() {
+    // Structural check first: for every train tool, render every
+    // train-phrasing template and every holdout-phrasing template against
+    // the same call, and confirm the rendered text never intersects --
+    // exactly the guarantee `phrasing_holdout_disjointness_...` checks for
+    // the hand-authored catalog, now at procedural scale.
+    let dataset = Dataset::new_sized(909, 600, 0.15).unwrap();
+    let catalog = grug_data::ToolCatalog::procedural(909, 600);
+
+    let mut checked = 0usize;
+    for tool in dataset.train_tools() {
+        let bank = catalog.phrasings().get(&tool.name).unwrap();
+
+        let mut args = serde_json::Map::new();
+        for p in &tool.params {
+            let placeholder = match &p.ty {
+                grug_data::ParamType::String => serde_json::Value::String("PLACEHOLDER".into()),
+                grug_data::ParamType::Integer => serde_json::Value::from(7),
+                grug_data::ParamType::Number => serde_json::Value::from(7.5),
+                grug_data::ParamType::Boolean => serde_json::Value::Bool(true),
+                grug_data::ParamType::Enum(variants) => {
+                    serde_json::Value::String(variants.first().cloned().unwrap_or_default())
+                }
+            };
+            args.insert(p.name.clone(), placeholder);
+        }
+        let call = grug_data::ToolCall::new(tool.name.clone(), serde_json::Value::Object(args));
+
+        let train_renders: HashSet<String> = bank
+            .train_templates()
+            .iter()
+            .map(|t| t.render(&call))
+            .collect();
+        let holdout_renders: HashSet<String> = bank
+            .holdout_templates()
+            .iter()
+            .map(|t| t.render(&call))
+            .collect();
+        assert!(
+            train_renders.is_disjoint(&holdout_renders),
+            "tool {} has overlapping train/holdout phrasing renders",
+            tool.name
+        );
+        checked += 1;
+    }
+    assert!(checked > 400, "expected to check most of the 600 train tools, got {checked}");
+
+    // Behavioral check: a large held-out-phrasing stream must never produce
+    // a `user_request` seen verbatim in a large training stream.
+    let train_examples = dataset.train_examples(5000).unwrap();
+    let holdout_phrasing_examples = dataset.holdout_phrasing_examples(5000).unwrap();
+
+    let train_requests: HashSet<&str> = train_examples
+        .iter()
+        .map(|ex| ex.user_request.as_str())
+        .collect();
+
+    let leaked = holdout_phrasing_examples
+        .iter()
+        .filter(|ex| train_requests.contains(ex.user_request.as_str()))
+        .count();
+    assert_eq!(
+        leaked, 0,
+        "{leaked} held-out-phrasing request(s) leaked verbatim into the procedural training stream"
+    );
+}
+
+#[test]
+fn procedural_two_axis_eval_well_formed() {
+    let dataset = Dataset::new_sized(321, 400, 0.15).unwrap();
+
+    let (phrasing_report, whole_tool_report) = dataset
+        .eval_both_axes(30, |ex| ex.expected_call_as_json_string())
+        .unwrap();
+
+    assert_eq!(phrasing_report.axis, EvalAxis::HeldOutPhrasing);
+    assert_eq!(whole_tool_report.axis, EvalAxis::WholeToolHoldout);
+    assert_eq!(phrasing_report.eval.n, 30);
+    assert_eq!(whole_tool_report.eval.n, 30);
+
+    // Perfect model (echoes ground truth) should hit 100% on both axes.
+    assert_eq!(phrasing_report.eval.valid_json_rate, 1.0);
+    assert_eq!(phrasing_report.eval.schema_adherence_rate, 1.0);
+    assert_eq!(phrasing_report.eval.arg_correct_rate, 1.0);
+    assert_eq!(whole_tool_report.eval.valid_json_rate, 1.0);
+    assert_eq!(whole_tool_report.eval.schema_adherence_rate, 1.0);
+    assert_eq!(whole_tool_report.eval.arg_correct_rate, 1.0);
+}
+
+#[test]
+fn procedural_generation_is_fast_at_moderate_volume() {
+    // Not the full 100k throughput probe (kept `#[ignore]`d below for manual
+    // runs), but part of the fast gate: confirm procedural generation of a
+    // few thousand examples over a sizable (1000-tool) catalog completes
+    // comfortably within the <15s fast-test-gate budget for this whole file.
+    let dataset = Dataset::new_sized(11, 1000, 0.15).unwrap();
+    let start = std::time::Instant::now();
+    let examples = dataset.train_examples(20_000).unwrap();
+    let elapsed = start.elapsed();
+    assert_eq!(examples.len(), 20_000);
+    assert!(
+        elapsed.as_secs() < 5,
+        "20k procedural example generation took {elapsed:?}, expected well under 5s"
+    );
+}
+
+#[test]
+#[ignore = "manual throughput probe, not part of the fast test gate"]
+fn procedural_throughput_probe_100k() {
+    let dataset = Dataset::new_sized(1, 1000, 0.15).unwrap();
+    let start = std::time::Instant::now();
+    let n = 100_000;
+    let examples = dataset.train_examples(n).unwrap();
+    let elapsed = start.elapsed();
+    eprintln!(
+        "{n} procedural examples in {elapsed:?} = {:.0}/sec",
+        n as f64 / elapsed.as_secs_f64()
+    );
+    assert_eq!(examples.len(), n);
+}
+
 #[test]
 #[ignore = "manual stats probe, not part of the fast test gate"]
 fn stats_probe_param_shapes() {

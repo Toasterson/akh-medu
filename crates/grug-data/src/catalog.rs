@@ -107,6 +107,22 @@ impl ToolCatalog {
 
         ToolCatalog::new(tools, phrasings)
     }
+
+    /// A procedurally-generated catalog of `n_tools` tools, deterministic in
+    /// `seed`: the new default *shape* of the data for scaling past the
+    /// hand-authored ~56-tool catalog (see `crate::procedural`). Each tool
+    /// gets [`crate::procedural::DEFAULT_TEMPLATES_PER_TOOL`] phrasing
+    /// templates, split train/holdout exactly like `built_in()`'s tools.
+    pub fn procedural(seed: u64, n_tools: usize) -> Self {
+        crate::procedural::build_catalog(seed, n_tools)
+    }
+
+    /// A procedurally-generated catalog with an explicit templates-per-tool
+    /// count, for callers that want a denser or thinner phrasing bank than
+    /// the default.
+    pub fn procedural_with_templates(seed: u64, n_tools: usize, templates_per_tool: usize) -> Self {
+        crate::procedural::build_catalog_with_templates(seed, n_tools, templates_per_tool)
+    }
 }
 
 /// Fuzzed-value accessors shared by every tool's phrasing templates in
