@@ -320,11 +320,13 @@ fn load_or_train_tokenizer(dataset: &Dataset, path: &Path, train_examples: usize
     }
 
     println!("train_p1a: training a fresh BPE tokenizer (vocab_size<={vocab_size})...");
-    // A representative-but-smaller corpus is enough to learn stable merges;
-    // capping this independent of `train_examples` keeps tokenizer training
-    // fast even when `--train-examples` is in the tens of thousands.
+    // The BPE corpus must cover the catalog's identifier + value surface, or
+    // merges starve and the vocab ceiling is never reached (at 1000 procedural
+    // tools a 5k sample under-covers tool/param names -> vocab capped ~2953 vs
+    // an 8000 target, which fragments arg values and hurts copy-correctness).
+    // Use (almost) the full training corpus; BPE training over it is still fast.
     let corpus_examples = dataset
-        .train_examples(train_examples.min(5_000).max(200))
+        .train_examples(train_examples.min(60_000).max(200))
         .expect("generator produces train examples for tokenizer training corpus");
     let corpus: Vec<String> = corpus_examples
         .iter()
