@@ -226,7 +226,13 @@ pub fn init_training<B: AutodiffBackend>(
     device: &B::Device,
 ) -> (TinyTransformer<B>, OptimizerAdaptor<Adam, TinyTransformer<B>, B>) {
     let model = model_config.init::<B>(device);
-    let optim = AdamConfig::new().init::<B, TinyTransformer<B>>();
+    // Gradient-norm clipping: without it the harder/longer hard-distractor task
+    // hits a large-gradient batch and diverges to NaN around step ~100 (the
+    // easier 2-distractor data happened not to). Norm-clip at 1.0 is the standard
+    // stabilizer and is cheap. (Phase 51 P1a-3 NaN fix.)
+    let optim = AdamConfig::new()
+        .with_grad_clipping(Some(burn::grad_clipping::GradientClippingConfig::Norm(1.0)))
+        .init::<B, TinyTransformer<B>>();
     (model, optim)
 }
 
