@@ -48,6 +48,28 @@ pub enum GrugError {
         )
     )]
     DeserializeFailed { message: String },
+
+    #[error("tool `{tool}` has only {count} phrasing template(s); need at least 2 to split train/holdout")]
+    #[diagnostic(
+        code(grug_data::insufficient_phrasings),
+        help(
+            "Every tool needs at least one train phrasing and one holdout phrasing \
+             so the held-out-phrasing eval axis is meaningful. Add more templates \
+             to this tool's phrasing bank in `catalog.rs`."
+        )
+    )]
+    InsufficientPhrasings { tool: String, count: usize },
+
+    #[error("no phrasing bank registered for tool `{tool}`")]
+    #[diagnostic(
+        code(grug_data::missing_phrasing_bank),
+        help(
+            "Every `ToolSchema` in the catalog must have a matching `PhrasingBank` \
+             built from the same tool name. This indicates a bug in \
+             `ToolCatalog::built_in` — please report it."
+        )
+    )]
+    MissingPhrasingBank { tool: String },
 }
 
 /// Convenience alias for `grug-data` operation results.

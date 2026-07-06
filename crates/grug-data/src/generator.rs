@@ -5,6 +5,11 @@
 //! chosen tool's schema), and the natural-language `user_request` is a
 //! template that references those same fuzzed values. There is no parsing or
 //! inference involved in labeling — the label is the source of truth.
+//!
+//! Phrasing selection (train vs. holdout template half) is controlled by
+//! [`PhrasingMode`], not by a separate code path — this is what lets
+//! `Dataset` reuse the same `Generator` machinery for all three streams
+//! (train, whole-tool holdout, held-out-phrasing).
 
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
@@ -14,6 +19,16 @@ use serde_json::{Map, Value};
 use crate::catalog::ToolCatalog;
 use crate::error::GrugResult;
 use crate::schema::{Example, ParamSpec, ParamType, ToolCall, ToolSchema};
+
+/// Which half of each tool's phrasing bank a generator draws `user_request`
+/// wordings from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PhrasingMode {
+    /// Only train-phrasing templates (the default for the training stream).
+    Train,
+    /// Only holdout-phrasing templates (axis B: held-out-phrasing eval).
+    Holdout,
+}
 
 /// A deterministic generator of tool-calling [`Example`]s.
 ///
@@ -26,20 +41,32 @@ use crate::schema::{Example, ParamSpec, ParamType, ToolCall, ToolSchema};
 pub struct Generator {
     rng: StdRng,
     catalog: ToolCatalog,
+    phrasing_mode: PhrasingMode,
 }
 
 impl Generator {
-    /// Build a generator over the built-in catalog, seeded deterministically.
+    /// Build a generator over the built-in catalog, seeded deterministically,
+    /// drawing train phrasings.
     pub fn new(seed: u64) -> Self {
         Self::with_catalog(seed, ToolCatalog::built_in())
     }
 
     /// Build a generator over a caller-supplied catalog (e.g. a train-only
-    /// sub-catalog produced by [`ToolCatalog::split_at`]).
+    /// sub-catalog produced by [`ToolCatalog::split_at`]), drawing train
+    /// phrasings.
     pub fn with_catalog(seed: u64, catalog: ToolCatalog) -> Self {
+        Self::with_catalog_and_mode(seed, catalog, PhrasingMode::Train)
+    }
+
+    /// Build a generator over a caller-supplied catalog, drawing wordings
+    /// from the given [`PhrasingMode`]. This is the constructor
+    /// `Dataset::holdout_phrasing_examples` uses: same (train) tool catalog,
+    /// but the *holdout* half of each tool's phrasing bank.
+    pub fn with_catalog_and_mode(seed: u64, catalog: ToolCatalog, phrasing_mode: PhrasingMode) -> Self {
         Self {
             rng: StdRng::seed_from_u64(seed),
             catalog,
+            phrasing_mode,
         }
     }
 
@@ -49,14 +76,14 @@ impl Generator {
         if self.catalog.is_empty() {
             return Err(crate::error::GrugError::EmptyCatalog);
         }
-        Ok((0..n).map(|_| self.next_example()).collect())
+        (0..n).map(|_| self.try_next_example()).collect()
     }
 
-    /// Generate one example. Panics only if the catalog is empty — callers
-    /// going through [`Generator::generate`] get a `GrugResult` instead;
-    /// this method is exposed for callers that already checked non-emptiness
-    /// (e.g. iterating with a known-good catalog).
-    pub fn next_example(&mut self) -> Example {
+    /// Generate one example, returning an error if this generator's catalog
+    /// has no phrasing bank registered for the drawn tool (should not happen
+    /// for catalogs built via `ToolCatalog::built_in` + `split_at`, but keeps
+    /// the path total for caller-supplied catalogs).
+    pub fn try_next_example(&mut self) -> GrugResult<Example> {
         let tools = self.catalog.tools();
         debug_assert!(!tools.is_empty(), "catalog must be non-empty");
         let tool = tools
@@ -76,8 +103,13 @@ impl Generator {
         }
         let arguments = Value::Object(args);
         let expected_call = ToolCall::new(tool.name.clone(), arguments);
-        let user_request = render_request(&mut self.rng, &tool, &expected_call);
-        let mock_response = render_mock_response(&tool, &expected_call);
+
+        let bank = self.catalog.phrasings().get(&tool.name)?;
+        let user_request = match self.phrasing_mode {
+            PhrasingMode::Train => bank.render_train(&mut self.rng, &expected_call),
+            PhrasingMode::Holdout => bank.render_holdout(&mut self.rng, &expected_call),
+        };
+        let mock_response = render_mock_response(&expected_call);
 
         // Offer a small bundle of tools (the target tool plus a few
         // distractors from the same catalog) rather than just one, so the
@@ -85,12 +117,30 @@ impl Generator {
         // the model's tool-selection task are both non-trivial.
         let offered = offer_bundle(&mut self.rng, tools, &tool.name);
 
-        Example {
+        Ok(Example {
             tools: offered,
             user_request,
             expected_call,
             mock_response,
-        }
+        })
+    }
+
+    /// Generate one example. Panics if the catalog is empty or has no
+    /// phrasing bank for the drawn tool — callers going through
+    /// [`Generator::generate`] / [`Generator::try_next_example`] get a
+    /// `GrugResult` instead; this method is exposed for callers (and
+    /// doctests) that already know the built-in catalog is well-formed.
+    pub fn next_example(&mut self) -> Example {
+        self.try_next_example()
+            .expect("built-in catalog has a phrasing bank for every tool")
+    }
+
+    /// Iterator form of example generation, for streaming large volumes
+    /// (10k-50k+) without materializing a `Vec` up front. Each item is
+    /// `GrugResult<Example>` so a missing phrasing bank surfaces per-item
+    /// rather than aborting the whole stream construction.
+    pub fn iter(&mut self) -> impl Iterator<Item = GrugResult<Example>> + '_ {
+        std::iter::from_fn(move || Some(self.try_next_example()))
     }
 }
 
@@ -137,10 +187,11 @@ fn fuzz_value(rng: &mut StdRng, ty: &ParamType) -> Value {
     }
 }
 
-/// A small bank of plausible string fillers, picked by param name so the
-/// generated request text reads naturally (a "city" fuzzes to a place name,
-/// a "query" to a short phrase, etc.) with a generic fallback for anything
-/// else.
+/// A small bank of plausible string fillers, picked generically so the
+/// generated request text reads naturally, with a generic fallback for
+/// anything else. Per-tool phrasing templates (see `catalog_tools.rs`) decide
+/// *how* a value is embedded in the sentence; this only decides *what* the
+/// fuzzed string value is.
 fn fuzz_string(rng: &mut StdRng) -> String {
     const PLACES: &[&str] = &[
         "Zurich", "Tokyo", "Nairobi", "Lima", "Oslo", "Seoul", "Denver", "Cairo",
@@ -160,119 +211,27 @@ fn fuzz_string(rng: &mut StdRng) -> String {
     }
 }
 
-/// Render a natural-language user request that references the fuzzed
-/// argument values from `call`, via a small per-tool template bank.
-///
-/// Falls back to a generic template for tools not covered by a bespoke
-/// phrasing (keeps this function total over any `ToolSchema`, including
-/// caller-supplied ones outside the built-in catalog).
-fn render_request(rng: &mut StdRng, tool: &ToolSchema, call: &ToolCall) -> String {
-    let args = call.arguments_map();
-    let get = |k: &str| args.get(k).and_then(Value::as_str).map(str::to_string);
-    let get_num = |k: &str| args.get(k).and_then(|v| v.as_f64());
-
-    let templates: Vec<String> = match tool.name.as_str() {
-        "get_weather" => {
-            let city = get("city").unwrap_or_else(|| "my city".into());
-            vec![
-                format!("What's the weather like in {city} right now?"),
-                format!("Can you check the weather for {city}?"),
-            ]
-        }
-        "send_email" => {
-            let to = get("to").unwrap_or_else(|| "someone".into());
-            let subject = get("subject").unwrap_or_else(|| "a quick note".into());
-            vec![
-                format!("Send an email to {to} about {subject}."),
-                format!("Email {to} regarding {subject}, please."),
-            ]
-        }
-        "search_flights" => {
-            let origin = get("origin").unwrap_or_else(|| "my city".into());
-            let dest = get("destination").unwrap_or_else(|| "somewhere".into());
-            vec![format!("Find me flights from {origin} to {dest}.")]
-        }
-        "set_timer" => {
-            let mins = get_num("duration_minutes").unwrap_or(10.0) as i64;
-            vec![format!("Set a timer for {mins} minutes.")]
-        }
-        "convert_currency" => {
-            let amount = get_num("amount").unwrap_or(100.0);
-            let from = get("from_currency").unwrap_or_else(|| "USD".into());
-            let to = get("to_currency").unwrap_or_else(|| "EUR".into());
-            vec![format!("Convert {amount:.2} {from} to {to}.")]
-        }
-        "create_calendar_event" => {
-            let title = get("title").unwrap_or_else(|| "a meeting".into());
-            let date = get("date").unwrap_or_else(|| "tomorrow".into());
-            vec![format!("Create a calendar event called {title} on {date}.")]
-        }
-        "search_restaurants" => {
-            let loc = get("location").unwrap_or_else(|| "downtown".into());
-            vec![format!("Find restaurants near {loc}.")]
-        }
-        "translate_text" => {
-            let text = get("text").unwrap_or_else(|| "hello".into());
-            let lang = get("target_language").unwrap_or_else(|| "French".into());
-            vec![format!("Translate \"{text}\" into {lang}.")]
-        }
-        "play_music" => {
-            let query = get("query").unwrap_or_else(|| "some music".into());
-            vec![format!("Play {query}.")]
-        }
-        "book_hotel" => {
-            let city = get("city").unwrap_or_else(|| "the city".into());
-            let nights = get_num("nights").unwrap_or(1.0) as i64;
-            vec![format!("Book a hotel in {city} for {nights} nights.")]
-        }
-        "set_reminder" => {
-            let text = get("text").unwrap_or_else(|| "something".into());
-            let at = get("remind_at").unwrap_or_else(|| "later".into());
-            vec![format!("Remind me to {text} at {at}.")]
-        }
-        "search_web" => {
-            let query = get("query").unwrap_or_else(|| "something".into());
-            vec![format!("Search the web for {query}.")]
-        }
-        "get_stock_price" => {
-            let ticker = get("ticker").unwrap_or_else(|| "a stock".into());
-            vec![format!("What's the current price of {ticker}?")]
-        }
-        _ => {
-            vec![format!(
-                "Please use {} to handle this: {}",
-                tool.name, tool.description
-            )]
-        }
-    };
-
-    templates
-        .choose(rng)
-        .cloned()
-        .unwrap_or_else(|| format!("Please call {}.", tool.name))
-}
-
-/// Render a plausible mock tool response for `call` against `tool`.
-fn render_mock_response(tool: &ToolSchema, call: &ToolCall) -> String {
-    match tool.name.as_str() {
-        "get_weather" => "{\"temperature\": 21, \"condition\": \"partly cloudy\"}".to_string(),
-        "send_email" => "{\"status\": \"sent\"}".to_string(),
-        "search_flights" => "{\"flights\": [{\"flight_no\": \"AA123\", \"price\": 412}]}".to_string(),
-        "set_timer" => "{\"status\": \"timer_set\"}".to_string(),
-        "convert_currency" => "{\"converted_amount\": 91.23}".to_string(),
-        "create_calendar_event" => "{\"status\": \"event_created\"}".to_string(),
-        "search_restaurants" => "{\"results\": [{\"name\": \"Trattoria Bella\", \"rating\": 4.5}]}".to_string(),
-        "translate_text" => "{\"translated\": \"bonjour\"}".to_string(),
-        "play_music" => "{\"status\": \"now_playing\"}".to_string(),
-        "book_hotel" => "{\"status\": \"booked\", \"confirmation\": \"HTL-9921\"}".to_string(),
-        "set_reminder" => "{\"status\": \"reminder_set\"}".to_string(),
-        "search_web" => "{\"results\": [{\"title\": \"Example result\", \"url\": \"https://example.com\"}]}".to_string(),
-        "get_stock_price" => "{\"price\": 187.42}".to_string(),
-        _ => {
-            let _ = call; // no bespoke fields to echo for unknown tools
-            "{\"status\": \"ok\"}".to_string()
-        }
-    }
+/// Render a plausible mock tool response for `call`. Generic (rather than
+/// per-tool-bespoke) now that the catalog is 40-60 tools — a fixed small
+/// bank of response shapes keyed by the *type* of the tool's first
+/// meaningful field is enough for a plausible "here's what the tool returned"
+/// line; this is not scored by the eval harness, only shown to the model as
+/// mock multi-turn context.
+fn render_mock_response(call: &ToolCall) -> String {
+    // Deterministic-but-varied: hash the tool name into a small bank of
+    // generic plausible JSON response shapes.
+    const RESPONSES: &[&str] = &[
+        "{\"status\": \"ok\"}",
+        "{\"status\": \"success\", \"id\": \"res-4471\"}",
+        "{\"result\": \"done\"}",
+        "{\"status\": \"completed\", \"details\": \"request handled\"}",
+    ];
+    let idx = call
+        .name
+        .bytes()
+        .fold(0usize, |acc, b| acc.wrapping_add(b as usize))
+        % RESPONSES.len();
+    RESPONSES[idx].to_string()
 }
 
 /// Ensure every required param actually got a value (defensive; exercised

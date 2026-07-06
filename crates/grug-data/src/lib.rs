@@ -27,15 +27,18 @@
 //! ```
 
 pub mod catalog;
+mod catalog_tools;
 pub mod dataset;
 pub mod error;
 pub mod eval;
 pub mod generator;
+pub mod phrasing;
 pub mod schema;
 
 pub use catalog::ToolCatalog;
-pub use dataset::Dataset;
+pub use dataset::{AxisReport, Dataset, EvalAxis};
 pub use error::{GrugError, GrugResult};
 pub use eval::{ArgMismatch, DiversityReport, EvalOutcome, EvalReport, SchemaViolation};
-pub use generator::Generator;
+pub use generator::{Generator, PhrasingMode};
+pub use phrasing::{PhrasingBank, PhrasingRegistry, PhrasingTemplate};
 pub use schema::{Example, ParamSpec, ParamType, ToolCall, ToolSchema};

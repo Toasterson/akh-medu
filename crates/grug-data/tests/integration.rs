@@ -1,8 +1,11 @@
-//! Integration tests for `grug-data`: determinism, holdout disjointness,
-//! eval-scorer correctness at each gated level, and the anti-collapse alarm.
+//! Integration tests for `grug-data`: determinism, holdout disjointness (both
+//! axes), eval-scorer correctness at each gated level, and the anti-collapse
+//! alarm.
+
+use std::collections::HashSet;
 
 use grug_data::eval::{score_output, ArgMismatch, DiversityReport, EvalReport, SchemaViolation};
-use grug_data::{Dataset, Example, Generator, ToolCatalog};
+use grug_data::{Dataset, EvalAxis, Example, Generator, ToolCatalog};
 
 #[test]
 fn determinism_same_seed_same_stream() {
@@ -386,4 +389,308 @@ fn anti_collapse_varied_outputs_score_high_diversity() {
         "expected high tool_name_entropy, got {}",
         report.tool_name_entropy
     );
+}
+
+// ---------------------------------------------------------------------
+// Phase 51 P1a: catalog scale + the phrasing-holdout (axis B) honest gate.
+// ---------------------------------------------------------------------
+
+#[test]
+fn catalog_size_in_range() {
+    let catalog = ToolCatalog::built_in();
+    assert!(
+        (40..=60).contains(&catalog.len()),
+        "expected 40-60 tools, got {}",
+        catalog.len()
+    );
+}
+
+#[test]
+fn catalog_has_varied_param_shapes() {
+    let catalog = ToolCatalog::built_in();
+    let tools = catalog.tools();
+
+    let has_enum = tools
+        .iter()
+        .filter(|t| {
+            t.params
+                .iter()
+                .any(|p| matches!(p.ty, grug_data::ParamType::Enum(_)))
+        })
+        .count();
+    let has_optional = tools
+        .iter()
+        .filter(|t| t.params.iter().any(|p| !p.required))
+        .count();
+    let many_params = tools.iter().filter(|t| t.params.len() >= 5).count();
+    let one_param = tools.iter().filter(|t| t.params.len() == 1).count();
+
+    assert!(has_enum >= 5, "expected several tools with enum params, got {has_enum}");
+    assert!(
+        has_optional >= 10,
+        "expected several tools with optional params, got {has_optional}"
+    );
+    assert!(
+        many_params >= 2,
+        "expected at least 2 tools with 5+ params, got {many_params}"
+    );
+    assert!(
+        one_param >= 2,
+        "expected at least 2 tools with exactly 1 param, got {one_param}"
+    );
+}
+
+#[test]
+fn every_tool_has_a_phrasing_bank_with_both_halves_nonempty() {
+    let catalog = ToolCatalog::built_in();
+    for tool in catalog.tools() {
+        let bank = catalog
+            .phrasings()
+            .get(&tool.name)
+            .unwrap_or_else(|_| panic!("no phrasing bank for {}", tool.name));
+        assert!(
+            bank.train_count() >= 1,
+            "{} has no train phrasings",
+            tool.name
+        );
+        assert!(
+            bank.holdout_count() >= 1,
+            "{} has no holdout phrasings",
+            tool.name
+        );
+        assert!(
+            bank.train_count() + bank.holdout_count() >= 6,
+            "{} has fewer than 6 total phrasing templates ({} + {})",
+            tool.name,
+            bank.train_count(),
+            bank.holdout_count()
+        );
+    }
+}
+
+#[test]
+fn phrasing_holdout_disjointness_no_holdout_template_leaks_into_training() {
+    // For every train-catalog tool, render every train-phrasing template and
+    // every holdout-phrasing template against the SAME expected call, and
+    // confirm the two rendered-string sets never intersect. This is the
+    // structural guarantee: if a holdout phrasing ever produced the same
+    // text as some train phrasing, the eval would be measuring memorization,
+    // not generalization.
+    let dataset = Dataset::new(4242).unwrap();
+    let catalog = ToolCatalog::built_in();
+
+    for tool in dataset.train_tools() {
+        let bank = catalog.phrasings().get(&tool.name).unwrap();
+
+        // A representative call: fuzz-free zero-ish values are fine here —
+        // we only care that the two template halves render to disjoint text
+        // for arbitrary shared input, not about argument correctness.
+        let mut args = serde_json::Map::new();
+        for p in &tool.params {
+            let placeholder = match &p.ty {
+                grug_data::ParamType::String => serde_json::Value::String("PLACEHOLDER".into()),
+                grug_data::ParamType::Integer => serde_json::Value::from(7),
+                grug_data::ParamType::Number => serde_json::Value::from(7.5),
+                grug_data::ParamType::Boolean => serde_json::Value::Bool(true),
+                grug_data::ParamType::Enum(variants) => {
+                    serde_json::Value::String(variants.first().cloned().unwrap_or_default())
+                }
+            };
+            args.insert(p.name.clone(), placeholder);
+        }
+        let call = grug_data::ToolCall::new(tool.name.clone(), serde_json::Value::Object(args));
+
+        let train_renders: HashSet<String> = bank
+            .train_templates()
+            .iter()
+            .map(|t| t.render(&call))
+            .collect();
+        let holdout_renders: HashSet<String> = bank
+            .holdout_templates()
+            .iter()
+            .map(|t| t.render(&call))
+            .collect();
+
+        assert!(
+            train_renders.is_disjoint(&holdout_renders),
+            "tool {} has a phrasing template that renders identically in both \
+             the train and holdout halves: train={:?} holdout={:?}",
+            tool.name,
+            train_renders,
+            holdout_renders
+        );
+    }
+
+    // Now the behavioral guarantee: generate a large TRAIN stream and a
+    // large HELD-OUT-PHRASING stream, and confirm none of the holdout
+    // stream's rendered `user_request` strings ever appear in the training
+    // stream's rendered requests, across every train tool.
+    let train_examples = dataset.train_examples(2000).unwrap();
+    let holdout_phrasing_examples = dataset.holdout_phrasing_examples(2000).unwrap();
+
+    let train_requests: HashSet<&str> = train_examples
+        .iter()
+        .map(|ex| ex.user_request.as_str())
+        .collect();
+
+    let mut leaked = 0usize;
+    for ex in &holdout_phrasing_examples {
+        if train_requests.contains(ex.user_request.as_str()) {
+            leaked += 1;
+        }
+    }
+    assert_eq!(
+        leaked, 0,
+        "{leaked} held-out-phrasing request(s) leaked verbatim into the training stream"
+    );
+}
+
+#[test]
+fn holdout_phrasing_examples_only_draw_train_tools() {
+    let dataset = Dataset::new(99).unwrap();
+    let train_names: HashSet<&str> = dataset
+        .train_tools()
+        .iter()
+        .map(|t| t.name.as_str())
+        .collect();
+    let holdout_tool_names: HashSet<&str> = dataset
+        .holdout_tools()
+        .iter()
+        .map(|t| t.name.as_str())
+        .collect();
+
+    let examples = dataset.holdout_phrasing_examples(300).unwrap();
+    assert!(!examples.is_empty());
+    for ex in &examples {
+        assert!(
+            train_names.contains(ex.expected_call.name.as_str()),
+            "held-out-phrasing example used tool {} which is not a train tool",
+            ex.expected_call.name
+        );
+        assert!(
+            !holdout_tool_names.contains(ex.expected_call.name.as_str()),
+            "held-out-phrasing example used whole-tool-holdout tool {}",
+            ex.expected_call.name
+        );
+    }
+}
+
+#[test]
+fn determinism_all_three_streams_reproduce() {
+    let ds_a = Dataset::new(555).unwrap();
+    let ds_b = Dataset::new(555).unwrap();
+
+    let train_a = ds_a.train_examples(200).unwrap();
+    let train_b = ds_b.train_examples(200).unwrap();
+    assert_eq!(train_a, train_b);
+
+    let holdout_a = ds_a.holdout_examples(50).unwrap();
+    let holdout_b = ds_b.holdout_examples(50).unwrap();
+    assert_eq!(holdout_a, holdout_b);
+
+    let phrasing_a = ds_a.holdout_phrasing_examples(50).unwrap();
+    let phrasing_b = ds_b.holdout_phrasing_examples(50).unwrap();
+    assert_eq!(phrasing_a, phrasing_b);
+
+    // And the three streams must NOT be identical to each other (independent
+    // RNG streams via distinct seed salts) even though train and
+    // held-out-phrasing share a tool catalog.
+    assert_ne!(train_a, phrasing_a);
+}
+
+#[test]
+fn volume_10k_train_examples_generate_without_pathological_slowdown() {
+    let dataset = Dataset::new(7).unwrap();
+    let start = std::time::Instant::now();
+    let examples = dataset.train_examples(10_000).unwrap();
+    let elapsed = start.elapsed();
+    assert_eq!(examples.len(), 10_000);
+    assert!(
+        elapsed.as_secs() < 5,
+        "10k example generation took {elapsed:?}, expected well under 5s"
+    );
+}
+
+#[test]
+fn streaming_iterator_matches_vec_returning_method() {
+    let dataset = Dataset::new(31).unwrap();
+    let via_vec = dataset.train_examples(25).unwrap();
+    let via_iter: Vec<Example> = dataset
+        .train_examples_iter()
+        .take(25)
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(via_vec, via_iter);
+}
+
+#[test]
+fn two_axis_eval_produces_well_formed_labeled_reports() {
+    let dataset = Dataset::new(123).unwrap();
+
+    // A "perfect" model: always answers with the ground-truth call.
+    let (phrasing_report, whole_tool_report) = dataset
+        .eval_both_axes(20, |ex| ex.expected_call_as_json_string())
+        .unwrap();
+
+    assert_eq!(phrasing_report.axis, EvalAxis::HeldOutPhrasing);
+    assert_eq!(whole_tool_report.axis, EvalAxis::WholeToolHoldout);
+
+    assert_eq!(phrasing_report.eval.n, 20);
+    assert_eq!(whole_tool_report.eval.n, 20);
+
+    // A perfect model should hit 100% on every level, on both axes.
+    assert_eq!(phrasing_report.eval.valid_json_rate, 1.0);
+    assert_eq!(phrasing_report.eval.schema_adherence_rate, 1.0);
+    assert_eq!(phrasing_report.eval.arg_correct_rate, 1.0);
+    assert_eq!(whole_tool_report.eval.valid_json_rate, 1.0);
+    assert_eq!(whole_tool_report.eval.schema_adherence_rate, 1.0);
+    assert_eq!(whole_tool_report.eval.arg_correct_rate, 1.0);
+
+    // Diversity should be well-formed (non-negative, bounded) on both axes.
+    assert!(phrasing_report.diversity.distinct_call_ratio > 0.0);
+    assert!(whole_tool_report.diversity.distinct_call_ratio > 0.0);
+}
+
+#[test]
+fn score_axis_labels_match_the_axis_argument() {
+    let dataset = Dataset::new(88).unwrap();
+    let examples = dataset.holdout_phrasing_examples(10).unwrap();
+    let pairs: Vec<(String, Example)> = examples
+        .iter()
+        .map(|ex| (ex.expected_call_as_json_string(), ex.clone()))
+        .collect();
+
+    let report = Dataset::score_axis(EvalAxis::HeldOutPhrasing, &pairs);
+    assert_eq!(report.axis, EvalAxis::HeldOutPhrasing);
+    assert_eq!(report.eval.n, 10);
+}
+
+#[test]
+#[ignore = "manual throughput probe, not part of the fast test gate"]
+fn throughput_probe_50k() {
+    let dataset = Dataset::new(1).unwrap();
+    let start = std::time::Instant::now();
+    let n = 50_000;
+    let examples = dataset.train_examples(n).unwrap();
+    let elapsed = start.elapsed();
+    eprintln!(
+        "{n} examples in {elapsed:?} = {:.0}/sec",
+        n as f64 / elapsed.as_secs_f64()
+    );
+    assert_eq!(examples.len(), n);
+}
+
+#[test]
+#[ignore = "manual stats probe, not part of the fast test gate"]
+fn stats_probe_param_shapes() {
+    let catalog = ToolCatalog::built_in();
+    let tools = catalog.tools();
+    let total = tools.len();
+    let enums = tools.iter().filter(|t| t.params.iter().any(|p| matches!(p.ty, grug_data::ParamType::Enum(_)))).count();
+    let optionals = tools.iter().filter(|t| t.params.iter().any(|p| !p.required)).count();
+    let many = tools.iter().filter(|t| t.params.len() >= 5).count();
+    let one = tools.iter().filter(|t| t.params.len() == 1).count();
+    let avg_train: f64 = tools.iter().map(|t| catalog.phrasings().get(&t.name).unwrap().train_count() as f64).sum::<f64>() / total as f64;
+    let avg_holdout: f64 = tools.iter().map(|t| catalog.phrasings().get(&t.name).unwrap().holdout_count() as f64).sum::<f64>() / total as f64;
+    eprintln!("total={total} enums={enums} optionals={optionals} many_params(>=5)={many} one_param={one} avg_train_templates={avg_train:.2} avg_holdout_templates={avg_holdout:.2}");
 }
