@@ -56,6 +56,22 @@ struct Args {
     #[arg(long, default_value_t = 42)]
     seed: u64,
 
+    /// Phase 51 P1a-2 (Wave 2): number of tools in the **procedural** catalog
+    /// (`grug_data::Dataset::new_sized`), hundreds-to-thousands, replacing
+    /// the hand-authored ~56-tool catalog so per-tool example counts stay low
+    /// enough that memorizing tool->call shape is infeasible (see
+    /// `grug_data::procedural` module docs -- this is the direct response to
+    /// P1a's whole-tool-holdout collapse: schema=0.0, diversity=1/128).
+    /// When absent, falls back to the original `Dataset::new` (hand-authored
+    /// catalog) path for backward compatibility.
+    #[arg(long)]
+    n_tools: Option<usize>,
+
+    /// Fraction of `--n-tools` reserved for the whole-tool holdout axis
+    /// (axis A). Only meaningful when `--n-tools` is given.
+    #[arg(long, default_value_t = 0.15)]
+    holdout_frac: f64,
+
     /// Number of distinct training examples to generate (drawn once, then
     /// cycled over `--epochs` passes). The plan's P1a target is 10k-50k.
     #[arg(long, default_value_t = 20_000)]
@@ -125,7 +141,20 @@ fn main() {
         Default::default()
     };
 
-    let dataset = Dataset::new(args.seed).expect("built-in catalog splits cleanly");
+    let dataset = build_dataset(args.seed, args.n_tools, args.holdout_frac).expect("dataset splits cleanly");
+    match args.n_tools {
+        Some(n) => println!(
+            "train_p1a: procedural catalog -- n_tools={n}, holdout_frac={}, train_tools={}, holdout_tools={}",
+            args.holdout_frac,
+            dataset.train_tools().len(),
+            dataset.holdout_tools().len(),
+        ),
+        None => println!(
+            "train_p1a: hand-authored built-in catalog -- train_tools={}, holdout_tools={}",
+            dataset.train_tools().len(),
+            dataset.holdout_tools().len(),
+        ),
+    }
 
     // --- Tokenizer: train fresh, or reuse an already-trained one under this
     // artifacts dir (so re-running the same command twice, e.g. after a
@@ -269,6 +298,17 @@ fn main() {
         eval_log_path.display(),
         ckpt_root.display(),
     );
+}
+
+/// Build the training/holdout [`Dataset`]: the **procedural** catalog
+/// (`Dataset::new_sized`) when `n_tools` is given (Phase 51 P1a-2, Wave 2),
+/// or the original hand-authored ~56-tool catalog (`Dataset::new`) otherwise
+/// -- keeps the pre-Wave-2 CLI invocation working unchanged.
+fn build_dataset(seed: u64, n_tools: Option<usize>, holdout_frac: f64) -> grug_data::GrugResult<Dataset> {
+    match n_tools {
+        Some(n) => Dataset::new_sized(seed, n, holdout_frac),
+        None => Dataset::new(seed),
+    }
 }
 
 /// Load a previously-trained tokenizer from `path`, or train a fresh one over
