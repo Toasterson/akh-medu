@@ -5,38 +5,55 @@
 // Runbook + full boot/provisioning analysis: docs/ops/vm-harness-openindiana.md
 // Shakeout baseline: docs/ai/2026-07-05-phase50-w1-illumos-shakeout.md
 //
-// ⚠ STATUS (2026-07-06): this file was MISSING the `uefi #true` /
-// `virtio-transitional #true` nodes that the installed vmctl binary already
-// supports (it was rebuilt with them by an earlier session, but the
-// committed VMFile.kdl never actually set them) — without both, `vmctl up`
-// either can't boot the GPT/UEFI-only openindiana-rust-ci image at all (no
-// OVMF pflash => SeaBIOS has no bootable code) or panics illumos's vioblk on
-// the modern-virtio-pci capability layout. Both are now set on all three
-// guests (2026-07-06 fix), on top of the pre-existing q35->pc PATH shim
-// (scripts/qemu-illumos-shim/, still required — smoke.sh prepends it).
-// With that fix, `vmctl up` now reaches the SAME failure the prior manual
-// investigation found: guests BOOT to multi-user and reach a console login
-// prompt, but automated SSH provisioning is still BLOCKED — no published
-// OpenIndiana image creates a login user from vmctl's cloud-init
-// cloud-config user-data. `svc:/system/sysconfig:default` (the rust-ci
-// image's provisioner) fails FAST (not a 120s SIGKILL as previously
-// assumed — SMF's own diagnosis is "method failing in a retryable manner
-// but too often") and transitions to maintenance, alongside
-// `svc:/network/ipmp:default` failing fatally; the console then shows
-// `unknown console login:` with no working credentials. IMPORTANT
-// debugging note for whoever continues: these images redirect their
-// console to VGA text mode once the kernel takes over from the loader —
-// vmctl's qemu backend passes `-nodefaults` with no `-vga`, so serial
-// `console.log` goes silent after the loader stage even on a perfectly
-// healthy boot (this made the stall look like a hang in earlier
-// investigations; it is not — use a QMP `screendump` with a `-vga std`
-// device added to actually see what's happening). A quick omnios-sysconfig
-// fallback attempt (2026-07-06) also did not reach an SSH banner within
-// ~2 minutes of reaching its console login prompt, so it is not a drop-in
-// fix either without further work. See the runbook's "SSH / login user" +
-// "UPDATE 2026-07-06" sections for the full trace and fix options. This
-// file + the provisioners are correct-in-shape and ready to run the moment
-// a guest is SSH-reachable.
+// ⚠ STATUS (2026-07-06, W1c): the SSH blocker is now ROOT-CAUSED, and it is
+// NOT a seed / cloud-init / provisioner problem (every earlier session had
+// that framing wrong). The published `openindiana-rust-ci` OI Hipster
+// 2026.04 image is a BROKEN BUILD with THREE independent, fatal defects,
+// found this session by mounting the image offline (qemu-nbd + `zpool
+// import`, no boot) and reading its SMF logs + device tree directly:
+//
+//   1. /usr/lib/sysconfig/sysconfig is an x86-64 GNU/Linux ELF
+//      (interpreter /lib64/ld-linux-x86-64.so.2) shipped into an illumos
+//      image. illumos cannot exec it -> the SMF start method dies from
+//      SIGKILL every boot (NOT the 120s retry-timeout earlier sessions
+//      guessed) and svc:/system/sysconfig:default goes to maintenance, so
+//      no login user is ever created.
+//   2. NO IDE/ATAPI cdrom driver in the guest: the running device tree has
+//      only isa@1 + vioblk/vioif/viorand, no pci-ide/ata node. vmctl
+//      attaches the NoCloud CIDATA seed as an IDE cdrom, so the seed (and
+//      the per-run SSH key inside it) is UNREADABLE by the guest.
+//   3. /sbin/dladm, /sbin/ipadm, /sbin/flowadm are MISSING -- only the
+//      SUNWcs compat symlinks exist; the package that ships the actual
+//      command binaries was never installed. Without dladm/ipadm the
+//      datalink+IP layer can't be configured, so network/physical:default
+//      fails (`/sbin/dladm: not found`, `cannot plumb net0: Could not open
+//      DLPI link`) and the guest never gets an IP -> nothing answers the
+//      SSH host-forward.
+//
+// The `uefi #true` / `virtio-transitional #true` fix (W1b) + the q35->pc
+// PATH shim (scripts/qemu-illumos-shim/, still required, smoke.sh prepends
+// it) are correct and get the guest to multi-user; the three defects above
+// are what block SSH after that.
+//
+// scripts/bake-illumos-fixed-image.sh performs an OFFLINE transform that
+// fixes #1 (native /sbin/sh sysconfig replacement), disables the fatal
+// ipmp, and adds a sudo->pfexec shim + declarative DHCP files. It produces
+// openindiana-rust-ci-fixed.qcow2 (referenced below). BUT defect #3
+// (missing net binaries) CANNOT be fixed offline (no IPS content cache; the
+// 2025.04 OI image's libdladm/dlmgmtd are a different, non-ABI-compatible
+// build), so even the -fixed image is STILL NOT SSH-reachable. The real fix
+// is an image REBUILD with the network-commands package installed (and a
+// native-illumos sysconfig, and a seed on a bus illumos can read). See
+// tests/vm/scripts/illumos-image-fix/ + the W1c shakeout doc for the full
+// trace + the exact recipe changes a rebuild needs.
+//
+// Debugging note that keeps biting people: these images route the console
+// to VGA text mode once the kernel takes over, and vmctl's qemu backend
+// passes `-nodefaults` with no `-vga`, so serial `console.log` goes silent
+// after the loader even on a healthy boot. Do NOT read that silence as a
+// hang. The reliable liveness signal is SSH reachability, or -- far better
+// for illumos debugging -- mounting the overlay offline and reading
+// /var/svc/log/*.log directly, which is how the above was pinned down.
 //
 // Three OpenIndiana guests, all pulled from the same base image
 // (openindiana-rust-ci, the only OpenIndiana image in the CloudNebulaProject
@@ -72,7 +89,7 @@
 //     "https://code.aopc.cloud/v2/cloudnebulaproject/openindiana-rust-ci/blobs/$DIGEST"
 
 vm "exec1" {
-    image "~/.local/share/vmctl/images/openindiana-rust-ci.qcow2"
+    image "~/.local/share/vmctl/images/openindiana-rust-ci-fixed.qcow2"
     vcpus 2
     memory 4096
     uefi #true
@@ -104,7 +121,7 @@ vm "exec1" {
 }
 
 vm "pg" {
-    image "~/.local/share/vmctl/images/openindiana-rust-ci.qcow2"
+    image "~/.local/share/vmctl/images/openindiana-rust-ci-fixed.qcow2"
     vcpus 2
     memory 4096
     uefi #true
@@ -126,7 +143,7 @@ vm "pg" {
 }
 
 vm "builder" {
-    image "~/.local/share/vmctl/images/openindiana-rust-ci.qcow2"
+    image "~/.local/share/vmctl/images/openindiana-rust-ci-fixed.qcow2"
     vcpus 4
     memory 8192
     uefi #true

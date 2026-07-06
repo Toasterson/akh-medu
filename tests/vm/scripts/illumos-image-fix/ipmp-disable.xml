@@ -1,0 +1,17 @@
+<?xml version='1.0'?>
+<!DOCTYPE service_bundle SYSTEM '/usr/share/lib/xml/dtd/service_bundle.dtd.1'>
+
+<!--
+  Phase 50 / W1c fix: disable network/ipmp:default on single-NIC guests.
+  in.mpathd fails fatally at boot (setup_listener failed for both IPv4 and
+  IPv6, method exit 95) because IPMP link-multipathing is meaningless on a
+  guest with one virtio NIC and was never intentionally configured. Disabling
+  the service removes the spurious maintenance-state FMA alert. Applied
+  automatically by manifest-import from /etc/svc/profile/site/.
+  NOTE: XML comments must not contain a double hyphen, so this text avoids it.
+-->
+<service_bundle type='profile' name='site-disable-ipmp'>
+  <service name='network/ipmp' type='service' version='1'>
+    <instance name='default' enabled='false' />
+  </service>
+</service_bundle>
