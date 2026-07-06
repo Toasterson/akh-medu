@@ -1,10 +1,22 @@
 # Phase 50 / W1 — illumos portability shakeout (baseline)
 
-> Date: 2026-07-05
-> Status: In progress — VM substrate up, native build/test run pending/partial
+> Date: 2026-07-05 (updated 2026-07-06)
+> Status: In progress — VM substrate up, native build/test run still blocked on SSH login
 > Plan: [2026-07-05-phase50-feature-test-benchmarks.md](plans/2026-07-05-phase50-feature-test-benchmarks.md) (W1)
 > ADR: [086 — Feature-test VM harness + benchmark program](decisions/086-feature-test-vm-harness-benchmarks.md)
 > Harness: `tests/vm/VMFile.kdl` (`builder` guest), `tests/vm/smoke.sh`
+>
+> **2026-07-06 update**: found + fixed a real regression — the committed
+> `VMFile.kdl` never actually set the `uefi`/`virtio-transitional` nodes the
+> installed `vmctl` supports, so `vmctl up` wasn't even reaching the failure
+> documented below (it panicked or didn't boot at all). Fixed; `vmctl up`
+> now reaches this doc's `system/sysconfig:default failed` state
+> automatically. Also root-caused why the boot looked "hung" for minutes at
+> a time (a console-visibility artifact, not a real stall) and tried the
+> omnios-sysconfig fallback (inconclusive — no SSH banner in ~2 min).
+> SSH login is still blocked; native build/test still not run. Full trace:
+> [docs/ops/vm-harness-openindiana.md](../ops/vm-harness-openindiana.md)
+> "UPDATE (2026-07-06)" section.
 
 ## Purpose
 

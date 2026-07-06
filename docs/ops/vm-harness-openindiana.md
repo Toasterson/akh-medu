@@ -454,3 +454,176 @@ Both agents fixed the illumos `vioblk` q35 panic; two routes exist:
       user-data provisioning-format mismatch above.
 - [ ] SSH login into any guest — **BLOCKED** (root-caused above). Blocks
       `smoke.sh` green + the native shakeout this session.
+
+---
+
+## UPDATE (2026-07-06) — committed VMFile.kdl regression fixed; console-visibility artifact resolved; sysconfig failure re-characterized with hard evidence
+
+Picked this up fresh from `develop` (worktree reset to `2a2949b`, the W1
+merge commit). This section records what changed and what is now know with
+much higher confidence than the sections above.
+
+### Regression found: the committed `VMFile.kdl` never actually set `uefi`/`virtio-transitional`
+
+The "UPDATE (2026-07-05)" section above says the installed `~/.cargo/bin/vmctl`
+was rebuilt with `uefi` and `virtio-transitional` VMFile nodes (confirmed
+again this session via `strings ~/.cargo/bin/vmctl | grep -i uefi` — both
+flags are compiled in, with a real `create --uefi`/`--virtio-transitional`
+CLI surface and a `VMFile.kdl` parser that accepts `uefi #true` /
+`virtio-transitional #true` bool nodes on a `vm` block). **But the
+`tests/vm/VMFile.kdl` actually committed to `develop` never set either
+node** — only the PATH shim (`-machine q35` → `pc` rewrite) was wired in.
+Reproduced from a clean worktree: `vmctl up --file VMFile.kdl --name exec1`
+with the shim on `PATH` produces a QEMU invocation with **no OVMF pflash
+drives at all** (`-machine pc,accel=kvm ... -drive ...overlay.qcow2 -device
+virtio-blk-pci,drive=drive0` — no `disable-modern`, no `if=pflash`). Since
+`openindiana-rust-ci` is GPT/UEFI-only (see quirk #1's original finding, real
+despite the earlier "not a blocker" note in the older shakeout doc — that
+note was about a *different*, older image build), this boots to a bare
+SeaBIOS spinner with **zero further console output ever** (confirmed: 8
+bytes of ANSI cursor-reposition codes in `console.log`, no progress after
+minutes). And even with `uefi #true` alone (no `virtio-transitional`), the
+guest reaches the OpenIndiana loader fine but then hits the **exact quirk-#2
+vioblk panic again**:
+
+```
+WARNING: vioblk0: Failed to map CAP 2 @ BAR4 0x3000+1000
+...
+panic[cpu0]/thread=...: vfs_mountroot: cannot mount root
+```
+
+**Fix applied:** added `uefi #true` and `virtio-transitional #true` to all
+three `vm` blocks in `tests/vm/VMFile.kdl` (matching the parser test shapes
+in `vm-manager/src/vmfile.rs`). Also bumped `builder` to `vcpus 4` / `memory
+8192` per this doc's own sizing note (§"`builder` — native illumos
+toolchain..."), which the committed file also hadn't done. With both flags
+set, `vmctl up` produces `-drive if=pflash,...OVMF_CODE.fd -drive
+if=pflash,...efivars.fd` plus `disable-modern=on,disable-legacy=off` on both
+virtio-blk-pci and virtio-net-pci, and the guest gets past the panic on the
+first try (`ZFS is trying an alternate path
+(/pci@0,0/pci1af4,2@3/blkdev@0,0:b)` — pool imports).
+
+### The "several minutes of silence" from quirk #4 is a console-routing artifact, NOT a hang
+
+This was the single most time-consuming thing to pin down this session, and
+it's worth recording precisely so nobody re-diagnoses it as a timing/host-
+contention bug again. `vmctl`'s QEMU backend passes `-nodefaults` and never
+adds a `-vga`/display device (confirmed: `screendump` over QMP against a
+running vmctl-launched guest fails with `"There is no console to take a
+screendump from"`). OpenIndiana's kernel, once it takes over from the
+loader, picks its console from whichever devices are actually present — with
+no VGA device, it should fall back to `ttya` (serial), and early on it does
+(the loader banner, `Welcome to illumos`, the `NOTICE: Performing full ZFS
+device scan!` lines, and the `vuid3ps2` STREAMS warning all land in
+`console.log` fine). But **after that point, on this image, `console.log`
+goes completely silent for 10+ minutes** with the qemu process sitting at
+low, non-pegged CPU (~5-17%) — which looks exactly like a hung guest, and is
+what the 2026-07-05 "boot quirk #4" section left as an open question.
+
+It is not a hang. Booting the *same* overlay+seed manually with `-vga std
+-vnc 127.0.0.1:0,to=99` added (bypassing vmctl, reusing its overlay.qcow2/
+seed.iso/efivars.fd files directly) and reading the framebuffer via QMP
+`screendump` shows the **entire rest of boot happening normally, in well
+under a minute**, all on the `text` (VGA) console — `Configuring devices.`,
+SMF service imports, the `system/sysconfig:default failed` / `network/ipmp:
+default failed fatally` messages, and finally an `unknown console login:`
+prompt. None of this ever reaches serial. **The guest was never stuck; the
+console was just pointed somewhere vmctl doesn't capture.** (Note: adding
+`-vga std` also changes OVMF's own boot behavior — with a GOP-capable
+display present, OVMF drops into its interactive `UiApp`/Boot Manager
+front page or a `Shell>` prompt on cold NVRAM instead of silently
+autobooting the ESP's default loader the way it does headless. Worked
+around by connecting to the serial `chardev` socket directly — the *loader*
+stage, unlike the running kernel, still listens on both ttya and the
+keyboard — and typing `FS0:` then `EFI\BOOT\bootx64.efi` to chainload
+manually. Once the illumos kernel takes over, further input has to go
+through QMP `send-key`, since the login prompt reads the PS/2 keyboard, not
+the serial UART.) **Practical upshot: don't trust "no vmctl `console.log`
+output" as a liveness signal for these images once boot passes the loader —
+use SSH reachability, or a `-vga std` + `screendump` side-channel, instead.**
+
+### `svc:/system/sysconfig:default` failure re-characterized: fast repeated failure, not a 120s SIGKILL
+
+With the console now actually visible, the failure is:
+
+```
+Jul  6 06:25:33 svc.startd[9]: network/ipmp:default: Method
+  "/lib/svc/method/net-ipmp" failed with exit status 95.
+Jul  6 06:25:33 svc.startd[9]: network/ipmp:default failed fatally:
+  transitioned to maintenance
+...
+Jul  6 06:25:35 svc.startd[9]: system/sysconfig:default failed:
+  transitioned to maintenance
+unknown console login:
+SUNW-MSG-ID: SMF-8000-YX ... network/ipmp:default ... "a method is failing
+  in a retryable manner but too often" ...
+SUNW-MSG-ID: SMF-8000-YX ... system/sysconfig:default ... same ...
+```
+
+This reached the login prompt in **under 15 real seconds** from the loader
+handoff — not the ~120s SMF `exec_method timeout_seconds` the 2026-07-05
+section assumed (that number is real, from `service-configs/smf/
+sysconfig.xml` in `~/ws/nebula/sysconfig`, but this run never hit it: the
+method fails and exits on its own well before the timeout, repeatedly, and
+SMF's own maintenance-transition policy (a handful of quick retries then
+give up) is what actually ends it). `network/ipmp` failing *first*, fatally,
+is suspicious as a possible trigger/co-factor for `sysconfig`'s own failure
+(sysconfig's SMF manifest only has an *optional* dependency on
+`network-physical`, not `ipmp`, so this isn't an explicit dependency chain,
+but a network-configuration step inside `sysconfig apply` itself could well
+be tripping over the same missing IPMP group setup) — flagged as the next
+concrete thing to check from inside a shell, not yet confirmed.
+
+**Read `~/ws/nebula/sysconfig`'s own source this session** (read-only,
+per instructions) to understand exactly what's being attempted:
+`crates/sysconfig-providers/src/cloud_init.rs` scans `/dev/dsk/c*{s2,p0}`
+via `fstyp`, mounts whatever has an `hsfs` filesystem and a `CIDATA`/`cidata`
+volume label, and parses a real subset of `#cloud-config` (`hostname`,
+`ssh_authorized_keys` → root, and a `users:` list with `name`/`shell`/
+`sudo`/`ssh_authorized_keys`/`groups` — confirmed by the crate's own unit
+tests, e.g. `parse_cloud_config_per_user_ssh_keys`). That format is exactly
+what vmctl's `cloud-init` block produces, so the seed *format* was probably
+never the problem. `crates/sysconfig-providers/src/lib.rs`'s `auto_detect()`
+tries `smartos` (checks for `/usr/sbin/mdata-get`), `ec2` (SMBIOS-gated, its
+HTTP fetch is a stub that always returns `NotAvailable` in this build — not
+a hang risk), `digitalocean`, then `cloud-init`, then `generic_cpio` — so if
+`mdata-get` happens to exist on this image and its `fetch()` blocks on a
+metadata channel that doesn't exist under plain QEMU/SLIRP, it would run
+*before* cloud-init ever gets a chance and could produce exactly this
+"failing repeatedly" signature. **Not confirmed** — would need a shell
+inside the guest (`/var/svc/log/system-sysconfig:default.log` has the real
+answer) to settle definitively; single-user boot / root-password login
+attempts this session did not succeed (root has no working/blank
+password on this image either).
+
+### omnios-sysconfig fallback: tried, not a quick win either
+
+Per the task's documented fallback option, pulled
+`oci://code.aopc.cloud/cloudnebulaproject/omnios-sysconfig:latest` (small —
+OCI in-RAM pull peaked around ~1.3 GiB RSS, fine memory-wise) with a custom
+`user-data` (`akh-exec` user + root SSH key, matching the confirmed sysconfig
+parser shape) via a standalone throwaway VMFile (not committed — this was a
+quick side-experiment, not part of the harness). Result: boots cleanly,
+reaches an `console login:` prompt within ~35s (no visible SMF failures this
+time, unlike rust-ci), but **no SSH banner ever answered in ~2 minutes of
+polling** the forwarded port. Inconclusive whether sysconfig actually
+succeeded there (hostname still showed `unknown` at the login banner, which
+may just be a pre-provisioning artifact rather than a failure signal) —
+this needs its own dedicated investigation and is **not** a proven
+drop-in fix; do not assume it "just works" without further verification.
+
+### Net status for the next session
+
+- `tests/vm/VMFile.kdl`'s `uefi`/`virtio-transitional` gap is fixed —
+  `vmctl up` now reliably reaches the same failure point the 2026-07-05
+  manual investigation found, automatically, for all three guests.
+- `smoke.sh` still cannot go green: no guest is SSH-reachable. This remains
+  the accurate, current, root-caused status.
+- The `builder` native `cargo build`/`cargo test` shakeout is still
+  blocked on SSH and was **not run** this session (would be fabricating
+  results to claim otherwise).
+- Most valuable next step: get a **shell** inside a booted guest (single-user
+  boot, or a console with a known root password baked at image-build time)
+  and read `/var/svc/log/system-sysconfig:default.log` directly — that
+  settles the smartos/mdata-get hypothesis (or rules it out) with certainty
+  instead of inference from FMA messages.
