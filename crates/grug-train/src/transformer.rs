@@ -242,6 +242,13 @@ impl TinyTransformerConfig {
         Self::new(vocab_size, 384, 6, 6, 1536, 640)
     }
 
+    /// Phase 51 P1a-3 capacity test: ~30M params (d_model 512, 8 layers, 8 heads,
+    /// d_ff 2048), ~2.3x the p1a 13M, to test whether the zero-shot / arg-correct
+    /// ceilings are capacity-bound rather than data-bound.
+    pub fn p1a_large(vocab_size: usize) -> Self {
+        Self::new(vocab_size, 512, 8, 8, 2048, 640)
+    }
+
     pub fn init<B: Backend>(&self, device: &B::Device) -> TinyTransformer<B> {
         let blocks = (0..self.n_layers)
             .map(|_| DecoderBlockConfig::new(self.d_model, self.n_heads, self.d_ff).init(device))

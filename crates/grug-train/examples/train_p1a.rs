@@ -123,6 +123,21 @@ struct Args {
     /// beyond the fixed P1a config) must be unchanged from the original run.
     #[arg(long)]
     resume: Option<PathBuf>,
+
+    /// Phase 51 P1a-3 capacity test: use the ~30M `p1a_large` config
+    /// (d_model 512, 8 layers/heads) instead of the ~13M `p1a` config, to test
+    /// whether the zero-shot / arg-correct ceilings are capacity-bound.
+    #[arg(long, default_value_t = false)]
+    large_model: bool,
+
+    /// Number of distractor tools offered alongside the target in each prompt.
+    #[arg(long, default_value_t = 4)]
+    distractor_count: usize,
+
+    /// Use hard (same-family, similarity-ranked) distractors. `--hard-distractors false`
+    /// falls back to uniform-random (the P1a-2 / Step-1 behavior).
+    #[arg(long, action = clap::ArgAction::Set, default_value_t = true)]
+    hard_distractors: bool,
 }
 
 fn main() {
@@ -141,7 +156,14 @@ fn main() {
         Default::default()
     };
 
-    let dataset = build_dataset(args.seed, args.n_tools, args.holdout_frac).expect("dataset splits cleanly");
+    let dataset = build_dataset(
+        args.seed,
+        args.n_tools,
+        args.holdout_frac,
+        args.distractor_count,
+        args.hard_distractors,
+    )
+    .expect("dataset splits cleanly");
     match args.n_tools {
         Some(n) => println!(
             "train_p1a: procedural catalog -- n_tools={n}, holdout_frac={}, train_tools={}, holdout_tools={}",
@@ -168,7 +190,11 @@ fn main() {
         if tokenizer_path.exists() { "loaded" } else { "freshly trained" }
     );
 
-    let model_config = TinyTransformerConfig::p1a(tokenizer.vocab_size());
+    let model_config = if args.large_model {
+        TinyTransformerConfig::p1a_large(tokenizer.vocab_size())
+    } else {
+        TinyTransformerConfig::p1a(tokenizer.vocab_size())
+    };
     let train_cfg = TrainConfig {
         learning_rate: args.learning_rate,
         max_seq_len: model_config.max_seq_len,
@@ -324,19 +350,24 @@ fn main() {
 /// (`Dataset::new_sized`) when `n_tools` is given (Phase 51 P1a-2, Wave 2),
 /// or the original hand-authored ~56-tool catalog (`Dataset::new`) otherwise
 /// -- keeps the pre-Wave-2 CLI invocation working unchanged.
-fn build_dataset(seed: u64, n_tools: Option<usize>, holdout_frac: f64) -> grug_data::GrugResult<Dataset> {
+fn build_dataset(
+    seed: u64,
+    n_tools: Option<usize>,
+    holdout_frac: f64,
+    distractor_count: usize,
+    hard: bool,
+) -> grug_data::GrugResult<Dataset> {
+    // NB: with hard distractors, keep `distractor_count` low enough that
+    // prompt+target stays under the model's ctx (640) — the PROMPT-LEN check at
+    // startup reports over_ctx; `build_batch` silently truncates the target off
+    // the end otherwise. Measured: 6 distractors overflow ~4%, 4 fits (max 584).
+    let distractors = if hard {
+        grug_data::DistractorConfig::hard_with_count(distractor_count)
+    } else {
+        grug_data::DistractorConfig::easy_with_count(distractor_count)
+    };
     match n_tools {
-        // 4 hard (same-family) distractors + target = 5 offered tools. Measured
-        // via the PROMPT-LEN check: the hard() default of 6 distractors overflows
-        // the 640-token ctx on ~4% of examples (max 785), which would silently
-        // truncate targets in build_batch; 4 keeps max well under 640 while still
-        // forcing in-context schema discrimination. (Phase 51 P1a-3, axis-A.)
-        Some(n) => Dataset::new_sized_with_distractors(
-            seed,
-            n,
-            holdout_frac,
-            grug_data::DistractorConfig::hard_with_count(4),
-        ),
+        Some(n) => Dataset::new_sized_with_distractors(seed, n, holdout_frac, distractors),
         None => Dataset::new(seed),
     }
 }
