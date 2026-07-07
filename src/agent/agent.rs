@@ -287,6 +287,7 @@ impl Agent {
         registry: &mut ToolRegistry,
         predicates: &AgentPredicates,
         engine: &Engine,
+        backend_override: Option<Arc<dyn crate::backend::Backend>>,
         #[cfg(feature = "delegation")]
         delegation_pending: std::sync::Arc<std::sync::Mutex<Vec<super::delegation::DelegationTask>>>,
     ) {
@@ -314,11 +315,10 @@ impl Agent {
         // One shared Backend (ADR 082) binds the executor-facing tools —
         // file_io/edit/glob/grep/shell_exec — to a single target, so a file
         // write and a shell command are guaranteed coherent. Phase 48a: the
-        // in-process backend only (unconfined, honestly Critical); 48b/48c
-        // swap in privilege-dropped / remote executors here.
-        let backend: std::sync::Arc<dyn crate::backend::Backend> = std::sync::Arc::new(
-            crate::backend::InProcessBackend::new(fs.clone()),
-        );
+        // in-process backend by default; 48c: `Agent::with_backend` lets a
+        // caller swap in a privilege-dropped / remote executor here.
+        let backend: std::sync::Arc<dyn crate::backend::Backend> = backend_override
+            .unwrap_or_else(|| std::sync::Arc::new(crate::backend::InProcessBackend::new(fs.clone())));
         registry.register(Box::new(tools::FileIoTool::with_backend(backend.clone())));
         // Claude-Code-parity coding tools, sharing the same sandbox so reads
         // and writes stay confined to the akh's roots.
@@ -690,6 +690,18 @@ impl Agent {
     /// Initializes well-known predicates, registers built-in tools, and
     /// optionally restores goals from the KG.
     pub fn new(engine: Arc<Engine>, config: AgentConfig) -> AgentResult<Self> {
+        Self::with_backend(engine, config, None)
+    }
+
+    /// Build an agent whose executor-facing tools (file_io/edit/glob/grep/shell_exec)
+    /// run through a caller-supplied [`Backend`](crate::backend::Backend) instead of
+    /// the default in-process one (ADR 082 / Phase 48c). Passing `None` reproduces
+    /// [`Agent::new`] byte-for-byte.
+    pub fn with_backend(
+        engine: Arc<Engine>,
+        config: AgentConfig,
+        backend: Option<Arc<dyn crate::backend::Backend>>,
+    ) -> AgentResult<Self> {
         let predicates = AgentPredicates::init(&engine)?;
         let project_predicates = ProjectPredicates::init(&engine)?;
         let dialogue_predicates = super::dialogue::DialoguePredicates::init(&engine)?;
@@ -707,6 +719,7 @@ impl Agent {
             &mut tool_registry,
             &predicates,
             &engine,
+            backend,
             #[cfg(feature = "delegation")]
             delegation_pending,
         );
@@ -3597,6 +3610,7 @@ impl Agent {
             &mut tool_registry,
             &predicates,
             &engine,
+            None,
             #[cfg(feature = "delegation")]
             delegation_pending,
         );
@@ -4000,5 +4014,41 @@ impl std::fmt::Debug for Agent {
             .field("constraint_checker", &self.constraint_checker)
             .field("interlocutors", &self.interlocutor_registry.len())
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod backend_seam_tests {
+    use super::*;
+    use crate::engine::EngineConfig;
+    use crate::vsa::Dimension;
+
+    fn test_engine() -> Arc<Engine> {
+        Arc::new(
+            Engine::new(EngineConfig {
+                dimension: Dimension::TEST,
+                ..Default::default()
+            })
+            .expect("engine construction should succeed"),
+        )
+    }
+
+    /// `Agent::with_backend(engine, config, None)` must construct exactly like
+    /// `Agent::new` (ADR 082 / Phase 48c seam): `None` selects the same
+    /// in-process `Backend` `register_builtin_tools` builds when no override is
+    /// given. This doesn't drive a swapped-in backend end-to-end (that's the
+    /// Phase 50 W3 runner's job against the real `RemoteBackend`); it just
+    /// proves the new constructor's `None` path is a drop-in for `Agent::new`.
+    #[test]
+    fn with_backend_none_matches_new() {
+        let agent = Agent::with_backend(test_engine(), AgentConfig::default(), None)
+            .expect("Agent::with_backend(.., None) should construct like Agent::new");
+
+        // Sanity: the executor-facing tools registered by register_builtin_tools
+        // are present, proving the in-process default backend path still ran.
+        assert!(
+            agent.tool_registry.list().iter().any(|sig| sig.name == "shell_exec"),
+            "shell_exec tool should be registered via the default in-process backend"
+        );
     }
 }
