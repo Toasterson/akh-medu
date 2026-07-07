@@ -156,3 +156,9 @@ The indicated next levers (in order of directness), for a fresh decision — **n
 ### What ships regardless
 
 **Schema-constrained decoding (Step A) is the concrete win from P1a-4** — a free inference-time 7× on zero-shot schema (0.031→0.219) with no in-distribution cost, on the *non-pointer* 13M checkpoint. Step B is a documented negative that redirects the effort from "more architecture" to "the training signal / the organ". n=128 → single points ±; one seed.
+
+### Step B2 — copy-supervision (2026-07-07): gate-collapse confirmed, still no zero-shot
+
+`p_gen` instrumentation on the Step B checkpoint showed **mean `p_gen` ≈ 0.96** (~95% of target positions >0.9) — **gate collapse confirmed**: the copy pathway trains but is never used. An auxiliary BCE supervising `p_gen` toward copy (`train_step_ptr_supervised`, weight λ) *does* move the gate (`p_gen` 0.96→~0.77 zero-shot by step 1000) but fails to clear the gate for two reasons: (1) **grad-norm-clip caps λ** — λ=1 and λ=4 gave *identical* `p_gen`=0.767 at step 1000 despite different losses/checkpoints; (2) even with the gate opening, in-distribution copying recovers only slowly (axis-B ~0.72/0.52 at step 12k) while **zero-shot plateaus at schema ~0.06** (axis-A, flat across 12k steps). The copy *attention* does not learn accurate in-context pointing at this scale.
+
+**The deeper lesson → format pivot (P2).** Three model-machinery levers now fail on zero-shot — capacity (P1a-3), the copy mechanism (Step B), copy-supervision (Step B2) — and constrained decoding only yields valid-but-wrong. The common thread is that a tiny model emitting **JSON** spends scarce capacity on the format, not the task (the small-model "format tax"). **[P2](plans/2026-07-07-phase51-p2-format-first-corpus.md) (ADR 088)** abandons JSON for a minimal High-Grug format and tests it on an otherwise-identical pipeline — the format, not more model machinery, is the next hypothesis.
