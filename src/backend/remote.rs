@@ -621,6 +621,28 @@ fn shell_quote_path(p: &Path) -> String {
     shell_quote(&p.to_string_lossy())
 }
 
+/// Insert a newline every 76 characters (standard MIME base64 line width —
+/// the same width `openssl base64`'s own encoder uses). See the long
+/// comment on [`RemoteBackend::write`] for why this is required: some
+/// `openssl base64 -d` builds (illumos exec1's 1.0.2u among them) silently
+/// truncate a single unwrapped base64 line past a few hundred bytes.
+fn wrap_base64_mime(encoded: &str) -> String {
+    const LINE_WIDTH: usize = 76;
+    if encoded.len() <= LINE_WIDTH {
+        return encoded.to_string();
+    }
+    let mut out = String::with_capacity(encoded.len() + encoded.len() / LINE_WIDTH + 1);
+    for (i, chunk) in encoded.as_bytes().chunks(LINE_WIDTH).enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        // Safe: `encoded` is base64 output, pure ASCII, so any byte-aligned
+        // chunk boundary is also a valid UTF-8 boundary.
+        out.push_str(std::str::from_utf8(chunk).expect("base64 alphabet is ASCII"));
+    }
+    out
+}
+
 /// Whether `name` is safe to appear on the left of `export NAME=...` without
 /// quoting (POSIX shell identifier: `[A-Za-z_][A-Za-z0-9_]*`).
 fn is_safe_env_key(name: &str) -> bool {
@@ -708,12 +730,31 @@ impl Filesystem for RemoteBackend {
     /// newline-terminated to flush the last line (hence `printf '%s\n'`
     /// below, not `printf '%s'`); verified byte-exact for both short and
     /// 300-byte payloads on the live guest.
+    ///
+    /// **The base64 must be MIME-wrapped (76 chars/line), not one long
+    /// line.** Found live against exec1 in Phase 50 W3 (this backend's first
+    /// exercise with real multi-KB payloads — task `setup.sh`/`verify.sh`
+    /// scripts, not W2b's ~300-byte probe): exec1's `openssl` is 1.0.2u
+    /// (2019), whose `base64 -d` silently truncates a single unwrapped
+    /// base64 line once it exceeds roughly 500-1000 input bytes, decoding to
+    /// a fixed *fraction* of the intended output rather than erroring —
+    /// reproduced deterministically (1000 B -> 232 B, 2000 B -> 464 B, 3000
+    /// B -> 696 B, a constant ~23% survival ratio) and confirmed
+    /// content-only: an identical-length non-base64 exec round-trips full
+    /// length, so the SSH exec-channel transport itself is not at fault.
+    /// Wrapping at 76 chars/line (the same width `openssl base64` itself
+    /// uses to *encode*) is the standard, widely-compatible base64 line
+    /// format and fixes the decode on this guest; verified byte-exact up to
+    /// 3000 B live. `shell_quote` single-quotes the whole blob, and POSIX
+    /// single quotes preserve embedded newlines literally, so the wrapped
+    /// form still travels as one `printf` argument.
     fn write(&self, path: &Path, contents: &str) -> FsResult<()> {
         if self.config.write_roots.is_empty() {
             return Err(FsError::WritesDisabled);
         }
         use base64::Engine as _;
         let encoded = base64::engine::general_purpose::STANDARD.encode(contents.as_bytes());
+        let wrapped = wrap_base64_mime(&encoded);
         let mut command = String::new();
         if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
             command.push_str("mkdir -p -- ");
@@ -721,7 +762,7 @@ impl Filesystem for RemoteBackend {
             command.push_str(" && ");
         }
         command.push_str("printf '%s\\n' ");
-        command.push_str(&shell_quote(&encoded));
+        command.push_str(&shell_quote(&wrapped));
         command.push_str(" | openssl base64 -d > ");
         command.push_str(&shell_quote_path(path));
         let outcome = self.run_file_op(path, command)?;
@@ -1054,6 +1095,54 @@ QFBgc=\n\
 
         let names = backend.read_dir(dir.path()).unwrap();
         assert!(names.iter().any(|p| p == &file), "read_dir missing the file: {names:?}");
+    }
+
+    /// Regression test for the Phase 50 W3 finding: a multi-KB payload (a
+    /// real task's `setup.sh`, not W2b's ~300-byte probe) must round-trip
+    /// byte-exact. This loopback fixture's `openssl` won't itself reproduce
+    /// the illumos-1.0.2u truncation bug the MIME-wrapping fix targets, but
+    /// it does guard the client-side plumbing (`wrap_base64_mime` + the
+    /// command it builds) against ever regressing to a single unwrapped
+    /// line for large content.
+    #[test]
+    fn write_then_read_round_trips_a_multi_kilobyte_payload() {
+        let backend = connected_backend(test_runtime());
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("big.txt");
+
+        // Content mirrors a real task script: mixed line lengths, quotes,
+        // and a `$`-heavy shell-ish line, well past the 76-char wrap width
+        // and past the sizes that reproduced the bug live (500-3000 B).
+        let mut payload = String::new();
+        for i in 0..200 {
+            payload.push_str(&format!(
+                "line {i}: 'single' \"double\" $VAR ${{BRACED}} `backtick` \\ backslash\n"
+            ));
+        }
+        assert!(payload.len() > 4000, "test payload should exceed the sizes that reproduced the bug");
+
+        backend.write(&file, &payload).unwrap();
+        let read = backend.read_to_string(&file).unwrap();
+        assert_eq!(read.len(), payload.len());
+        assert_eq!(read, payload);
+    }
+
+    #[test]
+    fn wrap_base64_mime_round_trips_through_a_real_base64_decoder() {
+        use base64::Engine as _;
+        for len in [0usize, 1, 75, 76, 77, 500, 1000, 3000, 10_000] {
+            let raw: Vec<u8> = (0..len).map(|i| (i % 256) as u8).collect();
+            let encoded = base64::engine::general_purpose::STANDARD.encode(&raw);
+            let wrapped = wrap_base64_mime(&encoded);
+            // No line exceeds the wrap width.
+            assert!(wrapped.lines().all(|l| l.len() <= 76), "line too long for len={len}");
+            // Stripping the newlines back out recovers the original base64
+            // (the wrap is purely cosmetic — content-preserving).
+            let unwrapped: String = wrapped.chars().filter(|c| *c != '\n').collect();
+            assert_eq!(unwrapped, encoded, "wrap lost/reordered content for len={len}");
+            let decoded = base64::engine::general_purpose::STANDARD.decode(unwrapped).unwrap();
+            assert_eq!(decoded, raw, "round trip mismatch for len={len}");
+        }
     }
 
     #[test]
