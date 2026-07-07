@@ -1,6 +1,6 @@
 # Phase 51 P2 — Format-First Corpus + Real Model Building
 
-- **Status:** Plan (active). Pivot from P1a-4's copy-mechanism dead-ends to the root cause: **the target format, not the model, is the bottleneck.**
+- **Status:** A/B **DONE** (2026-07-07). Format **locked in** ([ADR 088](../decisions/088-high-grug-boundary-format.md)); zero-shot verdict → **the organ, not the weights** ([ADR 089](../decisions/089-organ-kg-zeroshot-path.md), Phase 51 P3). The format hypothesis was half-right: it removed the *tax* (half the context, trivially-valid syntax) but was **not** the zero-shot cure — a fourth negative on that axis.
 - **Date:** 2026-07-07
 - **Continues:** [P1 scaling results](../2026-07-05-phase51-p1-scaling-results.md) (§10 Step A, §11 Step B, §11.x Step B2), [Phase 51 plan](2026-07-05-phase51-grug-brain-baby-llm.md), [ADR 087](../decisions/087-grug-brain-baby-llm-training.md), ADR 088 (this pivot).
 
@@ -48,6 +48,13 @@ Hold **everything** constant from the `p1a2-ep8` recipe (seed 42, 1000 procedura
 - **Runtime:** ~1 hr GPU, local (no API cost).
 
 If confirmed, this retroactively explains the whole P1a-4 arc: capacity/data/copy all failed because they targeted the wrong bottleneck.
+
+**Result (measured, `runs/p2-grug/`, base 13M, seed 42, only format varies):**
+- **Tax removed:** encoded seq len **halved** (median 109 vs JSON's ~345); valid-format trivial from step 0.
+- **In-distribution accuracy: a wash** — Grug arg tracks *near, marginally below* JSON (~0.63–0.66 vs ~0.78). Freed capacity did not visibly lift accuracy on this synthetic task.
+- **Zero-shot: unchanged** — axis-A schema **mean 0.030, max 0.055**, identical to JSON's 0.031, flat the whole run.
+
+**Verdict:** the format is the right boundary representation to **lock in** (efficiency + reliability + High-Grug alignment) but is **not** the zero-shot cure. Four levers now leave zero-shot at ~0.03. → [ADR 088](../decisions/088-high-grug-boundary-format.md) locks the format; [ADR 089](../decisions/089-organ-kg-zeroshot-path.md) moves zero-shot correctness to the organ/KG (P3).
 
 ## 3. Corpus design (delegated — reasoned here)
 
