@@ -48,6 +48,20 @@ pub trait Vocab {
     fn pad_id(&self) -> u32;
     /// `SEP` token id -- separates prompt tokens from target tokens.
     fn sep_id(&self) -> u32;
+
+    /// The raw byte contribution of every token id, indexed by id
+    /// (`table[id]`), for schema-constrained decoding
+    /// (`crate::generate::generate_constrained`).
+    ///
+    /// `Some(bytes)` is the exact byte sequence this token appends to the
+    /// decoded output; `None` marks a token that emits no directly-appendable
+    /// bytes (the special tokens `BOS`/`EOS`/`PAD`/`SEP`) and so must never be
+    /// offered as a constrained continuation. Concatenating the `Some` pieces
+    /// of a token id sequence reproduces the same bytes
+    /// [`Vocab::decode`] would (the constrained decoder drives a byte-level
+    /// grammar over exactly those bytes), so a byte-level tokenizer's pieces
+    /// and its `decode` agree by construction.
+    fn token_pieces(&self) -> Vec<Option<Vec<u8>>>;
 }
 
 /// `BOS` token id: one past the 256 byte-value tokens (0..=255).
@@ -139,6 +153,13 @@ impl Vocab for ByteTokenizer {
     }
     fn sep_id(&self) -> u32 {
         SEP
+    }
+    fn token_pieces(&self) -> Vec<Option<Vec<u8>>> {
+        // Byte tokens (0..=255) each contribute their own single byte; the
+        // four special tokens (>=256) contribute nothing appendable.
+        (0..VOCAB_SIZE)
+            .map(|id| if id < 256 { Some(vec![id as u8]) } else { None })
+            .collect()
     }
 }
 

@@ -1,7 +1,7 @@
 # Phase 51 P1a-4 — Next Steps: Zero-Shot via a Copy/Pointer Mechanism
 
-- **Status:** Plan (not started). Self-contained continuation doc — written so work can resume after conversation compaction.
-- **Date:** 2026-07-05
+- **Status:** Step A **DONE** (2026-07-07) — schema-constrained decoding built + measured; result in [scaling results §10](../2026-07-05-phase51-p1-scaling-results.md). Step B (copy/pointer) not started. Self-contained continuation doc — written so work can resume after conversation compaction.
+- **Date:** 2026-07-05 (Step A results 2026-07-07)
 - **Depends on / continues:** [P0→P1a-3 scaling results](../2026-07-05-phase51-p1-scaling-results.md) (§8 ablation), [Phase 51 plan](2026-07-05-phase51-grug-brain-baby-llm.md), [ADR 087](../decisions/087-grug-brain-baby-llm-training.md).
 
 ---
@@ -25,7 +25,9 @@ Phase 51 P0→P1a-3 is **complete and on develop** (unsigned commits, merged). A
 
 ## 1. The plan — cheapest-first, two experiments
 
-### Step A — Schema-constrained decoding (cheap, inference-only, do first)
+### Step A — Schema-constrained decoding (cheap, inference-only, do first) — ✅ DONE 2026-07-07
+> **Outcome:** built as a byte-level DFA (`grug_data::constrain::ToolCallGrammar`) + `generate_constrained` + `Vocab::token_pieces` + `examples/eval_constrained.rs`. Baseline reproduced the training run exactly; constrained decoding lifted **zero-shot schema 0.031→0.219 (~7×)** and **arg 0.031→0.125 (~4×)** with **no in-distribution regression** (axis-B schema 0.898→0.961). Confirms the residual zero-shot gap is a **value-copying** problem → Step B is the indicated lever, with a floor to beat (constrained zero-shot schema 0.219 / arg 0.125). Full result: [scaling results §10](../2026-07-05-phase51-p1-scaling-results.md).
+
 Constrain greedy decode so that at param-name positions the model may only emit tokens present in the *offered tool's schema* (grammar-/schema-constrained decoding). No retraining — apply to an existing 13M checkpoint (`runs/p1a2-ep8/checkpoints/step_00019999`, arg-0.78 model).
 - **What it tests:** does forcing *valid* param names lift zero-shot schema-adherence? It cannot fix arg *values* (those must be copied from the request), so expect schema↑ but arg-correct only partial.
 - **Where:** `crates/grug-train/src/generate.rs` — mask the logits at param-key positions to the schema's param-name token sequences.

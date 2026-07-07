@@ -223,6 +223,37 @@ impl BpeTokenizer {
         Ok(encoding.get_ids().to_vec())
     }
 
+    /// Per-id byte contribution for schema-constrained decoding (see
+    /// [`crate::tokenizer::Vocab::token_pieces`]).
+    ///
+    /// Byte-level BPE stores token surfaces in the GPT-2 byte<->unicode
+    /// *remapped* alphabet (a space is the char `Ġ`, etc.), so
+    /// `id_to_token(id)` returns those remapped chars, not raw bytes. We invert
+    /// the GPT-2 map ([`gpt2_char_to_byte`]) char-by-char to recover the exact
+    /// bytes the token appends to the decoded output. The four special tokens
+    /// map to `None` (they contribute no appendable bytes); any token whose
+    /// surface contains a char outside the byte-level alphabet also maps to
+    /// `None` (should not occur for a byte-level BPE, but fail closed rather
+    /// than guess a byte).
+    fn token_pieces_impl(&self) -> Vec<Option<Vec<u8>>> {
+        let char_to_byte = gpt2_char_to_byte();
+        let vocab_size = self.vocab_size();
+        let specials = [self.bos_id, self.eos_id, self.pad_id, self.sep_id];
+        (0..vocab_size as u32)
+            .map(|id| {
+                if specials.contains(&id) {
+                    return None;
+                }
+                let surface = self.inner.id_to_token(id)?;
+                let mut bytes = Vec::with_capacity(surface.len());
+                for ch in surface.chars() {
+                    bytes.push(*char_to_byte.get(&ch)?);
+                }
+                Some(bytes)
+            })
+            .collect()
+    }
+
     /// Decode token ids back into a `String`, dropping special tokens
     /// (`<bos>`/`<eos>`/`<pad>`/`<sep>`) rather than round-tripping them into
     /// the output -- same contract as
@@ -258,6 +289,37 @@ impl crate::tokenizer::Vocab for BpeTokenizer {
     fn sep_id(&self) -> u32 {
         self.sep_id
     }
+    fn token_pieces(&self) -> Vec<Option<Vec<u8>>> {
+        self.token_pieces_impl()
+    }
+}
+
+/// The inverse of GPT-2's `bytes_to_unicode` bijection: maps each remapped
+/// alphabet char back to its raw byte. This is the standard byte-level BPE
+/// alphabet (`tokenizers`' `ByteLevel::alphabet()` builds the forward map from
+/// the same construction), reproduced here so [`BpeTokenizer::token_pieces`]
+/// can turn a token's remapped-char surface back into the bytes it emits,
+/// without depending on a private helper in the `tokenizers` crate.
+fn gpt2_char_to_byte() -> std::collections::HashMap<char, u8> {
+    // Bytes that map to themselves (printable ASCII + two Latin-1 ranges).
+    let mut bs: Vec<u32> = Vec::new();
+    bs.extend((b'!' as u32)..=(b'~' as u32));
+    bs.extend(0xA1u32..=0xAC);
+    bs.extend(0xAEu32..=0xFF);
+    let mut cs: Vec<u32> = bs.clone();
+    // The remaining bytes map to fresh code points at 256+n, in byte order.
+    let mut n = 0u32;
+    for b in 0u32..256 {
+        if !bs.contains(&b) {
+            bs.push(b);
+            cs.push(256 + n);
+            n += 1;
+        }
+    }
+    bs.iter()
+        .zip(cs.iter())
+        .filter_map(|(&b, &c)| char::from_u32(c).map(|ch| (ch, b as u8)))
+        .collect()
 }
 
 #[cfg(test)]
@@ -367,5 +429,49 @@ mod tests {
     fn empty_corpus_is_rejected() {
         let err = BpeTokenizer::train(Vec::<String>::new(), 512).unwrap_err();
         assert!(matches!(err, GrugError::EmptyTrainingCorpus));
+    }
+
+    /// `token_pieces` must reconstruct exactly the bytes `decode` produces:
+    /// concatenating the per-token byte pieces of an encoded sequence yields
+    /// the original text's bytes. This validates the GPT-2 byte<->unicode
+    /// inverse map against the tokenizer's own decoder over real JSON.
+    #[test]
+    fn token_pieces_concatenate_to_the_decoded_bytes() {
+        use crate::tokenizer::Vocab;
+        let tok = BpeTokenizer::train(sample_corpus(), 512).unwrap();
+        let pieces = Vocab::token_pieces(&tok);
+        assert_eq!(pieces.len(), tok.vocab_size());
+
+        for text in [
+            r#"{"arguments":{"city":"Zurich"},"name":"get_weather"}"#,
+            r#"{"arguments":{"party_size":4,"time":"20:00"},"name":"book_table"}"#,
+            "please send an email to a@b.com with subject hi",
+            "Zürich 北京",
+        ] {
+            let ids = Vocab::encode(&tok, text).unwrap();
+            let mut reconstructed: Vec<u8> = Vec::new();
+            for &id in &ids {
+                let piece = pieces[id as usize]
+                    .as_ref()
+                    .unwrap_or_else(|| panic!("ordinary token {id} has no byte piece"));
+                reconstructed.extend_from_slice(piece);
+            }
+            assert_eq!(
+                reconstructed,
+                text.as_bytes(),
+                "token_pieces did not reconstruct {text:?}"
+            );
+        }
+    }
+
+    /// The four special tokens contribute no appendable bytes.
+    #[test]
+    fn token_pieces_are_none_for_special_tokens() {
+        use crate::tokenizer::Vocab;
+        let tok = BpeTokenizer::train(sample_corpus(), 512).unwrap();
+        let pieces = Vocab::token_pieces(&tok);
+        for id in [tok.bos_id(), tok.eos_id(), tok.pad_id(), tok.sep_id()] {
+            assert!(pieces[id as usize].is_none(), "special token {id} should have no byte piece");
+        }
     }
 }

@@ -28,6 +28,7 @@
 
 pub mod catalog;
 mod catalog_tools;
+pub mod constrain;
 pub mod dataset;
 pub mod error;
 pub mod eval;
@@ -37,6 +38,7 @@ pub mod procedural;
 pub mod schema;
 
 pub use catalog::ToolCatalog;
+pub use constrain::{GrammarState, ToolCallGrammar};
 pub use dataset::{AxisReport, Dataset, EvalAxis};
 pub use error::{GrugError, GrugResult};
 pub use eval::{ArgMismatch, DiversityReport, EvalOutcome, EvalReport, SchemaViolation};

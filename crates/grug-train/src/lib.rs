@@ -39,10 +39,10 @@ pub use bpe::BpeTokenizer;
 pub use checkpoint::{load_checkpoint, save_checkpoint};
 pub use error::{GrugError, GrugResult};
 pub use eval::{
-    run_eval, run_eval_and_log, run_two_axis_eval, run_two_axis_eval_and_log, AxisEvalLogRow,
-    EvalLogRow, FrozenHoldout, FrozenTwoAxisHoldout,
+    run_eval, run_eval_and_log, run_two_axis_eval, run_two_axis_eval_and_log,
+    run_two_axis_eval_constrained, AxisEvalLogRow, EvalLogRow, FrozenHoldout, FrozenTwoAxisHoldout,
 };
-pub use generate::{generate, GenerateConfig};
+pub use generate::{generate, generate_constrained, GenerateConfig};
 pub use model::{Mlp, MlpConfig};
 pub use tokenizer::{ByteTokenizer, Vocab};
 pub use transformer::{Attention, CausalSelfAttention, TinyTransformer, TinyTransformerConfig};

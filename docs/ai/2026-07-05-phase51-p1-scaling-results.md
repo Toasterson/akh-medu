@@ -92,3 +92,33 @@ A clean ablation ruled out the obvious levers: **more data (Step 2) and more cap
 1. **Copy/pointer mechanism** — the evidence-backed lever for zero-shot: let the model copy param-name/value spans directly from the offered schema. Architectural change to `TinyTransformer`.
 2. **Organ-scale + High Grug/KG** — accept that true zero-shot generalization belongs to the larger organ (P3+) where schema knowledge comes from the KG via the gap-token, not from weights.
 3. **P1b (Apertus)** — still open, but de-prioritized: it addresses comprehension, which this ablation shows is not the current bottleneck.
+
+## 10. P1a-4 Step A — schema-constrained decoding (2026-07-07)
+
+The P1a-3 ablation concluded the zero-shot wall is **architectural**: the model lacks a mechanism to emit param names it only saw in an unseen in-prompt schema. Step A is the cheap, inference-only probe of that claim (no retraining): constrain greedy decoding so every emitted token keeps the output on a path to a call that is valid for *some offered tool*, then re-eval the existing 13M arg-0.78 checkpoint (`runs/p1a2-ep8/step_00019999`) on the **same** frozen 128×2 holdout.
+
+**Method.** A byte-level DFA acceptor (`grug_data::constrain::ToolCallGrammar`) over the exact training target — which, because `serde_json`'s default `Map` is a `BTreeMap` (no `preserve_order` in this workspace), is `{"arguments":{<sorted params>},"name":"<tool>"}` (**arguments before name, name last**). A golden test pins this against 300 real generator targets. Since the name comes *last*, the acceptor carries a shrinking set of **viable tools** (those consistent with every param key emitted so far) and requires the final name to lie in it — so the constraint is "consistent with a single offered tool", not the weaker "each key belongs to *some* tool". Disallowed tokens' logits are masked to −∞ before the argmax (`generate_constrained`); `EOS` is offered only at a complete call. **Structure + param names + tool name are constrained; values are left free** — the deliberate isolation of "invalid names" from "wrong values". Per-token byte pieces come from `Vocab::token_pieces` (GPT-2 byte↔unicode inverse for the BPE surface; a test proves the pieces concatenate byte-exactly to `decode`).
+
+**Baseline reproduced the training run exactly** (load-fidelity + config check): axis-B arg **0.781** / schema 0.898, axis-A schema **0.031** — identical to the `p1a2-ep8` step-19999 eval row. So the deltas below are real, not artifacts of a mismatched holdout.
+
+| Axis | metric | baseline | constrained | Δ |
+|---|---|---|---|---|
+| **B** (held-out phrasing, in-distribution) | valid_json | 0.992 | 0.992 | — |
+| | schema | 0.898 | **0.961** | +0.063 |
+| | arg_correct | 0.781 | **0.797** | +0.016 |
+| | distinct_call_ratio | 0.906 | 0.969 | +0.063 |
+| **A** (whole-tool holdout, zero-shot) | valid_json | 0.984 | 0.969 | −0.015 |
+| | schema | **0.031** | **0.219** | **+0.188 (≈7×)** |
+| | arg_correct | **0.031** | **0.125** | **+0.094 (≈4×)** |
+| | distinct_call_ratio | 0.039 | 0.227 | +0.188 |
+
+(Artifact: `runs/p1a2-ep8/eval_constrained.json`. Baseline eval 122s, constrained 72s incl. per-step CPU masking, on the 7900 XTX.)
+
+**Reading.**
+- **In-distribution is not harmed — slightly helped.** Constraining cleaned up the occasional invalid key (schema 0.898→0.961) with no valid-JSON or arg regression. So schema-constrained decoding is a safe default even where the model already generalizes.
+- **Zero-shot schema-adherence lifts ~7× (0.031→0.219)** — a real, cheap floor-raiser. A meaningful fraction of the zero-shot failure *was* invalid param names, exactly as the P1a-3 diagnosis predicted; forcing valid, schema-consistent names recovers it.
+- **But it stays low in absolute terms, and arg-correct (0.125) trails schema (0.219).** Two residuals remain, both *values*-shaped, both what Step A cannot fix: (a) even a schema-valid call needs the right *argument values*, which must be **copied** from the request (constraining names can't supply them); (b) the acceptor does not force required-key coverage or the correct tool *selection*, so the model can still name the wrong tool or drop a required key. The gap between constrained-schema and constrained-arg is precisely the copy problem.
+
+**Verdict — Step A confirms the Step-B thesis.** Constrained decoding is worth keeping as a free inference-time win (ship it as the default decode for tool-calling; it strictly helps in-distribution and 7× on zero-shot schema), but the residual zero-shot gap is a **value-copying** problem, not a name-validity one. That is the evidence-backed motivation for **Step B — the copy/pointer mechanism** (let the model copy novel param *names and values* directly from the offered schema/request), now with a quantified floor to beat: constrained zero-shot schema 0.219 / arg 0.125.
+
+**Caveats (honest).** The grammar constrains names/structure only, not required-coverage or values, so constrained-schema 0.219 mixes "valid names" with residual "missing-required / wrong-tool" failures — a tighter required-coverage constraint would separate these further but was out of Step A's cheap-probe scope. n=128 per axis → treat single points as ±. Distractor config = easy (2 uniform), matching the `p1a2-ep8` training distribution.

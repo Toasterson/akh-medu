@@ -35,8 +35,10 @@ use grug_data::schema::Example;
 use grug_data::{Dataset, DiversityReport, EvalAxis, EvalReport};
 use serde::Serialize;
 
+use grug_data::constrain::ToolCallGrammar;
+
 use crate::error::{GrugError, GrugResult};
-use crate::generate::{generate, GenerateConfig};
+use crate::generate::{generate, generate_constrained, GenerateConfig};
 use crate::tokenizer::Vocab;
 use crate::train::format_prompt;
 use crate::transformer::TinyTransformer;
@@ -140,6 +142,54 @@ fn generate_outputs<B: Backend, V: Vocab>(
             (raw, example.clone())
         })
         .collect()
+}
+
+/// Greedy-generate on every example under schema-constrained decoding
+/// (Phase 51 P1a-4 Step A): the [`generate_outputs`] counterpart that builds a
+/// per-example [`ToolCallGrammar`] over the offered tools and calls
+/// [`generate_constrained`]. `pieces` is the tokenizer's per-id byte table
+/// ([`Vocab::token_pieces`]), built once by the caller.
+fn generate_outputs_constrained<B: Backend, V: Vocab>(
+    model: &TinyTransformer<B>,
+    tokenizer: &V,
+    pieces: &[Option<Vec<u8>>],
+    examples: &[Example],
+    gen_config: GenerateConfig,
+    device: &B::Device,
+) -> Vec<(String, Example)> {
+    examples
+        .iter()
+        .map(|example| {
+            let prompt = format_prompt(example);
+            let grammar = ToolCallGrammar::new(&example.tools);
+            let raw = generate_constrained(model, tokenizer, &prompt, &grammar, pieces, gen_config, device);
+            (raw, example.clone())
+        })
+        .collect()
+}
+
+/// Run one two-axis eval pass under **schema-constrained decoding** and return
+/// the `(axis_b_phrasing, axis_a_whole_tool)` `AxisReport` pair. The
+/// unconstrained counterpart is [`run_two_axis_eval`]; running both on the same
+/// frozen holdout is the Phase 51 P1a-4 Step A experiment (does forcing valid,
+/// schema-consistent parameter names lift schema-adherence — especially the
+/// zero-shot whole-tool axis — and how far does argument-correctness follow?).
+pub fn run_two_axis_eval_constrained<B: Backend, V: Vocab>(
+    model: &TinyTransformer<B>,
+    tokenizer: &V,
+    pieces: &[Option<Vec<u8>>],
+    holdout: &FrozenTwoAxisHoldout,
+    gen_config: GenerateConfig,
+    device: &B::Device,
+) -> (grug_data::AxisReport, grug_data::AxisReport) {
+    let phrasing_outputs = generate_outputs_constrained(model, tokenizer, pieces, &holdout.phrasing, gen_config, device);
+    let whole_tool_outputs =
+        generate_outputs_constrained(model, tokenizer, pieces, &holdout.whole_tool, gen_config, device);
+
+    (
+        Dataset::score_axis(EvalAxis::HeldOutPhrasing, &phrasing_outputs),
+        Dataset::score_axis(EvalAxis::WholeToolHoldout, &whole_tool_outputs),
+    )
 }
 
 fn append_row<R: Serialize>(row: &R, path: &Path) -> GrugResult<()> {
