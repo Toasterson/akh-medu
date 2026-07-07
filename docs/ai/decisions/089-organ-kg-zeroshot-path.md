@@ -1,6 +1,6 @@
 # ADR 089 — Zero-Shot Tool-Calling Belongs to the Organ, Not the Weights
 
-- **Status:** Accepted (design; P3 not built). Number provisional — reconcile on merge.
+- **Status:** Accepted. **Mechanism 2 (KG-backed repair) built + empirically validated (P3b, 2026-07-07): zero-shot arg-correct ~0.03 → ~0.55–0.60 (≈20×) on two independently-trained models, no retraining.** Mechanisms 1 (retrieval) + 3 (gap-token) designed, not built. Number provisional — reconcile on merge.
 - **Date:** 2026-07-07
 - **Deciders:** Till, Fable 5
 - **Evidence:** [P1 scaling results §8–§11](../2026-07-05-phase51-p1-scaling-results.md); `runs/p1a3-cap/`, `runs/p1a4-ptr*/`, `runs/p2-grug/`
