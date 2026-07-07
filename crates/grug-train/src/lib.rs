@@ -46,7 +46,7 @@ pub use eval::{
 };
 pub use generate::{generate, generate_constrained, generate_ptr, generate_ptr_constrained, GenerateConfig};
 pub use model::{Mlp, MlpConfig};
-pub use pointer::{PointerTransformer, PointerTransformerConfig};
+pub use pointer::{PointerParts, PointerTransformer, PointerTransformerConfig};
 pub use tokenizer::{ByteTokenizer, Vocab};
 pub use transformer::{Attention, CausalSelfAttention, TinyTransformer, TinyTransformerConfig};
 

@@ -31,7 +31,9 @@ use grug_train::eval::{
 };
 use grug_train::generate::GenerateConfig;
 use grug_train::tokenizer::Vocab;
-use grug_train::train::{build_batch, init_training_ptr, to_eval_model_ptr, train_step_ptr};
+use grug_train::train::{
+    build_batch, init_training_ptr, to_eval_model_ptr, train_step_ptr, train_step_ptr_supervised,
+};
 use grug_train::transformer::TinyTransformerConfig;
 use grug_train::{checkpoint, BpeTokenizer, PointerTransformerConfig};
 
@@ -74,6 +76,11 @@ struct Args {
     /// Distractor count (matches p1a2-ep8's 2). Uniform-random (easy).
     #[arg(long, default_value_t = 2)]
     distractor_count: usize,
+    /// Phase 51 P1a-4 Step B2: copy-supervision BCE weight. `0.0` = plain
+    /// marginal-likelihood pointer training (Step B); `>0` forces `p_gen`
+    /// toward copy on copyable tokens (Step B2, the gate-collapse fix).
+    #[arg(long, default_value_t = 0.0)]
+    copy_supervision: f64,
 }
 
 fn build_dataset(args: &Args) -> grug_data::GrugResult<Dataset> {
@@ -133,6 +140,11 @@ fn main() {
     let (mut model, mut optim) = init_training_ptr::<ActiveBackend>(&model_config, &device);
     let param_count = burn::module::Module::num_params(&model);
     println!("train_p1a_ptr: PointerTransformer(~{param_count} params over 13M trunk + copy head)");
+    if args.copy_supervision > 0.0 {
+        println!("train_p1a_ptr: COPY-SUPERVISION ON (Step B2), lambda={}", args.copy_supervision);
+    } else {
+        println!("train_p1a_ptr: copy-supervision OFF (plain marginal-likelihood, Step B)");
+    }
 
     let mut start_step = 0usize;
     if let Some(resume_dir) = &args.resume {
@@ -174,7 +186,11 @@ fn main() {
             .expect("BPE encoding should not fail");
 
         let step_start = Instant::now();
-        let (next_model, loss) = train_step_ptr(model, &mut optim, &batch, args.learning_rate);
+        let (next_model, loss) = if args.copy_supervision > 0.0 {
+            train_step_ptr_supervised(model, &mut optim, &batch, args.learning_rate, args.copy_supervision)
+        } else {
+            train_step_ptr(model, &mut optim, &batch, args.learning_rate)
+        };
         let step_ms = step_start.elapsed().as_secs_f64() * 1000.0;
         model = next_model;
         last_loss = loss;

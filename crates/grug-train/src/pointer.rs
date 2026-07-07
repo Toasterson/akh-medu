@@ -84,13 +84,25 @@ pub struct PointerTransformer<B: Backend> {
     d_model: usize,
 }
 
+/// The intermediate pieces of a pointer-generator forward pass, exposed for
+/// the copy-supervision loss (`crate::train`) and `p_gen` instrumentation.
+pub struct PointerParts<B: Backend> {
+    /// Mixed distribution as log-probabilities `log(P_final + eps)` `[B,S,V]`.
+    pub log_probs: Tensor<B, 3>,
+    /// The generate-vs-copy gate `[B,S,1]` (1 = generate, 0 = copy).
+    pub p_gen: Tensor<B, 3>,
+    /// The copy distribution over the vocabulary `[B,S,V]` (before gating).
+    pub p_copy: Tensor<B, 3>,
+}
+
 impl<B: Backend> PointerTransformer<B> {
-    /// The mixed next-token distribution as **log-probabilities**
-    /// `[batch, seq, vocab]`: `log(P_final + eps)`. Used both by the training
-    /// loss (`crate::train::masked_nll`) and by generation
-    /// (`crate::generate::generate_ptr`), which takes the argmax of the last
-    /// position (argmax over log-probs == argmax over probs).
-    pub fn log_probs(&self, input_ids: Tensor<B, 2, Int>) -> Tensor<B, 3> {
+    /// Full forward pass returning the mixed log-probs plus the intermediate
+    /// `p_gen` gate and copy distribution (`PointerParts`). [`log_probs`] is a
+    /// thin wrapper that keeps only `log_probs`; the copy-supervision loss and
+    /// the `p_gen` instrumentation need the other two.
+    ///
+    /// [`log_probs`]: PointerTransformer::log_probs
+    pub fn forward_parts(&self, input_ids: Tensor<B, 2, Int>) -> PointerParts<B> {
         let [batch, seq] = input_ids.dims();
         let device = input_ids.device();
 
@@ -128,10 +140,20 @@ impl<B: Backend> PointerTransformer<B> {
 
         // --- Mix (broadcast p_gen [B,S,1] over the vocab dim). ---
         let one_minus = p_gen.clone().neg().add_scalar(1.0); // [B, S, 1]
-        let p_final = p_vocab * p_gen + p_copy * one_minus; // [B, S, V]
+        let p_final = p_vocab * p_gen.clone() + p_copy.clone() * one_minus; // [B, S, V]
 
         // log(P + eps): P_final sums to 1 over vocab; eps guards log(0).
-        p_final.add_scalar(1e-9).log()
+        let log_probs = p_final.add_scalar(1e-9).log();
+        PointerParts { log_probs, p_gen, p_copy }
+    }
+
+    /// The mixed next-token distribution as **log-probabilities**
+    /// `[batch, seq, vocab]`: `log(P_final + eps)`. Used both by the training
+    /// loss (`crate::train::masked_nll`) and by generation
+    /// (`crate::generate::generate_ptr`), which takes the argmax of the last
+    /// position (argmax over log-probs == argmax over probs).
+    pub fn log_probs(&self, input_ids: Tensor<B, 2, Int>) -> Tensor<B, 3> {
+        self.forward_parts(input_ids).log_probs
     }
 
     /// Approximate learnable parameter count (trunk + copy head).
