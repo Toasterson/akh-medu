@@ -246,6 +246,20 @@ pub trait Tool: Send + Sync {
     fn advertise_to_llm(&self) -> bool {
         true
     }
+
+    /// The [`crate::backend::ExecLocus`] of the `Backend` this tool executed
+    /// through, if any (ADR 082 §7 / Phase 48f audit envelope). `None` for
+    /// tools with no backend at all (most of them — KG queries, planning,
+    /// etc.); the five executor-facing tools (`shell_exec`, `file_io`,
+    /// `edit`, `glob`, `grep`) override this to report the locus of their
+    /// injected `Backend` so [`ToolRegistry::execute`]'s audit entry can
+    /// carry it. Deliberately *not* threaded through `Engine`/`ToolRegistry`
+    /// as a separate lookup — the backend is already private state on these
+    /// five tool structs, and this one default-`None` method is the surgical
+    /// way to surface it without a wider refactor.
+    fn locus(&self) -> Option<crate::backend::ExecLocus> {
+        None
+    }
 }
 
 /// Registry of available tools.
@@ -405,6 +419,15 @@ impl ToolRegistry {
                 Ok(output) => (output.success, truncate_summary(&output.result, 200)),
                 Err(e) => (false, truncate_summary(&e.to_string(), 200)),
             };
+            // ADR 082 §7 audit envelope: which Backend (and where/as whom)
+            // ran this tool, if it's one of the backend-backed executor
+            // tools. `exit_code` stays `None` — `ToolOutput` has no exit-code
+            // field today (only `shell_exec` even has one to report), and
+            // adding one is out of scope for this surgical wiring.
+            let envelope = tool
+                .locus()
+                .map(|locus| crate::audit::ExecEnvelope::from_locus(&locus, None))
+                .unwrap_or_default();
 
             let mut entry = AuditEntry::new(
                 AuditKind::ToolInvocation {
@@ -413,6 +436,7 @@ impl ToolRegistry {
                     success,
                     output_summary,
                     duration_ms,
+                    envelope,
                 },
                 "default",
             );

@@ -63,6 +63,52 @@ impl std::fmt::Display for AuditId {
 // AuditKind
 // ---------------------------------------------------------------------------
 
+/// The identity/locus half of the ADR 082 §7 audit envelope, flattened onto
+/// an [`AuditKind::ToolInvocation`] entry: which `Backend` ran the tool,
+/// where, as whom, and (once available) how it exited — the fields a
+/// correlation-index query joins against the native OS audit trail (illumos
+/// `auditreduce`, sshd logs, …) rather than duplicating it.
+///
+/// All fields are `Option` and every field is `#[serde(default)]`: records
+/// persisted before this envelope existed deserialize with
+/// `ExecEnvelope::default()` (all `None`), and a backend that can't report a
+/// piece of the envelope (e.g. in-process with no discoverable hostname)
+/// leaves it `None` rather than fabricating a value.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ExecEnvelope {
+    /// Which `Backend` impl ran this — `"in-process"` / `"remote"` / ….
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
+    /// The host the exec ran on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    /// The OS principal the exec ran as.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub os_user: Option<String>,
+    /// The process's exit code, when the tool's execution surfaces one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    /// Stable per-backend-instance id to join against the native OS audit
+    /// trail (in production, the SSH certificate key-id — ADR 082 §7).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub correlation_id: Option<String>,
+}
+
+impl ExecEnvelope {
+    /// Build an envelope from a backend's [`crate::backend::ExecLocus`] plus
+    /// the exit code of the exec that just ran (if the tool's outcome
+    /// surfaces one — most non-`shell_exec` tools don't).
+    pub fn from_locus(locus: &crate::backend::ExecLocus, exit_code: Option<i32>) -> Self {
+        Self {
+            backend: Some(locus.backend.to_string()),
+            host: locus.host.clone(),
+            os_user: locus.os_user.clone(),
+            exit_code,
+            correlation_id: locus.correlation_id.clone(),
+        }
+    }
+}
+
 /// What kind of activity this audit entry records.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum AuditKind {
@@ -73,6 +119,11 @@ pub enum AuditKind {
         success: bool,
         output_summary: String,
         duration_ms: u64,
+        /// Identity/locus envelope for the backend that ran this tool (ADR
+        /// 082 §7, Phase 48f). `#[serde(default)]` so audit records
+        /// persisted before this field existed still deserialize.
+        #[serde(default)]
+        envelope: ExecEnvelope,
     },
     /// Content was ingested into the library.
     ContentIngestion {
@@ -496,12 +547,110 @@ impl AuditLedger {
 }
 
 /// Deserialize a bincode-encoded audit entry.
+///
+/// Falls back to [`LegacyAuditEntry`] on failure. This matters because
+/// bincode 1.x is a **positional**, non-self-describing format: adding
+/// `envelope: ExecEnvelope` as a new trailing field on `ToolInvocation`
+/// means a record persisted before that field existed is simply too short
+/// for the current shape — decoding runs out of bytes partway through the
+/// new field and errors, rather than gracefully defaulting the way a
+/// self-describing format (JSON, etc.) would honor `#[serde(default)]`.
+/// (Verified empirically against this exact struct shape before adding this
+/// fallback — see the Phase 48f commit.) The legacy shape mirrors
+/// pre-envelope `AuditEntry`/`AuditKind` field-for-field so bincode decodes
+/// old bytes correctly, then backfills `ExecEnvelope::default()`.
 fn deserialize_entry(bytes: &[u8]) -> AuditResult<AuditEntry> {
-    bincode::deserialize(bytes).map_err(|e| {
-        AuditError::Store(StoreError::Serialization {
-            message: format!("audit entry deserialize: {e}"),
-        })
-    })
+    match bincode::deserialize::<AuditEntry>(bytes) {
+        Ok(entry) => Ok(entry),
+        Err(current_shape_err) => bincode::deserialize::<LegacyAuditEntry>(bytes)
+            .map(AuditEntry::from)
+            .map_err(|_legacy_shape_err| {
+                AuditError::Store(StoreError::Serialization {
+                    message: format!("audit entry deserialize: {current_shape_err}"),
+                })
+            }),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Legacy shape (pre-48f) — decode fallback only, never written
+// ---------------------------------------------------------------------------
+
+/// The pre-Phase-48f shape of [`AuditKind`] — `ToolInvocation` without the
+/// `envelope` field. Variant order and field order must exactly mirror the
+/// historic enum, since bincode's positional encoding is keyed on order, not
+/// field names. Exists purely as a [`deserialize_entry`] fallback; nothing
+/// ever serializes this type.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+enum LegacyAuditKind {
+    ToolInvocation {
+        tool_name: String,
+        params_summary: String,
+        success: bool,
+        output_summary: String,
+        duration_ms: u64,
+    },
+    ContentIngestion {
+        document_title: String,
+        source: String,
+        format: String,
+        chunk_count: usize,
+        triple_count: usize,
+    },
+    AgentLog {
+        level: LogLevel,
+        message: String,
+    },
+}
+
+/// The pre-Phase-48f shape of [`AuditEntry`], paired with [`LegacyAuditKind`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct LegacyAuditEntry {
+    id: Option<AuditId>,
+    kind: LegacyAuditKind,
+    workspace: String,
+    timestamp: u64,
+}
+
+impl From<LegacyAuditEntry> for AuditEntry {
+    fn from(legacy: LegacyAuditEntry) -> Self {
+        let kind = match legacy.kind {
+            LegacyAuditKind::ToolInvocation {
+                tool_name,
+                params_summary,
+                success,
+                output_summary,
+                duration_ms,
+            } => AuditKind::ToolInvocation {
+                tool_name,
+                params_summary,
+                success,
+                output_summary,
+                duration_ms,
+                envelope: ExecEnvelope::default(),
+            },
+            LegacyAuditKind::ContentIngestion {
+                document_title,
+                source,
+                format,
+                chunk_count,
+                triple_count,
+            } => AuditKind::ContentIngestion {
+                document_title,
+                source,
+                format,
+                chunk_count,
+                triple_count,
+            },
+            LegacyAuditKind::AgentLog { level, message } => AuditKind::AgentLog { level, message },
+        };
+        AuditEntry {
+            id: legacy.id,
+            kind,
+            workspace: legacy.workspace,
+            timestamp: legacy.timestamp,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -620,6 +769,7 @@ mod tests {
                 success: true,
                 output_summary: "found 3 triples".into(),
                 duration_ms: 12,
+                envelope: ExecEnvelope::default(),
             },
             "ws",
         );
@@ -735,6 +885,13 @@ mod tests {
             success: true,
             output_summary: "".into(),
             duration_ms: 42,
+            envelope: ExecEnvelope {
+                backend: Some("in-process".into()),
+                host: Some("hephaistos".into()),
+                os_user: Some("toasty".into()),
+                exit_code: None,
+                correlation_id: Some("inproc-1234".into()),
+            },
         };
         assert!(tool.summary().contains("kg_query"));
         assert!(tool.summary().contains("42ms"));
@@ -748,5 +905,115 @@ mod tests {
         };
         assert!(ingest.summary().contains("My Doc"));
         assert!(ingest.summary().contains("5 chunks"));
+    }
+
+    #[test]
+    fn exec_envelope_from_locus_maps_all_fields() {
+        let locus = crate::backend::ExecLocus {
+            backend: "remote",
+            host: Some("exec1".into()),
+            os_user: Some("root".into()),
+            correlation_id: Some("remote-abc123".into()),
+        };
+        let envelope = ExecEnvelope::from_locus(&locus, Some(0));
+        assert_eq!(envelope.backend.as_deref(), Some("remote"));
+        assert_eq!(envelope.host.as_deref(), Some("exec1"));
+        assert_eq!(envelope.os_user.as_deref(), Some("root"));
+        assert_eq!(envelope.exit_code, Some(0));
+        assert_eq!(envelope.correlation_id.as_deref(), Some("remote-abc123"));
+    }
+
+    #[test]
+    fn exec_envelope_round_trips_through_serde() {
+        let envelope = ExecEnvelope {
+            backend: Some("in-process".into()),
+            host: None,
+            os_user: Some("toasty".into()),
+            exit_code: Some(3),
+            correlation_id: Some("inproc-42".into()),
+        };
+        let json = serde_json::to_string(&envelope).unwrap();
+        let round_tripped: ExecEnvelope = serde_json::from_str(&json).unwrap();
+        assert_eq!(envelope, round_tripped);
+    }
+
+    /// Sanity check only: JSON is self-describing, so `#[serde(default)]`
+    /// alone rescues a missing `envelope` key here. This does **not** prove
+    /// the real ledger is backward compatible — the ledger persists via
+    /// bincode (see [`deserialize_entry`]), which is positional and behaves
+    /// differently; [`tool_invocation_without_envelope_field_deserializes_via_bincode_legacy_fallback`]
+    /// below is the test that actually matters.
+    #[test]
+    fn tool_invocation_without_envelope_key_deserializes_with_default_envelope_json() {
+        let old_format_json = r#"{
+            "ToolInvocation": {
+                "tool_name": "kg_query",
+                "params_summary": "symbol=Sun",
+                "success": true,
+                "output_summary": "found 3 triples",
+                "duration_ms": 12
+            }
+        }"#;
+        let kind: AuditKind = serde_json::from_str(old_format_json).unwrap();
+        match kind {
+            AuditKind::ToolInvocation {
+                tool_name, envelope, ..
+            } => {
+                assert_eq!(tool_name, "kg_query");
+                assert_eq!(envelope, ExecEnvelope::default());
+            }
+            other => panic!("expected ToolInvocation, got: {other:?}"),
+        }
+    }
+
+    /// The most important test in this module. `bincode` is positional, not
+    /// self-describing: verified empirically (see [`deserialize_entry`]'s
+    /// doc comment) that `#[serde(default)]` on its own does **not** rescue
+    /// a struct that grew a new trailing field — decoding an old-shaped
+    /// buffer with the new struct definition runs out of bytes and errors.
+    /// This test proves the actual fix: bytes produced by the *pre-48f*
+    /// shape ([`LegacyAuditEntry`]/[`LegacyAuditKind`]) still deserialize
+    /// through [`deserialize_entry`], with the envelope backfilled to
+    /// default — i.e. every `ToolInvocation` already sitting in a real redb
+    /// ledger keeps working after this change.
+    #[test]
+    fn tool_invocation_without_envelope_field_deserializes_via_bincode_legacy_fallback() {
+        let legacy = LegacyAuditEntry {
+            id: AuditId::new(7),
+            kind: LegacyAuditKind::ToolInvocation {
+                tool_name: "kg_query".into(),
+                params_summary: "symbol=Sun".into(),
+                success: true,
+                output_summary: "found 3 triples".into(),
+                duration_ms: 12,
+            },
+            workspace: "ws".into(),
+            timestamp: 1_700_000_000,
+        };
+        let legacy_bytes = bincode::serialize(&legacy).unwrap();
+
+        // Confirms the premise: decoding the pre-envelope bytes directly as
+        // the *current* `AuditEntry` shape must fail (too few bytes for the
+        // trailing `envelope` field) — otherwise this test would not be
+        // exercising the fallback path at all.
+        assert!(bincode::deserialize::<AuditEntry>(&legacy_bytes).is_err());
+
+        let entry = deserialize_entry(&legacy_bytes).unwrap();
+        assert_eq!(entry.workspace, "ws");
+        match entry.kind {
+            AuditKind::ToolInvocation {
+                tool_name,
+                duration_ms,
+                envelope,
+                ..
+            } => {
+                assert_eq!(tool_name, "kg_query");
+                assert_eq!(duration_ms, 12);
+                assert_eq!(envelope, ExecEnvelope::default());
+                assert!(envelope.backend.is_none());
+                assert!(envelope.correlation_id.is_none());
+            }
+            other => panic!("expected ToolInvocation, got: {other:?}"),
+        }
     }
 }

@@ -53,7 +53,7 @@ use russh::client;
 use russh::keys::{HashAlg, PrivateKey, PrivateKeyWithHashAlg, PublicKey};
 use thiserror::Error;
 
-use crate::backend::{Backend, Confinement, ExecError, ExecOutcome, ExecRequest, ExecResult, Posture};
+use crate::backend::{Backend, Confinement, ExecError, ExecLocus, ExecOutcome, ExecRequest, ExecResult, Posture};
 use crate::fs::{Filesystem, FsError, FsResult};
 
 // ---------------------------------------------------------------------------
@@ -387,6 +387,16 @@ pub struct RemoteBackend {
     config: RemoteBackendConfig,
     handle: Arc<client::Handle<ClientHandler>>,
     runtime: tokio::runtime::Runtime,
+    /// Stable id for *this connection*, minted once at [`Self::connect`] /
+    /// [`Self::connect_over_stream`] and reused by every [`Backend::locus`]
+    /// call for the lifetime of the session (ADR 082 §7). In a production
+    /// OIDC→SSH-cert deployment (48d, deferred) this is exactly the value
+    /// that would be minted as the certificate's key-id, so a correlation-
+    /// index query can walk straight from an audit entry to the matching
+    /// sshd/auditd record for this session. Derived (not random) so it is
+    /// reproducible from connection parameters + process identity rather
+    /// than requiring a new UUID dependency.
+    correlation_id: String,
 }
 
 impl RemoteBackend {
@@ -400,10 +410,12 @@ impl RemoteBackend {
     pub fn connect(config: RemoteBackendConfig) -> Result<Self, RemoteError> {
         let runtime = new_runtime()?;
         let handle = runtime.block_on(Self::connect_tcp(&config))?;
+        let correlation_id = mint_correlation_id(&config);
         Ok(Self {
             config,
             handle: Arc::new(handle),
             runtime,
+            correlation_id,
         })
     }
 
@@ -442,10 +454,12 @@ impl RemoteBackend {
             Self::authenticate(&mut handle, &config).await?;
             Ok::<_, RemoteError>(handle)
         })?;
+        let correlation_id = mint_correlation_id(&config);
         Ok(Self {
             config,
             handle: Arc::new(handle),
             runtime,
+            correlation_id,
         })
     }
 
@@ -539,6 +553,30 @@ impl RemoteBackend {
                 source: std::io::Error::other(source.to_string()),
             })
     }
+}
+
+/// Mint a per-connection correlation id: a blake3 hash of the connection
+/// parameters (host, port, user, key path) plus this process's pid and the
+/// current time, hex-truncated to 16 characters. Not cryptographically
+/// meaningful — just short, unique-enough-in-practice, and dependency-free
+/// (no new `uuid` crate for a value that only needs to distinguish sessions
+/// in an audit join, not resist an adversary).
+fn mint_correlation_id(config: &RemoteBackendConfig) -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    let material = format!(
+        "{}:{}:{}:{}:{}:{}",
+        config.host,
+        config.port,
+        config.user,
+        config.private_key_path.display(),
+        std::process::id(),
+        nanos
+    );
+    let digest = blake3::hash(material.as_bytes());
+    format!("remote-{}", &digest.to_hex()[..16])
 }
 
 fn new_runtime() -> Result<tokio::runtime::Runtime, RemoteError> {
@@ -786,6 +824,19 @@ impl Backend for RemoteBackend {
         // unconfined/Critical").
         Posture {
             confinement: Confinement::RemoteUnverified,
+        }
+    }
+
+    /// `backend = "remote"`, `host`/`os_user` come straight from the
+    /// connection config (no round trip needed — they're already known),
+    /// `correlation_id` is the id minted once at [`Self::connect`] /
+    /// [`Self::connect_over_stream`] and held for the session's lifetime.
+    fn locus(&self) -> ExecLocus {
+        ExecLocus {
+            backend: "remote",
+            host: Some(self.config.host.clone()),
+            os_user: Some(self.config.user.clone()),
+            correlation_id: Some(self.correlation_id.clone()),
         }
     }
 }
@@ -1113,6 +1164,22 @@ QFBgc=\n\
                 confinement: Confinement::RemoteUnverified
             }
         );
+    }
+
+    #[test]
+    fn locus_reports_remote_backend_host_user_and_a_correlation_id() {
+        let backend = connected_backend(test_runtime());
+        let locus = backend.locus();
+        assert_eq!(locus.backend, "remote");
+        assert_eq!(locus.host.as_deref(), Some("loopback"));
+        assert_eq!(locus.os_user.as_deref(), Some("akh-exec"));
+        assert!(
+            locus.correlation_id.as_deref().is_some_and(|id| id.starts_with("remote-")),
+            "expected a remote-<hash> correlation id, got {:?}",
+            locus.correlation_id
+        );
+        // Stable across calls on the same connection.
+        assert_eq!(locus.correlation_id, backend.locus().correlation_id);
     }
 
     #[test]
