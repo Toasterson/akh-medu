@@ -122,3 +122,37 @@ The P1a-3 ablation concluded the zero-shot wall is **architectural**: the model 
 **Verdict — Step A confirms the Step-B thesis.** Constrained decoding is worth keeping as a free inference-time win (ship it as the default decode for tool-calling; it strictly helps in-distribution and 7× on zero-shot schema), but the residual zero-shot gap is a **value-copying** problem, not a name-validity one. That is the evidence-backed motivation for **Step B — the copy/pointer mechanism** (let the model copy novel param *names and values* directly from the offered schema/request), now with a quantified floor to beat: constrained zero-shot schema 0.219 / arg 0.125.
 
 **Caveats (honest).** The grammar constrains names/structure only, not required-coverage or values, so constrained-schema 0.219 mixes "valid names" with residual "missing-required / wrong-tool" failures — a tighter required-coverage constraint would separate these further but was out of Step A's cheap-probe scope. n=128 per axis → treat single points as ±. Distractor config = easy (2 uniform), matching the `p1a2-ep8` training distribution.
+
+## 11. P1a-4 Step B — pointer-generator copy mechanism (2026-07-07)
+
+Step A localised the residual zero-shot gap to **value copying** and predicted a copy/pointer mechanism as the lever. Step B built it (See et al. 2017, adapted to the decoder-only trunk): a single-head causal **copy attention** over input positions, scattered onto the vocabulary; a learned `p_gen ∈ [0,1]` gate from `[hidden ; context]`; mixed next-token distribution `P = p_gen·P_vocab + (1−p_gen)·P_copy`, trained by NLL over the mixture (marginal likelihood — generate-vs-copy is learned, not supervised). Same 13M trunk, same data/tokenizer/schedule as `p1a2-ep8` (seed 42, 1000 tools, 8 epochs, easy 2-distractors), batch 16, 96 min on the 7900 XTX. Artifacts: `runs/p1a4-ptr/`. Wiring verified before the run: a unit test confirms the mixed distribution normalises to 1.0, and an autodiff train-step test confirms loss decreases on a fixed batch (scatter backward + copy-path gradients + optimizer all work).
+
+| Decode | Axis | metric | non-pointer (Step A) | **pointer (Step B)** |
+|---|---|---|---|---|
+| **plain greedy** | B (in-dist) | arg_correct | 0.781 | **0.711** |
+| | A (zero-shot) | schema | 0.031 | **0.016** |
+| | A (zero-shot) | arg_correct | 0.031 | **0.016** |
+| **constrained** | B (in-dist) | schema / arg | 0.961 / 0.797 | **0.930 / 0.758** |
+| | A (zero-shot) | schema | 0.219 | **0.250** |
+| | A (zero-shot) | arg_correct | 0.125 | **0.094** |
+
+(Pointer axis-A plain schema across 41 evals: mean 0.026, max 0.062 — flat at the baseline floor the whole run.)
+
+### Verdict — Step B did **not** clear the gate
+
+The gate was zero-shot schema ≥ 0.3–0.5 without regressing in-distribution arg below ~0.75. Neither held:
+- **Zero-shot is unchanged.** Plain axis-A schema 0.016 ≈ the non-pointer baseline 0.031 (flat the entire run). The copy mechanism produced *no* zero-shot lift.
+- **In-distribution mildly regressed.** Plain axis-B arg 0.711 vs 0.781 (below the 0.75 floor); constrained axis-B arg 0.758 vs 0.797.
+- **The copy path is vestigial even under constraint.** Pointer+constrained axis-A schema 0.250 ≈ Step A's grammar-only 0.219 (within n=128 noise), and arg is *worse* (0.094 vs 0.125). So the constrained zero-shot signal comes entirely from the **grammar mask**, not the copy pathway — adding copy contributes nothing and slightly hurts.
+
+### Why — the mechanism is necessary but not sufficient; the *training signal* is the real lever
+
+Leading hypothesis (behaviourally strongly supported, not yet instrumented): **the training objective never incentivises copying.** On *trained* tools, generating each value from memory works — every required value is learnable, so there is no gradient pressure to route probability through the copy path. `p_gen` drifts toward "generate" and the copy attention stays undertrained; at zero-shot time that untrained copy path gives no benefit. The mild in-distribution regression is consistent with a partially-on copy path injecting noise into an otherwise-competent LM. This refines the P1a-3/Step-A picture: the wall is not only that a vanilla LM *lacks* a copy mechanism, but that **marginal-likelihood training on a memorisable distribution won't *learn* to use one** even when it's present.
+
+The indicated next levers (in order of directness), for a fresh decision — **not started**:
+1. **Force copying during training** — a coverage/copy-supervision loss (mark target tokens that appear verbatim in the prompt, push `p_gen` toward copy + copy-attention onto the matching source position), and/or **anti-memorisation data** (per-example novel/randomised values so generating from memory fails and copying is the only route). This directly trains the pathway Step B left dormant. Cheap confirming step first: **instrument `p_gen` / copy-attention entropy** to verify the gate-collapse hypothesis before investing in the loss.
+2. **Accept zero-shot belongs to the organ (Step C, P3+)** — schema knowledge arrives from the KG via the High-Grug gap-token, not from weights. The two negative results (more capacity/data in P1a-3; the learned copy mechanism here) together are a strong argument that a 13M weights-only model on synthetic templates is the wrong vehicle for open-world zero-shot.
+
+### What ships regardless
+
+**Schema-constrained decoding (Step A) is the concrete win from P1a-4** — a free inference-time 7× on zero-shot schema (0.031→0.219) with no in-distribution cost, on the *non-pointer* 13M checkpoint. Step B is a documented negative that redirects the effort from "more architecture" to "the training signal / the organ". n=128 → single points ±; one seed.
