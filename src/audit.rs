@@ -74,23 +74,33 @@ impl std::fmt::Display for AuditId {
 /// `ExecEnvelope::default()` (all `None`), and a backend that can't report a
 /// piece of the envelope (e.g. in-process with no discoverable hostname)
 /// leaves it `None` rather than fabricating a value.
+///
+/// **No `skip_serializing_if`.** These entries are persisted with `bincode`
+/// (see [`deserialize_entry`]), a *positional*, non-self-describing format:
+/// `skip_serializing_if` would omit a `None` field on write, but the decoder
+/// still expects it positionally and hits an unexpected-EOF ("io error") — a
+/// round-trip failure that broke the Phase-50 W3 manpage-grounding grade
+/// (which reads the ledger back). Always emitting all five `Option` fields
+/// (each as bincode's present/absent tag) keeps write/read symmetric; the
+/// JSON form is a few `null`s longer, which is fine. `#[serde(default)]`
+/// alone still gives the pre-envelope JSON backward-compat.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct ExecEnvelope {
     /// Which `Backend` impl ran this — `"in-process"` / `"remote"` / ….
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub backend: Option<String>,
     /// The host the exec ran on.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub host: Option<String>,
     /// The OS principal the exec ran as.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub os_user: Option<String>,
     /// The process's exit code, when the tool's execution surfaces one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub exit_code: Option<i32>,
     /// Stable per-backend-instance id to join against the native OS audit
     /// trail (in production, the SSH certificate key-id — ADR 082 §7).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub correlation_id: Option<String>,
 }
 
@@ -1012,6 +1022,65 @@ mod tests {
                 assert_eq!(envelope, ExecEnvelope::default());
                 assert!(envelope.backend.is_none());
                 assert!(envelope.correlation_id.is_none());
+            }
+            other => panic!("expected ToolInvocation, got: {other:?}"),
+        }
+    }
+
+    /// Regression for the Phase-50 W3 live failure: a `ToolInvocation` with a
+    /// **populated** envelope, written and read back through the real redb
+    /// ledger, must round-trip. The original 48f code carried
+    /// `#[serde(skip_serializing_if = "Option::is_none")]` on the envelope
+    /// fields, which under positional bincode omitted `None` fields on write
+    /// and then ran the decoder out of bytes on read ("io error") — so the
+    /// W3 runner's manpage-grounding grade, which reads the ledger back after
+    /// a turn, failed on every task. This asserts both a fully-populated and
+    /// an all-`None` (default) envelope survive the ledger round-trip.
+    #[test]
+    fn tool_invocation_with_envelope_round_trips_through_the_ledger() {
+        let db = test_db();
+        let ledger = AuditLedger::open(db).unwrap();
+
+        let populated = ExecEnvelope {
+            backend: Some("remote".into()),
+            host: Some("127.0.0.1".into()),
+            os_user: Some("root".into()),
+            exit_code: Some(0),
+            correlation_id: Some("remote-abc123".into()),
+        };
+        let mut entry = AuditEntry::new(
+            AuditKind::ToolInvocation {
+                tool_name: "shell_exec".into(),
+                params_summary: "man svcs".into(),
+                success: true,
+                output_summary: "SVCS(1)".into(),
+                duration_ms: 42,
+                envelope: populated.clone(),
+            },
+            "default",
+        );
+        let id = ledger.append(&mut entry).unwrap();
+        match ledger.get(id).unwrap().kind {
+            AuditKind::ToolInvocation { envelope, .. } => assert_eq!(envelope, populated),
+            other => panic!("expected ToolInvocation, got: {other:?}"),
+        }
+
+        // Default (all-None) envelope — the case that actually EOF'd on read.
+        let mut default_entry = AuditEntry::new(
+            AuditKind::ToolInvocation {
+                tool_name: "kg_query".into(),
+                params_summary: "symbol=Sun".into(),
+                success: true,
+                output_summary: "3 triples".into(),
+                duration_ms: 7,
+                envelope: ExecEnvelope::default(),
+            },
+            "default",
+        );
+        let did = ledger.append(&mut default_entry).unwrap();
+        match ledger.get(did).unwrap().kind {
+            AuditKind::ToolInvocation { envelope, .. } => {
+                assert_eq!(envelope, ExecEnvelope::default())
             }
             other => panic!("expected ToolInvocation, got: {other:?}"),
         }
