@@ -257,10 +257,19 @@ impl Dataset {
     /// loop doesn't need to import `EvalReport`/`DiversityReport` separately
     /// per axis; it just calls this once per axis's batch.
     pub fn score_axis(axis: EvalAxis, pairs: &[(String, Example)]) -> AxisReport {
+        Self::score_axis_fmt(axis, pairs, crate::format::TargetFormat::Json)
+    }
+
+    /// Score one axis under an explicit [`TargetFormat`] (Phase 51 P2).
+    pub fn score_axis_fmt(
+        axis: EvalAxis,
+        pairs: &[(String, Example)],
+        fmt: crate::format::TargetFormat,
+    ) -> AxisReport {
         AxisReport {
             axis,
-            eval: EvalReport::from_outputs(pairs),
-            diversity: DiversityReport::from_outputs(pairs),
+            eval: EvalReport::from_outputs_fmt(pairs, fmt),
+            diversity: DiversityReport::from_outputs_fmt(pairs, fmt),
         }
     }
 

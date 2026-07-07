@@ -1,0 +1,73 @@
+# Phase 51 P2 — Format-First Corpus + Real Model Building
+
+- **Status:** Plan (active). Pivot from P1a-4's copy-mechanism dead-ends to the root cause: **the target format, not the model, is the bottleneck.**
+- **Date:** 2026-07-07
+- **Continues:** [P1 scaling results](../2026-07-05-phase51-p1-scaling-results.md) (§10 Step A, §11 Step B, §11.x Step B2), [Phase 51 plan](2026-07-05-phase51-grug-brain-baby-llm.md), [ADR 087](../decisions/087-grug-brain-baby-llm-training.md), ADR 088 (this pivot).
+
+## 0. Why pivot (the evidence)
+
+P1a-3→P1a-4 chased zero-shot tool-calling through capacity, data, constrained decoding, a copy/pointer mechanism, and copy-supervision. Every lever that added *model machinery* failed or barely moved zero-shot. The reframing question — **is JSON too complex a target for a tiny model?** — is backed by the literature and by our own numbers:
+
+- **SLMs pay a "format tax."** *"The Constraint Tax"* and *"When Correct Isn't Usable"* (2026) find that for sub-3B models, format fidelity "consumes a material part of the generation problem": JSON's braces, quotes, per-field keys, arrays, and type constraints compete with the model's limited capacity for the actual task. Constrained decoding fixes *syntax* but yields "wrong answer with valid schema" — **precisely our Step A result** (constrained zero-shot schema 0.219 / arg 0.125).
+- **The field already left JSON.** Llama 3.2+ emit **pythonic** calls (`get_weather(city='SF')`) explicitly to remove JSON-schema ambiguity; Gemma uses **special-token** delimiters (`<tool_call>`…`</tool_call>`) or ` ```tool_code `. Structure is carried by *single special tokens + a minimal payload*, not hand-balanced punctuation.
+- **Phi sets the target.** phi-1-small = **350M**, 45% HumanEval, from curated *textbook-quality synthetic data + exercises* aimed at a **skill**, not world knowledge.
+- **Our own data double-taxes.** We serialize **both** the offered schema (prompt) *and* the call (target) as JSON. Two structural taxes on a 13M model.
+
+**Decision (ADR 088): retire JSON as the boundary format. Adopt a minimal, special-token-delimited "High-Grug v0" format for both the offered schema and the emitted call.** Then the tiny model spends capacity on schema-reading and value-grounding, not brace-balancing.
+
+Sources: [Textbooks Are All You Need (2306.11644)](https://arxiv.org/abs/2306.11644), [The Constraint Tax (2605.26128)](https://arxiv.org/pdf/2605.26128), [When Correct Isn't Usable (2605.02363)](https://arxiv.org/pdf/2605.02363), [vLLM tool-calling (pythonic vs JSON)](https://docs.vllm.ai/en/latest/features/tool_calling/), [FunctionGemma formatting](https://ai.google.dev/gemma/docs/functiongemma/formatting-and-best-practices).
+
+## 1. High-Grug v0 — the boundary format
+
+Design goals, in priority order: **(a)** structure decisions are "emit the next special token" (no character-level balancing/quoting/nesting); **(b)** deterministic, trivial parse (split on special tokens); **(c)** values may contain spaces without quoting; **(d)** aligns with the "tokens are structural symbols" High-Grug thesis (these special tokens are the first designed symbols).
+
+Five new special/added tokens (registered in the BPE tokenizer next to `<bos>`/`<eos>`/`<pad>`/`<sep>`): `<tool>`, `<param>`, `<call>`, `<arg>`, `<end>`.
+
+**Offered schema (prompt side)** — one segment per tool, params inline:
+```
+<tool>book_table<param>party_size int req<param>time str req<tool>get_weather<param>city str req
+```
+Within a `<param>` segment: `name TYPE REQ` (space-separated; TYPE ∈ {str,int,num,bool,enum}; REQ ∈ {req,opt}; for enum, variants follow: `mode enum req low medium high`).
+
+**Emitted call (target side)** — the model's output:
+```
+<call>book_table<arg>party_size 4<arg>time 20:00<end>
+```
+Within an `<arg>` segment: the first space-delimited token is the arg **name**, the **rest of the segment** (up to the next special token) is the **value** — so spaces in values need no quoting. No `{}`, `""`, `:`, `,`. Structure is entirely special tokens.
+
+Parsing a call for scoring: split on `<call>`/`<arg>`/`<end>`; the tool name is between `<call>` and the first `<arg>`; each `<arg>` splits once on the first space into (name, value). Deterministic and total.
+
+**Why this should help zero-shot specifically:** the offered schema is now flat and special-token-delimited, so "which params does *this* tool have" is a trivial read (each `<param>` is one segment), not a JSON-array parse. The call mirrors the schema's structure, so emitting the right params is copy-adjacent-by-layout. Constrained decoding (Step A grammar) ports trivially to this format if we still want the syntax floor.
+
+## 2. The first experiment — format A/B (the real-model-building step 1)
+
+Hold **everything** constant from the `p1a2-ep8` recipe (seed 42, 1000 procedural tools, 13M base `TinyTransformer` — **no pointer**, back to the clean base model, 8 epochs, easy 2-distractors) and change **only the target/schema format**: JSON vs High-Grug v0. Fresh BPE tokenizer per format (Grug adds the 5 special tokens). Eval the same two axes; the scorer is format-aware.
+
+- **Gate / hypothesis:** Grug format lifts in-distribution arg-correct above the JSON baseline (0.78) **and** moves zero-shot schema meaningfully off 0.03 — because the structural tax is gone and the schema is readable. If it clears zero-shot where every model lever failed, format was the real bottleneck.
+- **Snapshotting:** checkpoint every 500 steps (frequent, per the new directive) so we can bisect *when* a capability appears and resume cheaply.
+- **Runtime:** ~1 hr GPU, local (no API cost).
+
+If confirmed, this retroactively explains the whole P1a-4 arc: capacity/data/copy all failed because they targeted the wrong bottleneck.
+
+## 3. Corpus design (delegated — reasoned here)
+
+Principles, adapted from Phi + the SLM-format literature + our anti-memorisation finding:
+
+1. **Format-minimal (§1).** The single highest-leverage change. Both schema and call in High-Grug v0.
+2. **Skill-targeted, not knowledge-targeted (Phi).** The corpus teaches *tool-calling as a skill*: read an offered schema → emit a schema-consistent, value-grounded call. No world facts (those come from the KG at runtime — the project's whole thesis).
+3. **Diversity over volume, to defeat memorisation (our P1a-2 finding + still true).** Keep the 1000+ procedural tool catalog (few examples/tool). Expand toward more roles/types/arities so no tool-shape is memorisable.
+4. **Difficulty curriculum (Phi "exercises"):** single-required-arg → multi-arg → optional-arg mix → disambiguation among similar offered tools (the "hard distractor" axis, but now cheap because the format is readable) → multi-tool / no-applicable-tool (abstain).
+5. **Value-grounding built in:** every arg value appears verbatim in the request (copying is *possible*); values drawn from a wide space so they aren't memorisable — this is where the real "grounding" skill lives, and the flat format lets the model actually exercise it.
+6. **Reasoning slot reserved (P3):** leave room for an optional pre-call `<think>…</think>` trace (Gemma/Qwen style) — the eventual High-Grug *reasoning* language. Not in P2; P2 is tool-calling format only.
+
+## 4. Real model building + frequent snapshotting (the standing shift)
+
+Per the new directive, after the format A/B we stop one-off ablations and build the *pipeline*: curated corpus generator (§3) → base model → **checkpoint every 500 steps** → two-axis eval curve → keep the best. Snapshots are the unit of progress; every capability jump is bisectable and resumable. Scale (params, tokens, curriculum stages) increases only once the format+corpus foundation reads clean.
+
+## 5. Status of the P1a-4 copy-mechanism thread (closed)
+
+- **Step A (constrained decoding):** kept as a free inference-time syntax floor (7× zero-shot schema), format-agnostic.
+- **Step B (pointer-generator):** null — gate collapsed (measured `p_gen` ≈ 0.96).
+- **Step B2 (copy-supervision):** `p_gen` responds to a BCE (0.96→~0.77) but **grad-norm-clip caps λ's effect** (λ=1 and λ=4 gave identical `p_gen` at step 1000), and even with the gate open, in-distribution copying recovers slowly while **zero-shot plateaus ~0.05** — the copy *attention* doesn't learn accurate in-context pointing at this scale. Not the lever. Superseded by the format pivot.
+
+The honest lesson: three model-machinery levers (capacity, copy mechanism, copy supervision) all failed on zero-shot because the bottleneck was upstream, in the **representation the model is asked to produce**.

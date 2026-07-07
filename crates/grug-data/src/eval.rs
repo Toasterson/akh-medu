@@ -112,6 +112,72 @@ pub fn score_output(raw_output: &str, example: &Example) -> EvalOutcome {
     }
 }
 
+/// Score one raw model output against `example` under an explicit
+/// [`TargetFormat`] (Phase 51 P2). `TargetFormat::Json` is byte-identical to
+/// [`score_output`]; `TargetFormat::Grug` parses the flat pipe format via
+/// [`crate::format::parse_call`] and validates the resulting call the same way.
+pub fn score_output_fmt(raw_output: &str, example: &Example, fmt: crate::format::TargetFormat) -> EvalOutcome {
+    match fmt {
+        crate::format::TargetFormat::Json => score_output(raw_output, example),
+        crate::format::TargetFormat::Grug => {
+            let Some(call) = crate::format::parse_call(raw_output, fmt, &example.tools) else {
+                return EvalOutcome {
+                    parsed_json: false,
+                    schema: None,
+                    arg_correctness: None,
+                };
+            };
+            let schema_result = validate_call(&call, example);
+            let schema_ok = schema_result.as_ref().ok().cloned();
+            let arg_result = schema_ok
+                .as_ref()
+                .map(|c| check_arg_correctness(c, &example.expected_call, example.expected_schema()));
+            EvalOutcome {
+                parsed_json: true,
+                schema: Some(schema_result),
+                arg_correctness: arg_result,
+            }
+        }
+    }
+}
+
+/// Validate an already-parsed [`ToolCall`] against the schemas offered in
+/// `example` — the format-agnostic half of [`validate_schema`], shared by the
+/// Grug scoring path.
+fn validate_call(call: &ToolCall, example: &Example) -> Result<ToolCall, Vec<SchemaViolation>> {
+    let name = call.name.clone();
+    let Some(schema) = example.tools.iter().find(|t| t.name == name) else {
+        return Err(vec![SchemaViolation::UnknownTool { name }]);
+    };
+
+    let mut violations = Vec::new();
+    let args_map = call.arguments_map();
+
+    for required in schema.required_params() {
+        if !args_map.contains_key(&required.name) {
+            violations.push(SchemaViolation::MissingRequired {
+                param: required.name.clone(),
+            });
+        }
+    }
+    for (arg_name, arg_value) in &args_map {
+        match schema.param(arg_name) {
+            None => violations.push(SchemaViolation::UnknownArg { param: arg_name.clone() }),
+            Some(spec) => {
+                if !spec.ty.matches(arg_value) {
+                    violations.push(SchemaViolation::WrongType { param: arg_name.clone() });
+                }
+            }
+        }
+    }
+
+    if violations.is_empty() {
+        Ok(ToolCall::new(name, call.arguments.clone()))
+    } else {
+        Err(violations)
+    }
+}
+
 /// Parse `value` as a tool call shape and validate it against the tool
 /// schemas offered in `example`.
 fn validate_schema(value: &Value, example: &Example) -> Result<ToolCall, Vec<SchemaViolation>> {
@@ -253,9 +319,14 @@ pub struct EvalReport {
 impl EvalReport {
     /// Score and aggregate a batch in one call.
     pub fn from_outputs(pairs: &[(String, Example)]) -> Self {
+        Self::from_outputs_fmt(pairs, crate::format::TargetFormat::Json)
+    }
+
+    /// Score and aggregate a batch under an explicit [`TargetFormat`] (Phase 51 P2).
+    pub fn from_outputs_fmt(pairs: &[(String, Example)], fmt: crate::format::TargetFormat) -> Self {
         let outcomes: Vec<EvalOutcome> = pairs
             .iter()
-            .map(|(raw, ex)| score_output(raw, ex))
+            .map(|(raw, ex)| score_output_fmt(raw, ex, fmt))
             .collect();
         Self::from_outcomes(&outcomes)
     }
@@ -310,9 +381,14 @@ impl DiversityReport {
     /// denominator (the offered-tools union across the batch), not for
     /// correctness — this is deliberately independent of `EvalReport`.
     pub fn from_outputs(pairs: &[(String, Example)]) -> Self {
+        Self::from_outputs_fmt(pairs, crate::format::TargetFormat::Json)
+    }
+
+    /// Diversity alarm under an explicit [`TargetFormat`] (Phase 51 P2).
+    pub fn from_outputs_fmt(pairs: &[(String, Example)], fmt: crate::format::TargetFormat) -> Self {
         let outcomes: Vec<EvalOutcome> = pairs
             .iter()
-            .map(|(raw, ex)| score_output(raw, ex))
+            .map(|(raw, ex)| score_output_fmt(raw, ex, fmt))
             .collect();
 
         let universe_size: usize = {

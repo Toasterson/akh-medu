@@ -22,6 +22,7 @@ use burn::tensor::ElementConversion;
 use burn::tensor::{Int, Tensor, TensorData};
 
 use grug_data::schema::Example;
+use grug_data::TargetFormat;
 
 use crate::pointer::{PointerTransformer, PointerTransformerConfig};
 use crate::tokenizer::Vocab;
@@ -35,8 +36,15 @@ use crate::transformer::{TinyTransformer, TinyTransformerConfig};
 /// this to be *consistent* between training and generation, which
 /// [`format_prompt`] and [`crate::generate::generate`] both call.
 pub fn format_prompt(example: &Example) -> String {
-    let tools_json = serde_json::to_string(&example.tools).unwrap_or_default();
-    format!("{tools_json}\n{}", example.user_request)
+    format_prompt_fmt(example, TargetFormat::Json)
+}
+
+/// [`format_prompt`] under an explicit [`TargetFormat`] (Phase 51 P2): renders
+/// the offered tools via `grug_data::render_tools` so the *prompt-side* schema
+/// switches format alongside the target, not just the call.
+pub fn format_prompt_fmt(example: &Example, fmt: TargetFormat) -> String {
+    let tools = grug_data::render_tools(&example.tools, fmt);
+    format!("{tools}\n{}", example.user_request)
 }
 
 /// One tokenized training example: the full `BOS..EOS` id sequence, plus the
@@ -53,8 +61,18 @@ pub struct Encoded {
 
 /// Tokenize `example` into the `BOS <prompt> SEP <target> EOS` framing.
 pub fn encode_example<V: Vocab>(tokenizer: &V, example: &Example) -> crate::error::GrugResult<Encoded> {
-    let prompt = format_prompt(example);
-    let target = example.expected_call_as_json_string();
+    encode_example_fmt(tokenizer, example, TargetFormat::Json)
+}
+
+/// [`encode_example`] under an explicit [`TargetFormat`] (Phase 51 P2): both
+/// the prompt-side schema and the target call are rendered in `fmt`.
+pub fn encode_example_fmt<V: Vocab>(
+    tokenizer: &V,
+    example: &Example,
+    fmt: TargetFormat,
+) -> crate::error::GrugResult<Encoded> {
+    let prompt = format_prompt_fmt(example, fmt);
+    let target = grug_data::render_call(&example.expected_call, fmt);
 
     let mut ids = Vec::with_capacity(prompt.len() + target.len() + 3);
     ids.push(tokenizer.bos_id());
@@ -114,10 +132,21 @@ pub fn build_batch<B: AutodiffBackend, V: Vocab>(
     max_seq_len: usize,
     device: &B::Device,
 ) -> crate::error::GrugResult<Batch<B>> {
+    build_batch_fmt(tokenizer, examples, max_seq_len, device, TargetFormat::Json)
+}
+
+/// [`build_batch`] under an explicit [`TargetFormat`] (Phase 51 P2).
+pub fn build_batch_fmt<B: AutodiffBackend, V: Vocab>(
+    tokenizer: &V,
+    examples: &[Example],
+    max_seq_len: usize,
+    device: &B::Device,
+    fmt: TargetFormat,
+) -> crate::error::GrugResult<Batch<B>> {
     let pad_id = tokenizer.pad_id();
     let encoded: Vec<Encoded> = examples
         .iter()
-        .map(|ex| encode_example(tokenizer, ex))
+        .map(|ex| encode_example_fmt(tokenizer, ex, fmt))
         .collect::<crate::error::GrugResult<Vec<_>>>()?;
 
     let longest = encoded.iter().map(|e| e.ids.len()).max().unwrap_or(1).min(max_seq_len);

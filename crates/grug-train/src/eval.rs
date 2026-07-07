@@ -145,6 +145,34 @@ fn generate_outputs<B: Backend, V: Vocab>(
         .collect()
 }
 
+/// Two-axis eval under an explicit [`TargetFormat`] (Phase 51 P2): the prompt
+/// is rendered with `format_prompt_fmt` and outputs scored with
+/// `Dataset::score_axis_fmt`, so a JSON-vs-Grug A/B is a pure format swap on an
+/// otherwise-identical harness. Plain greedy decoding (`generate`).
+pub fn run_two_axis_eval_fmt<B: Backend, V: Vocab>(
+    model: &TinyTransformer<B>,
+    tokenizer: &V,
+    holdout: &FrozenTwoAxisHoldout,
+    gen_config: GenerateConfig,
+    device: &B::Device,
+    fmt: grug_data::TargetFormat,
+) -> (grug_data::AxisReport, grug_data::AxisReport) {
+    let axis = |examples: &[Example], which: grug_data::EvalAxis| {
+        let outputs: Vec<(String, Example)> = examples
+            .iter()
+            .map(|ex| {
+                let prompt = crate::train::format_prompt_fmt(ex, fmt);
+                (generate(model, tokenizer, &prompt, gen_config, device), ex.clone())
+            })
+            .collect();
+        Dataset::score_axis_fmt(which, &outputs, fmt)
+    };
+    (
+        axis(holdout.phrasing_examples(), grug_data::EvalAxis::HeldOutPhrasing),
+        axis(holdout.whole_tool_examples(), grug_data::EvalAxis::WholeToolHoldout),
+    )
+}
+
 /// Greedy-generate on every example under schema-constrained decoding
 /// (Phase 51 P1a-4 Step A): the [`generate_outputs`] counterpart that builds a
 /// per-example [`ToolCallGrammar`] over the offered tools and calls
