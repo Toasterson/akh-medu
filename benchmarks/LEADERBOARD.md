@@ -12,6 +12,9 @@ Per ADR 086 §4: once a task-set hash has a published run against it, that hash 
 | frontiercode | deepseek | cloud (`deepseek-v4-pro`) | autonomous | host | 2026-07-06 | 0/2 | 0.0% | 0.000 | `a63ea7b69e2b` | `92ffc17f10e4` |
 | frontiercode | glm-5.2 | cloud (`glm-5.2`) | autonomous | host | 2026-07-06 | 0/2 | 0.0% | 0.000 | `a63ea7b69e2b` | `92ffc17f10e4` |
 | frontiercode | qwen | cloud (`qwen3.5:397b`) | autonomous | host | 2026-07-06 | 0/2 | 0.0% | 0.000 | `a63ea7b69e2b` | `92ffc17f10e4` |
+| illumos-e2e | deepseek | cloud (`deepseek-v4-pro`) | autonomous | VM (`code.aopc.cloud/CloudNebulaProject`) | 2026-07-07 | 8/15 | 53.3% | 0.533 | `0c05049432a8` | `9fcd85270f19` |
+| illumos-e2e | glm-5.2 | cloud (`glm-5.2`) | autonomous | VM (`code.aopc.cloud/CloudNebulaProject`) | 2026-07-07 | 8/15 | 53.3% | 0.533 | `0c05049432a8` | `9fcd85270f19` |
+| illumos-e2e | qwen | cloud (`qwen3.5:397b`) | autonomous | VM (`code.aopc.cloud/CloudNebulaProject`) | 2026-07-07 | 8/15 | 53.3% | 0.533 | `0c05049432a8` | `cc00b55a8fbf` |
 | locomo | deepseek | cloud (`deepseek-v4-pro`) | autonomous | host | 2026-07-06 | 0/1 | 0.0% | 0.200 | `b0a503efba1a` | `92ffc17f10e4` |
 | locomo | glm-5.2 | cloud (`glm-5.2`) | autonomous | host | 2026-07-06 | 0/1 | 0.0% | 0.200 | `b0a503efba1a` | `92ffc17f10e4` |
 | locomo | qwen | cloud (`qwen3.5:397b`) | autonomous | host | 2026-07-06 | 0/1 | 0.0% | 0.000 | `b0a503efba1a` | `92ffc17f10e4` |
