@@ -1,0 +1,49 @@
+id = "relay-group-3svc"
+family = "orchestration"
+description = "Three independent, differently-broken SMF services; fix all three to online"
+subtasks = 3
+timeout_secs = 900
+expected_manpages = ["svcs", "svcadm", "svccfg"]
+mode = ["autonomous"]
+parallelizable = true
+
+# Machine-readable per-service subtask prompts. The W6 fleet-orchestration
+# harness hands one of these to each worker akh when it is NOT relying on
+# the orchestrator akh's own decomposition (or as ground truth to validate
+# that decomposition against) -- keeps the control-vs-orchestrated
+# comparison apples-to-apples and the run reproducible even when an
+# orchestrator's own split is unusable. Each prompt is self-contained: a
+# worker never sees the composite prompt.md, only its own subtask entry.
+
+[[subtask]]
+id = "relay-a"
+fmri = "svc:/site/relay-a:default"
+prompt = """
+The service `svc:/site/relay-a:default` on this host is unhealthy.
+Diagnose why and fix it so `svcs` reports it as `online`. You have root
+access; use whatever illumos tools you judge appropriate.
+"""
+
+[[subtask]]
+id = "relay-b"
+fmri = "svc:/site/relay-b:default"
+prompt = """
+The service `svc:/site/relay-b:default` on this host is unhealthy.
+Diagnose why and fix it so `svcs` reports it as `online`. You have root
+access; use whatever illumos tools you judge appropriate.
+"""
+
+[[subtask]]
+id = "relay-c"
+fmri = "svc:/site/relay-c:default"
+prompt = """
+The service `svc:/site/relay-c:default` on this host is unhealthy.
+Diagnose why and fix it so `svcs` reports it as `online`, AND set its
+`app/greeting` configuration property to exactly:
+
+    relay-c-ready
+
+so that the running configuration (not just the manifest on disk)
+reflects the new value. You have root access; use whatever illumos tools
+you judge appropriate.
+"""
