@@ -173,6 +173,44 @@ pub fn run_two_axis_eval_fmt<B: Backend, V: Vocab>(
     )
 }
 
+/// Two-axis eval that generates once and scores each axis **both raw and
+/// KG-repaired** (Phase 51 P3b): returns `((raw_b, raw_a), (repaired_b,
+/// repaired_a))`. The raw→repaired delta is what the symbolic grounding/repair
+/// layer (`grug_data::repair`) recovers on top of the neural proposal.
+pub fn run_two_axis_eval_raw_and_repaired_fmt<B: Backend, V: Vocab>(
+    model: &TinyTransformer<B>,
+    tokenizer: &V,
+    holdout: &FrozenTwoAxisHoldout,
+    gen_config: GenerateConfig,
+    device: &B::Device,
+    fmt: grug_data::TargetFormat,
+) -> (
+    (grug_data::AxisReport, grug_data::AxisReport),
+    (grug_data::AxisReport, grug_data::AxisReport),
+) {
+    let outputs = |examples: &[Example]| -> Vec<(String, Example)> {
+        examples
+            .iter()
+            .map(|ex| {
+                let prompt = crate::train::format_prompt_fmt(ex, fmt);
+                (generate(model, tokenizer, &prompt, gen_config, device), ex.clone())
+            })
+            .collect()
+    };
+    let b_out = outputs(holdout.phrasing_examples());
+    let a_out = outputs(holdout.whole_tool_examples());
+    (
+        (
+            Dataset::score_axis_fmt(grug_data::EvalAxis::HeldOutPhrasing, &b_out, fmt),
+            Dataset::score_axis_fmt(grug_data::EvalAxis::WholeToolHoldout, &a_out, fmt),
+        ),
+        (
+            Dataset::score_axis_repaired_fmt(grug_data::EvalAxis::HeldOutPhrasing, &b_out, fmt),
+            Dataset::score_axis_repaired_fmt(grug_data::EvalAxis::WholeToolHoldout, &a_out, fmt),
+        ),
+    )
+}
+
 /// Greedy-generate on every example under schema-constrained decoding
 /// (Phase 51 P1a-4 Step A): the [`generate_outputs`] counterpart that builds a
 /// per-example [`ToolCallGrammar`] over the offered tools and calls

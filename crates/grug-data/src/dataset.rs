@@ -273,6 +273,20 @@ impl Dataset {
         }
     }
 
+    /// Score one axis with the KG-backed repair pass applied (Phase 51 P3b):
+    /// the raw-vs-repaired lift is [`Dataset::score_axis_fmt`] vs this.
+    pub fn score_axis_repaired_fmt(
+        axis: EvalAxis,
+        pairs: &[(String, Example)],
+        fmt: crate::format::TargetFormat,
+    ) -> AxisReport {
+        AxisReport {
+            axis,
+            eval: EvalReport::from_outputs_repaired_fmt(pairs, fmt),
+            diversity: DiversityReport::from_outputs_fmt(pairs, fmt),
+        }
+    }
+
     /// Run both holdout axes end-to-end given a model function: generate `n`
     /// examples per axis, call `model` on each `(user_request, tools)` to get
     /// a raw output string, and return both labeled reports. This is the

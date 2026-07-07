@@ -141,6 +141,36 @@ pub fn score_output_fmt(raw_output: &str, example: &Example, fmt: crate::format:
     }
 }
 
+/// Score one raw model output under `fmt`, then apply the **KG-backed repair
+/// pass** ([`crate::repair::repair_call`]) before validating (Phase 51 P3b, ADR
+/// 089). Parsing failure is still `parsed=false`; otherwise the parsed call is
+/// grounded/repaired against the offered schemas and *that* call is scored — so
+/// the raw-vs-repaired delta is exactly what the symbolic layer recovers.
+pub fn score_output_repaired_fmt(
+    raw_output: &str,
+    example: &Example,
+    fmt: crate::format::TargetFormat,
+) -> EvalOutcome {
+    let Some(call) = crate::format::parse_call(raw_output, fmt, &example.tools) else {
+        return EvalOutcome {
+            parsed_json: false,
+            schema: None,
+            arg_correctness: None,
+        };
+    };
+    let (repaired, _stats) = crate::repair::repair_call(&call, &example.tools);
+    let schema_result = validate_call(&repaired, example);
+    let schema_ok = schema_result.as_ref().ok().cloned();
+    let arg_result = schema_ok
+        .as_ref()
+        .map(|c| check_arg_correctness(c, &example.expected_call, example.expected_schema()));
+    EvalOutcome {
+        parsed_json: true,
+        schema: Some(schema_result),
+        arg_correctness: arg_result,
+    }
+}
+
 /// Validate an already-parsed [`ToolCall`] against the schemas offered in
 /// `example` — the format-agnostic half of [`validate_schema`], shared by the
 /// Grug scoring path.
@@ -327,6 +357,18 @@ impl EvalReport {
         let outcomes: Vec<EvalOutcome> = pairs
             .iter()
             .map(|(raw, ex)| score_output_fmt(raw, ex, fmt))
+            .collect();
+        Self::from_outcomes(&outcomes)
+    }
+
+    /// Score and aggregate a batch with the KG-backed repair pass applied
+    /// (Phase 51 P3b): outputs are grounded/repaired against the offered
+    /// schemas before validation. Compare to [`EvalReport::from_outputs_fmt`]
+    /// for the raw-vs-repaired lift.
+    pub fn from_outputs_repaired_fmt(pairs: &[(String, Example)], fmt: crate::format::TargetFormat) -> Self {
+        let outcomes: Vec<EvalOutcome> = pairs
+            .iter()
+            .map(|(raw, ex)| score_output_repaired_fmt(raw, ex, fmt))
             .collect();
         Self::from_outcomes(&outcomes)
     }
