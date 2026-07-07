@@ -23,6 +23,7 @@ use burn::tensor::{Int, Tensor, TensorData};
 
 use grug_data::schema::Example;
 
+use crate::pointer::{PointerTransformer, PointerTransformerConfig};
 use crate::tokenizer::Vocab;
 use crate::transformer::{TinyTransformer, TinyTransformerConfig};
 
@@ -243,6 +244,84 @@ pub fn to_eval_model<B: AutodiffBackend>(model: &TinyTransformer<B>) -> TinyTran
     model.valid()
 }
 
+// ----------------------------------------------------------------------------
+// Phase 51 P1a-4 Step B: pointer-generator training (see `crate::pointer`).
+// ----------------------------------------------------------------------------
+
+/// Build a fresh [`PointerTransformer`] + Adam optimizer (same grad-norm
+/// clipping as [`init_training`]).
+pub fn init_training_ptr<B: AutodiffBackend>(
+    config: &PointerTransformerConfig,
+    device: &B::Device,
+) -> (PointerTransformer<B>, OptimizerAdaptor<Adam, PointerTransformer<B>, B>) {
+    let model = config.init::<B>(device);
+    let optim = AdamConfig::new()
+        .with_grad_clipping(Some(burn::grad_clipping::GradientClippingConfig::Norm(1.0)))
+        .init::<B, PointerTransformer<B>>();
+    (model, optim)
+}
+
+/// One forward + backward + optimizer step for the pointer-generator model.
+/// Identical framing to [`train_step`], but the model emits a *mixed*
+/// distribution (`PointerTransformer::log_probs`) so the loss is an NLL over
+/// those log-probs ([`masked_nll`]) rather than a cross-entropy over logits.
+pub fn train_step_ptr<B: AutodiffBackend>(
+    model: PointerTransformer<B>,
+    optim: &mut OptimizerAdaptor<Adam, PointerTransformer<B>, B>,
+    batch: &Batch<B>,
+    lr: f64,
+) -> (PointerTransformer<B>, f32) {
+    let device = batch.input_ids.device();
+    let mask_flags: Vec<i64> = batch.loss_mask.iter().map(|&m| if m { 1 } else { 0 }).collect();
+    let mask_tensor =
+        Tensor::<B, 1, Int>::from_data(TensorData::new(mask_flags, [batch.batch_size * batch.seq_len]), &device);
+
+    let log_probs = model.log_probs(batch.input_ids.clone()); // [batch, seq, vocab]
+    let masked_loss = masked_nll(log_probs, batch.targets.clone(), &mask_tensor);
+
+    let grads = masked_loss.backward();
+    let grads = GradientsParams::from_grads(grads, &model);
+    let model = optim.step(lr, model, grads);
+
+    let loss_value: f32 = masked_loss.into_scalar().elem();
+    (model, loss_value)
+}
+
+/// Negative log-likelihood over a model that already emits **log-probabilities**
+/// `[batch, seq, vocab]` (the pointer-generator mixed distribution), averaged
+/// only over positions where `mask` is nonzero. The logits counterpart is
+/// [`masked_cross_entropy`]; this one skips the `log_softmax` because the input
+/// is already normalised log-probs.
+fn masked_nll<B: AutodiffBackend>(
+    log_probs: Tensor<B, 3>,
+    targets: Tensor<B, 2, Int>,
+    mask: &Tensor<B, 1, Int>,
+) -> Tensor<B, 1> {
+    let [b, s, v] = log_probs.dims();
+    let log_probs_flat = log_probs.reshape([b * s, v]);
+    let targets_flat = targets.reshape([b * s, 1]);
+
+    let picked = log_probs_flat.gather(1, targets_flat).reshape([b * s]); // [b*s]
+
+    let mask_f = mask.clone().float();
+    let denom = mask_f.clone().sum();
+    let masked_sum = (picked * mask_f).sum();
+
+    let denom_scalar: f32 = denom.clone().into_scalar().elem();
+    if denom_scalar == 0.0 {
+        return masked_sum.neg();
+    }
+    (masked_sum.neg()) / denom
+}
+
+/// Project a training-mode [`PointerTransformer`] to its inference-mode
+/// projection, for generation/eval.
+pub fn to_eval_model_ptr<B: AutodiffBackend>(
+    model: &PointerTransformer<B>,
+) -> PointerTransformer<B::InnerBackend> {
+    model.valid()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -252,6 +331,49 @@ mod tests {
 
     fn tiny_model_config() -> TinyTransformerConfig {
         TinyTransformerConfig::new(crate::tokenizer::VOCAB_SIZE, 16, 2, 1, 32, 64)
+    }
+
+    /// Phase 51 P1a-4 Step B: a pointer-generator training step must run
+    /// forward+backward (through the scatter-based copy distribution) and
+    /// actually *learn* — several teacher-forced steps on a fixed tiny batch
+    /// should drive the loss down, which is only possible if gradients flow
+    /// through the copy path and optimizer update. This is the end-to-end
+    /// autodiff check the forward-only `pointer::tests` cannot make.
+    #[test]
+    fn ptr_train_step_learns_a_fixed_batch() {
+        use crate::pointer::PointerTransformerConfig;
+        let device = Default::default();
+        let tok = ByteTokenizer::new();
+        let dataset = Dataset::new(3).unwrap();
+        let examples = dataset.train_examples(4).unwrap();
+
+        // Byte tokenizer -> vocab 260; generous ctx so targets aren't truncated.
+        let cfg = PointerTransformerConfig::new(TinyTransformerConfig::new(
+            crate::tokenizer::VOCAB_SIZE,
+            32,
+            2,
+            2,
+            64,
+            512,
+        ));
+        let (mut model, mut optim) = init_training_ptr::<CpuAutodiffBackend>(&cfg, &device);
+        let batch = build_batch::<CpuAutodiffBackend, _>(&tok, &examples, 512, &device).unwrap();
+
+        let mut first = f32::NAN;
+        let mut last = f32::NAN;
+        for step in 0..8 {
+            let (next, loss) = train_step_ptr(model, &mut optim, &batch, 3e-3);
+            model = next;
+            assert!(loss.is_finite(), "loss went non-finite at step {step}: {loss}");
+            if step == 0 {
+                first = loss;
+            }
+            last = loss;
+        }
+        assert!(
+            last < first,
+            "pointer training did not reduce loss on a fixed batch: first={first}, last={last}"
+        );
     }
 
     #[test]

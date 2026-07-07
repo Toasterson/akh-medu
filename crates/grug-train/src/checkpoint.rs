@@ -30,6 +30,7 @@ use burn::tensor::backend::AutodiffBackend;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{GrugError, GrugResult};
+use crate::pointer::PointerTransformer;
 use crate::transformer::TinyTransformer;
 
 /// Checkpoint metadata written alongside the model/optimizer state.
@@ -145,6 +146,98 @@ pub fn load_checkpoint<B: AutodiffBackend>(
             message: format!("loading model: {e}"),
         })?;
 
+    let optim_record = recorder
+        .load(optim_path(dir), device)
+        .map_err(|e| GrugError::CheckpointReadFailed {
+            path: dir.display().to_string(),
+            message: format!("loading optimizer state: {e}"),
+        })?;
+    let optim = optim.load_record(optim_record);
+
+    Ok((model, optim, meta.step))
+}
+
+/// [`save_checkpoint`] for a [`PointerTransformer`] (Phase 51 P1a-4 Step B).
+/// Same on-disk layout (`model`/`optim`/`meta.json`); a separate function
+/// rather than a generic one to keep the proven `TinyTransformer` path
+/// untouched.
+pub fn save_checkpoint_ptr<B: AutodiffBackend>(
+    dir: impl AsRef<Path>,
+    step: usize,
+    model: &PointerTransformer<B>,
+    optim: &OptimizerAdaptor<Adam, PointerTransformer<B>, B>,
+) -> GrugResult<()> {
+    let dir = dir.as_ref();
+    std::fs::create_dir_all(dir).map_err(|e| GrugError::CheckpointWriteFailed {
+        path: dir.display().to_string(),
+        message: format!("creating checkpoint dir: {e}"),
+    })?;
+
+    let recorder = NamedMpkFileRecorder::<FullPrecisionSettings>::new();
+    model
+        .clone()
+        .save_file(model_path(dir), &recorder)
+        .map_err(|e| GrugError::CheckpointWriteFailed {
+            path: dir.display().to_string(),
+            message: format!("saving model: {e}"),
+        })?;
+    recorder
+        .record(optim.to_record(), optim_path(dir))
+        .map_err(|e| GrugError::CheckpointWriteFailed {
+            path: dir.display().to_string(),
+            message: format!("saving optimizer state: {e}"),
+        })?;
+
+    let meta = CheckpointMeta {
+        schema_version: SCHEMA_VERSION,
+        step,
+    };
+    let meta_json = serde_json::to_string_pretty(&meta).map_err(|e| GrugError::CheckpointWriteFailed {
+        path: dir.display().to_string(),
+        message: format!("serializing checkpoint metadata: {e}"),
+    })?;
+    std::fs::write(meta_path(dir), meta_json).map_err(|e| GrugError::CheckpointWriteFailed {
+        path: dir.display().to_string(),
+        message: format!("writing meta.json: {e}"),
+    })?;
+    Ok(())
+}
+
+/// [`load_checkpoint`] for a [`PointerTransformer`] (Phase 51 P1a-4 Step B).
+pub fn load_checkpoint_ptr<B: AutodiffBackend>(
+    dir: impl AsRef<Path>,
+    model: PointerTransformer<B>,
+    optim: OptimizerAdaptor<Adam, PointerTransformer<B>, B>,
+    device: &B::Device,
+) -> GrugResult<(PointerTransformer<B>, OptimizerAdaptor<Adam, PointerTransformer<B>, B>, usize)> {
+    let dir = dir.as_ref();
+    let recorder = NamedMpkFileRecorder::<FullPrecisionSettings>::new();
+
+    let meta_str = std::fs::read_to_string(meta_path(dir)).map_err(|e| GrugError::CheckpointReadFailed {
+        path: dir.display().to_string(),
+        message: format!("reading meta.json: {e}"),
+    })?;
+    let meta: CheckpointMeta =
+        serde_json::from_str(&meta_str).map_err(|e| GrugError::CheckpointReadFailed {
+            path: dir.display().to_string(),
+            message: format!("parsing meta.json: {e}"),
+        })?;
+    if meta.schema_version != SCHEMA_VERSION {
+        return Err(GrugError::CheckpointReadFailed {
+            path: dir.display().to_string(),
+            message: format!(
+                "checkpoint schema_version {} does not match this build's {SCHEMA_VERSION}",
+                meta.schema_version
+            ),
+        });
+    }
+
+    let model = model
+        .load_file(model_path(dir), &recorder, device)
+        .map_err(|e| GrugError::CheckpointReadFailed {
+            path: dir.display().to_string(),
+            message: format!("loading model: {e}"),
+        })?;
     let optim_record = recorder
         .load(optim_path(dir), device)
         .map_err(|e| GrugError::CheckpointReadFailed {

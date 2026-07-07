@@ -38,7 +38,8 @@ use serde::Serialize;
 use grug_data::constrain::ToolCallGrammar;
 
 use crate::error::{GrugError, GrugResult};
-use crate::generate::{generate, generate_constrained, GenerateConfig};
+use crate::generate::{generate, generate_constrained, generate_ptr, generate_ptr_constrained, GenerateConfig};
+use crate::pointer::PointerTransformer;
 use crate::tokenizer::Vocab;
 use crate::train::format_prompt;
 use crate::transformer::TinyTransformer;
@@ -189,6 +190,67 @@ pub fn run_two_axis_eval_constrained<B: Backend, V: Vocab>(
     (
         Dataset::score_axis(EvalAxis::HeldOutPhrasing, &phrasing_outputs),
         Dataset::score_axis(EvalAxis::WholeToolHoldout, &whole_tool_outputs),
+    )
+}
+
+/// Two-axis eval for the [`PointerTransformer`] under **plain greedy** decoding
+/// (Phase 51 P1a-4 Step B): the [`run_two_axis_eval`] counterpart that decodes
+/// from the pointer-generator's mixed distribution (`generate_ptr`). Comparing
+/// this to the non-pointer baseline (plain greedy: axis-B arg 0.78 / axis-A
+/// schema 0.03) isolates the copy mechanism's contribution.
+pub fn run_two_axis_eval_ptr<B: Backend, V: Vocab>(
+    model: &PointerTransformer<B>,
+    tokenizer: &V,
+    holdout: &FrozenTwoAxisHoldout,
+    gen_config: GenerateConfig,
+    device: &B::Device,
+) -> (grug_data::AxisReport, grug_data::AxisReport) {
+    let axis = |examples: &[Example], which: EvalAxis| {
+        let outputs: Vec<(String, Example)> = examples
+            .iter()
+            .map(|ex| (generate_ptr(model, tokenizer, &format_prompt(ex), gen_config, device), ex.clone()))
+            .collect();
+        Dataset::score_axis(which, &outputs)
+    };
+    (
+        axis(&holdout.phrasing, EvalAxis::HeldOutPhrasing),
+        axis(&holdout.whole_tool, EvalAxis::WholeToolHoldout),
+    )
+}
+
+/// Two-axis eval for the [`PointerTransformer`] under **schema-constrained**
+/// decoding (Phase 51 P1a-4 Step B): pointer copy mechanism *and* the Step A
+/// grammar mask together (`generate_ptr_constrained`).
+pub fn run_two_axis_eval_ptr_constrained<B: Backend, V: Vocab>(
+    model: &PointerTransformer<B>,
+    tokenizer: &V,
+    pieces: &[Option<Vec<u8>>],
+    holdout: &FrozenTwoAxisHoldout,
+    gen_config: GenerateConfig,
+    device: &B::Device,
+) -> (grug_data::AxisReport, grug_data::AxisReport) {
+    let axis = |examples: &[Example], which: EvalAxis| {
+        let outputs: Vec<(String, Example)> = examples
+            .iter()
+            .map(|ex| {
+                let grammar = ToolCallGrammar::new(&ex.tools);
+                let raw = generate_ptr_constrained(
+                    model,
+                    tokenizer,
+                    &format_prompt(ex),
+                    &grammar,
+                    pieces,
+                    gen_config,
+                    device,
+                );
+                (raw, ex.clone())
+            })
+            .collect();
+        Dataset::score_axis(which, &outputs)
+    };
+    (
+        axis(&holdout.phrasing, EvalAxis::HeldOutPhrasing),
+        axis(&holdout.whole_tool, EvalAxis::WholeToolHoldout),
     )
 }
 

@@ -31,6 +31,7 @@ pub mod error;
 pub mod eval;
 pub mod generate;
 pub mod model;
+pub mod pointer;
 pub mod tokenizer;
 pub mod train;
 pub mod transformer;
@@ -40,10 +41,12 @@ pub use checkpoint::{load_checkpoint, save_checkpoint};
 pub use error::{GrugError, GrugResult};
 pub use eval::{
     run_eval, run_eval_and_log, run_two_axis_eval, run_two_axis_eval_and_log,
-    run_two_axis_eval_constrained, AxisEvalLogRow, EvalLogRow, FrozenHoldout, FrozenTwoAxisHoldout,
+    run_two_axis_eval_constrained, run_two_axis_eval_ptr, run_two_axis_eval_ptr_constrained,
+    AxisEvalLogRow, EvalLogRow, FrozenHoldout, FrozenTwoAxisHoldout,
 };
-pub use generate::{generate, generate_constrained, GenerateConfig};
+pub use generate::{generate, generate_constrained, generate_ptr, generate_ptr_constrained, GenerateConfig};
 pub use model::{Mlp, MlpConfig};
+pub use pointer::{PointerTransformer, PointerTransformerConfig};
 pub use tokenizer::{ByteTokenizer, Vocab};
 pub use transformer::{Attention, CausalSelfAttention, TinyTransformer, TinyTransformerConfig};
 

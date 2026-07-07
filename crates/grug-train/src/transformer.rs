@@ -291,6 +291,18 @@ impl<B: Backend> TinyTransformer<B> {
     /// configured `max_seq_len`, since the learned position embedding table
     /// only has that many rows.
     pub fn forward(&self, input_ids: Tensor<B, 2, Int>) -> Tensor<B, 3> {
+        self.vocab_logits(self.hidden(input_ids))
+    }
+
+    /// The final hidden states `[batch_size, seq_len, d_model]` (post the
+    /// stack and final `LayerNorm`, pre `lm_head`).
+    ///
+    /// Split out of [`TinyTransformer::forward`] so a pointer-generator head
+    /// (Phase 51 P1a-4 Step B, `crate::pointer`) can consume the same trunk
+    /// representation the LM head sees — the copy-attention + `p_gen` gate are
+    /// computed from these hidden states. `forward` is exactly
+    /// `vocab_logits(hidden(input_ids))`, so its behaviour is unchanged.
+    pub fn hidden(&self, input_ids: Tensor<B, 2, Int>) -> Tensor<B, 3> {
         let [batch_size, seq_len] = input_ids.dims();
         assert!(
             seq_len <= self.max_seq_len,
@@ -313,7 +325,12 @@ impl<B: Backend> TinyTransformer<B> {
             hidden = block.forward(hidden, causal_mask.clone());
         }
 
-        let hidden = self.ln_final.forward(hidden);
+        self.ln_final.forward(hidden)
+    }
+
+    /// Project hidden states `[batch, seq, d_model]` to vocabulary logits
+    /// `[batch, seq, vocab_size]` via the LM head. See [`TinyTransformer::hidden`].
+    pub fn vocab_logits(&self, hidden: Tensor<B, 3>) -> Tensor<B, 3> {
         self.lm_head.forward(hidden)
     }
 
