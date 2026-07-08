@@ -229,6 +229,79 @@ impl Generator {
         })
     }
 
+    /// Generate one **abstention** example (Phase 51 P3c, ADR 089 mechanism 3):
+    /// a request phrased for a target tool `T`, but an offered bundle that
+    /// deliberately **excludes `T`** (only distractors), so no offered schema
+    /// covers the request. The ground-truth target is [`ToolCall::gap`] — the
+    /// model should emit the gap token, not a (necessarily wrong) call.
+    ///
+    /// The offered set is the same size as a normal example's (`distractor_count
+    /// + 1` tools, none of them `T`), so abstention vs. call is *not* trivially
+    /// separable by counting offered tools — the model must actually read the
+    /// schemas and notice none match. Abstention is an in-distribution
+    /// classification the weights can learn (unlike open-world zero-shot), which
+    /// is exactly the claim P3c tests.
+    ///
+    /// Returns an error only if the drawn tool has no phrasing bank (same
+    /// contract as [`Generator::try_next_example`]).
+    pub fn try_next_abstention_example(&mut self) -> GrugResult<Example> {
+        let tools = self.catalog.tools();
+        debug_assert!(!tools.is_empty(), "catalog must be non-empty");
+        let tool = tools
+            .choose(&mut self.rng)
+            .expect("catalog non-empty (checked by caller)")
+            .clone();
+
+        // Synthesize the *would-be* call only so the request phrasing can
+        // reference concrete values (it reads like a genuine request for `T`);
+        // the emitted ground truth is the gap sentinel, not this call.
+        let mut args = Map::new();
+        for param in &tool.params {
+            let include = param.required || self.rng.gen_bool(0.5);
+            if include {
+                args.insert(param.name.clone(), fuzz_value(&mut self.rng, &param.ty));
+            }
+        }
+        let would_be_call = ToolCall::new(tool.name.clone(), Value::Object(args));
+
+        let bank = self.catalog.phrasings().get(&tool.name)?;
+        let user_request = match self.phrasing_mode {
+            PhrasingMode::Train => bank.render_train(&mut self.rng, &would_be_call),
+            PhrasingMode::Holdout => bank.render_holdout(&mut self.rng, &would_be_call),
+        };
+
+        let offered = offer_distractors_only(
+            &mut self.rng,
+            tools,
+            &self.fingerprints,
+            &tool.name,
+            &self.distractors,
+        );
+        debug_assert!(
+            !offered.iter().any(|t| t.name == tool.name),
+            "abstention example must not offer the target tool"
+        );
+
+        Ok(Example {
+            tools: offered,
+            user_request,
+            expected_call: ToolCall::gap(),
+            mock_response: String::new(),
+        })
+    }
+
+    /// Generate `n` abstention examples (see [`Generator::try_next_abstention_example`]).
+    pub fn generate_abstention(&mut self, n: usize) -> GrugResult<Vec<Example>> {
+        if self.catalog.is_empty() {
+            return Err(crate::error::GrugError::EmptyCatalog);
+        }
+        // A single-tool catalog cannot produce a distractors-only bundle.
+        if self.catalog.tools().len() < 2 {
+            return Err(crate::error::GrugError::EmptyCatalog);
+        }
+        (0..n).map(|_| self.try_next_abstention_example()).collect()
+    }
+
     /// Generate one example. Panics if the catalog is empty or has no
     /// phrasing bank for the drawn tool — callers going through
     /// [`Generator::generate`] / [`Generator::try_next_example`] get a
@@ -439,6 +512,49 @@ fn offer_bundle(
             .collect()
     };
     offered.push(tools[chosen_idx].clone());
+    offered.shuffle(rng);
+    offered
+}
+
+/// Build a distractors-**only** offered bundle for an abstention example: the
+/// `config.distractor_count + 1` tools chosen against `target_name` (so the set
+/// is the same size as a normal example's target+distractors bundle), but with
+/// `target_name` itself deliberately excluded. Same easy/hard selection as
+/// [`offer_bundle`], order-shuffled.
+///
+/// Used by [`Generator::try_next_abstention_example`] — the request is phrased
+/// for `target_name`, the offered set is everything-similar-but-not-it, so the
+/// correct output is "no tool fits → gap".
+fn offer_distractors_only(
+    rng: &mut StdRng,
+    tools: &[ToolSchema],
+    fingerprints: &[ToolFingerprint],
+    target_name: &str,
+    config: &DistractorConfig,
+) -> Vec<ToolSchema> {
+    let target_idx = tools
+        .iter()
+        .position(|t| t.name == target_name)
+        .expect("target tool is in this catalog");
+
+    // Offered-set size matches a normal example (target + distractor_count),
+    // but here every member is a distractor, capped at what the catalog allows.
+    let n = (config.distractor_count + 1).min(tools.len().saturating_sub(1));
+    let mut offered: Vec<ToolSchema> = if n == 0 {
+        Vec::new()
+    } else if config.hard {
+        hard_distractor_indices(rng, fingerprints, target_idx, n)
+            .into_iter()
+            .map(|i| tools[i].clone())
+            .collect()
+    } else {
+        let sample_space = tools.len() - 1;
+        rand::seq::index::sample(rng, sample_space, n)
+            .into_iter()
+            .map(|i| if i >= target_idx { i + 1 } else { i })
+            .map(|i| tools[i].clone())
+            .collect()
+    };
     offered.shuffle(rng);
     offered
 }
@@ -723,6 +839,32 @@ mod tests {
                 "target + 7 hard distractors expected (catalog of 50 never caps this)"
             );
             assert!(ex.tools.iter().any(|t| t.name == ex.expected_call.name));
+        }
+    }
+
+    #[test]
+    fn abstention_example_excludes_target_and_targets_gap() {
+        let catalog = build_catalog(7, 50);
+        let mut generator = Generator::with_catalog_mode_and_distractors(
+            13,
+            catalog,
+            PhrasingMode::Train,
+            DistractorConfig::easy_with_count(2),
+        );
+        let examples = generator.generate_abstention(30).unwrap();
+        assert_eq!(examples.len(), 30);
+        for ex in &examples {
+            assert!(ex.is_abstention(), "expected gap target");
+            assert!(ex.expected_call.is_gap());
+            // Offered set is the same size as a normal easy-2 example (3 tools)
+            // and contains none named the gap sentinel...
+            assert_eq!(ex.tools.len(), 3, "target + 2 distractors' worth, all distractors");
+            assert!(!ex.tools.iter().any(|t| t.name == ToolCall::GAP_TOOL_NAME));
+            // ...and, crucially, no offered tool's schema is *the* answer: the
+            // request was phrased for a tool that is provably not in the bundle.
+            // (We can't recover which tool from the text, but the generator
+            // guarantees exclusion — asserted in try_next_abstention_example.)
+            assert!(!ex.user_request.is_empty());
         }
     }
 

@@ -43,8 +43,11 @@ pub use catalog::ToolCatalog;
 pub use constrain::{GrammarState, ToolCallGrammar};
 pub use dataset::{AxisReport, Dataset, EvalAxis};
 pub use error::{GrugError, GrugResult};
-pub use eval::{ArgMismatch, DiversityReport, EvalOutcome, EvalReport, SchemaViolation};
-pub use format::{parse_call, render_call, render_tools, TargetFormat};
+pub use eval::{
+    score_abstention_fmt, AbstentionOutcome, AbstentionReport, ArgMismatch, DiversityReport,
+    EvalOutcome, EvalReport, SchemaViolation,
+};
+pub use format::{parse_call, parse_output, render_call, render_tools, ParsedOutput, TargetFormat};
 pub use repair::{repair_call, RepairStats};
 pub use generator::{DistractorConfig, Generator, PhrasingMode};
 pub use phrasing::{PhrasingBank, PhrasingRegistry, PhrasingTemplate, TemplatePart};

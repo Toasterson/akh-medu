@@ -396,6 +396,108 @@ impl EvalReport {
     }
 }
 
+/// The gap-token confusion outcome for one output (Phase 51 P3c, ADR 089
+/// mechanism 3): did the model abstain, and should it have? Derived from the
+/// example's ground truth ([`Example::is_abstention`]) and the parsed output
+/// shape ([`crate::format::parse_output`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AbstentionOutcome {
+    /// Ground truth: no offered tool fits, the model *should* emit the gap token.
+    pub expected_abstain: bool,
+    /// The model emitted the gap token.
+    pub emitted_abstain: bool,
+    /// The output was a recognised shape (a call or an abstain) rather than
+    /// garbage — a should-call example that came out unparseable is a call
+    /// failure, not a false abstention, and this flag keeps the two distinct.
+    pub parseable: bool,
+}
+
+impl AbstentionOutcome {
+    /// The abstain decision matched ground truth.
+    pub fn correct(&self) -> bool {
+        self.expected_abstain == self.emitted_abstain
+    }
+}
+
+/// Score one raw output for the **abstention** decision under `fmt`.
+pub fn score_abstention_fmt(
+    raw_output: &str,
+    example: &Example,
+    fmt: crate::format::TargetFormat,
+) -> AbstentionOutcome {
+    let parsed = crate::format::parse_output(raw_output, fmt, &example.tools);
+    AbstentionOutcome {
+        expected_abstain: example.is_abstention(),
+        emitted_abstain: matches!(parsed, crate::format::ParsedOutput::Abstain),
+        parseable: !matches!(parsed, crate::format::ParsedOutput::Unparseable),
+    }
+}
+
+/// The gap-token confusion matrix over a mixed batch of should-call and
+/// should-abstain examples (Phase 51 P3c). The two headline metrics test ADR
+/// 089's claim that abstention is an in-distribution classification the weights
+/// *can* learn:
+///
+/// - **`abstain_recall`** — of the should-abstain examples, the fraction where
+///   the model correctly emitted the gap token. High = the model learned to
+///   recognise "no tool fits".
+/// - **`false_abstention_rate`** — of the should-call examples, the fraction
+///   where the model *wrongly* emitted the gap token. Low = abstention did not
+///   cannibalise real tool-calling (the failure mode that would make the
+///   mechanism useless).
+///
+/// `abstain_precision` (of the times it abstained, how often it was right) is
+/// included as a secondary diagnostic.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AbstentionReport {
+    pub abstain_recall: f64,
+    pub false_abstention_rate: f64,
+    pub abstain_precision: f64,
+    pub n_abstain: usize,
+    pub n_call: usize,
+}
+
+impl AbstentionReport {
+    /// Score and aggregate a mixed batch of `(raw_output, example)` pairs under
+    /// `fmt`. Examples are classified by their own ground truth, so the caller
+    /// just concatenates a should-call batch and a should-abstain batch.
+    pub fn from_outputs_fmt(pairs: &[(String, Example)], fmt: crate::format::TargetFormat) -> Self {
+        let outcomes: Vec<AbstentionOutcome> = pairs
+            .iter()
+            .map(|(raw, ex)| score_abstention_fmt(raw, ex, fmt))
+            .collect();
+        Self::from_outcomes(&outcomes)
+    }
+
+    /// Aggregate already-scored abstention outcomes into the confusion-matrix
+    /// rates. Empty groups yield `0.0` for their dependent rate (no division by
+    /// zero); with no abstentions emitted at all, precision is `0.0`.
+    pub fn from_outcomes(outcomes: &[AbstentionOutcome]) -> Self {
+        let n_abstain = outcomes.iter().filter(|o| o.expected_abstain).count();
+        let n_call = outcomes.iter().filter(|o| !o.expected_abstain).count();
+
+        let true_abstain = outcomes
+            .iter()
+            .filter(|o| o.expected_abstain && o.emitted_abstain)
+            .count();
+        let false_abstain = outcomes
+            .iter()
+            .filter(|o| !o.expected_abstain && o.emitted_abstain)
+            .count();
+        let emitted_abstain = true_abstain + false_abstain;
+
+        let ratio = |num: usize, den: usize| if den == 0 { 0.0 } else { num as f64 / den as f64 };
+
+        Self {
+            abstain_recall: ratio(true_abstain, n_abstain),
+            false_abstention_rate: ratio(false_abstain, n_call),
+            abstain_precision: ratio(true_abstain, emitted_abstain),
+            n_abstain,
+            n_call,
+        }
+    }
+}
+
 /// The anti-collapse alarm: a diversity/entropy score over a batch of raw
 /// model outputs, independent of correctness. A tiny model that has
 /// mode-collapsed onto emitting the same call for every prompt will pass
@@ -512,4 +614,58 @@ fn normalize_call_key(call: &ToolCall) -> String {
         .collect();
     pairs.sort();
     format!("{}({})", call.name, pairs.join(","))
+}
+
+#[cfg(test)]
+mod abstention_tests {
+    use super::*;
+    use crate::format::{render_call, TargetFormat};
+    use crate::schema::{Example, ParamSpec, ParamType, ToolCall, ToolSchema};
+
+    fn tool(name: &str) -> ToolSchema {
+        ToolSchema::new(name, "d", vec![ParamSpec::new("q", ParamType::String, true)])
+    }
+
+    /// A should-call example and a should-abstain example, scored together,
+    /// yield a correct confusion matrix: a right call + a right gap = perfect
+    /// recall, zero false-abstention.
+    #[test]
+    fn confusion_matrix_counts_both_directions() {
+        let fmt = TargetFormat::Grug;
+        let call_ex = Example {
+            tools: vec![tool("book_table")],
+            user_request: "r".into(),
+            expected_call: ToolCall::new("book_table", serde_json::json!({"q": "x"})),
+            mock_response: String::new(),
+        };
+        let abstain_ex = Example {
+            tools: vec![tool("get_weather")],
+            user_request: "r".into(),
+            expected_call: ToolCall::gap(),
+            mock_response: String::new(),
+        };
+
+        // Model gets both right.
+        let good = vec![
+            (render_call(&call_ex.expected_call, fmt), call_ex.clone()),
+            (render_call(&ToolCall::gap(), fmt), abstain_ex.clone()),
+        ];
+        let r = AbstentionReport::from_outputs_fmt(&good, fmt);
+        assert_eq!(r.n_call, 1);
+        assert_eq!(r.n_abstain, 1);
+        assert_eq!(r.abstain_recall, 1.0);
+        assert_eq!(r.false_abstention_rate, 0.0);
+        assert_eq!(r.abstain_precision, 1.0);
+
+        // Model wrongly abstains on the call and wrongly calls on the abstain:
+        // zero recall, full false-abstention, zero precision.
+        let bad = vec![
+            (render_call(&ToolCall::gap(), fmt), call_ex),
+            (render_call(&ToolCall::new("get_weather", serde_json::json!({"q": "y"})), fmt), abstain_ex),
+        ];
+        let r = AbstentionReport::from_outputs_fmt(&bad, fmt);
+        assert_eq!(r.abstain_recall, 0.0);
+        assert_eq!(r.false_abstention_rate, 1.0);
+        assert_eq!(r.abstain_precision, 0.0);
+    }
 }

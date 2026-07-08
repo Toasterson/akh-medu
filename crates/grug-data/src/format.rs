@@ -102,8 +102,24 @@ fn render_value_grug(v: &Value) -> String {
     }
 }
 
+/// The bare High-Grug abstention marker (Phase 51 P3c, ADR 089 mechanism 3):
+/// a single literal word, mirroring `call`/`tool` — decode-safe plain ASCII,
+/// no tokenizer change. Emitted when no offered tool fits the request.
+pub const GRUG_GAP_MARKER: &str = "gap";
+
 /// Render a [`ToolCall`] as the target string in `fmt`.
+///
+/// The abstention sentinel ([`ToolCall::is_gap`]) renders to a compact,
+/// call-distinct gap marker in each format (`gap` for Grug, `{"gap":true}` for
+/// JSON) rather than to a literal call to a tool named `__gap__` — so a model
+/// trained on these targets learns "emit gap" as its own output shape.
 pub fn render_call(call: &ToolCall, fmt: TargetFormat) -> String {
+    if call.is_gap() {
+        return match fmt {
+            TargetFormat::Json => "{\"gap\":true}".to_string(),
+            TargetFormat::Grug => GRUG_GAP_MARKER.to_string(),
+        };
+    }
     match fmt {
         TargetFormat::Json => serde_json::json!({
             "name": call.name,
@@ -169,6 +185,52 @@ pub fn parse_call(raw: &str, fmt: TargetFormat, offered: &[ToolSchema]) -> Optio
             Some(ToolCall::new(name, arguments))
         }
         TargetFormat::Grug => parse_call_grug(raw, offered),
+    }
+}
+
+/// The three mutually-exclusive shapes a model's raw output can take at the
+/// boundary (Phase 51 P3c, ADR 089): a concrete tool [`Call`](ParsedOutput::Call),
+/// an explicit [`Abstain`](ParsedOutput::Abstain) (the gap token — "no offered
+/// tool fits"), or [`Unparseable`](ParsedOutput::Unparseable) (neither shape
+/// recognised). Distinguishing *abstain* from *unparseable* is the whole point:
+/// the organ routes an abstain into retrieval/synthesis (ADR 089 mechanism 3),
+/// but an unparseable output is a plain neural failure.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ParsedOutput {
+    Call(ToolCall),
+    Abstain,
+    Unparseable,
+}
+
+/// Parse a model output string under `fmt`, classifying it as a call, an
+/// abstention (gap token), or unparseable. Abstention is checked **before** the
+/// call parse so a bare gap marker is never mis-read as a degenerate call.
+///
+/// - **Grug**: abstain iff the first whitespace-delimited token of the trimmed
+///   output is [`GRUG_GAP_MARKER`] (`gap`). Real calls always begin with the
+///   literal `call`, so this is unambiguous.
+/// - **JSON**: abstain iff the output parses to an object carrying a truthy
+///   `"gap"` and no `"name"` (so a real call object is never swallowed).
+pub fn parse_output(raw: &str, fmt: TargetFormat, offered: &[ToolSchema]) -> ParsedOutput {
+    let trimmed = raw.trim();
+    match fmt {
+        TargetFormat::Grug => {
+            if trimmed.split_whitespace().next() == Some(GRUG_GAP_MARKER) {
+                return ParsedOutput::Abstain;
+            }
+        }
+        TargetFormat::Json => {
+            if let Ok(Value::Object(map)) = serde_json::from_str::<Value>(trimmed) {
+                let gap = map.get("gap").is_some_and(|v| v.as_bool() == Some(true));
+                if gap && !map.contains_key("name") {
+                    return ParsedOutput::Abstain;
+                }
+            }
+        }
+    }
+    match parse_call(trimmed, fmt, offered) {
+        Some(call) => ParsedOutput::Call(call),
+        None => ParsedOutput::Unparseable,
     }
 }
 
@@ -268,6 +330,49 @@ mod tests {
             mock_response: String::new(),
         };
         assert_eq!(render_call(&ex.expected_call, TargetFormat::Json), ex.expected_call_as_json_string());
+    }
+
+    #[test]
+    fn gap_renders_and_parses_in_both_formats() {
+        let gap = ToolCall::gap();
+        let tools = vec![tool("book_table", &[("time", ParamType::String)])];
+
+        // Grug: bare `gap`.
+        assert_eq!(render_call(&gap, TargetFormat::Grug), "gap");
+        assert_eq!(
+            parse_output("gap", TargetFormat::Grug, &tools),
+            ParsedOutput::Abstain
+        );
+        // JSON: `{"gap":true}`.
+        assert_eq!(render_call(&gap, TargetFormat::Json), "{\"gap\":true}");
+        assert_eq!(
+            parse_output("{\"gap\":true}", TargetFormat::Json, &tools),
+            ParsedOutput::Abstain
+        );
+    }
+
+    #[test]
+    fn a_real_call_is_never_read_as_abstain() {
+        let tools = vec![tool("book_table", &[("time", ParamType::String)])];
+        let call = ToolCall::new("book_table", serde_json::json!({"time": "20:00"}));
+        for fmt in [TargetFormat::Grug, TargetFormat::Json] {
+            let rendered = render_call(&call, fmt);
+            match parse_output(&rendered, fmt, &tools) {
+                ParsedOutput::Call(c) => assert_eq!(c.name, "book_table"),
+                other => panic!("{fmt:?} call mis-parsed as {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn garbage_output_is_unparseable_not_abstain() {
+        let tools = vec![tool("book_table", &[("time", ParamType::String)])];
+        // A Grug call head is `call <name>`; leading junk with no `gap` word and
+        // no recoverable name is unparseable, and specifically NOT an abstain.
+        assert_eq!(
+            parse_output("{ not json at all", TargetFormat::Json, &tools),
+            ParsedOutput::Unparseable
+        );
     }
 
     /// Grug render→parse recovers the ground-truth call across many real

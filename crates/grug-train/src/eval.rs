@@ -320,6 +320,62 @@ pub fn run_two_axis_eval_ptr_constrained<B: Backend, V: Vocab>(
     )
 }
 
+/// Both halves of the Phase 51 P3c abstention eval, drawn once and frozen for
+/// the whole run (like [`FrozenTwoAxisHoldout`]):
+///
+/// - `call`: should-**call** examples (TRAIN tools × HOLDOUT phrasings, axis-B
+///   shape) — used to measure the **false-abstention rate** (does gap-token
+///   supervision make the model wrongly abstain on requests a tool *does* cover?).
+/// - `abstain`: should-**abstain** examples ([`Dataset::abstention_examples`]) —
+///   used to measure **abstain recall** (did the model learn to emit gap when no
+///   offered tool fits?).
+///
+/// Scoring both together yields the full [`grug_data::AbstentionReport`]
+/// confusion matrix.
+pub struct FrozenAbstentionHoldout {
+    call: Vec<Example>,
+    abstain: Vec<Example>,
+}
+
+impl FrozenAbstentionHoldout {
+    /// Draw `n_call` should-call and `n_abstain` should-abstain frozen examples.
+    pub fn new(dataset: &Dataset, n_call: usize, n_abstain: usize) -> GrugResult<Self> {
+        Ok(Self {
+            call: dataset.holdout_phrasing_examples(n_call)?,
+            abstain: dataset.abstention_examples(n_abstain)?,
+        })
+    }
+
+    pub fn call_examples(&self) -> &[Example] {
+        &self.call
+    }
+
+    pub fn abstain_examples(&self) -> &[Example] {
+        &self.abstain
+    }
+}
+
+/// Run one abstention eval pass (Phase 51 P3c): greedy-generate on both the
+/// should-call and should-abstain frozen batches under `fmt`, then score the
+/// combined confusion matrix. The two headline rates are `abstain_recall` (on
+/// the abstain batch) and `false_abstention_rate` (on the call batch).
+pub fn run_abstention_eval_fmt<B: Backend, V: Vocab>(
+    model: &TinyTransformer<B>,
+    tokenizer: &V,
+    holdout: &FrozenAbstentionHoldout,
+    gen_config: GenerateConfig,
+    device: &B::Device,
+    fmt: grug_data::TargetFormat,
+) -> grug_data::AbstentionReport {
+    let mut pairs: Vec<(String, Example)> = Vec::with_capacity(holdout.call.len() + holdout.abstain.len());
+    for ex in holdout.call.iter().chain(holdout.abstain.iter()) {
+        let prompt = crate::train::format_prompt_fmt(ex, fmt);
+        let raw = generate(model, tokenizer, &prompt, gen_config, device);
+        pairs.push((raw, ex.clone()));
+    }
+    grug_data::AbstentionReport::from_outputs_fmt(&pairs, fmt)
+}
+
 fn append_row<R: Serialize>(row: &R, path: &Path) -> GrugResult<()> {
     let line = serde_json::to_string(row).map_err(|e| GrugError::EvalLogSerializeFailed {
         message: e.to_string(),

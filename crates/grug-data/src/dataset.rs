@@ -60,6 +60,17 @@ fn holdout_count_from_frac(n_tools: usize, holdout_frac: f64) -> usize {
 /// catalog.
 const HOLDOUT_PHRASING_SEED_SALT: u64 = 0xC2B2_AE3D_27D4_EB4F;
 
+/// XOR salt for the **abstention** RNG streams (Phase 51 P3c). Distinct from
+/// every other salt so the gap examples' random draws are independent of the
+/// call streams — a training run that mixes abstention in cannot leak the call
+/// or holdout sequences, and the abstention holdout is reproducible on its own.
+const ABSTENTION_SEED_SALT: u64 = 0x1D8E_3A0B_9C57_F26D;
+
+/// A second salt distinguishing the abstention **holdout** stream (recall eval)
+/// from the abstention **train-mix** stream, so the model is never evaluated on
+/// an abstention example it could have trained on.
+const ABSTENTION_HOLDOUT_SEED_SALT: u64 = 0x84A3_51CE_7B02_9F6E;
+
 impl Dataset {
     /// Build the default dataset: the built-in catalog, split with
     /// [`DEFAULT_HOLDOUT_COUNT`] tools reserved for whole-tool holdout, using
@@ -193,6 +204,61 @@ impl Dataset {
             self.distractors,
         );
         std::iter::from_fn(move || Some(generator.try_next_example()))
+    }
+
+    /// Generate `n` training examples mixing concrete calls with **abstention**
+    /// examples (Phase 51 P3c, ADR 089 mechanism 3): a fraction `abstain_frac`
+    /// (clamped to `[0, 1]`) of the returned examples are gap-targets whose
+    /// offered bundle excludes the tool the request needs. All draw from TRAIN
+    /// tools × TRAIN phrasings (in-distribution), from RNG streams independent of
+    /// every eval axis. Abstention examples are interleaved evenly
+    /// (Bresenham-style) so every training batch sees a representative mix rather
+    /// than a block of one kind.
+    ///
+    /// `abstain_frac == 0.0` reproduces [`Dataset::train_examples`] exactly (the
+    /// call generator is advanced identically); `1.0` yields all-abstention.
+    pub fn train_examples_with_abstention(&self, n: usize, abstain_frac: f64) -> GrugResult<Vec<Example>> {
+        let frac = abstain_frac.clamp(0.0, 1.0);
+        let mut call_gen = Generator::with_catalog_mode_and_distractors(
+            self.seed,
+            self.train_catalog.clone(),
+            PhrasingMode::Train,
+            self.distractors,
+        );
+        let mut abstain_gen = Generator::with_catalog_mode_and_distractors(
+            self.seed ^ ABSTENTION_SEED_SALT,
+            self.train_catalog.clone(),
+            PhrasingMode::Train,
+            self.distractors,
+        );
+        let mut out = Vec::with_capacity(n);
+        let mut acc = 0.0f64;
+        for _ in 0..n {
+            acc += frac;
+            if acc >= 1.0 {
+                acc -= 1.0;
+                out.push(abstain_gen.try_next_abstention_example()?);
+            } else {
+                out.push(call_gen.try_next_example()?);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Generate `n` **abstention holdout** examples (Phase 51 P3c): TRAIN tools ×
+    /// HOLDOUT phrasings, offered bundle excludes the needed tool, gap target —
+    /// the recall half of the abstention eval. Mirrors axis B (in-distribution
+    /// tools, unseen wordings) so it measures whether the abstention *skill*
+    /// generalizes, not whether a request string was memorized. Uses an RNG
+    /// stream independent of the abstention train-mix and of both call axes.
+    pub fn abstention_examples(&self, n: usize) -> GrugResult<Vec<Example>> {
+        let mut generator = Generator::with_catalog_mode_and_distractors(
+            self.seed ^ ABSTENTION_HOLDOUT_SEED_SALT,
+            self.train_catalog.clone(),
+            PhrasingMode::Holdout,
+            self.distractors,
+        );
+        generator.generate_abstention(n)
     }
 
     /// Generate `n` **whole-tool holdout** (axis A) examples: HOLDOUT tools
