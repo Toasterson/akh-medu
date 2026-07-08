@@ -56,6 +56,11 @@ If confirmed, this retroactively explains the whole P1a-4 arc: capacity/data/cop
 
 **Verdict:** the format is the right boundary representation to **lock in** (efficiency + reliability + High-Grug alignment) but is **not** the zero-shot cure. Four levers now leave zero-shot at ~0.03. → [ADR 088](../decisions/088-high-grug-boundary-format.md) locks the format; [ADR 089](../decisions/089-organ-kg-zeroshot-path.md) moves zero-shot correctness to the organ/KG (P3).
 
+### P3 organ results (as they land)
+
+- **P3b — KG-backed repair (mechanism 2), 2026-07-07:** ✅ the first lever to move zero-shot — arg-correct **~0.03 → ~0.55–0.60 (≈20×)** on two independently-trained models, no retraining. Zero-shot was a *grounding* problem, not a weights problem. See [scaling-results §12](../2026-07-05-phase51-p1-scaling-results.md#12).
+- **P3c — gap-token abstention (mechanism 3), 2026-07-08:** ✅ built + measured (`runs/p3c-gap/`, `examples/train_gap.rs`). Abstention *is* in-distribution learnable — recall off zero to a **~0.24 plateau at ~0.92 precision, ~0.02 false-abstention, no call regression** — categorically unlike zero-shot (which no lever moved). But a 13M model **under-abstains** (recall low): a precise, conservative safety valve, usable as the organ's fallback behind retrieval+repair, not yet a primary abstention signal. Open: `--abstain-frac` / hard-distractor sweep, capacity. See [scaling-results §13](../2026-07-05-phase51-p1-scaling-results.md#13) and [ADR 089](../decisions/089-organ-kg-zeroshot-path.md).
+
 ## 3. Corpus design (delegated — reasoned here)
 
 Principles, adapted from Phi + the SLM-format literature + our anti-memorisation finding:
