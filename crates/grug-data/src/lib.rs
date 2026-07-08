@@ -37,6 +37,7 @@ pub mod repair;
 pub mod generator;
 pub mod phrasing;
 pub mod procedural;
+pub mod retriever;
 pub mod schema;
 
 pub use catalog::ToolCatalog;
@@ -49,6 +50,7 @@ pub use eval::{
 };
 pub use format::{parse_call, parse_output, render_call, render_tools, ParsedOutput, TargetFormat};
 pub use repair::{repair_call, RepairStats};
+pub use retriever::{retrieval_recall_at_k, Retriever};
 pub use generator::{DistractorConfig, Generator, PhrasingMode};
 pub use phrasing::{PhrasingBank, PhrasingRegistry, PhrasingTemplate, TemplatePart};
 pub use procedural::{build_catalog as build_procedural_catalog, DEFAULT_TEMPLATES_PER_TOOL};

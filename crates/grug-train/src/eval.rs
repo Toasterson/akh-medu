@@ -376,6 +376,110 @@ pub fn run_abstention_eval_fmt<B: Backend, V: Vocab>(
     grug_data::AbstentionReport::from_outputs_fmt(&pairs, fmt)
 }
 
+/// The frozen eval set for retrieval-scoped operation (Phase 51 P3a, ADR 089
+/// mechanism 1), drawn once:
+///
+/// - `scoped`: in-registry requests offered the retriever's top-k (registry
+///   tools × held-out phrasings) — a mix of call labels (retrieval surfaced the
+///   target) and gap labels (retrieval miss).
+/// - `novelty`: genuine out-of-registry requests offered the registry's closest
+///   confusables — all gap labels (the hard abstention test).
+/// - `recall_at_k`: the model-independent retrieval recall@k over the registry,
+///   computed once at construction — mechanism 1's premise check.
+pub struct FrozenRetrievalHoldout {
+    scoped: Vec<Example>,
+    novelty: Vec<Example>,
+    recall_at_k: f64,
+}
+
+impl FrozenRetrievalHoldout {
+    /// Draw the retrieval-scoped holdout: `n_scoped` in-registry call/gap
+    /// examples, `n_novelty` genuine-novelty abstentions, and a recall probe of
+    /// `n_recall` `(request, target)` pairs — all frozen for the run.
+    pub fn new(
+        dataset: &Dataset,
+        k: usize,
+        n_scoped: usize,
+        n_novelty: usize,
+        n_recall: usize,
+    ) -> GrugResult<Self> {
+        let retriever = dataset.registry_retriever();
+        let recall_pairs = dataset.retrieval_recall_pairs(n_recall)?;
+        let recall_at_k = grug_data::retrieval_recall_at_k(&retriever, &recall_pairs, k);
+        Ok(Self {
+            scoped: dataset.retrieval_holdout_examples(k, n_scoped)?,
+            novelty: dataset.retrieval_abstention_examples(k, n_novelty)?,
+            recall_at_k,
+        })
+    }
+
+    /// The model-independent retrieval recall@k (mechanism 1 premise).
+    pub fn recall_at_k(&self) -> f64 {
+        self.recall_at_k
+    }
+}
+
+/// The three-part result of a retrieval-scoped eval (mechanism 1):
+///
+/// - `recall_at_k`: does retrieval surface the target into the offered set?
+///   (model-independent premise).
+/// - `call`: registry-wide call reliability — schema/arg-correct over the
+///   *call-labelled* scoped examples (offered set genuinely covered the request).
+/// - `abstention`: the gap confusion matrix over *all* scoped + novelty examples
+///   (recall on should-abstain = retrieval misses + genuine novelty;
+///   false-abstention on should-call).
+#[derive(Debug, Clone, Copy)]
+pub struct RetrievalEval {
+    pub recall_at_k: f64,
+    pub call: grug_data::EvalReport,
+    pub abstention: grug_data::AbstentionReport,
+    pub n_call: usize,
+    pub n_abstain: usize,
+}
+
+/// Run one retrieval-scoped eval pass (mechanism 1): greedy-generate on the
+/// scoped + novelty holdouts under `fmt`, then score registry-wide call
+/// reliability (call-labelled subset) and the gap confusion matrix (all).
+pub fn run_retrieval_eval_fmt<B: Backend, V: Vocab>(
+    model: &TinyTransformer<B>,
+    tokenizer: &V,
+    holdout: &FrozenRetrievalHoldout,
+    gen_config: GenerateConfig,
+    device: &B::Device,
+    fmt: grug_data::TargetFormat,
+) -> RetrievalEval {
+    let gen_pairs = |examples: &[Example]| -> Vec<(String, Example)> {
+        examples
+            .iter()
+            .map(|ex| {
+                let prompt = crate::train::format_prompt_fmt(ex, fmt);
+                (generate(model, tokenizer, &prompt, gen_config, device), ex.clone())
+            })
+            .collect()
+    };
+    let scoped = gen_pairs(&holdout.scoped);
+    let novelty = gen_pairs(&holdout.novelty);
+
+    // Registry-wide call reliability: only the scoped examples whose label is a
+    // concrete call (retrieval covered the request).
+    let call_pairs: Vec<(String, Example)> =
+        scoped.iter().filter(|(_, ex)| !ex.is_abstention()).cloned().collect();
+    let call = grug_data::EvalReport::from_outputs_fmt(&call_pairs, fmt);
+
+    // Abstention confusion matrix over everything (scoped call+gap ∪ novelty gap).
+    let mut all = scoped.clone();
+    all.extend(novelty.iter().cloned());
+    let abstention = grug_data::AbstentionReport::from_outputs_fmt(&all, fmt);
+
+    RetrievalEval {
+        recall_at_k: holdout.recall_at_k,
+        call,
+        abstention,
+        n_call: call_pairs.len(),
+        n_abstain: all.len() - call_pairs.len(),
+    }
+}
+
 fn append_row<R: Serialize>(row: &R, path: &Path) -> GrugResult<()> {
     let line = serde_json::to_string(row).map_err(|e| GrugError::EvalLogSerializeFailed {
         message: e.to_string(),

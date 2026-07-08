@@ -40,10 +40,11 @@ pub use bpe::BpeTokenizer;
 pub use checkpoint::{load_checkpoint, save_checkpoint};
 pub use error::{GrugError, GrugResult};
 pub use eval::{
-    run_abstention_eval_fmt, run_eval, run_eval_and_log, run_two_axis_eval,
+    run_abstention_eval_fmt, run_eval, run_eval_and_log, run_retrieval_eval_fmt, run_two_axis_eval,
     run_two_axis_eval_and_log, run_two_axis_eval_constrained, run_two_axis_eval_fmt,
     run_two_axis_eval_ptr, run_two_axis_eval_ptr_constrained, run_two_axis_eval_raw_and_repaired_fmt,
-    AxisEvalLogRow, EvalLogRow, FrozenAbstentionHoldout, FrozenHoldout, FrozenTwoAxisHoldout,
+    AxisEvalLogRow, EvalLogRow, FrozenAbstentionHoldout, FrozenHoldout, FrozenRetrievalHoldout,
+    FrozenTwoAxisHoldout, RetrievalEval,
 };
 pub use generate::{generate, generate_constrained, generate_ptr, generate_ptr_constrained, GenerateConfig};
 pub use model::{Mlp, MlpConfig};

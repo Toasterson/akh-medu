@@ -71,6 +71,14 @@ const ABSTENTION_SEED_SALT: u64 = 0x1D8E_3A0B_9C57_F26D;
 /// an abstention example it could have trained on.
 const ABSTENTION_HOLDOUT_SEED_SALT: u64 = 0x84A3_51CE_7B02_9F6E;
 
+/// XOR salts for the **retrieval-scoped** streams (Phase 51 P3a, ADR 089
+/// mechanism 1). Each is distinct from every other salt so retrieval train /
+/// holdout / genuine-novelty / recall-probe draws are mutually independent.
+const RETRIEVAL_TRAIN_SEED_SALT: u64 = 0x2545_F491_1A3B_C7D9;
+const RETRIEVAL_HOLDOUT_SEED_SALT: u64 = 0xB7E1_5162_8AED_2A6B;
+const RETRIEVAL_ABSTAIN_SEED_SALT: u64 = 0x6C62_72E1_5AF5_33A9;
+const RETRIEVAL_RECALL_SEED_SALT: u64 = 0x3F84_D0C3_A190_7E5D;
+
 impl Dataset {
     /// Build the default dataset: the built-in catalog, split with
     /// [`DEFAULT_HOLDOUT_COUNT`] tools reserved for whole-tool holdout, using
@@ -261,6 +269,199 @@ impl Dataset {
         generator.generate_abstention(n)
     }
 
+    /// The **registry**: the tools the model trains on and the retriever
+    /// (mechanism 1) selects from — an alias for [`Dataset::train_tools`] under
+    /// the retrieval-scoped framing, where the whole-tool holdout is repurposed
+    /// as the *out-of-registry* (genuine-novelty) source rather than a target.
+    pub fn registry(&self) -> &[crate::schema::ToolSchema] {
+        self.train_catalog.tools()
+    }
+
+    /// Build a [`Retriever`](crate::retriever::Retriever) over this dataset's
+    /// registry (mechanism 1). Indices it returns index [`Dataset::registry`].
+    pub fn registry_retriever(&self) -> crate::retriever::Retriever {
+        crate::retriever::Retriever::new(self.registry())
+    }
+
+    /// Re-scope a base example to the retrieval-selected offered set (ADR 089
+    /// mechanism 1): replace its offered tools with the retriever's top-`k` for
+    /// the request, then **relabel** — if retrieval surfaced the target tool the
+    /// label is the concrete call; if it did **not** (a retrieval miss, or a
+    /// genuine out-of-registry request), the correct label becomes the gap
+    /// token, because a tool that was never offered cannot be called. This is
+    /// the training signal that couples mechanism 1 to mechanism 3: "call when
+    /// the offered set covers the request, abstain when it doesn't."
+    fn scope_to_retrieval(
+        base: Example,
+        retriever: &crate::retriever::Retriever,
+        registry: &[crate::schema::ToolSchema],
+        k: usize,
+    ) -> Example {
+        let offered: Vec<crate::schema::ToolSchema> = retriever
+            .top_k(&base.user_request, k)
+            .into_iter()
+            .map(|i| registry[i].clone())
+            .collect();
+        let target_offered = offered.iter().any(|t| t.name == base.expected_call.name);
+        let expected_call = if target_offered {
+            base.expected_call
+        } else {
+            crate::schema::ToolCall::gap()
+        };
+        Example {
+            tools: offered,
+            expected_call,
+            user_request: base.user_request,
+            mock_response: base.mock_response,
+        }
+    }
+
+    /// Generate `n` **retrieval-scoped training** examples (ADR 089 mechanism 1):
+    /// a request for a registry tool, offered the retriever's top-`k` over the
+    /// whole registry (TRAIN tools × TRAIN phrasings), labelled call-or-gap by
+    /// [`Dataset::scope_to_retrieval`]. Most are calls (retrieval surfaces the
+    /// target); retrieval misses become in-registry gaps. This is the realistic
+    /// runtime offered set — request-keyed confusables, not random distractors.
+    pub fn retrieval_train_examples(&self, k: usize, n: usize) -> GrugResult<Vec<Example>> {
+        let retriever = self.registry_retriever();
+        let registry = self.registry().to_vec();
+        let mut generator = Generator::with_catalog_mode_and_distractors(
+            self.seed ^ RETRIEVAL_TRAIN_SEED_SALT,
+            self.train_catalog.clone(),
+            PhrasingMode::Train,
+            self.distractors,
+        );
+        (0..n)
+            .map(|_| {
+                generator
+                    .try_next_example()
+                    .map(|base| Self::scope_to_retrieval(base, &retriever, &registry, k))
+            })
+            .collect()
+    }
+
+    /// Generate `n` **retrieval-scoped holdout** examples (mechanism 1): same as
+    /// [`Dataset::retrieval_train_examples`] but TRAIN tools × HOLDOUT phrasings
+    /// and an independent RNG stream — the in-registry call/gap eval set (unseen
+    /// wordings of registry tools).
+    pub fn retrieval_holdout_examples(&self, k: usize, n: usize) -> GrugResult<Vec<Example>> {
+        let retriever = self.registry_retriever();
+        let registry = self.registry().to_vec();
+        let mut generator = Generator::with_catalog_mode_and_distractors(
+            self.seed ^ RETRIEVAL_HOLDOUT_SEED_SALT,
+            self.train_catalog.clone(),
+            PhrasingMode::Holdout,
+            self.distractors,
+        );
+        (0..n)
+            .map(|_| {
+                generator
+                    .try_next_example()
+                    .map(|base| Self::scope_to_retrieval(base, &retriever, &registry, k))
+            })
+            .collect()
+    }
+
+    /// Generate `n` **genuine-novelty abstention** examples under retrieval
+    /// (mechanism 1 ∘ mechanism 3): a request for an **out-of-registry** tool
+    /// (the whole-tool HOLDOUT catalog — never trained, never a valid target),
+    /// offered the retriever's top-`k` over the **registry**. Since the true
+    /// tool is not in the registry it can never be offered, so the label is
+    /// always gap — but the offered set is the closest in-registry *confusables*
+    /// (they share verb/noun tokens), making this a much harder abstention test
+    /// than random distractors: the model must notice that none of the plausibly
+    /// related tools actually match.
+    pub fn retrieval_abstention_examples(&self, k: usize, n: usize) -> GrugResult<Vec<Example>> {
+        if self.registry().len() < 2 {
+            return Err(crate::error::GrugError::EmptyCatalog);
+        }
+        let retriever = self.registry_retriever();
+        let registry = self.registry().to_vec();
+        // Requests are drawn from the OUT-OF-REGISTRY (holdout) catalog.
+        let mut generator = Generator::with_catalog_mode_and_distractors(
+            self.seed ^ RETRIEVAL_ABSTAIN_SEED_SALT,
+            self.holdout_catalog.clone(),
+            PhrasingMode::Train,
+            self.distractors,
+        );
+        (0..n)
+            .map(|_| {
+                generator.try_next_example().map(|base| {
+                    let scoped = Self::scope_to_retrieval(base, &retriever, &registry, k);
+                    debug_assert!(scoped.is_abstention(), "out-of-registry request must label as gap");
+                    scoped
+                })
+            })
+            .collect()
+    }
+
+    /// Generate `n` **retrieval-scoped training** examples mixing in-registry
+    /// requests (call, or in-registry gap on a retrieval miss) with a fraction
+    /// `novelty_frac` of **genuine-novelty** out-of-registry abstention examples
+    /// (ADR 089 mechanism 1 ∘ 3). Interleaved Bresenham-style so every batch
+    /// sees both. `novelty_frac == 0.0` is pure [`Dataset::retrieval_train_examples`].
+    ///
+    /// This is the corpus the retrieval-scoped model trains on: it learns to
+    /// call when the retrieved offered set covers the request, and to gap both
+    /// when retrieval missed an in-registry tool *and* when the request needs a
+    /// capability the registry does not contain.
+    pub fn retrieval_train_mix(&self, k: usize, n: usize, novelty_frac: f64) -> GrugResult<Vec<Example>> {
+        let frac = novelty_frac.clamp(0.0, 1.0);
+        let retriever = self.registry_retriever();
+        let registry = self.registry().to_vec();
+        let mut call_gen = Generator::with_catalog_mode_and_distractors(
+            self.seed ^ RETRIEVAL_TRAIN_SEED_SALT,
+            self.train_catalog.clone(),
+            PhrasingMode::Train,
+            self.distractors,
+        );
+        let mut novelty_gen = Generator::with_catalog_mode_and_distractors(
+            self.seed ^ RETRIEVAL_ABSTAIN_SEED_SALT,
+            self.holdout_catalog.clone(),
+            PhrasingMode::Train,
+            self.distractors,
+        );
+        let mut out = Vec::with_capacity(n);
+        let mut acc = 0.0f64;
+        for _ in 0..n {
+            acc += frac;
+            let base = if acc >= 1.0 {
+                acc -= 1.0;
+                novelty_gen.try_next_example()?
+            } else {
+                call_gen.try_next_example()?
+            };
+            out.push(Self::scope_to_retrieval(base, &retriever, &registry, k));
+        }
+        Ok(out)
+    }
+
+    /// `n` `(request, registry_target_index)` pairs for the model-independent
+    /// **retrieval recall@k** probe (mechanism 1's premise check): registry
+    /// tools × HOLDOUT phrasings, each paired with the target's index into
+    /// [`Dataset::registry`]. Feed to
+    /// [`retrieval_recall_at_k`](crate::retriever::retrieval_recall_at_k).
+    pub fn retrieval_recall_pairs(&self, n: usize) -> GrugResult<Vec<(String, usize)>> {
+        let registry = self.registry();
+        let mut generator = Generator::with_catalog_mode_and_distractors(
+            self.seed ^ RETRIEVAL_RECALL_SEED_SALT,
+            self.train_catalog.clone(),
+            PhrasingMode::Holdout,
+            self.distractors,
+        );
+        (0..n)
+            .map(|_| {
+                generator.try_next_example().map(|base| {
+                    let idx = registry
+                        .iter()
+                        .position(|t| t.name == base.expected_call.name)
+                        .expect("target is a registry tool");
+                    (base.user_request, idx)
+                })
+            })
+            .collect()
+    }
+
     /// Generate `n` **whole-tool holdout** (axis A) examples: HOLDOUT tools
     /// (never trained) × any phrasing, using an RNG stream independent of
     /// `train_examples`. Tests in-context schema-reading on tools the model
@@ -379,5 +580,66 @@ impl Dataset {
             Self::score_axis(EvalAxis::HeldOutPhrasing, &phrasing_pairs),
             Self::score_axis(EvalAxis::WholeToolHoldout, &whole_tool_pairs),
         ))
+    }
+}
+
+#[cfg(test)]
+mod retrieval_tests {
+    use super::*;
+    use crate::retriever::{retrieval_recall_at_k, Retriever};
+
+    /// Retrieval-scoped training examples: offered set is ≤ k tools drawn from
+    /// the registry, and the common case is a call whose target is offered.
+    #[test]
+    fn retrieval_train_examples_offer_top_k_and_mostly_call() {
+        let dataset = Dataset::new_sized(42, 400, 0.15).unwrap();
+        let k = 6;
+        let examples = dataset.retrieval_train_examples(k, 200).unwrap();
+        assert_eq!(examples.len(), 200);
+        let registry_names: std::collections::HashSet<&str> =
+            dataset.registry().iter().map(|t| t.name.as_str()).collect();
+        let mut calls = 0;
+        for ex in &examples {
+            assert!(ex.tools.len() <= k, "offered set must be ≤ k");
+            // Every offered tool is from the registry.
+            for t in &ex.tools {
+                assert!(registry_names.contains(t.name.as_str()));
+            }
+            if !ex.is_abstention() {
+                calls += 1;
+                // A call's target is necessarily among the offered tools.
+                assert!(ex.tools.iter().any(|t| t.name == ex.expected_call.name));
+            }
+        }
+        // Retrieval is good on this data, so the vast majority are calls.
+        assert!(calls as f64 / examples.len() as f64 > 0.8, "expected mostly calls, got {calls}/200");
+    }
+
+    /// Genuine-novelty abstention: an out-of-registry request, offered the
+    /// registry's closest confusables, always labels as gap and never offers
+    /// the true tool.
+    #[test]
+    fn retrieval_abstention_always_gaps_and_never_offers_target() {
+        let dataset = Dataset::new_sized(7, 400, 0.15).unwrap();
+        let out_of_reg: std::collections::HashSet<&str> =
+            dataset.holdout_tools().iter().map(|t| t.name.as_str()).collect();
+        let examples = dataset.retrieval_abstention_examples(6, 100).unwrap();
+        assert_eq!(examples.len(), 100);
+        for ex in &examples {
+            assert!(ex.is_abstention(), "out-of-registry request must gap");
+            // None of the offered tools is an out-of-registry tool.
+            assert!(!ex.tools.iter().any(|t| out_of_reg.contains(t.name.as_str())));
+        }
+    }
+
+    /// The mechanism-1 premise: retrieval recall@k over the registry is high, so
+    /// the offered set almost always contains the target.
+    #[test]
+    fn retrieval_recall_is_high_over_registry() {
+        let dataset = Dataset::new_sized(42, 1000, 0.15).unwrap();
+        let retriever = Retriever::new(dataset.registry());
+        let pairs = dataset.retrieval_recall_pairs(256).unwrap();
+        let recall = retrieval_recall_at_k(&retriever, &pairs, 8);
+        assert!(recall > 0.9, "recall@8 over the registry should be high, got {recall}");
     }
 }
