@@ -248,4 +248,15 @@ On clean requests both are high — the caveat made concrete: the *only* tool-si
 
 **15c — The organ's gap-response, built + measured.** The runtime half of M3 (`grug_data::organ`): `GapResponse{Widen,Synthesize}` + `respond_to_gap` + `GapRecoveryReport`. On a fired gap the organ widens retrieval along `[16,64,…,|registry|]`; the first width surfacing a **covering** tool (`Retriever::covers` = *all* name tokens present, not one-token overlap) → `Widen` and re-offer; else → `Synthesize`. Measured (`examples/gap_organ.rs`): (1) **retrieval is not the bottleneck** — the two-token match is unique enough that recall saturates even at k=3, so **0 natural retrieval-miss gaps** exist to rescue (the widen mechanism is proven by a synthetic test forcing a covering tool outside the offer); (2) **genuine novelty terminates correctly** — 500 out-of-registry requests → **500 Synthesize (1.000), 0 false-widen**: the all-tokens coverage test is never fooled by a partial confusable. On this corpus M3's runtime value is entirely synthesis-gating; the widen branch is standing capacity for the harder retrieval regime a semantic router faces. Synthesis authoring itself stays a KG/agent-layer seam.
 
-**15d — Confirmatory run (seed 43), n=2 on the headline.** The §14 full-stack numbers are n=1; ROCm training is non-deterministic, so a fresh-seed run (`runs/p3a-registry-s43/`, seed 43, otherwise identical) samples corpus + init + GPU variance. *(Run launched 2026-07-09; number pending — appended on completion.)*
+**15d — Confirmatory run (seed 43): n=2, and grounding is a variance absorber.** The §14 numbers were n=1; a fresh-seed run (`runs/p3a-registry-s43/`, seed 43, otherwise identical — 20000 steps, 65 min, final loss 0.051) gives the second sample. Both evals use their own seed's registry split (n=256 on `step_00019999`).
+
+| metric | seed 42 | seed 43 |
+|---|---|---|
+| retrieval recall@8 | **1.000** | **1.000** |
+| raw neural — whole-call / per-value | 0.594 / 0.748 | **0.465 / 0.680** |
+| M2 repaired — whole-call | 0.594 | 0.477 |
+| **grounded** — whole-call / per-value | **0.738 / 0.824** | **0.727 / 0.811** |
+| grounded schema | 0.945 | 0.957 |
+| abstain recall / false-abstain / precision | ~0.998 / 0.001 / 0.999 | 0.977 / 0.012 / 0.988 |
+
+**The finding:** the premise (recall@8) is seed-invariant at 1.000, and abstention is stable (~0.98–1.0). But the decisive observation is the last-mile stack's behaviour under neural variance: the **raw** neural whole-call number swings **0.13** across seeds (0.594 → 0.465 — seed 43 drew a weaker model), yet the **grounded** number converges to within **0.011** (0.738 vs 0.727). The grounded Δ is correspondingly larger on the weaker seed (+0.262 vs +0.145). So value-grounding does not merely raise the mean — it **absorbs the model's training-seed variance**, pulling a noisier proposer to the same ~0.73 grounded outcome. This is exactly the ADR 089 thesis sharpened: the correctness that matters lives in the symbolic organ, and the organ makes the shipped number robust to which particular weights the neural System-1 happened to land on. Mean grounded whole-call over n=2 ≈ **0.733 ± 0.006**; raw ≈ 0.53 ± 0.065 — an order of magnitude more spread.
