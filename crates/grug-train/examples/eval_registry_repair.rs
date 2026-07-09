@@ -112,13 +112,17 @@ fn main() {
         r.call.schema_adherence_rate, r.call.arg_correct_rate, r.call.arg_value_accuracy
     );
     println!(
-        "M2  repaired (KG-grounded)  : schema={:.3} arg(whole-call)={:.3} arg(per-value)={:.3}",
+        "M2  repaired (name-grounded): schema={:.3} arg(whole-call)={:.3} arg(per-value)={:.3}",
         r.call_repaired.schema_adherence_rate, r.call_repaired.arg_correct_rate, r.call_repaired.arg_value_accuracy
     );
     println!(
-        "    Δ lift                    : schema {:+.3}   arg {:+.3}",
-        r.call_repaired.schema_adherence_rate - r.call.schema_adherence_rate,
-        r.call_repaired.arg_correct_rate - r.call.arg_correct_rate,
+        "P3a grounded (value-grounded): schema={:.3} arg(whole-call)={:.3} arg(per-value)={:.3}",
+        r.call_grounded.schema_adherence_rate, r.call_grounded.arg_correct_rate, r.call_grounded.arg_value_accuracy
+    );
+    println!(
+        "    Δ (raw→grounded)          : whole-call {:+.3}   per-value {:+.3}",
+        r.call_grounded.arg_correct_rate - r.call.arg_correct_rate,
+        r.call_grounded.arg_value_accuracy - r.call.arg_value_accuracy,
     );
     println!(
         "M3  abstention (n_abstain={})  : recall={:.3} false_abstain={:.3} precision={:.3}",
@@ -134,6 +138,7 @@ fn main() {
         "n_abstain": r.n_abstain,
         "call_raw": { "schema": r.call.schema_adherence_rate, "arg_whole_call": r.call.arg_correct_rate, "arg_per_value": r.call.arg_value_accuracy },
         "call_repaired": { "schema": r.call_repaired.schema_adherence_rate, "arg_whole_call": r.call_repaired.arg_correct_rate, "arg_per_value": r.call_repaired.arg_value_accuracy },
+        "call_grounded": { "schema": r.call_grounded.schema_adherence_rate, "arg_whole_call": r.call_grounded.arg_correct_rate, "arg_per_value": r.call_grounded.arg_value_accuracy },
         "abstain_recall": r.abstention.abstain_recall,
         "false_abstention_rate": r.abstention.false_abstention_rate,
         "abstain_precision": r.abstention.abstain_precision,

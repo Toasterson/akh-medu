@@ -57,6 +57,26 @@ fn is_empty_val(v: &serde_json::Value) -> bool {
     v.as_str() == Some("")
 }
 
+/// Render a JSON value the way it appears in the request text (unquoted).
+fn val_text(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::Bool(b) => b.to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn type_tag(ty: &grug_data::ParamType) -> &'static str {
+    match ty {
+        grug_data::ParamType::String => "str",
+        grug_data::ParamType::Integer => "int",
+        grug_data::ParamType::Number => "num",
+        grug_data::ParamType::Boolean => "bool",
+        grug_data::ParamType::Enum(_) => "enum",
+    }
+}
+
 fn main() {
     let args = Args::parse();
     let fmt = TargetFormat::parse_label(&args.format).expect("--format json|grug");
@@ -91,6 +111,14 @@ fn main() {
     // Per-param mismatch tallies + suspicious sub-cases:
     let (mut value_diff_params, mut presence_diff_params, mut numeric_close_diffs, mut empty_val_diffs) =
         (0usize, 0usize, 0usize, 0usize);
+    // Value-grounding design inputs: is the CORRECT value in the request (the
+    // premise a grounding pass depends on)? Is the WRONG value in the request
+    // (misalignment) or not (hallucination)? And are the errors a pure
+    // permutation of the right values (→ type-aware re-alignment fixes them)?
+    let (mut want_in_req, mut got_in_req, mut permutation_cases, mut value_cases_total) =
+        (0usize, 0usize, 0usize, 0usize);
+    use std::collections::BTreeMap;
+    let mut err_by_type: BTreeMap<&'static str, usize> = BTreeMap::new();
     let mut shown = 0;
 
     for ex in &examples {
@@ -121,6 +149,8 @@ fn main() {
         };
         let got = call.arguments_map();
         let want = ex.expected_call.arguments_map();
+        let schema = ex.tools.iter().find(|t| t.name == call.name);
+        let req = &ex.user_request;
 
         let (mut has_val, mut has_pres, mut wrong_tool_here) = (false, false, false);
         if let Some(Err(mismatches)) = &outcome.arg_correctness {
@@ -146,6 +176,20 @@ fn main() {
                         if w.is_some_and(is_empty_val) || g.is_some_and(is_empty_val) {
                             empty_val_diffs += 1;
                         }
+                        // Value-grounding design inputs.
+                        if let Some(wv) = w {
+                            if req.contains(&val_text(wv)) {
+                                want_in_req += 1;
+                            }
+                        }
+                        if let Some(gv) = g {
+                            if req.contains(&val_text(gv)) {
+                                got_in_req += 1;
+                            }
+                        }
+                        if let Some(ty) = schema.and_then(|s| s.param(param)).map(|p| &p.ty) {
+                            *err_by_type.entry(type_tag(ty)).or_insert(0) += 1;
+                        }
                     }
                     ArgMismatch::PresenceDiffers { param } => {
                         has_pres = true;
@@ -165,6 +209,21 @@ fn main() {
             case_value_only += 1;
         } else if has_pres {
             case_presence_only += 1;
+        }
+
+        // Permutation test (for cases with a value error): is the model emitting
+        // the correct MULTISET of values, just assigned to the wrong params? If
+        // so, a type-aware re-alignment could recover them; if not, values are
+        // hallucinated/corrupted and re-alignment cannot.
+        if has_val && !wrong_tool_here {
+            value_cases_total += 1;
+            let mut want_vals: Vec<String> = want.values().map(val_text).collect();
+            let mut got_vals: Vec<String> = got.values().map(val_text).collect();
+            want_vals.sort();
+            got_vals.sort();
+            if want_vals == got_vals {
+                permutation_cases += 1;
+            }
         }
 
         if shown < 20 && !wrong_tool_here {
@@ -209,4 +268,17 @@ fn main() {
     println!("  ValueDiffers params   : {value_diff_params}  (numeric-close [scorer-bug flag]: {numeric_close_diffs})");
     println!("  PresenceDiffers params: {presence_diff_params}");
     println!("  mismatches involving an EMPTY-string value [generator artifact]: {empty_val_diffs}");
+    println!("\n=== value-grounding design inputs (over {value_diff_params} ValueDiffers) ===");
+    println!(
+        "  CORRECT value appears in request : {want_in_req}/{value_diff_params} ({:.1}%)  [grounding premise: can we re-extract it?]",
+        pct(want_in_req, value_diff_params)
+    );
+    println!(
+        "  WRONG value appears in request   : {got_in_req}/{value_diff_params} ({:.1}%)  [in-req ⇒ misalignment; not-in-req ⇒ hallucination]",
+        pct(got_in_req, value_diff_params)
+    );
+    println!(
+        "  permutation cases (right value multiset, wrong assignment): {permutation_cases}/{value_cases_total}  [re-alignment could fix these]"
+    );
+    println!("  value errors by param type: {err_by_type:?}");
 }

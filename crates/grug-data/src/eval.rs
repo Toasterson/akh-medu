@@ -141,15 +141,37 @@ pub fn score_output_fmt(raw_output: &str, example: &Example, fmt: crate::format:
     }
 }
 
-/// Score one raw model output under `fmt`, then apply the **KG-backed repair
-/// pass** ([`crate::repair::repair_call`]) before validating (Phase 51 P3b, ADR
-/// 089). Parsing failure is still `parsed=false`; otherwise the parsed call is
-/// grounded/repaired against the offered schemas and *that* call is scored — so
-/// the raw-vs-repaired delta is exactly what the symbolic layer recovers.
-pub fn score_output_repaired_fmt(
+/// Which symbolic post-process(es) to apply to a parsed call before scoring
+/// (Phase 51 P3a/P3b). `Grounded` composes the full last-mile stack:
+/// M2 name-repair *then* value-grounding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Post {
+    Raw,
+    Repaired,
+    Grounded,
+}
+
+/// Apply the selected post-process to a parsed `call` for `example`.
+pub(crate) fn apply_post(call: ToolCall, example: &Example, post: Post) -> ToolCall {
+    match post {
+        Post::Raw => call,
+        Post::Repaired => crate::repair::repair_call(&call, &example.tools).0,
+        Post::Grounded => {
+            let (repaired, _) = crate::repair::repair_call(&call, &example.tools);
+            crate::ground::ground_values(&repaired, &example.user_request, &example.tools).0
+        }
+    }
+}
+
+/// Score one raw output under `fmt`, applying `post` to the parsed call before
+/// validating. Parsing failure is `parsed=false`; otherwise the post-processed
+/// call is validated + argument-checked, so the raw-vs-post delta is exactly
+/// what the symbolic layer recovers.
+pub(crate) fn score_output_post_fmt(
     raw_output: &str,
     example: &Example,
     fmt: crate::format::TargetFormat,
+    post: Post,
 ) -> EvalOutcome {
     let Some(call) = crate::format::parse_call(raw_output, fmt, &example.tools) else {
         return EvalOutcome {
@@ -158,8 +180,8 @@ pub fn score_output_repaired_fmt(
             arg_correctness: None,
         };
     };
-    let (repaired, _stats) = crate::repair::repair_call(&call, &example.tools);
-    let schema_result = validate_call(&repaired, example);
+    let call = apply_post(call, example, post);
+    let schema_result = validate_call(&call, example);
     let schema_ok = schema_result.as_ref().ok().cloned();
     let arg_result = schema_ok
         .as_ref()
@@ -169,6 +191,30 @@ pub fn score_output_repaired_fmt(
         schema: Some(schema_result),
         arg_correctness: arg_result,
     }
+}
+
+/// Score one raw model output under `fmt`, then apply the **KG-backed repair
+/// pass** ([`crate::repair::repair_call`]) before validating (Phase 51 P3b, ADR
+/// 089) — grounds tool + param *names* against the offered schemas.
+pub fn score_output_repaired_fmt(
+    raw_output: &str,
+    example: &Example,
+    fmt: crate::format::TargetFormat,
+) -> EvalOutcome {
+    score_output_post_fmt(raw_output, example, fmt, Post::Repaired)
+}
+
+/// Score one raw model output under `fmt` with the **full last-mile stack**:
+/// M2 name-repair *then* value-grounding ([`crate::ground::ground_values`],
+/// Phase 51 P3a) — snaps mis-copied argument *values* to the request's own
+/// value inventory. The repaired-vs-grounded delta is what value-grounding adds
+/// on top of name-repair.
+pub fn score_output_grounded_fmt(
+    raw_output: &str,
+    example: &Example,
+    fmt: crate::format::TargetFormat,
+) -> EvalOutcome {
+    score_output_post_fmt(raw_output, example, fmt, Post::Grounded)
 }
 
 /// Validate an already-parsed [`ToolCall`] against the schemas offered in
@@ -359,23 +405,16 @@ pub struct EvalReport {
 /// Micro count of `(hits, total)` over expected argument-value slots for
 /// [`EvalReport::arg_value_accuracy`]. `total` counts every expected param on
 /// every example; `hits` counts those the model emitted with a value equal
-/// (under [`values_equal_normalized`]) to ground truth. `repaired` applies the
-/// P3b KG-repair pass to the parsed call first, matching
-/// [`EvalReport::from_outputs_repaired_fmt`].
+/// (under [`values_equal_normalized`]) to ground truth. `post` selects the
+/// symbolic post-process applied to the parsed call first.
 fn arg_value_hits_fmt(
     pairs: &[(String, Example)],
     fmt: crate::format::TargetFormat,
-    repaired: bool,
+    post: Post,
 ) -> (usize, usize) {
     let (mut hits, mut total) = (0usize, 0usize);
     for (raw, ex) in pairs {
-        let call = crate::format::parse_call(raw, fmt, &ex.tools).map(|c| {
-            if repaired {
-                crate::repair::repair_call(&c, &ex.tools).0
-            } else {
-                c
-            }
-        });
+        let call = crate::format::parse_call(raw, fmt, &ex.tools).map(|c| apply_post(c, ex, post));
         let want = ex.expected_call.arguments_map();
         let schema = ex.expected_schema();
         let got = call.as_ref().map(|c| c.arguments_map());
@@ -404,7 +443,7 @@ impl EvalReport {
             .iter()
             .map(|(raw, ex)| score_output_fmt(raw, ex, fmt))
             .collect();
-        let (hits, total) = arg_value_hits_fmt(pairs, fmt, false);
+        let (hits, total) = arg_value_hits_fmt(pairs, fmt, Post::Raw);
         Self::from_outcomes(&outcomes).with_value_accuracy(hits, total)
     }
 
@@ -417,7 +456,21 @@ impl EvalReport {
             .iter()
             .map(|(raw, ex)| score_output_repaired_fmt(raw, ex, fmt))
             .collect();
-        let (hits, total) = arg_value_hits_fmt(pairs, fmt, true);
+        let (hits, total) = arg_value_hits_fmt(pairs, fmt, Post::Repaired);
+        Self::from_outcomes(&outcomes).with_value_accuracy(hits, total)
+    }
+
+    /// Score and aggregate a batch with the **full last-mile stack** (Phase 51
+    /// P3a): M2 name-repair *then* value-grounding
+    /// ([`crate::ground::ground_values`]). Compare to
+    /// [`EvalReport::from_outputs_repaired_fmt`] for the value-grounding lift on
+    /// top of name-repair.
+    pub fn from_outputs_grounded_fmt(pairs: &[(String, Example)], fmt: crate::format::TargetFormat) -> Self {
+        let outcomes: Vec<EvalOutcome> = pairs
+            .iter()
+            .map(|(raw, ex)| score_output_grounded_fmt(raw, ex, fmt))
+            .collect();
+        let (hits, total) = arg_value_hits_fmt(pairs, fmt, Post::Grounded);
         Self::from_outcomes(&outcomes).with_value_accuracy(hits, total)
     }
 

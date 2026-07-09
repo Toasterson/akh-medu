@@ -33,6 +33,7 @@ pub mod dataset;
 pub mod error;
 pub mod eval;
 pub mod format;
+pub mod ground;
 pub mod repair;
 pub mod generator;
 pub mod phrasing;
@@ -49,6 +50,7 @@ pub use eval::{
     EvalOutcome, EvalReport, SchemaViolation,
 };
 pub use format::{parse_call, parse_output, render_call, render_tools, ParsedOutput, TargetFormat};
+pub use ground::{ground_values, GroundStats};
 pub use repair::{repair_call, RepairStats};
 pub use retriever::{retrieval_recall_at_k, Retriever};
 pub use generator::{DistractorConfig, Generator, PhrasingMode};

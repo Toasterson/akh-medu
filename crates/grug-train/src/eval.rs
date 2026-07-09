@@ -440,6 +440,12 @@ pub struct RetrievalEval {
     /// realistic retrieval-selected offered set (8 request-keyed confusables)
     /// rather than P3b's easy-2 distractors.
     pub call_repaired: grug_data::EvalReport,
+    /// Registry-wide call reliability after the **full last-mile stack**: M2
+    /// name-repair *then* value-grounding ([`grug_data::ground_values`], Phase 51
+    /// P3a) — snaps mis-copied argument *values* to the request's own value
+    /// inventory. The `call_repaired` → `call_grounded` delta is what value
+    /// grounding adds on top of name-repair.
+    pub call_grounded: grug_data::EvalReport,
     pub abstention: grug_data::AbstentionReport,
     pub n_call: usize,
     pub n_abstain: usize,
@@ -477,6 +483,8 @@ pub fn run_retrieval_eval_fmt<B: Backend, V: Vocab>(
     // Full-stack (M1→propose→M2): repair each proposal against the retrieved
     // offered set before scoring.
     let call_repaired = grug_data::EvalReport::from_outputs_repaired_fmt(&call_pairs, fmt);
+    // Full last-mile stack: M2 repair then value-grounding against the request.
+    let call_grounded = grug_data::EvalReport::from_outputs_grounded_fmt(&call_pairs, fmt);
 
     // Abstention confusion matrix over everything (scoped call+gap ∪ novelty
     // gap). Repair is a call-grounding pass and never rewrites a gap output into
@@ -490,6 +498,7 @@ pub fn run_retrieval_eval_fmt<B: Backend, V: Vocab>(
         recall_at_k: holdout.recall_at_k,
         call,
         call_repaired,
+        call_grounded,
         abstention,
         n_call: call_pairs.len(),
         n_abstain: all.len() - call_pairs.len(),
