@@ -1,6 +1,6 @@
 # Phase 51 P3d — Semantic-Retrieval Corpus: remove the name-only-corpus asterisk
 
-- **Status:** P3d-1 **built + measured** (2026-07-09, commit `9ad8c13`); P3d-2/P3d-3 pending. **Headline: recall@8 = 1.000 was *entirely* surface coupling to the name** — lexical-on-name collapses 1.000 → 0.002 the moment the name leaves the request (D1); a description-keyed retriever fully recovers at D1 (0.99–1.00) but every surface retriever floors at ~0.01–0.02 under true paraphrase (D2). See [scaling-results §16](../2026-07-05-phase51-p1-scaling-results.md#16).
+- **Status:** P3d-1 + P3d-2 **built + measured** (2026-07-09, commits `9ad8c13`, `fda1923`); P3d-3 pending. **Headline: recall@8 = 1.000 was *entirely* surface coupling to the name** — lexical-on-name collapses 1.000 → 0.002 the moment the name leaves the request (D1); a description-keyed retriever fully recovers at D1 (0.99–1.00) but every surface retriever floors at ~0.01–0.02 under true paraphrase (D2). **P3d-2: a stock learned embedder (all-MiniLM-L6-v2) only *partially* bridges D2 — recall 0.210 (~11–17× the surface floor, but far from ~1.0)** → off-the-shelf semantic ≫ surface but is necessary-not-sufficient; genuine paraphrase over a large registry needs a fine-tuned/domain retriever (Phase-28 VSA) or richer descriptions. See [scaling-results §16](../2026-07-05-phase51-p1-scaling-results.md#16).
 - **Deciders:** Till, Claude (Opus 4.8).
 - **Relates:** extends [ADR 089](../decisions/089-organ-kg-zeroshot-path.md) (organ, not weights) and the P3a results ([scaling-results §14–15](../2026-07-05-phase51-p1-scaling-results.md#14)). Consumes the Phase-28 semantic router / Phase-37 Seshat embedder (`all-MiniLM-L6-v2`) as the learned retriever.
 - **Anima:** log under project `019d9844-ce74-7993-a9f0-c953b8f04a4e` ("Akh-Medu"); this file is the backup + Seshat paste source.
@@ -118,6 +118,6 @@ Risks: (a) gloss authoring quality — a lazy gloss that shares a token re-intro
 - [x] `catalog.rs` / `dataset.rs`: `procedural_signal` / `new_sized_signal` constructors (`9ad8c13`). *(Retrieval-stream threading for the D1 retrain is P3d-3.)*
 - [x] `retriever.rs`: `Retriever`/`SemanticRetriever::new_over(text)` description-keyed constructors (`9ad8c13`).
 - [x] `examples/recall_matrix.rs` (P3d-1) — the tier × retriever recall table. **Done, measured.**
-- [ ] `examples/semantic_recall_minilm.rs` (P3d-2) — Seshat/MiniLM D2 recall (the ~0.01–0.02 D2 floor is what it must beat).
+- [x] `examples/semantic_recall_minilm.rs` (P3d-2, in `crates/seshat/`) + `grug_data::EmbedRetriever` — Seshat/MiniLM D2 recall. **Done: D2 minilm@desc = 0.210** (beats the ~0.01–0.02 surface floor ~11–17× but far from 1.0 — partial bridge). Model provisioned from `sentence-transformers/all-MiniLM-L6-v2`; runtime needs `ORT_DYLIB_PATH` → onnxruntime 1.23.x.
 - [ ] `train_registry` + `eval_registry_repair`: accept `--signal-mode`; retrain on D1, re-measure abstention + full stack (P3d-3).
 - [x] Docs: scaling-results §16 (`46...`), plan + memory + Seshat. *(ADR 089 M1-caveat update folded into §16; the abstention confirm-or-correct waits on P3d-3.)*
