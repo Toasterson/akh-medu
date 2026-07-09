@@ -55,7 +55,10 @@ pub use format::{parse_call, parse_output, render_call, render_tools, ParsedOutp
 pub use ground::{ground_values, GroundStats};
 pub use organ::{respond_to_gap, GapRecoveryReport, GapResponse};
 pub use repair::{repair_call, RepairStats};
-pub use retriever::{retrieval_recall_at_k, semantic_recall_at_k, Retriever, SemanticRetriever};
+pub use retriever::{
+    embed_recall_at_k, retrieval_recall_at_k, semantic_recall_at_k, EmbedRetriever, Retriever,
+    SemanticRetriever,
+};
 pub use generator::{DistractorConfig, Generator, PhrasingMode};
 pub use phrasing::{PhrasingBank, PhrasingRegistry, PhrasingTemplate, TemplatePart};
 pub use procedural::{

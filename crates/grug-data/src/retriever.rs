@@ -369,6 +369,83 @@ pub fn semantic_recall_at_k(
     hits as f64 / pairs.len() as f64
 }
 
+// ===========================================================================
+// Learned-embedding retriever — Phase 51 P3d-2.
+//
+// The recall matrix (P3d-1) showed that under genuine paraphrase (D2) every
+// *surface* retriever — exact-token lexical and char-trigram HDC — floors at
+// ~0.01–0.02, because the request (alt gloss) and the description (primary
+// gloss) share no surface tokens. Only a *learned* semantic embedding can
+// bridge synonyms. This retriever ranks by cosine over precomputed embedding
+// vectors; the embedding itself is done *outside* grug-data (which stays
+// ML-free) — e.g. Seshat's ONNX all-MiniLM-L6-v2 (`crates/seshat/examples/
+// semantic_recall_minilm.rs`) — so this type owns only the cosine ranking, and
+// the recall predicate (`rank < k`) stays byte-for-byte identical to the
+// lexical/HDC retrievers, keeping the matrix a fair comparison.
+// ===========================================================================
+
+/// A retriever over precomputed, **L2-normalized** per-tool embedding vectors.
+/// Cosine similarity is a plain dot product on normalized vectors.
+#[derive(Debug, Clone)]
+pub struct EmbedRetriever {
+    tool_vecs: Vec<Vec<f32>>,
+}
+
+impl EmbedRetriever {
+    /// Build over per-tool embedding vectors, parallel to the registry the
+    /// caller indexes against. Vectors should be L2-normalized (as Seshat's
+    /// embedder returns) so `score` is cosine.
+    pub fn new(tool_vecs: Vec<Vec<f32>>) -> Self {
+        Self { tool_vecs }
+    }
+
+    pub fn len(&self) -> usize {
+        self.tool_vecs.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.tool_vecs.is_empty()
+    }
+
+    /// Cosine similarity (dot product of L2-normalized vectors) of tool
+    /// `tool_idx` against a query embedding. `0.0` on a dimension mismatch.
+    fn score(&self, tool_idx: usize, query: &[f32]) -> f32 {
+        let v = &self.tool_vecs[tool_idx];
+        if v.len() != query.len() {
+            return 0.0;
+        }
+        v.iter().zip(query).map(|(a, b)| a * b).sum()
+    }
+
+    /// Whether `target_idx` ranks within the top-`k` by cosine similarity to
+    /// `query` (ties broken by ascending index) — the same `rank < k` predicate
+    /// the surface retrievers use.
+    pub fn retrieved(&self, query: &[f32], target_idx: usize, k: usize) -> bool {
+        let target_sim = self.score(target_idx, query);
+        let rank = (0..self.tool_vecs.len())
+            .filter(|&i| i != target_idx)
+            .filter(|&i| {
+                let s = self.score(i, query);
+                s > target_sim || (s == target_sim && i < target_idx)
+            })
+            .count();
+        rank < k
+    }
+}
+
+/// Learned-embedding retrieval **recall@k** over `(query_embedding, target_idx)`
+/// pairs — the [`retrieval_recall_at_k`] counterpart for [`EmbedRetriever`].
+pub fn embed_recall_at_k(retriever: &EmbedRetriever, pairs: &[(Vec<f32>, usize)], k: usize) -> f64 {
+    if pairs.is_empty() {
+        return 0.0;
+    }
+    let hits = pairs
+        .iter()
+        .filter(|(q, target)| retriever.retrieved(q, *target, k))
+        .count();
+    hits as f64 / pairs.len() as f64
+}
+
 /// Retrieval **recall@k** over a batch of `(request, target_idx)` pairs: the
 /// fraction whose target was genuinely retrieved into the top-`k` (see
 /// [`Retriever::retrieved`]). This is the model-independent premise check for
@@ -513,6 +590,23 @@ mod tests {
         // high on clean requests — the caveat, made concrete.
         assert!(lex > 0.9, "clean lexical recall@8 = {lex}");
         assert!(sem > 0.9, "clean semantic recall@8 = {sem}");
+    }
+
+    #[test]
+    fn embed_retriever_ranks_by_cosine() {
+        // Three near-orthogonal unit vectors; a query closest to tool 1.
+        let tools = vec![
+            vec![1.0, 0.0, 0.0],
+            vec![0.0, 1.0, 0.0],
+            vec![0.0, 0.0, 1.0],
+        ];
+        let r = EmbedRetriever::new(tools);
+        let query = vec![0.1, 0.99, 0.0]; // closest to tool 1
+        assert!(r.retrieved(&query, 1, 1), "nearest tool is retrieved at k=1");
+        assert!(!r.retrieved(&query, 0, 1), "a far tool is not top-1");
+        // recall helper over a batch.
+        let pairs = vec![(vec![0.9, 0.1, 0.0], 0usize), (vec![0.0, 0.2, 0.98], 2usize)];
+        assert_eq!(embed_recall_at_k(&r, &pairs, 1), 1.0);
     }
 
     #[test]

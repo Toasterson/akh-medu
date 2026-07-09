@@ -10486,6 +10486,7 @@ dependencies = [
  "candle-transformers 0.8.4",
  "chrono",
  "flate2",
+ "grug-data",
  "miette 7.6.0",
  "ndarray 0.17.2",
  "ort",
