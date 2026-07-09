@@ -343,7 +343,53 @@ pub struct EvalReport {
     pub valid_json_rate: f64,
     pub schema_adherence_rate: f64,
     pub arg_correct_rate: f64,
+    /// **Micro-averaged per-argument-value accuracy** (Phase 51 P3a metric
+    /// lens): of every expected `(param → value)` slot across the batch, the
+    /// fraction the model produced with an equal value. Unlike
+    /// `arg_correct_rate` — whole-call exact match, where a *single* wrong value
+    /// fails an entire multi-param call — this measures value fidelity at the
+    /// slot level, so a model that gets 4 of 5 args right on every call scores
+    /// ~0.8 here but 0.0 on `arg_correct_rate`. Populated only by the
+    /// `from_outputs*` constructors (which see the ground-truth values); a
+    /// report built via [`EvalReport::from_outcomes`] alone leaves this `0.0`.
+    pub arg_value_accuracy: f64,
     pub n: usize,
+}
+
+/// Micro count of `(hits, total)` over expected argument-value slots for
+/// [`EvalReport::arg_value_accuracy`]. `total` counts every expected param on
+/// every example; `hits` counts those the model emitted with a value equal
+/// (under [`values_equal_normalized`]) to ground truth. `repaired` applies the
+/// P3b KG-repair pass to the parsed call first, matching
+/// [`EvalReport::from_outputs_repaired_fmt`].
+fn arg_value_hits_fmt(
+    pairs: &[(String, Example)],
+    fmt: crate::format::TargetFormat,
+    repaired: bool,
+) -> (usize, usize) {
+    let (mut hits, mut total) = (0usize, 0usize);
+    for (raw, ex) in pairs {
+        let call = crate::format::parse_call(raw, fmt, &ex.tools).map(|c| {
+            if repaired {
+                crate::repair::repair_call(&c, &ex.tools).0
+            } else {
+                c
+            }
+        });
+        let want = ex.expected_call.arguments_map();
+        let schema = ex.expected_schema();
+        let got = call.as_ref().map(|c| c.arguments_map());
+        for (k, wv) in &want {
+            total += 1;
+            let ty = schema.and_then(|s| s.param(k)).map(|p| &p.ty);
+            if let Some(gv) = got.as_ref().and_then(|g| g.get(k)) {
+                if values_equal_normalized(gv, wv, ty) {
+                    hits += 1;
+                }
+            }
+        }
+    }
+    (hits, total)
 }
 
 impl EvalReport {
@@ -358,7 +404,8 @@ impl EvalReport {
             .iter()
             .map(|(raw, ex)| score_output_fmt(raw, ex, fmt))
             .collect();
-        Self::from_outcomes(&outcomes)
+        let (hits, total) = arg_value_hits_fmt(pairs, fmt, false);
+        Self::from_outcomes(&outcomes).with_value_accuracy(hits, total)
     }
 
     /// Score and aggregate a batch with the KG-backed repair pass applied
@@ -370,10 +417,21 @@ impl EvalReport {
             .iter()
             .map(|(raw, ex)| score_output_repaired_fmt(raw, ex, fmt))
             .collect();
-        Self::from_outcomes(&outcomes)
+        let (hits, total) = arg_value_hits_fmt(pairs, fmt, true);
+        Self::from_outcomes(&outcomes).with_value_accuracy(hits, total)
     }
 
-    /// Aggregate already-scored outcomes.
+    /// Fill in [`EvalReport::arg_value_accuracy`] from a `(hits, total)` slot
+    /// count (`0.0` for an empty denominator). Kept separate from
+    /// [`EvalReport::from_outcomes`] because per-value accuracy needs the
+    /// ground-truth values, which `EvalOutcome` alone does not carry.
+    fn with_value_accuracy(mut self, hits: usize, total: usize) -> Self {
+        self.arg_value_accuracy = if total == 0 { 0.0 } else { hits as f64 / total as f64 };
+        self
+    }
+
+    /// Aggregate already-scored outcomes. Leaves `arg_value_accuracy` at `0.0`
+    /// (it requires the ground-truth values — see [`EvalReport::with_value_accuracy`]).
     pub fn from_outcomes(outcomes: &[EvalOutcome]) -> Self {
         let n = outcomes.len();
         if n == 0 {
@@ -381,6 +439,7 @@ impl EvalReport {
                 valid_json_rate: 0.0,
                 schema_adherence_rate: 0.0,
                 arg_correct_rate: 0.0,
+                arg_value_accuracy: 0.0,
                 n: 0,
             };
         }
@@ -391,6 +450,7 @@ impl EvalReport {
             valid_json_rate: valid_json as f64 / n as f64,
             schema_adherence_rate: schema_valid as f64 / n as f64,
             arg_correct_rate: arg_correct as f64 / n as f64,
+            arg_value_accuracy: 0.0,
             n,
         }
     }
@@ -614,6 +674,52 @@ fn normalize_call_key(call: &ToolCall) -> String {
         .collect();
     pairs.sort();
     format!("{}({})", call.name, pairs.join(","))
+}
+
+#[cfg(test)]
+mod value_accuracy_tests {
+    use super::*;
+    use crate::format::TargetFormat;
+    use crate::schema::{Example, ParamSpec, ParamType, ToolCall, ToolSchema};
+
+    fn two_param_example() -> Example {
+        let tool = ToolSchema::new(
+            "book_table",
+            "d",
+            vec![
+                ParamSpec::new("guest", ParamType::String, true),
+                ParamSpec::new("party_size", ParamType::Integer, true),
+            ],
+        );
+        Example {
+            tools: vec![tool],
+            user_request: "r".into(),
+            expected_call: ToolCall::new("book_table", serde_json::json!({"guest": "Ada", "party_size": 4})),
+            mock_response: String::new(),
+        }
+    }
+
+    /// A call with one value right and one wrong scores 0.5 on per-value
+    /// accuracy but 0.0 on whole-call exact match — the whole point of the
+    /// finer lens.
+    #[test]
+    fn per_value_accuracy_is_finer_than_whole_call() {
+        let ex = two_param_example();
+        // guest right ("Ada"), party_size wrong (9 vs 4).
+        let raw = "call book_table | guest Ada | party_size 9";
+        let report = EvalReport::from_outputs_fmt(&[(raw.to_string(), ex)], TargetFormat::Grug);
+        assert_eq!(report.arg_correct_rate, 0.0, "one wrong value fails the whole call");
+        assert!((report.arg_value_accuracy - 0.5).abs() < 1e-9, "1 of 2 values correct = 0.5, got {}", report.arg_value_accuracy);
+    }
+
+    #[test]
+    fn a_fully_correct_call_scores_1_on_both() {
+        let ex = two_param_example();
+        let raw = "call book_table | guest Ada | party_size 4";
+        let report = EvalReport::from_outputs_fmt(&[(raw.to_string(), ex)], TargetFormat::Grug);
+        assert_eq!(report.arg_correct_rate, 1.0);
+        assert!((report.arg_value_accuracy - 1.0).abs() < 1e-9);
+    }
 }
 
 #[cfg(test)]

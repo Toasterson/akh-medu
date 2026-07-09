@@ -107,8 +107,14 @@ fn main() {
     println!("\n=== Phase 51 P3a full-stack — M1 retrieve → propose → M2 repair → M3 gap ===");
     println!("M1  retrieval recall@{}     : {:.3}  (target present in offered set)", args.retrieval_k, r.recall_at_k);
     println!("    registry call (n={})", r.n_call);
-    println!("      raw (neural)          : schema={:.3} arg={:.3}", r.call.schema_adherence_rate, r.call.arg_correct_rate);
-    println!("M2  repaired (KG-grounded)  : schema={:.3} arg={:.3}", r.call_repaired.schema_adherence_rate, r.call_repaired.arg_correct_rate);
+    println!(
+        "      raw (neural)          : schema={:.3} arg(whole-call)={:.3} arg(per-value)={:.3}",
+        r.call.schema_adherence_rate, r.call.arg_correct_rate, r.call.arg_value_accuracy
+    );
+    println!(
+        "M2  repaired (KG-grounded)  : schema={:.3} arg(whole-call)={:.3} arg(per-value)={:.3}",
+        r.call_repaired.schema_adherence_rate, r.call_repaired.arg_correct_rate, r.call_repaired.arg_value_accuracy
+    );
     println!(
         "    Δ lift                    : schema {:+.3}   arg {:+.3}",
         r.call_repaired.schema_adherence_rate - r.call.schema_adherence_rate,
@@ -126,8 +132,8 @@ fn main() {
         "recall_at_k": r.recall_at_k,
         "n_call": r.n_call,
         "n_abstain": r.n_abstain,
-        "call_raw": { "schema": r.call.schema_adherence_rate, "arg": r.call.arg_correct_rate },
-        "call_repaired": { "schema": r.call_repaired.schema_adherence_rate, "arg": r.call_repaired.arg_correct_rate },
+        "call_raw": { "schema": r.call.schema_adherence_rate, "arg_whole_call": r.call.arg_correct_rate, "arg_per_value": r.call.arg_value_accuracy },
+        "call_repaired": { "schema": r.call_repaired.schema_adherence_rate, "arg_whole_call": r.call_repaired.arg_correct_rate, "arg_per_value": r.call_repaired.arg_value_accuracy },
         "abstain_recall": r.abstention.abstain_recall,
         "false_abstention_rate": r.abstention.false_abstention_rate,
         "abstain_precision": r.abstention.abstain_precision,
