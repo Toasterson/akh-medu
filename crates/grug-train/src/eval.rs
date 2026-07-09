@@ -432,6 +432,14 @@ impl FrozenRetrievalHoldout {
 pub struct RetrievalEval {
     pub recall_at_k: f64,
     pub call: grug_data::EvalReport,
+    /// Registry-wide call reliability **after the M2 KG-repair pass** (ADR 089
+    /// mechanism 2, `grug_data::repair`) grounds each proposal against the
+    /// *retrieved* offered set — the full-stack number: M1-retrieve → propose →
+    /// M2-repair. The `call` → `call_repaired` delta is what the symbolic
+    /// grounding recovers on top of the neural proposal, now measured under the
+    /// realistic retrieval-selected offered set (8 request-keyed confusables)
+    /// rather than P3b's easy-2 distractors.
+    pub call_repaired: grug_data::EvalReport,
     pub abstention: grug_data::AbstentionReport,
     pub n_call: usize,
     pub n_abstain: usize,
@@ -439,7 +447,8 @@ pub struct RetrievalEval {
 
 /// Run one retrieval-scoped eval pass (mechanism 1): greedy-generate on the
 /// scoped + novelty holdouts under `fmt`, then score registry-wide call
-/// reliability (call-labelled subset) and the gap confusion matrix (all).
+/// reliability (call-labelled subset, **raw and M2-repaired**) and the gap
+/// confusion matrix (all).
 pub fn run_retrieval_eval_fmt<B: Backend, V: Vocab>(
     model: &TinyTransformer<B>,
     tokenizer: &V,
@@ -465,8 +474,14 @@ pub fn run_retrieval_eval_fmt<B: Backend, V: Vocab>(
     let call_pairs: Vec<(String, Example)> =
         scoped.iter().filter(|(_, ex)| !ex.is_abstention()).cloned().collect();
     let call = grug_data::EvalReport::from_outputs_fmt(&call_pairs, fmt);
+    // Full-stack (M1→propose→M2): repair each proposal against the retrieved
+    // offered set before scoring.
+    let call_repaired = grug_data::EvalReport::from_outputs_repaired_fmt(&call_pairs, fmt);
 
-    // Abstention confusion matrix over everything (scoped call+gap ∪ novelty gap).
+    // Abstention confusion matrix over everything (scoped call+gap ∪ novelty
+    // gap). Repair is a call-grounding pass and never rewrites a gap output into
+    // a call (or vice versa — `parse_output` detects abstention before the call
+    // parse), so the abstention matrix is unaffected and scored once, raw.
     let mut all = scoped.clone();
     all.extend(novelty.iter().cloned());
     let abstention = grug_data::AbstentionReport::from_outputs_fmt(&all, fmt);
@@ -474,6 +489,7 @@ pub fn run_retrieval_eval_fmt<B: Backend, V: Vocab>(
     RetrievalEval {
         recall_at_k: holdout.recall_at_k,
         call,
+        call_repaired,
         abstention,
         n_call: call_pairs.len(),
         n_abstain: all.len() - call_pairs.len(),

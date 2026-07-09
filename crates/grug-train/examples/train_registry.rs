@@ -204,9 +204,9 @@ fn main() {
             let r = run_retrieval_eval_fmt(&eval_model, &tokenizer, &holdout, gen_config, &device, fmt);
             log_registry_row(&eval_log_path, step, args.format.as_str(), args.retrieval_k, &r);
             println!(
-                "  eval@{step}  recall@{}={:.3} | registry_call: schema={:.3} arg={:.3} (n={}) | GAP: recall={:.3} false_abstain={:.3} precision={:.3} (n_abstain={})",
+                "  eval@{step}  recall@{}={:.3} | registry_call: schema={:.3} arg={:.3} → repaired arg={:.3} (n={}) | GAP: recall={:.3} false_abstain={:.3} precision={:.3} (n_abstain={})",
                 args.retrieval_k, r.recall_at_k,
-                r.call.schema_adherence_rate, r.call.arg_correct_rate, r.n_call,
+                r.call.schema_adherence_rate, r.call.arg_correct_rate, r.call_repaired.arg_correct_rate, r.n_call,
                 r.abstention.abstain_recall, r.abstention.false_abstention_rate, r.abstention.abstain_precision, r.n_abstain,
             );
         }
@@ -259,6 +259,10 @@ fn log_registry_row(path: &Path, step: usize, fmt_label: &str, k: usize, r: &gru
             "schema_adherence_rate": r.call.schema_adherence_rate,
             "arg_correct_rate": r.call.arg_correct_rate,
             "n": r.n_call,
+        },
+        "registry_call_repaired": {
+            "schema_adherence_rate": r.call_repaired.schema_adherence_rate,
+            "arg_correct_rate": r.call_repaired.arg_correct_rate,
         },
         "abstain_recall": r.abstention.abstain_recall,
         "false_abstention_rate": r.abstention.false_abstention_rate,
