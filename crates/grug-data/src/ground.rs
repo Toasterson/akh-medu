@@ -19,13 +19,25 @@
 //!   re-permutes), and never invents a value the request doesn't contain.
 //! - **Enum**: if the emitted value is not the declared variant that appears in
 //!   the request, and exactly one declared variant does appear, snap to it.
-//! - **String / Boolean**: left untouched — the request's string bank and the
-//!   two boolean tokens don't give an unambiguous re-grounding signal, so
-//!   touching them would risk breaking correct values (measured: strings/bools
-//!   are a minority of the residual).
+//! - **String**: the request embeds the argument's string value *verbatim*
+//!   (the generator synthesizes the value first and the phrasing references it),
+//!   so — exactly like numbers — the correct value is a span of the request. An
+//!   emitted string that is not already a verbatim request span is snapped to
+//!   the request word-window (1..=[`STR_MAX_WORDS`] words) most similar to it by
+//!   normalized Levenshtein, but *only* if that similarity clears
+//!   [`STR_SNAP_THRESHOLD`] — a confidently-wrong emission with no close request
+//!   span is left untouched rather than snapped to noise. As with numbers,
+//!   already-claimed spans aren't reused, so two string args can't collapse onto
+//!   the same evidence.
+//! - **Boolean**: deliberately left untouched. A boolean is a single bit and a
+//!   bag-of-words request gives no unambiguous polarity signal (the value isn't
+//!   a copyable span, and "enable/disable"-style cues need positional parsing we
+//!   don't do here) — snapping would be a coin-flip that can *regress* a
+//!   correct value, which violates this pass's do-no-harm contract. Measured:
+//!   booleans are a small minority of the residual, so the miss is cheap.
 //!
 //! Values the model already copied correctly are never modified (they match a
-//! request value), so grounding cannot regress an already-correct arg to a
+//! request value/span), so grounding cannot regress an already-correct arg to a
 //! wrong one — only ungrounded values are candidates.
 
 use serde_json::Value;
@@ -37,7 +49,21 @@ use crate::schema::{ParamType, ToolCall, ToolSchema};
 pub struct GroundStats {
     pub numeric_regrounded: usize,
     pub enum_regrounded: usize,
+    pub string_regrounded: usize,
 }
+
+/// Longest request word-window (in whitespace words) considered a candidate
+/// span when re-grounding a string value. The generator's string bank tops out
+/// at three words (`"the new proposal"`), so 3 covers every legitimate value
+/// without inviting spurious long-span matches.
+const STR_MAX_WORDS: usize = 3;
+
+/// Minimum normalized (`1 - lev/maxlen`) similarity between an ungrounded string
+/// value and a request span for the snap to fire. Below this the value is left
+/// unchanged — a genuinely-wrong emission with no close request evidence must
+/// not be dragged onto an unrelated span. 0.5 admits corruption/truncation
+/// (`"Zuric"` → `"Zurich"`, sim 0.83) while rejecting unrelated pairs.
+const STR_SNAP_THRESHOLD: f64 = 0.5;
 
 /// Re-ground `call`'s argument values against `request`, using `offered` to
 /// find the emitted tool's schema (for per-arg types). Returns the grounded
@@ -115,7 +141,131 @@ pub fn ground_values(
         }
     }
 
+    // String grounding: the value is a verbatim request span. Claim the span of
+    // every already-grounded string first (so two args can't snap to the same
+    // evidence), then snap each ungrounded string to its nearest unclaimed span
+    // above threshold. `Enum` values are strings too but are handled above — a
+    // param whose declared type is `Enum` is skipped here.
+    let spans = word_spans(request); // (byte_start, byte_end) of each request word
+    let windows: Vec<&str> = span_windows(request, &spans);
+    let mut claimed: Vec<bool> = vec![false; windows.len()];
+
+    // First pass: mark windows claimed by strings the model already copied
+    // verbatim (case-insensitive exact match), so they aren't reused. Claim the
+    // first still-unclaimed matching window (a value can appear once per span).
+    for (name, value) in &args {
+        let Some(spec) = schema.param(name) else { continue };
+        if spec.ty != ParamType::String {
+            continue;
+        }
+        let Some(s) = value.as_str() else { continue };
+        if let Some(i) = (0..windows.len()).find(|&i| !claimed[i] && windows[i].eq_ignore_ascii_case(s)) {
+            claimed[i] = true;
+        }
+    }
+
+    // Second pass: snap ungrounded strings to the nearest unclaimed window.
+    for (name, value) in &args {
+        let Some(spec) = schema.param(name) else { continue };
+        if spec.ty != ParamType::String {
+            continue;
+        }
+        let Some(s) = value.as_str() else { continue };
+        // Grounded already (a window equals it, case-insensitively)?
+        if windows.iter().any(|win| win.eq_ignore_ascii_case(s)) {
+            continue;
+        }
+        // Best unclaimed window by normalized similarity.
+        let mut best: Option<(usize, f64)> = None;
+        for (i, win) in windows.iter().enumerate() {
+            if claimed[i] {
+                continue;
+            }
+            let sim = normalized_similarity(s, win);
+            if best.is_none_or(|(_, b)| sim > b) {
+                best = Some((i, sim));
+            }
+        }
+        if let Some((i, sim)) = best {
+            if sim >= STR_SNAP_THRESHOLD && !windows[i].eq_ignore_ascii_case(s) {
+                new_args.insert(name.clone(), Value::String(windows[i].to_string()));
+                claimed[i] = true;
+                stats.string_regrounded += 1;
+            }
+        }
+    }
+
     (ToolCall::new(call.name.clone(), Value::Object(new_args)), stats)
+}
+
+/// Byte ranges of each "word" in `text`: a maximal run of ASCII alphanumeric
+/// chars or apostrophes (so `grandma's` stays one word). Word boundaries are
+/// char boundaries, so the ranges are safe to slice `text` with.
+fn word_spans(text: &str) -> Vec<(usize, usize)> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        let is_word = |b: u8| b.is_ascii_alphanumeric() || b == b'\'';
+        if is_word(bytes[i]) {
+            let start = i;
+            while i < bytes.len() && is_word(bytes[i]) {
+                i += 1;
+            }
+            out.push((start, i));
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Every candidate span: for each word start, the exact request substring
+/// covering 1..=[`STR_MAX_WORDS`] consecutive words. Slices are borrowed from
+/// `text` so casing/apostrophes are preserved verbatim (a snapped value must
+/// byte-equal the request's own span to score).
+fn span_windows<'a>(text: &'a str, words: &[(usize, usize)]) -> Vec<&'a str> {
+    let mut out = Vec::new();
+    for i in 0..words.len() {
+        let end = (i + STR_MAX_WORDS).min(words.len());
+        for j in i..end {
+            out.push(&text[words[i].0..words[j].1]);
+        }
+    }
+    out
+}
+
+/// Normalized string similarity in `[0, 1]`: `1 - lev(a,b) / max(|a|,|b|)`,
+/// case-insensitive. `1.0` for two empty strings.
+fn normalized_similarity(a: &str, b: &str) -> f64 {
+    let al: Vec<char> = a.to_ascii_lowercase().chars().collect();
+    let bl: Vec<char> = b.to_ascii_lowercase().chars().collect();
+    let max = al.len().max(bl.len());
+    if max == 0 {
+        return 1.0;
+    }
+    1.0 - levenshtein(&al, &bl) as f64 / max as f64
+}
+
+/// Classic two-row Levenshtein edit distance over char slices.
+fn levenshtein(a: &[char], b: &[char]) -> usize {
+    if a.is_empty() {
+        return b.len();
+    }
+    if b.is_empty() {
+        return a.len();
+    }
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut curr = vec![0usize; b.len() + 1];
+    for (i, &ca) in a.iter().enumerate() {
+        curr[0] = i + 1;
+        for (j, &cb) in b.iter().enumerate() {
+            let cost = if ca == cb { 0 } else { 1 };
+            curr[j + 1] = (prev[j + 1] + 1).min(curr[j] + 1).min(prev[j] + cost);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[b.len()]
 }
 
 /// Coerce a grounded request number into the JSON shape the param type expects:
@@ -239,6 +389,79 @@ mod tests {
         let (grounded, stats) = ground_values(&call, request, &offered);
         assert_eq!(stats.enum_regrounded, 1);
         assert_eq!(grounded.arguments["mode_level"], serde_json::json!("high"));
+    }
+
+    /// A tool with two string params (plus an enum), for string-grounding tests.
+    fn str_tool() -> ToolSchema {
+        ToolSchema::new(
+            "share_doc",
+            "d",
+            vec![
+                ParamSpec::new("document", ParamType::String, true),
+                ParamSpec::new("place", ParamType::String, true),
+                ParamSpec::new("mode_level", ParamType::Enum(vec!["low".into(), "high".into()]), false),
+            ],
+        )
+    }
+
+    #[test]
+    fn snaps_corrupted_single_word_string_to_request_span() {
+        let offered = vec![str_tool()];
+        let request = "share the new proposal with Zurich";
+        // `place` corrupted (Zur1ch) → snap to the verbatim request span "Zurich".
+        let call = ToolCall::new(
+            "share_doc",
+            serde_json::json!({"document": "the new proposal", "place": "Zur1ch"}),
+        );
+        let (grounded, stats) = ground_values(&call, request, &offered);
+        assert_eq!(stats.string_regrounded, 1);
+        assert_eq!(grounded.arguments["place"], serde_json::json!("Zurich"));
+        // The already-correct multi-word string is untouched.
+        assert_eq!(grounded.arguments["document"], serde_json::json!("the new proposal"));
+    }
+
+    #[test]
+    fn snaps_corrupted_multi_word_string_verbatim_with_apostrophe() {
+        let offered = vec![str_tool()];
+        let request = "please share grandma's recipe with Oslo";
+        let call = ToolCall::new(
+            "share_doc",
+            serde_json::json!({"document": "grandmas recipe", "place": "Oslo"}),
+        );
+        let (grounded, stats) = ground_values(&call, request, &offered);
+        assert_eq!(stats.string_regrounded, 1);
+        // Snapped to the exact request substring, apostrophe preserved.
+        assert_eq!(grounded.arguments["document"], serde_json::json!("grandma's recipe"));
+    }
+
+    #[test]
+    fn leaves_confidently_wrong_string_untouched() {
+        let offered = vec![str_tool()];
+        let request = "share the budget review with Tokyo";
+        // A value with no close request span (well below threshold vs every
+        // window) must be left alone, not dragged onto noise.
+        let call = ToolCall::new(
+            "share_doc",
+            serde_json::json!({"document": "zzzzzzzzzz", "place": "Tokyo"}),
+        );
+        let (grounded, stats) = ground_values(&call, request, &offered);
+        assert_eq!(stats.string_regrounded, 0);
+        assert_eq!(grounded.arguments["document"], serde_json::json!("zzzzzzzzzz"));
+    }
+
+    #[test]
+    fn two_corrupted_strings_do_not_collapse_to_one_span() {
+        let offered = vec![str_tool()];
+        let request = "share Denver with Cairo";
+        // Both single-word strings corrupted; each must claim a distinct span.
+        let call = ToolCall::new(
+            "share_doc",
+            serde_json::json!({"document": "Denvr", "place": "Cair0"}),
+        );
+        let (grounded, stats) = ground_values(&call, request, &offered);
+        assert_eq!(stats.string_regrounded, 2);
+        assert_eq!(grounded.arguments["document"], serde_json::json!("Denver"));
+        assert_eq!(grounded.arguments["place"], serde_json::json!("Cairo"));
     }
 
     #[test]

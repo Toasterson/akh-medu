@@ -85,6 +85,18 @@ impl Retriever {
         scored.into_iter().take(k).map(|(_, i)| i).collect()
     }
 
+    /// Does tool `tool_idx` **fully cover** `request` — is *every* one of its
+    /// `verb_noun` name tokens present in the request? This is the strong
+    /// coverage signal (both tokens, not just one) that makes the true tool the
+    /// unique top hit; the organ's gap-response loop uses it to tell a genuine
+    /// retrieval miss (a real tool that fully covers the request but ranked
+    /// outside the offered top-K) apart from a mere partial-overlap confusable.
+    pub fn covers(&self, request: &str, tool_idx: usize) -> bool {
+        let request_tokens = tokenize(request);
+        let toks = &self.tool_tokens[tool_idx];
+        !toks.is_empty() && toks.iter().all(|t| request_tokens.contains(t.as_str()))
+    }
+
     /// Whether `target_idx` is among the top-`k` retrieved for `request` **with
     /// nonzero overlap** — i.e. genuinely surfaced by relevance, not merely
     /// padding out `k`. This is the honest recall predicate: a target dragged
@@ -125,6 +137,207 @@ fn tokenize(request: &str) -> HashSet<&str> {
         .split(|c: char| !c.is_ascii_alphanumeric())
         .filter(|s| !s.is_empty())
         .collect()
+}
+
+// ===========================================================================
+// Semantic (HDC / VSA) retriever — Phase 51 P3a follow-up.
+//
+// The lexical `Retriever` above scores by *exact* name-token overlap, which is
+// why its recall@8 is ~1.0: the procedural phrasings embed the tool's verb+noun
+// tokens verbatim, so an exact-token retriever always finds them. That is the
+// standing caveat — the retriever and the training *label* share one signal
+// (the name tokens), so the 1.0 could be an artifact of surface coupling rather
+// than evidence a realistic router would cover the request.
+//
+// This `SemanticRetriever` is a step toward the real (VSA) router: it encodes
+// each tool and each request as a **binary hypervector** over character
+// trigrams (hash-projected, bundled by majority) and ranks by Hamming
+// similarity. It is *surface-semantic*, not a learned embedding — on this
+// corpus the only tool-side content is the name (descriptions merely echo it),
+// so an HDC retriever still keys on the name's surface form. What it adds over
+// exact-token matching is **robustness**: char trigrams degrade gracefully
+// under typos / morphological drift that break exact-token overlap outright.
+//
+// The honest experiment (see `semantic_vs_lexical_*` tests): on *clean*
+// requests both retrievers hit ~1.0 (both key on the verbatim name); under
+// request-side typos to the name tokens, the exact-token lexical retriever
+// collapses while the HDC retriever largely survives. Neither is a learned
+// semantic model, so neither can be claimed to retrieve under genuine
+// *paraphrase* (synonyms with no shared surface) — that is the learned Phase 28
+// VSA router's job, and this name-only corpus cannot stand in for that test.
+// ===========================================================================
+
+/// Hypervector dimensionality in bits (a multiple of 64). 2048 bits is ample
+/// separation for a few-thousand-tool registry while staying cheap to build and
+/// compare (32 × `u64` popcount per Hamming).
+const HDC_DIM: usize = 2048;
+const HDC_WORDS: usize = HDC_DIM / 64;
+
+/// A packed binary hypervector.
+type HyperVec = [u64; HDC_WORDS];
+
+/// A retriever that ranks tools by **Hamming similarity of character-trigram
+/// hypervectors** rather than exact name-token overlap. Tool hypervectors are
+/// precomputed at construction; [`SemanticRetriever::top_k`] encodes the request
+/// once and ranks the registry by bit agreement.
+#[derive(Debug, Clone)]
+pub struct SemanticRetriever {
+    tool_hvs: Vec<HyperVec>,
+}
+
+impl SemanticRetriever {
+    /// Build over `registry`, encoding each tool's `name` (underscores treated
+    /// as spaces so `fetch_ledger` trigrams read like the phrase) plus its
+    /// description into a hypervector.
+    pub fn new(registry: &[ToolSchema]) -> Self {
+        let tool_hvs = registry.iter().map(|t| encode_tool(t)).collect();
+        Self { tool_hvs }
+    }
+
+    pub fn len(&self) -> usize {
+        self.tool_hvs.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.tool_hvs.is_empty()
+    }
+
+    /// Bit-agreement (Hamming similarity) of a tool against a request HV: the
+    /// count of matching bits, in `0..=HDC_DIM`. Higher = more similar.
+    fn similarity(&self, tool_idx: usize, request_hv: &HyperVec) -> u32 {
+        let tool = &self.tool_hvs[tool_idx];
+        let mut agree = 0u32;
+        for w in 0..HDC_WORDS {
+            agree += (!(tool[w] ^ request_hv[w])).count_ones();
+        }
+        agree
+    }
+
+    /// Indices of the top-`k` registry tools for `request`, most similar first;
+    /// ties broken by ascending index (deterministic, like [`Retriever::top_k`]).
+    pub fn top_k(&self, request: &str, k: usize) -> Vec<usize> {
+        let hv = encode_text(request);
+        let k = k.min(self.tool_hvs.len());
+        let mut scored: Vec<(u32, usize)> =
+            (0..self.tool_hvs.len()).map(|i| (self.similarity(i, &hv), i)).collect();
+        scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+        scored.into_iter().take(k).map(|(_, i)| i).collect()
+    }
+
+    /// Whether `target_idx` ranks within the top-`k` by Hamming similarity.
+    /// Unlike the lexical retriever there is no "zero overlap" floor — every HV
+    /// has *some* agreement — so a target dragged in only because the registry
+    /// is smaller than `k` is still excluded by the `rank < k` test, but there
+    /// is no separate nonzero-overlap gate (similarity is effectively always
+    /// positive). This is the honest recall predicate for the HDC retriever.
+    pub fn retrieved(&self, request: &str, target_idx: usize, k: usize) -> bool {
+        let hv = encode_text(request);
+        let target_sim = self.similarity(target_idx, &hv);
+        let rank = (0..self.tool_hvs.len())
+            .filter(|&i| i != target_idx)
+            .filter(|&i| {
+                let s = self.similarity(i, &hv);
+                s > target_sim || (s == target_sim && i < target_idx)
+            })
+            .count();
+        rank < k
+    }
+}
+
+/// Encode a tool into a hypervector: its name (with `_`→space) and description.
+fn encode_tool(tool: &ToolSchema) -> HyperVec {
+    let text = format!("{} {}", tool.name.replace('_', " "), tool.description);
+    encode_text(&text)
+}
+
+/// Encode text into a binary hypervector: bundle (majority-vote) the random
+/// projection of every character trigram of the lowercased text. Deterministic
+/// — no RNG state, each trigram maps to a fixed pseudo-random HV via its hash.
+fn encode_text(text: &str) -> HyperVec {
+    let lower = text.to_ascii_lowercase();
+    let chars: Vec<char> = lower.chars().collect();
+    // Per-bit signed accumulator for the majority bundle.
+    let mut counts = [0i32; HDC_DIM];
+    let mut any = false;
+    // Character trigrams (sliding window of 3); for very short text, fall back
+    // to the whole thing as one gram so it still encodes to something.
+    if chars.len() >= 3 {
+        for w in chars.windows(3) {
+            accumulate_gram(w, &mut counts);
+            any = true;
+        }
+    } else if !chars.is_empty() {
+        accumulate_gram(&chars, &mut counts);
+        any = true;
+    }
+    let mut hv = [0u64; HDC_WORDS];
+    if !any {
+        return hv;
+    }
+    for (bit, &c) in counts.iter().enumerate() {
+        if c > 0 {
+            hv[bit / 64] |= 1u64 << (bit % 64);
+        }
+    }
+    hv
+}
+
+/// Add one character gram's random-projection vector (±1 per bit, derived
+/// deterministically from the gram's hash) into the signed accumulator.
+fn accumulate_gram(gram: &[char], counts: &mut [i32; HDC_DIM]) {
+    let mut seed = fnv1a(gram);
+    for word in 0..HDC_WORDS {
+        let bits = splitmix64(&mut seed);
+        for b in 0..64 {
+            let idx = word * 64 + b;
+            if (bits >> b) & 1 == 1 {
+                counts[idx] += 1;
+            } else {
+                counts[idx] -= 1;
+            }
+        }
+    }
+}
+
+/// FNV-1a over a character gram (each char folded as its UTF-32 code point),
+/// seeding the per-gram projection.
+fn fnv1a(gram: &[char]) -> u64 {
+    let mut h = 0xcbf29ce484222325u64;
+    for &c in gram {
+        for byte in (c as u32).to_le_bytes() {
+            h ^= byte as u64;
+            h = h.wrapping_mul(0x00000100000001B3);
+        }
+    }
+    // Avoid a zero state feeding splitmix (still fine, but keep it lively).
+    h | 1
+}
+
+/// SplitMix64 step — a fast, well-distributed PRNG for expanding a gram seed
+/// into `HDC_DIM` pseudo-random bits.
+fn splitmix64(x: &mut u64) -> u64 {
+    *x = x.wrapping_add(0x9E3779B97F4A7C15);
+    let mut z = *x;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+    z ^ (z >> 31)
+}
+
+/// Semantic (HDC) retrieval **recall@k** over `(request, target_idx)` pairs —
+/// the [`retrieval_recall_at_k`] counterpart for [`SemanticRetriever`].
+pub fn semantic_recall_at_k(
+    retriever: &SemanticRetriever,
+    pairs: &[(String, usize)],
+    k: usize,
+) -> f64 {
+    if pairs.is_empty() {
+        return 0.0;
+    }
+    let hits = pairs
+        .iter()
+        .filter(|(req, target)| retriever.retrieved(req, *target, k))
+        .count();
+    hits as f64 / pairs.len() as f64
 }
 
 /// Retrieval **recall@k** over a batch of `(request, target_idx)` pairs: the
@@ -213,5 +426,91 @@ mod tests {
         }
         let recall = retrieval_recall_at_k(&r, &pairs, 8);
         assert!(recall > 0.9, "recall@8 should be high on the procedural registry, got {recall}");
+    }
+
+    /// Draw `n` `(request, target_idx)` pairs from the procedural registry —
+    /// shared by the semantic-retriever tests below.
+    fn sample_pairs(seed: u64, n_tools: usize, n: usize) -> (Vec<ToolSchema>, Vec<(String, usize)>) {
+        use rand::Rng;
+        use rand::SeedableRng;
+        let catalog = build_catalog(42, n_tools);
+        let registry = catalog.tools().to_vec();
+        let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+        let mut pairs = Vec::new();
+        for _ in 0..n {
+            let idx = rng.gen_range(0..registry.len());
+            let bank = catalog.phrasings().get(&registry[idx].name).unwrap();
+            let mut args = serde_json::Map::new();
+            for p in &registry[idx].params {
+                args.insert(p.name.clone(), crate::generator::fuzz_value(&mut rng, &p.ty));
+            }
+            let call = crate::schema::ToolCall::new(registry[idx].name.clone(), serde_json::Value::Object(args));
+            let req = bank.render_train(&mut rng, &call);
+            pairs.push((req, idx));
+        }
+        (registry, pairs)
+    }
+
+    /// Substitute one middle character in every request word that equals one of
+    /// `name`'s `verb_noun` tokens — enough to break an *exact-token* match while
+    /// leaving most character trigrams intact.
+    fn corrupt_name_tokens(request: &str, name: &str) -> String {
+        let toks: HashSet<String> = name.split('_').map(|s| s.to_ascii_lowercase()).collect();
+        request
+            .split_whitespace()
+            .map(|w| {
+                let key: String = w.chars().filter(|c| c.is_ascii_alphanumeric()).collect::<String>().to_ascii_lowercase();
+                if toks.contains(&key) && w.chars().count() >= 2 {
+                    let mut cs: Vec<char> = w.chars().collect();
+                    let i = cs.len() / 2;
+                    cs[i] = if cs[i] == 'x' { 'q' } else { 'x' };
+                    cs.into_iter().collect()
+                } else {
+                    w.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    #[test]
+    fn semantic_recall_matches_lexical_on_clean_requests() {
+        let (registry, pairs) = sample_pairs(7, 500, 200);
+        let lexical = Retriever::new(&registry);
+        let semantic = SemanticRetriever::new(&registry);
+        let lex = retrieval_recall_at_k(&lexical, &pairs, 8);
+        let sem = semantic_recall_at_k(&semantic, &pairs, 8);
+        // Both key on the verbatim name embedded in the request, so both are
+        // high on clean requests — the caveat, made concrete.
+        assert!(lex > 0.9, "clean lexical recall@8 = {lex}");
+        assert!(sem > 0.9, "clean semantic recall@8 = {sem}");
+    }
+
+    #[test]
+    fn semantic_survives_name_typos_that_break_lexical() {
+        let (registry, pairs) = sample_pairs(9, 500, 200);
+        let lexical = Retriever::new(&registry);
+        let semantic = SemanticRetriever::new(&registry);
+
+        let clean_lex = retrieval_recall_at_k(&lexical, &pairs, 8);
+
+        let noisy: Vec<(String, usize)> = pairs
+            .iter()
+            .map(|(req, idx)| (corrupt_name_tokens(req, &registry[*idx].name), *idx))
+            .collect();
+        let noisy_lex = retrieval_recall_at_k(&lexical, &noisy, 8);
+        let noisy_sem = semantic_recall_at_k(&semantic, &noisy, 8);
+
+        // Exact-token overlap collapses under name typos...
+        assert!(
+            noisy_lex < clean_lex - 0.1,
+            "lexical recall should degrade materially under name typos: clean={clean_lex} noisy={noisy_lex}"
+        );
+        // ...while the char-trigram HDC retriever is far more robust (rank order
+        // survives even as absolute bit-agreement drops).
+        assert!(
+            noisy_sem > noisy_lex + 0.1,
+            "semantic recall should beat lexical under typos: sem={noisy_sem} lex={noisy_lex}"
+        );
     }
 }
