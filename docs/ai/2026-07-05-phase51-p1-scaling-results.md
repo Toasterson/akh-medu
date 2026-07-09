@@ -260,3 +260,21 @@ On clean requests both are high — the caveat made concrete: the *only* tool-si
 | abstain recall / false-abstain / precision | ~0.998 / 0.001 / 0.999 | 0.977 / 0.012 / 0.988 |
 
 **The finding:** the premise (recall@8) is seed-invariant at 1.000, and abstention is stable (~0.98–1.0). But the decisive observation is the last-mile stack's behaviour under neural variance: the **raw** neural whole-call number swings **0.13** across seeds (0.594 → 0.465 — seed 43 drew a weaker model), yet the **grounded** number converges to within **0.011** (0.738 vs 0.727). The grounded Δ is correspondingly larger on the weaker seed (+0.262 vs +0.145). So value-grounding does not merely raise the mean — it **absorbs the model's training-seed variance**, pulling a noisier proposer to the same ~0.73 grounded outcome. This is exactly the ADR 089 thesis sharpened: the correctness that matters lives in the symbolic organ, and the organ makes the shipped number robust to which particular weights the neural System-1 happened to land on. Mean grounded whole-call over n=2 ≈ **0.733 ± 0.006**; raw ≈ 0.53 ± 0.065 — an order of magnitude more spread.
+
+## 16. P3d-1 — the recall matrix: recall@8 = 1.000 was *entirely* surface coupling to the name (2026-07-09)
+
+Every §14–15 headline carried the asterisk that the corpus embeds the tool name verbatim in the request and lets the description echo the name. P3d ([plan](plans/2026-07-09-phase51-p3d-semantic-retrieval-corpus.md)) builds the corpus that removes it: a **gloss lexicon** (`grug_data::semantic`, `VERB_GLOSS`/`NOUN_GLOSS`, each verb/noun given primary + alt synonyms with *zero whole-word overlap with the name*, tested) drives three `SignalMode` tiers — **D0** name (current), **D1** description (request + description use the primary gloss, name absent), **D2** paraphrase (request uses the *alt* gloss, description the *primary* — surface-disjoint). Argument values are never glossed (they stay verbatim), so value-grounding is a control.
+
+P3d-1 is the model-independent recall matrix (`examples/recall_matrix.rs`, seed 42, 1000 tools, k=8, n=500): recall@8 for a lexical and an HDC retriever, each keyed on the name or the description.
+
+| tier | lex@name | lex@desc | hdc@name | hdc@desc |
+|---|---|---|---|---|
+| **D0** name | **1.000** | 1.000 | 0.990 | 0.924 |
+| **D1** description | **0.002** | **0.990** | 0.010 | **1.000** |
+| **D2** paraphrase | 0.002 | **0.012** | 0.008 | **0.018** |
+
+*(one tool, transformed: D0 request "resume the endpoint" → D1 "continue the api address" (desc "Continue the api address.") → D2 "carry on the service url" vs the same primary-gloss description.)*
+
+**Two caveats, now numbers.** (1) **How much of recall@8 = 1.000 was surface coupling? All of it.** The instant the name leaves the request (D1), lexical-on-**name** collapses **1.000 → 0.002** — the P3a premise was the verbatim name, nothing more. (2) **Does the signal survive when moved to the description?** At **D1, completely** — a description-keyed retriever recovers it (lex 0.990, HDC **1.000**): retrieval is fine keyed on *meaning-bearing text the retriever actually reads*, as the real system does, **provided request and description share vocabulary**. At **D2 (genuine paraphrase), no surface retriever can** — lexical- and HDC-on-description floor at **0.012 / 0.018**, because request (alt gloss) and description (primary gloss) share no content surface. That ~0.01–0.02 is the **surface-retrieval floor under true paraphrase**, and it is exactly where a *learned* embedding must earn its keep (P3d-2, Seshat MiniLM). D0 hdc@desc 0.924 < 1.0 is HDC noise on the echo-description; immaterial.
+
+**Consequence for the arc.** The P3a premise (recall = 1.0) is *not* a semantic result — it is a surface artifact that vanishes under D1. The good news is D1 shows the premise is *recoverable* by reading the description, so the organ's retrieval story is sound wherever the request and the capability description share vocabulary (the common case). The open question is D2 — genuine paraphrase — which surface methods cannot touch and which P3d-2/P3d-3 test with a learned embedder and an abstention retrain. This is the honest sharpening the whole P3d phase was for: the caveat is now a measured floor, not a hand-wave.

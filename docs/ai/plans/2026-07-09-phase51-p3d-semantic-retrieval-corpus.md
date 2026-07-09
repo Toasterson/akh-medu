@@ -1,6 +1,6 @@
 # Phase 51 P3d — Semantic-Retrieval Corpus: remove the name-only-corpus asterisk
 
-- **Status:** Design (not built). 2026-07-09.
+- **Status:** P3d-1 **built + measured** (2026-07-09, commit `9ad8c13`); P3d-2/P3d-3 pending. **Headline: recall@8 = 1.000 was *entirely* surface coupling to the name** — lexical-on-name collapses 1.000 → 0.002 the moment the name leaves the request (D1); a description-keyed retriever fully recovers at D1 (0.99–1.00) but every surface retriever floors at ~0.01–0.02 under true paraphrase (D2). See [scaling-results §16](../2026-07-05-phase51-p1-scaling-results.md#16).
 - **Deciders:** Till, Claude (Opus 4.8).
 - **Relates:** extends [ADR 089](../decisions/089-organ-kg-zeroshot-path.md) (organ, not weights) and the P3a results ([scaling-results §14–15](../2026-07-05-phase51-p1-scaling-results.md#14)). Consumes the Phase-28 semantic router / Phase-37 Seshat embedder (`all-MiniLM-L6-v2`) as the learned retriever.
 - **Anima:** log under project `019d9844-ce74-7993-a9f0-c953b8f04a4e` ("Akh-Medu"); this file is the backup + Seshat paste source.
@@ -113,11 +113,11 @@ Risks: (a) gloss authoring quality — a lazy gloss that shares a token re-intro
 
 ## 8. Buildable checklist
 
-- [ ] `semantic.rs`: `VERB_GLOSS` / `NOUN_GLOSS` tables + zero-overlap + uniqueness tests.
-- [ ] `procedural.rs`: `SignalMode`, `describe_tool`, `verb_phrase_for_signal`, `build_catalog_signal`.
-- [ ] `dataset.rs`: thread `SignalMode` through the sized constructors + retrieval streams.
-- [ ] `retriever.rs`: `*::new_over(text)` description-keyed constructors.
-- [ ] `examples/recall_matrix.rs` (P3d-1) — the tier × retriever recall table.
-- [ ] `examples/semantic_recall_minilm.rs` (P3d-2) — Seshat/MiniLM D2 recall.
+- [x] `semantic.rs`: `SignalMode`, `VERB_GLOSS`/`NOUN_GLOSS` tables + zero-name-overlap + content-disjoint tests, `glossed_phrase`, `describe_tool` (`9ad8c13`).
+- [x] `procedural.rs`: `build_catalog_signal` threads `SignalMode` (Name byte-identical); retired `verb_phrase_for` for `glossed_phrase` (`9ad8c13`).
+- [x] `catalog.rs` / `dataset.rs`: `procedural_signal` / `new_sized_signal` constructors (`9ad8c13`). *(Retrieval-stream threading for the D1 retrain is P3d-3.)*
+- [x] `retriever.rs`: `Retriever`/`SemanticRetriever::new_over(text)` description-keyed constructors (`9ad8c13`).
+- [x] `examples/recall_matrix.rs` (P3d-1) — the tier × retriever recall table. **Done, measured.**
+- [ ] `examples/semantic_recall_minilm.rs` (P3d-2) — Seshat/MiniLM D2 recall (the ~0.01–0.02 D2 floor is what it must beat).
 - [ ] `train_registry` + `eval_registry_repair`: accept `--signal-mode`; retrain on D1, re-measure abstention + full stack (P3d-3).
-- [ ] Docs: scaling-results §16, ADR 089 update (confirm-or-correct the M1 caveat), memory, Seshat.
+- [x] Docs: scaling-results §16 (`46...`), plan + memory + Seshat. *(ADR 089 M1-caveat update folded into §16; the abstention confirm-or-correct waits on P3d-3.)*
