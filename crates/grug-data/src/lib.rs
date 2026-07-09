@@ -41,6 +41,7 @@ pub mod phrasing;
 pub mod procedural;
 pub mod retriever;
 pub mod schema;
+pub mod semantic;
 
 pub use catalog::ToolCatalog;
 pub use constrain::{GrammarState, ToolCallGrammar};
@@ -57,5 +58,8 @@ pub use repair::{repair_call, RepairStats};
 pub use retriever::{retrieval_recall_at_k, semantic_recall_at_k, Retriever, SemanticRetriever};
 pub use generator::{DistractorConfig, Generator, PhrasingMode};
 pub use phrasing::{PhrasingBank, PhrasingRegistry, PhrasingTemplate, TemplatePart};
-pub use procedural::{build_catalog as build_procedural_catalog, DEFAULT_TEMPLATES_PER_TOOL};
+pub use procedural::{
+    build_catalog as build_procedural_catalog, build_catalog_signal, DEFAULT_TEMPLATES_PER_TOOL,
+};
+pub use semantic::{describe_tool, glossed_phrase, SignalMode};
 pub use schema::{Example, ParamSpec, ParamType, ToolCall, ToolSchema};

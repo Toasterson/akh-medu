@@ -46,6 +46,17 @@ impl Retriever {
         Self { tool_tokens }
     }
 
+    /// Build a retriever keyed on an arbitrary per-tool text (e.g. the tool
+    /// **description** rather than its name), parallel to the registry the
+    /// caller will index against. Tokens are the text's lowercased alphanumeric
+    /// words — the same tokenization requests get — so `covers`/`retrieved`/
+    /// recall behave identically. This is what lets the P3d recall matrix
+    /// compare name-keyed vs description-keyed retrieval on one code path.
+    pub fn new_over<S: AsRef<str>>(texts: &[S]) -> Self {
+        let tool_tokens = texts.iter().map(|t| word_tokens(t.as_ref())).collect();
+        Self { tool_tokens }
+    }
+
     /// Number of tools in the registry this retriever indexes.
     pub fn len(&self) -> usize {
         self.tool_tokens.len()
@@ -129,6 +140,15 @@ fn name_tokens(name: &str) -> Vec<String> {
         .collect()
 }
 
+/// Lowercased whole-word tokens of arbitrary text (split on non-alphanumeric),
+/// the tool-side signal for a description-keyed [`Retriever::new_over`].
+fn word_tokens(text: &str) -> Vec<String> {
+    text.split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_ascii_lowercase())
+        .collect()
+}
+
 /// Tokenize a request into a lowercased word set for overlap scoring: split on
 /// any non-alphanumeric char (so punctuation and the em-dash separators used by
 /// the procedural shapes don't fuse to adjacent words), drop empties.
@@ -191,6 +211,15 @@ impl SemanticRetriever {
     /// description into a hypervector.
     pub fn new(registry: &[ToolSchema]) -> Self {
         let tool_hvs = registry.iter().map(|t| encode_tool(t)).collect();
+        Self { tool_hvs }
+    }
+
+    /// Build over an arbitrary per-tool text (e.g. the description alone),
+    /// parallel to the registry — the HDC counterpart to [`Retriever::new_over`],
+    /// so the P3d recall matrix can compare name-keyed vs description-keyed HDC
+    /// retrieval.
+    pub fn new_over<S: AsRef<str>>(texts: &[S]) -> Self {
+        let tool_hvs = texts.iter().map(|t| encode_text(t.as_ref())).collect();
         Self { tool_hvs }
     }
 

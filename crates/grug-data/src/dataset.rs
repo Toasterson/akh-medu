@@ -163,6 +163,22 @@ impl Dataset {
         Self::with_catalog_and_distractors(seed, catalog, holdout_count, distractors)
     }
 
+    /// Like [`Dataset::new_sized_with_distractors`], but under an explicit
+    /// [`SignalMode`](crate::semantic::SignalMode) (Phase 51 P3d). `Name`
+    /// reproduces the current corpus; `Description`/`Paraphrase` build the
+    /// glossed (name-free) corpus that P3d re-measures the stack on.
+    pub fn new_sized_signal(
+        seed: u64,
+        n_tools: usize,
+        holdout_frac: f64,
+        distractors: DistractorConfig,
+        mode: crate::semantic::SignalMode,
+    ) -> GrugResult<Self> {
+        let catalog = ToolCatalog::procedural_signal(seed, n_tools, mode);
+        let holdout_count = holdout_count_from_frac(n_tools, holdout_frac);
+        Self::with_catalog_and_distractors(seed, catalog, holdout_count, distractors)
+    }
+
     /// Like [`Dataset::new_sized`], but with an explicit
     /// templates-per-tool count instead of
     /// [`crate::procedural::DEFAULT_TEMPLATES_PER_TOOL`]. Uses the default

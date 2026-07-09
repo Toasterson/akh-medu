@@ -123,6 +123,20 @@ impl ToolCatalog {
     pub fn procedural_with_templates(seed: u64, n_tools: usize, templates_per_tool: usize) -> Self {
         crate::procedural::build_catalog_with_templates(seed, n_tools, templates_per_tool)
     }
+
+    /// A procedurally-generated catalog under an explicit
+    /// [`SignalMode`](crate::semantic::SignalMode) (Phase 51 P3d):
+    /// `SignalMode::Name` is byte-identical to [`ToolCatalog::procedural`],
+    /// while `Description`/`Paraphrase` move the retrieval signal off the tool
+    /// name (glossed descriptions + request phrasings).
+    pub fn procedural_signal(seed: u64, n_tools: usize, mode: crate::semantic::SignalMode) -> Self {
+        crate::procedural::build_catalog_signal(
+            seed,
+            n_tools,
+            crate::procedural::DEFAULT_TEMPLATES_PER_TOOL,
+            mode,
+        )
+    }
 }
 
 /// Fuzzed-value accessors shared by every tool's phrasing templates in
