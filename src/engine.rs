@@ -176,6 +176,12 @@ pub struct Engine {
     /// mode. Every successful assert/retract is recorded here (best-effort,
     /// non-blocking).
     mutation_sink: std::sync::OnceLock<Arc<dyn crate::mutation::MutationSink>>,
+    /// ADR 091 decision 5: optional WAL body-paging reader, installed by the
+    /// daemon binary alongside the `MutationSink` when a Postgres store is
+    /// configured. Lets [`Engine::turn_body`] page a captured turn's raw text
+    /// back out of the WAL at recall time without the engine itself depending
+    /// on SeaORM/tokio. Absent in local-only/in-memory mode.
+    turn_body_reader: std::sync::OnceLock<Arc<dyn crate::mutation::TurnBodyReader>>,
     /// Phase 47: live, lock-free inference toggles (e.g. speculative decode). Shared by `Arc`
     /// with the Candle chat backend so a tool flipping it via `&Engine` is observed next turn.
     /// Seeded from the akh's `AkhConfig` at startup.
@@ -405,6 +411,7 @@ impl Engine {
             predicate_hierarchy: RwLock::new(None),
             hierarchy_dirty: AtomicBool::new(true),
             mutation_sink: std::sync::OnceLock::new(),
+            turn_body_reader: std::sync::OnceLock::new(),
             inference_options: Arc::new(crate::inference_options::InferenceOptions::default()),
             identity_index: dashmap::DashMap::new(),
             identity_index_built: AtomicBool::new(false),
@@ -523,6 +530,27 @@ impl Engine {
     #[inline]
     pub fn record_turn(&self, payload: serde_json::Value) {
         self.record_mutation(crate::mutation::MutationKind::Turn, payload);
+    }
+
+    /// Install the turn-body WAL reader (ADR 091 decision 5).
+    ///
+    /// Set once at workspace load, alongside the `MutationSink`, when a
+    /// Postgres backing store is configured. Returns `Err` (ignored by
+    /// callers) if a reader was already installed.
+    pub fn set_turn_body_reader(
+        &self,
+        reader: Arc<dyn crate::mutation::TurnBodyReader>,
+    ) -> Result<(), Arc<dyn crate::mutation::TurnBodyReader>> {
+        self.turn_body_reader.set(reader)
+    }
+
+    /// Page a captured turn's raw body back out of the WAL by `seq`
+    /// (ADR 091 decision 5). Synchronous and best-effort: `None` if no
+    /// reader is installed (in-memory/local-only engines) or the underlying
+    /// lookup found nothing. Callers (recall) must treat `None` as "fall back
+    /// to the existing summary/label path", never as an error.
+    pub fn turn_body(&self, seq: i64) -> Option<String> {
+        self.turn_body_reader.get().and_then(|r| r.turn_body(seq))
     }
 
     /// Allocate a new symbol with the given kind and label.

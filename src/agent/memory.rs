@@ -745,6 +745,22 @@ pub fn index_cycle_episode(
     Ok(())
 }
 
+/// Cap on the paged-in turn body surfaced as an episode's summary/content
+/// (ADR 091 decision 5). The context manager budgets the recalled section
+/// further; this cap just bounds a single entry's contribution.
+const TURN_BODY_SUMMARY_CAP: usize = 1500;
+
+/// Truncate `s` to at most `max_chars` **characters** (not bytes), returning
+/// the original string unchanged if it is already shorter. Uses
+/// `char_indices` to find a safe UTF-8 boundary — a fixed byte-offset slice
+/// panics on multi-byte sequences.
+fn truncate_chars(s: &str, max_chars: usize) -> String {
+    match s.char_indices().nth(max_chars) {
+        Some((byte_idx, _)) => s[..byte_idx].to_string(),
+        None => s.to_string(),
+    }
+}
+
 /// Reconstruct an EpisodicEntry from its KG triples.
 fn reconstruct_episode(
     engine: &Engine,
@@ -802,6 +818,22 @@ fn reconstruct_episode(
     // No explicit summary → fall back to the label-embedded excerpt (cycle path).
     if summary.is_empty() {
         summary = label_summary;
+    }
+
+    // ADR 091 decision 5: body-paging. Harvested transcript episodes carry the
+    // label convention "episode:turn:{seq}" (Wave 2A); when it matches, and an
+    // `Engine::turn_body` reader is installed, page the raw turn text out of
+    // the WAL and prefer it over the has_summary/label fallback above — the
+    // point of paging is to surface the *actual conversation content* at
+    // recall time, not the 80-char excerpt. If no reader is installed (e.g.
+    // in-memory engines) or the row is gone, `turn_body` returns `None` and
+    // the existing fallback stands untouched.
+    if let Some(seq_str) = episode_label.strip_prefix("episode:turn:") {
+        if let Ok(seq) = seq_str.parse::<i64>() {
+            if let Some(body) = engine.turn_body(seq) {
+                summary = truncate_chars(&body, TURN_BODY_SUMMARY_CAP);
+            }
+        }
     }
 
     // Get the episode's creation timestamp from its symbol metadata.
@@ -1523,5 +1555,126 @@ mod tests {
 
         let episodes = recall_recent_episodes(&engine, &predicates, 5).unwrap();
         assert!(episodes.is_empty());
+    }
+
+    // -- ADR 091 decision 5: recall body-paging tests --
+
+    /// Mint an `episode:turn:{seq}` index the way harvest does (Wave 2A
+    /// convention): `learned`-linked to `syms`, `has_tag` → `tag:conversation`,
+    /// `memory_type` → `episodic_memory`, `has_summary` → an 80-char excerpt.
+    /// The body itself is *not* stored in the KG (ADR 091 decision 5) — it
+    /// lives only behind the installed `TurnBodyReader`.
+    fn mint_turn_episode(
+        engine: &crate::engine::Engine,
+        predicates: &AgentPredicates,
+        seq: i64,
+        syms: &[SymbolId],
+        excerpt: &str,
+    ) -> SymbolId {
+        let label = format!("episode:turn:{seq}");
+        let episode_id = engine
+            .create_symbol(crate::symbol::SymbolKind::Entity, &label)
+            .unwrap()
+            .id;
+        for sym in syms {
+            engine
+                .add_triple(&Triple::new(episode_id, predicates.learned, *sym))
+                .unwrap();
+        }
+        let tag_sym = engine.resolve_or_create_entity("tag:conversation").unwrap();
+        engine
+            .add_triple(&Triple::new(episode_id, predicates.has_tag, tag_sym))
+            .unwrap();
+        let mem_type_sym = engine.resolve_or_create_entity("episodic_memory").unwrap();
+        engine
+            .add_triple(&Triple::new(episode_id, predicates.memory_type, mem_type_sym))
+            .unwrap();
+        let summary_label = format!("summary:{excerpt}");
+        let summary_sym = engine.resolve_or_create_entity(&summary_label).unwrap();
+        engine
+            .add_triple(&Triple::new(episode_id, predicates.has_summary, summary_sym))
+            .unwrap();
+        episode_id
+    }
+
+    /// A `TurnBodyReader` stub returning a fixed body for one known `seq`.
+    struct StubTurnBodyReader {
+        seq: i64,
+        body: String,
+    }
+
+    impl crate::mutation::TurnBodyReader for StubTurnBodyReader {
+        fn turn_body(&self, seq: i64) -> Option<String> {
+            if seq == self.seq {
+                Some(self.body.clone())
+            } else {
+                None
+            }
+        }
+    }
+
+    #[test]
+    fn recall_pages_body_from_installed_reader() {
+        let engine = crate::engine::Engine::new(crate::engine::EngineConfig::default()).unwrap();
+        let predicates = test_predicates(&engine);
+
+        engine
+            .set_turn_body_reader(std::sync::Arc::new(StubTurnBodyReader {
+                seq: 42,
+                body: "User: what is rust?\nAkh: a systems language.".to_string(),
+            }))
+            .map_err(|_| ())
+            .expect("first reader install should succeed");
+
+        let sym = engine.resolve_or_create_entity("rust").unwrap();
+        mint_turn_episode(&engine, &predicates, 42, &[sym], "what is rust? excerpt");
+
+        let episodes = recall_episodes(&engine, &[sym], &predicates, 5, None).unwrap();
+        assert_eq!(episodes.len(), 1);
+        assert_eq!(
+            episodes[0].summary,
+            "User: what is rust?\nAkh: a systems language."
+        );
+    }
+
+    #[test]
+    fn recall_falls_back_to_summary_when_no_reader_installed() {
+        let engine = crate::engine::Engine::new(crate::engine::EngineConfig::default()).unwrap();
+        let predicates = test_predicates(&engine);
+
+        // No `set_turn_body_reader` call — `Engine::turn_body` must return
+        // `None` and `reconstruct_episode` must keep the has_summary excerpt.
+        let sym = engine.resolve_or_create_entity("golang").unwrap();
+        mint_turn_episode(&engine, &predicates, 99, &[sym], "what is golang? excerpt");
+
+        let episodes = recall_episodes(&engine, &[sym], &predicates, 5, None).unwrap();
+        assert_eq!(episodes.len(), 1);
+        assert_eq!(episodes[0].summary, "what is golang? excerpt");
+    }
+
+    #[test]
+    fn recall_truncates_oversized_body_at_char_boundary() {
+        let engine = crate::engine::Engine::new(crate::engine::EngineConfig::default()).unwrap();
+        let predicates = test_predicates(&engine);
+
+        // Build a body well over the cap using multi-byte UTF-8 characters
+        // (each "é" is 2 bytes) so a byte-offset slice would panic on a
+        // non-char boundary; `truncate_chars` must not.
+        let long_body: String = std::iter::repeat_n('é', TURN_BODY_SUMMARY_CAP + 500).collect();
+        engine
+            .set_turn_body_reader(std::sync::Arc::new(StubTurnBodyReader {
+                seq: 7,
+                body: long_body,
+            }))
+            .map_err(|_| ())
+            .expect("reader install should succeed");
+
+        let sym = engine.resolve_or_create_entity("unicode_topic").unwrap();
+        mint_turn_episode(&engine, &predicates, 7, &[sym], "excerpt");
+
+        let episodes = recall_episodes(&engine, &[sym], &predicates, 5, None).unwrap();
+        assert_eq!(episodes.len(), 1);
+        assert_eq!(episodes[0].summary.chars().count(), TURN_BODY_SUMMARY_CAP);
+        assert!(episodes[0].summary.chars().all(|c| c == 'é'));
     }
 }

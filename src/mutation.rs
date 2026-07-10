@@ -103,6 +103,22 @@ impl MutationSink for CountingSink {
     }
 }
 
+/// Pages a captured turn's body back out of the WAL at recall time (ADR 091
+/// decision 5: "a minted episode is a lightweight index; the body stays in
+/// the WAL"). Mirrors [`MutationSink`]'s shape — a tiny synchronous seam the
+/// engine can call from the recall path without knowing about SeaORM or
+/// tokio. The daemon binary installs the real, Postgres-backed implementation
+/// (bridging its async DB hop with `block_on`/`block_in_place`); in-memory or
+/// local-only engines simply never install one, and [`crate::engine::Engine::turn_body`]
+/// returns `None`.
+pub trait TurnBodyReader: Send + Sync {
+    /// Look up the raw turn body for a given WAL `seq`. Returns `None` if the
+    /// row does not exist, is not a `kind="turn"` row, or the lookup failed
+    /// (best-effort: recall must fall back to the existing summary/label path,
+    /// never error, on a missing body).
+    fn turn_body(&self, seq: i64) -> Option<String>;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
