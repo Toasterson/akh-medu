@@ -56,6 +56,8 @@ pub mod operator_channel;
 #[cfg(feature = "oxifed")]
 pub mod oxifed;
 pub mod goal_generation;
+#[cfg(feature = "postgres")]
+pub mod harvest;
 pub mod idle;
 pub mod journal_ingest;
 pub mod library_learn;
@@ -126,6 +128,8 @@ pub use multi_agent::{
 pub use oxifed::{OxifedChannel, OxifedConfig, OxifedError, OxifedInboundHandle, OxifedResult};
 #[cfg(feature = "daemon")]
 pub use daemon::{AgentDaemon, DaemonConfig};
+#[cfg(feature = "postgres")]
+pub use harvest::{HarvestMetrics, harvest_daily_log, mint_turn_episode};
 pub use decomposition::{
     DecompositionMethod, DecompositionOutput, DecompositionStrategy, DependencyEdge, MethodRegistry,
     TaskNode, TaskNodeKind, TaskTree,
