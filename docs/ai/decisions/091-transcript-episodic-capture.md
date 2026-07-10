@@ -1,6 +1,6 @@
 # ADR 091: Transcript → Episodic Capture — the ADR-081 write-side first slice
 
-- **Status:** Accepted (design) — implementation in progress
+- **Status:** Implemented (2026-07-11) — all five build increments landed; acceptance test green against live Postgres (`tests/adr091_acceptance.rs`: capture → fresh-engine restart over PG → harvest → recall pages the fact stated only in session A; un-harvested control returns 0). Full live-daemon kill/restart drill remains an ops runbook step.
 - **Date:** 2026-07-08
 - **Plan:** [docs/ai/plans/2026-07-08-transcript-episodic-capture.md](../plans/2026-07-08-transcript-episodic-capture.md)
 - **Extends:** [ADR 081](081-akh-memory-schema-typing.md) (Akh Memory & Schema-Typing)
