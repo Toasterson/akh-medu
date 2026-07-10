@@ -202,6 +202,57 @@ impl DaemonPauseHandle {
     }
 }
 
+/// ADR 091 decision 5: pages a captured turn's raw body back out of the WAL
+/// at recall time. `Engine::turn_body` is a synchronous seam (the recall path
+/// stays sync/testable — see `src/mutation.rs::TurnBodyReader`); this is the
+/// one real, Postgres-backed implementation, installed alongside the
+/// `MutationSink` in `ServerState::wire_wal`.
+///
+/// Bridges the async DB hop with the runtime `Handle` captured at
+/// construction time (`wire_wal` always runs inside the daemon's tokio
+/// runtime, so `Handle::current()` there is infallible). `turn_body` may be
+/// called either from a `block_in_place` context (the agentic turn's recall
+/// path already runs under one — see `agentic_chat.rs`) or, conceivably, from
+/// a plain sync context with no runtime entered at all. `Handle::try_current()`
+/// distinguishes the two: if it succeeds we are on a thread that already has
+/// a runtime context entered, so a bare `handle.block_on` would panic — wrap
+/// it in `tokio::task::block_in_place` (safe to nest). If it fails, no
+/// runtime is entered on this thread and `handle.block_on` is used directly.
+struct PgTurnBodyReader {
+    pool: Arc<akhomed_store::DatabaseConnection>,
+    akh_id: akhomed_store::uuid::Uuid,
+    handle: tokio::runtime::Handle,
+}
+
+impl akh_medu::mutation::TurnBodyReader for PgTurnBodyReader {
+    fn turn_body(&self, seq: i64) -> Option<String> {
+        let fut = akhomed_store::load_turn_by_seq(&self.pool, self.akh_id, seq);
+        let result = if tokio::runtime::Handle::try_current().is_ok() {
+            tokio::task::block_in_place(|| self.handle.block_on(fut))
+        } else {
+            self.handle.block_on(fut)
+        };
+        match result {
+            Ok(Some(payload)) => {
+                let user_prompt = payload
+                    .get("user_prompt")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let agent_answer = payload
+                    .get("agent_answer")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                Some(format!("User: {user_prompt}\nAkh: {agent_answer}"))
+            }
+            Ok(None) => None,
+            Err(e) => {
+                tracing::warn!(seq, error = %e, "turn body lookup failed; recall falls back to summary");
+                None
+            }
+        }
+    }
+}
+
 impl ServerState {
     fn new(
         paths: AkhPaths,
@@ -418,6 +469,23 @@ impl ServerState {
         {
             tracing::warn!(workspace = %name, "mutation sink already installed; skipping WAL wiring");
             return;
+        }
+
+        // ADR 091 decision 5: install the WAL body-paging reader alongside the
+        // sink so `recall_episodes` can page a harvested turn's raw text back
+        // out of Postgres. Best-effort/independent of the sink install above —
+        // a reader failing to install just means recall keeps using the
+        // has_summary/label fallback (see `set_turn_body_reader`'s doc comment).
+        let turn_body_reader = Arc::new(PgTurnBodyReader {
+            pool: Arc::clone(pool),
+            akh_id,
+            handle: tokio::runtime::Handle::current(),
+        });
+        if engine
+            .set_turn_body_reader(turn_body_reader as Arc<dyn akh_medu::mutation::TurnBodyReader>)
+            .is_err()
+        {
+            tracing::warn!(workspace = %name, "turn body reader already installed; skipping");
         }
 
         let (shutdown, shutdown_rx) = tokio::sync::watch::channel(false);
