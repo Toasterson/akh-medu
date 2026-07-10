@@ -15,6 +15,12 @@ pub struct Model {
 
     /// `mutation_log.seq` covered by this state — wake replays rows `seq > watermark`.
     pub watermark: i64,
+    /// `mutation_log.seq` covered by the sleep-cycle "harvest" phase (ADR 091):
+    /// how far `kind='turn'` rows have been walked into `episode:turn:*`
+    /// indices. Distinct from `watermark` (the wake-replay boundary over all
+    /// kinds). Written ONLY by [`crate::snapshots::set_harvest_watermark`] —
+    /// see the comment on [`crate::snapshots::upsert_akh_state`].
+    pub harvest_watermark: i64,
     /// The symbol-id allocator counter (`sym_allocator_next`) at snapshot time.
     pub allocator_next: i64,
     /// OODA cycle counter.

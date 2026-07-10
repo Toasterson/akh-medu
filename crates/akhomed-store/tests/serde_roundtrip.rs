@@ -43,6 +43,7 @@ fn akh_and_state_roundtrip() {
         last_sleep_cycle: 5,
         psyche: Some(json!({ "awakened": true })),
         extra: Some(json!({ "method_stats": [] })),
+        harvest_watermark: 12,
         updated_at: ts(),
     });
 }

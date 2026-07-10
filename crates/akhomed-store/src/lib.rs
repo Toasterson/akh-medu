@@ -28,9 +28,11 @@ pub use memberships::{
     try_acquire_akh_lock,
 };
 pub use migration::Migrator;
-pub use mutations::{MutationRow, append_mutations, ensure_akh};
+pub use mutations::{
+    MutationRow, TurnRow, append_mutations, ensure_akh, load_turn_by_seq, load_turns_since,
+};
 pub use pool::{PoolOptions, connect};
-pub use snapshots::TailMutation;
+pub use snapshots::{TailMutation, get_harvest_watermark, set_harvest_watermark};
 
 // Re-export the connection type, the `sea_orm` crate, and `uuid` so downstream
 // crates (the `akhomed` daemon, its tests) can name the pool, run raw queries,
