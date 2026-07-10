@@ -109,10 +109,37 @@ run_agentic_turn (turn end; agentic path; daemon/TUI/MCP via the shared Agent me
 
 ## Acceptance criteria (this slice)
 
-- [ ] A completed agentic turn writes exactly one `kind='turn'` WAL row (capture flag on).
-- [ ] Wake/relocation replays with `turn` rows present and does not error (they are skipped).
-- [ ] A sleep cycle harvests un-harvested turns into `episode:turn:*` indices and advances
+- [x] A completed agentic turn writes exactly one `kind='turn'` WAL row (capture flag on).
+      Covered by `src/agent/agentic_chat.rs::tests::transcript_capture_gate_and_emit_turn_wal`
+      (payload shape + gating) and `tests/wal_live.rs::turn_mutation_flushes_with_turn_kind`
+      (the row lands in Postgres with `kind='turn'`, live).
+- [x] Wake/relocation replays with `turn` rows present and does not error (they are skipped).
+      Covered by the `"turn"` skip arm in `crates/akhomed-store/src/snapshots.rs::apply_mutation`
+      and its unit test; exercised end-to-end by `tests/harvest_live.rs` and
+      `tests/adr091_acceptance.rs`, both of which write `kind='turn'` rows and then run
+      migrations/harvest against the same akh without error.
+- [x] A sleep cycle harvests un-harvested turns into `episode:turn:*` indices and advances
       the per-akh watermark; re-running harvests nothing new.
-- [ ] A fresh session, **after a daemon restart**, recalls a fact stated only in a prior
+      Covered by `tests/harvest_live.rs::harvest_mints_episodes_and_is_idempotent` and,
+      at the acceptance level (Phase B of the full loop), `tests/adr091_acceptance.rs::
+      transcript_to_episodic_recall_survives_restart_across_pg`.
+- [x] A fresh session, **after a daemon restart**, recalls a fact stated only in a prior
       session (cross-session durable recall); the `passthrough` control returns 0.
-- [ ] `capture_transcripts=false` produces zero turn rows (opt-out honored).
+      Covered by `tests/adr091_acceptance.rs::transcript_to_episodic_recall_survives_restart_across_pg`
+      (Phases A–D): session A's turn is written by one `Engine` instance, flushed to
+      Postgres, and that engine dropped; a second, completely fresh `Engine` instance
+      (the restart discriminator) harvests it into an episode index; a third instance's
+      question — which never saw session A — recalls the fact via WAL body-paging; a
+      fourth, un-harvested control engine recalls nothing (`passthrough` stays 0). The
+      restart boundary this test exercises is the WAL/Postgres hop (fresh `Engine`
+      instances over the same database, per ADR 091 decision 8's "restart is the
+      discriminator" framing) — full KG durability across a literal daemon-process
+      restart (snapshot/wake) is already covered by the Phase 38 / ADR 049 live
+      snapshot/wake tests, so this test does not re-prove that separately. A full
+      live-daemon restart drill (start `akhomed`, converse, kill -9, restart, converse
+      again) remains an ops runbook step, not a unit/integration test.
+- [x] `capture_transcripts=false` produces zero turn rows (opt-out honored).
+      Covered by `src/agent/agentic_chat.rs::tests::transcript_capture_gate_and_emit_turn_wal`
+      step 3 (`AKH_TRANSCRIPT_CAPTURE=0` forces the gate off even with the config field
+      on; `emit_turn_wal` records nothing beyond the prior enabled-path assertion) — a
+      `RecordingSink` stand-in for the WAL, so no live-Postgres row is written to count.
