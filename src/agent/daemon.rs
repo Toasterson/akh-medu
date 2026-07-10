@@ -174,6 +174,12 @@ pub struct AgentDaemon {
     /// constructed without explicit autonomy runs only always-on infra tasks
     /// (session persistence + user-trigger evaluation).
     autonomy: AutonomyConfig,
+    /// Postgres backing store + this akh's stable id, for the ADR 091
+    /// sleep-cycle transcript-harvest phase. `None` in local-only mode (no
+    /// `[postgres]` section configured) — harvest is then a no-op, matching
+    /// every other store-backed background task's local-only degradation.
+    #[cfg(feature = "postgres")]
+    db: Option<(akhomed_store::DatabaseConnection, akhomed_store::uuid::Uuid)>,
 }
 
 impl AgentDaemon {
@@ -188,6 +194,8 @@ impl AgentDaemon {
             shutdown: None,
             status: None,
             autonomy: AutonomyConfig::default(),
+            #[cfg(feature = "postgres")]
+            db: None,
         }
     }
 
@@ -231,6 +239,19 @@ impl AgentDaemon {
     /// Attach a shared status for real-time monitoring.
     pub fn with_status(mut self, status: Arc<tokio::sync::Mutex<DaemonStatus>>) -> Self {
         self.status = Some(status);
+        self
+    }
+
+    /// Attach the Postgres backing store + this akh's stable id, enabling the
+    /// ADR 091 sleep-cycle transcript-harvest phase. Omit (local-only mode) to
+    /// leave harvest a no-op.
+    #[cfg(feature = "postgres")]
+    pub fn with_db(
+        mut self,
+        db: akhomed_store::DatabaseConnection,
+        akh_id: akhomed_store::uuid::Uuid,
+    ) -> Self {
+        self.db = Some((db, akh_id));
         self
     }
 
@@ -866,6 +887,29 @@ impl AgentDaemon {
                     metrics.dream_connections_found,
                 )));
                 tracing::info!(?metrics, "daemon: sleep cycle complete");
+
+                // ADR 091: transcript-harvest phase, still inside the agent
+                // lock (this whole method already runs inside the caller's
+                // `block_in_place`) so the store calls' internal `block_on`
+                // never blocks a live async task on this thread.
+                #[cfg(feature = "postgres")]
+                if let Some((db, akh_id)) = self.db.as_ref() {
+                    match super::harvest::harvest_daily_log(
+                        db,
+                        &agent.engine,
+                        agent.predicates(),
+                        *akh_id,
+                    ) {
+                        Ok(hm) => tracing::info!(
+                            turns_harvested = hm.turns_harvested,
+                            episodes_minted = hm.episodes_minted,
+                            last_seq = hm.last_seq,
+                            "daemon: transcript harvest complete"
+                        ),
+                        Err(e) => tracing::warn!(error = %e, "daemon: transcript harvest failed"),
+                    }
+                }
+
                 drop(guard); // Release agent lock before status lock.
                 if let Some(ref status) = self.status
                     && let Ok(mut st) = status.try_lock()

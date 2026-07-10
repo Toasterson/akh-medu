@@ -223,6 +223,15 @@ impl IdleScheduler {
             }
             "sleep" => {
                 self.last_sleep = now;
+                // TODO(adr-091): TUI harvest wiring. `IdleScheduler::tick` has
+                // no `DatabaseConnection`/akh_id in scope (unlike
+                // `AgentDaemon`, which now carries both via `.with_db(...)`),
+                // and this module isn't `postgres`-feature-gated today, so
+                // wiring `harvest_daily_log` in here isn't a small addition —
+                // it needs a `db`/`akh_id` param threaded through `tick()`
+                // from whatever owns the TUI's Postgres pool (if any), plus a
+                // `#[cfg(feature = "postgres")]` split. Left undone this wave;
+                // the daemon is the primary deployment path (see CLAUDE.md).
                 match super::sleep::run_sleep_cycle(
                     &agent.engine,
                     &agent.working_memory,

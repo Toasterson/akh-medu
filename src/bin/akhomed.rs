@@ -1415,6 +1415,7 @@ impl ServerState {
             .map(|c| c.autonomy.clone())
             .unwrap_or_default();
 
+        let pool = self.pg_pool();
         let handle = tokio::task::spawn(async move {
             run_daemon_task(
                 shared_agent,
@@ -1424,6 +1425,7 @@ impl ServerState {
                 autonomy,
                 daemon_ws_name,
                 task_handle,
+                pool,
             )
             .await;
         });
@@ -1536,6 +1538,9 @@ async fn run_daemon_task(
     autonomy: akh_medu::akh_config::AutonomyConfig,
     ws_name: String,
     pause_handle: DaemonPauseHandle,
+    // ADR 091: Postgres pool for the sleep-cycle transcript-harvest phase.
+    // `None` in local-only mode — harvest is then a no-op.
+    pool: Option<Arc<akhomed_store::DatabaseConnection>>,
 ) {
     use akh_medu::agent::AgentDaemon;
 
@@ -1544,6 +1549,10 @@ async fn run_daemon_task(
         .with_shutdown(shutdown_rx)
         .with_status(Arc::clone(&status))
         .with_pause_handles(pause_handle.paused, pause_handle.cycle_done);
+    if let Some(pool) = pool {
+        let akh_id = akh_medu::wal::akh_id_for(&ws_name);
+        daemon = daemon.with_db((*pool).clone(), akh_id);
+    }
 
     if let Err(e) = daemon.run().await {
         tracing::error!(error = %e, ws = %ws_name, "daemon task failed");
@@ -2325,6 +2334,7 @@ async fn main() {
                     let pause_handle = DaemonPauseHandle::new();
                     state.daemon_pauses.write().await.insert(ws_name.clone(), pause_handle.clone());
                     let task_handle = pause_handle.clone();
+                    let pool = state.pg_pool();
                     let handle = tokio::task::spawn(async move {
                         run_daemon_task(
                             shared_agent,
@@ -2334,6 +2344,7 @@ async fn main() {
                             autonomy,
                             daemon_ws,
                             task_handle,
+                            pool,
                         )
                         .await;
                     });

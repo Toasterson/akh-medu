@@ -209,6 +209,14 @@ pub enum AgentError {
         help("An engine-level error occurred during an agent operation.")
     )]
     Engine(Box<crate::error::AkhError>),
+
+    /// A `akhomed-store` (Postgres backing-store) operation failed. Only
+    /// constructible with the `postgres` feature (ADR 091 transcript-harvest
+    /// phase is the first agent-layer caller of the store crate).
+    #[cfg(feature = "postgres")]
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Store(#[from] akhomed_store::StoreError),
 }
 
 impl From<crate::error::AkhError> for AgentError {
