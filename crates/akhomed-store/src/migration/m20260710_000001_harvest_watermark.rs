@@ -25,11 +25,16 @@ enum AkhState {
 #[async_trait::async_trait]
 impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        // `IF NOT EXISTS` matches the repo's guarded-DDL convention (see the
+        // hypertable migration / the `.if_not_exists()` table creates): the
+        // migration suite runs under concurrent callers (advisory-locked in
+        // prod, but plain-parallel in tests), so a raced second `up` must
+        // no-op instead of dying with 42701 duplicate-column.
         manager
             .alter_table(
                 Table::alter()
                     .table(AkhState::Table)
-                    .add_column(
+                    .add_column_if_not_exists(
                         ColumnDef::new(AkhState::HarvestWatermark)
                             .big_integer()
                             .not_null()
