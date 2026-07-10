@@ -1200,6 +1200,12 @@ impl ServerState {
             agent.set_context_manager(manager);
         }
 
+        // ADR 091: per-akh transcript-capture opt-out (default on). The
+        // `AKH_TRANSCRIPT_CAPTURE` env override is applied at the emit site
+        // (`agentic_chat::Agent::transcript_capture_enabled`), not here — this
+        // only wires the config-file default.
+        agent.set_capture_transcripts(akh_config.capture_transcripts);
+
         // Extract the snapshot Arc before moving agent into Mutex so it can be
         // registered without ever re-acquiring the agent lock.
         let snapshot = agent.psyche_snapshot();

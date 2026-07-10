@@ -279,6 +279,12 @@ pub struct Agent {
     /// Delegation manager for offloading LLM-class tasks (Phase 36).
     #[cfg(feature = "delegation")]
     pub(crate) delegation_manager: super::delegation::DelegationManager,
+    /// Whether completed agentic turns are captured to the WAL as raw
+    /// transcript staging (ADR 091, `kind="turn"`). Default-on (capture is the
+    /// akh's own memory); per-workspace opt-out via `AkhConfig::capture_transcripts`
+    /// / the `AKH_TRANSCRIPT_CAPTURE` env override (see
+    /// `agentic_chat::Agent::transcript_capture_enabled`).
+    pub(crate) capture_transcripts: bool,
 }
 
 impl Agent {
@@ -849,6 +855,7 @@ impl Agent {
             context_manager: None,
             #[cfg(feature = "delegation")]
             delegation_manager,
+            capture_transcripts: true,
         };
 
         // Initialize interlocutor predicates.
@@ -1917,6 +1924,16 @@ impl Agent {
     /// wrapped in [`SafetyEnforced`](super::context::SafetyEnforced) by the caller.
     pub fn set_context_manager(&mut self, manager: Box<dyn super::context::ContextManager>) {
         self.context_manager = Some(manager);
+    }
+
+    /// Set whether completed agentic turns are captured to the WAL as raw
+    /// transcript staging (ADR 091). Default `true` (capture is the akh's own
+    /// memory); wired from `AkhConfig::capture_transcripts` at agent
+    /// construction. The `AKH_TRANSCRIPT_CAPTURE` env var overrides this at
+    /// the emit site regardless of what was set here (see
+    /// `agentic_chat::Agent::transcript_capture_enabled`).
+    pub fn set_capture_transcripts(&mut self, enabled: bool) {
+        self.capture_transcripts = enabled;
     }
 
     /// Register this agent with its attached model manager using the current
@@ -3920,6 +3937,7 @@ impl Agent {
             context_manager: None,
             #[cfg(feature = "delegation")]
             delegation_manager,
+            capture_transcripts: true,
         };
 
         // Initialize interlocutor predicates.

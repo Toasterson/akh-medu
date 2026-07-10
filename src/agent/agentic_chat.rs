@@ -62,6 +62,48 @@ fn env_usize(key: &str) -> Option<usize> {
         .filter(|&n| n > 0)
 }
 
+/// `SystemTime::now()` rendered as an RFC3339 UTC timestamp
+/// (`YYYY-MM-DDTHH:MM:SS.nnnnnnnnnZ`), std-only (no `chrono`).
+///
+/// The main crate's `chrono` dependency is optional (gated behind the
+/// `calendar` feature — see `Cargo.toml`), so unconditionally-compiled code
+/// like the turn-capture hook (ADR 091) cannot name it. Everywhere else in the
+/// crate that needs a timestamp outside a `chrono`-gated feature uses
+/// `SystemTime` directly (see `agent/contact.rs`, `agent/dialogue.rs`, etc.);
+/// this just also renders it as RFC3339 for the turn-record JSON payload's
+/// `ts` field.
+fn rfc3339_now() -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = now.as_secs() as i64;
+    let nanos = now.subsec_nanos();
+    let days = secs.div_euclid(86_400);
+    let secs_of_day = secs.rem_euclid(86_400);
+    let (y, m, d) = civil_from_days(days);
+    let hh = secs_of_day / 3600;
+    let mm = (secs_of_day % 3600) / 60;
+    let ss = secs_of_day % 60;
+    format!("{y:04}-{m:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}.{nanos:09}Z")
+}
+
+/// Days-since-epoch → civil (year, month, day), Howard Hinnant's
+/// `civil_from_days` algorithm (public-domain; proleptic Gregorian, valid
+/// across the full `i64` range). `days` is `0` for 1970-01-01.
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097); // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32; // [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32; // [1, 12]
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m, d)
+}
+
 /// Why an agentic turn's tool loop ended without the model volunteering a final
 /// answer. Each maps to a short clause the forced-synthesis nudge explains.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -310,6 +352,12 @@ impl Agent {
             }
         };
 
+        // Compact tool trace for the ADR 091 turn-capture hook: {tool, ok} per
+        // call, accumulated across every round of this turn (not just the
+        // final one) — never raw arguments/results, so a chatty tool loop
+        // doesn't bloat the WAL payload.
+        let mut tool_trace: Vec<Value> = Vec::new();
+
         // Govern the tool loop with a frontier-style budget — a model-scaled
         // iteration backstop + wall-clock cap + repeat-loop detection — instead of
         // a flat round count. The loop yields *why* it stopped so the turn can end
@@ -368,6 +416,10 @@ impl Agent {
                 let answer = turn.content.trim();
                 if !answer.is_empty() {
                     self.conversation_state_mut().record_agent_turn(answer);
+                    // ADR 091: capture the completed turn to the WAL (raw
+                    // staging; a no-op if no sink is installed or capture is
+                    // opted out).
+                    self.emit_turn_wal(engine, agent_id, user_prompt, answer, &tool_trace);
                     // Streaming already emitted the answer as deltas; only the
                     // non-streaming fallback still needs to emit it.
                     if used_fallback {
@@ -412,6 +464,7 @@ impl Agent {
                     success,
                     format!("({}) → {}", preview_args(&tc.arguments), result),
                 ));
+                tool_trace.push(json!({"tool": tc.name.clone(), "ok": success}));
                 conversation.push(json!({"role": "tool", "content": result}));
             }
         };
@@ -419,7 +472,16 @@ impl Agent {
         // Budget exhausted — force one tool-free synthesis ("reflect and answer")
         // so the turn returns the best answer it can from what it gathered, rather
         // than the old bare "(stopped after N rounds)" cutoff.
-        self.force_final_answer(backend.as_ref(), agent_id, &mut conversation, sink, stop);
+        self.force_final_answer(
+            backend.as_ref(),
+            engine,
+            agent_id,
+            user_prompt,
+            &mut conversation,
+            sink,
+            stop,
+            &tool_trace,
+        );
         Some(())
     }
 
@@ -427,13 +489,21 @@ impl Agent {
     /// to answer *now* with no tools, using what it already gathered, and emit the
     /// result. Mirrors how frontier harnesses convert a hit budget into a
     /// best-effort answer instead of a dead end.
+    ///
+    /// `user_prompt`/`tool_trace` are threaded through purely so the ADR 091
+    /// turn-capture hook fires here too — this is a turn-end site exactly like
+    /// the normal-completion path in [`Self::run_agentic_turn`].
+    #[allow(clippy::too_many_arguments)]
     fn force_final_answer(
         &mut self,
         backend: &dyn super::chat_backend::ChatBackend,
+        engine: &Engine,
         agent_id: &str,
+        user_prompt: &str,
         conversation: &mut Vec<Value>,
         sink: &dyn MessageSink,
         stop: TurnStop,
+        tool_trace: &[Value],
     ) {
         conversation.push(json!({
             "role": "user",
@@ -481,9 +551,66 @@ impl Agent {
             return;
         }
         self.conversation_state_mut().record_agent_turn(answer);
+        // ADR 091: same capture hook as the normal-completion turn-end site.
+        self.emit_turn_wal(engine, agent_id, user_prompt, answer, tool_trace);
         if used_fallback {
             sink.emit(&AkhMessage::narrative(answer, "acp"));
         }
+    }
+
+    /// Whether transcript capture (ADR 091) is enabled for this turn.
+    ///
+    /// `AKH_TRANSCRIPT_CAPTURE` overrides the per-akh config: `"0"` forces it
+    /// off, `"1"` forces it on; unset (or any other value) falls back to
+    /// [`Agent::capture_transcripts`](super::Agent). Capture is default-on
+    /// (a sovereign akh's own memory), with this as its opt-out.
+    fn transcript_capture_enabled(&self) -> bool {
+        match std::env::var("AKH_TRANSCRIPT_CAPTURE").ok().as_deref() {
+            Some("0") => false,
+            Some("1") => true,
+            _ => self.capture_transcripts,
+        }
+    }
+
+    /// Build and record one ADR-091 turn capture on the WAL
+    /// (`Engine::record_turn`) — a no-op if capture is opted out (see
+    /// [`Self::transcript_capture_enabled`]) or no `MutationSink` is installed
+    /// (in-memory/local-only engines).
+    ///
+    /// Called from every turn-end site in [`Self::run_agentic_turn`] (normal
+    /// completion and [`Self::force_final_answer`]), so every surface that
+    /// drives the agentic loop (daemon, TUI, MCP) captures identically.
+    ///
+    /// **The payload schema is LOCKED** — Wave 2's sleep-cycle harvest phase
+    /// parses it verbatim (ADR 091 / the transcript-capture plan):
+    /// `{v, ts, workspace, model, user_prompt, agent_answer, tools: [{tool, ok}]}`.
+    fn emit_turn_wal(
+        &self,
+        engine: &Engine,
+        agent_id: &str,
+        user_prompt: &str,
+        answer: &str,
+        tools: &[Value],
+    ) {
+        if !self.transcript_capture_enabled() {
+            return;
+        }
+        // Cheap, in-scope model name: the Ollama-backed path's model manager
+        // names the pinned model directly. Other backings (e.g. Candle, set
+        // via `chat_backend`) don't expose a model name through the
+        // `ChatBackend` trait today, so this is `None` for them rather than
+        // plumbing new state through the trait for this slice.
+        let model = self.model_manager.as_deref().map(|m| m.model());
+        let payload = json!({
+            "v": 1,
+            "ts": rfc3339_now(),
+            "workspace": agent_id,
+            "model": model,
+            "user_prompt": user_prompt,
+            "agent_answer": answer,
+            "tools": tools,
+        });
+        engine.record_turn(payload);
     }
 }
 
@@ -575,6 +702,7 @@ fn preview_args(args: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::AgentConfig;
     use crate::agent::error::AgentResult;
     use crate::agent::tool::{Tool, ToolOutput, ToolSignature};
     use crate::agent::tool_manifest::{
@@ -693,5 +821,142 @@ mod tests {
         let p = preview_args(&big);
         assert!(p.ends_with('…'));
         assert!(p.chars().count() <= ARG_PREVIEW_LEN + 1);
+    }
+
+    // --- ADR 091: transcript→episodic capture (write-side first slice) ---
+
+    #[test]
+    fn rfc3339_now_has_known_shape_and_matches_a_reference_instant() {
+        // Format shape, independent of "now".
+        let s = rfc3339_now();
+        assert_eq!(s.len(), "2026-07-10T00:00:00.000000000Z".len());
+        assert!(s.ends_with('Z'));
+        assert_eq!(s.as_bytes()[4], b'-');
+        assert_eq!(s.as_bytes()[7], b'-');
+        assert_eq!(s.as_bytes()[10], b'T');
+
+        // civil_from_days against known reference instants (cross-checked
+        // against `datetime.utcfromtimestamp` — the algorithm is Howard
+        // Hinnant's well-known `civil_from_days`).
+        assert_eq!(civil_from_days(0), (1970, 1, 1)); // unix epoch
+        assert_eq!(civil_from_days(1_700_000_000 / 86_400), (2023, 11, 14));
+    }
+
+    fn test_engine() -> std::sync::Arc<Engine> {
+        std::sync::Arc::new(
+            Engine::new(crate::engine::EngineConfig::default())
+                .expect("engine construction should succeed"),
+        )
+    }
+
+    /// A [`MutationSink`](crate::mutation::MutationSink) that records every
+    /// mutation it receives, for asserting on the built payload without a live
+    /// WAL/Postgres.
+    struct RecordingSink {
+        records: std::sync::Mutex<Vec<(crate::mutation::MutationKind, Value)>>,
+    }
+
+    impl crate::mutation::MutationSink for RecordingSink {
+        fn record(&self, mutation: crate::mutation::MutationRecord) {
+            self.records.lock().unwrap().push((mutation.kind, mutation.payload));
+        }
+    }
+
+    // All three ADR-091 behaviors below (gate precedence, payload shape,
+    // opt-out no-op) are asserted in ONE test function rather than split
+    // across several `#[test]`s. `AKH_TRANSCRIPT_CAPTURE` is process-global
+    // state and cargo runs tests in parallel threads within one binary, so
+    // several tests each mutating the same fixed (schema-locked, cannot be
+    // renamed) env var would race each other; sequencing them here is the
+    // simplest race-free option without pulling in a `serial_test` dependency.
+    #[test]
+    fn transcript_capture_gate_and_emit_turn_wal() {
+        // SAFETY: edition-2024 requires explicit unsafe for env mutation;
+        // this test owns AKH_TRANSCRIPT_CAPTURE for its duration and clears
+        // it before returning (including via the early assertions below).
+        unsafe {
+            std::env::remove_var("AKH_TRANSCRIPT_CAPTURE");
+        }
+
+        // --- 1. Gate precedence: env overrides the config field. ---
+        let mut agent = Agent::new(test_engine(), AgentConfig::default()).unwrap();
+        agent.capture_transcripts = true;
+        assert!(agent.transcript_capture_enabled(), "unset env falls back to the config field (on)");
+        agent.capture_transcripts = false;
+        assert!(!agent.transcript_capture_enabled(), "unset env falls back to the config field (off)");
+
+        unsafe {
+            std::env::set_var("AKH_TRANSCRIPT_CAPTURE", "0");
+        }
+        agent.capture_transcripts = true;
+        assert!(!agent.transcript_capture_enabled(), "env=0 forces off regardless of the field");
+
+        unsafe {
+            std::env::set_var("AKH_TRANSCRIPT_CAPTURE", "1");
+        }
+        agent.capture_transcripts = false;
+        assert!(agent.transcript_capture_enabled(), "env=1 forces on regardless of the field");
+
+        // --- 2. `emit_turn_wal` builds the locked payload shape when enabled. ---
+        unsafe {
+            std::env::remove_var("AKH_TRANSCRIPT_CAPTURE");
+        }
+        let engine = test_engine();
+        let sink = std::sync::Arc::new(RecordingSink {
+            records: std::sync::Mutex::new(Vec::new()),
+        });
+        engine
+            .set_mutation_sink(sink.clone())
+            .map_err(|_| ())
+            .expect("sink not yet installed on a fresh engine");
+        let mut agent = Agent::new(std::sync::Arc::clone(&engine), AgentConfig::default()).unwrap();
+        agent.capture_transcripts = true;
+        // Agent::new itself asserts predicate-init triples through the sink
+        // (unrelated `assert` mutations); drop those so the count below only
+        // reflects `emit_turn_wal`'s own record.
+        sink.records.lock().unwrap().clear();
+
+        let tools = vec![json!({"tool": "kg_query", "ok": true})];
+        agent.emit_turn_wal(&engine, "tecton", "capital of France?", "Paris.", &tools);
+
+        {
+            let records = sink.records.lock().unwrap();
+            assert_eq!(records.len(), 1, "exactly one turn mutation recorded");
+            let (kind, payload) = &records[0];
+            assert_eq!(*kind, crate::mutation::MutationKind::Turn);
+            assert_eq!(kind.as_str(), "turn");
+
+            // LOCKED schema (Wave 2's sleep-cycle harvest phase parses this
+            // verbatim): {v, ts, workspace, model, user_prompt, agent_answer, tools}.
+            assert_eq!(payload["v"], 1);
+            assert!(payload["ts"].as_str().is_some_and(|s| s.ends_with('Z')));
+            assert_eq!(payload["workspace"], "tecton");
+            assert_eq!(payload["model"], Value::Null); // no model manager attached in this test
+            assert_eq!(payload["user_prompt"], "capital of France?");
+            assert_eq!(payload["agent_answer"], "Paris.");
+            assert_eq!(payload["tools"], json!([{"tool": "kg_query", "ok": true}]));
+            // No stray keys.
+            assert_eq!(
+                payload.as_object().unwrap().len(),
+                7,
+                "payload must carry exactly the locked field set"
+            );
+        }
+
+        // --- 3. Opt-out (env="0") writes nothing, even with the field on. ---
+        unsafe {
+            std::env::set_var("AKH_TRANSCRIPT_CAPTURE", "0");
+        }
+        agent.capture_transcripts = true; // env override wins anyway
+        agent.emit_turn_wal(&engine, "tecton", "hi", "hello", &[]);
+        assert_eq!(
+            sink.records.lock().unwrap().len(),
+            1,
+            "opted-out capture writes nothing beyond step 2's single record"
+        );
+
+        unsafe {
+            std::env::remove_var("AKH_TRANSCRIPT_CAPTURE");
+        }
     }
 }

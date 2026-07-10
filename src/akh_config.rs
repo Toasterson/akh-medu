@@ -256,6 +256,14 @@ pub struct AkhConfig {
     /// `DelegationManager` is wired behind the `delegation` feature in its phase.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delegation: Option<DelegationConfig>,
+
+    /// Whether completed agentic turns are captured to the WAL as raw
+    /// transcript staging (ADR 091, `kind="turn"`). Default-on: capture is
+    /// the akh's own memory, so on-by-default is right, but a sovereign akh
+    /// must be able to refuse. `AKH_TRANSCRIPT_CAPTURE` ("0"/"1") overrides
+    /// this at the emit site regardless of what is set here.
+    #[serde(default = "default_true")]
+    pub capture_transcripts: bool,
 }
 
 impl Default for AkhConfig {
@@ -275,6 +283,7 @@ impl Default for AkhConfig {
             ollama_endpoint: OllamaEndpoint::default(),
             autonomy: AutonomyConfig::default(),
             delegation: None,
+            capture_transcripts: true,
         }
     }
 }
