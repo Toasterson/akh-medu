@@ -515,6 +515,16 @@ impl Engine {
         }
     }
 
+    /// Record a completed conversation turn on the WAL sink, if one is
+    /// installed (ADR 091: transcript→episodic capture, write-side first
+    /// slice). Non-blocking; a no-op for in-memory/local-only engines with no
+    /// `MutationSink` installed. `payload` is the locked turn-record schema
+    /// built by [`crate::agent::agentic_chat`]'s capture hook.
+    #[inline]
+    pub fn record_turn(&self, payload: serde_json::Value) {
+        self.record_mutation(crate::mutation::MutationKind::Turn, payload);
+    }
+
     /// Allocate a new symbol with the given kind and label.
     pub fn create_symbol(
         &self,
