@@ -37,7 +37,10 @@ pub use schema_registry::{
     SchemaPackRow, admit_pack, get_pack, latest_pack, list_active_microtheories, list_packs,
     record_pack_activation,
 };
-pub use snapshots::{TailMutation, get_harvest_watermark, set_harvest_watermark};
+pub use snapshots::{
+    TailMutation, get_harvest_watermark, get_librarian_watermark, set_harvest_watermark,
+    set_librarian_watermark,
+};
 
 // Re-export the connection type, the `sea_orm` crate, and `uuid` so downstream
 // crates (the `akhomed` daemon, its tests) can name the pool, run raw queries,

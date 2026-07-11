@@ -60,6 +60,7 @@ pub mod goal_generation;
 pub mod harvest;
 pub mod idle;
 pub mod journal_ingest;
+pub mod librarian;
 pub mod library_learn;
 pub mod mcts;
 pub mod memory;

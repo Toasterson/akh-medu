@@ -1202,6 +1202,18 @@ pub fn derivation_kind_prose(kind: &DerivationKind) -> String {
         DerivationKind::OpenClawImport { source_path, kind } => {
             format!("imported from OpenClaw ({kind}): {source_path}")
         }
+        DerivationKind::LibrarianExtraction {
+            model_id,
+            source_id,
+            schema_type,
+        } => match schema_type {
+            Some(type_name) => format!(
+                "Librarian-extracted triple typed as {type_name} (model: {model_id}, source: {source_id})"
+            ),
+            None => format!(
+                "Librarian-extracted frontier triple (model: {model_id}, source: {source_id})"
+            ),
+        },
     }
 }
 

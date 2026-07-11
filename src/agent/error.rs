@@ -221,6 +221,26 @@ pub enum AgentError {
     #[error(transparent)]
     #[diagnostic(transparent)]
     Store(#[from] akhomed_store::StoreError),
+
+    /// The daily-Librarian pass (ADR 081 slice 4, `agent::librarian`) could
+    /// not extract from a source — the configured `LibrarianModel` was
+    /// unavailable or returned an unparseable reply.
+    ///
+    /// **Poison-safe by construction:** [`super::librarian::run_librarian_pass`]
+    /// propagates this error immediately, before advancing the librarian
+    /// watermark — so the offending source (and only it, plus anything after
+    /// it in the same batch) is retried on the next pass rather than being
+    /// silently skipped or corrupting the watermark.
+    #[error("librarian extraction failed for source \"{source_id}\": {reason}")]
+    #[diagnostic(
+        code(akh::agent::librarian_extraction_failed),
+        help(
+            "Check the configured LibrarianModel backend (AKH_LIBRARIAN_MODEL / Ollama \
+             reachability for the real backend) and retry. The watermark was not advanced, so \
+             this source is retried automatically on the next pass once the backend recovers."
+        )
+    )]
+    Librarian { source_id: String, reason: String },
 }
 
 impl From<crate::error::AkhError> for AgentError {
