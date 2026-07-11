@@ -35,6 +35,7 @@ pub mod skill_author;
 pub mod reason;
 pub mod shell_exec;
 pub mod similarity_search;
+pub mod structured_task;
 pub mod task_list;
 pub mod text_ingest;
 pub mod user_interact;
@@ -73,6 +74,10 @@ pub use skill_author::SkillAuthorTool;
 pub use reason::ReasonTool;
 pub use shell_exec::ShellExecTool;
 pub use similarity_search::SimilaritySearchTool;
+pub use structured_task::{
+    StructuredTaskCompleteTool, StructuredTaskCreateTool, StructuredTaskListTool,
+    StructuredTaskUpdateTool,
+};
 pub use task_list::{TaskItem, TaskListTool, TaskStatus};
 pub use text_ingest::TextIngestTool;
 pub use user_interact::UserInteractTool;

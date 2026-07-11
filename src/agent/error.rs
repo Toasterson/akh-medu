@@ -203,6 +203,10 @@ pub enum AgentError {
     #[diagnostic(transparent)]
     Delegation(#[from] super::delegation::DelegationError),
 
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Task(#[from] super::tasks::TaskError),
+
     #[error("{0}")]
     #[diagnostic(
         code(akh::agent::engine),
