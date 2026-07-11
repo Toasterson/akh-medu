@@ -160,6 +160,11 @@ libloading = { version = "0.8", optional = true }
 # lean `akh` client binary never compiles SeaORM/sqlx.
 akhomed-store = { path = "crates/akhomed-store", optional = true }
 
+# Phase 51 / ADR 089: the organ's tool-call passes (retrieval-scoped catalog +
+# KG-repair of near-miss calls) at the live agent boundary. Pure Rust, no ML
+# dependency — the tested lab implementation, reused rather than reimplemented.
+grug-data = { path = "crates/grug-data" }
+
 # Calendar (feature-gated)
 icalendar = { version = "0.16", optional = true, features = ["parser"] }
 chrono = { version = "0.4", optional = true, features = ["serde"] }
