@@ -99,6 +99,18 @@ pub enum LibraryError {
     )]
     DomainNotAllowed { domain: String },
 
+    #[error("frontmatter parse error at line {line}: {message}")]
+    #[diagnostic(
+        code(akh::library::frontmatter_parse),
+        help(
+            "Frontmatter is a `key: value` block, one field per line (optional `---` fences \
+             are stripped). Supported value forms: plain text (optionally \"quoted\"), bare \
+             numbers, true/false, YYYY-MM-DD dates, YYYY-MM-DDThh:mm[:ss] datetimes, \
+             [a, b, c] lists, and [[target]] / [[target|alias]] wikilinks."
+        )
+    )]
+    FrontmatterParse { line: usize, message: String },
+
     #[error(transparent)]
     #[diagnostic(transparent)]
     Engine(#[from] crate::error::EngineError),

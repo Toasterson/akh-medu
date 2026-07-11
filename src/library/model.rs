@@ -34,7 +34,7 @@ impl std::fmt::Display for ContentFormat {
 }
 
 /// Where the document came from.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DocumentSource {
     /// Local filesystem path.
     File(String),
@@ -55,7 +55,7 @@ impl std::fmt::Display for DocumentSource {
 }
 
 /// Persistent record for a document in the catalog.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DocumentRecord {
     /// URL-safe slug identifier (e.g., "rust-programming-language").
     pub id: String,
