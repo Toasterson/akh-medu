@@ -39,6 +39,7 @@ pub mod generator;
 pub mod organ;
 pub mod phrasing;
 pub mod procedural;
+pub mod reason;
 pub mod retriever;
 pub mod schema;
 pub mod semantic;
@@ -64,6 +65,11 @@ pub use generator::{DistractorConfig, Generator, PhrasingMode};
 pub use phrasing::{PhrasingBank, PhrasingRegistry, PhrasingTemplate, TemplatePart};
 pub use procedural::{
     build_catalog as build_procedural_catalog, build_catalog_signal, DEFAULT_TEMPLATES_PER_TOOL,
+};
+pub use reason::{
+    score_reason_outputs, AbstentionStats as ReasonAbstentionStats, DepthStats as ReasonDepthStats,
+    EntityId, EntityType, Fact as ReasonFact, ReasonConfig, ReasonDataset, ReasonDiversityReport,
+    ReasonError, ReasonEvalSummary, ReasonExample, RelationKind, ReplayReport, TraceArm,
 };
 pub use semantic::{describe_tool, glossed_phrase, SignalMode};
 pub use schema::{Example, ParamSpec, ParamType, ToolCall, ToolSchema};

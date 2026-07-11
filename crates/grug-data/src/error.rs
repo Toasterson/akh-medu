@@ -70,6 +70,12 @@ pub enum GrugError {
         )
     )]
     MissingPhrasingBank { tool: String },
+
+    /// An error from the Phase 51 P3-R procedural reasoning corpus
+    /// (`crate::reason`).
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Reason(#[from] crate::reason::ReasonError),
 }
 
 /// Convenience alias for `grug-data` operation results.

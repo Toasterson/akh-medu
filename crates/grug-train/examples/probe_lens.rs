@@ -25,9 +25,10 @@ use burn::tensor::backend::Backend;
 use burn::tensor::{Int, Tensor, TensorData};
 
 use grug_data::schema::Example;
-use grug_data::{Dataset, DistractorConfig, SignalMode, TargetFormat};
+use grug_data::{Dataset, DistractorConfig, ReasonConfig, ReasonDataset, SignalMode, TargetFormat};
+use grug_train::reason_train::encode_reason_example;
 use grug_train::tokenizer::Vocab;
-use grug_train::train::encode_example_fmt;
+use grug_train::train::{Encoded, encode_example_fmt};
 use grug_train::transformer::{TinyTransformer, TinyTransformerConfig};
 use grug_train::{BpeTokenizer, checkpoint};
 
@@ -71,6 +72,16 @@ struct Args {
     /// `eval_registry_repair.rs`'s `--retrieval-k` default).
     #[arg(long, default_value_t = 8)]
     retrieval_k: usize,
+    /// Reconstruct the Phase 51 P3-R reasoning corpus (`train_reason.rs`'s
+    /// `ReasonDataset`, defaults matching that example) instead of a
+    /// tool-calling one — probes axis-B (held-out subjects, trained depths),
+    /// axis-A (held-out depths) and abstention. Wins over `--registry`.
+    /// Used for the ADR-092 crossover-migration gate.
+    #[arg(long, default_value_t = false)]
+    reason: bool,
+    /// Held-out depths for the reason axis-A probe (only with `--reason`).
+    #[arg(long, default_value = "5,6")]
+    axis_a_depths: String,
     #[arg(long, default_value = "json")]
     format: String,
     #[arg(long, default_value_t = 128)]
@@ -166,19 +177,44 @@ fn probe_axis<B: Backend, V: Vocab>(
     device: &B::Device,
     axis_name: &str,
 ) -> AxisProbe {
-    let vocab_size = tokenizer.vocab_size();
+    let mut encodeds = Vec::with_capacity(examples.len());
+    let mut n_encode_failed = 0usize;
+    for example in examples {
+        match encode_example_fmt(tokenizer, example, fmt) {
+            Ok(e) => encodeds.push(e),
+            Err(_) => n_encode_failed += 1,
+        }
+    }
+    probe_axis_encoded(
+        model,
+        tokenizer.vocab_size(),
+        &encodeds,
+        n_encode_failed,
+        max_seq_len,
+        device,
+        axis_name,
+    )
+}
+
+/// The probe core over pre-tokenized `BOS <prompt> SEP <target> EOS`
+/// sequences — shared by the tool-calling reconstructions (via
+/// [`probe_axis`]) and the P3-R reasoning corpus (encoded with
+/// [`encode_reason_example`]). `pre_skipped` counts examples the caller
+/// already dropped at encode time.
+fn probe_axis_encoded<B: Backend>(
+    model: &TinyTransformer<B>,
+    vocab_size: usize,
+    encodeds: &[Encoded],
+    pre_skipped: usize,
+    max_seq_len: usize,
+    device: &B::Device,
+    axis_name: &str,
+) -> AxisProbe {
     let mut aggs: Option<Vec<LayerAgg>> = None;
     let mut n_scored = 0usize;
-    let mut n_skipped = 0usize;
+    let mut n_skipped = pre_skipped;
 
-    for example in examples {
-        let encoded = match encode_example_fmt(tokenizer, example, fmt) {
-            Ok(e) => e,
-            Err(_) => {
-                n_skipped += 1;
-                continue;
-            }
-        };
+    for encoded in encodeds {
         let ids = &encoded.ids;
         // Completion length excludes the trailing EOS `encode_example_fmt`
         // appends -- we score predictions of the gold *content* tokens, not
@@ -330,14 +366,75 @@ fn main() {
     let (model, step) =
         checkpoint::load_model_only(&ckpt_dir, model, &device).expect("checkpoint loads");
     println!(
-        "probe_lens: FORMAT={fmt:?} REGISTRY={} checkpoint {} (step {step})",
+        "probe_lens: FORMAT={fmt:?} REGISTRY={} REASON={} checkpoint {} (step {step})",
         args.registry,
+        args.reason,
         ckpt_dir.display()
     );
 
     let distractors = DistractorConfig::easy_with_count(args.distractors);
 
-    let axes: Vec<AxisProbe> = if args.registry {
+    let axes: Vec<AxisProbe> = if args.reason {
+        // train_reason.rs's reconstruction (ADR 092 / P3-R): same
+        // `ReasonConfig` defaults + seed, so the frozen axes reproduce.
+        let depths: Vec<usize> = args
+            .axis_a_depths
+            .split(',')
+            .map(|s| {
+                s.trim()
+                    .parse()
+                    .expect("--axis-a-depths must be comma-separated integers")
+            })
+            .collect();
+        let dataset = ReasonDataset::new(ReasonConfig {
+            seed: args.seed,
+            ..ReasonConfig::default()
+        })
+        .expect("reason dataset builds");
+
+        let encode_all = |examples: &[grug_data::ReasonExample]| {
+            let mut encodeds = Vec::with_capacity(examples.len());
+            let mut failed = 0usize;
+            for ex in examples {
+                match encode_reason_example(&tokenizer, ex) {
+                    Ok(e) => encodeds.push(e),
+                    Err(_) => failed += 1,
+                }
+            }
+            (encodeds, failed)
+        };
+
+        let axis_b = dataset
+            .axis_b_examples(args.examples)
+            .expect("reason axis-B draws");
+        let axis_a = dataset
+            .axis_a_examples(args.examples, &depths)
+            .expect("reason axis-A draws");
+        let abstention = dataset
+            .abstention_examples(args.examples)
+            .expect("reason abstention draws");
+
+        let vocab_size = tokenizer.vocab_size();
+        [
+            ("reason_axis_b_heldout_subjects", axis_b),
+            ("reason_axis_a_heldout_depths", axis_a),
+            ("reason_abstention", abstention),
+        ]
+        .into_iter()
+        .map(|(name, examples)| {
+            let (encodeds, failed) = encode_all(&examples);
+            probe_axis_encoded(
+                &model,
+                vocab_size,
+                &encodeds,
+                failed,
+                max_seq_len,
+                &device,
+                name,
+            )
+        })
+        .collect()
+    } else if args.registry {
         let signal_mode = SignalMode::parse_label(&args.signal_mode)
             .expect("--signal-mode must be name|d0|description|d1|paraphrase|d2");
         let dataset = Dataset::new_sized_signal(
@@ -434,6 +531,8 @@ fn main() {
         "checkpoint_dir": ckpt_dir.display().to_string(),
         "format": args.format,
         "registry": args.registry,
+        "reason": args.reason,
+        "axis_a_depths": args.axis_a_depths,
         "signal_mode": args.signal_mode,
         "seed": args.seed,
         "n_tools": args.n_tools,
