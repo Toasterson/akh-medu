@@ -95,7 +95,9 @@ enum Commands {
     },
 }
 
-/// Schema-pack operations (offline compiler half of ADR 081 Slice 2).
+/// Schema-pack operations (ADR 081 Slice 2: offline compiler + the Postgres
+/// registry). `compile`/`show` are local file operations; `admit`/`list`/
+/// `install` route over ACP to the daemon's Postgres-backed registry.
 #[derive(Subcommand)]
 enum SchemaAction {
     /// Compile a portable schema-pack source (JSON) into a native-triple blob.
@@ -110,6 +112,34 @@ enum SchemaAction {
     Show {
         /// Path to a compiled `.akhschema` blob.
         blob: PathBuf,
+    },
+    /// Admit a compiled schema pack to the shared registry (ADR 081 decision
+    /// 8: admission always requires an explicit human confirm — pass `--yes`).
+    /// The non-LLM operator path: no engine, no model, just this command.
+    Admit {
+        /// Path to a compiled `.akhschema` blob (from `akh schema compile`).
+        blob: PathBuf,
+        /// Confirm admission. Without this flag the command only prints the
+        /// pack summary and refuses to admit — the human-confirm gate.
+        #[arg(long)]
+        yes: bool,
+        /// Attribute the admission to this identity instead of
+        /// `$USER`/`$LOGNAME`.
+        #[arg(long)]
+        confirmed_by: Option<String>,
+    },
+    /// List schema packs admitted to the shared registry.
+    List,
+    /// Install (fetch + bulk-insert-as-microtheory) a registry pack into a
+    /// workspace, and record it as active for that workspace so later wakes
+    /// converge it automatically.
+    Install {
+        /// `name` or `name@version` (defaults to the most recently admitted
+        /// version of `name` when no `@version` is given).
+        pack: String,
+        /// Workspace to install into (defaults to --workspace).
+        #[arg(long)]
+        workspace: Option<String>,
     },
 }
 
@@ -1013,7 +1043,7 @@ fn main() -> Result<()> {
 
         // ── Schema packs (ADR 081) ──────────────────────────────────────
         Commands::Schema { action } => {
-            dispatch_schema(action)?;
+            dispatch_schema(&cli.workspace, action)?;
         }
 
         // ── Wiki (Akhipedia) ─────────────────────────────────────────────
@@ -1023,8 +1053,22 @@ fn main() -> Result<()> {
     }
 }
 
-/// Dispatch `akh schema` subcommands. Local file operations; no Engine, no ACP.
-fn dispatch_schema(action: SchemaAction) -> Result<()> {
+/// Encode bytes as lowercase hex (used to carry a schema-pack blob over the
+/// ACP JSON wire — base64 is behind an optional feature this binary doesn't
+/// otherwise need, and pack blobs are small).
+fn hex_encode(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
+}
+
+/// Dispatch `akh schema` subcommands. `compile`/`show` are local file
+/// operations (no Engine, no ACP); `admit`/`list`/`install` route over ACP to
+/// the daemon's Postgres-backed registry (ADR 081 decision 9) — the same
+/// pattern as `akh akh {snapshot,wake}` and `akh migrate`.
+fn dispatch_schema(current_ws: &str, action: SchemaAction) -> Result<()> {
     use akh_medu::schema::{CompiledSchemaPack, compile};
 
     match action {
@@ -1081,6 +1125,76 @@ fn dispatch_schema(action: SchemaAction) -> Result<()> {
             for t in &pack.triples {
                 println!("    ({}, {}, {})", t.subject, t.predicate, t.object);
             }
+        }
+        SchemaAction::Admit {
+            blob,
+            yes,
+            confirmed_by,
+        } => {
+            let bytes = std::fs::read(&blob).into_diagnostic()?;
+            // Decode locally first so a corrupt/incompatible blob is caught
+            // before ever reaching the daemon, and so the summary the human
+            // confirms against is read straight from the artifact.
+            let pack = CompiledSchemaPack::from_blob(&bytes)?;
+            println!("Schema pack {}@{} ({})", pack.name, pack.version, pack.scope);
+            println!("  microtheory: {}", pack.microtheory_label());
+            println!("  types: {}", pack.types.join(", "));
+            if !pack.relations.is_empty() {
+                println!("  relations: {}", pack.relations.join(", "));
+            }
+            if !pack.assumes.is_empty() {
+                println!(
+                    "  assumes (verified against the registry at admit time): {}",
+                    pack.assumes.join(", ")
+                );
+            }
+            let blob_checksum = akh_medu::schema::compile::checksum_hex(&bytes);
+            println!("  blob checksum (blake3): {blob_checksum}");
+
+            if !yes {
+                println!();
+                println!(
+                    "Not admitted. Review the pack above, then re-run with --yes to confirm \
+                     admission to the shared registry (ADR 081 decision 8: admission always \
+                     requires an explicit human confirm)."
+                );
+                return Ok(());
+            }
+
+            let confirmed_by = confirmed_by
+                .or_else(|| std::env::var("USER").ok())
+                .or_else(|| std::env::var("LOGNAME").ok())
+                .unwrap_or_else(|| "unknown".to_string());
+
+            let params = serde_json::json!({
+                "name": pack.name,
+                "version": pack.version,
+                "scope": pack.scope.to_string(),
+                "source_url": pack.source_url,
+                "checksum": blob_checksum,
+                "confirmed_by": confirmed_by,
+                "blob_hex": hex_encode(&bytes),
+            });
+            let result = acp_call("_akh/schema/admit", params)?;
+            print_acp(&result)?;
+        }
+        SchemaAction::List => {
+            let result = acp_call("_akh/schema/list", serde_json::json!({}))?;
+            print_acp(&result)?;
+        }
+        SchemaAction::Install { pack, workspace } => {
+            let ws = workspace.unwrap_or_else(|| current_ws.to_string());
+            let (name, version) = match pack.split_once('@') {
+                Some((n, v)) => (n.to_string(), Some(v.to_string())),
+                None => (pack, None),
+            };
+            let params = serde_json::json!({
+                "workspace": ws,
+                "name": name,
+                "version": version,
+            });
+            let result = acp_call("_akh/schema/install", params)?;
+            print_acp(&result)?;
         }
     }
     Ok(())

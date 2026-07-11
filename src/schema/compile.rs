@@ -244,16 +244,17 @@ impl RegistryRow {
 
 /// The schema-pack registry seam (ADR 081 decision 9).
 ///
-/// The production implementation is a dedicated `akhomed-store` Postgres
-/// table with the operator-confirm inflow and workspace-scoped activation —
-/// that half of Slice 2 needs Postgres infrastructure and is **not built
-/// here**. This trait is the boundary the compiler/install side codes
-/// against; tests use an in-memory impl.
+/// The production implementation ([`super::registry_pg::PgSchemaRegistry`],
+/// behind the `postgres` feature) is a dedicated `akhomed-store` Postgres
+/// table with the operator-confirm inflow and workspace-scoped activation.
+/// This trait is the boundary the compiler/install side codes against; tests
+/// use an in-memory impl (see the `tests` module below).
 pub trait SchemaRegistry {
     /// Admit a confirmed pack to the registry. Must reject a (name, version)
     /// that is already admitted, and must reject any row whose declared type
     /// names collide with types declared by an already-admitted pack
-    /// (global immutability, ADR 081 decision 5).
+    /// (global immutability, ADR 081 decision 5). Implementations should
+    /// call [`check_admission`] first to get both checks for free.
     fn admit(&self, row: RegistryRow) -> SchemaResult<()>;
 
     /// Fetch an admitted pack by (name, version).
@@ -261,6 +262,47 @@ pub trait SchemaRegistry {
 
     /// List admitted packs as (name, version) pairs.
     fn list(&self) -> SchemaResult<Vec<(String, String)>>;
+}
+
+/// Validate a row against `registry`'s already-admitted rows before
+/// insertion — the two guards [`SchemaRegistry::admit`] documents, factored
+/// out so every backend enforces them identically:
+///
+/// 1. reject a duplicate `(name, version)`
+/// 2. reject any type name the row declares that a *different* already-
+///    admitted pack also declares (ADR 081 decision 5: global, immutable,
+///    additive type names — enforced at the registry gate, not only at
+///    per-akh install time).
+///
+/// Backends call this at the top of their `admit` implementation, then do
+/// the backend-specific write.
+pub fn check_admission(registry: &dyn SchemaRegistry, row: &RegistryRow) -> SchemaResult<()> {
+    if registry.fetch(&row.name, &row.version)?.is_some() {
+        return Err(SchemaError::AlreadyAdmitted {
+            name: row.name.clone(),
+            version: row.version.clone(),
+        });
+    }
+
+    let pack = row.decode()?;
+    for (other_name, other_version) in registry.list()? {
+        if other_name == row.name && other_version == row.version {
+            continue; // the duplicate case, already handled above
+        }
+        let Some(other_row) = registry.fetch(&other_name, &other_version)? else {
+            continue; // raced deletion between list() and fetch(); ignore
+        };
+        let other_pack = other_row.decode()?;
+        for type_name in &pack.types {
+            if other_pack.types.contains(type_name) {
+                return Err(SchemaError::TypeRedefinition {
+                    type_name: type_name.clone(),
+                    existing_compartment: other_pack.microtheory_label(),
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -391,5 +433,151 @@ mod tests {
         // Tamper with the blob → checksum mismatch.
         row.blob[0] ^= 0xFF;
         assert!(matches!(row.decode(), Err(SchemaError::Decode { .. })));
+    }
+
+    // -----------------------------------------------------------------
+    // `SchemaRegistry` trait contract — proved against an in-memory fake.
+    // Every real backend (the Postgres `PgSchemaRegistry`, `postgres`
+    // feature) is expected to satisfy the exact same contract; these tests
+    // exercise it without any database.
+    // -----------------------------------------------------------------
+
+    use std::sync::Mutex;
+
+    /// A trivial in-memory [`SchemaRegistry`] — a `Vec<RegistryRow>` behind a
+    /// mutex, admitting via [`check_admission`] exactly like the Postgres
+    /// backend does. Used only by tests.
+    #[derive(Default)]
+    struct InMemoryRegistry {
+        rows: Mutex<Vec<RegistryRow>>,
+    }
+
+    impl SchemaRegistry for InMemoryRegistry {
+        fn admit(&self, row: RegistryRow) -> SchemaResult<()> {
+            check_admission(self, &row)?;
+            self.rows.lock().unwrap().push(row);
+            Ok(())
+        }
+
+        fn fetch(&self, name: &str, version: &str) -> SchemaResult<Option<RegistryRow>> {
+            Ok(self
+                .rows
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|r| r.name == name && r.version == version)
+                .cloned())
+        }
+
+        fn list(&self) -> SchemaResult<Vec<(String, String)>> {
+            Ok(self
+                .rows
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|r| (r.name.clone(), r.version.clone()))
+                .collect())
+        }
+    }
+
+    #[test]
+    fn registry_admits_and_lists_a_pack() {
+        let registry = InMemoryRegistry::default();
+        let pack = compile(SRC).unwrap();
+        let row = RegistryRow::from_pack(&pack, "toasty").unwrap();
+
+        registry.admit(row).unwrap();
+
+        assert_eq!(
+            registry.list().unwrap(),
+            vec![("core-test".to_string(), "0.1.0".to_string())]
+        );
+        let fetched = registry.fetch("core-test", "0.1.0").unwrap().unwrap();
+        assert_eq!(fetched.confirmed_by, "toasty");
+        assert!(registry.fetch("core-test", "9.9.9").unwrap().is_none());
+    }
+
+    #[test]
+    fn registry_rejects_duplicate_name_and_version() {
+        let registry = InMemoryRegistry::default();
+        let pack = compile(SRC).unwrap();
+        registry
+            .admit(RegistryRow::from_pack(&pack, "toasty").unwrap())
+            .unwrap();
+
+        let err = registry
+            .admit(RegistryRow::from_pack(&pack, "someone-else").unwrap())
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            SchemaError::AlreadyAdmitted { ref name, ref version }
+                if name == "core-test" && version == "0.1.0"
+        ));
+    }
+
+    #[test]
+    fn registry_rejects_type_collision_across_different_packs() {
+        let registry = InMemoryRegistry::default();
+        let first = compile(SRC).unwrap(); // declares Person, Organization, Employee
+        registry
+            .admit(RegistryRow::from_pack(&first, "toasty").unwrap())
+            .unwrap();
+
+        // A different pack (different name/version) re-declaring "Person" must
+        // be rejected at the registry gate, not only at per-akh install time.
+        let rival = compile(
+            r#"{"pack": {"name": "rival", "version": "1.0.0"},
+                "types": [{"name": "Person"}]}"#,
+        )
+        .unwrap();
+        let err = registry
+            .admit(RegistryRow::from_pack(&rival, "toasty").unwrap())
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            SchemaError::TypeRedefinition { ref type_name, .. } if type_name == "Person"
+        ));
+    }
+
+    #[test]
+    fn registry_allows_additive_extension_via_is_a() {
+        let registry = InMemoryRegistry::default();
+        let core = compile(SRC).unwrap();
+        registry
+            .admit(RegistryRow::from_pack(&core, "toasty").unwrap())
+            .unwrap();
+
+        // A pack that only *extends* an existing type via `is_a` (no
+        // redeclared type names) is admitted cleanly.
+        let extension = compile(
+            r#"{"pack": {"name": "hr", "version": "1.0.0"},
+                "assumes": ["Person"],
+                "types": [{"name": "Manager", "is_a": "Person"}]}"#,
+        )
+        .unwrap();
+        registry
+            .admit(RegistryRow::from_pack(&extension, "toasty").unwrap())
+            .unwrap();
+
+        let mut names: Vec<_> = registry.list().unwrap().into_iter().map(|(n, _)| n).collect();
+        names.sort();
+        assert_eq!(names, vec!["core-test".to_string(), "hr".to_string()]);
+    }
+
+    #[test]
+    fn registry_allows_reinstalling_the_same_pack_version_is_still_a_conflict() {
+        // NOTE: admission (registry-level) is stricter than install
+        // (engine-level): reinstalling the exact same pack@version at the
+        // engine is idempotent (`install::reinstall_same_pack_is_idempotent`),
+        // but *admitting* the same (name, version) twice is always rejected —
+        // the registry row is meant to be written exactly once.
+        let registry = InMemoryRegistry::default();
+        let pack = compile(SRC).unwrap();
+        let row = RegistryRow::from_pack(&pack, "toasty").unwrap();
+        registry.admit(row.clone()).unwrap();
+        assert!(matches!(
+            registry.admit(row).unwrap_err(),
+            SchemaError::AlreadyAdmitted { .. }
+        ));
     }
 }

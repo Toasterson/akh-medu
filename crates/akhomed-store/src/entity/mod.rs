@@ -29,6 +29,7 @@ pub mod goal_dependency;
 pub mod goal_hierarchy;
 pub mod learned_method;
 pub mod learned_method_step;
+pub mod schema_registry;
 pub mod sleep_metric;
 
 // workspaces.* — workspace metadata + membership

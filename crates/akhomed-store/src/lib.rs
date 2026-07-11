@@ -19,6 +19,7 @@ pub mod error;
 pub mod memberships;
 pub mod migration;
 pub mod mutations;
+pub mod schema_registry;
 pub mod snapshots;
 mod pool;
 
@@ -32,6 +33,10 @@ pub use mutations::{
     MutationRow, TurnRow, append_mutations, ensure_akh, load_turn_by_seq, load_turns_since,
 };
 pub use pool::{PoolOptions, connect};
+pub use schema_registry::{
+    SchemaPackRow, admit_pack, get_pack, latest_pack, list_active_microtheories, list_packs,
+    record_pack_activation,
+};
 pub use snapshots::{TailMutation, get_harvest_watermark, set_harvest_watermark};
 
 // Re-export the connection type, the `sea_orm` crate, and `uuid` so downstream
