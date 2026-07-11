@@ -76,6 +76,53 @@ pub struct SchemaDigest {
     pub relations: Vec<RelationDigest>,
 }
 
+impl SchemaDigest {
+    /// Whether no schema pack is installed at all — the digest carries
+    /// nothing worth rendering into a prompt.
+    pub fn is_empty(&self) -> bool {
+        self.types.is_empty() && self.relations.is_empty()
+    }
+
+    /// Compact, token-cheap textual rendering for the working-context
+    /// runtime's core tier (ADR 081 slice 7): one line per type (with its
+    /// `is-a` ancestry and effective properties) and one line per relation.
+    /// Not meant to be exhaustive — [`SchemaDigest`] itself (serialized) is
+    /// the full introspection artifact; this is the "always in context"
+    /// summary a model reads to know the in-force vocabulary at a glance.
+    pub fn render_compact(&self) -> String {
+        let mut out = String::new();
+        for t in &self.types {
+            out.push_str("- ");
+            out.push_str(&t.name);
+            if t.chain.len() > 1 {
+                out.push_str(" (is-a ");
+                out.push_str(&t.chain[1..].join(" -> "));
+                out.push(')');
+            }
+            if !t.properties.is_empty() {
+                let names: Vec<&str> = t.properties.iter().map(|p| p.name.as_str()).collect();
+                out.push_str(" [");
+                out.push_str(&names.join(", "));
+                out.push(']');
+            }
+            out.push('\n');
+        }
+        if !self.relations.is_empty() {
+            out.push_str("relations:\n");
+            for r in &self.relations {
+                out.push_str("- ");
+                out.push_str(&r.name);
+                out.push('(');
+                out.push_str(r.arg1_type.as_deref().unwrap_or("?"));
+                out.push_str(", ");
+                out.push_str(r.arg2_type.as_deref().unwrap_or("?"));
+                out.push_str(")\n");
+            }
+        }
+        out
+    }
+}
+
 /// Build the in-force schema digest for `engine`. Read-only; never mutates
 /// the KG. An engine with no schema pack installed yields an empty digest,
 /// not an error.
@@ -225,6 +272,26 @@ mod tests {
         assert_eq!(d.relations[0].name, "worksFor");
         assert_eq!(d.relations[0].arg1_type.as_deref(), Some("Person"));
         assert_eq!(d.relations[0].arg2_type.as_deref(), Some("Organization"));
+    }
+
+    #[test]
+    fn empty_digest_renders_nothing() {
+        let engine = test_engine();
+        let d = digest(&engine).unwrap();
+        assert!(d.is_empty());
+        assert_eq!(d.render_compact(), "");
+    }
+
+    #[test]
+    fn render_compact_lists_types_ancestry_properties_and_relations() {
+        let engine = test_engine();
+        install_pack(&engine, &compile(SRC).unwrap()).unwrap();
+        let d = digest(&engine).unwrap();
+        assert!(!d.is_empty());
+        let rendered = d.render_compact();
+        assert!(rendered.contains("Employee (is-a Person)"), "{rendered}");
+        assert!(rendered.contains("employer"), "{rendered}");
+        assert!(rendered.contains("worksFor(Person, Organization)"), "{rendered}");
     }
 
     #[test]

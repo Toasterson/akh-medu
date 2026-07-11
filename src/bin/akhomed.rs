@@ -1406,16 +1406,24 @@ impl ServerState {
             }
         }
 
-        // Phase 44b/c/h/i: assemble each turn through a curating context manager,
-        // guarded by `SafetyEnforced` so eviction can never drop a safety-pinned
-        // span. `AKH_CONTEXT_STRATEGY` selects the strategy (default `compacting`):
-        //   compacting — history + KG + recall within the model's real budget,
-        //                with budget-driven section + tool degradation (44b/c/d/e/g);
+        // Phase 44b/c/h/i (extended ADR 081 slice 7): assemble each turn through
+        // a curating context manager, guarded by `SafetyEnforced` so eviction can
+        // never drop a safety-pinned span. `AKH_CONTEXT_STRATEGY` selects the
+        // strategy (default `compacting`):
+        //   compacting — history + KG + recall + schema digest + active-note
+        //                frontmatter within the model's real budget, with
+        //                budget-driven section + tool degradation (44b/c/d/e/g);
         //   passive    — lean context; the longer thread is carried by background
         //                consolidation + recall, not verbatim history (44h);
         //   virtual    — MemGPT tiers (core/recall/archival) + the self-edit tools
-        //                core_memory_append/replace + archival_search (44i).
+        //                core_memory_append/replace, archival_search, query_graph
+        //                (44i; the latter two extended in ADR 081 slice 7).
         // The lib default stays pass-through (tests / embedded).
+        //
+        // This `virtual`-strategy branch is also today's **tier-gating
+        // mechanism** (ADR 081 slice 7 decision 4): small/append-only models run
+        // `compacting`/`passive` and get no self-edit tools at all; only capable
+        // models selected onto `virtual` get the self-edit + archival/query tools.
         {
             use akh_medu::agent::context::{
                 CompactingManager, ContextManager, PassiveManager, SafetyEnforced,
@@ -1434,7 +1442,12 @@ impl ServerState {
                     agent.register_tool(Box::new(
                         akh_medu::agent::tools::CoreMemoryReplaceTool::new(name),
                     ));
-                    agent.register_tool(Box::new(akh_medu::agent::tools::ArchivalSearchTool));
+                    // No persistent note store is wired to the daemon yet (`Note`
+                    // shipped as a carrier type only — ADR 081 work-item P1), so
+                    // archival_search stays KG-only here; `ArchivalSearchTool::with_notes`
+                    // is ready for whichever slice adds a durable note catalog.
+                    agent.register_tool(Box::new(akh_medu::agent::tools::ArchivalSearchTool::new()));
+                    agent.register_tool(Box::new(akh_medu::agent::tools::QueryGraphTool));
                     Box::new(SafetyEnforced::new(VirtualContextManager::default()))
                 }
                 _ => Box::new(SafetyEnforced::new(CompactingManager)),
